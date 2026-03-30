@@ -4601,13 +4601,14 @@ Coordinator                     Service A
      │◄── 200 OK ───────────────────┤
 ```
 
-**Key differences from our design:**
+**Key differences from our saga/TCC model** (this is why Phase 6 builds a separate `LraCoordinator` module rather than layering on `SagaEngine`):
 
-| Aspect | Our Design (Daemon Mode) | MicroProfile LRA |
+| Aspect | SagaEngine (saga/TCC model) | MicroProfile LRA |
 |--------|--------------------------|-------------------|
-| Step discovery | Declared upfront in saga definition | Dynamic — participants enlist at runtime as LRA propagates |
-| Orchestration | Pure orchestration — coordinator calls each step | Hybrid — first service drives the call chain, coordinator handles completion/compensation |
-| Who calls participants | Coordinator calls each step directly | First participant calls the next service; coordinator only calls completion/compensation callbacks |
+| Who drives execution | Coordinator calls `step.execute()` for each step | Client calls services directly; coordinator only manages lifecycle |
+| Step discovery | Declared upfront in saga definition (JSON/YAML) | Dynamic — participants self-register at runtime as LRA context propagates |
+| Orchestration | Pure orchestration — coordinator drives the entire flow | Hybrid — client drives the call chain, coordinator handles completion/compensation |
+| Who calls participants | Coordinator calls each step directly | Client calls next service; coordinator only calls `@Complete`/`@Compensate` callbacks |
 | Library on participants | Not required | Required — every participant needs the LRA library for the JAX-RS filter |
 | Success callback | None — on success, nothing extra happens | `@Complete` called on all participants |
 | Transport | gRPC + HTTP | HTTP only |
@@ -4626,53 +4627,66 @@ public enum ParticipantStatus {
 }
 ```
 
-### Implementation: Add LRA Protocol to Daemon Mode (Phase 6)
+### Implementation: Add LRA Coordinator to Daemon Mode (Phase 6)
 
-Layer the MicroProfile LRA REST API on top of the Phase 3 coordinator daemon. The daemon already handles saga lifecycle and HTTP callbacks — Phase 6 adds LRA-specific endpoints so the coordinator can interoperate with standard LRA participants. This produces a fully spec-compliant, TCK-passing implementation.
+The LRA coordinator is a **separate module** that runs alongside the saga engine in the daemon process. It does NOT layer on top of `SagaEngine` because the execution models are fundamentally different: our saga engine drives step execution (calls `step.execute()` in order), while LRA has the client drive execution (the coordinator only manages participant enlistment and close/cancel callbacks). However, the LRA coordinator **shares infrastructure** with the saga engine — `SagaStore` for persistence and the recovery mechanism for crash handling.
 
 ```
-┌─────────────────────────────────────┐
-│  LRA Coordinator (new service)       │
-│  ┌───────────────────────────────┐  │
-│  │  LRA REST API                  │  │  ← Narayana-compatible endpoints
-│  │  POST /lra-coordinator/start   │  │
-│  │  PUT  /{lra-id}/close          │  │
-│  │  PUT  /{lra-id}/cancel         │  │
-│  │  PUT  /{lra-id} (join)         │  │
-│  │  GET  /recovery                │  │
-│  └──────────┬────────────────────┘  │
-│             │                        │
-│  ┌──────────▼────────────────────┐  │
-│  │  SagaEngine (our design)       │  │  ← reuse engine + compensation
-│  └──────────┬────────────────────┘  │
-│             │                        │
-│  ┌──────────▼────────────────────┐  │
-│  │  SagaStore (ScalarDB)          │  │  ← replaces Narayana object store
-│  └───────────────────────────────┘  │
-└─────────────────────────────────────┘
-         │ HTTP callbacks
-    ┌────┴────┬──────────┐
-    ▼         ▼          ▼
- Service A  Service B  Service C
- @LRA       @LRA       @LRA
- @Compensate @Compensate @Compensate
+┌──────────────────────────────────────────────┐
+│  Daemon Process                               │
+│                                               │
+│  ┌─────────────────┐  ┌────────────────────┐ │
+│  │ SagaEngine       │  │ LraCoordinator      │ │  ← separate execution logic
+│  │ (drives steps    │  │ (tracks enlisted    │ │
+│  │  in order)       │  │  participants,      │ │
+│  │                  │  │  manages close/     │ │
+│  │                  │  │  cancel callbacks)  │ │
+│  └──────┬───────────┘  └──────┬─────────────┘ │
+│         │                      │               │
+│  ┌──────▼──────────────────────▼─────────────┐ │
+│  │  SagaStore (ScalarDB)                      │ │  ← shared persistence
+│  │  Recovery mechanism (periodic scan)        │ │  ← shared recovery
+│  └────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────┘
+         │                        │
+         │ gRPC / HTTP            │ HTTP callbacks (LRA protocol)
+    ┌────┴────┐              ┌────┴────┬──────────┐
+    ▼         ▼              ▼         ▼          ▼
+ Step A    Step B         Service X  Service Y  Service Z
+ (saga)    (saga)         @LRA       @LRA       @LRA
+                          @Compensate @Compensate @Compensate
 ```
+
+**Why LRA is a separate module, not a layer on SagaEngine:**
+
+| Aspect | SagaEngine (our saga/TCC model) | LraCoordinator (LRA model) |
+|---|---|---|
+| **Who drives execution** | Coordinator calls `step.execute()` for each step | Client calls services directly; coordinator only calls close/cancel callbacks |
+| **Participant discovery** | Static — all steps declared upfront in JSON/YAML | Dynamic — participants self-register via `PUT /lra/{id}` (join) during execution |
+| **Workflow definition** | Predefined saga definition (step order, compensation mapping) | No predefined workflow — participants enlist as the client's call chain progresses |
+| **Success callback** | None (execution = success) | `@Complete` called on all participants |
+| **What coordinator stores** | Full saga state (events, step status, context) | Participant registry (callback URLs per LRA) + LRA lifecycle state |
+
+**What they share:**
+- `SagaStore` — append-only events work for both saga and LRA state persistence
+- Recovery mechanism — periodic scan of stale sagas/LRAs
+- Daemon infrastructure — same HTTP server, ScalarDB connection, config
 
 **What needs to be built:**
 
 | Work Item | Est. LoC | Time |
 |---|---|---|
-| LRA Coordinator REST API (start/close/cancel/join/recovery) | ~500 | 1.5-2 days |
-| Participant registry (track callback URLs per LRA) | ~200 | 0.5-1 day |
-| HTTP callback client (call @Compensate/@Complete endpoints) | ~300 | 0.5-1 day |
+| LRA REST API (start/close/cancel/join/recovery per MicroProfile spec) | ~500 | 1.5-2 days |
+| LRA Coordinator execution logic (lifecycle management, close/cancel orchestration, participant ordering) | ~250 | 1-1.5 days |
+| Participant registry (track callback URLs per LRA) | ~150 | 0.5 day |
+| HTTP callback client (call @Compensate/@Complete endpoints) | ~200 | 0.5-1 day |
 | Async status polling (@Status + retry loop) | ~150 | 0.5-1 day |
 | @Forget / @AfterLRA lifecycle | ~100 | 0.5 day |
-| LRA context header propagation (JAX-RS filter) | ~150 | 0.5 day |
-| Adapt SagaStore schema for LRA model | ~200 | 0.5-1 day |
+| LRA state persistence (adapt SagaStore for LRA events + recovery) | ~200 | 1-1.5 days |
 | Quarkus extension (build processor + dev services) | ~400 | 2-3 days |
-| Unit tests (all classes) | ~1,000 | 1.5-2 days |
+| Unit tests (all classes) | ~1,200 | 2-2.5 days |
 | TCK compliance testing | ~500 | 1.5-2 days |
-| **Total** | **~3,500** | **~9.5-13.5 days** |
+| **Total** | **~3,650** | **~10.5-14 days** |
 
 See [Phase 6 in the Implementation Plan](#phase-6-lra-compliance) for the consolidated breakdown.
 
@@ -5021,21 +5035,24 @@ GET /sagas/abc-123
 
 ## Phase 6: LRA Compliance
 
-**Scope:** Add MicroProfile LRA REST API endpoints to the Phase 3 coordinator daemon, enabling interoperability with any LRA participant. This makes the coordinator pass the MicroProfile LRA TCK. Requires Phase 3 (daemon mode) as a prerequisite.
+**Scope:** Build an LRA coordinator module that runs alongside the saga engine in the Phase 3 daemon process. The LRA coordinator is a **separate module** from `SagaEngine` because the execution models differ fundamentally (see [Part VI: LRA Compatibility](#implementation-add-lra-coordinator-to-daemon-mode-phase-6) for details). However, it shares `SagaStore` for persistence and the recovery mechanism for crash handling. This makes the coordinator pass the MicroProfile LRA TCK. Requires Phase 3 (daemon mode) as a prerequisite.
 
 | Work Item | Est. LoC | Time |
 |---|---|---|
 | LRA REST API (start/close/cancel/join/recovery per MicroProfile spec) | ~500 | 1.5-2 days |
-| LRA ↔ Saga model adapter (translate LRA lifecycle to saga state) | ~200 | 1-1.5 days |
+| LRA Coordinator execution logic (lifecycle management, close/cancel orchestration, participant ordering) | ~250 | 1-1.5 days |
+| Participant registry (track callback URLs per LRA) | ~150 | 0.5 day |
+| HTTP callback client (call @Compensate/@Complete endpoints) | ~200 | 0.5-1 day |
 | Async status polling (@Status + retry loop) | ~150 | 0.5-1 day |
 | @Forget / @AfterLRA lifecycle | ~100 | 0.5 day |
+| LRA state persistence (adapt SagaStore for LRA events + recovery) | ~200 | 1-1.5 days |
 | Quarkus extension for LRA coordinator (build processor + dev services) | ~400 | 2-3 days |
-| Unit tests (all classes: REST API, adapter, poller, callback client, header propagation) | ~1,000 | 1.5-2 days |
+| Unit tests (all classes: REST API, coordinator, registry, callback client, poller, persistence) | ~1,200 | 2-2.5 days |
 | TCK compliance testing | ~500 | 1.5-2 days |
-| **Phase 6 Total** | **~2,850** | **~8.5-11 days** |
+| **Phase 6 Total** | **~3,650** | **~10.5-14 days** |
 
 **Pros**: Fully LRA-compliant, passes TCK, interoperable with any LRA participant
-**Cons**: Requires Phase 3 daemon mode as a prerequisite
+**Cons**: Requires Phase 3 daemon mode as a prerequisite; LRA coordinator is a separate module from SagaEngine (more code to maintain)
 
 See [MicroProfile LRA Compatibility](#microprofile-lra-compatibility) in Part VI for LRA spec details, annotation reference, and lifecycle.
 
@@ -5093,8 +5110,8 @@ Add a custom binary protocol over TCP using Netty for maximum performance in dat
 | Phase 3 complete (+ daemon mode, RemoteSagaManager) | ~15.5-22 days |
 | Phase 4 complete (+ DX & observability) | ~18.5-26.5 days |
 | Phase 5 complete (+ admin API) | ~21-30.5 days |
-| Phase 6 complete (+ LRA compliance) | ~29.5-41.5 days |
-| Phase 7 complete (+ gRPC & TCP/Netty transports) | ~38.5-54 days |
+| Phase 6 complete (+ LRA compliance) | ~31.5-44.5 days |
+| Phase 7 complete (+ gRPC & TCP/Netty transports) | ~40.5-57 days |
 
 ## Enhancement Roadmap (v2+)
 
