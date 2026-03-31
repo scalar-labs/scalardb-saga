@@ -6,6 +6,20 @@ This document describes a saga orchestration engine built on top of ScalarDB, in
 
 **What it is:** A saga orchestration engine that coordinates distributed transactions across microservices using the Saga pattern (sequential steps with compensations) and TCC pattern (Try-Confirm-Cancel with resource reservations).
 
+### Target Users
+
+ScalarDB Saga targets **teams building microservices that need eventual consistency across services** — e.g., order placement spanning payment, inventory, and shipping services where temporary inconsistency is acceptable as long as the system eventually converges.
+
+For operations that require **strong consistency** (ACID guarantees across databases), use ScalarDB 2PC transactions. ScalarDB Saga complements ScalarDB 2PC: use 2PC where correctness requires immediate consistency, and Saga where eventual consistency with compensation-based rollback is sufficient.
+
+Typical user profiles:
+
+- **Enterprise teams decomposing monoliths** — need to coordinate writes across 3-10 services that were previously in a single database transaction
+- **Greenfield microservice teams** — building distributed systems from scratch and need a compensation-based consistency mechanism from day one
+- **Platform teams standardizing distributed transactions** — want a single saga framework for the organization rather than each team building ad-hoc retry/rollback logic
+
+**Not the target**: Teams that need pure choreography (event-driven, no central coordinator), teams that already use Temporal/Cadence for general workflow orchestration, or teams that only need strong consistency across databases (where ScalarDB 2PC suffices).
+
 **Key design decisions:**
 
 1. **Orchestration over choreography** — an explicit coordinator drives the workflow, rather than services reacting to events. This gives a single point of visibility for the entire saga flow, deterministic compensation ordering, and straightforward debugging. Every major saga framework (Temporal, Seata, Eventuate, MassTransit, Axon) has converged on orchestration; choreography becomes unmanageable for sagas beyond 2-3 services.
