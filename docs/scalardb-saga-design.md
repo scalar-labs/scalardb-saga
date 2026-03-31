@@ -16,7 +16,7 @@ This document describes a saga orchestration engine built on top of ScalarDB, in
 
 4. **No message broker required** — step invocation uses direct method calls (embedded) or HTTP/gRPC (daemon), not message queues. Unlike Eventuate (requires Kafka + Debezium) or MassTransit (requires RabbitMQ/SQS), there is no broker infrastructure to deploy or manage. An optional outbox relay (v2+) can publish events to brokers for downstream consumers, but it is not required for the saga engine itself.
 
-5. **Declarative saga definitions with framework integrations** — workflows are defined in JSON or YAML, separating workflow structure from step implementation. This makes sagas versionable, inspectable, and modifiable without recompiling. Optional Spring Boot and Quarkus modules add annotation-based step registration (`@SagaStep`/`@SagaCompensation`) for teams that prefer convention-over-configuration.
+5. **Declarative saga definitions with framework integrations** — workflows are defined via Java builder API, JSON/YAML, or Protocol Buffers (daemon mode via gRPC). JSON/YAML separates workflow structure from step implementation, making sagas versionable, inspectable, and modifiable without recompiling. The Java builder provides compile-time type safety and IDE auto-completion. Optional Spring Boot and Quarkus modules add annotation-based step registration (`@SagaStep`/`@SagaCompensation`) for teams that prefer convention-over-configuration.
 
 **How we compare:**
 
@@ -26,7 +26,7 @@ This document describes a saga orchestration engine built on top of ScalarDB, in
 | **Mandatory infra** | None (embedded) | None | Temporal Server + DB + ES | Kafka + CDC | RabbitMQ/SQS | Coordinator + etcd | Coordinator | Axon Server (prod) |
 | **State store** | Any DB (ScalarDB) | JDBC only | Cassandra/PostgreSQL/MySQL | JDBC + Kafka | SQL/MongoDB/Redis | etcd/Oracle DB | File/JDBC | JDBC/Axon Server |
 | **Language** | Java (polyglot via daemon) | Java | Go, Java, TS, Python, .NET | Java | .NET | Java, Node.js | Java | Java |
-| **Saga definition** | JSON/YAML + annotations (Spring, Quarkus) | JSON + visual designer | Code-as-workflow | Code (SagaDsl) | Code (state machine) | Annotations (@LRA) | Annotations (@LRA) | Annotations (@Saga) |
+| **Saga definition** | Java builder, JSON/YAML, Protocol Buffers (daemon) + annotations (Spring, Quarkus) | JSON + visual designer | Code-as-workflow | Code (SagaDsl) | Code (state machine) | Annotations (@LRA) | Annotations (@LRA) | Annotations (@Saga) |
 | **Framework coupling** | None (optional Spring Boot, Quarkus modules) | Spring required | None | Spring Boot required | .NET DI required | Jakarta EE | Quarkus/WildFly | Spring required |
 | **Coordinator HA** | Any replica recovers | Any replica recovers | Server cluster (Raft) | Broker-based | Broker-based | Enterprise only (paid) | Single-node only | Axon Server Enterprise (paid) |
 | **Outbox built-in** | Yes (events = outbox) | No | N/A (durable execution) | Yes (CDC/polling) | No | No | No | Yes (event store) |
@@ -450,14 +450,14 @@ The engine uses an **append-only event store** — each state change is a single
 
 ### What It Does
 
-Parses a saga definition (JSON or YAML), then executes each step sequentially. Each "step" is a user-provided function (action + compensation pair). The engine walks through steps in order, passing context between them.
+Parses a saga definition (JSON, YAML, or Java builder API), then executes each step sequentially. Each "step" is a user-provided function (action + compensation pair). The engine walks through steps in order, passing context between them.
 
 ```
  ┌─────────────────────────────────────────────────────┐
  │                   SagaEngine                         │
  │                                                      │
  │  SagaDefinition ──► Step1 ──► Step2 ──► Step3       │
- │  (parsed JSON)      │         │         │            │
+ │  (from definition)  │         │         │            │
  │                     action    action    action        │
  │                     comp.     comp.     comp.         │
  │                                                      │
@@ -697,6 +697,48 @@ steps:
     stepClass: com.example.CreditAccountStep
     timeoutMs: 30000
 ```
+
+### Saga Definition (Java Builder API)
+
+For embedded mode, a type-safe Java builder provides compile-time checks and IDE auto-completion:
+
+```java
+SagaDefinition def = SagaDefinition.builder("MoneyTransfer")
+    .version("1.0")
+    .mode(SagaMode.SAGA)
+    .recoverStrategy(RecoverStrategy.COMPENSATE)
+    .timeoutMs(300000)
+    .defaultRetryPolicy(RetryPolicy.builder()
+        .maxAttempts(3)
+        .initialIntervalMs(1000)
+        .backoffMultiplier(2.0)
+        .maxIntervalMs(30000)
+        .build())
+    .step("debit")
+        .stepClass(DebitAccountStep.class)
+        .timeoutMs(60000)
+        .retryPolicy(RetryPolicy.builder().maxAttempts(5).build())
+        .add()
+    .step("credit")
+        .stepClass(CreditAccountStep.class)
+        .timeoutMs(30000)
+        .add()
+    .build();
+
+sagaManager.register(def);
+```
+
+The Java builder uses `stepClass` references — the developer writes communication logic in the `Step` implementation. For simple steps where no custom logic is needed, use the declarative `call`/`compensate` format in JSON/YAML instead (see [Declarative Communication](#solution-declarative-communication-in-the-saga-definition)).
+
+#### Saga Definition Formats
+
+| Format | `stepClass` (Java code) | Declarative `call` (no code) | Primary use |
+|---|---|---|---|
+| **Java builder** | Yes | No (just write a Step class) | Embedded mode |
+| **JSON/YAML** | Yes (embedded only) | Yes | Both modes |
+| **Protocol Buffers** | No | Yes | Daemon mode (Phase 7a) |
+
+All formats produce the same `SagaDefinition` domain model.
 
 ### SagaDefinition Domain Model
 
@@ -2442,7 +2484,7 @@ public class TccDebitStep implements TccStep {
 }
 ```
 
-### TCC Definition (JSON / YAML)
+### TCC Definition (JSON / YAML / Java Builder)
 
 ```json
 {
@@ -2587,7 +2629,7 @@ Seata's TCC uses annotations (`@TwoPhaseBusinessAction`) with a centralized Tran
 | Aspect | Seata TCC | This Engine (TCC Mode) |
 |---|---|---|
 | **Architecture** | Centralized TC server + participant SDK | Embedded library (daemon mode in Phase 3) |
-| **Registration** | Annotation-driven (`@TwoPhaseBusinessAction`) | JSON/YAML definition + `TccStep` interface |
+| **Registration** | Annotation-driven (`@TwoPhaseBusinessAction`) | Java builder or JSON/YAML definition + `TccStep` interface |
 | **State storage** | Seata Server's internal DB | ScalarDB (any backend) |
 | **Try/Confirm/Cancel** | Separate methods via annotation | `TccStep.execute()` / `confirm()` / `compensate()` |
 | **Resource manager** | Branch transaction model | Step-level (each step manages its own resources) |
@@ -2629,7 +2671,7 @@ The saga engine is designed as three layers. Each layer builds on the one below,
 
 Users can interact at any layer:
 - **Layer 1 only**: Full control, implement `Step` interface directly. Best for complex steps or when no framework is used.
-- **Layer 2**: Register typed lambdas in `ServiceInvokerRegistry`. JSON/YAML-driven saga definitions. No Step classes needed.
+- **Layer 2**: Register typed lambdas in `ServiceInvokerRegistry`. Java builder or JSON/YAML-driven saga definitions. No Step classes needed.
 - **Layer 3**: Annotate methods in a saga class. Framework scans and auto-registers. Minimal boilerplate.
 
 ### Layer 2: ServiceInvoker
@@ -4606,7 +4648,7 @@ Coordinator                     Service A
 | Aspect | SagaEngine (saga/TCC model) | MicroProfile LRA |
 |--------|--------------------------|-------------------|
 | Who drives execution | Coordinator calls `step.execute()` for each step | Client calls services directly; coordinator only manages lifecycle |
-| Step discovery | Declared upfront in saga definition (JSON/YAML) | Dynamic — participants self-register at runtime as LRA context propagates |
+| Step discovery | Declared upfront in saga definition (Java builder or JSON/YAML) | Dynamic — participants self-register at runtime as LRA context propagates |
 | Orchestration | Pure orchestration — coordinator drives the entire flow | Hybrid — client drives the call chain, coordinator handles completion/compensation |
 | Who calls participants | Coordinator calls each step directly | Client calls next service; coordinator only calls `@Complete`/`@Compensate` callbacks |
 | Library on participants | Not required | Required — every participant needs the LRA library for the JAX-RS filter |
@@ -4662,7 +4704,7 @@ The LRA coordinator is a **separate module** that runs alongside the saga engine
 | Aspect | SagaEngine (our saga/TCC model) | LraCoordinator (LRA model) |
 |---|---|---|
 | **Who drives execution** | Coordinator calls `step.execute()` for each step | Client calls services directly; coordinator only calls close/cancel callbacks |
-| **Participant discovery** | Static — all steps declared upfront in JSON/YAML | Dynamic — participants self-register via `PUT /lra/{id}` (join) during execution |
+| **Participant discovery** | Static — all steps declared upfront in Java builder or JSON/YAML | Dynamic — participants self-register via `PUT /lra/{id}` (join) during execution |
 | **Workflow definition** | Predefined saga definition (step order, compensation mapping) | No predefined workflow — participants enlist as the client's call chain progresses |
 | **Success callback** | None (execution = success) | `@Complete` called on all participants |
 | **What coordinator stores** | Full saga state (events, step status, context) | Participant registry (callback URLs per LRA) + LRA lifecycle state |
@@ -5062,16 +5104,238 @@ See [MicroProfile LRA Compatibility](#microprofile-lra-compatibility) in Part VI
 
 ### 7a: gRPC Transport
 
-Add gRPC as an alternative transport for both coordinator and participant communication. Define `.proto` files as the formal contract; auto-generated stubs provide type-safe clients for multiple languages.
+Add gRPC as an alternative transport for both coordinator and participant communication. The `.proto` files serve as both the **formal API contract** and the **saga definition format** for daemon mode — polyglot clients use generated types to define and submit sagas with compile-time type safety.
+
+#### Protocol Buffers Schema
+
+```protobuf
+syntax = "proto3";
+package scalardb.saga.v1;
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/empty.proto";
+
+// --- Saga definition ---
+
+message SagaDefinition {
+  string name = 1;
+  string version = 2;
+  SagaMode mode = 3;
+  RecoverStrategy recover_strategy = 4;
+  uint64 timeout_ms = 5;
+  RetryPolicy default_retry_policy = 6;
+  repeated StepDefinition steps = 7;
+}
+
+message StepDefinition {
+  string name = 1;
+  uint64 timeout_ms = 2;
+  RetryPolicy retry_policy = 3;
+  CallDefinition call = 4;             // forward action
+  CallDefinition compensate = 5;       // compensation
+}
+
+message CallDefinition {
+  string service = 1;                  // logical service name (resolved via config)
+  string method = 2;                   // method/operation name
+  string transport = 3;                // "grpc" or "http"
+  google.protobuf.Struct request = 4;  // parameter mapping (${...} expressions)
+  map<string, string> output = 5;      // response extraction ($.path expressions)
+}
+
+message RetryPolicy {
+  uint32 max_attempts = 1;
+  uint64 initial_interval_ms = 2;
+  double backoff_multiplier = 3;
+  uint64 max_interval_ms = 4;
+}
+
+enum SagaMode {
+  SAGA_MODE_UNSPECIFIED = 0;
+  SAGA = 1;
+  TCC = 2;
+}
+
+enum RecoverStrategy {
+  RECOVER_STRATEGY_UNSPECIFIED = 0;
+  COMPENSATE = 1;
+  FORWARD = 2;
+}
+
+// --- Runtime API ---
+
+message StartSagaRequest {
+  string saga_name = 1;
+  google.protobuf.Struct input = 2;
+}
+
+message StartSagaResponse {
+  string saga_id = 1;
+}
+
+message GetSagaRequest {
+  string saga_id = 1;
+}
+
+enum SagaStatus {
+  SAGA_STATUS_UNSPECIFIED = 0;
+  RUNNING = 1;
+  COMPLETED = 2;
+  COMPENSATING = 3;
+  COMPENSATED = 4;
+  ESCALATED = 5;
+}
+
+service SagaService {
+  rpc RegisterSaga(SagaDefinition) returns (google.protobuf.Empty);
+  rpc StartSaga(StartSagaRequest) returns (StartSagaResponse);
+  rpc GetSaga(GetSagaRequest) returns (SagaInstanceResponse);
+  rpc CompensateSaga(GetSagaRequest) returns (SagaInstanceResponse);
+}
+```
+
+In daemon mode, `StepDefinition` uses declarative `call`/`compensate` blocks — the same format as JSON/YAML declarative communication (see [Declarative Communication](#solution-declarative-communication-in-the-saga-definition)). No `stepClass` field because daemon-mode clients don't run Java Step classes.
+
+#### Client Usage Examples
+
+**Java:**
+
+```java
+SagaServiceGrpc.SagaServiceBlockingStub stub =
+    SagaServiceGrpc.newBlockingStub(channel);
+
+stub.registerSaga(SagaDefinition.newBuilder()
+    .setName("MoneyTransfer")
+    .setVersion("1.0")
+    .setMode(SagaMode.SAGA)
+    .setRecoverStrategy(RecoverStrategy.COMPENSATE)
+    .setTimeoutMs(300000)
+    .addSteps(StepDefinition.newBuilder()
+        .setName("debit")
+        .setCall(CallDefinition.newBuilder()
+            .setService("account-service")
+            .setMethod("debit")
+            .setTransport("grpc")
+            .setRequest(Struct.newBuilder()
+                .putFields("account_id", Value.newBuilder()
+                    .setStringValue("${accountId}").build())
+                .putFields("amount", Value.newBuilder()
+                    .setStringValue("${amount}").build())
+                .build())
+            .putOutput("debitId", "$.debit_id")
+            .build())
+        .setCompensate(CallDefinition.newBuilder()
+            .setService("account-service")
+            .setMethod("reverseDebit")
+            .setTransport("grpc")
+            .setRequest(Struct.newBuilder()
+                .putFields("debit_id", Value.newBuilder()
+                    .setStringValue("${debitId}").build())
+                .build())
+            .build())
+        .setTimeoutMs(60000)
+        .build())
+    .addSteps(StepDefinition.newBuilder()
+        .setName("credit")
+        .setCall(CallDefinition.newBuilder()
+            .setService("account-service")
+            .setMethod("credit")
+            .setTransport("grpc")
+            .setRequest(Struct.newBuilder()
+                .putFields("account_id", Value.newBuilder()
+                    .setStringValue("${toAccountId}").build())
+                .putFields("amount", Value.newBuilder()
+                    .setStringValue("${amount}").build())
+                .build())
+            .putOutput("creditId", "$.credit_id")
+            .build())
+        .setCompensate(CallDefinition.newBuilder()
+            .setService("account-service")
+            .setMethod("reverseCredit")
+            .setTransport("grpc")
+            .setRequest(Struct.newBuilder()
+                .putFields("credit_id", Value.newBuilder()
+                    .setStringValue("${creditId}").build())
+                .build())
+            .build())
+        .setTimeoutMs(30000)
+        .build())
+    .build());
+
+StartSagaResponse response = stub.startSaga(
+    StartSagaRequest.newBuilder()
+        .setSagaName("MoneyTransfer")
+        .setInput(Struct.newBuilder()
+            .putFields("accountId", Value.newBuilder()
+                .setStringValue("A001").build())
+            .putFields("toAccountId", Value.newBuilder()
+                .setStringValue("B002").build())
+            .putFields("amount", Value.newBuilder()
+                .setNumberValue(100).build())
+            .build())
+        .build());
+```
+
+**Python:**
+
+```python
+from google.protobuf.struct_pb2 import Struct
+
+stub = saga_pb2_grpc.SagaServiceStub(channel)
+
+debit_req = Struct()
+debit_req.update({"account_id": "${accountId}", "amount": "${amount}"})
+debit_comp_req = Struct()
+debit_comp_req.update({"debit_id": "${debitId}"})
+
+credit_req = Struct()
+credit_req.update({"account_id": "${toAccountId}", "amount": "${amount}"})
+credit_comp_req = Struct()
+credit_comp_req.update({"credit_id": "${creditId}"})
+
+stub.RegisterSaga(saga_pb2.SagaDefinition(
+    name="MoneyTransfer",
+    version="1.0",
+    mode=saga_pb2.SAGA,
+    recover_strategy=saga_pb2.COMPENSATE,
+    timeout_ms=300000,
+    steps=[
+        saga_pb2.StepDefinition(
+            name="debit",
+            call=saga_pb2.CallDefinition(
+                service="account-service", method="debit", transport="grpc",
+                request=debit_req, output={"debitId": "$.debit_id"}),
+            compensate=saga_pb2.CallDefinition(
+                service="account-service", method="reverseDebit",
+                transport="grpc", request=debit_comp_req),
+            timeout_ms=60000),
+        saga_pb2.StepDefinition(
+            name="credit",
+            call=saga_pb2.CallDefinition(
+                service="account-service", method="credit", transport="grpc",
+                request=credit_req, output={"creditId": "$.credit_id"}),
+            compensate=saga_pb2.CallDefinition(
+                service="account-service", method="reverseCredit",
+                transport="grpc", request=credit_comp_req),
+            timeout_ms=30000),
+    ]))
+
+input_data = Struct()
+input_data.update({"accountId": "A001", "toAccountId": "B002", "amount": 100})
+response = stub.StartSaga(saga_pb2.StartSagaRequest(
+    saga_name="MoneyTransfer", input=input_data))
+```
+
+#### Work Breakdown
 
 | Work Item | Est. LoC | Time |
 |---|---|---|
-| `.proto` definitions (coordinator API + participant protocol) | ~100 | 0.25 day |
+| `.proto` definitions (saga definition schema + coordinator API + participant protocol) | ~150 | 0.5 day |
 | gRPC coordinator server (serves saga lifecycle API over gRPC) | ~200 | 1-1.5 days |
 | gRPC participant SDK (hosts Steps over gRPC) | ~200 | 1-1.5 days |
 | `RemoteSagaManager` gRPC variant | ~100 | 0.5 day |
 | Tests (all classes: server, client, participant SDK, error handling) | ~500 | 1.5-2 days |
-| **Phase 7a Total** | **~1,100** | **~4-5.5 days** |
+| **Phase 7a Total** | **~1,150** | **~4.5-6 days** |
 
 ### 7b: TCP/Netty Transport
 
@@ -5111,7 +5375,7 @@ Add a custom binary protocol over TCP using Netty for maximum performance in dat
 | Phase 4 complete (+ DX & observability) | ~18.5-26.5 days |
 | Phase 5 complete (+ admin API) | ~21-30.5 days |
 | Phase 6 complete (+ LRA compliance) | ~31.5-44.5 days |
-| Phase 7 complete (+ gRPC & TCP/Netty transports) | ~40.5-57 days |
+| Phase 7 complete (+ gRPC & TCP/Netty transports) | ~41-57.5 days |
 
 ## Enhancement Roadmap (v2+)
 
