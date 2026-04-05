@@ -1376,24 +1376,24 @@ public class SagaSchema {
      * Table 2: saga_index — mutable lookup/recovery index.
      *
      * Partition key: bucket (INT)  — hash(saga_id) % NUM_BUCKETS
-     * Clustering key: (status (INT), saga_id (TEXT))
+     * Clustering key: (status (INT), updated_at (TIMESTAMPTZ), saga_id (TEXT))
      * Secondary index: saga_id
      *
      * One row per saga. Written on saga start and on each status transition.
-     * Because status is part of the clustering key (immutable), status
-     * transitions require DELETE old row + INSERT new row in one transaction.
+     * Because status and updated_at are part of the clustering key (immutable),
+     * status transitions require DELETE old row + INSERT new row in one transaction.
      *
      * Bucket-based partitioning distributes recovery scans across database
      * nodes — each bucket is a separate partition, avoiding hot-partition
      * problems that would occur if status alone were the partition key.
      *
-     * Status as clustering key prefix enables efficient recovery scans:
-     * scan each bucket with clustering key prefix status=RUNNING to read
-     * only active sagas, skipping all COMPLETED/COMPENSATED/ESCALATED rows
-     * at the storage layer.
+     * Clustering key design enables efficient recovery scans:
+     * scan each bucket with status=RUNNING and updated_at <= threshold,
+     * reading only stale active sagas. Completed/compensated rows and
+     * recently-updated active sagas are skipped at the storage layer.
      *
      * Used for:
-     * - Recovery scan: for each bucket, scan status=RUNNING with stale updated_at
+     * - Recovery scan: for each bucket, scan status=RUNNING with updated_at <= threshold
      * - Fast status lookup: getInstance(sagaId) via secondary index on saga_id
      * - Admin API queries: list by status, count by name
      * - Conflict-based claiming: version column incremented on claim
@@ -1411,16 +1411,17 @@ public class SagaSchema {
         return TableMetadata.newBuilder()
             .addColumn("bucket",       DataType.INT)      // PK: hash(saga_id) % NUM_BUCKETS
             .addColumn("status",       DataType.INT)      // CK1: SagaStatus ordinal
-            .addColumn("saga_id",      DataType.TEXT)      // CK2: unique identifier
+            .addColumn("updated_at",   DataType.TIMESTAMPTZ) // CK2: last state change time
+            .addColumn("saga_id",      DataType.TEXT)      // CK3: unique identifier
             .addColumn("saga_name",    DataType.TEXT)
             .addColumn("owner_id",     DataType.TEXT)      // replica that last claimed this saga
             .addColumn("version",      DataType.INT)       // incremented on each claim
             .addColumn("definition_version", DataType.TEXT) // saga definition version at creation
             .addColumn("definition_json",    DataType.TEXT) // full definition JSON snapshot
             .addColumn("created_at",   DataType.TIMESTAMPTZ)
-            .addColumn("updated_at",   DataType.TIMESTAMPTZ)
             .addPartitionKey("bucket")
             .addClusteringKey("status", Scan.Ordering.Order.ASC)
+            .addClusteringKey("updated_at", Scan.Ordering.Order.ASC)
             .addClusteringKey("saga_id", Scan.Ordering.Order.ASC)
             .addSecondaryIndex("saga_id")
             .build();
@@ -1706,9 +1707,9 @@ public class ScalarDbSagaStore implements SagaStore {
     /**
      * Find sagas stuck in RUNNING or COMPENSATING with stale updated_at.
      *
-     * Scans each bucket with clustering key prefix status=RUNNING (and
-     * status=COMPENSATING), reading only active sagas. Completed/compensated
-     * rows are skipped entirely at the storage layer.
+     * Scans each bucket with clustering key range status=RUNNING (or
+     * COMPENSATING) and updated_at <= threshold. Both non-active statuses
+     * and recently-updated sagas are skipped at the storage layer.
      *
      * Bucket-based partitioning distributes scans across database nodes —
      * no hot-partition problem.
@@ -1720,26 +1721,23 @@ public class ScalarDbSagaStore implements SagaStore {
         try {
             tx = txManager.begin();
 
-            // Scan each bucket for RUNNING and COMPENSATING sagas
+            // Scan each bucket for RUNNING and COMPENSATING sagas with stale updated_at
             for (int bucket = 0; bucket < SagaSchema.NUM_BUCKETS; bucket++) {
                 for (int status : new int[]{
                         SagaStatus.RUNNING.ordinal(),
                         SagaStatus.COMPENSATING.ordinal()}) {
-                    List<Result> rows = tx.scan(Scan.newBuilder()
+                    Scan scan = Scan.newBuilder()
                         .namespace(SagaSchema.NAMESPACE).table("saga_index")
                         .partitionKey(Key.ofInt("bucket", bucket))
-                        .start(Key.of(
-                            Key.ofInt("status", status),
-                            Key.ofText("saga_id", "")))     // scan from start of this status
+                        .start(Key.ofInt("status", status), true)
                         .end(Key.of(
                             Key.ofInt("status", status),
-                            Key.ofText("saga_id", "\uffff"))) // to end of this status
-                        .build());
-
-                    for (Result r : rows) {
-                        Instant updatedAt = r.getTimestampTZ("updated_at");
-                        if (updatedAt.isBefore(threshold)) {
-                            result.add(toSagaInstance(r));
+                            Key.ofTimestampTZ("updated_at", threshold)), true)
+                        .build();
+                    try (Scanner scanner = tx.getScanner(scan)) {
+                        Optional<Result> r;
+                        while ((r = scanner.one()).isPresent()) {
+                            result.add(toSagaInstance(r.get()));
                         }
                     }
                 }
