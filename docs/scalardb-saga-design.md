@@ -160,8 +160,8 @@ com.scalar.db.saga/
 | 1 | **SagaEngine** | Owns saga lifecycle: `createSaga()` (persist), `executeSaga()` (run steps), `execute()` (convenience). Walks through steps sequentially, delegates to retry/compensation on failure. Features: per-step/per-saga timeouts, graceful shutdown, TCC mode (`TccStep` with try/confirm/cancel). Async step completion (daemon mode only): parks on `StepResult.pending()`, resumes via callback. |
 | 2 | **CompensationManager** | Executes compensations in reverse (LIFO) with retry. Stops on failure — saga stays in `COMPENSATING` for recovery to retry. Escalation after repeated recovery failures. |
 | 3 | **RetryPolicy** | Exponential backoff + jitter. Participant-driven error classification (`StepExecutionException.isRetryable()`). Virtual thread execution. |
-| 4 | **SagaStore** (interface) | Append-only event persistence: 1 INSERT per step (event row doubles as outbox entry). Bucket-partitioned `saga_index` table with `status` as clustering key for efficient recovery scans and distributed writes. Default implementation: `ScalarDbSagaStore`. |
-| 5 | **SagaRecoveryManager** | Scans each `saga_index` bucket for `status=RUNNING` with stale `updated_at` (similar to Seata's model). Bucket partitioning distributes scans across database nodes. Replays events to reconstruct state. Conflict-based claiming via ScalarDB transaction conflict detection. |
+| 4 | **SagaStore** (interface) | Append-only event persistence: 1 INSERT per step (event row doubles as outbox entry). Bucket-partitioned `saga_status` table with `status` as clustering key for efficient recovery scans and distributed writes. Default implementation: `ScalarDbSagaStore`. |
+| 5 | **SagaRecoveryManager** | Scans each `saga_status` bucket for `status=RUNNING` with stale `updated_at` (similar to Seata's model). Bucket partitioning distributes scans across database nodes. Replays events to reconstruct state. Conflict-based claiming via ScalarDB transaction conflict detection. |
 | 6 | **ServiceInvoker** | Framework-agnostic typed lambdas for step dispatch. Declarative JSON communication (Layer 2b). |
 | 7 | **SagaTestHarness** | In-memory testing: mock steps, crash simulation, assertion helpers. Uses `InMemorySagaStore`. |
 | 8 | **SagaAdminService** | Production operations API: list, inspect, compensate, retry, force-complete. |
@@ -410,7 +410,7 @@ Since our design persists all saga state in ScalarDB (not in-memory), **any inst
 
 ```
                     ┌──────────────┐
-                    │   ScalarDB    │  ← saga events + index live here,
+                    │   ScalarDB    │  ← saga events + status live here,
                     │  (shared DB)  │     not in any single process
                     └──────┬───────┘
                            │
@@ -430,19 +430,19 @@ Since our design persists all saga state in ScalarDB (not in-memory), **any inst
 
   Replica 1 crashes → saga's updated_at stops advancing.
   Replica 2's periodic scan finds the stale saga
-  in saga_index, claims it via transactional write, and resumes.
+  in saga_status, claims it via transactional write, and resumes.
 ```
 
 **Recovery protocol (Seata-style periodic scan):**
 
-1. **Saga registered on creation**: `SagaEngine.execute()` inserts a row into `saga_index` with `status=RUNNING` and `updated_at=now`.
-2. **No per-step ownership writes**: The engine does not write any lease/ownership data per step — only appends events to `saga_events`. The `saga_index.updated_at` is updated on saga start and end only.
-3. **Periodic recovery scan**: Every replica runs `SagaRecoveryManager` on a background scheduler (default: every 30s). It scans each `saga_index` bucket with clustering key prefix `status=RUNNING` (and `COMPENSATING`), reading only active sagas. Bucket-based partitioning distributes these scans across database nodes.
-4. **Conflict-based claiming**: Before recovering a saga, the replica writes a new `saga_index` row with updated `owner_id` and incremented `version` (DELETE + INSERT in one transaction, zero reads — the status and metadata are already known from step 3). If two replicas try to claim the same saga concurrently, ScalarDB's transaction conflict detection causes one to get `CommitConflictException` and back off.
+1. **Saga registered on creation**: `SagaEngine.execute()` inserts a row into `saga_status` with `status=RUNNING` and `updated_at=now`.
+2. **No per-step ownership writes**: The engine does not write any lease/ownership data per step — only appends events to `saga_events`. The `saga_status.updated_at` is updated on saga start and end only.
+3. **Periodic recovery scan**: Every replica runs `SagaRecoveryManager` on a background scheduler (default: every 30s). It scans each `saga_status` bucket with clustering key prefix `status=RUNNING` (and `COMPENSATING`), reading only active sagas. Bucket-based partitioning distributes these scans across database nodes.
+4. **Conflict-based claiming**: Before recovering a saga, the replica writes a new `saga_status` row with updated `owner_id` and incremented `version` (DELETE + INSERT in one transaction, zero reads — the status and metadata are already known from step 3). If two replicas try to claim the same saga concurrently, ScalarDB's transaction conflict detection causes one to get `CommitConflictException` and back off.
 5. **Event replay for state reconstruction**: The claiming replica reads all events from `saga_events` for the saga and replays them to reconstruct current state (e.g., finds the last `STEP_COMPLETED` event at step 3).
 6. **Resume forward execution**: The engine resumes from `lastCompleted + 1` (step 4). The step may or may not have executed before the crash — **this is why `execute()` must be idempotent**.
 7. **Resume compensation**: If the saga was `COMPENSATING`, the engine resumes compensation from the last compensated step downward. If a compensation fails again, the saga stays in `COMPENSATING` for the next recovery scan. After repeated failures (configurable threshold), the recovery manager escalates the saga to `ESCALATED` for manual intervention.
-8. **Index updated on completion**: When a saga reaches a terminal state (`COMPLETED`, `COMPENSATED`, `ESCALATED`), the engine updates `saga_index.status` to the terminal state. Terminal entries can be cleaned up after a configurable retention period.
+8. **Status updated on completion**: When a saga reaches a terminal state (`COMPLETED`, `COMPENSATED`, `ESCALATED`), the engine updates `saga_status.status` to the terminal state. Terminal entries can be cleaned up after a configurable retention period.
 
 **Append-only event persistence:**
 
@@ -567,15 +567,15 @@ public class SagaContext {
     private final String sagaId;
     private final Map<String, Object> data;
     private int nextEventSequence;       // tracks next saga_events sequence in memory
-    private SagaStatus currentStatus;    // tracks current saga_index status in memory
-    private SagaIndexMetadata indexMetadata; // cached saga_index columns (immutable after creation)
+    private SagaStatus currentStatus;    // tracks current saga_status status in memory
+    private SagaStatusMetadata statusMetadata; // cached saga_status columns (immutable after creation)
 
     public int getAndIncrementSequence() { return nextEventSequence++; }
     public void setNextEventSequence(int seq) { this.nextEventSequence = seq; }
     public SagaStatus getCurrentStatus() { return currentStatus; }
     public void setCurrentStatus(SagaStatus status) { this.currentStatus = status; }
-    public SagaIndexMetadata getIndexMetadata() { return indexMetadata; }
-    public void setIndexMetadata(SagaIndexMetadata m) { this.indexMetadata = m; }
+    public SagaStatusMetadata getStatusMetadata() { return statusMetadata; }
+    public void setStatusMetadata(SagaStatusMetadata m) { this.statusMetadata = m; }
 
     public <T> T get(String key, Class<T> type);
 
@@ -603,11 +603,11 @@ public class SagaContext {
     }
 }
 
-// --- engine/SagaIndexMetadata.java ---
-// Immutable snapshot of saga_index columns that don't change after creation.
-// Cached in SagaContext so that recordTransition can write the new index row
+// --- engine/SagaStatusMetadata.java ---
+// Immutable snapshot of saga_status columns that don't change after creation.
+// Cached in SagaContext so that recordTransition can write the new status row
 // without reading the old one first (eliminates the GET from the transaction).
-public record SagaIndexMetadata(
+public record SagaStatusMetadata(
     String sagaName,
     String ownerId,
     int version,
@@ -829,8 +829,8 @@ public class SagaEngine {
     private final String ownerId;          // unique ID for this replica (e.g., UUID)
 
     /**
-     * Persist a new saga (saga_index + SAGA_STARTED event). Returns the saga ID.
-     * Stores the full definition JSON snapshot in saga_index so that recovery
+     * Persist a new saga (saga_status + SAGA_STARTED event). Returns the saga ID.
+     * Stores the full definition JSON snapshot in saga_status so that recovery
      * always uses the exact definition this saga was started with.
      */
     public String createSaga(SagaDefinition def, Map<String, Object> input) {
@@ -848,7 +848,7 @@ public class SagaEngine {
         SagaContext context = new SagaContext(sagaId, saga.getInput());
         context.setNextEventSequence(1);        // next sequence after SAGA_STARTED
         context.setCurrentStatus(SagaStatus.RUNNING);
-        context.setIndexMetadata(new SagaIndexMetadata(
+        context.setStatusMetadata(new SagaStatusMetadata(
             saga.getSagaName(), ownerId, 0,
             def.getVersion(), saga.getDefinitionJson(), saga.getCreatedAt()));
         return executeSteps(def, context, 0, -1);
@@ -864,7 +864,7 @@ public class SagaEngine {
         SagaContext context = new SagaContext(sagaId, input);
         context.setNextEventSequence(1);
         context.setCurrentStatus(SagaStatus.RUNNING);
-        context.setIndexMetadata(new SagaIndexMetadata(
+        context.setStatusMetadata(new SagaStatusMetadata(
             def.getName(), ownerId, 0, def.getVersion(), def.toJson(), now));
         return executeSteps(def, context, 0, -1);
     }
@@ -896,7 +896,7 @@ public class SagaEngine {
 
                 // Append-only: 1 INSERT per step. The event row doubles as
                 // an outbox entry for downstream consumers. No "step started"
-                // write, no lease renewal — recovery uses saga_index scan.
+                // write, no lease renewal — recovery uses saga_status scan.
                 store.appendEvent(sagaId, context.getAndIncrementSequence(),
                     SagaEvent.stepCompleted(i, stepDef.getName(), result));
                 context.merge(result);
@@ -955,13 +955,13 @@ public class SagaEngine {
 
     /**
      * Helper: record a status transition and update context tracking.
-     * Passes the cached index metadata so recordTransition needs zero reads.
+     * Passes the cached status metadata so recordTransition needs zero reads.
      */
     private void transition(SagaContext context, SagaEvent event) {
         store.recordTransition(context.getSagaId(),
             context.getAndIncrementSequence(),
             context.getCurrentStatus(),
-            context.getIndexMetadata(),
+            context.getStatusMetadata(),
             event);
         context.setCurrentStatus(event.getTargetStatus());
     }
@@ -1016,7 +1016,7 @@ public class DefaultSagaManager implements SagaManager {
                              SagaCallback callback) {
         SagaDefinition def = definitions.get(sagaName);
 
-        // 1. Persist saga via engine (saga_index + SAGA_STARTED event).
+        // 1. Persist saga via engine (saga_status + SAGA_STARTED event).
         //    This guarantees the saga is recoverable even if the process
         //    crashes before the virtual thread starts executing.
         String sagaId = engine.createSaga(def, input);
@@ -1323,14 +1323,14 @@ No `isNonRetryable()` method needed — the participant's `StepExecutionExceptio
 
 ### What It Does
 
-Stores saga state as **append-only events** using ScalarDB's transaction API. Each state change is a single INSERT into `saga_events`. A small mutable `saga_index` table provides fast status lookups and efficient recovery scanning.
+Stores saga state as **append-only events** using ScalarDB's transaction API. Each state change is a single INSERT into `saga_events`. A small mutable `saga_status` table provides fast status lookups and efficient recovery scanning.
 
 **Why ScalarDB**: Database-agnostic ACID transactions — saga state and outbox writes are atomic in one transaction (no dual-write problem), and one persistence implementation works regardless of the user's database choice (Cassandra, DynamoDB, PostgreSQL, MySQL, Cosmos DB, etc.).
 
 The critical features:
 - **1 INSERT per step** — append-only events, no read-modify-write
 - **Event rows double as outbox entries** — CDC or polling can tail `saga_events` directly, eliminating the dual-write problem (same approach as Eventuate Tram)
-- **No per-step lease/ownership writes** — recovery uses periodic scan of `saga_index` (Seata-style)
+- **No per-step lease/ownership writes** — recovery uses periodic scan of `saga_status` (Seata-style)
 
 ### Where Saga State Lives
 
@@ -1373,7 +1373,7 @@ public class SagaSchema {
     }
 
     /**
-     * Table 2: saga_index — mutable lookup/recovery index.
+     * Table 2: saga_status — mutable status/recovery table.
      *
      * Partition key: bucket (INT)  — hash(saga_id) % NUM_BUCKETS
      * Clustering key: (status (INT), updated_at (TIMESTAMPTZ), saga_id (TEXT))
@@ -1407,7 +1407,7 @@ public class SagaSchema {
         return Math.abs(sagaId.hashCode()) % NUM_BUCKETS;
     }
 
-    public static TableMetadata sagaIndexTable() {
+    public static TableMetadata sagaStatusTable() {
         return TableMetadata.newBuilder()
             .addColumn("bucket",       DataType.INT)      // PK: hash(saga_id) % NUM_BUCKETS
             .addColumn("status",       DataType.INT)      // CK1: SagaStatus ordinal
@@ -1433,7 +1433,7 @@ public class SagaSchema {
     public static void createAll(Admin admin) throws ExecutionException {
         admin.createNamespace(NAMESPACE, true);
         admin.createTable(NAMESPACE, "saga_events", sagaEventsTable(), true);
-        admin.createTable(NAMESPACE, "saga_index",  sagaIndexTable(),  true);
+        admin.createTable(NAMESPACE, "saga_status",  sagaStatusTable(),  true);
     }
 }
 ```
@@ -1496,12 +1496,12 @@ Event stream for a 5-step saga (happy path):
   seq=5  STEP_COMPLETED    {stepIndex: 4, stepName: "audit"}
   seq=6  SAGA_COMPLETED    {}                                    ← saga end
 
-Total: 7 INSERTs to saga_events + 2 writes to saga_index = 9 writes
+Total: 7 INSERTs to saga_events + 2 writes to saga_status = 9 writes
 ```
 
 | Framework | Writes per step | Total for 5-step saga | Model |
 |---|---|---|---|
-| **This design** | 1 INSERT | 9 (7 events + 2 index) | Append-only events + mutable index |
+| **This design** | 1 INSERT | 9 (7 events + 2 status) | Append-only events + mutable status |
 | **Axon** | 1 INSERT | ~7 | Append-only event store |
 | **Eventuate** | 1 INSERT | ~7 | Append-only events + CDC |
 | **Temporal** | ~1 (batched) | ~7 | Append-only event history |
@@ -1515,25 +1515,25 @@ Total: 7 INSERTs to saga_events + 2 writes to saga_index = 9 writes
 ```java
 // --- store/SagaStore.java ---
 public interface SagaStore {
-    // Saga lifecycle — writes to both saga_events and saga_index in ONE transaction
+    // Saga lifecycle — writes to both saga_events and saga_status in ONE transaction
     String createSaga(String sagaName, String ownerId,
                        Map<String, Object> input, String definitionJson);
 
-    // Append-only event write — 1 INSERT to saga_events (no index update)
+    // Append-only event write — 1 INSERT to saga_events (no status table update)
     // Used for step-level events (STEP_COMPLETED, STEP_COMPENSATED, etc.)
     // Caller provides the sequence number (tracked in SagaContext).
     void appendEvent(String sagaId, int sequence, SagaEvent event);
 
-    // Append event + transition saga_index status atomically in ONE transaction.
+    // Append event + transition saga_status status atomically in ONE transaction.
     // The new status is derived from event.getTargetStatus().
-    // The old status and index metadata are provided by the caller (tracked in
+    // The old status and status metadata are provided by the caller (tracked in
     // SagaContext), so no reads are needed — the transaction is 3 pure writes:
-    // 1 INSERT (event) + 1 DELETE (old index row) + 1 INSERT (new index row).
+    // 1 INSERT (event) + 1 DELETE (old status row) + 1 INSERT (new status row).
     // Used for status transitions (COMPENSATING, COMPLETED, ESCALATED, etc.)
     void recordTransition(String sagaId, int sequence, SagaStatus oldStatus,
-                           SagaIndexMetadata metadata, SagaEvent event);
+                           SagaStatusMetadata metadata, SagaEvent event);
 
-    // Recovery — scan saga_index + replay saga_events
+    // Recovery — scan saga_status + replay saga_events
     List<SagaInstance> findRecoverable(long recoveryTimeoutMs);
     boolean claimForRecovery(SagaInstance saga, String newOwnerId);
     List<SagaEvent> getEvents(String sagaId);
@@ -1556,7 +1556,7 @@ public class ScalarDbSagaStore implements SagaStore {
 
     /**
      * Create a new saga. Writes to both saga_events (SAGA_STARTED event)
-     * and saga_index (RUNNING status) in one transaction.
+     * and saga_status (RUNNING status) in one transaction.
      */
     public String createSaga(String sagaName, String ownerId,
                               Map<String, Object> input, String definitionJson) {
@@ -1579,9 +1579,9 @@ public class ScalarDbSagaStore implements SagaStore {
                 .timestampTZValue("created_at", now)
                 .build());
 
-            // 2. Insert saga_index row (bucket + status=RUNNING)
+            // 2. Insert saga_status row (bucket + status=RUNNING)
             tx.insert(Insert.newBuilder()
-                .namespace(SagaSchema.NAMESPACE).table("saga_index")
+                .namespace(SagaSchema.NAMESPACE).table("saga_status")
                 .partitionKey(Key.ofInt("bucket", SagaSchema.bucketOf(sagaId)))
                 .clusteringKey(Key.of(
                     Key.ofInt("status", SagaStatus.RUNNING.ordinal()),
@@ -1635,22 +1635,22 @@ public class ScalarDbSagaStore implements SagaStore {
     }
 
     /**
-     * Atomically: append event + transition saga_index status in ONE transaction.
-     * Used for status transitions to ensure event and index are always consistent.
+     * Atomically: append event + transition saga_status status in ONE transaction.
+     * Used for status transitions to ensure event and status are always consistent.
      *
      * Because status is part of the clustering key (immutable in ScalarDB),
      * a status transition = DELETE old row + INSERT new row with the new status.
      * Both happen in the same transaction with the event append.
      *
-     * The sequence number, old status, and index metadata are all provided by
+     * The sequence number, old status, and status metadata are all provided by
      * the caller (tracked in SagaContext). This means the transaction needs
      * zero reads — it's 3 pure writes:
-     *   1 INSERT (event) + 1 DELETE (old index row) + 1 INSERT (new index row)
+     *   1 INSERT (event) + 1 DELETE (old status row) + 1 INSERT (new status row)
      *
      * Reduced from the original 5 ops (2 scans + 2 inserts + 1 delete).
      */
     public void recordTransition(String sagaId, int sequence,
-                                  SagaStatus oldStatus, SagaIndexMetadata metadata,
+                                  SagaStatus oldStatus, SagaStatusMetadata metadata,
                                   SagaEvent event) {
         SagaStatus newStatus = event.getTargetStatus();
         DistributedTransaction tx = null;
@@ -1674,7 +1674,7 @@ public class ScalarDbSagaStore implements SagaStore {
 
             // 2. DELETE old row (old status in clustering key)
             tx.delete(Delete.newBuilder()
-                .namespace(SagaSchema.NAMESPACE).table("saga_index")
+                .namespace(SagaSchema.NAMESPACE).table("saga_status")
                 .partitionKey(Key.ofInt("bucket", bucket))
                 .clusteringKey(Key.of(
                     Key.ofInt("status", oldStatus.ordinal()),
@@ -1683,7 +1683,7 @@ public class ScalarDbSagaStore implements SagaStore {
 
             // 3. INSERT new row (new status in clustering key, columns from metadata)
             tx.insert(Insert.newBuilder()
-                .namespace(SagaSchema.NAMESPACE).table("saga_index")
+                .namespace(SagaSchema.NAMESPACE).table("saga_status")
                 .partitionKey(Key.ofInt("bucket", bucket))
                 .clusteringKey(Key.of(
                     Key.ofInt("status", newStatus.ordinal()),
@@ -1727,7 +1727,7 @@ public class ScalarDbSagaStore implements SagaStore {
                         SagaStatus.RUNNING.ordinal(),
                         SagaStatus.COMPENSATING.ordinal()}) {
                     Scan scan = Scan.newBuilder()
-                        .namespace(SagaSchema.NAMESPACE).table("saga_index")
+                        .namespace(SagaSchema.NAMESPACE).table("saga_status")
                         .partitionKey(Key.ofInt("bucket", bucket))
                         .start(Key.ofInt("status", status), true)
                         .end(Key.of(
@@ -1770,7 +1770,7 @@ public class ScalarDbSagaStore implements SagaStore {
 
             // DELETE old row + INSERT with updated owner and version
             tx.delete(Delete.newBuilder()
-                .namespace(SagaSchema.NAMESPACE).table("saga_index")
+                .namespace(SagaSchema.NAMESPACE).table("saga_status")
                 .partitionKey(Key.ofInt("bucket", bucket))
                 .clusteringKey(Key.of(
                     Key.ofInt("status", status),
@@ -1778,7 +1778,7 @@ public class ScalarDbSagaStore implements SagaStore {
                 .build());
 
             tx.insert(Insert.newBuilder()
-                .namespace(SagaSchema.NAMESPACE).table("saga_index")
+                .namespace(SagaSchema.NAMESPACE).table("saga_status")
                 .partitionKey(Key.ofInt("bucket", bucket))
                 .clusteringKey(Key.of(
                     Key.ofInt("status", status),
@@ -1827,7 +1827,7 @@ public class ScalarDbSagaStore implements SagaStore {
     }
 
     /**
-     * Get saga status from saga_index — single point-read.
+     * Get saga status from saga_status — single point-read.
      * For full state (including step results), use getEvents() and replay.
      */
     public SagaInstance getInstance(String sagaId) {
@@ -1837,7 +1837,7 @@ public class ScalarDbSagaStore implements SagaStore {
 
             // Lookup via secondary index on saga_id
             Optional<Result> result = tx.scan(Scan.newBuilder()
-                .namespace(SagaSchema.NAMESPACE).table("saga_index")
+                .namespace(SagaSchema.NAMESPACE).table("saga_status")
                 .indexKey(Key.ofText("saga_id", sagaId))
                 .build())
                 .stream().findFirst();
@@ -1864,7 +1864,7 @@ public class ScalarDbSagaStore implements SagaStore {
 
 ### What It Does
 
-On application startup, scans `saga_index` for sagas stuck in `RUNNING` or `COMPENSATING` status with stale `updated_at` (meaning the process crashed mid-execution). Replays events from `saga_events` to reconstruct state, then resumes execution.
+On application startup, scans `saga_status` for sagas stuck in `RUNNING` or `COMPENSATING` status with stale `updated_at` (meaning the process crashed mid-execution). Replays events from `saga_events` to reconstruct state, then resumes execution.
 
 ### Recovery Logic
 
@@ -1896,7 +1896,7 @@ public class SagaRecoveryManager {
     /**
      * Start periodic recovery scanning.
      * Runs once immediately (startup recovery), then periodically.
-     * Finds stale RUNNING sagas in saga_index and resumes them.
+     * Finds stale RUNNING sagas in saga_status and resumes them.
      */
     public void start() {
         scheduler.scheduleWithFixedDelay(
@@ -1911,7 +1911,7 @@ public class SagaRecoveryManager {
     }
 
     /**
-     * Single recovery pass: find stale sagas in saga_index,
+     * Single recovery pass: find stale sagas in saga_status,
      * claim via transactional write, replay events, and resume.
      */
     void recover() {
@@ -1933,7 +1933,7 @@ public class SagaRecoveryManager {
     }
 
     private void recoverOne(SagaInstance saga) {
-        // Use the definition snapshot stored in saga_index at creation time.
+        // Use the definition snapshot stored in saga_status at creation time.
         // This ensures recovery uses the exact definition the saga was started with,
         // even if the current definition has been updated (new steps, different order,
         // renamed steps). This is the same approach Temporal uses (workflow versioning)
@@ -1965,7 +1965,7 @@ public class SagaRecoveryManager {
                 store.recordTransition(saga.getSagaId(),
                     state.context.getAndIncrementSequence(),
                     state.context.getCurrentStatus(),
-                    state.context.getIndexMetadata(),
+                    state.context.getStatusMetadata(),
                     SagaEvent.sagaEscalated("exceeded " + failureCount + " compensation attempts"));
                 return;
             }
@@ -2019,10 +2019,10 @@ public class SagaRecoveryManager {
         // Reconstruct in-memory tracking fields from the event stream.
         // nextEventSequence = total events replayed (events are 0-indexed by sequence).
         // currentStatus = final status after replaying all events.
-        // indexMetadata = immutable saga_index columns from the SagaInstance.
+        // statusMetadata = immutable saga_status columns from the SagaInstance.
         context.setNextEventSequence(events.size());
         context.setCurrentStatus(status);
-        context.setIndexMetadata(new SagaIndexMetadata(
+        context.setStatusMetadata(new SagaStatusMetadata(
             saga.getSagaName(), saga.getOwnerId(), saga.getVersion(),
             saga.getDefinitionVersion(), saga.getDefinitionJson(),
             saga.getCreatedAt()));
@@ -2168,7 +2168,7 @@ public class SagaTimeoutException extends RuntimeException {
 When a step times out:
 1. The virtual thread running `step.execute()` is interrupted via `Future.cancel(true)`
 2. Compensation begins immediately — the current replica handles it
-3. Other replicas will not pick up this saga because the current replica is still active and updating `saga_index` on status changes
+3. Other replicas will not pick up this saga because the current replica is still active and updating `saga_status` on status changes
 
 ## Graceful Shutdown
 
@@ -2178,7 +2178,7 @@ When the process shuts down (e.g., Kubernetes pod termination, deployment rollin
 
 1. Stops accepting new sagas
 2. Waits for in-flight sagas to complete their current step
-3. Marks incomplete sagas in `saga_index` for immediate recovery (sets `updated_at = 0`)
+3. Marks incomplete sagas in `saga_status` for immediate recovery (sets `updated_at = 0`)
 4. Stops the recovery scheduler
 
 Without graceful shutdown, the recovery timeout (60s default) means a recovery delay of up to 60s, and the interrupted step may leave partial side effects.
@@ -2205,7 +2205,7 @@ public class SagaEngine implements AutoCloseable {
         }
 
         // 2. Mark active sagas for immediate recovery
-        //    (update saga_index.updated_at to epoch 0 so recovery picks them up)
+        //    (update saga_status.updated_at to epoch 0 so recovery picks them up)
         for (String sagaId : activeSagas) {
             try {
                 store.markForRecovery(sagaId);  // sets updated_at = 0
@@ -4313,7 +4313,7 @@ public class DefaultSagaAdminService implements SagaAdminService {
         // Replay events to reconstruct sequence; build metadata from instance
         SagaInstance saga = store.getInstance(sagaId);
         List<SagaEvent> events = store.getEvents(sagaId);
-        SagaIndexMetadata metadata = new SagaIndexMetadata(
+        SagaStatusMetadata metadata = new SagaStatusMetadata(
             saga.getSagaName(), saga.getOwnerId(), saga.getVersion(),
             saga.getDefinitionVersion(), saga.getDefinitionJson(),
             saga.getCreatedAt());
@@ -4770,7 +4770,7 @@ The `quarkus-scalardb` extension already provides `DistributedTransactionManager
 
 ## Phase 1: Core Engine
 
-**Scope:** Core engine + SagaStore + recovery (with index table) + timeouts + virtual threads + graceful shutdown + saga versioning + compensation retry + SagaContext validation + TCC mode.
+**Scope:** Core engine + SagaStore + recovery (with status table) + timeouts + virtual threads + graceful shutdown + saga versioning + compensation retry + SagaContext validation + TCC mode.
 
 ### File-by-File Breakdown
 
@@ -4780,14 +4780,14 @@ The `quarkus-scalardb` extension already provides `DistributedTransactionManager
 | `Step.java` | Interface (2 methods) | ~15 | Trivial |
 | `TccStep.java` | TCC extension of Step (1 method) | ~10 | Trivial |
 | `StepResult.java` | Simple data class | ~30 | Trivial |
-| `SagaContext.java` | Map wrapper with typed getters + type validation + in-memory tracking fields (`nextEventSequence`, `currentStatus`, `indexMetadata`) | ~80 | Trivial |
+| `SagaContext.java` | Map wrapper with typed getters + type validation + in-memory tracking fields (`nextEventSequence`, `currentStatus`, `statusMetadata`) | ~80 | Trivial |
 | `SagaStatus.java` | Enum (7 values: RUNNING, CONFIRMING, COMPLETED, FAILED, COMPENSATING, COMPENSATED, ESCALATED) | ~10 | Trivial |
 | `StepStatus.java` | Enum (4 values: WAITING (daemon mode only), COMPLETED, CONFIRMED, FAILED) | ~5 | Trivial |
 | `SagaDefinition.java` | POJO + inner `StepDefinition` + SagaMode + RecoverStrategy | ~60 | Trivial |
 | `SagaInstance.java` | Read-only view of saga state | ~40 | Trivial |
 | `SagaManager.java` | Interface (8 methods incl. start, startAsync ×2; completeStep is daemon mode only) | ~25 | Trivial |
 | `SagaCallback.java` | Callback interface (onCompleted, onCompensated, onEscalated) | ~10 | Trivial |
-| `SagaIndexMetadata.java` | Record caching immutable saga_index columns (sagaName, ownerId, version, etc.) for zero-read `recordTransition` | ~15 | Trivial |
+| `SagaStatusMetadata.java` | Record caching immutable saga_status columns (sagaName, ownerId, version, etc.) for zero-read `recordTransition` | ~15 | Trivial |
 | **engine/** | | | |
 | `RetryPolicy.java` | Config POJO + default/compensation/confirm factories | ~50 | Trivial |
 | `CompensationManager.java` | Reverse-loop + retry + stop on failure (throws `StepCompensationException`) | ~70 | Low |
@@ -4799,10 +4799,10 @@ The `quarkus-scalardb` extension already provides `DistributedTransactionManager
 | **store/** | | | |
 | `SagaStore.java` | Interface (appendEvent, recordTransition, findRecoverable, claimForRecovery, getEvents) | ~30 | Trivial |
 | `SagaEvent.java` | Event types + factory methods (each saga-level event carries its `targetStatus`) | ~90 | Low |
-| `SagaSchema.java` | 2 TableMetadata definitions (saga_events, saga_index with bucket partitioning) + bucketOf() + createAll | ~80 | Low |
-| `ScalarDbSagaStore.java` | Append-only events + bucket-partitioned saga_index (DELETE+INSERT for status transitions) + bucket-parallel recovery scan + conflict-based claiming | ~400 | **Medium** |
+| `SagaSchema.java` | 2 TableMetadata definitions (saga_events, saga_status with bucket partitioning) + bucketOf() + createAll | ~80 | Low |
+| `ScalarDbSagaStore.java` | Append-only events + bucket-partitioned saga_status (DELETE+INSERT for status transitions) + bucket-parallel recovery scan + conflict-based claiming | ~400 | **Medium** |
 | **recovery/** | | | |
-| `SagaRecoveryManager.java` | Periodic scan of saga_index + event replay + resume (with versioned definitions, TCC CONFIRMING handling) | ~200 | **Medium** |
+| `SagaRecoveryManager.java` | Periodic scan of saga_status + event replay + resume (with versioned definitions, TCC CONFIRMING handling) | ~200 | **Medium** |
 | **timeout/** | | | |
 | `TimeoutPolicy.java` | Per-step and per-saga deadline calculation | ~30 | Trivial |
 | **exception/** | | | |
@@ -4829,7 +4829,7 @@ The `quarkus-scalardb` extension already provides `DistributedTransactionManager
 
 The ~1,750 LoC of production code is not the hard part — AI generates the API layer, parser, builder, and enums quickly. The hard parts are:
 
-1. **SagaStore correctness** (~30% of effort) — Getting the append-only event writes right, ensuring sequence numbering is correct, handling `CommitConflictException` / `AbortException` edge cases in ScalarDB, and ensuring event replay + `saga_index` recovery scan work correctly.
+1. **SagaStore correctness** (~30% of effort) — Getting the append-only event writes right, ensuring sequence numbering is correct, handling `CommitConflictException` / `AbortException` edge cases in ScalarDB, and ensuring event replay + `saga_status` recovery scan work correctly.
 2. **Comprehensive testing** (~40% of effort) — Unit tests for every class (~1,800 LoC) plus integration tests (~400 LoC). AI generates test scaffolding fast, but the edge cases that matter (crash recovery simulation, concurrent conflict handling, timeout mid-step, TCC confirm-after-partial-failure) require careful human reasoning.
 3. **Retry + error classification** (~10%) — Straightforward logic, but the interaction between retry exhaustion → compensation → compensation failure → escalation has several paths to test.
 
@@ -5077,7 +5077,7 @@ GET /sagas/abc-123
 
 ### Where the Time Actually Goes
 
-1. **InMemorySagaStore + its tests** (~35% of Phase 4b effort) — Must faithfully replicate all `SagaStore` semantics (append-only events, saga_index, recovery scan, conflict-based claiming) without ScalarDB. The store itself and its comprehensive tests (verifying semantic parity with `ScalarDbSagaStore`) are the tricky parts.
+1. **InMemorySagaStore + its tests** (~35% of Phase 4b effort) — Must faithfully replicate all `SagaStore` semantics (append-only events, saga_status, recovery scan, conflict-based claiming) without ScalarDB. The store itself and its comprehensive tests (verifying semantic parity with `ScalarDbSagaStore`) are the tricky parts.
 2. **Web UI** (~30% of Phase 4c effort) — Even a minimal dashboard (saga list with status badges, step timeline, action buttons) requires frontend work. Consider using a pre-built admin template to save time. AI generates HTML/JS/CSS quickly.
 3. **OpenTelemetry integration** is straightforward — the `SagaEventListener` callback interface keeps the engine decoupled from any specific telemetry SDK.
 
