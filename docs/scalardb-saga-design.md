@@ -832,8 +832,12 @@ public class SagaEngine {
      * Persist a new saga (saga_status + SAGA_STARTED event). Returns the saga ID.
      * Stores the full definition JSON snapshot in saga_status so that recovery
      * always uses the exact definition this saga was started with.
+     * Rejects new sagas if the engine is shutting down.
      */
     public String createSaga(SagaDefinition def, Map<String, Object> input) {
+        if (shuttingDown) {
+            throw new IllegalStateException("Engine is shutting down — not accepting new sagas");
+        }
         return store.createSaga(def.getName(), ownerId, input, def.toJson());
     }
 
@@ -886,8 +890,20 @@ public class SagaEngine {
         String sagaId = context.getSagaId();
         List<StepDefinition> steps = def.getSteps();
 
+        if (!registerActive(sagaId)) {
+            // Engine is shutting down. Saga is already persisted as RUNNING.
+            // Mark for immediate recovery so another replica picks it up quickly.
+            store.markForRecovery(sagaId);
+            return store.getInstance(sagaId);
+        }
+
         try {
             for (int i = startIndex; i < steps.size(); i++) {
+                // Graceful shutdown: stop between steps (saga stays RUNNING for recovery)
+                if (shouldStopBetweenSteps()) {
+                    break;
+                }
+
                 StepDefinition stepDef = steps.get(i);
                 Step step = instantiate(stepDef);
                 RetryPolicy policy = resolveRetryPolicy(stepDef, def);
@@ -903,7 +919,9 @@ public class SagaEngine {
                 completedIndex = i;
             }
 
-            transition(context, SagaEvent.sagaCompleted());
+            if (completedIndex == steps.size() - 1) {
+                transition(context, SagaEvent.sagaCompleted());
+            }
 
         } catch (StepExecutionException e) {
             // Step failed (retryable exhausted or non-retryable business error)
@@ -934,6 +952,8 @@ public class SagaEngine {
                 }
             }
             // If FORWARD strategy, leave as FAILED for manual/scheduled retry
+        } finally {
+            unregisterActive(sagaId);
         }
 
         return store.getInstance(sagaId);
@@ -2177,9 +2197,20 @@ When a step times out:
 When the process shuts down (e.g., Kubernetes pod termination, deployment rolling update), the engine:
 
 1. Stops accepting new sagas
-2. Waits for in-flight sagas to complete their current step
+2. Waits for in-flight sagas according to the configured shutdown mode
 3. Marks incomplete sagas in `saga_status` for immediate recovery (sets `updated_at = 0`)
 4. Stops the recovery scheduler
+
+#### Shutdown Modes
+
+| Mode | Behavior | Default timeout | Best for |
+|---|---|---|---|
+| `WAIT_CURRENT_STEP` (default) | Complete the in-flight step, then stop between steps | 30s | Kubernetes rolling updates, fast restarts |
+| `WAIT_ALL_SAGAS` | Wait for all in-flight sagas to fully complete | 300s | Planned maintenance, zero-recovery shutdown |
+
+With `WAIT_CURRENT_STEP`, incomplete sagas are marked for immediate recovery and resumed by another replica. No step is interrupted mid-execution, so no partial side effects.
+
+With `WAIT_ALL_SAGAS`, the engine waits for every saga to reach a terminal state. If the timeout expires, remaining sagas fall back to the `WAIT_CURRENT_STEP` behavior (mark for recovery).
 
 Without graceful shutdown, the recovery timeout (60s default) means a recovery delay of up to 60s, and the interrupted step may leave partial side effects.
 
@@ -2189,22 +2220,58 @@ Without graceful shutdown, the recovery timeout (60s default) means a recovery d
 // --- engine/SagaEngine.java ---
 public class SagaEngine implements AutoCloseable {
     private volatile boolean shuttingDown = false;
+    private final Object shutdownLock = new Object();
     private final Set<String> activeSagas = ConcurrentHashMap.newKeySet();
-    private final long shutdownTimeoutMs;  // default: 30_000
+    private final ShutdownMode shutdownMode;   // default: WAIT_CURRENT_STEP
+    private final long shutdownTimeoutMs;
+
+    public enum ShutdownMode { WAIT_CURRENT_STEP, WAIT_ALL_SAGAS }
+
+    public SagaEngine(SagaStore store, ShutdownMode shutdownMode,
+                      Long shutdownTimeoutMs, ...) {
+        this.shutdownMode = shutdownMode != null ? shutdownMode : ShutdownMode.WAIT_CURRENT_STEP;
+        this.shutdownTimeoutMs = shutdownTimeoutMs != null
+            ? shutdownTimeoutMs
+            : (this.shutdownMode == ShutdownMode.WAIT_ALL_SAGAS ? 300_000L : 30_000L);
+    }
+
+    /**
+     * Register a saga as active for shutdown tracking.
+     * Returns false if the engine is shutting down (saga should not execute).
+     * Synchronized with shutdown() to prevent the race where a saga starts
+     * executing after shutdown sees an empty activeSagas set.
+     */
+    private boolean registerActive(String sagaId) {
+        synchronized (shutdownLock) {
+            if (shuttingDown) {
+                return false;
+            }
+            activeSagas.add(sagaId);
+            return true;
+        }
+    }
+
+    private void unregisterActive(String sagaId) {
+        activeSagas.remove(sagaId);
+    }
 
     /**
      * Initiate graceful shutdown.
      */
     public void shutdown() {
-        shuttingDown = true;
+        // Set flag under lock — after this, no new sagas can register
+        synchronized (shutdownLock) {
+            shuttingDown = true;
+        }
 
-        // 1. Wait for in-flight sagas to finish their current step
+        // activeSagas is now frozen (no new additions possible).
+        // Wait for in-flight sagas to drain.
         long deadline = System.currentTimeMillis() + shutdownTimeoutMs;
         while (!activeSagas.isEmpty() && System.currentTimeMillis() < deadline) {
             Thread.sleep(100);  // virtual thread — cheap
         }
 
-        // 2. Mark active sagas for immediate recovery
+        // Mark remaining active sagas for immediate recovery
         //    (update saga_status.updated_at to epoch 0 so recovery picks them up)
         for (String sagaId : activeSagas) {
             try {
@@ -2214,15 +2281,17 @@ public class SagaEngine implements AutoCloseable {
             }
         }
 
-        // 3. Stop recovery scheduler
+        // Stop recovery scheduler
         recoveryManager.stop();
     }
 
-    // Called at the start of executeSteps()
-    private void checkShutdown() {
-        if (shuttingDown) {
-            throw new SagaShutdownException("Engine is shutting down");
-        }
+    /**
+     * Check if the engine should stop between steps.
+     * In WAIT_CURRENT_STEP mode, returns true after the current step completes.
+     * In WAIT_ALL_SAGAS mode, returns false — sagas continue to completion.
+     */
+    private boolean shouldStopBetweenSteps() {
+        return shuttingDown && shutdownMode == ShutdownMode.WAIT_CURRENT_STEP;
     }
 
     @Override
