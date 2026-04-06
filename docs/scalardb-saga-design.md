@@ -1101,7 +1101,13 @@ Compensate: Step2.compensate() ◄─┘
 
 ### Design Decisions
 
-- **Stop on failure**: If a compensation fails after retries, the engine stops the compensation loop. The saga remains in `COMPENSATING` status, and the recovery manager retries from the failed step on the next scan. This preserves the reverse execution order — the application designed the compensation order to maintain business invariants, and the engine must respect it.
+- **Two-phase compensation retry**: Compensation retries are split into two phases that handle different failure scenarios:
+  - **Phase 1 — immediate retry** (CompensationManager): Handles transient failures (network blips, momentary service unavailability). Quick retries with short backoff (default: 3 attempts, 1s/2s/4s intervals). If the failure is transient, this resolves it in seconds without involving recovery. After retries are exhausted, the saga is persisted as `COMPENSATING` and the thread is freed.
+  - **Phase 2 — periodic recovery retry** (SagaRecoveryManager): Handles prolonged outages (participant down for minutes, deployment in progress). Recovery scans run every ~30s, giving external systems time to recover without blocking a thread or burning through retries. After a configurable number of recovery attempts, escalates to `ESCALATED` for manual intervention.
+
+  Combining both phases into one long immediate retry would block the saga thread for potentially minutes. The two-phase approach keeps Phase 1 fast (seconds) and delegates longer retries to the background recovery scheduler.
+
+- **Stop on failure**: If a compensation fails after Phase 1 retries, the engine stops the compensation loop. The saga remains in `COMPENSATING` status, and the recovery manager retries from the failed step on the next scan. This preserves the reverse execution order — the application designed the compensation order to maintain business invariants, and the engine must respect it.
 - **Escalation after repeated recovery failures**: If the recovery manager has retried the same compensation too many times (configurable threshold), it transitions the saga to `ESCALATED` for manual intervention.
 - **Idempotency required**: Compensations may be called multiple times (on crash recovery), so they MUST check if already compensated.
 
@@ -1160,7 +1166,7 @@ public class CompensationManager {
                 if (attempt >= compensationRetryPolicy.getMaxAttempts()) {
                     store.appendEvent(context.getSagaId(),
                         context.getAndIncrementSequence(),
-                        SagaEvent.compensationFailed(stepIndex, e));
+                        SagaEvent.stepCompensationFailed(stepIndex, e));
                     throw new StepCompensationException(stepDef.getName(), stepIndex, e);
                 }
                 // Exponential backoff (virtual thread — cheap to sleep)
@@ -1171,7 +1177,7 @@ public class CompensationManager {
                     Thread.currentThread().interrupt();
                     store.appendEvent(context.getSagaId(),
                         context.getAndIncrementSequence(),
-                        SagaEvent.compensationFailed(stepIndex, e));
+                        SagaEvent.stepCompensationFailed(stepIndex, e));
                     throw new StepCompensationException(stepDef.getName(), stepIndex, e);
                 }
                 interval = Math.min(
@@ -1475,7 +1481,7 @@ public class SagaEvent {
     public static final String STEP_WAITING        = "STEP_WAITING";
     public static final String STEP_CONFIRMED      = "STEP_CONFIRMED";   // TCC
     public static final String STEP_COMPENSATED    = "STEP_COMPENSATED";
-    public static final String COMPENSATION_FAILED = "COMPENSATION_FAILED";
+    public static final String STEP_COMPENSATION_FAILED = "STEP_COMPENSATION_FAILED";
     public static final String SAGA_COMPENSATING   = "SAGA_COMPENSATING";
     public static final String SAGA_CONFIRMING     = "SAGA_CONFIRMING";  // TCC
     public static final String SAGA_FAILED         = "SAGA_FAILED";
@@ -1491,7 +1497,7 @@ public class SagaEvent {
     public static SagaEvent stepWaiting(int stepIndex) { ... }
     public static SagaEvent stepConfirmed(int stepIndex, String stepName) { ... }
     public static SagaEvent stepCompensated(int stepIndex) { ... }
-    public static SagaEvent compensationFailed(int stepIndex, Exception e) { ... }
+    public static SagaEvent stepCompensationFailed(int stepIndex, Exception e) { ... }
 
     // Saga-level factory methods (each carries its target SagaStatus)
     public static SagaEvent sagaCompensating() { ... }  // → COMPENSATING
@@ -1976,9 +1982,9 @@ public class SagaRecoveryManager {
 
         if (state.status == SagaStatus.COMPENSATING) {
             // Was mid-compensation — resume from where compensation left off.
-            // Count COMPENSATION_FAILED events to detect repeated failures.
+            // Count STEP_COMPENSATION_FAILED events to detect repeated failures.
             long failureCount = events.stream()
-                .filter(e -> e.getEventType().equals(SagaEvent.COMPENSATION_FAILED))
+                .filter(e -> e.getEventType().equals(SagaEvent.STEP_COMPENSATION_FAILED))
                 .count();
             if (failureCount >= maxCompensationRecoveryAttempts) {
                 // Too many failures — escalate for manual intervention
