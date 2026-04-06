@@ -1103,12 +1103,12 @@ Compensate: Step2.compensate() ◄─┘
 
 - **Two-phase compensation retry**: Compensation retries are split into two phases that handle different failure scenarios:
   - **Phase 1 — immediate retry** (CompensationManager): Handles transient failures (network blips, momentary service unavailability). Quick retries with short backoff (default: 3 attempts, 1s/2s/4s intervals). If the failure is transient, this resolves it in seconds without involving recovery. After retries are exhausted, the saga is persisted as `COMPENSATING` and the thread is freed.
-  - **Phase 2 — periodic recovery retry** (SagaRecoveryManager): Handles prolonged outages (participant down for minutes, deployment in progress). Recovery scans run every ~30s, giving external systems time to recover without blocking a thread or burning through retries. After a configurable number of recovery attempts, escalates to `ESCALATED` for manual intervention.
+  - **Phase 2 — periodic recovery retry** (SagaRecoveryManager): Handles prolonged outages (participant down for minutes or hours, deployment in progress). Recovery scans run every ~30s, giving external systems time to recover without blocking a thread or burning through retries. If the saga has been stuck in `COMPENSATING` longer than the `compensationGracePeriod` (default: 4 hours), escalates to `ESCALATED` for manual intervention. Escalated sagas can be bulk-retried via the Admin API when the participant recovers.
 
   Combining both phases into one long immediate retry would block the saga thread for potentially minutes. The two-phase approach keeps Phase 1 fast (seconds) and delegates longer retries to the background recovery scheduler.
 
 - **Stop on failure**: If a compensation fails after Phase 1 retries, the engine stops the compensation loop. The saga remains in `COMPENSATING` status, and the recovery manager retries from the failed step on the next scan. This preserves the reverse execution order — the application designed the compensation order to maintain business invariants, and the engine must respect it.
-- **Escalation after repeated recovery failures**: If the recovery manager has retried the same compensation too many times (configurable threshold), it transitions the saga to `ESCALATED` for manual intervention.
+- **Time-based escalation**: The recovery manager escalates a saga to `ESCALATED` based on how long it has been stuck in `COMPENSATING`, not the number of retry attempts. Default: `compensationGracePeriod = 4 hours`. This tolerates prolonged outages — if a participant is down for 2 hours but comes back, sagas auto-recover without manual intervention. Count-based escalation (e.g., escalate after 10 attempts) would escalate within ~5 minutes, requiring manual recovery for every outage longer than that. Escalated sagas can be bulk-retried via the Admin API when the participant recovers.
 - **Idempotency required**: Compensations may be called multiple times (on crash recovery), so they MUST check if already compensated.
 
 ```java
@@ -1171,8 +1171,7 @@ public class CompensationManager {
                 }
                 // Exponential backoff (virtual thread — cheap to sleep)
                 try {
-                    long jitter = ThreadLocalRandom.current().nextLong(interval / 4);
-                    Thread.sleep(interval + jitter);
+                    interval = compensationRetryPolicy.sleepWithBackoff(interval);
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
                     store.appendEvent(context.getSagaId(),
@@ -1180,9 +1179,6 @@ public class CompensationManager {
                         SagaEvent.stepCompensationFailed(stepIndex, e));
                     throw new StepCompensationException(stepDef.getName(), stepIndex, e);
                 }
-                interval = Math.min(
-                    (long) (interval * compensationRetryPolicy.getBackoffMultiplier()),
-                    compensationRetryPolicy.getMaxIntervalMs());
             }
         }
     }
@@ -1274,6 +1270,15 @@ public class RetryPolicy {
     public static RetryPolicy defaultPolicy() {
         return new RetryPolicy(3, 1000, 2.0, 30000);
     }
+
+    /**
+     * Sleep with exponential backoff + jitter. Returns the next interval.
+     */
+    public long sleepWithBackoff(long currentInterval) throws InterruptedException {
+        long jitter = ThreadLocalRandom.current().nextLong(currentInterval / 4);
+        Thread.sleep(currentInterval + jitter);
+        return Math.min((long) (currentInterval * backoffMultiplier), maxIntervalMs);
+    }
 }
 ```
 
@@ -1332,12 +1337,7 @@ private StepResult executeWithRetry(Step step, SagaContext ctx, RetryPolicy poli
             }
 
             // Exponential backoff with jitter (virtual thread — cheap to sleep)
-            long jitter = ThreadLocalRandom.current().nextLong(interval / 4);
-            Thread.sleep(interval + jitter);
-            interval = Math.min(
-                (long) (interval * policy.getBackoffMultiplier()),
-                policy.getMaxIntervalMs()
-            );
+            interval = policy.sleepWithBackoff(interval);
         }
     }
 }
@@ -1982,17 +1982,19 @@ public class SagaRecoveryManager {
 
         if (state.status == SagaStatus.COMPENSATING) {
             // Was mid-compensation — resume from where compensation left off.
-            // Count STEP_COMPENSATION_FAILED events to detect repeated failures.
-            long failureCount = events.stream()
+            // Check if compensation has been stuck longer than the grace period.
+            Instant firstFailure = events.stream()
                 .filter(e -> e.getEventType().equals(SagaEvent.STEP_COMPENSATION_FAILED))
-                .count();
-            if (failureCount >= maxCompensationRecoveryAttempts) {
-                // Too many failures — escalate for manual intervention
+                .map(SagaEvent::getTimestamp)
+                .findFirst()
+                .orElse(Instant.now());
+            if (Duration.between(firstFailure, Instant.now()).compareTo(compensationGracePeriod) > 0) {
+                // Stuck too long — escalate for manual intervention
                 store.recordTransition(saga.getSagaId(),
                     state.context.getAndIncrementSequence(),
                     state.context.getCurrentStatus(),
                     state.context.getStatusMetadata(),
-                    SagaEvent.sagaEscalated("exceeded " + failureCount + " compensation attempts"));
+                    SagaEvent.sagaEscalated("compensation stuck for over " + compensationGracePeriod));
                 return;
             }
             int compensateFrom = state.lastCompensated - 1;
@@ -4287,6 +4289,10 @@ public interface SagaAdminService {
     // Re-execute a FAILED saga from the last successfully completed step.
     SagaInstance retrySaga(String sagaId);
 
+    // Retry all ESCALATED sagas, optionally filtered by saga name.
+    // Returns the number of sagas moved back to COMPENSATING.
+    int retryEscalated(@Nullable String sagaName);
+
     // Aggregate metrics across all saga instances.
     SagaMetrics getMetrics();
 }
@@ -4401,6 +4407,27 @@ public class DefaultSagaAdminService implements SagaAdminService {
     public SagaInstance retrySaga(String sagaId) {
         requireStatus(sagaId, SagaStatus.FAILED);
         return sagaManager.resume(sagaId);
+    }
+
+    @Override
+    public int retryEscalated(@Nullable String sagaName) {
+        SagaQuery.Builder qb = SagaQuery.builder()
+            .status(SagaStatus.ESCALATED);
+        if (sagaName != null) {
+            qb.sagaName(sagaName);
+        }
+        List<SagaInstance> escalated = store.query(qb.build()).getItems();
+        int count = 0;
+        for (SagaInstance saga : escalated) {
+            // Move back to COMPENSATING so the recovery scheduler picks it up
+            store.recordTransition(saga.getSagaId(),
+                store.getEvents(saga.getSagaId()).size(),
+                SagaStatus.COMPENSATING,
+                saga.getStatusMetadata(),
+                SagaEvent.sagaRetried("bulk retry via retryEscalated"));
+            count++;
+        }
+        return count;
     }
 
     @Override
