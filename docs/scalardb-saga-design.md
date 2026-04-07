@@ -4533,7 +4533,7 @@ public class DefaultSagaAdminService implements SagaAdminService {
     @Override
     public int resetEscalated(@Nullable String sagaName) {
         SagaQuery.Builder qb = SagaQuery.builder()
-            .status(SagaStatus.ESCALATED);
+            .statusIn(SagaStatus.ESCALATED);
         if (sagaName != null) {
             qb.sagaName(sagaName);
         }
