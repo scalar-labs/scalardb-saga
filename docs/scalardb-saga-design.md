@@ -568,12 +568,15 @@ public class SagaContext {
     private final Map<String, Object> data;
     private int nextEventSequence;       // tracks next saga_events sequence in memory
     private SagaStatus currentStatus;    // tracks current saga_status status in memory
+    private Instant currentUpdatedAt;    // tracks current saga_status updated_at (needed for DELETE)
     private SagaStatusMetadata statusMetadata; // cached saga_status columns (immutable after creation)
 
     public int getAndIncrementSequence() { return nextEventSequence++; }
     public void setNextEventSequence(int seq) { this.nextEventSequence = seq; }
     public SagaStatus getCurrentStatus() { return currentStatus; }
     public void setCurrentStatus(SagaStatus status) { this.currentStatus = status; }
+    public Instant getCurrentUpdatedAt() { return currentUpdatedAt; }
+    public void setCurrentUpdatedAt(Instant updatedAt) { this.currentUpdatedAt = updatedAt; }
     public SagaStatusMetadata getStatusMetadata() { return statusMetadata; }
     public void setStatusMetadata(SagaStatusMetadata m) { this.statusMetadata = m; }
 
@@ -844,11 +847,11 @@ public class SagaEngine {
      * always uses the exact definition this saga was started with.
      * Rejects new sagas if the engine is shutting down.
      */
-    public String createSaga(SagaDefinition def, Map<String, Object> input) {
+    public String createSaga(SagaDefinition def, Map<String, Object> input, Instant now) {
         if (shuttingDown) {
             throw new IllegalStateException("Engine is shutting down — not accepting new sagas");
         }
-        return store.createSaga(def.getName(), ownerId, input, def.getVersion());
+        return store.createSaga(def.getName(), ownerId, input, def.getVersion(), now);
     }
 
     /**
@@ -862,6 +865,7 @@ public class SagaEngine {
         SagaContext context = new SagaContext(sagaId, saga.getInput());
         context.setNextEventSequence(1);        // next sequence after SAGA_STARTED
         context.setCurrentStatus(SagaStatus.RUNNING);
+        context.setCurrentUpdatedAt(saga.getUpdatedAt());
         context.setStatusMetadata(new SagaStatusMetadata(
             saga.getSagaName(), ownerId, 0,
             def.getVersion(), saga.getCreatedAt()));
@@ -872,12 +876,13 @@ public class SagaEngine {
      * Convenience: create + execute in one call (synchronous).
      */
     public SagaInstance execute(SagaDefinition def, Map<String, Object> input) {
-        Instant now = Instant.now();  // same timestamp used by createSaga
-        String sagaId = createSaga(def, input);
+        Instant now = Instant.now();
+        String sagaId = createSaga(def, input, now);
         // createSaga wrote 1 event (SAGA_STARTED at seq 0) and set status RUNNING
         SagaContext context = new SagaContext(sagaId, input);
         context.setNextEventSequence(1);
         context.setCurrentStatus(SagaStatus.RUNNING);
+        context.setCurrentUpdatedAt(now);
         context.setStatusMetadata(new SagaStatusMetadata(
             def.getName(), ownerId, 0, def.getVersion(), now));
         return executeSteps(def, context, 0, -1);
@@ -978,12 +983,14 @@ public class SagaEngine {
      * Passes the cached status metadata so recordTransition needs zero reads.
      */
     private void transition(SagaContext context, SagaEvent event) {
-        store.recordTransition(context.getSagaId(),
+        Instant newUpdatedAt = store.recordTransition(context.getSagaId(),
             context.getAndIncrementSequence(),
             context.getCurrentStatus(),
+            context.getCurrentUpdatedAt(),
             context.getStatusMetadata(),
             event);
         context.setCurrentStatus(event.getTargetStatus());
+        context.setCurrentUpdatedAt(newUpdatedAt);
     }
 
     private Step instantiate(StepDefinition stepDef) {
@@ -1039,7 +1046,8 @@ public class DefaultSagaManager implements SagaManager {
         // 1. Persist saga via engine (saga_status + SAGA_STARTED event).
         //    This guarantees the saga is recoverable even if the process
         //    crashes before the virtual thread starts executing.
-        String sagaId = engine.createSaga(def, input);
+        Instant now = Instant.now();
+        String sagaId = engine.createSaga(def, input, now);
 
         // 2. Submit execution to a virtual thread
         asyncExecutor.submit(() -> {
@@ -1563,9 +1571,11 @@ The 3 additional operations in this design maintain the `saga_status` table, whi
 ```java
 // --- store/SagaStore.java ---
 public interface SagaStore {
-    // Saga lifecycle — writes to both saga_events and saga_status in ONE transaction
+    // Saga lifecycle — writes to both saga_events and saga_status in ONE transaction.
+    // The caller provides `now` so it can track the same value in SagaContext.
     String createSaga(String sagaName, String ownerId,
-                       Map<String, Object> input, String definitionVersion);
+                       Map<String, Object> input, String definitionVersion,
+                       Instant now);
 
     // Definition persistence — called once per definition version at registration time
     void registerDefinition(SagaDefinition definition);
@@ -1578,12 +1588,14 @@ public interface SagaStore {
 
     // Append event + transition saga_status status atomically in ONE transaction.
     // The new status is derived from event.getTargetStatus().
-    // The old status and status metadata are provided by the caller (tracked in
-    // SagaContext), so no reads are needed — the transaction is 3 pure writes:
+    // The old status, old updated_at, and status metadata are provided by the
+    // caller (tracked in SagaContext), so no reads are needed — 3 pure writes:
     // 1 INSERT (event) + 1 DELETE (old status row) + 1 INSERT (new status row).
     // Used for status transitions (COMPENSATING, COMPLETED, ESCALATED, etc.)
-    void recordTransition(String sagaId, int sequence, SagaStatus oldStatus,
-                           SagaStatusMetadata metadata, SagaEvent event);
+    // Returns the Instant used for the new updated_at (caller updates SagaContext).
+    Instant recordTransition(String sagaId, int sequence, SagaStatus oldStatus,
+                              Instant oldUpdatedAt, SagaStatusMetadata metadata,
+                              SagaEvent event);
 
     // Recovery — scan saga_status + replay saga_events
     List<SagaInstance> findRecoverable(long recoveryTimeoutMs);
@@ -1611,9 +1623,9 @@ public class ScalarDbSagaStore implements SagaStore {
      * and saga_status (RUNNING status) in one transaction.
      */
     public String createSaga(String sagaName, String ownerId,
-                              Map<String, Object> input, String definitionVersion) {
+                              Map<String, Object> input, String definitionVersion,
+                              Instant now) {
         String sagaId = UUID.randomUUID().toString();
-        Instant now = Instant.now();
         DistributedTransaction tx = null;
         try {
             tx = txManager.begin();
@@ -1637,13 +1649,13 @@ public class ScalarDbSagaStore implements SagaStore {
                 .partitionKey(Key.ofInt("bucket", SagaSchema.bucketOf(sagaId)))
                 .clusteringKey(Key.of(
                     Key.ofInt("status", SagaStatus.RUNNING.ordinal()),
+                    Key.ofTimestampTZ("updated_at", now),
                     Key.ofText("saga_id", sagaId)))
                 .textValue("saga_name", sagaName)
                 .textValue("owner_id", ownerId)
                 .intValue("version", 0)
                 .textValue("definition_version", definitionVersion)
                 .timestampTZValue("created_at", now)
-                .timestampTZValue("updated_at", now)
                 .build());
 
             tx.commit();
@@ -1693,16 +1705,16 @@ public class ScalarDbSagaStore implements SagaStore {
      * a status transition = DELETE old row + INSERT new row with the new status.
      * Both happen in the same transaction with the event append.
      *
-     * The sequence number, old status, and status metadata are all provided by
-     * the caller (tracked in SagaContext). This means the transaction needs
-     * zero reads — it's 3 pure writes:
+     * The sequence number, old status, old updated_at, and status metadata are
+     * all provided by the caller (tracked in SagaContext). This means the
+     * transaction needs zero reads — it's 3 pure writes:
      *   1 INSERT (event) + 1 DELETE (old status row) + 1 INSERT (new status row)
      *
      * Reduced from the original 5 ops (2 scans + 2 inserts + 1 delete).
      */
-    public void recordTransition(String sagaId, int sequence,
-                                  SagaStatus oldStatus, SagaStatusMetadata metadata,
-                                  SagaEvent event) {
+    public Instant recordTransition(String sagaId, int sequence,
+                                     SagaStatus oldStatus, Instant oldUpdatedAt,
+                                     SagaStatusMetadata metadata, SagaEvent event) {
         SagaStatus newStatus = event.getTargetStatus();
         DistributedTransaction tx = null;
         try {
@@ -1723,31 +1735,33 @@ public class ScalarDbSagaStore implements SagaStore {
                 .timestampTZValue("created_at", now)
                 .build());
 
-            // 2. DELETE old row (old status in clustering key)
+            // 2. DELETE old row (old status + old updated_at in clustering key)
             tx.delete(Delete.newBuilder()
                 .namespace(SagaSchema.NAMESPACE).table("saga_status")
                 .partitionKey(Key.ofInt("bucket", bucket))
                 .clusteringKey(Key.of(
                     Key.ofInt("status", oldStatus.ordinal()),
+                    Key.ofTimestampTZ("updated_at", oldUpdatedAt),
                     Key.ofText("saga_id", sagaId)))
                 .build());
 
-            // 3. INSERT new row (new status in clustering key, columns from metadata)
+            // 3. INSERT new row (new status + new updated_at in clustering key, columns from metadata)
             tx.insert(Insert.newBuilder()
                 .namespace(SagaSchema.NAMESPACE).table("saga_status")
                 .partitionKey(Key.ofInt("bucket", bucket))
                 .clusteringKey(Key.of(
                     Key.ofInt("status", newStatus.ordinal()),
+                    Key.ofTimestampTZ("updated_at", now),
                     Key.ofText("saga_id", sagaId)))
                 .textValue("saga_name", metadata.sagaName())
                 .textValue("owner_id", metadata.ownerId())
                 .intValue("version", metadata.version())
                 .textValue("definition_version", metadata.definitionVersion())
                 .timestampTZValue("created_at", metadata.createdAt())
-                .timestampTZValue("updated_at", now)
                 .build());
 
             tx.commit();
+            return now;
         } catch (Exception e) {
             abortQuietly(tx);
             throw new SagaPersistenceException("Failed to record transition", e);
@@ -2084,6 +2098,7 @@ public class SagaRecoveryManager {
                 store.recordTransition(saga.getSagaId(),
                     state.context.getAndIncrementSequence(),
                     state.context.getCurrentStatus(),
+                    state.context.getCurrentUpdatedAt(),
                     state.context.getStatusMetadata(),
                     SagaEvent.sagaEscalated("compensation stuck for over " + compensationGracePeriod));
                 return;
@@ -2141,6 +2156,7 @@ public class SagaRecoveryManager {
         // statusMetadata = immutable saga_status columns from the SagaInstance.
         context.setNextEventSequence(events.size());
         context.setCurrentStatus(status);
+        context.setCurrentUpdatedAt(saga.getUpdatedAt());
         context.setStatusMetadata(new SagaStatusMetadata(
             saga.getSagaName(), saga.getOwnerId(), saga.getVersion(),
             saga.getDefinitionVersion(), saga.getCreatedAt()));
@@ -4394,9 +4410,9 @@ public interface SagaAdminService {
     // Re-execute a FAILED saga from the last successfully completed step.
     SagaInstance retrySaga(String sagaId);
 
-    // Retry all ESCALATED sagas, optionally filtered by saga name.
-    // Returns the number of sagas moved back to COMPENSATING.
-    int retryEscalated(@Nullable String sagaName);
+    // Reset ESCALATED sagas back to COMPENSATING so recovery retries compensation.
+    // Optionally filtered by saga name. Returns the number of sagas reset.
+    int resetEscalated(@Nullable String sagaName);
 
     // Aggregate metrics across all saga instances.
     SagaMetrics getMetrics();
@@ -4503,7 +4519,8 @@ public class DefaultSagaAdminService implements SagaAdminService {
             saga.getSagaName(), saga.getOwnerId(), saga.getVersion(),
             saga.getDefinitionVersion(), saga.getCreatedAt());
         store.recordTransition(sagaId, events.size(),
-            SagaStatus.ESCALATED, metadata, SagaEvent.sagaCompleted());
+            SagaStatus.ESCALATED, saga.getUpdatedAt(), metadata,
+            SagaEvent.sagaCompleted());
         return store.getInstance(sagaId);
     }
 
@@ -4514,7 +4531,7 @@ public class DefaultSagaAdminService implements SagaAdminService {
     }
 
     @Override
-    public int retryEscalated(@Nullable String sagaName) {
+    public int resetEscalated(@Nullable String sagaName) {
         SagaQuery.Builder qb = SagaQuery.builder()
             .status(SagaStatus.ESCALATED);
         if (sagaName != null) {
@@ -4526,9 +4543,9 @@ public class DefaultSagaAdminService implements SagaAdminService {
             // Move back to COMPENSATING so the recovery scheduler picks it up
             store.recordTransition(saga.getSagaId(),
                 store.getEvents(saga.getSagaId()).size(),
-                SagaStatus.COMPENSATING,
+                SagaStatus.ESCALATED, saga.getUpdatedAt(),
                 saga.getStatusMetadata(),
-                SagaEvent.sagaRetried("bulk retry via retryEscalated"));
+                SagaEvent.sagaCompensating("reset via resetEscalated"));
             count++;
         }
         return count;
