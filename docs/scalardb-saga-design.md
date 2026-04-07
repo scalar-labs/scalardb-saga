@@ -772,12 +772,14 @@ public class SagaDefinition {
     // FORWARD:  on step failure, mark as FAILED for retry via Admin API
 
     public static class StepDefinition {
-        String name;
+        String name;                 // unique within the saga (used as idempotency key with sagaId)
         String stepClass;            // FQCN of Step implementation
         RetryPolicy retryPolicy;     // per-step override (nullable)
     }
 }
 ```
+
+Step names must be unique within a saga definition — the engine throws a `SagaDefinitionException` on duplicate step names at registration time. The `sagaId + stepName` pair serves as the idempotency key propagated to participants via `X-Saga-Id` and `X-Saga-Step` headers.
 
 **Mixed recovery (pivot transaction pattern):** Some workflows have compensatable steps followed by non-compensatable steps (e.g., reserve inventory → charge payment → send email). If you need backward recovery for early steps and forward recovery for later steps, split the workflow into two sagas:
 
@@ -2754,7 +2756,7 @@ The saga engine is designed as three layers. Each layer builds on the one below,
 │  ServiceInvokerRegistry                                          │
 │  Typed lambdas — no reflection                                   │
 │  Built-in invokers: GrpcInvoker, HttpInvoker, SpringBeanInvoker  │
-│  Saga context propagation (X-Saga-Id header / gRPC metadata)    │
+│  Saga context propagation (X-Saga-Id, X-Saga-Step headers)      │
 ├──────────────────────────────────────────────────────────────────┤
 │  Layer 1: Core Engine (framework-agnostic)                        │
 │                                                                   │
@@ -2884,7 +2886,7 @@ public class GrpcInvoker<S> implements ServiceInvoker {
 }
 ```
 
-`HttpInvoker` follows the same pattern but wraps an HTTP client, automatically propagates `X-Saga-Id` header, and classifies HTTP status codes as retryable/non-retryable.
+`HttpInvoker` follows the same pattern but wraps an HTTP client, automatically propagates `X-Saga-Id` and `X-Saga-Step` headers, and classifies HTTP status codes as retryable/non-retryable.
 
 #### Proto Ownership
 
@@ -3036,14 +3038,16 @@ Saga definition (JSON/YAML)
 │  - Builds protobuf message from request map   │
 │  - Calls stub method via reflection on        │
 │    generated gRPC stub                        │
-│  - Propagates X-Saga-Id via gRPC metadata     │
+│  - Propagates X-Saga-Id, X-Saga-Step via       │
+│    gRPC metadata                              │
 │  - Maps gRPC status codes to retryable/       │
 │    non-retryable                              │
 │                                               │
 │  HttpTransportAdapter:                        │
 │  - Builds JSON request body from request map  │
 │  - Calls HTTP endpoint (POST/PUT)             │
-│  - Propagates X-Saga-Id via HTTP header       │
+│  - Propagates X-Saga-Id, X-Saga-Step via       │
+│    HTTP headers                               │
 │  - Maps HTTP status codes:                    │
 │    - 2xx → success                            │
 │    - 408, 429, 502, 503, 504 → retryable     │
@@ -3145,11 +3149,13 @@ public interface TransportAdapter {
      * @param method    Method/operation name
      * @param request   Request parameters (key-value pairs)
      * @param sagaId    Saga ID for context propagation
+     * @param stepName  Step name for context propagation
      * @return Response as key-value pairs
      * @throws TransportException with retryable/non-retryable classification
      */
     Map<String, Object> call(String service, String method,
-                              Map<String, Object> request, String sagaId)
+                              Map<String, Object> request,
+                              String sagaId, String stepName)
         throws TransportException;
 }
 
@@ -3178,7 +3184,8 @@ public class GrpcTransportAdapter implements TransportAdapter {
 
     @Override
     public Map<String, Object> call(String service, String method,
-                                      Map<String, Object> request, String sagaId)
+                                      Map<String, Object> request,
+                                      String sagaId, String stepName)
             throws TransportException {
         try {
             ManagedChannel channel = channels.get(service);
@@ -3190,6 +3197,7 @@ public class GrpcTransportAdapter implements TransportAdapter {
             // Propagate saga context via gRPC metadata
             Metadata headers = new Metadata();
             headers.put(Metadata.Key.of("x-saga-id", Metadata.ASCII_STRING_MARSHALLER), sagaId);
+            headers.put(Metadata.Key.of("x-saga-step", Metadata.ASCII_STRING_MARSHALLER), stepName);
 
             // Build protobuf message from request map and invoke
             // (uses protobuf JSON format for map → message conversion)
@@ -3226,7 +3234,8 @@ public class HttpTransportAdapter implements TransportAdapter {
 
     @Override
     public Map<String, Object> call(String service, String method,
-                                      Map<String, Object> request, String sagaId)
+                                      Map<String, Object> request,
+                                      String sagaId, String stepName)
             throws TransportException {
         String baseUrl = serviceBaseUrls.get(service);
         if (baseUrl == null) {
@@ -3239,6 +3248,7 @@ public class HttpTransportAdapter implements TransportAdapter {
                 .uri(URI.create(baseUrl + "/" + method))
                 .header("Content-Type", "application/json")
                 .header("X-Saga-Id", sagaId)
+                .header("X-Saga-Step", stepName)
                 .POST(HttpRequest.BodyPublishers.ofString(toJson(request)))
                 .timeout(Duration.ofSeconds(30))
                 .build();
@@ -3292,7 +3302,7 @@ saga.services.shipping-service.endpoint=http://shipping-service:8080
 │  JSON-defined request/response mapping                           │
 │  Built-in transport adapters: GrpcTransportAdapter,              │
 │    HttpTransportAdapter                                          │
-│  Automatic context propagation (X-Saga-Id)                       │
+│  Automatic context propagation (X-Saga-Id, X-Saga-Step)          │
 │  Automatic error classification (retryable vs non-retryable)     │
 │  User writes ZERO Java code for simple steps                     │
 ├──────────────────────────────────────────────────────────────────┤
@@ -3326,8 +3336,8 @@ All transport adapters automatically propagate the saga context to participants:
 
 | Transport | Propagation mechanism |
 |---|---|
-| gRPC | `x-saga-id` metadata key |
-| HTTP | `X-Saga-Id` HTTP header |
+| gRPC | `x-saga-id`, `x-saga-step` metadata keys |
+| HTTP | `X-Saga-Id`, `X-Saga-Step` HTTP headers |
 
 Participants can read this header for logging, tracing, or idempotency purposes. See "Participant Idempotency Levels" below.
 
@@ -4960,7 +4970,7 @@ The ~1,750 LoC of production code is not the hard part — AI generates the API 
 | `DeclarativeStepAdapter.java` | JSON expression resolution (${...}) + output extraction ($.path) | ~120 | **Medium** |
 | `TransportAdapter.java` | Interface + TransportException | ~30 | Trivial |
 | `GrpcTransportAdapter.java` | Protobuf message building from maps + gRPC metadata propagation | ~100 | Medium |
-| `HttpTransportAdapter.java` | JSON body building + X-Saga-Id propagation + status code mapping | ~80 | Low |
+| `HttpTransportAdapter.java` | JSON body building + X-Saga-Id/X-Saga-Step propagation + status code mapping | ~80 | Low |
 | Updated `SagaEngine` | Support `service`/`method` in addition to `stepClass` | ~30 | Low |
 | Updated `SagaDefinitionParser` | Parse `call`, `compensate` blocks | ~50 | Low |
 | Tests (all classes: invoker unit + declarative integration + transport edge cases) | | ~800 | Medium |
@@ -4987,7 +4997,7 @@ The ~1,750 LoC of production code is not the hard part — AI generates the API 
 | | | | |
 | **Phase 2d: Participant Protocol & SDK (`scalardb-saga-participant`)** | | | |
 | **protocol/** | | | |
-| Participant HTTP Protocol spec (documented contract) | Request/response format, error signaling (`X-Saga-Retryable`), correlation headers (`X-Saga-Id`) | ~50 | Trivial |
+| Participant HTTP Protocol spec (documented contract) | Request/response format, error signaling (`X-Saga-Retryable`), correlation headers (`X-Saga-Id`, `X-Saga-Step`) | ~50 | Trivial |
 | **participant/** | | | |
 | `SagaParticipantServer.java` | Lightweight HTTP server (Javalin) hosting `Step` implementations, implementing the participant protocol | ~120 | Medium |
 | `StepEndpoint.java` | HTTP endpoint: deserialize `SagaContext`, call `Step`, serialize `StepResult`, map errors to HTTP | ~100 | Low |
