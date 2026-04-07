@@ -1441,8 +1441,8 @@ public class SagaSchema {
             .addColumn("updated_at",   DataType.TIMESTAMPTZ) // CK2: last state change time
             .addColumn("saga_id",      DataType.TEXT)      // CK3: unique identifier
             .addColumn("saga_name",    DataType.TEXT)
-            .addColumn("owner_id",     DataType.TEXT)      // replica that last claimed this saga
-            .addColumn("version",      DataType.INT)       // incremented on each claim
+            .addColumn("owner_id",     DataType.TEXT)      // ID of the replica processing this saga (informational, for observability)
+            .addColumn("version",      DataType.INT)       // incremented on each recovery claim (optimistic concurrency control)
             .addColumn("definition_version", DataType.TEXT) // saga definition version at creation
             .addColumn("definition_json",    DataType.TEXT) // full definition JSON snapshot
             .addColumn("created_at",   DataType.TIMESTAMPTZ)
@@ -3961,7 +3961,7 @@ The core engine has zero dependency on any DI framework. All wiring is done via 
 // --- engine/SagaManagerBuilder.java ---
 public class SagaManagerBuilder {
     private SagaStore store;
-    private String ownerId = UUID.randomUUID().toString();
+    private String ownerId = UUID.randomUUID().toString();  // random on each startup; override with pod name for observability
     private long recoveryTimeoutMs = 60_000;       // stale saga threshold (1 min)
     private long recoveryIntervalSeconds = 30;
     private List<SagaEventListener> eventListeners = new ArrayList<>();
