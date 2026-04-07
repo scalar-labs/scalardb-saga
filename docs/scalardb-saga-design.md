@@ -923,25 +923,13 @@ public class SagaEngine {
                 transition(context, SagaEvent.sagaCompleted());
             }
 
-        } catch (StepExecutionException e) {
-            // Step failed (retryable exhausted or non-retryable business error)
-            // — compensate. Include the current step (completedIndex + 1) because
-            // it may have had external side effects before throwing.
-            int compensateFrom = completedIndex + 1;
-            transition(context, SagaEvent.sagaCompensating());
-            try {
-                compensationManager.compensate(def, context, compensateFrom);
-                transition(context, SagaEvent.sagaCompensated());
-            } catch (StepCompensationException ce) {
-                // Compensation failed — saga stays in COMPENSATING.
-                // Recovery will retry from the failed compensation step.
-            }
-
         } catch (Exception e) {
-            // Compensate from current step — it may have had side effects.
-            int compensateFrom = completedIndex + 1;
-            transition(context, SagaEvent.sagaFailed());
+            // Step failed (StepExecutionException) or unexpected error (Exception).
+            // Recovery decision depends on recoverStrategy, not the exception type.
             if (def.getRecoverStrategy() == RecoverStrategy.COMPENSATE) {
+                // Compensate all completed steps + the failed step (completedIndex + 1)
+                // because it may have had partial side effects.
+                int compensateFrom = completedIndex + 1;
                 transition(context, SagaEvent.sagaCompensating());
                 try {
                     compensationManager.compensate(def, context, compensateFrom);
@@ -950,8 +938,10 @@ public class SagaEngine {
                     // Compensation failed — saga stays in COMPENSATING.
                     // Recovery will retry from the failed compensation step.
                 }
+            } else {
+                // FORWARD: leave as FAILED for manual retry via Admin API.
+                transition(context, SagaEvent.sagaFailed());
             }
-            // If FORWARD strategy, leave as FAILED for manual/scheduled retry
         } finally {
             unregisterActive(sagaId);
         }
