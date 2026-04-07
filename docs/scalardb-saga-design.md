@@ -1779,12 +1779,14 @@ public class ScalarDbSagaStore implements SagaStore {
     }
 
     /**
-     * Claim a saga for recovery: DELETE old row + INSERT with updated owner_id
-     * and incremented version in one transaction. Zero reads — the caller
-     * (findRecoverable) already provides the full SagaInstance.
+     * Claim a saga for recovery: read current row to verify it hasn't been
+     * claimed since findRecoverable, then DELETE old row + INSERT with updated
+     * owner_id and incremented version.
      *
-     * ScalarDB's transaction conflict detection ensures that if two replicas
-     * try to claim concurrently, one gets CommitConflictException.
+     * The read serves two purposes:
+     * - Serial case: version check detects a prior claim by another process.
+     * - Concurrent case: the read creates a read-set entry in ScalarDB's
+     *   transaction, so overlapping claims on the same row conflict reliably.
      */
     public boolean claimForRecovery(SagaInstance saga, String newOwnerId) {
         DistributedTransaction tx = null;
@@ -1795,12 +1797,30 @@ public class ScalarDbSagaStore implements SagaStore {
             int status = saga.getStatus().ordinal();
             Instant now = Instant.now();
 
+            // Read current row to verify it hasn't been claimed since findRecoverable
+            Optional<Result> current = tx.get(Get.newBuilder()
+                .namespace(SagaSchema.NAMESPACE).table("saga_status")
+                .partitionKey(Key.ofInt("bucket", bucket))
+                .clusteringKey(Key.of(
+                    Key.ofInt("status", status),
+                    Key.ofTimestampTZ("updated_at", saga.getUpdatedAt()),
+                    Key.ofText("saga_id", sagaId)))
+                .build());
+
+            if (current.isEmpty()
+                    || current.get().getInt("version") != saga.getVersion()) {
+                // Row was already claimed or changed — skip
+                tx.abort();
+                return false;
+            }
+
             // DELETE old row + INSERT with updated owner and version
             tx.delete(Delete.newBuilder()
                 .namespace(SagaSchema.NAMESPACE).table("saga_status")
                 .partitionKey(Key.ofInt("bucket", bucket))
                 .clusteringKey(Key.of(
                     Key.ofInt("status", status),
+                    Key.ofTimestampTZ("updated_at", saga.getUpdatedAt()),
                     Key.ofText("saga_id", sagaId)))
                 .build());
 
@@ -1809,6 +1829,7 @@ public class ScalarDbSagaStore implements SagaStore {
                 .partitionKey(Key.ofInt("bucket", bucket))
                 .clusteringKey(Key.of(
                     Key.ofInt("status", status),
+                    Key.ofTimestampTZ("updated_at", now),
                     Key.ofText("saga_id", sagaId)))
                 .textValue("saga_name", saga.getSagaName())
                 .textValue("owner_id", newOwnerId)
@@ -1816,7 +1837,6 @@ public class ScalarDbSagaStore implements SagaStore {
                 .textValue("definition_version", saga.getDefinitionVersion())
                 .textValue("definition_json", saga.getDefinitionJson())
                 .timestampTZValue("created_at", saga.getCreatedAt())
-                .timestampTZValue("updated_at", now)
                 .build());
 
             tx.commit();
