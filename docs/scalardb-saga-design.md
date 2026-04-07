@@ -618,6 +618,28 @@ public record SagaStatusMetadata(
     Instant createdAt
 ) {}
 
+// --- api/SagaInstance.java ---
+// Read-only view of a saga, constructed from a saga_status row.
+public class SagaInstance {
+    private final String sagaId;
+    private final String sagaName;
+    private final SagaStatus status;
+    private final String ownerId;
+    private final int version;
+    private final String definitionVersion;
+    private final Instant createdAt;
+    private final Instant updatedAt;
+    private final Map<String, Object> input;
+
+    public SagaStatusMetadata getStatusMetadata() {
+        return new SagaStatusMetadata(sagaName, ownerId, version, definitionVersion, createdAt);
+    }
+
+    // Getters: getSagaId(), getSagaName(), getStatus(), getOwnerId(),
+    //          getVersion(), getDefinitionVersion(), getCreatedAt(),
+    //          getUpdatedAt(), getInput()
+}
+
 // --- api/StepResult.java ---
 // Output of a step execution, merged into SagaContext for subsequent steps.
 public class StepResult {
@@ -766,6 +788,7 @@ public class SagaDefinition {
     private SagaMode mode;                    // SAGA (default) or TCC
     private List<StepDefinition> steps;
     private RecoveryStrategy recoveryStrategy;  // Saga mode only: BACKWARD or FORWARD (null for TCC)
+    private long timeoutMs;                   // saga-level timeout (0 = no timeout)
     private RetryPolicy defaultRetryPolicy;
 
     public enum SagaMode { SAGA, TCC }
@@ -776,6 +799,7 @@ public class SagaDefinition {
     public static class StepDefinition {
         String name;                 // unique within the saga (used as idempotency key with sagaId)
         String stepClass;            // FQCN of Step implementation
+        long timeoutMs;              // per-step timeout (0 = use saga-level timeout only)
         RetryPolicy retryPolicy;     // per-step override (nullable)
     }
 }
@@ -1493,6 +1517,7 @@ public class SagaEvent {
     private final String stepName;      // null for saga-level events
     private final String payload;       // JSON
     private final SagaStatus targetStatus;  // non-null for transition events, null for step-level events
+    private final Instant timestamp;    // set from saga_events.created_at when loaded from store
 
     // Event type constants
     public static final String SAGA_STARTED        = "SAGA_STARTED";
@@ -1509,6 +1534,7 @@ public class SagaEvent {
     public static final String SAGA_ESCALATED      = "SAGA_ESCALATED";
 
     public SagaStatus getTargetStatus() { return targetStatus; }
+    public Instant getTimestamp() { return timestamp; }
 
     // Step-level factory methods (no status transition)
     public static SagaEvent sagaStarted(String sagaName, Map<String, Object> input) { ... }
@@ -2291,7 +2317,7 @@ private long calculateStepDeadline(StepDefinition stepDef, long sagaDeadline) {
 ```java
 // --- exception/StepTimeoutException.java ---
 public class StepTimeoutException extends StepExecutionException {
-    public StepTimeoutException(String message) { super(message); }
+    public StepTimeoutException(String message) { super(message, false); }  // never retryable
 }
 
 // --- exception/SagaTimeoutException.java ---
@@ -4234,8 +4260,8 @@ public class CrashingStoreDecorator implements SagaStore {
     private final Set<String> crashAfterSteps;  // step names to crash after
 
     @Override
-    public void appendEvent(String sagaId, SagaEvent event) {
-        delegate.appendEvent(sagaId, event);
+    public void appendEvent(String sagaId, int sequence, SagaEvent event) {
+        delegate.appendEvent(sagaId, sequence, event);
         if (event.getEventType().equals(SagaEvent.STEP_COMPLETED)
                 && crashAfterSteps.contains(event.getStepName())) {
             throw new SimulatedCrashException("Simulated crash after step: " + event.getStepName());
@@ -4548,7 +4574,7 @@ public class DefaultSagaAdminService implements SagaAdminService {
                 store.getEvents(saga.getSagaId()).size(),
                 SagaStatus.ESCALATED, saga.getUpdatedAt(),
                 saga.getStatusMetadata(),
-                SagaEvent.sagaCompensating("reset via resetEscalated"));
+                SagaEvent.sagaCompensating());
             count++;
         }
         return count;
@@ -5418,10 +5444,12 @@ message GetSagaRequest {
 enum SagaStatus {
   SAGA_STATUS_UNSPECIFIED = 0;
   RUNNING = 1;
-  COMPLETED = 2;
-  COMPENSATING = 3;
-  COMPENSATED = 4;
-  ESCALATED = 5;
+  CONFIRMING = 2;      // TCC only
+  COMPLETED = 3;
+  FAILED = 4;
+  COMPENSATING = 5;
+  COMPENSATED = 6;
+  ESCALATED = 7;
 }
 
 service SagaService {
