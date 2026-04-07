@@ -1533,17 +1533,28 @@ Event stream for a 5-step saga (happy path):
   seq=5  STEP_COMPLETED    {stepIndex: 4, stepName: "audit"}
   seq=6  SAGA_COMPLETED    {}                                    ← saga end
 
-Total: 7 INSERTs to saga_events + 2 writes to saga_status = 9 writes
+Transactions and operations:
+  1. createSaga:       1 tx — 2 ops (1 INSERT event + 1 INSERT status)
+  2. steps 0-4:        5 tx — 5 ops (1 INSERT event each)
+  3. sagaCompleted:    1 tx — 3 ops (1 INSERT event + 1 DELETE old status + 1 INSERT new status)
+
+Total: 7 transactions, 10 operations
+  - saga_events:  7 INSERTs
+  - saga_status:  2 INSERTs + 1 DELETE
+
+Note: registerDefinition (1 tx, 1 PUT) is a one-time cost per definition version, not per saga.
 ```
 
-| Framework | Writes per step | Total for 5-step saga | Model |
+| Framework | Transactions | Operations | Model |
 |---|---|---|---|
-| **This design** | 1 INSERT | 9 (7 events + 2 status) | Append-only events + mutable status |
-| **Axon** | 1 INSERT | ~7 | Append-only event store |
-| **Eventuate** | 1 INSERT | ~7 | Append-only events + CDC |
-| **Temporal** | ~1 (batched) | ~7 | Append-only event history |
-| **Seata** | 2 (INSERT + UPDATE) | ~12 | Mutable rows (STARTED + COMPLETED) |
-| **Previous design** | 3 ops in 1 tx | ~17 | Mutable rows (UPSERT + UPDATE + INSERT) |
+| **This design** | 7 tx | 10 ops (7 events + 3 status) | Append-only events + mutable status |
+| **Axon** | ~7 tx | ~7 ops | Append-only event store |
+| **Eventuate** | ~7 tx | ~7 ops | Append-only events + CDC |
+| **Temporal** | ~7 tx (batched) | ~7 ops | Append-only event history |
+| **Seata** | ~7 tx | ~12 ops | Mutable rows (STARTED + COMPLETED) |
+| **Previous design** | ~7 tx | ~17 ops | Mutable rows (UPSERT + UPDATE + INSERT) |
+
+The 3 additional operations in this design maintain the `saga_status` table, which enables efficient recovery scans (clustering key prefix scan by status) without requiring CDC infrastructure or eventual-consistency projections.
 
 ### SagaStore Interface
 
