@@ -660,7 +660,7 @@ Saga definitions can be written in JSON or YAML. YAML is often preferred for han
   "name": "MoneyTransfer",
   "version": "1.0",
   "mode": "SAGA",
-  "recoverStrategy": "COMPENSATE",
+  "recoveryStrategy": "BACKWARD",
   "timeoutMs": 300000,
   "defaultRetryPolicy": {
     "maxAttempts": 3,
@@ -691,7 +691,7 @@ Saga definitions can be written in JSON or YAML. YAML is often preferred for han
 name: MoneyTransfer
 version: "1.0"
 mode: SAGA
-recoverStrategy: COMPENSATE
+recoveryStrategy: BACKWARD
 timeoutMs: 300000
 
 defaultRetryPolicy:
@@ -720,7 +720,7 @@ For embedded mode, a type-safe Java builder provides compile-time checks and IDE
 SagaDefinition def = SagaDefinition.builder("MoneyTransfer")
     .version("1.0")
     .mode(SagaMode.SAGA)
-    .recoverStrategy(RecoverStrategy.COMPENSATE)
+    .recoveryStrategy(RecoveryStrategy.BACKWARD)
     .timeoutMs(300000)
     .defaultRetryPolicy(RetryPolicy.builder()
         .maxAttempts(3)
@@ -763,11 +763,11 @@ public class SagaDefinition {
     private String version;
     private SagaMode mode;                    // SAGA (default) or TCC
     private List<StepDefinition> steps;
-    private RecoverStrategy recoverStrategy;  // COMPENSATE or FORWARD
+    private RecoveryStrategy recoveryStrategy;  // Saga mode only: BACKWARD or FORWARD (null for TCC)
     private RetryPolicy defaultRetryPolicy;
 
     public enum SagaMode { SAGA, TCC }
-    public enum RecoverStrategy { COMPENSATE, FORWARD }
+    public enum RecoveryStrategy { BACKWARD, FORWARD }
 
     public static class StepDefinition {
         String name;
@@ -925,8 +925,8 @@ public class SagaEngine {
 
         } catch (Exception e) {
             // Step failed (StepExecutionException) or unexpected error (Exception).
-            // Recovery decision depends on recoverStrategy, not the exception type.
-            if (def.getRecoverStrategy() == RecoverStrategy.COMPENSATE) {
+            // Recovery decision depends on recoveryStrategy, not the exception type.
+            if (def.getRecoveryStrategy() == RecoveryStrategy.BACKWARD) {
                 // Compensate all completed steps + the failed step (completedIndex + 1)
                 // because it may have had partial side effects.
                 int compensateFrom = completedIndex + 1;
@@ -939,7 +939,7 @@ public class SagaEngine {
                     // Recovery will retry from the failed compensation step.
                 }
             } else {
-                // FORWARD: leave as FAILED for manual retry via Admin API.
+                // FORWARD: leave as FAILED for retry via Admin API.
                 transition(context, SagaEvent.sagaFailed());
             }
         } finally {
@@ -2570,7 +2570,6 @@ public class TccDebitStep implements TccStep {
   "name": "MoneyTransfer",
   "version": "1.0",
   "mode": "TCC",
-  "recoverStrategy": "COMPENSATE",
   "timeoutMs": 300000,
   "steps": [
     {
@@ -2587,7 +2586,7 @@ public class TccDebitStep implements TccStep {
 }
 ```
 
-The only difference from a Saga definition is `"mode": "TCC"`. The step classes must implement `TccStep` instead of `Step`. If a step class implements only `Step` (no `confirm()`), the engine throws a `SagaDefinitionException` at registration time.
+The differences from a Saga definition: `"mode": "TCC"`, and no `recoveryStrategy` field. The step classes must implement `TccStep` instead of `Step`. If a step class implements only `Step` (no `confirm()`), the engine throws a `SagaDefinitionException` at registration time. If `recoveryStrategy` is set on a TCC definition, the engine throws a `SagaDefinitionException` — the TCC protocol defines fixed recovery behavior per phase (see below).
 
 ### Engine Execution Logic
 
@@ -2662,7 +2661,15 @@ public static RetryPolicy confirmDefault() {
 
 ### Recovery in TCC Mode
 
-The recovery manager handles two additional scenarios in TCC mode:
+Unlike Saga mode, where `recoveryStrategy` is configurable (BACKWARD or FORWARD), TCC mode has **fixed recovery behavior** defined by the TCC protocol. The `recoveryStrategy` field is not applicable to TCC definitions.
+
+| TCC Phase | On failure | Recovery behavior | Rationale |
+|---|---|---|---|
+| **Try** | Cancel all tried steps | Undo | Cannot leave resources reserved indefinitely |
+| **Confirm** | Retry confirm | Retry until success | Reservations exist — must commit them |
+| **Cancel** | Retry cancel | Retry until success | Must release reservations |
+
+The recovery manager handles these scenarios on crash:
 
 | Saga Status at Crash | Recovery Action |
 |---|---|
@@ -4875,7 +4882,7 @@ The `quarkus-scalardb` extension already provides `DistributedTransactionManager
 | `SagaContext.java` | Map wrapper with typed getters + type validation + in-memory tracking fields (`nextEventSequence`, `currentStatus`, `statusMetadata`) | ~80 | Trivial |
 | `SagaStatus.java` | Enum (7 values: RUNNING, CONFIRMING, COMPLETED, FAILED, COMPENSATING, COMPENSATED, ESCALATED) | ~10 | Trivial |
 | `StepStatus.java` | Enum (4 values: WAITING (daemon mode only), COMPLETED, CONFIRMED, FAILED) | ~5 | Trivial |
-| `SagaDefinition.java` | POJO + inner `StepDefinition` + SagaMode + RecoverStrategy | ~60 | Trivial |
+| `SagaDefinition.java` | POJO + inner `StepDefinition` + SagaMode + RecoveryStrategy | ~60 | Trivial |
 | `SagaInstance.java` | Read-only view of saga state | ~40 | Trivial |
 | `SagaManager.java` | Interface (8 methods incl. start, startAsync ×2; completeStep is daemon mode only) | ~25 | Trivial |
 | `SagaCallback.java` | Callback interface (onCompleted, onCompensated, onEscalated) | ~10 | Trivial |
@@ -5225,7 +5232,7 @@ message SagaDefinition {
   string name = 1;
   string version = 2;
   SagaMode mode = 3;
-  RecoverStrategy recover_strategy = 4;
+  RecoveryStrategy recovery_strategy = 4;
   uint64 timeout_ms = 5;
   RetryPolicy default_retry_policy = 6;
   repeated StepDefinition steps = 7;
@@ -5260,9 +5267,9 @@ enum SagaMode {
   TCC = 2;
 }
 
-enum RecoverStrategy {
-  RECOVER_STRATEGY_UNSPECIFIED = 0;
-  COMPENSATE = 1;
+enum RecoveryStrategy {
+  RECOVERY_STRATEGY_UNSPECIFIED = 0;
+  BACKWARD = 1;
   FORWARD = 2;
 }
 
@@ -5312,7 +5319,7 @@ stub.registerSaga(SagaDefinition.newBuilder()
     .setName("MoneyTransfer")
     .setVersion("1.0")
     .setMode(SagaMode.SAGA)
-    .setRecoverStrategy(RecoverStrategy.COMPENSATE)
+    .setRecoveryStrategy(RecoveryStrategy.BACKWARD)
     .setTimeoutMs(300000)
     .addSteps(StepDefinition.newBuilder()
         .setName("debit")
@@ -5401,7 +5408,7 @@ stub.RegisterSaga(saga_pb2.SagaDefinition(
     name="MoneyTransfer",
     version="1.0",
     mode=saga_pb2.SAGA,
-    recover_strategy=saga_pb2.COMPENSATE,
+    recovery_strategy=saga_pb2.BACKWARD,
     timeout_ms=300000,
     steps=[
         saga_pb2.StepDefinition(
