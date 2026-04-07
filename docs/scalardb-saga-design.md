@@ -1600,10 +1600,13 @@ public interface SagaStore {
     // Recovery — scan saga_status + replay saga_events
     List<SagaInstance> findRecoverable(long recoveryTimeoutMs);
     boolean claimForRecovery(SagaInstance saga, String newOwnerId);
+    void markForRecovery(String sagaId);  // sets updated_at to epoch 0 for immediate recovery
     List<SagaEvent> getEvents(String sagaId);
 
     // Queries
     SagaInstance getInstance(String sagaId);
+    SagaPage<SagaInstance> listInstances(SagaQuery query);
+    SagaMetrics computeMetrics();
 }
 ```
 
@@ -4537,7 +4540,7 @@ public class DefaultSagaAdminService implements SagaAdminService {
         if (sagaName != null) {
             qb.sagaName(sagaName);
         }
-        List<SagaInstance> escalated = store.query(qb.build()).getItems();
+        List<SagaInstance> escalated = store.listInstances(qb.build()).getItems();
         int count = 0;
         for (SagaInstance saga : escalated) {
             // Move back to COMPENSATING so the recovery scheduler picks it up
