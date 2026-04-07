@@ -438,7 +438,7 @@ Since our design persists all saga state in ScalarDB (not in-memory), **any inst
 1. **Saga registered on creation**: `SagaEngine.execute()` inserts a row into `saga_status` with `status=RUNNING` and `updated_at=now`.
 2. **No per-step ownership writes**: The engine does not write any lease/ownership data per step — only appends events to `saga_events`. The `saga_status.updated_at` is updated on saga start and end only.
 3. **Periodic recovery scan**: Every replica runs `SagaRecoveryManager` on a background scheduler (default: every 30s). It scans each `saga_status` bucket with clustering key prefix `status=RUNNING` (and `COMPENSATING`), reading only active sagas. Bucket-based partitioning distributes these scans across database nodes.
-4. **Conflict-based claiming**: Before recovering a saga, the replica writes a new `saga_status` row with updated `owner_id` and incremented `version` (DELETE + INSERT in one transaction, zero reads — the status and metadata are already known from step 3). If two replicas try to claim the same saga concurrently, ScalarDB's transaction conflict detection causes one to get `CommitConflictException` and back off.
+4. **Conflict-based claiming**: Before recovering a saga, the replica reads the current `saga_status` row to verify it hasn't been claimed since the scan, then writes a new row with updated `owner_id` and incremented `version` (read + DELETE + INSERT in one transaction). The read provides both version-based optimistic concurrency control (serial case) and transaction conflict detection (concurrent case).
 5. **Event replay for state reconstruction**: The claiming replica reads all events from `saga_events` for the saga and replays them to reconstruct current state (e.g., finds the last `STEP_COMPLETED` event at step 3).
 6. **Resume forward execution**: The engine resumes from `lastCompleted + 1` (step 4). The step may or may not have executed before the crash — **this is why `execute()` must be idempotent**.
 7. **Resume compensation**: If the saga was `COMPENSATING`, the engine resumes compensation from the last compensated step downward. If a compensation fails again, the saga stays in `COMPENSATING` for the next recovery scan. After repeated failures (configurable threshold), the recovery manager escalates the saga to `ESCALATED` for manual intervention.
@@ -612,7 +612,6 @@ public record SagaStatusMetadata(
     String ownerId,
     int version,
     String definitionVersion,
-    String definitionJson,
     Instant createdAt
 ) {}
 
@@ -849,7 +848,7 @@ public class SagaEngine {
         if (shuttingDown) {
             throw new IllegalStateException("Engine is shutting down — not accepting new sagas");
         }
-        return store.createSaga(def.getName(), ownerId, input, def.toJson());
+        return store.createSaga(def.getName(), ownerId, input, def.getVersion());
     }
 
     /**
@@ -858,14 +857,14 @@ public class SagaEngine {
      */
     public SagaInstance executeSaga(String sagaId) {
         SagaInstance saga = store.getInstance(sagaId);
-        SagaDefinition def = SagaDefinitionParser.parse(saga.getDefinitionJson());
+        SagaDefinition def = resolveDefinition(saga.getSagaName(), saga.getDefinitionVersion());
         // createSaga wrote 1 event (SAGA_STARTED at seq 0) and set status RUNNING
         SagaContext context = new SagaContext(sagaId, saga.getInput());
         context.setNextEventSequence(1);        // next sequence after SAGA_STARTED
         context.setCurrentStatus(SagaStatus.RUNNING);
         context.setStatusMetadata(new SagaStatusMetadata(
             saga.getSagaName(), ownerId, 0,
-            def.getVersion(), saga.getDefinitionJson(), saga.getCreatedAt()));
+            def.getVersion(), saga.getCreatedAt()));
         return executeSteps(def, context, 0, -1);
     }
 
@@ -880,7 +879,7 @@ public class SagaEngine {
         context.setNextEventSequence(1);
         context.setCurrentStatus(SagaStatus.RUNNING);
         context.setStatusMetadata(new SagaStatusMetadata(
-            def.getName(), ownerId, 0, def.getVersion(), def.toJson(), now));
+            def.getName(), ownerId, 0, def.getVersion(), now));
         return executeSteps(def, context, 0, -1);
     }
 
@@ -1444,7 +1443,6 @@ public class SagaSchema {
             .addColumn("owner_id",     DataType.TEXT)      // ID of the replica processing this saga (informational, for observability)
             .addColumn("version",      DataType.INT)       // incremented on each recovery claim (optimistic concurrency control)
             .addColumn("definition_version", DataType.TEXT) // saga definition version at creation
-            .addColumn("definition_json",    DataType.TEXT) // full definition JSON snapshot
             .addColumn("created_at",   DataType.TIMESTAMPTZ)
             .addPartitionKey("bucket")
             .addClusteringKey("status", Scan.Ordering.Order.ASC)
@@ -1454,13 +1452,25 @@ public class SagaSchema {
             .build();
     }
 
+    public static TableMetadata sagaDefinitionsTable() {
+        return TableMetadata.newBuilder()
+            .addColumn("saga_name",          DataType.TEXT)        // PK
+            .addColumn("definition_version", DataType.TEXT)        // CK
+            .addColumn("definition_json",    DataType.TEXT)        // full definition JSON
+            .addColumn("registered_at",      DataType.TIMESTAMPTZ)
+            .addPartitionKey("saga_name")
+            .addClusteringKey("definition_version", Scan.Ordering.Order.ASC)
+            .build();
+    }
+
     /**
      * Create all saga tables using ScalarDB Admin API.
      */
     public static void createAll(Admin admin) throws ExecutionException {
         admin.createNamespace(NAMESPACE, true);
-        admin.createTable(NAMESPACE, "saga_events", sagaEventsTable(), true);
-        admin.createTable(NAMESPACE, "saga_status",  sagaStatusTable(),  true);
+        admin.createTable(NAMESPACE, "saga_events",      sagaEventsTable(),      true);
+        admin.createTable(NAMESPACE, "saga_status",       sagaStatusTable(),       true);
+        admin.createTable(NAMESPACE, "saga_definitions",  sagaDefinitionsTable(),  true);
     }
 }
 ```
@@ -1544,7 +1554,11 @@ Total: 7 INSERTs to saga_events + 2 writes to saga_status = 9 writes
 public interface SagaStore {
     // Saga lifecycle — writes to both saga_events and saga_status in ONE transaction
     String createSaga(String sagaName, String ownerId,
-                       Map<String, Object> input, String definitionJson);
+                       Map<String, Object> input, String definitionVersion);
+
+    // Definition persistence — called once per definition version at registration time
+    void registerDefinition(SagaDefinition definition);
+    Optional<SagaDefinition> getDefinition(String sagaName, String definitionVersion);
 
     // Append-only event write — 1 INSERT to saga_events (no status table update)
     // Used for step-level events (STEP_COMPLETED, STEP_COMPENSATED, etc.)
@@ -1586,7 +1600,7 @@ public class ScalarDbSagaStore implements SagaStore {
      * and saga_status (RUNNING status) in one transaction.
      */
     public String createSaga(String sagaName, String ownerId,
-                              Map<String, Object> input, String definitionJson) {
+                              Map<String, Object> input, String definitionVersion) {
         String sagaId = UUID.randomUUID().toString();
         Instant now = Instant.now();
         DistributedTransaction tx = null;
@@ -1616,8 +1630,7 @@ public class ScalarDbSagaStore implements SagaStore {
                 .textValue("saga_name", sagaName)
                 .textValue("owner_id", ownerId)
                 .intValue("version", 0)
-                .textValue("definition_version", /* parsed from def */ "1.0")
-                .textValue("definition_json", definitionJson)
+                .textValue("definition_version", definitionVersion)
                 .timestampTZValue("created_at", now)
                 .timestampTZValue("updated_at", now)
                 .build());
@@ -1719,7 +1732,6 @@ public class ScalarDbSagaStore implements SagaStore {
                 .textValue("owner_id", metadata.ownerId())
                 .intValue("version", metadata.version())
                 .textValue("definition_version", metadata.definitionVersion())
-                .textValue("definition_json", metadata.definitionJson())
                 .timestampTZValue("created_at", metadata.createdAt())
                 .timestampTZValue("updated_at", now)
                 .build());
@@ -1835,7 +1847,6 @@ public class ScalarDbSagaStore implements SagaStore {
                 .textValue("owner_id", newOwnerId)
                 .intValue("version", saga.getVersion() + 1)
                 .textValue("definition_version", saga.getDefinitionVersion())
-                .textValue("definition_json", saga.getDefinitionJson())
                 .timestampTZValue("created_at", saga.getCreatedAt())
                 .build());
 
@@ -1849,6 +1860,50 @@ public class ScalarDbSagaStore implements SagaStore {
         } catch (Exception e) {
             abortQuietly(tx);
             throw new SagaPersistenceException("Failed to claim saga for recovery", e);
+        }
+    }
+
+    /**
+     * Persist a saga definition. Called once per definition version at registration
+     * time. Uses PUT (idempotent) so safe to call on every startup.
+     */
+    public void registerDefinition(SagaDefinition definition) {
+        DistributedTransaction tx = null;
+        try {
+            tx = txManager.begin();
+            tx.put(Put.newBuilder()
+                .namespace(SagaSchema.NAMESPACE).table("saga_definitions")
+                .partitionKey(Key.ofText("saga_name", definition.getName()))
+                .clusteringKey(Key.ofText("definition_version", definition.getVersion()))
+                .textValue("definition_json", definition.toJson())
+                .timestampTZValue("registered_at", Instant.now())
+                .build());
+            tx.commit();
+        } catch (Exception e) {
+            abortQuietly(tx);
+            throw new SagaPersistenceException("Failed to register definition", e);
+        }
+    }
+
+    /**
+     * Look up a saga definition by name and version. Used as a fallback during
+     * recovery when the definition is no longer in the in-memory registry.
+     */
+    public Optional<SagaDefinition> getDefinition(String sagaName, String definitionVersion) {
+        DistributedTransaction tx = null;
+        try {
+            tx = txManager.begin();
+            Optional<Result> result = tx.get(Get.newBuilder()
+                .namespace(SagaSchema.NAMESPACE).table("saga_definitions")
+                .partitionKey(Key.ofText("saga_name", sagaName))
+                .clusteringKey(Key.ofText("definition_version", definitionVersion))
+                .build());
+            tx.commit();
+            return result.map(r ->
+                SagaDefinitionParser.parse(r.getText("definition_json")));
+        } catch (Exception e) {
+            abortQuietly(tx);
+            throw new SagaPersistenceException("Failed to get definition", e);
         }
     }
 
@@ -1966,7 +2021,7 @@ public class SagaRecoveryManager {
 
         for (SagaInstance saga : stuckSagas) {
             try {
-                // Claim via DELETE + INSERT in one transaction (zero reads).
+                // Claim via read + DELETE + INSERT in one transaction.
                 // If another replica claims it concurrently, returns false.
                 if (!store.claimForRecovery(saga, ownerId)) {
                     continue;  // Another replica claimed it
@@ -1980,20 +2035,24 @@ public class SagaRecoveryManager {
     }
 
     private void recoverOne(SagaInstance saga) {
-        // Use the definition snapshot stored in saga_status at creation time.
-        // This ensures recovery uses the exact definition the saga was started with,
-        // even if the current definition has been updated (new steps, different order,
-        // renamed steps). This is the same approach Temporal uses (workflow versioning)
-        // and Camunda (process instance → process definition version binding).
-        SagaDefinition def;
-        if (saga.getDefinitionJson() != null) {
-            def = SagaDefinitionParser.parse(saga.getDefinitionJson());
-        } else {
-            // Fallback for sagas created before versioning was added
+        // Look up the definition by name + version. This ensures recovery uses the
+        // exact definition the saga was started with, even if the current definition
+        // has been updated (new steps, different order, renamed steps).
+        // 1. In-memory versioned lookup (fast path)
+        // 2. In-memory latest version (if versioned lookup misses)
+        // 3. saga_definitions table (if definition was unregistered from memory)
+        SagaDefinition def = definitions.get(
+            saga.getSagaName() + ":" + saga.getDefinitionVersion());
+        if (def == null) {
             def = definitions.get(saga.getSagaName());
         }
         if (def == null) {
-            logger.error("No definition found for saga: {}", saga.getSagaName());
+            def = store.getDefinition(saga.getSagaName(), saga.getDefinitionVersion())
+                .orElse(null);
+        }
+        if (def == null) {
+            logger.error("No definition found for saga: {} version: {}",
+                saga.getSagaName(), saga.getDefinitionVersion());
             return;
         }
 
@@ -2073,8 +2132,7 @@ public class SagaRecoveryManager {
         context.setCurrentStatus(status);
         context.setStatusMetadata(new SagaStatusMetadata(
             saga.getSagaName(), saga.getOwnerId(), saga.getVersion(),
-            saga.getDefinitionVersion(), saga.getDefinitionJson(),
-            saga.getCreatedAt()));
+            saga.getDefinitionVersion(), saga.getCreatedAt()));
 
         return new SagaState(context, lastCompleted, lastCompensated, status);
     }
@@ -4432,8 +4490,7 @@ public class DefaultSagaAdminService implements SagaAdminService {
         List<SagaEvent> events = store.getEvents(sagaId);
         SagaStatusMetadata metadata = new SagaStatusMetadata(
             saga.getSagaName(), saga.getOwnerId(), saga.getVersion(),
-            saga.getDefinitionVersion(), saga.getDefinitionJson(),
-            saga.getCreatedAt());
+            saga.getDefinitionVersion(), saga.getCreatedAt());
         store.recordTransition(sagaId, events.size(),
             SagaStatus.ESCALATED, metadata, SagaEvent.sagaCompleted());
         return store.getInstance(sagaId);
@@ -4935,10 +4992,10 @@ The `quarkus-scalardb` extension already provides `DistributedTransactionManager
 | **parser/** | | | |
 | `SagaDefinitionParser.java` | Jackson JSON/YAML → SagaDefinition (detects format by file extension; uses `jackson-dataformat-yaml`) | ~80 | Low |
 | **store/** | | | |
-| `SagaStore.java` | Interface (appendEvent, recordTransition, findRecoverable, claimForRecovery, getEvents) | ~30 | Trivial |
+| `SagaStore.java` | Interface (appendEvent, recordTransition, findRecoverable, claimForRecovery, getEvents, registerDefinition, getDefinition) | ~40 | Trivial |
 | `SagaEvent.java` | Event types + factory methods (each saga-level event carries its `targetStatus`) | ~90 | Low |
-| `SagaSchema.java` | 2 TableMetadata definitions (saga_events, saga_status with bucket partitioning) + bucketOf() + createAll | ~80 | Low |
-| `ScalarDbSagaStore.java` | Append-only events + bucket-partitioned saga_status (DELETE+INSERT for status transitions) + bucket-parallel recovery scan + conflict-based claiming | ~400 | **Medium** |
+| `SagaSchema.java` | 3 TableMetadata definitions (saga_events, saga_status, saga_definitions) + bucketOf() + createAll | ~100 | Low |
+| `ScalarDbSagaStore.java` | Append-only events + bucket-partitioned saga_status (DELETE+INSERT for status transitions) + bucket-parallel recovery scan + conflict-based claiming + definition persistence | ~450 | **Medium** |
 | **recovery/** | | | |
 | `SagaRecoveryManager.java` | Periodic scan of saga_status + event replay + resume (with versioned definitions, TCC CONFIRMING handling) | ~200 | **Medium** |
 | **timeout/** | | | |
