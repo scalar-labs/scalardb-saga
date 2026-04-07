@@ -768,6 +768,8 @@ public class SagaDefinition {
 
     public enum SagaMode { SAGA, TCC }
     public enum RecoveryStrategy { BACKWARD, FORWARD }
+    // BACKWARD: on step failure, compensate all completed steps (default)
+    // FORWARD:  on step failure, mark as FAILED for retry via Admin API
 
     public static class StepDefinition {
         String name;
@@ -776,6 +778,13 @@ public class SagaDefinition {
     }
 }
 ```
+
+**Mixed recovery (pivot transaction pattern):** Some workflows have compensatable steps followed by non-compensatable steps (e.g., reserve inventory → charge payment → send email). If you need backward recovery for early steps and forward recovery for later steps, split the workflow into two sagas:
+
+- **Saga A** (`BACKWARD`): Compensatable steps. If any fails, all are compensated.
+- **Saga B** (`FORWARD`): Retriable steps. Started after Saga A completes. If any fails, retried until success.
+
+The boundary between the two sagas acts as the pivot point — once Saga A completes, the workflow is committed to moving forward.
 
 ### SagaManager (Top-Level API)
 
