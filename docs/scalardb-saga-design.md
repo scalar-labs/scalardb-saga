@@ -826,9 +826,9 @@ public interface SagaManager extends AutoCloseable {
     void registerFromClasspath(String resourcePath);
 
     // Start a new saga instance (synchronous — blocks until saga completes)
-    SagaInstance start(String sagaName, Map<String, Object> input);
+    String start(String sagaName, Map<String, Object> input);
 
-    // Start a new saga instance (asynchronous — returns immediately with saga ID)
+    // Start a new saga instance (asynchronous — returns immediately)
     String startAsync(String sagaName, Map<String, Object> input);
 
     // Start a new saga instance (asynchronous with completion callback)
@@ -866,50 +866,49 @@ public class SagaEngine {
     private final String ownerId;          // unique ID for this replica (e.g., UUID)
 
     /**
-     * Persist a new saga (saga_status + SAGA_STARTED event). Returns the saga ID.
-     * Stores the full definition JSON snapshot in saga_status so that recovery
-     * always uses the exact definition this saga was started with.
+     * Persist a new saga (saga_status + SAGA_STARTED event).
+     * Returns the full SagaInstance so callers can use it without a read-back.
      * Rejects new sagas if the engine is shutting down.
      */
-    public String createSaga(SagaDefinition def, Map<String, Object> input, Instant now) {
+    public SagaInstance createSaga(SagaDefinition def, Map<String, Object> input) {
         if (shuttingDown) {
             throw new IllegalStateException("Engine is shutting down — not accepting new sagas");
         }
-        return store.createSaga(def.getName(), ownerId, input, def.getVersion(), now);
+        return store.createSaga(def.getName(), ownerId, input, def.getVersion());
     }
 
     /**
-     * Execute a previously created saga. Loads definition from the store,
+     * Execute a previously created saga. Loads the instance from the store,
      * then runs steps from the beginning.
      */
-    public SagaInstance executeSaga(String sagaId) {
-        SagaInstance saga = store.getInstance(sagaId);
+    public void executeSaga(String sagaId) {
+        executeSaga(store.getInstance(sagaId));
+    }
+
+    /**
+     * Execute a previously created saga from a known SagaInstance (avoids a read-back).
+     * Used by startAsync() which already has the instance from createSaga().
+     */
+    public void executeSaga(SagaInstance saga) {
         SagaDefinition def = resolveDefinition(saga.getSagaName(), saga.getDefinitionVersion());
         // createSaga wrote 1 event (SAGA_STARTED at seq 0) and set status RUNNING
-        SagaContext context = new SagaContext(sagaId, saga.getInput());
+        SagaContext context = new SagaContext(saga.getSagaId(), saga.getInput());
         context.setNextEventSequence(1);        // next sequence after SAGA_STARTED
         context.setCurrentStatus(SagaStatus.RUNNING);
         context.setCurrentUpdatedAt(saga.getUpdatedAt());
         context.setStatusMetadata(new SagaStatusMetadata(
             saga.getSagaName(), ownerId, 0,
             def.getVersion(), saga.getCreatedAt()));
-        return executeSteps(def, context, 0, -1);
+        executeSteps(def, context, 0, -1);
     }
 
     /**
      * Convenience: create + execute in one call (synchronous).
      */
-    public SagaInstance execute(SagaDefinition def, Map<String, Object> input) {
-        Instant now = Instant.now();
-        String sagaId = createSaga(def, input, now);
-        // createSaga wrote 1 event (SAGA_STARTED at seq 0) and set status RUNNING
-        SagaContext context = new SagaContext(sagaId, input);
-        context.setNextEventSequence(1);
-        context.setCurrentStatus(SagaStatus.RUNNING);
-        context.setCurrentUpdatedAt(now);
-        context.setStatusMetadata(new SagaStatusMetadata(
-            def.getName(), ownerId, 0, def.getVersion(), now));
-        return executeSteps(def, context, 0, -1);
+    public String execute(SagaDefinition def, Map<String, Object> input) {
+        SagaInstance instance = createSaga(def, input);
+        executeSaga(instance);
+        return instance.getSagaId();
     }
 
     /**
@@ -917,15 +916,15 @@ public class SagaEngine {
      * completedIndex is initialized to fromStep - 1 (steps before fromStep
      * are known to have completed based on persisted step logs).
      */
-    public SagaInstance resumeFrom(SagaDefinition def, SagaContext context, int fromStep) {
-        return executeSteps(def, context, fromStep, fromStep - 1);
+    public void resumeFrom(SagaDefinition def, SagaContext context, int fromStep) {
+        executeSteps(def, context, fromStep, fromStep - 1);
     }
 
     /**
      * Shared execution loop used by both execute() and resumeFrom().
      */
-    private SagaInstance executeSteps(SagaDefinition def, SagaContext context,
-                                      int startIndex, int completedIndex) {
+    private void executeSteps(SagaDefinition def, SagaContext context,
+                               int startIndex, int completedIndex) {
         String sagaId = context.getSagaId();
         List<StepDefinition> steps = def.getSteps();
 
@@ -933,7 +932,7 @@ public class SagaEngine {
             // Engine is shutting down. Saga is already persisted as RUNNING.
             // Mark for immediate recovery so another replica picks it up quickly.
             store.markForRecovery(sagaId);
-            return store.getInstance(sagaId);
+            return;
         }
 
         try {
@@ -985,7 +984,6 @@ public class SagaEngine {
             unregisterActive(sagaId);
         }
 
-        return store.getInstance(sagaId);
     }
 
     /**
@@ -1039,7 +1037,7 @@ public class SagaEngine {
 `DefaultSagaManager` implements the `SagaManager` interface. It delegates all saga lifecycle logic (creation, step execution, compensation) to `SagaEngine`, and handles definition registry, async threading, and callbacks.
 
 - **`start()`**: Delegates to `engine.execute()` — synchronous, blocks until the saga completes.
-- **`startAsync()`**: Calls `engine.createSaga()` to persist the saga and get the ID, then submits `engine.executeSaga()` to a virtual thread. The caller gets back the saga ID immediately.
+- **`startAsync()`**: Calls `engine.createSaga()` to persist the saga, then submits `engine.executeSaga()` to a virtual thread. The caller gets back the `SagaInstance` immediately.
 - **`resume()`, `compensate()`**: Delegates to corresponding `SagaEngine` methods.
 - **`getInstance()`**: Delegates to `SagaStore`.
 
@@ -1051,7 +1049,7 @@ public class DefaultSagaManager implements SagaManager {
         Executors.newVirtualThreadPerTaskExecutor();
 
     @Override
-    public SagaInstance start(String sagaName, Map<String, Object> input) {
+    public String start(String sagaName, Map<String, Object> input) {
         // Synchronous — blocks until saga completes
         SagaDefinition def = definitions.get(sagaName);
         return engine.execute(def, input);
@@ -1064,21 +1062,23 @@ public class DefaultSagaManager implements SagaManager {
 
     @Override
     public String startAsync(String sagaName, Map<String, Object> input,
-                             SagaCallback callback) {
+                              SagaCallback callback) {
         SagaDefinition def = definitions.get(sagaName);
 
         // 1. Persist saga via engine (saga_status + SAGA_STARTED event).
         //    This guarantees the saga is recoverable even if the process
         //    crashes before the virtual thread starts executing.
-        Instant now = Instant.now();
-        String sagaId = engine.createSaga(def, input, now);
+        SagaInstance instance = engine.createSaga(def, input);
+        String sagaId = instance.getSagaId();
 
-        // 2. Submit execution to a virtual thread
+        // 2. Submit execution to a virtual thread (pass SagaInstance to avoid read-back)
         asyncExecutor.submit(() -> {
             try {
-                SagaInstance result = engine.executeSaga(sagaId);
+                engine.executeSaga(instance);
 
                 if (callback != null) {
+                    // getInstance hits cache (populated by recordTransition) — no DB read
+                    SagaInstance result = store.getInstance(sagaId);
                     switch (result.getStatus()) {
                         case COMPLETED    -> callback.onCompleted(result);
                         case COMPENSATED  -> callback.onCompensated(result);
@@ -1092,7 +1092,7 @@ public class DefaultSagaManager implements SagaManager {
             }
         });
 
-        // 3. Return saga ID immediately
+        // 3. Return saga ID immediately (saga is persisted, execution is async)
         return sagaId;
     }
 }
@@ -1598,10 +1598,9 @@ The 3 additional operations in this design maintain the `saga_status` table, whi
 // --- store/SagaStore.java ---
 public interface SagaStore {
     // Saga lifecycle — writes to both saga_events and saga_status in ONE transaction.
-    // The caller provides `now` so it can track the same value in SagaContext.
-    String createSaga(String sagaName, String ownerId,
-                       Map<String, Object> input, String definitionVersion,
-                       Instant now);
+    // Returns the full SagaInstance so the caller can use it without a read-back.
+    SagaInstance createSaga(String sagaName, String ownerId,
+                             Map<String, Object> input, String definitionVersion);
 
     // Definition persistence — called once per definition version at registration time
     void registerDefinition(SagaDefinition definition);
@@ -1642,6 +1641,10 @@ public interface SagaStore {
 // --- store/ScalarDbSagaStore.java ---
 public class ScalarDbSagaStore implements SagaStore {
     private final DistributedTransactionManager txManager;
+    private final Cache<String, SagaInstance> cache = Caffeine.newBuilder()
+        .maximumSize(10_000)
+        .expireAfterWrite(Duration.ofMinutes(5))
+        .build();
 
     public ScalarDbSagaStore(DistributedTransactionManager txManager) {
         this.txManager = txManager;
@@ -1651,10 +1654,10 @@ public class ScalarDbSagaStore implements SagaStore {
      * Create a new saga. Writes to both saga_events (SAGA_STARTED event)
      * and saga_status (RUNNING status) in one transaction.
      */
-    public String createSaga(String sagaName, String ownerId,
-                              Map<String, Object> input, String definitionVersion,
-                              Instant now) {
+    public SagaInstance createSaga(String sagaName, String ownerId,
+                                    Map<String, Object> input, String definitionVersion) {
         String sagaId = UUID.randomUUID().toString();
+        Instant now = Instant.now();
         DistributedTransaction tx = null;
         try {
             tx = txManager.begin();
@@ -1692,7 +1695,10 @@ public class ScalarDbSagaStore implements SagaStore {
             abortQuietly(tx);
             throw new SagaPersistenceException("Failed to create saga", e);
         }
-        return sagaId;
+        SagaInstance instance = new SagaInstance(sagaId, sagaName, SagaStatus.RUNNING,
+            ownerId, 0, definitionVersion, now, now, input);
+        cache.put(sagaId, instance);
+        return instance;
     }
 
     /**
@@ -1790,6 +1796,9 @@ public class ScalarDbSagaStore implements SagaStore {
                 .build());
 
             tx.commit();
+            cache.put(sagaId, new SagaInstance(sagaId, metadata.sagaName(),
+                newStatus, metadata.ownerId(), metadata.version(),
+                metadata.definitionVersion(), metadata.createdAt(), now));
             return now;
         } catch (Exception e) {
             abortQuietly(tx);
@@ -1987,6 +1996,10 @@ public class ScalarDbSagaStore implements SagaStore {
      * For full state (including step results), use getEvents() and replay.
      */
     public SagaInstance getInstance(String sagaId) {
+        return cache.get(sagaId, this::loadFromDb);
+    }
+
+    private SagaInstance loadFromDb(String sagaId) {
         DistributedTransaction tx = null;
         try {
             tx = txManager.begin();
@@ -4155,12 +4168,13 @@ The above runs once at application startup. After that, `sagaManager.start()` is
 
 ```java
 // Per request — e.g., inside an HTTP handler or message consumer
-SagaInstance result = sagaManager.start("MoneyTransfer", Map.of(
+String sagaId = sagaManager.start("MoneyTransfer", Map.of(
     "fromAccountId", "A001",
     "toAccountId",   "B002",
     "amount",        5000
 ));
 
+SagaInstance result = sagaManager.getInstance(sagaId);
 System.out.println(result.getStatus());  // COMPLETED or COMPENSATED
 ```
 
@@ -4395,9 +4409,10 @@ class MoneyTransferSagaTest {
 
     @Test
     void transferSucceeds() {
-        SagaInstance instance = sagaManager.start("MoneyTransfer",
+        String sagaId = sagaManager.start("MoneyTransfer",
             Map.of("fromAccountId", "A1", "toAccountId", "A2", "amount", 100));
-        assertEquals(SagaStatus.COMPLETED, instance.getStatus());
+        SagaInstance result = sagaManager.getInstance(sagaId);
+        assertEquals(SagaStatus.COMPLETED, result.getStatus());
     }
 }
 ```
@@ -5207,9 +5222,9 @@ SagaManager manager = RemoteSagaManager.builder()
     .coordinatorUrl("http://coordinator:8080").build();
 
 // Both use the same API — sync and async work identically
-SagaInstance result = manager.start("transferMoney", input);          // sync
-String sagaId = manager.startAsync("transferMoney", input);          // async
-SagaInstance status = manager.getInstance(sagaId);                    // poll
+String sagaId = manager.start("transferMoney", input);                // sync
+String sagaId = manager.startAsync("transferMoney", input);           // async
+SagaInstance result = manager.getInstance(sagaId);                    // poll
 ```
 
 `RemoteSagaManager` maps `startAsync()` to `POST /sagas?async=true`, which returns `202 Accepted` with the saga ID. The `SagaCallback` variant polls `GET /sagas/{id}` on a background thread and invokes the callback when the saga reaches a terminal status.
