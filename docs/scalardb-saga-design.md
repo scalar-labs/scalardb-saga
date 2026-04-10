@@ -719,6 +719,71 @@ steps:
     timeoutMs: 30000
 ```
 
+**Mixed recovery (pivot transaction) example — JSON:**
+
+```json
+{
+  "name": "PlaceOrder",
+  "version": "1.0",
+  "mode": "SAGA",
+  "recoveryStrategy": "MIXED",
+  "timeoutMs": 300000,
+  "steps": [
+    {
+      "name": "reserveInventory",
+      "stepClass": "com.example.ReserveInventoryStep",
+      "timeoutMs": 60000
+    },
+    {
+      "name": "chargePayment",
+      "stepClass": "com.example.ChargePaymentStep",
+      "pivot": true,
+      "timeoutMs": 60000
+    },
+    {
+      "name": "sendConfirmationEmail",
+      "stepClass": "com.example.SendConfirmationEmailStep",
+      "timeoutMs": 30000
+    },
+    {
+      "name": "updateAnalytics",
+      "stepClass": "com.example.UpdateAnalyticsStep",
+      "timeoutMs": 10000
+    }
+  ]
+}
+```
+
+**YAML equivalent:**
+
+```yaml
+# Place order saga — reserve + charge are compensatable,
+# email + analytics are retriable (must eventually succeed).
+name: PlaceOrder
+version: "1.0"
+mode: SAGA
+recoveryStrategy: MIXED
+timeoutMs: 300000
+
+steps:
+  - name: reserveInventory
+    stepClass: com.example.ReserveInventoryStep
+    timeoutMs: 60000
+
+  - name: chargePayment         # pivot — if this fails, compensate above
+    stepClass: com.example.ChargePaymentStep
+    pivot: true
+    timeoutMs: 60000
+
+  - name: sendConfirmationEmail  # retriable — must eventually succeed
+    stepClass: com.example.SendConfirmationEmailStep
+    timeoutMs: 30000
+
+  - name: updateAnalytics        # retriable — must eventually succeed
+    stepClass: com.example.UpdateAnalyticsStep
+    timeoutMs: 10000
+```
+
 ### Saga Definition (Java Builder API)
 
 For embedded mode, a type-safe Java builder provides compile-time checks and IDE auto-completion:
@@ -749,6 +814,34 @@ SagaDefinition def = SagaDefinition.builder("MoneyTransfer")
 sagaManager.register(def);
 ```
 
+**Mixed recovery (pivot transaction) example:**
+
+```java
+SagaDefinition def = SagaDefinition.builder("PlaceOrder")
+    .version("1.0")
+    .mode(SagaMode.SAGA)
+    .recoveryStrategy(RecoveryStrategy.MIXED)
+    .timeoutMs(300000)
+    .step("reserveInventory")
+        .stepClass(ReserveInventoryStep.class)
+        .timeoutMs(60000)
+        .add()
+    .step("chargePayment")          // pivot — the go/no-go step
+        .stepClass(ChargePaymentStep.class)
+        .pivot(true)
+        .timeoutMs(60000)
+        .add()
+    .step("sendConfirmationEmail")  // retriable — after pivot
+        .stepClass(SendConfirmationEmailStep.class)
+        .timeoutMs(30000)
+        .add()
+    .step("updateAnalytics")        // retriable — after pivot
+        .stepClass(UpdateAnalyticsStep.class)
+        .timeoutMs(10000)
+        .add()
+    .build();
+```
+
 The Java builder uses `stepClass` references — the developer writes communication logic in the `Step` implementation. For simple steps where no custom logic is needed, use the declarative `call`/`compensate` format in JSON/YAML instead (see [Declarative Communication](#solution-declarative-communication-in-the-saga-definition)).
 
 #### Saga Definition Formats
@@ -770,32 +863,80 @@ public class SagaDefinition {
     private String version;
     private SagaMode mode;                    // SAGA (default) or TCC
     private List<StepDefinition> steps;
-    private RecoveryStrategy recoveryStrategy;  // Saga mode only: BACKWARD or FORWARD (null for TCC)
+    private RecoveryStrategy recoveryStrategy;  // Saga mode only: BACKWARD, FORWARD, or MIXED (null for TCC)
     private long timeoutMs;                   // saga-level timeout (0 = no timeout)
     private RetryPolicy defaultRetryPolicy;
 
     public enum SagaMode { SAGA, TCC }
-    public enum RecoveryStrategy { BACKWARD, FORWARD }
+    public enum RecoveryStrategy { BACKWARD, FORWARD, MIXED }
     // BACKWARD: on step failure, compensate all completed steps (default)
     // FORWARD:  on step failure, mark as FAILED for retry via Admin API
+    // MIXED:    steps before the pivot are compensatable (backward recovery on failure),
+    //           steps after the pivot are retriable (forward recovery on failure).
+    //           The pivot step itself is the go/no-go point: if it fails, compensate
+    //           all completed steps before it (backward). Once the pivot succeeds,
+    //           all subsequent steps must succeed (retry on failure, never compensate).
+    //           Exactly one step must have pivot=true when recoveryStrategy is MIXED.
 
     public static class StepDefinition {
         String name;                 // unique within the saga (used as idempotency key with sagaId)
         String stepClass;            // FQCN of Step implementation
         long timeoutMs;              // per-step timeout (0 = use saga-level timeout only)
         RetryPolicy retryPolicy;     // per-step override (nullable)
+        boolean pivot;               // true = this is the pivot step (at most one per saga)
+    }
+
+    /**
+     * Returns the index of the pivot step within the steps list.
+     * For BACKWARD: returns lastIndex (all steps are compensatable).
+     * For FORWARD: returns -1 (all steps are retriable).
+     * For MIXED: returns the index of the step with pivot=true.
+     * For TCC: not applicable (throws IllegalStateException).
+     */
+    public int getPivotIndex() {
+        if (mode == SagaMode.TCC) {
+            throw new IllegalStateException("getPivotIndex() is not applicable to TCC mode");
+        }
+        return switch (recoveryStrategy) {
+            case BACKWARD -> steps.size() - 1;
+            case FORWARD -> -1;
+            case MIXED -> {
+                for (int i = 0; i < steps.size(); i++) {
+                    if (steps.get(i).isPivot()) yield i;
+                }
+                throw new IllegalStateException("No pivot step found in MIXED recovery strategy");
+            }
+        };
     }
 }
 ```
 
 Step names must be unique within a saga definition — the engine throws a `SagaDefinitionException` on duplicate step names at registration time. The `sagaId + stepName` pair serves as the idempotency key propagated to participants via `X-Saga-Id` and `X-Saga-Step` headers.
 
-**Mixed recovery (pivot transaction pattern):** Some workflows have compensatable steps followed by non-compensatable steps (e.g., reserve inventory → charge payment → send email). If you need backward recovery for early steps and forward recovery for later steps, split the workflow into two sagas:
+**Pivot transaction (mixed recovery):** Some workflows have compensatable steps followed by non-compensatable steps (e.g., reserve inventory → charge payment → send email). Use `RecoveryStrategy.MIXED` with a pivot step:
 
-- **Saga A** (`BACKWARD`): Compensatable steps. If any fails, all are compensated.
-- **Saga B** (`FORWARD`): Retriable steps. Started after Saga A completes. If any fails, retried until success.
+- Steps **before** the pivot step: compensatable. On failure, all completed steps are compensated in reverse order.
+- The **pivot step** itself: the go/no-go point. If it fails, compensate all completed steps before it. If it succeeds, the workflow is committed to moving forward.
+- Steps **after** the pivot step: retriable. On failure, the saga is marked as `FAILED` for retry via the Admin API. These steps are never compensated.
 
-The boundary between the two sagas acts as the pivot point — once Saga A completes, the workflow is committed to moving forward.
+```
+Compensatable steps         Pivot           Retriable steps
+┌────────────────────┐  ┌────────────┐  ┌────────────────────┐
+│ reserveInventory   │──│ chargePmt  │──│ sendEmail          │
+│ reserveShipping    │  │ (go/no-go) │  │ updateAnalytics    │
+└────────────────────┘  └────────────┘  └────────────────────┘
+  On failure: compensate    On failure:     On failure: retry
+  backward                  compensate      (never compensate)
+                            backward
+```
+
+Note that `BACKWARD` and `FORWARD` are special cases of the mixed recovery model: `BACKWARD` is equivalent to a pivot at the last step (all steps are compensatable), and `FORWARD` is equivalent to a pivot before the first step (all steps are retriable). Internally, the engine uses a single pivot-based execution loop for all three strategies (see [Shared Internal Execution Logic](#shared-internal-execution-logic)).
+
+**Validation at registration time:**
+
+- `pivot: true` is required on exactly one step when `recoveryStrategy` is `MIXED`, rejected otherwise.
+- The pivot step must not be the first or last step — use `FORWARD` or `BACKWARD` instead for those degenerate cases. This prevents confusion and makes the intent explicit.
+- `recoveryStrategy` is rejected on TCC definitions (TCC has fixed recovery behavior).
 
 ### SagaManager (Top-Level API)
 
@@ -901,6 +1042,18 @@ public class SagaEngine {
 
     /**
      * Shared execution loop used by both execute() and resumeFrom().
+     *
+     * For Saga mode (BACKWARD / FORWARD / MIXED), uses a pivot-based model:
+     * steps at or before the pivot index are compensatable (backward recovery
+     * on failure), steps after the pivot are retriable (forward recovery on
+     * failure). BACKWARD sets pivotIndex=lastStep, FORWARD sets pivotIndex=-1,
+     * and MIXED sets pivotIndex to the step marked with pivot=true.
+     *
+     * For TCC mode, uses a two-phase protocol (Try all → Confirm all) which
+     * is structurally different from the pivot model. TCC and Saga share the
+     * same per-step infrastructure (executeWithRetry, event appending, context
+     * merging, timeout enforcement, graceful shutdown) but differ in their
+     * top-level loop structure.
      */
     private void executeSteps(SagaDefinition def, SagaContext context,
                                int startIndex, int completedIndex) {
@@ -915,6 +1068,36 @@ public class SagaEngine {
         }
 
         try {
+            if (def.getMode() == SagaMode.TCC) {
+                // === TCC MODE ===
+                // Two-phase protocol: Try all → Confirm all.
+                // See TCC (Try-Confirm-Cancel) Mode section for details.
+                executeTccSteps(def, context, startIndex, completedIndex);
+            } else {
+                // === SAGA MODE (BACKWARD / FORWARD / MIXED) ===
+                // Single pass with pivot-based failure handling.
+                executeSagaSteps(def, context, startIndex, completedIndex);
+            }
+        } finally {
+            unregisterActive(sagaId);
+        }
+    }
+
+    /**
+     * Saga mode execution: single pass through steps with pivot-based
+     * failure handling. The pivot index determines the recovery boundary:
+     *
+     *   BACKWARD (pivotIndex = lastStep):  all steps are compensatable
+     *   FORWARD  (pivotIndex = -1):        all steps are retriable
+     *   MIXED    (pivotIndex = N):         steps 0..N compensatable, N+1.. retriable
+     */
+    private void executeSagaSteps(SagaDefinition def, SagaContext context,
+                                   int startIndex, int completedIndex) {
+        String sagaId = context.getSagaId();
+        List<StepDefinition> steps = def.getSteps();
+        int pivotIndex = def.getPivotIndex();
+
+        try {
             for (int i = startIndex; i < steps.size(); i++) {
                 // Graceful shutdown: stop between steps (saga stays RUNNING for recovery)
                 if (shouldStopBetweenSteps()) {
@@ -925,15 +1108,36 @@ public class SagaEngine {
                 Step step = instantiate(stepDef);
                 RetryPolicy policy = resolveRetryPolicy(stepDef, def);
 
-                StepResult result = executeWithRetry(step, context, policy);
+                try {
+                    StepResult result = executeWithRetry(step, context, policy);
 
-                // Append-only: 1 INSERT per step. The event row doubles as
-                // an outbox entry for downstream consumers. No "step started"
-                // write, no lease renewal — recovery uses saga_state scan.
-                store.appendEvent(sagaId, context.getAndIncrementSequence(),
-                    SagaEvent.stepCompleted(i, stepDef.getName(), result));
-                context.merge(result);
-                completedIndex = i;
+                    // Append-only: 1 INSERT per step. The event row doubles as
+                    // an outbox entry for downstream consumers. No "step started"
+                    // write, no lease renewal — recovery uses saga_state scan.
+                    store.appendEvent(sagaId, context.getAndIncrementSequence(),
+                        SagaEvent.stepCompleted(i, stepDef.getName(), result));
+                    context.merge(result);
+                    completedIndex = i;
+                } catch (Exception e) {
+                    // Failure handling depends on where we are relative to the pivot.
+                    if (i <= pivotIndex) {
+                        // Failed at or before the pivot — compensate backward.
+                        transition(context, SagaEvent.sagaCompensating());
+                        try {
+                            compensationManager.compensate(def, context, completedIndex);
+                            transition(context, SagaEvent.sagaCompensated());
+                        } catch (StepCompensationException ce) {
+                            // Compensation failed — saga stays in COMPENSATING.
+                            // Recovery will retry from the failed compensation step.
+                        }
+                    } else {
+                        // Failed after the pivot — mark as FAILED for retry.
+                        // These steps must eventually succeed; the Admin API
+                        // or recovery manager will retry from this step.
+                        transition(context, SagaEvent.sagaFailed());
+                    }
+                    return;
+                }
             }
 
             if (completedIndex == steps.size() - 1) {
@@ -941,28 +1145,21 @@ public class SagaEngine {
             }
 
         } catch (Exception e) {
-            // Step failed (StepExecutionException) or unexpected error (Exception).
-            // Recovery decision depends on recoveryStrategy, not the exception type.
-            if (def.getRecoveryStrategy() == RecoveryStrategy.BACKWARD) {
-                // Compensate all completed steps + the failed step (completedIndex + 1)
-                // because it may have had partial side effects.
-                int compensateFrom = completedIndex + 1;
+            // Unexpected error outside the per-step try/catch (e.g., persistence failure).
+            // Fall back to the same pivot-based logic: if we haven't passed the pivot,
+            // attempt compensation; otherwise mark as FAILED.
+            if (completedIndex < pivotIndex) {
                 transition(context, SagaEvent.sagaCompensating());
                 try {
-                    compensationManager.compensate(def, context, compensateFrom);
+                    compensationManager.compensate(def, context, completedIndex);
                     transition(context, SagaEvent.sagaCompensated());
                 } catch (StepCompensationException ce) {
-                    // Compensation failed — saga stays in COMPENSATING.
-                    // Recovery will retry from the failed compensation step.
+                    // Saga stays in COMPENSATING for recovery.
                 }
             } else {
-                // FORWARD: leave as FAILED for retry via Admin API.
                 transition(context, SagaEvent.sagaFailed());
             }
-        } finally {
-            unregisterActive(sagaId);
         }
-
     }
 
     /**
@@ -2097,17 +2294,12 @@ public class SagaRecoveryManager {
         // Replay events to reconstruct state
         List<SagaEvent> events = store.getEvents(saga.getSagaId());
         SagaContext context = replayEvents(saga, events);
+        SagaStatus status = context.getCurrentState().getStatus();
 
-        if (context.getCurrentState().getStatus() == SagaStatus.COMPENSATING) {
+        if (status == SagaStatus.COMPENSATING) {
             // Was mid-compensation — resume from where compensation left off.
             // Check if compensation has been stuck longer than the grace period.
-            Instant firstFailure = events.stream()
-                .filter(e -> e.getEventType().equals(SagaEvent.STEP_COMPENSATION_FAILED))
-                .map(SagaEvent::getTimestamp)
-                .findFirst()
-                .orElse(Instant.now());
-            if (Duration.between(firstFailure, Instant.now()).compareTo(compensationGracePeriod) > 0) {
-                // Stuck too long — escalate for manual intervention
+            if (isStuckLongerThanGracePeriod(saga, events, SagaEvent.STEP_COMPENSATION_FAILED)) {
                 store.recordTransition(context.getCurrentState(),
                     context.getAndIncrementSequence(),
                     SagaEvent.sagaEscalated("compensation stuck for over " + compensationGracePeriod));
@@ -2119,8 +2311,39 @@ public class SagaRecoveryManager {
                 .min().orElse(Integer.MAX_VALUE);
             engine.compensateFrom(def, context, lastCompensated - 1);
 
+        } else if (def.getMode() == SagaMode.TCC
+                && status == SagaStatus.CONFIRMING) {
+            // TCC: crash during confirm phase, or confirm failed after immediate
+            // retries. Resume confirming. Same two-phase retry pattern as Saga
+            // FAILED recovery — escalate if stuck longer than grace period.
+            if (isStuckLongerThanGracePeriod(saga, events, SagaEvent.STEP_CONFIRM_FAILED)) {
+                store.recordTransition(context.getCurrentState(),
+                    context.getAndIncrementSequence(),
+                    SagaEvent.sagaEscalated("confirm stuck for over " + compensationGracePeriod));
+                return;
+            }
+            int lastConfirmed = findLastConfirmedStepIndex(events);
+            engine.resumeConfirm(def, context, lastConfirmed + 1);
+
+        } else if (status == SagaStatus.FAILED) {
+            // FAILED status — applies to FORWARD and MIXED recovery strategies.
+            // For FORWARD: retry from the failed step (all steps are retriable).
+            // For MIXED: retry from the failed step (which is after the pivot).
+            // Same two-phase retry pattern — escalate if stuck too long.
+            if (isStuckLongerThanGracePeriod(saga, events, SagaEvent.SAGA_FAILED)) {
+                store.recordTransition(context.getCurrentState(),
+                    context.getAndIncrementSequence(),
+                    SagaEvent.sagaEscalated("retriable step stuck for over " + compensationGracePeriod));
+                return;
+            }
+            int lastCompleted = events.stream()
+                .filter(e -> e.getEventType().equals(SagaEvent.STEP_COMPLETED))
+                .mapToInt(SagaEvent::getStepIndex)
+                .max().orElse(-1);
+            engine.resumeFrom(def, context, lastCompleted + 1);
+
         } else {
-            // Was mid-execution — resume from the next step after last completed.
+            // RUNNING — was mid-execution. Resume from next step after last completed.
             // Step MUST be idempotent (same as the forward path).
             int lastCompleted = events.stream()
                 .filter(e -> e.getEventType().equals(SagaEvent.STEP_COMPLETED))
@@ -2130,6 +2353,43 @@ public class SagaRecoveryManager {
         }
     }
 
+    /**
+     * Check if a saga has been stuck in its current status longer than the grace period.
+     * Used by COMPENSATING, CONFIRMING (TCC), and FAILED recovery to decide
+     * when to escalate. All follow the same two-phase retry pattern:
+     * immediate retry → periodic recovery retry → time-based escalation.
+     */
+    private boolean isStuckLongerThanGracePeriod(SagaStateSnapshot saga,
+            List<SagaEvent> events, String failureEventType) {
+        Instant firstFailure = events.stream()
+            .filter(e -> e.getEventType().equals(failureEventType))
+            .map(SagaEvent::getTimestamp)
+            .findFirst()
+            .orElse(Instant.now());
+        return Duration.between(firstFailure, Instant.now())
+            .compareTo(compensationGracePeriod) > 0;
+    }
+
+```
+
+**Recovery behavior by recovery strategy and status:**
+
+| Recovery Strategy | Status at Recovery | Recovery Action | Escalation |
+|---|---|---|---|
+| **BACKWARD** | `RUNNING` | Resume from last completed + 1. On failure, compensate backward. | N/A |
+| **BACKWARD** | `COMPENSATING` | Resume compensation from last compensated - 1. | Escalate if stuck > grace period |
+| **FORWARD** | `RUNNING` | Resume from last completed + 1. On failure, mark `FAILED`. | N/A |
+| **FORWARD** | `FAILED` | Retry from last completed + 1 (all steps are retriable). | Escalate if stuck > grace period |
+| **MIXED** | `RUNNING` | Resume from last completed + 1. Failure handling depends on position relative to pivot. | N/A |
+| **MIXED** | `COMPENSATING` | Resume compensation (step failed at or before pivot). | Escalate if stuck > grace period |
+| **MIXED** | `FAILED` | Retry from last completed + 1 (step after pivot failed; must succeed). | Escalate if stuck > grace period |
+| **TCC** | `RUNNING` | Resume Try. On failure, Cancel all completed. | N/A |
+| **TCC** | `CONFIRMING` | Resume Confirm. Retry aggressively. | Escalate if stuck > grace period |
+| **TCC** | `COMPENSATING` | Resume Cancel. | Escalate if stuck > grace period |
+
+All "must succeed" statuses (`FAILED`, `CONFIRMING`, `COMPENSATING`) follow the same two-phase retry pattern: immediate retry in the engine → periodic recovery retry → time-based escalation after the grace period.
+
+```java
     /**
      * Replay events to reconstruct SagaContext for resumption.
      * Accumulates step outputs into the context data map, sets the next event sequence,
@@ -2698,35 +2958,82 @@ The differences from a Saga definition: `"mode": "TCC"`, and no `recoveryStrateg
 
 ### Engine Execution Logic
 
+TCC mode has its own execution path because it follows a fundamentally different two-phase protocol (Try all → Confirm all), rather than the pivot-based model used by Saga mode. However, both modes share the same per-step infrastructure: `executeWithRetry()`, event appending, context merging, timeout enforcement, and graceful shutdown checks.
+
+The top-level branching in `SagaEngine.executeSteps()`:
+
 ```java
-// In SagaEngine.executeSteps():
-
-if (definition.getMode() == SagaMode.TCC) {
+if (def.getMode() == SagaMode.TCC) {
     // === TCC MODE ===
-
-    // Phase 1: Try — execute all steps (reserve resources)
-    for (int i = 0; i < steps.size(); i++) {
-        StepResult result = executeWithRetry(steps.get(i), context, policy, stepDeadline);
-        store.appendEvent(sagaId, context.getAndIncrementSequence(),
-            SagaEvent.stepCompleted(i, steps.get(i).getName(), result));
-        context.merge(result);
-        completedIndex = i;
-    }
-    // All Try steps succeeded. Transition to CONFIRMING.
-    transition(context, SagaEvent.sagaConfirming());
-
-    // Phase 2: Confirm — commit all reservations
-    for (int i = 0; i < steps.size(); i++) {
-        TccStep tccStep = (TccStep) steps.get(i);
-        confirmWithRetry(tccStep, context, confirmRetryPolicy);
-        store.appendEvent(sagaId, context.getAndIncrementSequence(),
-            SagaEvent.stepConfirmed(i, steps.get(i).getName()));
-    }
-    transition(context, SagaEvent.sagaCompleted());
-
+    // Two-phase: Try all → Confirm all
+    executeTccSteps(def, context, startIndex, completedIndex);
 } else {
-    // === SAGA MODE (existing behavior) ===
-    // ... execute steps, compensate on failure ...
+    // === SAGA MODE (BACKWARD / FORWARD / MIXED) ===
+    // Single pass with pivot-based failure handling
+    executeSagaSteps(def, context, startIndex, completedIndex);
+}
+```
+
+The `executeTccSteps()` method:
+
+```java
+// --- engine/SagaEngine.java ---
+
+/**
+ * TCC execution: Try phase → Confirm phase.
+ * TCC has its own execution path because it's a two-phase protocol,
+ * not a pivot-based model. However, per-step retry, event append,
+ * context merging, and timeout enforcement reuse the same infrastructure
+ * as the saga path.
+ */
+private void executeTccSteps(SagaDefinition def, SagaContext context,
+                              int startIndex, int completedIndex) {
+    String sagaId = context.getSagaId();
+    List<StepDefinition> steps = def.getSteps();
+
+    try {
+        // Phase 1: Try — execute all steps (reserve resources)
+        for (int i = startIndex; i < steps.size(); i++) {
+            if (shouldStopBetweenSteps()) return;
+
+            StepDefinition stepDef = steps.get(i);
+            RetryPolicy policy = resolveRetryPolicy(stepDef, def);
+            StepResult result = executeWithRetry(instantiate(stepDef), context, policy);
+            store.appendEvent(sagaId, context.getAndIncrementSequence(),
+                SagaEvent.stepCompleted(i, stepDef.getName(), result));
+            context.merge(result);
+            completedIndex = i;
+        }
+
+        // All Try steps succeeded. Transition to CONFIRMING.
+        transition(context, SagaEvent.sagaConfirming());
+
+        // Phase 2: Confirm — commit all reservations
+        for (int i = 0; i < steps.size(); i++) {
+            TccStep tccStep = (TccStep) instantiate(steps.get(i));
+            confirmWithRetry(tccStep, context, RetryPolicy.confirmDefault());
+            store.appendEvent(sagaId, context.getAndIncrementSequence(),
+                SagaEvent.stepConfirmed(i, steps.get(i).getName()));
+        }
+        transition(context, SagaEvent.sagaCompleted());
+
+    } catch (Exception e) {
+        if (context.getCurrentState().getStatus() == SagaStatus.CONFIRMING) {
+            // Confirm failed after immediate retries. Saga stays in CONFIRMING.
+            // Recovery manager will retry confirm periodically (same two-phase
+            // retry pattern as Saga FAILED status). Escalates to ESCALATED if
+            // stuck longer than the grace period.
+        } else {
+            // Try failed — compensate (cancel) all completed Try steps
+            transition(context, SagaEvent.sagaCompensating());
+            try {
+                compensationManager.compensate(def, context, completedIndex);
+                transition(context, SagaEvent.sagaCompensated());
+            } catch (StepCompensationException ce) {
+                // Saga stays in COMPENSATING for recovery.
+            }
+        }
+    }
 }
 ```
 
@@ -2746,9 +3053,10 @@ private void confirmWithRetry(TccStep step, SagaContext context,
         } catch (Exception e) {
             attempt++;
             if (attempt >= policy.getMaxAttempts()) {
-                // Confirm keeps failing — escalate for manual intervention.
-                // This should be rare: the reservation exists, so confirmation
-                // should eventually succeed unless the participant is permanently down.
+                // Confirm keeps failing after immediate retries. Throw to
+                // let the saga stay in CONFIRMING status. The recovery manager
+                // will retry confirm periodically. If stuck longer than the
+                // grace period, recovery escalates to ESCALATED.
                 throw new ConfirmationFailedException(step.getName(), attempt, e);
             }
             // Wait and retry — confirm MUST eventually succeed
@@ -2769,29 +3077,40 @@ public static RetryPolicy confirmDefault() {
 
 ### Recovery in TCC Mode
 
-Unlike Saga mode, where `recoveryStrategy` is configurable (BACKWARD or FORWARD), TCC mode has **fixed recovery behavior** defined by the TCC protocol. The `recoveryStrategy` field is not applicable to TCC definitions.
+Unlike Saga mode, where `recoveryStrategy` is configurable (BACKWARD, FORWARD, or MIXED), TCC mode has **fixed recovery behavior** defined by the TCC protocol. The `recoveryStrategy` field is not applicable to TCC definitions.
+
+TCC recovery follows the same **two-phase retry pattern** as Saga mode: immediate retry (in the engine) → periodic recovery retry (recovery manager) → time-based escalation. The phases differ in which retry behavior applies:
 
 | TCC Phase | On failure | Recovery behavior | Rationale |
 |---|---|---|---|
-| **Try** | Cancel all tried steps | Undo | Cannot leave resources reserved indefinitely |
-| **Confirm** | Retry confirm | Retry until success | Reservations exist — must commit them |
-| **Cancel** | Retry cancel | Retry until success | Must release reservations |
+| **Try** | Cancel all tried steps | Compensate backward | Cannot leave resources reserved indefinitely |
+| **Confirm** | Retry confirm | Retry until success, escalate if stuck | Reservations exist — must commit them |
+| **Cancel** | Retry cancel | Retry until success, escalate if stuck | Must release reservations |
 
 The recovery manager handles these scenarios on crash:
 
 | Saga Status at Crash | Recovery Action |
 |---|---|
 | `RUNNING` (Try phase) | Resume Try from last completed step. If Try fails, Cancel all completed steps. |
-| `CONFIRMING` | Resume Confirm from last confirmed step. Confirm must succeed — retry aggressively. |
-| `COMPENSATING` | Continue Cancel (same as Saga mode compensation). |
+| `CONFIRMING` | Resume Confirm from last confirmed step. Retry aggressively. Escalate if stuck longer than grace period. |
+| `COMPENSATING` | Continue Cancel (same as Saga mode compensation). Escalate if stuck longer than grace period. |
+
+Note: TCC `CONFIRMING` recovery is analogous to Saga `FAILED` recovery (for FORWARD/MIXED strategies) — both represent "must succeed" steps that the recovery manager retries periodically. Both escalate to `ESCALATED` after the grace period, following the same two-phase retry pattern.
 
 ```java
 // In SagaRecoveryManager.recoverOne():
 if (definition.getMode() == SagaMode.TCC
         && saga.getStatus() == SagaStatus.CONFIRMING) {
-    // Crash during confirm phase. Resume confirming from where we left off.
-    // Find the last confirmed step index and continue from the next one.
-    int lastConfirmed = findLastConfirmedStepIndex(logs);
+    // Crash during confirm phase (or confirm failed after immediate retries).
+    // Resume confirming from where we left off. If stuck longer than the
+    // grace period, escalate — same pattern as Saga FAILED recovery.
+    if (isStuckLongerThanGracePeriod(saga, events)) {
+        store.recordTransition(context.getCurrentState(),
+            context.getAndIncrementSequence(),
+            SagaEvent.sagaEscalated("confirm stuck for over " + compensationGracePeriod));
+        return;
+    }
+    int lastConfirmed = findLastConfirmedStepIndex(events);
     engine.resumeConfirm(definition, context, lastConfirmed + 1);
 } else {
     // Standard recovery (Try in progress, or Saga mode)
@@ -4977,7 +5296,7 @@ The `quarkus-scalardb` extension already provides `DistributedTransactionManager
 
 ## Phase 1: Core Engine
 
-**Scope:** Core engine + SagaStore + recovery (with status table) + timeouts + virtual threads + graceful shutdown + saga versioning + compensation retry + SagaContext validation + TCC mode.
+**Scope:** Core engine + SagaStore + recovery (with status table) + timeouts + virtual threads + graceful shutdown + saga versioning + compensation retry + SagaContext validation + TCC mode + MIXED recovery strategy (pivot transaction).
 
 ### File-by-File Breakdown
 
@@ -4990,14 +5309,14 @@ The `quarkus-scalardb` extension already provides `DistributedTransactionManager
 | `SagaContext.java` | Map wrapper with typed getters + type validation + in-memory tracking fields (`nextEventSequence`, `currentState`) | ~60 | Trivial |
 | `SagaStatus.java` | Enum (7 values: RUNNING, CONFIRMING, COMPLETED, FAILED, COMPENSATING, COMPENSATED, ESCALATED) | ~10 | Trivial |
 | `StepStatus.java` | Enum (4 values: WAITING (daemon mode only), COMPLETED, CONFIRMED, FAILED) | ~5 | Trivial |
-| `SagaDefinition.java` | POJO + inner `StepDefinition` + SagaMode + RecoveryStrategy | ~60 | Trivial |
+| `SagaDefinition.java` | POJO + inner `StepDefinition` (with `pivot` flag) + SagaMode + RecoveryStrategy (BACKWARD/FORWARD/MIXED) + `getPivotIndex()` + validation | ~80 | Trivial |
 | `SagaStateSnapshot.java` | Read-only view of saga state | ~40 | Trivial |
 | `SagaManager.java` | Interface (8 methods incl. start, startAsync ×2; completeStep is daemon mode only) | ~25 | Trivial |
 | `SagaCallback.java` | Callback interface (onCompleted, onCompensated, onEscalated) | ~10 | Trivial |
 | **engine/** | | | |
 | `RetryPolicy.java` | Config POJO + default/compensation/confirm factories | ~50 | Trivial |
 | `CompensationManager.java` | Reverse-loop + retry + stop on failure (throws `StepCompensationException`) | ~70 | Low |
-| `SagaEngine.java` | createSaga + executeSaga + execute (convenience) + resumeFrom + core step loop + Saga/TCC branching + retry + timeout + async step handling + error routing | ~270 | **Medium** |
+| `SagaEngine.java` | createSaga + executeSaga + execute (convenience) + resumeFrom + pivot-based saga loop (`executeSagaSteps`) + TCC two-phase loop (`executeTccSteps`) + retry + timeout + async step handling + error routing | ~300 | **Medium** |
 | `DefaultSagaManager.java` | Delegates to engine + recovery + startAsync (virtual thread submission + callback dispatch). completeStep is daemon mode only. | ~140 | Low |
 | `SagaManagerBuilder.java` | DI-free builder for wiring | ~60 | Low |
 | **parser/** | | | |
@@ -5008,7 +5327,7 @@ The `quarkus-scalardb` extension already provides `DistributedTransactionManager
 | `SagaSchema.java` | 3 TableMetadata definitions (saga_events, saga_state, saga_definitions) + bucketOf() + createAll | ~100 | Low |
 | `ScalarDbSagaStore.java` | Append-only events + bucket-partitioned saga_state (DELETE+INSERT for status transitions) + bucket-parallel recovery scan + conflict-based claiming + definition persistence | ~450 | **Medium** |
 | **recovery/** | | | |
-| `SagaRecoveryManager.java` | Periodic scan of saga_state + event replay + resume (with versioned definitions, TCC CONFIRMING handling) | ~200 | **Medium** |
+| `SagaRecoveryManager.java` | Periodic scan of saga_state + event replay + resume (with versioned definitions, TCC CONFIRMING handling, MIXED/FORWARD FAILED handling, unified time-based escalation) | ~230 | **Medium** |
 | **timeout/** | | | |
 | `TimeoutPolicy.java` | Per-step and per-saga deadline calculation | ~30 | Trivial |
 | **exception/** | | | |
@@ -5602,7 +5921,107 @@ Add a custom binary protocol over TCP using Netty for maximum performance in dat
 The following features are not included in the initial phases but planned for future iterations:
 
 1. **Conditional branching**: Add `ChoiceStep` that evaluates expressions to pick the next step
-2. **Parallel steps**: Execute independent steps concurrently with configurable parallelism
+2. **Parallel step execution**
+
+   Execute independent steps concurrently within a "parallel steps" group. Reduces latency from `sum(step latencies)` to `max(step latencies)` per group — significant for TCC where all Try steps and all Confirm steps are independent.
+
+   **Definition model — parallel groups (not DAG):**
+
+   Parallel groups are simpler to implement, validate, and reason about compensation for than a full DAG-based model. Steps within a group have no ordering guarantees; steps between groups are sequential.
+
+   ```yaml
+   # v2 Saga definition with parallel groups
+   name: PlaceOrder
+   version: "2.0"
+   mode: SAGA
+   recoveryStrategy: MIXED
+   steps:
+     - parallel:                        # parallel group
+       - name: reserveInventory
+         stepClass: com.example.ReserveInventoryStep
+       - name: reserveShipping
+         stepClass: com.example.ReserveShippingStep
+     - name: chargePayment              # sequential (pivot)
+       stepClass: com.example.ChargePaymentStep
+       pivot: true
+     - parallel:                        # parallel group (retriable)
+       - name: sendConfirmationEmail
+         stepClass: com.example.SendConfirmationEmailStep
+       - name: updateAnalytics
+         stepClass: com.example.UpdateAnalyticsStep
+   ```
+
+   ```java
+   // v2 Java builder
+   SagaDefinition.builder("PlaceOrder")
+       .version("2.0")
+       .recoveryStrategy(RecoveryStrategy.MIXED)
+       .parallelSteps()
+           .step("reserveInventory").stepClass(ReserveInventoryStep.class).add()
+           .step("reserveShipping").stepClass(ReserveShippingStep.class).add()
+           .add()
+       .step("chargePayment").stepClass(ChargePaymentStep.class).pivot(true).add()
+       .parallelSteps()
+           .step("sendConfirmationEmail").stepClass(SendConfirmationEmailStep.class).add()
+           .step("updateAnalytics").stepClass(UpdateAnalyticsStep.class).add()
+           .add()
+       .build();
+   ```
+
+   **TCC parallel execution:**
+
+   TCC uses the same `parallel:` group syntax as Saga. If steps are declared in a parallel group, their Try executions run in parallel and their Confirm executions also run in parallel (same grouping applies to both phases):
+
+   ```yaml
+   # v2 TCC definition with parallel groups — same syntax as Saga
+   name: MoneyTransfer
+   version: "2.0"
+   mode: TCC
+   steps:
+     - parallel:                        # try + confirm run in parallel
+       - name: debit
+         stepClass: com.example.TccDebitStep
+       - name: credit
+         stepClass: com.example.TccCreditStep
+     - name: shipping                   # try + confirm run sequentially
+       stepClass: com.example.TccShippingStep
+   ```
+
+   **API design for forward compatibility (v1 preparation):**
+
+   In v1, `StepDefinition` is a concrete class. In v2, it becomes a sealed interface with two implementations:
+
+   ```java
+   // v1: concrete class (current)
+   public static class StepDefinition {
+       String name;
+       String stepClass;
+       long timeoutMs;
+       RetryPolicy retryPolicy;
+       boolean pivot;
+   }
+
+   // v2: sealed interface
+   public sealed interface StepDefinition permits SingleStep, ParallelSteps {}
+
+   public record SingleStep(
+       String name, String stepClass, long timeoutMs, RetryPolicy retryPolicy, boolean pivot
+   ) implements StepDefinition {}
+
+   public record ParallelSteps(
+       List<SingleStep> steps
+   ) implements StepDefinition {}
+   ```
+
+   v1 JSON/YAML definitions and builder-built definitions work without changes in v2. The parser treats every step object without the `parallel` key as a `SingleStep`. The builder API is unchanged — `parallelSteps()` is purely additive.
+
+   **Key implementation challenges (v2):**
+
+   - **Compensation within parallel groups:** When one step in a parallel group fails, the engine must wait for all in-flight steps to complete (or timeout), then compensate all completed steps. Compensation order within a group is non-deterministic (any order is safe because the steps are independent by definition).
+   - **SagaContext concurrent access:** Parallel steps must not write to the same context keys. Use per-step isolated output that merges after the barrier. Reject parallel groups where steps declare overlapping output keys.
+   - **Event sequencing:** Batch-append events after the parallel group barrier. If the process crashes mid-parallel-group, all steps in the group are re-executed on recovery (idempotency required, same as today).
+   - **Pivot interaction:** A step with `pivot: true` cannot be inside a parallel group — it must be a single step, because the pivot is a single go/no-go point. The engine validates this at registration time.
+
 3. **Outbox relay**: Background thread/process that reads unpublished events from `saga_events` and publishes to Kafka/RabbitMQ (or use CDC/Debezium to tail the table directly)
 4. **Participant SDK**: Optional participant-side SDK with `@SagaParticipant`, `@SagaAction`, `@SagaCompensation` annotations, built-in idempotency, and anomaly protection (empty rollback, suspension). The anomaly protection uses an INSERT-based barrier mechanism inspired by Seata's TCC Fence and DTM's Sub-Transaction Barrier. Since we don't control participant databases, this is an opt-in library. See "Participant Idempotency Levels" in ServiceInvoker and Framework Integration, and [scalardb-saga-barrier-sdk-research.md](scalardb-saga-barrier-sdk-research.md) for detailed research.
 5. **SubStateMachine (nesting)**: Compose sagas from sub-sagas for complex workflows
