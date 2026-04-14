@@ -2066,7 +2066,7 @@ public interface SagaStore {
 
     // Recovery — scan saga_state + replay saga_events
     List<SagaStateSnapshot> findRecoverable(long recoveryTimeoutMs);
-    boolean claimForRecovery(SagaStateSnapshot saga, String newOwnerId);
+    @Nullable SagaStateSnapshot claimForRecovery(SagaStateSnapshot saga, String newOwnerId);
     void markForRecovery(String sagaId);  // sets updated_at to epoch 0 for immediate recovery
     List<SagaEvent> getEvents(String sagaId);
 
@@ -2329,7 +2329,8 @@ public class ScalarDbSagaStore implements SagaStore {
      * - Concurrent case: the read creates a read-set entry in ScalarDB's
      *   transaction, so overlapping claims on the same row conflict reliably.
      */
-    public boolean claimForRecovery(SagaStateSnapshot saga, String newOwnerId) {
+    @Nullable
+    public SagaStateSnapshot claimForRecovery(SagaStateSnapshot saga, String newOwnerId) {
         DistributedTransaction tx = null;
         try {
             tx = txManager.begin();
@@ -2352,7 +2353,7 @@ public class ScalarDbSagaStore implements SagaStore {
                     || current.get().getInt("version") != saga.getVersion()) {
                 // Row was already claimed or changed — skip
                 tx.abort();
-                return false;
+                return null;
             }
 
             // DELETE old row + INSERT with updated owner and version
@@ -2380,12 +2381,18 @@ public class ScalarDbSagaStore implements SagaStore {
                 .build());
 
             tx.commit();
-            return true;
+            // Return snapshot reflecting the claimed state (version+1, new owner, new updated_at)
+            SagaStateSnapshot claimed = new SagaStateSnapshot(
+                sagaId, saga.getSagaName(), saga.getStatus(), newOwnerId,
+                saga.getVersion() + 1, saga.getDefinitionVersion(),
+                saga.getCreatedAt(), now, saga.getInput());
+            cache.put(sagaId, claimed);
+            return claimed;
 
         } catch (CommitConflictException e) {
             // Another replica claimed it concurrently
             abortQuietly(tx);
-            return false;
+            return null;
         } catch (Exception e) {
             abortQuietly(tx);
             throw new SagaPersistenceException("Failed to claim saga for recovery", e);
@@ -2562,11 +2569,12 @@ public class SagaRecoveryManager {
         for (SagaStateSnapshot saga : stuckSagas) {
             try {
                 // Claim via read + DELETE + INSERT in one transaction.
-                // If another replica claims it concurrently, returns false.
-                if (!store.claimForRecovery(saga, ownerId)) {
+                // If another replica claims it concurrently, returns null.
+                SagaStateSnapshot claimed = store.claimForRecovery(saga, ownerId);
+                if (claimed == null) {
                     continue;  // Another replica claimed it
                 }
-                recoverOne(saga);
+                recoverOne(claimed);
             } catch (Exception e) {
                 // Log and continue — don't let one stuck saga block others
                 logger.error("Failed to recover saga {}", saga.getSagaId(), e);
