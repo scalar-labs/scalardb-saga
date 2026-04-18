@@ -28,7 +28,7 @@ Typical user profiles:
 
 3. **Any-database via ScalarDB** — saga state is stored as append-only events in ScalarDB, working across any database backend (Cassandra, DynamoDB, PostgreSQL, MySQL, Cosmos DB, etc.). No storage vendor lock-in — unlike competitors that require specific stores (etcd, Cassandra, file system, or a message broker).
 
-4. **No message broker required** — step invocation uses direct method calls (embedded) or HTTP/gRPC (daemon), not message queues. Unlike Eventuate (requires Kafka + Debezium) or MassTransit (requires RabbitMQ/SQS), there is no broker infrastructure to deploy or manage. An optional outbox relay (v2+) can publish events to brokers for downstream consumers, but it is not required for the saga engine itself.
+4. **No message broker required** — the engine invokes steps via direct method calls (`step.execute()`). What the step does internally (in-process call, HTTP, gRPC) is up to the step implementation. Unlike Eventuate (requires Kafka + Debezium) or MassTransit (requires RabbitMQ/SQS), there is no broker infrastructure to deploy or manage.
 
 5. **Declarative saga definitions with framework integrations** — workflows are defined via Java builder API, JSON/YAML, or Protocol Buffers (daemon mode via gRPC). JSON/YAML separates workflow structure from step implementation, making sagas versionable, inspectable, and modifiable without recompiling. The Java builder provides compile-time type safety and IDE auto-completion. Optional Spring Boot and Quarkus modules add annotation-based step registration (`@SagaStep`/`@SagaCompensation`) for teams that prefer convention-over-configuration.
 
@@ -43,7 +43,7 @@ Typical user profiles:
 | **Saga definition** | Java builder, JSON/YAML, Protocol Buffers (daemon) + annotations (Spring, Quarkus) | JSON + visual designer | Code-as-workflow | Code (SagaDsl) | Code (state machine) | Annotations (@LRA) | Annotations (@LRA) | Annotations (@Saga) |
 | **Framework coupling** | None (optional Spring Boot, Quarkus modules) | Spring required | None | Spring Boot required | .NET DI required | Jakarta EE | Quarkus/WildFly | Spring required |
 | **Coordinator HA** | Any replica recovers | Any replica recovers | Server cluster (Raft) | Broker-based | Broker-based | Enterprise only (paid) | Single-node only | Axon Server Enterprise (paid) |
-| **Outbox built-in** | Yes (events = outbox) | No | N/A (durable execution) | Yes (CDC/polling) | No | No | No | Yes (event store) |
+| **Outbox built-in** | No (not needed) | No | N/A (durable execution) | Yes (CDC/polling) | No | No | No | Yes (event store) |
 | **License** | Open source | Open source (Apache 2.0) | Open source (MIT) | Open source (Apache 2.0) | Open source (Apache 2.0) | Proprietary | Open source (Apache 2.0) | Open source (Apache 2.0) |
 
 > See [scalardb-saga-competitive-analysis.md](scalardb-saga-competitive-analysis.md) for detailed competitive analysis including architecture diagrams, head-to-head comparisons, and competitive advantages/disadvantages.
@@ -113,14 +113,14 @@ com.scalar.db.saga/
 │   ├── TccStep.java              # Standalone TCC interface (reserve/confirm/cancel)
 │   ├── StepResult.java
 │   ├── SagaStatus.java
-│   └── StepStatus.java
 ├── engine/                      # Core execution
 │   ├── SagaEngine.java
 │   ├── CompensationManager.java
 │   ├── RetryPolicy.java
 │   ├── ExecutionContext.java      # Internal: implements SagaContext, adds engine tracking
-│   ├── TccTryAdapter.java        # Internal: adapts TccStep.reserve/cancel → Step
-│   ├── TccConfirmAdapter.java    # Internal: adapts TccStep.confirm → Step
+│   ├── StepWithPolicy.java         # Internal: record bundling Step + RetryPolicy
+│   ├── TccReserveStep.java        # Internal: wraps TccStep.reserve/cancel → Step
+│   ├── TccConfirmStep.java        # Internal: wraps TccStep.confirm → Step
 │   └── DefaultSagaManager.java
 ├── parser/                      # Definition loading
 │   └── SagaDefinitionParser.java
@@ -150,7 +150,7 @@ com.scalar.db.saga/
 │   └── SagaMetrics.java
 ├── testing/                     # Testing harness
 │   ├── SagaTestHarness.java
-│   ├── InMemorySagaStore.java
+│   ├── (uses ScalarDbSagaStore + SQLite internally)
 │   └── MockStep.java
 └── devserver/                   # Local development server
     ├── SagaDevServer.java
@@ -164,12 +164,12 @@ com.scalar.db.saga/
 | # | Component | Responsibility |
 |---|-----------|---------------|
 | 1 | **SagaEngine** | Owns saga lifecycle: `createSaga()` (persist), `executeSaga()` (run steps), `execute()` (convenience). Walks through steps sequentially, delegates to retry/compensation on failure. Features: per-step/per-saga timeouts, graceful shutdown, TCC mode (`TccStep` with try/confirm/cancel). Async step completion (daemon mode only): parks on `StepResult.pending()`, resumes via callback. |
-| 2 | **CompensationManager** | Executes compensations in reverse (LIFO) with retry. Accepts a pre-built `List<Step>` plan (works with both Saga steps and TCC adapters). Stops on failure — saga stays in `COMPENSATING` for recovery to retry. Escalation after repeated recovery failures. |
+| 2 | **CompensationManager** | Executes compensations in reverse (LIFO) with retry. Accepts a pre-built `List<StepWithPolicy>` plan (works with both Saga steps and TCC steps). Stops on failure — saga stays in `COMPENSATING` for recovery to retry. Escalation after repeated recovery failures. |
 | 3 | **RetryPolicy** | Exponential backoff + jitter. Participant-driven error classification (`StepExecutionException.isRetryable()`). Virtual thread execution. |
-| 4 | **SagaStore** (interface) | Append-only event persistence: 1 INSERT per step (event row doubles as outbox entry). Bucket-partitioned `saga_state` table with `status` as clustering key for efficient recovery scans and distributed writes. Default implementation: `ScalarDbSagaStore`. |
+| 4 | **SagaStore** (interface) | Append-only event persistence: 1 INSERT per step. Bucket-partitioned `saga_state` table with `status` as clustering key for efficient recovery scans and distributed writes. Default implementation: `ScalarDbSagaStore`. |
 | 5 | **SagaRecoveryManager** | Scans each `saga_state` bucket for `status=RUNNING` with stale `updated_at` (similar to Seata's model). Bucket partitioning distributes scans across database nodes. Replays events to reconstruct state. Conflict-based claiming via ScalarDB transaction conflict detection. |
 | 6 | **ServiceInvoker** | Framework-agnostic typed lambdas for step dispatch. Declarative JSON communication (Layer 2b). |
-| 7 | **SagaTestHarness** | In-memory testing: mock steps, crash simulation, assertion helpers. Uses `InMemorySagaStore`. |
+| 7 | **SagaTestHarness** | Integration testing: mock steps, crash simulation, assertion helpers. Uses `ScalarDbSagaStore` backed by in-memory SQLite. |
 | 8 | **SagaAdminService** | Production operations API: list, inspect, compensate, retry, force-complete. |
 | 9 | **SagaDevServer** | Zero-config dev environment: SQLite-backed database + embedded web UI. |
 | 10 | **OpenTelemetrySagaListener** | Tracing spans per saga/step, metrics counters/histograms/gauges, lifecycle events. |
@@ -348,7 +348,7 @@ See [Bootstrap and Execute](#3-bootstrap-and-execute) in Part IV for the full bo
 # database.properties — only needed in the orchestrator service
 scalar.db.contact_points=cassandra-host
 scalar.db.username=admin
-scalar.db.password=secret
+scalar.db.password=<your-password>
 scalar.db.storage=cassandra
 ```
 
@@ -450,6 +450,25 @@ Since our design persists all saga state in ScalarDB (not in-memory), **any inst
 7. **Resume compensation**: If the saga was `COMPENSATING`, the engine resumes compensation from the last compensated step downward. If a compensation fails again, the saga stays in `COMPENSATING` for the next recovery scan. After repeated failures (configurable threshold), the recovery manager escalates the saga to `ESCALATED` for manual intervention.
 8. **Status updated on completion**: When a saga reaches a terminal state (`COMPLETED`, `COMPENSATED`, `ESCALATED`), the engine updates `saga_state.status` to the terminal state. Terminal entries can be cleaned up after a configurable retention period.
 
+**Isolation level: SNAPSHOT is sufficient.**
+
+ScalarDB supports configurable isolation levels (SNAPSHOT, SERIALIZABLE, READ_COMMITTED). The default SNAPSHOT level is a weak variant closer to read-committed snapshot isolation — each Get/Scan operation reads the latest committed data rather than from a fixed transaction-start snapshot. This means write-skew, read-skew, and read-only anomalies are theoretically possible.
+
+However, the saga workload is safe under SNAPSHOT because no transaction performs multiple reads where cross-read consistency matters:
+
+| Transaction | Reads | Writes | Why safe |
+|---|---|---|---|
+| `createSaga` | 0 | INSERT event + INSERT state | Writes only |
+| `appendEvent` | 0 | INSERT event | Writes only |
+| `recordTransition` | 0 (caller provides state) | INSERT event + DELETE/INSERT state | Writes only |
+| `claimForRecovery` | 1 Get | DELETE/INSERT state | Single read — no second read to skew against. Concurrent claims produce write-write conflict. |
+| `getEvents` | 1 Scan (single partition) | 0 | Single scan operation |
+| `findRecoverableByBucket` | 3 Scans (1 bucket × 3 statuses) | 0 | Called per bucket from `recover()`. Each result is independently validated by a separate `claimForRecovery` transaction. |
+
+Write-skew requires reading row X and writing row Y based on that read — no saga transaction does this. The read-only anomaly requires an invariant spanning multiple data items with concurrent write transactions — no invariant spans multiple sagas, and within a single saga, only one replica executes at a time (after claiming).
+
+> **Guideline for future contributors**: If you add a new transaction that reads from multiple rows/tables and makes decisions based on the combined result, re-evaluate whether SNAPSHOT isolation is still sufficient. The current safety relies on every transaction having at most one read that influences writes.
+
 **Append-only event persistence:**
 
 The engine uses an **append-only event store** — each state change is a single INSERT into `saga_events`. There are no UPDATEs to the event table, and no separate "step started" writes. This is the same model used by Axon Framework, Eventuate Tram, and conceptually by Temporal (event history) and Restate (journal). In contrast, Seata Saga writes **both** `INSERT (STARTED)` and `UPDATE (COMPLETED)` per step — doubling the write volume.
@@ -532,7 +551,7 @@ public interface Step {
 // Standalone interface for TCC (Try-Confirm-Cancel) mode.
 // Unlike Step (which is for Saga mode), TccStep has three methods whose names
 // match the TCC phases directly. The engine internally adapts TccStep to Step
-// via TccTryAdapter and TccConfirmAdapter so that both Saga and TCC run through
+// via TccReserveStep and TccConfirmStep so that both Saga and TCC run through
 // the same pivot-based execution loop. See "Unified Execution Model" below.
 //
 // LIFECYCLE: Same as Step — non-static, application-level singletons.
@@ -649,16 +668,14 @@ public class SagaStateSnapshot {
     private final String definitionVersion;
     private final Instant createdAt;
     private final Instant updatedAt;
-    private final Map<String, Object> input;
 
     public SagaStateSnapshot withTransition(SagaStatus newStatus, Instant newUpdatedAt) {
         return new SagaStateSnapshot(sagaId, sagaName, newStatus, ownerId,
-            version, definitionVersion, createdAt, newUpdatedAt, input);
+            version, definitionVersion, createdAt, newUpdatedAt);
     }
 
     // Getters: getSagaId(), getSagaName(), getStatus(), getOwnerId(),
-    //          getVersion(), getDefinitionVersion(), getCreatedAt(),
-    //          getUpdatedAt(), getInput()
+    //          getVersion(), getDefinitionVersion(), getCreatedAt(), getUpdatedAt()
 }
 
 // --- api/StepResult.java ---
@@ -684,13 +701,6 @@ public enum SagaStatus {
     ESCALATED       // stuck beyond grace period, needs manual intervention
 }
 
-// --- api/StepStatus.java ---
-public enum StepStatus {
-    WAITING,     // daemon mode only: returned pending(), waiting for external callback
-    COMPLETED,   // execute() succeeded (Try succeeded in TCC mode)
-    CONFIRMED,   // TCC only: confirm() succeeded
-    FAILED
-}
 ```
 
 ### Saga Definition (JSON / YAML)
@@ -826,12 +836,12 @@ steps:
 For embedded mode, a type-safe Java builder provides compile-time checks and IDE auto-completion:
 
 ```java
-SagaDefinition def = SagaDefinition.builder("MoneyTransfer")
+SagaDefinition def = SagaDefinition.newBuilder("MoneyTransfer")
     .version("1.0")
     .mode(SagaMode.SAGA)
     .recoveryStrategy(RecoveryStrategy.BACKWARD)
     .timeoutMs(300000)
-    .defaultRetryPolicy(RetryPolicy.builder()
+    .defaultRetryPolicy(RetryPolicy.newBuilder()
         .maxAttempts(3)
         .initialIntervalMs(1000)
         .backoffMultiplier(2.0)
@@ -840,7 +850,7 @@ SagaDefinition def = SagaDefinition.builder("MoneyTransfer")
     .step("debit")
         .stepClass(DebitAccountStep.class)
         .timeoutMs(60000)
-        .retryPolicy(RetryPolicy.builder().maxAttempts(5).build())
+        .retryPolicy(RetryPolicy.newBuilder().maxAttempts(5).build())
         .add()
     .step("credit")
         .stepClass(CreditAccountStep.class)
@@ -854,7 +864,7 @@ sagaManager.register(def);
 **Mixed recovery (pivot transaction) example:**
 
 ```java
-SagaDefinition def = SagaDefinition.builder("PlaceOrder")
+SagaDefinition def = SagaDefinition.newBuilder("PlaceOrder")
     .version("1.0")
     .mode(SagaMode.SAGA)
     .recoveryStrategy(RecoveryStrategy.MIXED)
@@ -1083,10 +1093,10 @@ public class SagaEngine {
      * Execute a previously created saga from a known SagaStateSnapshot (avoids a read-back).
      * Used by startAsync() which already has the instance from createSaga().
      */
-    public void executeSaga(SagaStateSnapshot saga) {
+    public void executeSaga(SagaStateSnapshot saga, Map<String, Object> input) {
         SagaDefinition def = resolveDefinition(saga.getSagaName(), saga.getDefinitionVersion());
         // createSaga wrote 1 event (SAGA_STARTED at seq 0) and set status RUNNING
-        ExecutionContext context = new ExecutionContext(saga.getSagaId(), saga.getInput());
+        ExecutionContext context = new ExecutionContext(saga.getSagaId(), input);
         context.setNextEventSequence(1);        // next sequence after SAGA_STARTED
         context.setCurrentState(saga);
         executeSteps(def, context, 0);
@@ -1101,7 +1111,7 @@ public class SagaEngine {
     public String execute(SagaDefinition def, @Nullable String sagaId,
                            Map<String, Object> input) {
         SagaStateSnapshot saga = createSaga(def, sagaId, input);
-        executeSaga(saga);
+        executeSaga(saga, input);
         return saga.getSagaId();
     }
 
@@ -1137,14 +1147,16 @@ public class SagaEngine {
         }
 
         try {
-            List<Step> plan;
+            List<StepWithPolicy> plan;
             if (def.getMode() == SagaMode.TCC) {
                 // Expand TCC definition into a unified execution plan:
-                //   [A.try, B.try, C.try (pivot), A.confirm, B.confirm, C.confirm]
+                //   [A.reserve, B.reserve, C.reserve (pivot), A.confirm, B.confirm, C.confirm]
                 plan = expandTccPlan(def);
             } else {
                 plan = def.getSteps().stream()
-                    .map(this::instantiate).toList();
+                    .map(stepDef -> new StepWithPolicy(
+                        instantiate(stepDef), resolveRetryPolicy(stepDef, def)))
+                    .toList();
             }
 
             executeSagaSteps(plan, def.getPivotPolicy(), context, startIndex);
@@ -1164,22 +1176,20 @@ public class SagaEngine {
      * The expansion is deterministic (same definition version → same plan →
      * same step indices), which is required for crash recovery correctness.
      */
-    // --- engine/TccTryAdapter.java ---
+    // --- engine/TccReserveStep.java ---
 
     /**
-     * Adapts TccStep for the Try phase: forward = reserve(), compensate = cancel().
+     * Wraps TccStep for the Reserve (Try) phase: forward = reserve(), compensate = cancel().
      * Internal class — not part of the public API.
      */
-    class TccTryAdapter implements Step {
+    class TccReserveStep implements Step {
         private final TccStep tccStep;
-        private final RetryPolicy retryPolicy;
 
-        TccTryAdapter(TccStep tccStep, RetryPolicy retryPolicy) {
+        TccReserveStep(TccStep tccStep) {
             this.tccStep = tccStep;
-            this.retryPolicy = retryPolicy;
         }
 
-        @Override public String getName() { return tccStep.getName() + ".try"; }
+        @Override public String getName() { return tccStep.getName() + ".reserve"; }
         @Override public StepResult execute(SagaContext ctx) throws StepExecutionException {
             return tccStep.reserve(ctx);
         }
@@ -1188,20 +1198,18 @@ public class SagaEngine {
         }
     }
 
-    // --- engine/TccConfirmAdapter.java ---
+    // --- engine/TccConfirmStep.java ---
 
     /**
-     * Adapts TccStep for the Confirm phase: forward = confirm(), compensate = no-op.
+     * Wraps TccStep for the Confirm phase: forward = confirm(), compensate = no-op.
      * Confirm steps are always after the pivot, so compensate() should never be called.
      * Internal class — not part of the public API.
      */
-    class TccConfirmAdapter implements Step {
+    class TccConfirmStep implements Step {
         private final TccStep tccStep;
-        private final RetryPolicy retryPolicy;
 
-        TccConfirmAdapter(TccStep tccStep, RetryPolicy retryPolicy) {
+        TccConfirmStep(TccStep tccStep) {
             this.tccStep = tccStep;
-            this.retryPolicy = retryPolicy;
         }
 
         @Override public String getName() { return tccStep.getName() + ".confirm"; }
@@ -1214,17 +1222,28 @@ public class SagaEngine {
         }
     }
 
-    private List<Step> expandTccPlan(SagaDefinition def) {
-        List<Step> plan = new ArrayList<>();
+    /**
+     * Bundles a Step with its resolved RetryPolicy.
+     * Internal record — not part of the public API.
+     */
+    record StepWithPolicy(Step step, RetryPolicy retryPolicy) {}
+
+    private List<StepWithPolicy> expandTccPlan(SagaDefinition def) {
+        List<StepWithPolicy> reserves = new ArrayList<>();
+        List<StepWithPolicy> confirms = new ArrayList<>();
         for (StepDefinition stepDef : def.getSteps()) {
             TccStep tccStep = (TccStep) instantiate(stepDef);
-            RetryPolicy tryPolicy = resolveRetryPolicy(stepDef, def);
-            plan.add(new TccTryAdapter(tccStep, tryPolicy));
+            // Reserve: user-configured retry policy. Reserve is the main business logic —
+            // users need control over retry attempts and backoff intervals.
+            reserves.add(new StepWithPolicy(
+                new TccReserveStep(tccStep), resolveRetryPolicy(stepDef, def)));
+            // Confirm: hardcoded aggressive retry. Confirms MUST succeed — resources are
+            // already reserved. confirmDefault() = 10 attempts, 500ms initial, 60s max.
+            confirms.add(new StepWithPolicy(
+                new TccConfirmStep(tccStep), RetryPolicy.confirmDefault()));
         }
-        for (StepDefinition stepDef : def.getSteps()) {
-            TccStep tccStep = (TccStep) instantiate(stepDef);
-            plan.add(new TccConfirmAdapter(tccStep, RetryPolicy.confirmDefault()));
-        }
+        List<StepWithPolicy> plan = new ArrayList<>(reserves);
+        plan.addAll(confirms);
         return plan;
     }
 
@@ -1259,7 +1278,7 @@ public class SagaEngine {
      * When pivot.crossingEvent is non-null, the engine emits it once when
      * crossing the pivot boundary (e.g., CONFIRMING for TCC).
      */
-    private void executeSagaSteps(List<Step> plan, PivotPolicy pivot,
+    private void executeSagaSteps(List<StepWithPolicy> plan, PivotPolicy pivot,
                                    ExecutionContext context, int startIndex) {
         String sagaId = context.getSagaId();
         int completedIndex = startIndex - 1;
@@ -1278,17 +1297,15 @@ public class SagaEngine {
                     transition(context, pivot.crossingEvent());
                 }
 
-                Step step = plan.get(i);
-                RetryPolicy policy = resolveRetryPolicy(step);
+                StepWithPolicy entry = plan.get(i);
 
                 try {
-                    StepResult result = executeWithRetry(step, context, policy);
+                    StepResult result = executeWithRetry(entry.step(), context, entry.retryPolicy());
 
-                    // Append-only: 1 INSERT per step. The event row doubles as
-                    // an outbox entry for downstream consumers. No "step started"
+                    // Append-only: 1 INSERT per step. No "step started"
                     // write, no lease renewal — recovery uses saga_state scan.
                     store.appendEvent(sagaId, context.nextSequence(),
-                        SagaEvent.stepCompleted(i, step.getName(), result));
+                        SagaEvent.stepCompleted(i, entry.step().getName(), result));
                     context.advanceSequence();
                     context.merge(result);
                     completedIndex = i;
@@ -1311,7 +1328,7 @@ public class SagaEngine {
                         // and escalation timing.
                         if (!context.hasFailureEvent(i)) {
                             store.appendEvent(sagaId, context.nextSequence(),
-                                SagaEvent.stepFailed(i, step.getName(), e));
+                                SagaEvent.stepFailed(i, entry.step().getName(), e));
                             context.advanceSequence();
                         }
                     }
@@ -1348,18 +1365,22 @@ public class SagaEngine {
     /**
      * Trigger compensation starting from a specific step index.
      * Builds the execution plan from the definition — for TCC, this produces
-     * the expanded 2N-step plan with adapters whose compensate() delegates
-     * to tccStep.cancel().
+     * the expanded 2N-step plan whose compensate() delegates to tccStep.cancel().
      */
     public void compensateFrom(SagaDefinition def, ExecutionContext context, int fromStep) {
-        List<Step> plan;
+        List<StepWithPolicy> plan;
         if (def.getMode() == SagaMode.TCC) {
             plan = expandTccPlan(def);
         } else {
             plan = def.getSteps().stream()
-                .map(this::instantiate).toList();
+                .map(stepDef -> new StepWithPolicy(
+                    instantiate(stepDef), resolveRetryPolicy(stepDef, def)))
+                .toList();
         }
-        transition(context, SagaEvent.sagaCompensating());
+        // Only transition if not already COMPENSATING (recovery resumes mid-compensation)
+        if (context.getCurrentState().getStatus() != SagaStatus.COMPENSATING) {
+            transition(context, SagaEvent.sagaCompensating());
+        }
         try {
             compensationManager.compensate(plan, context, fromStep);
             transition(context, SagaEvent.sagaCompensated());
@@ -1393,6 +1414,49 @@ public class SagaEngine {
             ? stepDef.getRetryPolicy()
             : def.getDefaultRetryPolicy();
     }
+
+    /**
+     * Reconstruct an ExecutionContext by replaying a saga's event stream.
+     * Package-private: used by SagaRecoveryManager and DefaultSagaManager.completeStep().
+     *
+     * Accumulates step outputs into the context data map, sets the next event sequence,
+     * and derives the current saga state from the event stream.
+     * A typical saga has 5-15 events — trivial cost.
+     */
+    ExecutionContext replayEvents(SagaStateSnapshot saga, List<SagaEvent> events) {
+        ExecutionContext context = new ExecutionContext(saga.getSagaId(), Map.of());
+        SagaStatus status = SagaStatus.RUNNING;
+
+        for (SagaEvent event : events) {
+            switch (event.getEventType()) {
+                case SagaEvent.SAGA_STARTED:
+                    Map<String, Object> input = fromJson(event.getPayload());
+                    context = new ExecutionContext(saga.getSagaId(), input);
+                    break;
+                case SagaEvent.STEP_COMPLETED:
+                    StepResult result = StepResult.fromJson(event.getPayload());
+                    context.merge(result);
+                    break;
+                case SagaEvent.STEP_FAILED:
+                case SagaEvent.STEP_COMPENSATION_FAILED:
+                    context.markStepFailed(event.getStepIndex());
+                    break;
+                case SagaEvent.SAGA_COMPENSATING:
+                case SagaEvent.SAGA_CONFIRMING:
+                case SagaEvent.SAGA_COMPLETED:
+                case SagaEvent.SAGA_COMPENSATED:
+                case SagaEvent.SAGA_ESCALATED:
+                    status = event.getTargetStatus();
+                    break;
+                // STEP_COMPENSATED doesn't change saga status or track failures.
+            }
+        }
+
+        context.setNextEventSequence(events.size());
+        context.setCurrentState(saga.withTransition(status, saga.getUpdatedAt()));
+
+        return context;
+    }
 }
 ```
 
@@ -1415,14 +1479,14 @@ public class DefaultSagaManager implements SagaManager {
     @Override
     public String start(String sagaName, Map<String, Object> input) {
         // Synchronous — blocks until saga completes. Server-generated ID.
-        return engine.execute(definitions.get(sagaName), null, input);
+        return engine.execute(getDefinition(sagaName), null, input);
     }
 
     @Override
     public void start(String sagaId, String sagaName, Map<String, Object> input) {
         // Synchronous — blocks until saga completes. Client-supplied ID.
         // Throws SagaAlreadyExistsException if sagaId is already in use.
-        engine.execute(definitions.get(sagaName), sagaId, input);
+        engine.execute(getDefinition(sagaName), sagaId, input);
     }
 
     @Override
@@ -1456,7 +1520,7 @@ public class DefaultSagaManager implements SagaManager {
     private SagaStateSnapshot startAsyncInternal(@Nullable String sagaId, String sagaName,
                                                   Map<String, Object> input,
                                                   SagaCallback callback) {
-        SagaDefinition def = definitions.get(sagaName);
+        SagaDefinition def = getDefinition(sagaName);
 
         // 1. Persist saga via engine (saga_state + SAGA_STARTED event).
         //    This guarantees the saga is recoverable even if the process
@@ -1467,7 +1531,7 @@ public class DefaultSagaManager implements SagaManager {
         // 2. Submit execution to a virtual thread (pass SagaStateSnapshot to avoid read-back)
         asyncExecutor.submit(() -> {
             try {
-                engine.executeSaga(saga);
+                engine.executeSaga(saga, input);
 
                 if (callback != null) {
                     // getStateSnapshot hits cache (populated by recordTransition) — no DB read
@@ -1487,6 +1551,14 @@ public class DefaultSagaManager implements SagaManager {
 
         // 3. Return the persisted snapshot (saga is persisted, execution is async)
         return saga;
+    }
+
+    private SagaDefinition getDefinition(String sagaName) {
+        SagaDefinition def = definitions.get(sagaName);
+        if (def == null) {
+            throw new SagaDefinitionNotFoundException(sagaName);
+        }
+        return def;
     }
 }
 ```
@@ -1544,10 +1616,29 @@ try {
 **Why throw rather than silently return the existing snapshot?** Silent idempotency would require hashing and comparing `input` to detect "same ID, different input" bugs, which adds complexity and an extra read on the happy path. Throwing forces the caller to consciously handle the retry case and also surfaces client bugs where the same ID is accidentally reused across unrelated business operations. Callers that want "get-or-create" semantics can wrap the call in two lines (catch exception → use the attached snapshot).
 
 **ID validation.** `SagaStore.createSaga()` validates caller-supplied IDs at the boundary:
-- Non-null, non-empty, non-whitespace-only
-- Length within the `saga_id` column limit
-- URL-safe characters recommended (so daemon-mode REST paths don't need encoding)
+- Non-null, non-empty
+- Length: 1–128 characters
+- **Strict character allowlist: `[a-zA-Z0-9._-]`** (enforced, not just recommended)
 - Globally unique across all sagas in the cluster (not just per saga name)
+
+The strict allowlist is a security requirement, not a style preference. Saga IDs are embedded in:
+- HTTP headers (`X-Saga-Id`) — CR/LF characters would enable header injection
+- URL path segments (`/api/sagas/{sagaId}/...`) — path traversal characters would manipulate callback URLs
+- gRPC metadata (`x-saga-id`) — control characters could corrupt metadata frames
+
+```java
+private static final Pattern SAGA_ID_PATTERN = Pattern.compile("[a-zA-Z0-9._-]{1,128}");
+
+private void validateSagaId(String sagaId) {
+    if (sagaId == null || !SAGA_ID_PATTERN.matcher(sagaId).matches()) {
+        throw new IllegalArgumentException(
+            "Saga ID must be 1-128 characters matching [a-zA-Z0-9._-], got: "
+            + (sagaId == null ? "null" : "'" + sagaId.substring(0, Math.min(sagaId.length(), 20)) + "'"));
+    }
+}
+```
+
+Auto-generated IDs (`UUID.randomUUID().toString()`) already satisfy this pattern — UUIDs use `[0-9a-f-]`.
 
 **Duplicate detection cost.** Collision is detected via ScalarDB's `Insert` "fail if exists" semantics — no extra read on the happy path. The collision path pays one follow-up read in a fresh transaction to populate the snapshot attached to `SagaAlreadyExistsException`. See the ScalarDbSagaStore section for details.
 
@@ -1597,17 +1688,17 @@ public class CompensationManager {
      * If a compensation fails after all retries, throws StepCompensationException
      * to stop the loop — the saga stays in COMPENSATING for recovery to retry.
      *
-     * Accepts a pre-built execution plan (List<Step>) so it works with both
-     * Saga steps and TCC adapters. For TCC, step.compensate() on a
-     * TccTryAdapter delegates to tccStep.cancel(). For TccConfirmAdapter
+     * Accepts a pre-built execution plan (List<StepWithPolicy>) so it works
+     * with both Saga steps and TCC steps. For TCC, step.compensate() on a
+     * TccReserveStep delegates to tccStep.cancel(). For TccConfirmStep
      * (after the pivot), compensate() is a no-op — but those steps are never
      * passed to this method because only steps ≤ pivot are compensated.
      */
-    public void compensate(List<Step> plan, ExecutionContext context, int completedIndex)
+    public void compensate(List<StepWithPolicy> plan, ExecutionContext context, int completedIndex)
             throws StepCompensationException {
 
         for (int i = completedIndex; i >= 0; i--) {
-            compensateWithRetry(plan.get(i), context, i);
+            compensateWithRetry(plan.get(i).step(), context, i);
         }
     }
 
@@ -1744,11 +1835,25 @@ public class RetryPolicy {
     }
 
     /**
-     * Sleep with exponential backoff + jitter. Returns the next interval.
+     * Sleep with exponential backoff + equal jitter. Returns the next interval.
+     *
+     * Jitter strategy: "Equal Jitter" from the AWS Architecture Blog
+     * (https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/).
+     *
+     * Three common approaches:
+     *   Full jitter:    sleep = random(0, interval)        — widest spread, but can sleep near 0
+     *   Equal jitter:   sleep = interval/2 + random(0, interval/2) — 50% spread, guaranteed minimum wait
+     *   Decorrelated:   sleep = random(baseInterval, lastSleep * 3) — stateful, harder to reason about
+     *
+     * We use equal jitter because:
+     *   - 50% spread mitigates thundering herds effectively
+     *   - Guaranteed minimum of interval/2 prevents near-zero sleeps that
+     *     would hammer a recovering participant
+     *   - Stateless — each call depends only on the current interval
      */
     public long sleepWithBackoff(long currentInterval) throws InterruptedException {
-        long jitter = ThreadLocalRandom.current().nextLong(currentInterval / 4);
-        Thread.sleep(currentInterval + jitter);
+        long half = currentInterval / 2;
+        Thread.sleep(half + ThreadLocalRandom.current().nextLong(half));
         return Math.min((long) (currentInterval * backoffMultiplier), maxIntervalMs);
     }
 }
@@ -1763,6 +1868,10 @@ Uses **virtual threads** (Java 21+) to eliminate thread pool exhaustion during e
 ```java
 // Virtual thread executor — used for all step executions and retries.
 // Virtual threads are cheap (no thread pool sizing needed) and non-blocking on sleep.
+// Note: If a step directly calls a JDBC driver that uses `synchronized` internally
+// (e.g., MySQL Connector/J < 9.0), the virtual thread may pin to its carrier thread.
+// This is uncommon — steps typically call participants via HTTP/gRPC, not JDBC directly.
+// If needed, use drivers with ReentrantLock-based implementations (MySQL 9.x+, PostgreSQL 42.7+).
 private static final ExecutorService STEP_EXECUTOR =
     Executors.newVirtualThreadPerTaskExecutor();
 
@@ -1774,42 +1883,40 @@ private StepResult executeWithRetry(Step step, ExecutionContext ctx, RetryPolicy
     long interval = policy.getInitialIntervalMs();
 
     while (true) {
-        try {
-            attempt++;
+        attempt++;
 
-            // Per-step timeout enforcement via virtual thread + Future
+        // Always submit to virtual thread executor — provides a cancellation
+        // handle (future.cancel(true)) and unified exception handling.
+        Future<StepResult> future = STEP_EXECUTOR.submit(() -> step.execute(ctx));
+        try {
             if (stepDeadline > 0) {
                 long remaining = stepDeadline - System.currentTimeMillis();
                 if (remaining <= 0) {
+                    future.cancel(true);
                     throw new StepTimeoutException("Step timeout exceeded");
                 }
-                Future<StepResult> future = STEP_EXECUTOR.submit(() -> step.execute(ctx));
-                try {
-                    return future.get(remaining, TimeUnit.MILLISECONDS);
-                } catch (TimeoutException e) {
-                    future.cancel(true);  // interrupt the virtual thread
-                    throw new StepTimeoutException("Step timed out after " + remaining + "ms");
-                }
+                return future.get(remaining, TimeUnit.MILLISECONDS);
             } else {
-                return step.execute(ctx);
+                return future.get();
             }
-
-        } catch (StepTimeoutException e) {
-            throw e;  // timeouts are not retryable
-
-        } catch (StepExecutionException e) {
-            // Participant decided: is this retryable?
-            if (!e.isRetryable()) {
-                throw e;  // non-retryable → propagate to trigger compensation
+        } catch (TimeoutException e) {
+            future.cancel(true);
+            throw new StepTimeoutException("Step timed out");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            future.cancel(true);
+            throw new StepExecutionException("Step interrupted", e, false);
+        } catch (ExecutionException e) {
+            if (e.getCause() instanceof StepExecutionException se) {
+                // Participant-thrown: check retry policy
+                if (!se.isRetryable() || attempt >= policy.getMaxAttempts()) {
+                    throw se;
+                }
+                interval = policy.sleepWithBackoff(interval);
+            } else {
+                // Unexpected error (NPE, ClassCast, etc.) — not retryable
+                throw new StepExecutionException("Step failed", e.getCause(), false);
             }
-
-            // Retryable, but exhausted attempts?
-            if (attempt >= policy.getMaxAttempts()) {
-                throw e;  // give up → propagate to trigger compensation
-            }
-
-            // Exponential backoff with jitter (virtual thread — cheap to sleep)
-            interval = policy.sleepWithBackoff(interval);
         }
     }
 }
@@ -1823,11 +1930,10 @@ No `isNonRetryable()` method needed — the participant's `StepExecutionExceptio
 
 Stores saga state as **append-only events** using ScalarDB's transaction API. Each state change is a single INSERT into `saga_events`. A small mutable `saga_state` table provides fast status lookups and efficient recovery scanning.
 
-**Why ScalarDB**: Database-agnostic ACID transactions — saga state and outbox writes are atomic in one transaction (no dual-write problem), and one persistence implementation works regardless of the user's database choice (Cassandra, DynamoDB, PostgreSQL, MySQL, Cosmos DB, etc.).
+**Why ScalarDB**: Database-agnostic ACID transactions — one persistence implementation works regardless of the user's database choice (Cassandra, DynamoDB, PostgreSQL, MySQL, Cosmos DB, etc.).
 
 The critical features:
-- **1 INSERT per step** — append-only events, no read-modify-write
-- **Event rows double as outbox entries** — CDC or polling can tail `saga_events` directly, eliminating the dual-write problem (same approach as Eventuate Tram)
+- **1 ScalarDB transaction with 1 INSERT per step** — append-only events, no read-modify-write
 - **No per-step lease/ownership writes** — recovery uses periodic scan of `saga_state` (Seata-style)
 
 ### Where Saga State Lives
@@ -1847,13 +1953,8 @@ public class SagaSchema {
      * Partition key: saga_id (TEXT)
      * Clustering key: sequence (INT, ascending)
      *
-     * Every state change is a single INSERT. No UPDATEs, no DELETEs
-     * during normal operation. Each row doubles as an outbox entry
-     * (the `published` column tracks relay progress).
-     *
-     * This is the same model as Axon's event store and Eventuate's
-     * events table. ScalarDB's clustering key ensures efficient
-     * ordered scan by saga_id.
+     * Every state change is a single INSERT. No UPDATEs, no DELETEs.
+     * ScalarDB's clustering key ensures efficient ordered scan by saga_id.
      */
     public static TableMetadata sagaEventsTable() {
         return TableMetadata.newBuilder()
@@ -1863,7 +1964,6 @@ public class SagaSchema {
             .addColumn("step_index", DataType.INT)       // step index (for step events; -1 for saga events)
             .addColumn("step_name",  DataType.TEXT)      // step name (for step events; null for saga events)
             .addColumn("payload",    DataType.TEXT)      // JSON: step result, error, input, etc.
-            .addColumn("published",  DataType.BOOLEAN)   // false until outbox relay picks it up
             .addColumn("created_at", DataType.TIMESTAMPTZ)
             .addPartitionKey("saga_id")
             .addClusteringKey("sequence", Scan.Ordering.Order.ASC)
@@ -1959,19 +2059,20 @@ public class SagaEvent {
     private final SagaStatus targetStatus;  // non-null for transition events, null for step-level events
     private final Instant timestamp;    // set from saga_events.created_at when loaded from store
 
-    // Event type constants
-    public static final String SAGA_STARTED        = "SAGA_STARTED";
-    public static final String STEP_COMPLETED      = "STEP_COMPLETED";
-    public static final String STEP_FAILED         = "STEP_FAILED";
-    public static final String STEP_WAITING        = "STEP_WAITING";
-    public static final String STEP_CONFIRMED      = "STEP_CONFIRMED";   // TCC
-    public static final String STEP_COMPENSATED    = "STEP_COMPENSATED";
+    // --- Saga lifecycle (6) ---
+    // In-progress states use present participle; terminal states use past participle.
+    public static final String SAGA_STARTED      = "SAGA_STARTED";
+    public static final String SAGA_CONFIRMING   = "SAGA_CONFIRMING";   // TCC
+    public static final String SAGA_COMPENSATING = "SAGA_COMPENSATING";
+    public static final String SAGA_COMPLETED    = "SAGA_COMPLETED";
+    public static final String SAGA_COMPENSATED  = "SAGA_COMPENSATED";
+    public static final String SAGA_ESCALATED    = "SAGA_ESCALATED";
+
+    // --- Step outcomes (4) ---
+    public static final String STEP_COMPLETED           = "STEP_COMPLETED";
+    public static final String STEP_FAILED              = "STEP_FAILED";
+    public static final String STEP_COMPENSATED         = "STEP_COMPENSATED";
     public static final String STEP_COMPENSATION_FAILED = "STEP_COMPENSATION_FAILED";
-    public static final String SAGA_COMPENSATING   = "SAGA_COMPENSATING";
-    public static final String SAGA_CONFIRMING     = "SAGA_CONFIRMING";  // TCC
-    public static final String SAGA_COMPLETED      = "SAGA_COMPLETED";
-    public static final String SAGA_COMPENSATED    = "SAGA_COMPENSATED";
-    public static final String SAGA_ESCALATED      = "SAGA_ESCALATED";
 
     public SagaStatus getTargetStatus() { return targetStatus; }
     public Instant getTimestamp() { return timestamp; }
@@ -1980,8 +2081,6 @@ public class SagaEvent {
     public static SagaEvent sagaStarted(String sagaName, Map<String, Object> input) { ... }
     public static SagaEvent stepCompleted(int stepIndex, String stepName, StepResult result) { ... }
     public static SagaEvent stepFailed(int stepIndex, String stepName, Exception e) { ... }
-    public static SagaEvent stepWaiting(int stepIndex) { ... }
-    public static SagaEvent stepConfirmed(int stepIndex, String stepName) { ... }
     public static SagaEvent stepCompensated(int stepIndex) { ... }
     public static SagaEvent stepCompensationFailed(int stepIndex, Exception e) { ... }
 
@@ -2064,8 +2163,8 @@ public interface SagaStore {
     SagaStateSnapshot recordTransition(SagaStateSnapshot current, int sequence,
                                         SagaEvent event);
 
-    // Recovery — scan saga_state + replay saga_events
-    List<SagaStateSnapshot> findRecoverable(long recoveryTimeoutMs);
+    // Recovery — scan a single bucket of saga_state for stale in-progress sagas
+    List<SagaStateSnapshot> findRecoverableByBucket(int bucket, long recoveryTimeoutMs);
     @Nullable SagaStateSnapshot claimForRecovery(SagaStateSnapshot saga, String newOwnerId);
     void markForRecovery(String sagaId);  // sets updated_at to epoch 0 for immediate recovery
     List<SagaEvent> getEvents(String sagaId);
@@ -2073,7 +2172,8 @@ public interface SagaStore {
     // Queries
     SagaStateSnapshot getStateSnapshot(String sagaId);
     SagaPage<SagaStateSnapshot> listStateSnapshots(SagaQuery query);
-    SagaMetrics computeMetrics();
+    Map<SagaStatus, Long> countByStatus();
+    Map<String, Long> countBySagaName();
 }
 ```
 
@@ -2083,13 +2183,18 @@ public interface SagaStore {
 // --- store/ScalarDbSagaStore.java ---
 public class ScalarDbSagaStore implements SagaStore {
     private final DistributedTransactionManager txManager;
-    private final Cache<String, SagaStateSnapshot> cache = Caffeine.newBuilder()
-        .maximumSize(10_000)
-        .expireAfterWrite(Duration.ofMinutes(5))
-        .build();
+    private final int maxEventPayloadBytes;
+    private final Cache<String, SagaStateSnapshot> cache;
 
-    public ScalarDbSagaStore(DistributedTransactionManager txManager) {
+    public ScalarDbSagaStore(DistributedTransactionManager txManager,
+                             int maxEventPayloadBytes,
+                             int cacheMaxSize, Duration cacheExpireAfterWrite) {
         this.txManager = txManager;
+        this.maxEventPayloadBytes = maxEventPayloadBytes;
+        this.cache = Caffeine.newBuilder()
+            .maximumSize(cacheMaxSize)
+            .expireAfterWrite(cacheExpireAfterWrite)
+            .build();
     }
 
     /**
@@ -2107,7 +2212,7 @@ public class ScalarDbSagaStore implements SagaStore {
         if (sagaId == null) {
             sagaId = UUID.randomUUID().toString();
         } else {
-            validateSagaId(sagaId);  // non-null, non-empty, length ≤ column limit, URL-safe charset
+            validateSagaId(sagaId);  // non-null, 1-128 chars, [a-zA-Z0-9._-] only
         }
         Instant now = Instant.now();
         DistributedTransaction tx = null;
@@ -2126,7 +2231,6 @@ public class ScalarDbSagaStore implements SagaStore {
                 .intValue("step_index", -1)
                 .textValue("payload", toJson(Map.of(
                     "sagaName", sagaName, "input", input)))
-                .booleanValue("published", false)
                 .timestampTZValue("created_at", now)
                 .build());
 
@@ -2162,7 +2266,7 @@ public class ScalarDbSagaStore implements SagaStore {
             throw new SagaPersistenceException("Failed to create saga", e);
         }
         SagaStateSnapshot saga = new SagaStateSnapshot(sagaId, sagaName, SagaStatus.RUNNING,
-            ownerId, 0, definitionVersion, now, now, input);
+            ownerId, 0, definitionVersion, now, now);
         cache.put(sagaId, saga);
         return saga;
     }
@@ -2187,7 +2291,6 @@ public class ScalarDbSagaStore implements SagaStore {
                 .intValue("step_index", event.getStepIndex())
                 .textValue("step_name", event.getStepName())
                 .textValue("payload", event.getPayload())
-                .booleanValue("published", false)
                 .timestampTZValue("created_at", Instant.now())
                 .build());
 
@@ -2232,7 +2335,6 @@ public class ScalarDbSagaStore implements SagaStore {
                 .intValue("step_index", event.getStepIndex())
                 .textValue("step_name", event.getStepName())
                 .textValue("payload", event.getPayload())
-                .booleanValue("published", false)
                 .timestampTZValue("created_at", now)
                 .build());
 
@@ -2281,32 +2383,29 @@ public class ScalarDbSagaStore implements SagaStore {
      * Bucket-based partitioning distributes scans across database nodes —
      * no hot-partition problem.
      */
-    public List<SagaStateSnapshot> findRecoverable(long recoveryTimeoutMs) {
+    public List<SagaStateSnapshot> findRecoverableByBucket(int bucket, long recoveryTimeoutMs) {
         List<SagaStateSnapshot> result = new ArrayList<>();
         Instant threshold = Instant.now().minusMillis(recoveryTimeoutMs);
         DistributedTransaction tx = null;
         try {
             tx = txManager.begin();
 
-            // Scan each bucket for in-progress sagas with stale updated_at
-            for (int bucket = 0; bucket < SagaSchema.NUM_BUCKETS; bucket++) {
-                for (int status : new int[]{
-                        SagaStatus.RUNNING.ordinal(),
-                        SagaStatus.CONFIRMING.ordinal(),
-                        SagaStatus.COMPENSATING.ordinal()}) {
-                    Scan scan = Scan.newBuilder()
-                        .namespace(SagaSchema.NAMESPACE).table("saga_state")
-                        .partitionKey(Key.ofInt("bucket", bucket))
-                        .start(Key.ofInt("status", status), true)
-                        .end(Key.of(
-                            Key.ofInt("status", status),
-                            Key.ofTimestampTZ("updated_at", threshold)), true)
-                        .build();
-                    try (Scanner scanner = tx.getScanner(scan)) {
-                        Optional<Result> r;
-                        while ((r = scanner.one()).isPresent()) {
-                            result.add(toSagaStateSnapshot(r.get()));
-                        }
+            for (int status : new int[]{
+                    SagaStatus.RUNNING.ordinal(),
+                    SagaStatus.CONFIRMING.ordinal(),
+                    SagaStatus.COMPENSATING.ordinal()}) {
+                Scan scan = Scan.newBuilder()
+                    .namespace(SagaSchema.NAMESPACE).table("saga_state")
+                    .partitionKey(Key.ofInt("bucket", bucket))
+                    .start(Key.ofInt("status", status), true)
+                    .end(Key.of(
+                        Key.ofInt("status", status),
+                        Key.ofTimestampTZ("updated_at", threshold)), true)
+                    .build();
+                try (Scanner scanner = tx.getScanner(scan)) {
+                    Optional<Result> r;
+                    while ((r = scanner.one()).isPresent()) {
+                        result.add(toSagaStateSnapshot(r.get()));
                     }
                 }
             }
@@ -2321,7 +2420,7 @@ public class ScalarDbSagaStore implements SagaStore {
 
     /**
      * Claim a saga for recovery: read current row to verify it hasn't been
-     * claimed since findRecoverable, then DELETE old row + INSERT with updated
+     * claimed since findRecoverableByBucket, then DELETE old row + INSERT with updated
      * owner_id and incremented version.
      *
      * The read serves two purposes:
@@ -2339,7 +2438,7 @@ public class ScalarDbSagaStore implements SagaStore {
             int status = saga.getStatus().ordinal();
             Instant now = Instant.now();
 
-            // Read current row to verify it hasn't been claimed since findRecoverable
+            // Read current row to verify it hasn't been claimed since findRecoverableByBucket
             Optional<Result> current = tx.get(Get.newBuilder()
                 .namespace(SagaSchema.NAMESPACE).table("saga_state")
                 .partitionKey(Key.ofInt("bucket", bucket))
@@ -2385,7 +2484,7 @@ public class ScalarDbSagaStore implements SagaStore {
             SagaStateSnapshot claimed = new SagaStateSnapshot(
                 sagaId, saga.getSagaName(), saga.getStatus(), newOwnerId,
                 saga.getVersion() + 1, saga.getDefinitionVersion(),
-                saga.getCreatedAt(), now, saga.getInput());
+                saga.getCreatedAt(), now);
             cache.put(sagaId, claimed);
             return claimed;
 
@@ -2396,6 +2495,69 @@ public class ScalarDbSagaStore implements SagaStore {
         } catch (Exception e) {
             abortQuietly(tx);
             throw new SagaPersistenceException("Failed to claim saga for recovery", e);
+        }
+    }
+
+    /**
+     * Mark a saga for immediate recovery by setting updated_at to epoch 0.
+     * Called during shutdown for sagas that couldn't finish on this replica.
+     *
+     * Best-effort: if the executing thread concurrently completes or transitions
+     * the saga, ScalarDB's conflict detection will reject this transaction.
+     * That's fine — it means the saga no longer needs recovery.
+     */
+    public void markForRecovery(String sagaId) {
+        DistributedTransaction tx = null;
+        try {
+            tx = txManager.begin();
+
+            // Read current state (in same transaction for atomicity)
+            Optional<Result> result = tx.get(Get.newBuilder()
+                .namespace(SagaSchema.NAMESPACE).table("saga_state")
+                .indexKey(Key.ofText("saga_id", sagaId))
+                .build());
+
+            if (result.isEmpty()) {
+                tx.commit();
+                return;
+            }
+
+            Result r = result.get();
+            int bucket = r.getInt("bucket");
+            int status = r.getInt("status");
+            Instant updatedAt = r.getTimestampTZ("updated_at");
+
+            // DELETE old row
+            tx.delete(Delete.newBuilder()
+                .namespace(SagaSchema.NAMESPACE).table("saga_state")
+                .partitionKey(Key.ofInt("bucket", bucket))
+                .clusteringKey(Key.of(
+                    Key.ofInt("status", status),
+                    Key.ofTimestampTZ("updated_at", updatedAt),
+                    Key.ofText("saga_id", sagaId)))
+                .build());
+
+            // INSERT new row with updated_at = EPOCH for immediate recovery pickup
+            tx.insert(Insert.newBuilder()
+                .namespace(SagaSchema.NAMESPACE).table("saga_state")
+                .partitionKey(Key.ofInt("bucket", bucket))
+                .clusteringKey(Key.of(
+                    Key.ofInt("status", status),
+                    Key.ofTimestampTZ("updated_at", Instant.EPOCH),
+                    Key.ofText("saga_id", sagaId)))
+                .textValue("saga_name", r.getText("saga_name"))
+                .textValue("owner_id", r.getText("owner_id"))
+                .intValue("version", r.getInt("version"))
+                .textValue("definition_version", r.getText("definition_version"))
+                .timestampTZValue("created_at", r.getTimestampTZ("created_at"))
+                .build());
+
+            tx.commit();
+            cache.invalidate(sagaId);
+        } catch (Exception e) {
+            // Best effort — if this fails (e.g., conflict with executing thread),
+            // the saga will still be picked up by the normal recovery timeout scan.
+            abortQuietly(tx);
         }
     }
 
@@ -2468,8 +2630,13 @@ public class ScalarDbSagaStore implements SagaStore {
      * Get saga status from saga_state — single point-read.
      * For full state (including step results), use getEvents() and replay.
      */
+    @Nullable
     public SagaStateSnapshot getStateSnapshot(String sagaId) {
-        return cache.get(sagaId, this::loadFromDb);
+        SagaStateSnapshot cached = cache.getIfPresent(sagaId);
+        if (cached != null) return cached;
+        SagaStateSnapshot loaded = loadFromDb(sagaId);
+        if (loaded != null) cache.put(sagaId, loaded);
+        return loaded;  // null if saga doesn't exist
     }
 
     private SagaStateSnapshot loadFromDb(String sagaId) {
@@ -2498,7 +2665,17 @@ public class ScalarDbSagaStore implements SagaStore {
         }
     }
 
-    private String toJson(Object obj) { /* Jackson serialization */ }
+    // Serializes to JSON with payload size validation. Prevents database bloat,
+    // memory pressure during replayEvents(), and DoS via large step outputs or saga inputs.
+    private String toJson(Object obj) {
+        String json = /* Jackson serialization */;
+        int byteSize = json.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        if (byteSize > maxEventPayloadBytes) {
+            throw new IllegalArgumentException(
+                "Event payload exceeds limit: " + byteSize + " bytes > " + maxEventPayloadBytes);
+        }
+        return json;
+    }
 }
 ```
 
@@ -2560,24 +2737,28 @@ public class SagaRecoveryManager {
     }
 
     /**
-     * Single recovery pass: find stale sagas in saga_state,
+     * Single recovery pass: scan each bucket independently for stale sagas,
      * claim via transactional write, replay events, and resume.
+     * Per-bucket transactions avoid a single long transaction spanning all buckets.
      */
     void recover() {
-        List<SagaStateSnapshot> stuckSagas = store.findRecoverable(recoveryTimeoutMs);
+        for (int bucket = 0; bucket < SagaSchema.NUM_BUCKETS; bucket++) {
+            List<SagaStateSnapshot> stale = store.findRecoverableByBucket(
+                bucket, recoveryTimeoutMs);
 
-        for (SagaStateSnapshot saga : stuckSagas) {
-            try {
-                // Claim via read + DELETE + INSERT in one transaction.
-                // If another replica claims it concurrently, returns null.
-                SagaStateSnapshot claimed = store.claimForRecovery(saga, ownerId);
-                if (claimed == null) {
-                    continue;  // Another replica claimed it
+            for (SagaStateSnapshot saga : stale) {
+                try {
+                    // Claim via read + DELETE + INSERT in one transaction.
+                    // If another instance claims it concurrently, returns null.
+                    SagaStateSnapshot claimed = store.claimForRecovery(saga, ownerId);
+                    if (claimed == null) {
+                        continue;
+                    }
+                    recoverOne(claimed);
+                } catch (Exception e) {
+                    // Log and continue — don't let one stuck saga block others
+                    logger.error("Failed to recover saga {}", saga.getSagaId(), e);
                 }
-                recoverOne(claimed);
-            } catch (Exception e) {
-                // Log and continue — don't let one stuck saga block others
-                logger.error("Failed to recover saga {}", saga.getSagaId(), e);
             }
         }
     }
@@ -2600,7 +2781,7 @@ public class SagaRecoveryManager {
             logger.error("Definition not found for saga: {} version: {} — escalating",
                 saga.getSagaName(), saga.getDefinitionVersion());
             List<SagaEvent> events = store.getEvents(saga.getSagaId());
-            ExecutionContext context = replayEvents(saga, events);
+            ExecutionContext context = engine.replayEvents(saga, events);
             store.recordTransition(context.getCurrentState(),
                 context.nextSequence(),
                 SagaEvent.sagaEscalated("definition version "
@@ -2610,7 +2791,7 @@ public class SagaRecoveryManager {
 
         // Replay events to reconstruct state
         List<SagaEvent> events = store.getEvents(saga.getSagaId());
-        ExecutionContext context = replayEvents(saga, events);
+        ExecutionContext context = engine.replayEvents(saga, events);
         SagaStatus status = context.getCurrentState().getStatus();
 
         if (status == SagaStatus.COMPENSATING) {
@@ -2660,14 +2841,17 @@ public class SagaRecoveryManager {
      * when to escalate. Returns false if no matching failure events exist
      * (e.g., crash recovery where the saga was interrupted, not failed).
      */
+    // Uses Clock (injected via constructor) for testability.
     private boolean isStuckLongerThanGracePeriod(SagaStateSnapshot saga,
             List<SagaEvent> events, String failureEventType) {
-        Instant firstFailure = events.stream()
+        Optional<Instant> firstFailure = events.stream()
             .filter(e -> e.getEventType().equals(failureEventType))
             .map(SagaEvent::getTimestamp)
-            .findFirst()
-            .orElse(Instant.now());
-        return Duration.between(firstFailure, Instant.now())
+            .findFirst();
+        if (firstFailure.isEmpty()) {
+            return false;  // no failure events — crash recovery, not stuck
+        }
+        return Duration.between(firstFailure.get(), clock.instant())
             .compareTo(compensationGracePeriod) > 0;
     }
 
@@ -2689,52 +2873,6 @@ public class SagaRecoveryManager {
 All in-progress statuses (`RUNNING`, `CONFIRMING`, `COMPENSATING`) follow the same two-phase retry pattern: immediate retry in the engine → periodic recovery retry → time-based escalation after the grace period. Escalation checks use step-level failure events (`STEP_FAILED`, `STEP_COMPENSATION_FAILED`) — sagas with no failure events (crash recovery) skip the escalation check and proceed directly to resume.
 
 ```java
-    /**
-     * Replay events to reconstruct ExecutionContext for resumption.
-     * Accumulates step outputs into the context data map, sets the next event sequence,
-     * and derives the current saga state from the event stream.
-     * A typical saga has 5-15 events — trivial cost.
-     */
-    private ExecutionContext replayEvents(SagaStateSnapshot saga, List<SagaEvent> events) {
-        ExecutionContext context = new ExecutionContext(saga.getSagaId(), Map.of());
-        SagaStatus status = SagaStatus.RUNNING;
-
-        for (SagaEvent event : events) {
-            switch (event.getEventType()) {
-                case SagaEvent.SAGA_STARTED:
-                    Map<String, Object> input = fromJson(event.getPayload());
-                    context = new ExecutionContext(saga.getSagaId(), input);
-                    break;
-                case SagaEvent.STEP_COMPLETED:
-                    StepResult result = StepResult.fromJson(event.getPayload());
-                    context.merge(result);
-                    break;
-                case SagaEvent.STEP_FAILED:
-                case SagaEvent.STEP_COMPENSATION_FAILED:
-                    context.markStepFailed(event.getStepIndex());
-                    break;
-                case SagaEvent.SAGA_COMPENSATING:
-                case SagaEvent.SAGA_CONFIRMING:
-                case SagaEvent.SAGA_COMPLETED:
-                case SagaEvent.SAGA_COMPENSATED:
-                case SagaEvent.SAGA_ESCALATED:
-                    status = event.getTargetStatus();
-                    break;
-                // Step-level events (STEP_WAITING, STEP_CONFIRMED, STEP_COMPENSATED)
-                // don't change saga status or track failures.
-            }
-        }
-
-        // Reconstruct in-memory tracking fields from the event stream.
-        // nextEventSequence = total events replayed (events are 0-indexed by sequence).
-        // Sequences are guaranteed dense (no gaps) because all call sites advance
-        // the counter only after a successful write (nextSequence() + advanceSequence()).
-        // currentState = saga snapshot updated to reflect replayed status.
-        context.setNextEventSequence(events.size());
-        context.setCurrentState(saga.withTransition(status, saga.getUpdatedAt()));
-
-        return context;
-    }
 }
 ```
 
@@ -2938,7 +3076,12 @@ public class SagaEngine implements AutoCloseable {
         // Wait for in-flight sagas to drain.
         long deadline = System.currentTimeMillis() + shutdownTimeoutMs;
         while (!activeSagas.isEmpty() && System.currentTimeMillis() < deadline) {
-            Thread.sleep(100);  // virtual thread — cheap
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;  // proceed to mark remaining sagas for recovery
+            }
         }
 
         // Mark remaining active sagas for immediate recovery
@@ -3070,12 +3213,12 @@ public class AsyncDebitStep implements Step {
 StepResult result = executeWithRetry(step, context, policy, stepDeadline);
 
 if (result.isPending()) {
-    // Park the saga — append STEP_WAITING event, release the thread.
-    // The saga will be resumed by completeStep() when the callback arrives.
-    store.appendEvent(sagaId, context.nextSequence(),
-        SagaEvent.stepWaiting(i));
-    context.advanceSequence();
-    return store.getStateSnapshot(sagaId);  // returns with status=RUNNING
+    // Park the saga — release the thread without appending an event.
+    // The saga stays RUNNING with step i as the next to execute
+    // (lastCompleted + 1). The saga will be resumed either by:
+    //   1. completeStep() when the callback arrives, or
+    //   2. Recovery, which re-dispatches the step (participant is idempotent).
+    return store.getStateSnapshot(sagaId);
 }
 
 // Synchronous completion — continue as before
@@ -3108,27 +3251,30 @@ public SagaStateSnapshot completeStep(String sagaId, String stepName,
                                   Map<String, Object> output) {
     SagaStateSnapshot saga = store.getStateSnapshot(sagaId);
     if (saga == null) throw new SagaNotFoundException(sagaId);
+    if (saga.getStatus() != SagaStatus.RUNNING) {
+        return saga;  // saga already moved on (compensating, escalated, etc.) — ignore late callback
+    }
 
-    // Replay events to find the WAITING step
-    List<SagaEvent> events = store.getEvents(sagaId);
-    SagaEvent waitingEvent = events.stream()
-        .filter(e -> e.getEventType().equals(SagaEvent.STEP_WAITING)
-                  && e.getStepName().equals(stepName))
-        .findFirst()
-        .orElseThrow(() -> new IllegalStateException(
-            "Step " + stepName + " is not in WAITING status"));
-
-    // Rebuild context from events (also reconstructs nextEventSequence and currentState)
     SagaDefinition def = loadDefinition(saga);
-    ExecutionContext context = replayEvents(saga, events);
+    List<SagaEvent> events = store.getEvents(sagaId);
+    ExecutionContext context = engine.replayEvents(saga, events);
+
+    // Resolve step index from definition and validate
+    int stepIndex = def.getStepIndex(stepName);
+    boolean alreadyCompleted = events.stream()
+        .anyMatch(e -> e.getEventType().equals(SagaEvent.STEP_COMPLETED)
+                    && e.getStepIndex() == stepIndex);
+    if (alreadyCompleted) {
+        return saga;  // idempotent: callback already processed
+    }
 
     // Append step completed event with the callback result
     store.appendEvent(sagaId, context.nextSequence(),
-        SagaEvent.stepCompleted(waitingEvent.getStepIndex(), stepName, StepResult.of(output)));
+        SagaEvent.stepCompleted(stepIndex, stepName, StepResult.of(output)));
     context.advanceSequence();
     context.merge(StepResult.of(output));
 
-    return engine.resumeFrom(def, context, waitingEvent.getStepIndex() + 1);
+    return engine.resumeFrom(def, context, stepIndex + 1);
 }
 ```
 
@@ -3265,22 +3411,24 @@ The differences from a Saga definition: `"mode": "TCC"`, and no `recoveryStrateg
 
 ### Engine Execution Logic (Unified Model)
 
-TCC and Saga share the same pivot-based execution loop (`executeSagaSteps`). For TCC, the engine expands N user-defined TCC steps into a 2N-step plan using adapters before running the unified loop:
+TCC and Saga share the same pivot-based execution loop (`executeSagaSteps`). For TCC, the engine expands N user-defined TCC steps into a 2N-step plan using `TccReserveStep` and `TccConfirmStep` wrappers before running the unified loop:
 
 ```
 TCC expansion (3 user steps → 6 plan slots):
-  [debit.try, credit.try, ship.try (pivot), debit.confirm, credit.confirm, ship.confirm]
-   └── compensatable (cancel on failure) ──┘  └── retriable (retry on failure) ──────────┘
+  [debit.reserve, credit.reserve, ship.reserve (pivot), debit.confirm, credit.confirm, ship.confirm]
+   └── compensatable (cancel on failure) ────────────┘  └── retriable (retry on failure) ──────────┘
 ```
 
 The expansion in `SagaEngine.executeSteps()`:
 
 ```java
-List<Step> plan;
+List<StepWithPolicy> plan;
 if (def.getMode() == SagaMode.TCC) {
-    plan = expandTccPlan(def);             // 2N adapter steps
+    plan = expandTccPlan(def);
 } else {
-    plan = def.getSteps().stream().map(this::instantiate).toList();
+    plan = def.getSteps().stream()
+        .map(stepDef -> new StepWithPolicy(instantiate(stepDef), resolveRetryPolicy(stepDef, def)))
+        .toList();
 }
 executeSagaSteps(plan, def.getPivotPolicy(), context, startIndex);
 ```
@@ -3296,11 +3444,11 @@ if (pivot.crossingEvent() != null && i == pivot.index() + 1
 }
 ```
 
-The adapters (`TccTryAdapter`, `TccConfirmAdapter`) bridge `TccStep` methods to the `Step` interface. `TccTryAdapter.execute()` calls `reserve()` and `compensate()` calls `cancel()`. `TccConfirmAdapter.execute()` calls `confirm()` and `compensate()` is a no-op (confirm steps are always after the pivot, so they are retriable, not compensatable). See the adapter definitions in the [Core Engine](#state-machine-parser--execution-engine) section.
+`TccReserveStep` and `TccConfirmStep` wrap `TccStep` methods into the `Step` interface. `TccReserveStep.execute()` calls `reserve()` and `compensate()` calls `cancel()`. `TccConfirmStep.execute()` calls `confirm()` and `compensate()` is a no-op (confirm steps are always after the pivot, so they are retriable, not compensatable). See the definitions in the [Core Engine](#sagaengine-core-execution-logic) section.
 
 ### Confirm Retry Behavior
 
-The confirm phase has a critical property: **it must always succeed**. Resources are already reserved (Try succeeded), so confirmation is just committing the reservation. In the unified model, confirm steps are `TccConfirmAdapter` instances placed after the pivot. The standard `executeWithRetry()` handles retries, but with a more aggressive confirm retry policy:
+The confirm phase has a critical property: **it must always succeed**. Resources are already reserved (Try succeeded), so confirmation is just committing the reservation. In the unified model, confirm steps are `TccConfirmStep` instances placed after the pivot. The standard `executeWithRetry()` handles retries, but with a more aggressive confirm retry policy:
 
 ```java
 // --- engine/RetryPolicy.java ---
@@ -3426,7 +3574,7 @@ This is fragile — type mismatches are runtime errors, parameter mapping is com
 
 ```java
 // Our approach — type-safe, no reflection
-registry.register("account-service", GrpcInvoker.builder(accountStub)
+registry.register("account-service", GrpcInvoker.newBuilder(accountStub)
     .action("debit", (stub, ctx) -> {
         var resp = stub.debit(DebitRequest.newBuilder()
             .setAccountId(ctx.get("accountId", String.class))
@@ -3520,7 +3668,7 @@ public class GrpcInvoker<S> implements ServiceInvoker {
     }
 
     // Builder pattern (see examples above)
-    public static <S> Builder<S> builder(S stub) { return new Builder<>(stub); }
+    public static <S> Builder<S> newBuilder(S stub) { return new Builder<>(stub); }
 }
 ```
 
@@ -3533,7 +3681,7 @@ public class GrpcInvoker<S> implements ServiceInvoker {
 | Layer | Who defines proto | Who generates stubs | How stubs are used |
 |-------|------------------|--------------------|--------------------|
 | **Layer 1** (Step) | Participant service | Orchestrator adds generated jar to classpath | Step author calls stub directly in `execute()` |
-| **Layer 2** (GrpcInvoker) | Participant service | Orchestrator adds generated jar to classpath | Passed to `GrpcInvoker.builder(stub)` at startup |
+| **Layer 2** (GrpcInvoker) | Participant service | Orchestrator adds generated jar to classpath | Passed to `GrpcInvoker.newBuilder(stub)` at startup |
 | **Layer 2b** (Declarative) | Participant service | Orchestrator adds generated jar to classpath | `GrpcTransportAdapter` uses generated message types and `MethodDescriptor` via reflection |
 | **Phase 7** (saga protocol) | Saga engine project | Both coordinator and participant | Coordinator API + participant protocol — published by the saga engine project |
 
@@ -4461,111 +4609,14 @@ public class KafkaNotificationStep implements Step {
 
 **When to use**: One or two steps need to talk to a queue; the rest are direct calls.
 
-### Option B: Outbox Relay (Guaranteed Delivery)
-
-The `saga_events` table doubles as an outbox — each event row has a `published` column. A separate background relay process polls unpublished rows and forwards them to an external broker. This is the same approach Eventuate Tram uses (CDC/Debezium can also tail the events table directly).
-
-```
-  SagaEngine                       Outbox Relay (background)      Consumer
-    │                                   │                            │
-    ├─► execute step                    │                            │
-    ├─► appendEvent(saga_events) ─────┐│                            │
-    │                                 ││                            │
-    │                    ┌────────────┘│                            │
-    │                    ▼             │                            │
-    │              saga_events table   │                            │
-    │              (published=false)   │                            │
-    │                    │             │                            │
-    │                    └──► poll ────┤                            │
-    │                                 ├─► publish to Kafka ────────►│
-    │                                 ├─► mark published=true      │
-```
-
-Because the event is written as the saga state update itself (not a separate outbox INSERT), there is **no dual-write problem by design** — the event IS the state update.
-
-The relay is a small background component (~50 LoC):
-
-```java
-public class OutboxRelay implements Runnable {
-    private final DistributedTransactionManager txManager;
-    private final KafkaProducer<String, String> producer;
-
-    @Override
-    public void run() {
-        while (!Thread.currentThread().isInterrupted()) {
-            DistributedTransaction tx = null;
-            try {
-                tx = txManager.begin();
-
-                // Scan for unpublished events
-                // In production, partition by saga_id or use a secondary
-                // index to avoid full table scan
-                List<Result> events = tx.scan(Scan.newBuilder()
-                    .namespace(SagaSchema.NAMESPACE).table("saga_events")
-                    // ... filter published=false ...
-                    .build());
-
-                for (Result event : events) {
-                    String topic = event.getText("event_type");
-                    String payload = event.getText("payload");
-                    String sagaId = event.getText("saga_id");
-                    int sequence = event.getInt("sequence");
-
-                    // Publish to broker
-                    producer.send(new ProducerRecord<>(topic, payload)).get();
-
-                    // Mark as published
-                    tx.update(Update.newBuilder()
-                        .namespace(SagaSchema.NAMESPACE).table("saga_events")
-                        .partitionKey(Key.ofText("saga_id", sagaId))
-                        .clusteringKey(Key.ofInt("sequence", sequence))
-                        .booleanValue("published", true)
-                        .build());
-                }
-
-                tx.commit();
-            } catch (Exception e) {
-                abortQuietly(tx);
-                // Log and retry on next poll cycle
-            }
-
-            Thread.sleep(pollIntervalMs);
-        }
-    }
-}
-```
-
-**When to use**: You need guaranteed event delivery to external systems, decoupled from saga execution.
-
-### Option C: Both Combined
-
-Steps do direct calls for orchestration (payments, inventory); the outbox emits events for downstream consumers who don't participate in the saga (analytics, notifications).
-
-```
-  SagaEngine
-    │
-    ├─► DebitStep.execute()          ← direct call (participates in saga)
-    │     └─► outbox: "DEBITED"      ← event for external consumers
-    │
-    ├─► CreditStep.execute()         ← direct call (participates in saga)
-    │     └─► outbox: "CREDITED"     ← event for external consumers
-    │
-    └─► done
-         └─► outbox: "SAGA_COMPLETED"
-
-  Meanwhile, OutboxRelay ──► Kafka ──► Analytics service (not part of the saga)
-```
-
 ### Which to Choose
 
 | Approach | When to Use |
 |---|---|
-| **No broker** (Phase 1 default) | All participants are in-process or callable via RPC |
-| **Option A** (Step wraps producer) | One or two steps need to talk to a queue; rest are direct calls |
-| **Option B** (Outbox relay) | Guaranteed event delivery to external systems, decoupled from saga execution |
-| **Both combined** | Steps do direct calls for orchestration; outbox emits events for non-participating consumers |
+| **No broker** (default) | All participants are in-process or callable via RPC |
+| **Step wraps producer** | One or two steps need to talk to a queue; rest are direct calls |
 
-The key design principle: **the engine never changes.** Broker support is purely at the `Step` implementation level or the outbox relay level.
+The key design principle: **the engine never changes.** Broker support is purely at the `Step` implementation level — the engine is unaware of message brokers.
 
 ---
 
@@ -4582,6 +4633,7 @@ public class SagaManagerBuilder {
     private String ownerId = UUID.randomUUID().toString();  // random on each startup; override with pod name for observability
     private long recoveryTimeoutMs = 60_000;       // stale saga threshold (1 min)
     private long recoveryIntervalSeconds = 30;
+    private int maxEventPayloadBytes = 64 * 1024;  // 64 KB default
     private List<SagaEventListener> eventListeners = new ArrayList<>();
 
     public SagaManagerBuilder store(SagaStore store) {
@@ -4601,6 +4653,11 @@ public class SagaManagerBuilder {
 
     public SagaManagerBuilder recoveryIntervalSeconds(long seconds) {
         this.recoveryIntervalSeconds = seconds;
+        return this;
+    }
+
+    public SagaManagerBuilder maxEventPayloadBytes(int maxBytes) {
+        this.maxEventPayloadBytes = maxBytes;
         return this;
     }
 
@@ -4641,8 +4698,8 @@ Admin admin = factory.getTransactionAdmin();
 SagaSchema.createAll(admin);
 
 // Wire with plain Java builder (no Guice/Spring/CDI needed)
-SagaStore store = new ScalarDbSagaStore(txManager);
-SagaManager sagaManager = new SagaManagerBuilder()
+SagaStore store = new ScalarDbSagaStore(txManager, 64 * 1024, 10_000, Duration.ofMinutes(5));
+SagaManager sagaManager = SagaManagerBuilder.newBuilder()
     .store(store)
     .recoveryTimeoutMs(60_000)     // stale saga threshold (1 min)
     .recoveryIntervalSeconds(30)
@@ -4673,21 +4730,7 @@ System.out.println(result.getStatus());  // COMPLETED or COMPENSATED
 
 ### What It Does
 
-Provides a lightweight, in-memory testing framework for saga definitions — no database required. This is a genuine differentiator against Seata/MicroTx/Narayana, none of which provide testing utilities. Temporal's replay-based testing framework is widely cited as their biggest DX win.
-
-### InMemorySagaStore
-
-```java
-// --- testing/InMemorySagaStore.java ---
-// In-memory implementation of SagaStore for testing. No database, no ScalarDB.
-public class InMemorySagaStore implements SagaStore {
-    private final Map<String, SagaStateSnapshot> index = new ConcurrentHashMap<>();
-    private final Map<String, List<SagaEvent>> events = new ConcurrentHashMap<>();
-
-    // All SagaStore methods implemented with simple in-memory maps.
-    // Supports full saga lifecycle: create, append events, recovery scan, event replay.
-}
-```
+Provides a lightweight integration testing framework for saga definitions. Uses `ScalarDbSagaStore` backed by in-memory SQLite — tests the real store code path with no external database required. This is a genuine differentiator against Seata/MicroTx/Narayana, none of which provide testing utilities. Temporal's replay-based testing framework is widely cited as their biggest DX win.
 
 ### MockStep
 
@@ -4724,7 +4767,7 @@ public class MockStep implements Step {
 // --- testing/SagaTestHarness.java ---
 public class SagaTestHarness {
     private final SagaDefinition definition;
-    private final InMemorySagaStore store;
+    private final ScalarDbSagaStore store;  // backed by in-memory SQLite
     private final Map<String, MockStep> mockSteps;
 
     public static Builder forDefinition(SagaDefinition definition) {
@@ -4862,8 +4905,8 @@ public class SagaDevServerConfig {
     private final String sagaDefinitionPath;      // classpath resource dir
     private final boolean autoOpenBrowser;        // default: false
 
-    public static Builder builder() { return new Builder(); }
-    public static SagaDevServerConfig defaults() { return builder().build(); }
+    public static Builder newBuilder() { return new Builder(); }
+    public static SagaDevServerConfig defaults() { return newBuilder().build(); }
 }
 ```
 
@@ -4887,7 +4930,7 @@ class MoneyTransferSagaTest {
     @BeforeAll
     static void setUp() {
         devServer = SagaDevServer.create(
-            SagaDevServerConfig.builder()
+            SagaDevServerConfig.newBuilder()
                 .port(0)                           // random port
                 .sagaDefinitionPath("sagas/")
                 .build());
@@ -4949,8 +4992,9 @@ public interface SagaAdminService {
     SagaStateSnapshot retrySaga(String sagaId);
 
     // Reset ESCALATED sagas back to COMPENSATING so recovery retries compensation.
-    // Optionally filtered by saga name. Returns the number of sagas reset.
-    int resetEscalated(@Nullable String sagaName);
+    // Filtered by query (sagaName, fromTime, toTime). Status is forced to ESCALATED
+    // regardless of query. Paginates internally to bound memory. Returns the count.
+    int resetEscalated(SagaQuery query);
 
     // Aggregate metrics across all saga instances.
     SagaMetrics getMetrics();
@@ -4969,9 +5013,13 @@ public class SagaQuery {
     private final int pageSize;           // default: 50, max: 500
     private final String pageToken;       // opaque cursor; null = first page
 
-    public static Builder builder() { return new Builder(); }
+    public static Builder newBuilder() { return new Builder(); }
+    public static Builder newBuilder(SagaQuery prototype) { return new Builder(prototype); }
 
     public static class Builder {
+        Builder() {}
+        Builder(SagaQuery prototype) { /* copy all fields */ }
+
         public Builder statusIn(SagaStatus... statuses);
         public Builder sagaName(String name);
         public Builder fromTime(Instant from);
@@ -5008,14 +5056,12 @@ public class SagaDetail {
 }
 
 // --- admin/SagaMetrics.java ---
+// Duration percentiles and failure rates are handled by OpenTelemetry
+// histograms (saga.duration, saga.step.duration). This class provides
+// operational counts for the Admin API.
 public class SagaMetrics {
     private final Map<SagaStatus, Long> countByStatus;
     private final Map<String, Long> countBySagaName;
-    private final Duration avgDuration;
-    private final Duration p50Duration;
-    private final Duration p99Duration;
-    private final double failureRate;
-    private final double compensationFailureRate;
 }
 ```
 
@@ -5026,6 +5072,7 @@ public class SagaMetrics {
 public class DefaultSagaAdminService implements SagaAdminService {
     private final SagaStore store;
     private final SagaManager sagaManager;
+    private final String ownerId;
 
     @Override
     public SagaPage<SagaStateSnapshot> listSagas(SagaQuery query) {
@@ -5045,6 +5092,11 @@ public class DefaultSagaAdminService implements SagaAdminService {
     public SagaStateSnapshot triggerCompensation(String sagaId) {
         requireStatus(sagaId, SagaStatus.RUNNING);
         requireHasEvent(sagaId, SagaEvent.STEP_FAILED);
+        SagaStateSnapshot saga = store.getStateSnapshot(sagaId);
+        SagaStateSnapshot claimed = store.claimForRecovery(saga, ownerId);
+        if (claimed == null) {
+            throw new SagaConcurrentModificationException(sagaId);
+        }
         return sagaManager.compensate(sagaId);
     }
 
@@ -5060,30 +5112,43 @@ public class DefaultSagaAdminService implements SagaAdminService {
     public SagaStateSnapshot retrySaga(String sagaId) {
         requireStatus(sagaId, SagaStatus.RUNNING);
         requireHasEvent(sagaId, SagaEvent.STEP_FAILED);
+        SagaStateSnapshot saga = store.getStateSnapshot(sagaId);
+        SagaStateSnapshot claimed = store.claimForRecovery(saga, ownerId);
+        if (claimed == null) {
+            throw new SagaConcurrentModificationException(sagaId);
+        }
         return sagaManager.resume(sagaId);
     }
 
     @Override
-    public int resetEscalated(@Nullable String sagaName) {
-        SagaQuery.Builder qb = SagaQuery.builder()
-            .statusIn(SagaStatus.ESCALATED);
-        if (sagaName != null) {
-            qb.sagaName(sagaName);
-        }
-        List<SagaStateSnapshot> escalated = store.listStateSnapshots(qb.build()).getItems();
+    public int resetEscalated(SagaQuery query) {
+        // Force ESCALATED status regardless of what the caller passed
+        SagaQuery effectiveQuery = SagaQuery.newBuilder(query)
+            .statusIn(SagaStatus.ESCALATED)
+            .pageToken(null)
+            .build();
+
         int count = 0;
-        for (SagaStateSnapshot saga : escalated) {
-            store.recordTransition(saga,
-                store.getEvents(saga.getSagaId()).size(),
-                SagaEvent.sagaCompensating());
-            count++;
-        }
+        SagaQuery pageQuery = effectiveQuery;
+        do {
+            SagaPage<SagaStateSnapshot> page = store.listStateSnapshots(pageQuery);
+            for (SagaStateSnapshot saga : page.getItems()) {
+                store.recordTransition(saga,
+                    store.getEvents(saga.getSagaId()).size(),
+                    SagaEvent.sagaCompensating());
+                count++;
+            }
+            pageQuery = page.getNextPageToken() != null
+                ? SagaQuery.newBuilder(effectiveQuery)
+                    .pageToken(page.getNextPageToken()).build()
+                : null;
+        } while (pageQuery != null);
         return count;
     }
 
     @Override
     public SagaMetrics getMetrics() {
-        return store.computeMetrics();
+        return new SagaMetrics(store.countByStatus(), store.countBySagaName());
     }
 }
 ```
@@ -5209,6 +5274,18 @@ public class OpenTelemetrySagaListener implements SagaEventListener {
     }
 
     @Override
+    public void onSagaCompensated(String sagaId, Duration totalDuration) {
+        activeSagaGauge.add(-1);
+        sagaDurationHistogram.record(totalDuration.toMillis());
+
+        Span span = sagaSpans.remove(sagaId);
+        if (span != null) {
+            span.setStatus(StatusCode.ERROR, "Compensated");
+            span.end();
+        }
+    }
+
+    @Override
     public void onRecoveryClaimed(String sagaId, String ownerId) {
         recoveryClaimCounter.add(1,
             Attributes.of(AttributeKey.stringKey("recovery.owner"), ownerId));
@@ -5234,7 +5311,7 @@ public class OpenTelemetrySagaListener implements SagaEventListener {
 Register the listener via the builder:
 
 ```java
-SagaManager sagaManager = new SagaManagerBuilder()
+SagaManager sagaManager = SagaManagerBuilder.newBuilder()
     .store(store)
     .addEventListener(new OpenTelemetrySagaListener(tracer, meter))
     .build();
@@ -5338,23 +5415,29 @@ The async step completion endpoint (`POST /api/sagas/{sagaId}/steps/{stepName}/c
 When a step returns `StepResult.pending()`, the engine generates a step-scoped HMAC callback token:
 
 ```java
+long issuedAt = Instant.now().getEpochSecond();
 String token = HmacUtils.hmacSha256Hex(callbackSecret,
-    sagaId + ":" + stepName + ":" + stepIndex);
+    sagaId + ":" + stepName + ":" + stepIndex + ":" + issuedAt);
 ```
 
-The token is included in the callback URL returned to the participant:
+The token and timestamp are included in the callback URL returned to the participant:
 
 ```
-POST /api/sagas/{sagaId}/steps/{stepName}/complete?token={hmac}
+POST /api/sagas/{sagaId}/steps/{stepName}/complete?token={hmac}&iat={issuedAt}
 ```
 
-The callback endpoint validates the token before processing. Requests with missing or invalid tokens are rejected with `401 Unauthorized`. The `callbackSecret` is configured per coordinator instance:
+The callback endpoint validates the token before processing:
+1. Recompute the HMAC from the URL parameters (`sagaId`, `stepName`, `stepIndex`, `iat`)
+2. Compare using `MessageDigest.isEqual()` (constant-time) to prevent timing attacks
+3. Reject if `iat` is older than the step timeout (default: saga-level `timeoutMs`)
+
+Requests with missing, invalid, or expired tokens are rejected with `401 Unauthorized`. The `callbackSecret` is configured per coordinator instance:
 
 ```properties
 scalar.db.saga.security.callback-secret=<random-256-bit-key>
 ```
 
-This is the same pattern as Oracle MicroTx's signed transaction token (`Oracle_Tmm_Tx_Token`), simplified to HMAC-SHA256.
+This is the same pattern as Oracle MicroTx's signed transaction token (`Oracle_Tmm_Tx_Token`), simplified to HMAC-SHA256 with time-bounded validity.
 
 ### Embedded Mode: Framework Integration
 
@@ -5644,6 +5727,30 @@ The `quarkus-scalardb` extension already provides `DistributedTransactionManager
 
 **Estimation assumptions**: A skilled engineer using AI (Claude Code) for all development. Estimates include comprehensive unit tests and integration tests covering all classes. AI accelerates boilerplate and test scaffolding (~35% faster than manual), but transactional correctness, crash recovery testing, and spec compliance remain human-driven.
 
+### Testing Strategy
+
+| Phase | Unit (Mockito) | Integration (SagaTestHarness) | Transport (WireMock) |
+|---|---|---|---|
+| **1: Core Engine** | Engine, CompensationManager, RetryPolicy, RecoveryManager, etc. | SagaTestHarness (ScalarDB + SQLite + MockStep): saga lifecycle, crash recovery, TCC | N/A — no transport layer |
+| **2a: ServiceInvoker** | DeclarativeStepAdapter, expression resolution | Transport adapters | HttpTransportAdapter, GrpcTransportAdapter with WireMock |
+| **2b: Spring Boot** | Annotation scanner, auto-configuration | Spring Boot Test: @SagaStep scanning, property binding, controllers | N/A |
+| **3: Daemon Mode** | REST/gRPC handlers, RemoteSagaManager | In-process daemon + HTTP client: full REST API lifecycle | Daemon + WireMock: client → REST API → engine → participants |
+| **4a: Observability** | SagaEventListener, metrics | OpenTelemetry test SDK: verify spans/metrics | N/A |
+| **5: Admin API** | SagaAdminService, SagaQuery | SagaTestHarness: admin operations on real saga state | N/A |
+
+### Sample Application (Incremental)
+
+A money transfer sample application grows with each phase, serving as E2E validation, demo, and user reference.
+
+| Phase | What's added |
+|---|---|
+| **2a** | Basic sample: orchestrator + debit/credit participant services + HTTP transport + docker-compose |
+| **2b** | Spring Boot version of the orchestrator (annotation-based) |
+| **3** | Daemon mode variant: daemon + client SDK calling REST API |
+| **4a** | OpenTelemetry: Jaeger/Zipkin in docker-compose, trace visualization |
+| **4c** | Dev server: local development workflow demo |
+| **5** | Admin API: admin dashboard usage, manual retry/compensation demo |
+
 ## Phase 1: Core Engine
 
 **Scope:** Core engine + SagaStore + recovery (with status table) + timeouts + virtual threads + graceful shutdown + saga versioning + compensation retry + SagaContext validation + TCC mode + MIXED recovery strategy (pivot transaction).
@@ -5659,7 +5766,6 @@ The `quarkus-scalardb` extension already provides `DistributedTransactionManager
 | `SagaContext.java` | Public interface (3 methods: `getSagaId`, `get`, `put`) — what Step implementations see | ~10 | Trivial |
 | `ExecutionContext.java` | Engine-internal: implements `SagaContext`, adds type validation + event sequencing + state tracking + failure tracking | ~70 | Trivial |
 | `SagaStatus.java` | Enum (6 values: RUNNING, CONFIRMING, COMPLETED, COMPENSATING, COMPENSATED, ESCALATED) | ~10 | Trivial |
-| `StepStatus.java` | Enum (4 values: WAITING (daemon mode only), COMPLETED, CONFIRMED, FAILED) | ~5 | Trivial |
 | `SagaDefinition.java` | POJO + inner `StepDefinition` (with `pivot` flag) + SagaMode + RecoveryStrategy (BACKWARD/FORWARD/MIXED) + `getPivotIndex()` + validation | ~80 | Trivial |
 | `SagaStateSnapshot.java` | Read-only view of saga state | ~40 | Trivial |
 | `SagaManager.java` | Interface (8 methods incl. start, startAsync ×2; completeStep is daemon mode only) | ~25 | Trivial |
@@ -5667,15 +5773,16 @@ The `quarkus-scalardb` extension already provides `DistributedTransactionManager
 | **engine/** | | | |
 | `RetryPolicy.java` | Config POJO + default/compensation/confirm factories | ~50 | Trivial |
 | `CompensationManager.java` | Reverse-loop + retry + stop on failure (throws `StepCompensationException`) | ~70 | Low |
-| `SagaEngine.java` | createSaga (server- or client-supplied ID) + executeSaga + execute (convenience) + resumeFrom + unified pivot-based loop (`executeSagaSteps`) + `expandTccPlan` (TCC→adapter expansion) + retry + timeout + async step handling + error routing | ~310 | **Medium** |
-| `TccTryAdapter.java` | Internal: adapts `TccStep.reserve()`/`cancel()` → `Step.execute()`/`compensate()` | ~20 | Trivial |
-| `TccConfirmAdapter.java` | Internal: adapts `TccStep.confirm()` → `Step.execute()`, compensate = no-op | ~20 | Trivial |
+| `SagaEngine.java` | createSaga (server- or client-supplied ID) + executeSaga + execute (convenience) + resumeFrom + unified pivot-based loop (`executeSagaSteps`) + `expandTccPlan` (TCC→StepWithPolicy expansion) + retry + timeout + async step handling + error routing | ~310 | **Medium** |
+| `StepWithPolicy.java` | Record bundling `Step` + `RetryPolicy` (internal) | ~5 | Trivial |
+| `TccReserveStep.java` | Wraps `TccStep.reserve()`/`cancel()` → `Step.execute()`/`compensate()` | ~20 | Trivial |
+| `TccConfirmStep.java` | Wraps `TccStep.confirm()` → `Step.execute()`, compensate = no-op | ~20 | Trivial |
 | `DefaultSagaManager.java` | Delegates to engine + recovery + startAsync (virtual thread submission + callback dispatch). completeStep is daemon mode only. | ~140 | Low |
 | `SagaManagerBuilder.java` | DI-free builder for wiring | ~60 | Low |
 | **parser/** | | | |
 | `SagaDefinitionParser.java` | Jackson JSON/YAML → SagaDefinition (detects format by file extension; uses `jackson-dataformat-yaml`) | ~80 | Low |
 | **store/** | | | |
-| `SagaStore.java` | Interface (appendEvent, recordTransition, findRecoverable, claimForRecovery, getEvents, registerDefinition, getDefinition) | ~40 | Trivial |
+| `SagaStore.java` | Interface (appendEvent, recordTransition, findRecoverableByBucket, claimForRecovery, getEvents, registerDefinition, getDefinition) | ~40 | Trivial |
 | `SagaEvent.java` | Event types + factory methods (each saga-level event carries its `targetStatus`) | ~90 | Low |
 | `SagaSchema.java` | 3 TableMetadata definitions (saga_events, saga_state, saga_definitions) + bucketOf() + createAll | ~100 | Low |
 | `ScalarDbSagaStore.java` | Append-only events + bucket-partitioned saga_state (DELETE+INSERT for status transitions) + bucket-parallel recovery scan + conflict-based claiming + definition persistence | ~450 | **Medium** |
@@ -5685,10 +5792,14 @@ The `quarkus-scalardb` extension already provides `DistributedTransactionManager
 | `TimeoutPolicy.java` | Per-step and per-saga deadline calculation | ~30 | Trivial |
 | **exception/** | | | |
 | 6 exception classes | StepExecutionException (with `retryable` flag), StepCompensationException, StepTimeoutException, SagaTimeoutException, SagaPersistenceException, SagaAlreadyExistsException | ~60 | Trivial |
+| **testing/** | | | |
+| `MockStep.java` | Configurable mock with execution/compensation history tracking | ~80 | Low |
+| `SagaTestHarness.java` | Builder + execute + assertions (executionOrder, compensationOrder, finalContext). Uses `ScalarDbSagaStore` backed by in-memory SQLite. | ~150 | Medium |
+| `CrashingStoreDecorator.java` | Decorator that throws `SimulatedCrashException` at configured step boundaries | ~60 | Low |
 | **Tests** | | | |
 | Unit tests (all classes: engine, compensation, retry, store, recovery, parser, builder, context, TCC) | | ~1,800 | Medium |
-| Integration tests (end-to-end: Saga mode + TCC mode, crash recovery, timeout) | | ~400 | Medium |
-| **Total** | | **~3,945** | |
+| Integration tests (via SagaTestHarness: Saga mode + TCC mode, crash recovery, timeout) | | ~400 | Medium |
+| **Total** | | **~4,235** | |
 
 ### Timeline
 
@@ -5700,8 +5811,9 @@ The `quarkus-scalardb` extension already provides `DistributedTransactionManager
 | SagaEngine + CompensationManager + RetryPolicy (Saga + TCC modes) | 1-1.5 days |
 | SagaRecoveryManager + graceful shutdown | 0.5 day |
 | Parser + Builder wiring + timeout enforcement | 0.25 day |
-| Tests: unit tests for all classes + integration tests | 1.5-2.5 days |
-| **Total** | **~5-7 working days** |
+| SagaTestHarness + MockStep + CrashingStoreDecorator | 0.5 day |
+| Tests: unit tests for all classes + integration tests (via harness) | 1.5-2.5 days |
+| **Total** | **~5.5-7.5 working days** |
 
 ### Where the Time Actually Goes
 
@@ -5830,7 +5942,7 @@ Either configuration works in either deployment mode.
 SagaManager manager = SagaManagerBuilder.newBuilder().store(store).build();
 
 // Daemon mode — same interface
-SagaManager manager = RemoteSagaManager.builder()
+SagaManager manager = RemoteSagaManager.newBuilder()
     .coordinatorUrl("http://coordinator:8080").build();
 
 // Both use the same API — sync and async work identically
@@ -5959,14 +6071,9 @@ The `409 Conflict` body carries the existing saga snapshot so the caller can ins
 | Tests (listener invocation, metrics assertions, span lifecycle) | | ~300 | Low |
 | **Phase 4a Total** | | **~525** | |
 | | | | |
-| **Phase 4b: Testing Harness (`scalardb-saga-testing`)** | | | |
-| **testing/** | | | |
-| `InMemorySagaStore.java` | Full `SagaStore` implementation with `ConcurrentHashMap` | ~200 | Low |
-| `MockStep.java` | Configurable mock with execution/compensation history tracking | ~80 | Low |
-| `SagaTestHarness.java` | Builder + execute + assertions (executionOrder, compensationOrder, finalContext) | ~150 | Medium |
-| `CrashingStoreDecorator.java` | Decorator that throws `SimulatedCrashException` at configured step boundaries | ~60 | Low |
-| Tests (all classes: InMemorySagaStore semantics, MockStep, harness assertions, crash simulation) | | ~500 | Medium |
-| **Phase 4b Total** | | **~990** | |
+| **Phase 4b: Testing Harness — moved to Phase 1** | | | |
+| Moved to Phase 1. `InMemorySagaStore` removed (ScalarDB + SQLite replaces it). | | | |
+| **Phase 4b Total** | | **~0** | |
 | | | | |
 | **Phase 4c: Local Development Server (`scalardb-saga-dev-server`)** | | | |
 | **devserver/** | | | |
@@ -5978,21 +6085,20 @@ The `409 Conflict` body carries the existing saga snapshot so the caller can ins
 | Tests (server startup, API routes, config loading, CLI args) | | ~350 | Low |
 | **Phase 4c Total** | | **~940** | |
 | | | | |
-| **Phase 4 Total** | | **~2,455** | |
+| **Phase 4 Total** | | **~1,465** | |
 
 ### Timeline
 
 | Work | Time |
 |---|---|
 | Phase 4a: OpenTelemetry listener + metrics + integration with engine + tests | 0.5-1 day |
-| Phase 4b: InMemorySagaStore + MockStep + SagaTestHarness + CrashingStoreDecorator + tests | 1.5-2 days |
+| Phase 4b: (moved to Phase 1) | 0 days |
 | Phase 4c: SagaDevServer (Javalin + SQLite + web UI + CLI) + tests | 1-1.5 days |
-| **Total** | **~3-4.5 working days** |
+| **Total** | **~1.5-2.5 working days** |
 
 ### Where the Time Actually Goes
 
-1. **InMemorySagaStore + its tests** (~35% of Phase 4b effort) — Must faithfully replicate all `SagaStore` semantics (append-only events, saga_state, recovery scan, conflict-based claiming) without ScalarDB. The store itself and its comprehensive tests (verifying semantic parity with `ScalarDbSagaStore`) are the tricky parts.
-2. **Web UI** (~30% of Phase 4c effort) — Even a minimal dashboard (saga list with status badges, step timeline, action buttons) requires frontend work. Consider using a pre-built admin template to save time. AI generates HTML/JS/CSS quickly.
+1. **Web UI** (~30% of Phase 4c effort) — Even a minimal dashboard (saga list with status badges, step timeline, action buttons) requires frontend work. Consider using a pre-built admin template to save time. AI generates HTML/JS/CSS quickly.
 3. **OpenTelemetry integration** is straightforward — the `SagaEventListener` callback interface keeps the engine decoupled from any specific telemetry SDK.
 
 ## Phase 5: Admin API
@@ -6086,6 +6192,7 @@ enum RecoveryStrategy {
   RECOVERY_STRATEGY_UNSPECIFIED = 0;
   BACKWARD = 1;
   FORWARD = 2;
+  MIXED = 3;
 }
 
 // --- Runtime API ---
@@ -6341,7 +6448,7 @@ The following features are not included in the initial phases but planned for fu
 
    ```java
    // v2 Java builder
-   SagaDefinition.builder("PlaceOrder")
+   SagaDefinition.newBuilder("PlaceOrder")
        .version("2.0")
        .recoveryStrategy(RecoveryStrategy.MIXED)
        .parallelSteps()
@@ -6410,7 +6517,7 @@ The following features are not included in the initial phases but planned for fu
    - **Event sequencing:** Batch-append events after the parallel group barrier. If the process crashes mid-parallel-group, all steps in the group are re-executed on recovery (idempotency required, same as today).
    - **Pivot interaction:** A step with `pivot: true` cannot be inside a parallel group — it must be a single step, because the pivot is a single go/no-go point. The engine validates this at registration time.
 
-3. **Outbox relay**: Background thread/process that reads unpublished events from `saga_events` and publishes to Kafka/RabbitMQ (or use CDC/Debezium to tail the table directly)
+3. **Event publishing**: Use CDC/Debezium to tail `saga_events` and publish to Kafka/RabbitMQ, or implement a polling publisher that reads events by sequence range
 4. **Participant SDK**: Optional participant-side SDK with `@SagaParticipant`, `@SagaAction`, `@SagaCompensation` annotations, built-in idempotency, and anomaly protection (empty rollback, suspension). The anomaly protection uses an INSERT-based barrier mechanism inspired by Seata's TCC Fence and DTM's Sub-Transaction Barrier. Since we don't control participant databases, this is an opt-in library. See "Participant Idempotency Levels" in ServiceInvoker and Framework Integration, and [scalardb-saga-barrier-sdk-research.md](scalardb-saga-barrier-sdk-research.md) for detailed research.
 5. **SubStateMachine (nesting)**: Compose sagas from sub-sagas for complex workflows
 6. **Loop execution**: Repeat steps based on collection inputs
