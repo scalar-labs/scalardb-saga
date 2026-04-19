@@ -133,6 +133,10 @@ com.scalar.db.saga/
 ├── exception/                   # Exception types
 │   ├── SagaPersistenceException.java
 │   ├── SagaAlreadyExistsException.java
+│   ├── SagaDefinitionException.java
+│   ├── SagaDefinitionNotFoundException.java
+│   ├── SagaNotFoundException.java
+│   ├── SagaConcurrentModificationException.java
 │   ├── StepExecutionException.java
 │   ├── StepCompensationException.java
 │   └── StepTimeoutException.java
@@ -1082,14 +1086,6 @@ public class SagaEngine {
     }
 
     /**
-     * Execute a previously created saga. Loads the instance from the store,
-     * then runs steps from the beginning.
-     */
-    public void executeSaga(String sagaId) {
-        executeSaga(store.getStateSnapshot(sagaId));
-    }
-
-    /**
      * Execute a previously created saga from a known SagaStateSnapshot (avoids a read-back).
      * Used by startAsync() which already has the instance from createSaga().
      */
@@ -1118,8 +1114,9 @@ public class SagaEngine {
     /**
      * Resume execution from a specific step index (used by crash recovery).
      */
-    public void resumeFrom(SagaDefinition def, ExecutionContext context, int fromStep) {
+    public SagaStateSnapshot resumeFrom(SagaDefinition def, ExecutionContext context, int fromStep) {
         executeSteps(def, context, fromStep);
+        return context.getCurrentState();
     }
 
     /**
@@ -1363,7 +1360,7 @@ public class SagaEngine {
     }
 
     /**
-     * Trigger compensation starting from a specific step index.
+     * Trigger compensation from the given step index down to step 0 (inclusive).
      * Builds the execution plan from the definition — for TCC, this produces
      * the expanded 2N-step plan whose compensate() delegates to tccStep.cancel().
      */
@@ -1814,6 +1811,11 @@ public class StepExecutionException extends Exception {
         this.retryable = retryable;
     }
 
+    public StepExecutionException(String message, Throwable cause, boolean retryable) {
+        super(message, cause);
+        this.retryable = retryable;
+    }
+
     public boolean isRetryable() { return retryable; }
 }
 ```
@@ -2174,6 +2176,10 @@ public interface SagaStore {
     SagaPage<SagaStateSnapshot> listStateSnapshots(SagaQuery query);
     Map<SagaStatus, Long> countByStatus();
     Map<String, Long> countBySagaName();
+
+    // Data retention — deletes all events and state for a terminal saga.
+    // Only sagas in COMPLETED, COMPENSATED, or ESCALATED status may be deleted.
+    void deleteSaga(String sagaId);
 }
 ```
 
@@ -2988,6 +2994,37 @@ public class SagaAlreadyExistsException extends RuntimeException {
 
     public String getSagaId() { return sagaId; }
     public SagaStateSnapshot getExisting() { return existing; }
+}
+
+// --- exception/SagaPersistenceException.java ---
+public class SagaPersistenceException extends RuntimeException {
+    public SagaPersistenceException(String message, Throwable cause) { super(message, cause); }
+}
+
+// --- exception/SagaDefinitionException.java ---
+public class SagaDefinitionException extends RuntimeException {
+    public SagaDefinitionException(String message) { super(message); }
+}
+
+// --- exception/SagaDefinitionNotFoundException.java ---
+public class SagaDefinitionNotFoundException extends RuntimeException {
+    public SagaDefinitionNotFoundException(String sagaName) {
+        super("No saga definition registered for: " + sagaName);
+    }
+}
+
+// --- exception/SagaNotFoundException.java ---
+public class SagaNotFoundException extends RuntimeException {
+    public SagaNotFoundException(String sagaId) {
+        super("Saga not found: " + sagaId);
+    }
+}
+
+// --- exception/SagaConcurrentModificationException.java ---
+public class SagaConcurrentModificationException extends RuntimeException {
+    public SagaConcurrentModificationException(String sagaId) {
+        super("Saga is being processed by another replica: " + sagaId);
+    }
 }
 ```
 
@@ -3863,7 +3900,7 @@ public class DeclarativeStepAdapter implements Step {
 
             // 2. Call the service via transport adapter
             Map<String, Object> response = transport.call(
-                actionCall.getService(), actionCall.getMethod(), request, ctx.getSagaId());
+                actionCall.getService(), actionCall.getMethod(), request, ctx.getSagaId(), name);
 
             // 3. Extract output fields from response
             Map<String, Object> output = extractOutput(actionCall.getOutput(), response);
@@ -3879,7 +3916,7 @@ public class DeclarativeStepAdapter implements Step {
         try {
             Map<String, Object> request = resolveExpressions(compensateCall.getRequest(), ctx);
             transport.call(compensateCall.getService(),
-                           compensateCall.getMethod(), request, ctx.getSagaId());
+                           compensateCall.getMethod(), request, ctx.getSagaId(), name);
         } catch (TransportException e) {
             throw new StepCompensationException(e);
         }
@@ -4634,6 +4671,8 @@ public class SagaManagerBuilder {
     private long recoveryTimeoutMs = 60_000;       // stale saga threshold (1 min)
     private long recoveryIntervalSeconds = 30;
     private int maxEventPayloadBytes = 64 * 1024;  // 64 KB default
+    private SagaEngine.ShutdownMode shutdownMode;  // null → engine default (WAIT_CURRENT_STEP)
+    private Long shutdownTimeoutMs;                 // null → engine default (30s or 300s)
     private List<SagaEventListener> eventListeners = new ArrayList<>();
 
     public SagaManagerBuilder store(SagaStore store) {
@@ -4661,6 +4700,16 @@ public class SagaManagerBuilder {
         return this;
     }
 
+    public SagaManagerBuilder shutdownMode(SagaEngine.ShutdownMode shutdownMode) {
+        this.shutdownMode = shutdownMode;
+        return this;
+    }
+
+    public SagaManagerBuilder shutdownTimeoutMs(long shutdownTimeoutMs) {
+        this.shutdownTimeoutMs = shutdownTimeoutMs;
+        return this;
+    }
+
     public SagaManagerBuilder addEventListener(SagaEventListener listener) {
         this.eventListeners.add(listener);
         return this;
@@ -4670,7 +4719,8 @@ public class SagaManagerBuilder {
         Objects.requireNonNull(store, "SagaStore is required");
         CompensationManager compensationManager = new CompensationManager(store);
         SagaEngine engine = new SagaEngine(store, compensationManager,
-                                            ownerId, eventListeners);
+                                            ownerId, eventListeners,
+                                            shutdownMode, shutdownTimeoutMs);
         SagaRecoveryManager recovery = new SagaRecoveryManager(
             store, engine, ownerId, recoveryTimeoutMs, recoveryIntervalSeconds);
         return new DefaultSagaManager(engine, store, recovery);
@@ -5067,6 +5117,8 @@ public class SagaMetrics {
 
 ### DefaultSagaAdminService
 
+All mutating admin operations (`triggerCompensation`, `forceComplete`, `retrySaga`, `resetEscalated`) should log the operator identity (from `SagaIdentity` in daemon mode, or caller-supplied in embedded mode) and the reason for the action.
+
 ```java
 // --- admin/DefaultSagaAdminService.java ---
 public class DefaultSagaAdminService implements SagaAdminService {
@@ -5191,6 +5243,8 @@ public interface SagaEventListener {
     default void onSagaCompleted(String sagaId, Duration totalDuration) {}
     default void onCompensationStarted(String sagaId, int fromStep) {}
     default void onStepCompensated(String sagaId, String stepName, int stepIndex) {}
+    default void onStepCompensationFailed(String sagaId, String stepName, int stepIndex,
+                                           Exception error) {}
     default void onSagaCompensated(String sagaId, Duration totalDuration) {}
     default void onSagaEscalated(String sagaId, String reason) {}
     default void onRecoveryClaimed(String sagaId, String ownerId) {}
@@ -5205,14 +5259,22 @@ public class OpenTelemetrySagaListener implements SagaEventListener {
     private final Tracer tracer;
     private final Meter meter;
 
-    // Metrics instruments
+    // Metrics instruments — saga-level
     private final LongCounter sagaStartedCounter;
     private final LongCounter sagaCompletedCounter;
-    private final LongCounter stepFailedCounter;
+    private final LongCounter sagaCompensatedCounter;
     private final LongCounter sagaEscalatedCounter;
     private final DoubleHistogram sagaDurationHistogram;
-    private final DoubleHistogram stepDurationHistogram;
     private final LongUpDownCounter activeSagaGauge;
+
+    // Metrics instruments — step-level
+    private final LongCounter stepCompletedCounter;
+    private final LongCounter stepFailedCounter;
+    private final LongCounter stepCompensatedCounter;
+    private final LongCounter stepCompensationFailedCounter;
+    private final DoubleHistogram stepDurationHistogram;
+
+    // Metrics instruments — recovery
     private final LongCounter recoveryClaimCounter;
 
     // Per-saga span tracking
@@ -5233,6 +5295,8 @@ public class OpenTelemetrySagaListener implements SagaEventListener {
     @Override
     public void onStepCompleted(String sagaId, String stepName, int stepIndex,
                                  StepResult result, Duration duration) {
+        stepCompletedCounter.add(1,
+            Attributes.of(AttributeKey.stringKey("saga.step"), stepName));
         stepDurationHistogram.record(duration.toMillis(),
             Attributes.of(
                 AttributeKey.stringKey("saga.step"), stepName,
@@ -5246,6 +5310,26 @@ public class OpenTelemetrySagaListener implements SagaEventListener {
                 .startSpan();
             stepSpan.end();
         }
+    }
+
+    @Override
+    public void onStepFailed(String sagaId, String stepName, int stepIndex,
+                              Exception error, int attemptCount) {
+        stepFailedCounter.add(1,
+            Attributes.of(AttributeKey.stringKey("saga.step"), stepName));
+    }
+
+    @Override
+    public void onStepCompensated(String sagaId, String stepName, int stepIndex) {
+        stepCompensatedCounter.add(1,
+            Attributes.of(AttributeKey.stringKey("saga.step"), stepName));
+    }
+
+    @Override
+    public void onStepCompensationFailed(String sagaId, String stepName, int stepIndex,
+                                          Exception error) {
+        stepCompensationFailedCounter.add(1,
+            Attributes.of(AttributeKey.stringKey("saga.step"), stepName));
     }
 
     @Override
@@ -5275,6 +5359,7 @@ public class OpenTelemetrySagaListener implements SagaEventListener {
 
     @Override
     public void onSagaCompensated(String sagaId, Duration totalDuration) {
+        sagaCompensatedCounter.add(1);
         activeSagaGauge.add(-1);
         sagaDurationHistogram.record(totalDuration.toMillis());
 
@@ -5299,11 +5384,15 @@ public class OpenTelemetrySagaListener implements SagaEventListener {
 |---|---|---|
 | `saga.started` | Counter | Total sagas started |
 | `saga.completed` | Counter | Total sagas completed successfully |
-| `saga.failed` | Counter | Total sagas that failed |
+| `saga.compensated` | Counter | Total sagas compensated (step failure) |
 | `saga.escalated` | Counter | Total sagas escalated (compensation failure) |
 | `saga.duration` | Histogram | End-to-end saga duration (ms) |
-| `saga.step.duration` | Histogram | Per-step execution duration (ms) |
 | `saga.active` | UpDownCounter | Currently active (in-flight) sagas |
+| `saga.step.completed` | Counter | Total step completions |
+| `saga.step.failed` | Counter | Total step failures (including retries) |
+| `saga.step.compensated` | Counter | Total step compensations |
+| `saga.step.compensation_failed` | Counter | Total step compensation failures |
+| `saga.step.duration` | Histogram | Per-step execution duration (ms) |
 | `saga.recovery.claimed` | Counter | Recovery claims by replica |
 
 ### Integration
@@ -5791,7 +5880,7 @@ A money transfer sample application grows with each phase, serving as E2E valida
 | **timeout/** | | | |
 | `TimeoutPolicy.java` | Per-step and per-saga deadline calculation | ~30 | Trivial |
 | **exception/** | | | |
-| 6 exception classes | StepExecutionException (with `retryable` flag), StepCompensationException, StepTimeoutException, SagaTimeoutException, SagaPersistenceException, SagaAlreadyExistsException | ~60 | Trivial |
+| 10 exception classes | StepExecutionException (with `retryable` flag), StepCompensationException, StepTimeoutException, SagaTimeoutException, SagaPersistenceException, SagaAlreadyExistsException, SagaDefinitionException, SagaDefinitionNotFoundException, SagaNotFoundException, SagaConcurrentModificationException | ~80 | Trivial |
 | **testing/** | | | |
 | `MockStep.java` | Configurable mock with execution/compensation history tracking | ~80 | Low |
 | `SagaTestHarness.java` | Builder + execute + assertions (executionOrder, compensationOrder, finalContext). Uses `ScalarDbSagaStore` backed by in-memory SQLite. | ~150 | Medium |
@@ -5949,6 +6038,7 @@ SagaManager manager = RemoteSagaManager.newBuilder()
 String sagaId = manager.start("transferMoney", input);                // sync, server-generated ID
 String sagaId = manager.startAsync("transferMoney", input);           // async, server-generated ID
 SagaStateSnapshot result = manager.getStateSnapshot(sagaId);          // poll
+manager.completeStep(sagaId, "debit", output);                        // async step callback
 
 // Idempotent variant with client-supplied ID (see "Client-Supplied Saga IDs" section)
 try {
@@ -5969,6 +6059,7 @@ try {
 | `/sagas` | GET | List sagas (with status filter, pagination) |
 | `/sagas/{id}` | GET | Get saga status and step details |
 | `/sagas/{id}/cancel` | PUT | Request saga cancellation (triggers compensation) |
+| `/sagas/{id}/steps/{stepName}/complete` | POST | Complete an async step via external callback (resumes parked saga) |
 | `/health` | GET | Health check (ScalarDB connectivity, recovery manager status) |
 
 **Sync vs async `POST /sagas`:**
