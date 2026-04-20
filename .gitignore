@@ -26,5 +26,14 @@ Thumbs.db
 *.war
 hs_err_pid*
 
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.jks
+*.keystore
+
 # Test
 /test-output/

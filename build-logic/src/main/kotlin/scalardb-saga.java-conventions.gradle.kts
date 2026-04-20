@@ -15,7 +15,6 @@ plugins {
 val libs = the<LibrariesForLibs>()
 
 group = "com.scalar.db.saga"
-version = "1.0.0-SNAPSHOT"
 
 base.archivesName = "scalardb-saga-${project.name}"
 
@@ -111,6 +110,7 @@ testing {
 }
 
 dependencies {
+    implementation(platform(libs.jackson.bom))
     compileOnly(libs.jspecify)
 
     testImplementation(libs.mockito.core)
@@ -121,6 +121,5 @@ dependencies {
 tasks.withType<Test>().configureEach {
     testLogging {
         events("passed", "skipped", "failed")
-        showStandardStreams = true
     }
 }
