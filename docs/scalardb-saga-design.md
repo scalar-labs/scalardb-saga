@@ -121,6 +121,7 @@ com.scalar.db.saga/
 │   ├── StepWithPolicy.java         # Internal: record bundling Step + RetryPolicy
 │   ├── TccReserveStep.java        # Internal: wraps TccStep.reserve/cancel → Step
 │   ├── TccConfirmStep.java        # Internal: wraps TccStep.confirm → Step
+│   ├── SagaDefinitionRegistry.java  # Definition registration + versioned lookup
 │   └── DefaultSagaManager.java
 ├── parser/                      # Definition loading
 │   └── SagaDefinitionParser.java
@@ -129,6 +130,7 @@ com.scalar.db.saga/
 │   ├── SagaSchema.java
 │   └── ScalarDbSagaStore.java   # Default implementation (ScalarDB)
 ├── recovery/                    # Crash recovery
+│   ├── RecoveryConfig.java         # Record: recovery timing + clock config
 │   └── SagaRecoveryManager.java
 ├── exception/                   # Exception types
 │   ├── SagaPersistenceException.java
@@ -1048,6 +1050,10 @@ public interface SagaManager extends AutoCloseable {
 
     // Daemon mode only: complete an async step via external callback (resumes parked saga)
     SagaStateSnapshot completeStep(String sagaId, String stepName, Map<String, Object> output);
+
+    // Start periodic crash recovery scanning.
+    // Call after registering all saga definitions. Delegates to SagaRecoveryManager.start().
+    void startRecovery();
 }
 
 // --- api/SagaCallback.java ---
@@ -1089,8 +1095,7 @@ public class SagaEngine {
      * Execute a previously created saga from a known SagaStateSnapshot (avoids a read-back).
      * Used by startAsync() which already has the instance from createSaga().
      */
-    public void executeSaga(SagaStateSnapshot saga, Map<String, Object> input) {
-        SagaDefinition def = resolveDefinition(saga.getSagaName(), saga.getDefinitionVersion());
+    public void executeSaga(SagaDefinition def, SagaStateSnapshot saga, Map<String, Object> input) {
         // createSaga wrote 1 event (SAGA_STARTED at seq 0) and set status RUNNING
         ExecutionContext context = new ExecutionContext(saga.getSagaId(), input);
         context.setNextEventSequence(1);        // next sequence after SAGA_STARTED
@@ -1152,11 +1157,13 @@ public class SagaEngine {
             } else {
                 plan = def.getSteps().stream()
                     .map(stepDef -> new StepWithPolicy(
-                        instantiate(stepDef), resolveRetryPolicy(stepDef, def)))
+                        instantiate(stepDef), resolveRetryPolicy(stepDef, def),
+                        stepDef.getTimeoutMs()))
                     .toList();
             }
 
-            executeSagaSteps(plan, def.getPivotPolicy(), context, startIndex);
+            executeSagaSteps(plan, def.getPivotPolicy(), context, startIndex,
+                             def.getTimeoutMs());
         } finally {
             unregisterActive(sagaId);
         }
@@ -1223,7 +1230,7 @@ public class SagaEngine {
      * Bundles a Step with its resolved RetryPolicy.
      * Internal record — not part of the public API.
      */
-    record StepWithPolicy(Step step, RetryPolicy retryPolicy) {}
+    record StepWithPolicy(Step step, RetryPolicy retryPolicy, long stepTimeoutMs) {}
 
     private List<StepWithPolicy> expandTccPlan(SagaDefinition def) {
         List<StepWithPolicy> reserves = new ArrayList<>();
@@ -1233,11 +1240,13 @@ public class SagaEngine {
             // Reserve: user-configured retry policy. Reserve is the main business logic —
             // users need control over retry attempts and backoff intervals.
             reserves.add(new StepWithPolicy(
-                new TccReserveStep(tccStep), resolveRetryPolicy(stepDef, def)));
+                new TccReserveStep(tccStep), resolveRetryPolicy(stepDef, def),
+                stepDef.getTimeoutMs()));
             // Confirm: hardcoded aggressive retry. Confirms MUST succeed — resources are
             // already reserved. confirmDefault() = 10 attempts, 500ms initial, 60s max.
             confirms.add(new StepWithPolicy(
-                new TccConfirmStep(tccStep), RetryPolicy.confirmDefault()));
+                new TccConfirmStep(tccStep), RetryPolicy.confirmDefault(),
+                stepDef.getTimeoutMs()));
         }
         List<StepWithPolicy> plan = new ArrayList<>(reserves);
         plan.addAll(confirms);
@@ -1276,15 +1285,24 @@ public class SagaEngine {
      * crossing the pivot boundary (e.g., CONFIRMING for TCC).
      */
     private void executeSagaSteps(List<StepWithPolicy> plan, PivotPolicy pivot,
-                                   ExecutionContext context, int startIndex) {
+                                   ExecutionContext context, int startIndex,
+                                   long sagaTimeoutMs) {
         String sagaId = context.getSagaId();
         int completedIndex = startIndex - 1;
+        long sagaDeadline = sagaTimeoutMs > 0
+            ? System.currentTimeMillis() + sagaTimeoutMs : 0;
 
         try {
             for (int i = startIndex; i < plan.size(); i++) {
                 // Graceful shutdown: stop between steps (saga stays RUNNING for recovery)
                 if (shouldStopBetweenSteps()) {
                     break;
+                }
+
+                // Saga-level timeout: check before each step
+                if (sagaDeadline > 0 && System.currentTimeMillis() > sagaDeadline) {
+                    throw new SagaTimeoutException(
+                        "Saga " + sagaId + " exceeded deadline of " + sagaTimeoutMs + "ms");
                 }
 
                 // Emit the crossing event once when transitioning past the pivot.
@@ -1295,9 +1313,11 @@ public class SagaEngine {
                 }
 
                 StepWithPolicy entry = plan.get(i);
+                long stepDeadline = calculateStepDeadline(entry.stepTimeoutMs(), sagaDeadline);
 
                 try {
-                    StepResult result = executeWithRetry(entry.step(), context, entry.retryPolicy());
+                    StepResult result = executeWithRetry(entry.step(), context,
+                                                         entry.retryPolicy(), stepDeadline);
 
                     // Append-only: 1 INSERT per step. No "step started"
                     // write, no lease renewal — recovery uses saga_state scan.
@@ -1371,7 +1391,8 @@ public class SagaEngine {
         } else {
             plan = def.getSteps().stream()
                 .map(stepDef -> new StepWithPolicy(
-                    instantiate(stepDef), resolveRetryPolicy(stepDef, def)))
+                    instantiate(stepDef), resolveRetryPolicy(stepDef, def),
+                    stepDef.getTimeoutMs()))
                 .toList();
         }
         // Only transition if not already COMPENSATING (recovery resumes mid-compensation)
@@ -1457,9 +1478,47 @@ public class SagaEngine {
 }
 ```
 
+### SagaDefinitionRegistry
+
+Centralized definition registry. `DefaultSagaManager` calls `register()`, while `SagaRecoveryManager` calls `resolve()`. Two-tier lookup: in-memory first, then store fallback (for definitions unregistered from memory after a redeploy).
+
+```java
+// --- engine/SagaDefinitionRegistry.java ---
+public class SagaDefinitionRegistry {
+    private final Map<String, SagaDefinition> definitions = new ConcurrentHashMap<>();
+    private final SagaStore store;
+
+    public SagaDefinitionRegistry(SagaStore store) {
+        this.store = store;
+    }
+
+    public void register(SagaDefinition definition) {
+        definitions.put(definition.getName(), definition);
+        definitions.put(definition.getName() + ":" + definition.getVersion(), definition);
+        store.registerDefinition(definition);
+    }
+
+    // Lookup by name only (latest registered version) — used when starting new sagas
+    @Nullable
+    public SagaDefinition get(String sagaName) {
+        return definitions.get(sagaName);
+    }
+
+    // Versioned lookup with store fallback — used during recovery and async completion
+    @Nullable
+    public SagaDefinition resolve(String sagaName, String version) {
+        SagaDefinition def = definitions.get(sagaName + ":" + version);
+        if (def == null) {
+            def = store.getDefinition(sagaName, version).orElse(null);
+        }
+        return def;
+    }
+}
+```
+
 ### DefaultSagaManager
 
-`DefaultSagaManager` implements the `SagaManager` interface. It delegates all saga lifecycle logic (creation, step execution, compensation) to `SagaEngine`, and handles definition registry, async threading, and callbacks.
+`DefaultSagaManager` implements the `SagaManager` interface. It delegates all saga lifecycle logic (creation, step execution, compensation) to `SagaEngine`, and handles definition registration (via `SagaDefinitionRegistry`), async threading, and callbacks.
 
 - **`start()`**: Delegates to `engine.execute()` — synchronous, blocks until the saga completes.
 - **`startAsync()`**: Calls `engine.createSaga()` to persist the saga, then submits `engine.executeSaga()` to a virtual thread. The caller gets back the `SagaStateSnapshot` immediately.
@@ -1470,6 +1529,9 @@ public class SagaEngine {
 // --- engine/DefaultSagaManager.java ---
 public class DefaultSagaManager implements SagaManager {
     private final SagaEngine engine;
+    private final SagaStore store;
+    private final SagaDefinitionRegistry registry;
+    private final SagaRecoveryManager recovery;
     private final ExecutorService asyncExecutor =
         Executors.newVirtualThreadPerTaskExecutor();
 
@@ -1528,7 +1590,7 @@ public class DefaultSagaManager implements SagaManager {
         // 2. Submit execution to a virtual thread (pass SagaStateSnapshot to avoid read-back)
         asyncExecutor.submit(() -> {
             try {
-                engine.executeSaga(saga, input);
+                engine.executeSaga(def, saga, input);
 
                 if (callback != null) {
                     // getStateSnapshot hits cache (populated by recordTransition) — no DB read
@@ -1550,8 +1612,24 @@ public class DefaultSagaManager implements SagaManager {
         return saga;
     }
 
+    @Override
+    public void register(SagaDefinition definition) {
+        registry.register(definition);
+    }
+
+    @Override
+    public void startRecovery() {
+        recovery.start();
+    }
+
+    @Override
+    public void close() {
+        if (recovery != null) recovery.stop();
+        engine.shutdown();
+    }
+
     private SagaDefinition getDefinition(String sagaName) {
-        SagaDefinition def = definitions.get(sagaName);
+        SagaDefinition def = registry.get(sagaName);
         if (def == null) {
             throw new SagaDefinitionNotFoundException(sagaName);
         }
@@ -2170,6 +2248,7 @@ public interface SagaStore {
     @Nullable SagaStateSnapshot claimForRecovery(SagaStateSnapshot saga, String newOwnerId);
     void markForRecovery(String sagaId);  // sets updated_at to epoch 0 for immediate recovery
     List<SagaEvent> getEvents(String sagaId);
+    int getEventCount(String sagaId);  // COUNT query — avoids materializing all events
 
     // Queries
     SagaStateSnapshot getStateSnapshot(String sagaId);
@@ -2701,23 +2780,35 @@ On application startup, scans `saga_state` for sagas stuck in `RUNNING` or `COMP
 ### Recovery Logic
 
 ```java
+// --- recovery/RecoveryConfig.java ---
+record RecoveryConfig(long recoveryTimeoutMs, long recoveryIntervalSeconds,
+                      Duration compensationGracePeriod, Clock clock) {}
+```
+
+```java
 // --- recovery/SagaRecoveryManager.java ---
 public class SagaRecoveryManager {
     private final SagaStore store;
     private final SagaEngine engine;
-    private final Map<String, SagaDefinition> definitions;
+    private final SagaDefinitionRegistry registry;
     private final String ownerId;
-    private final long recoveryTimeoutMs;          // default: 60000 (1 min)
+    private final long recoveryTimeoutMs;
     private final ScheduledExecutorService scheduler;
-    private final long recoveryIntervalSeconds;    // default: 30
+    private final long recoveryIntervalSeconds;
+    private final Duration compensationGracePeriod;
+    private final Clock clock;
 
     public SagaRecoveryManager(SagaStore store, SagaEngine engine,
-                                String ownerId, long recoveryTimeoutMs,
-                                long recoveryIntervalSeconds) {
+                                SagaDefinitionRegistry registry,
+                                String ownerId, RecoveryConfig config) {
         this.store = store;
         this.engine = engine;
+        this.registry = registry;
         this.ownerId = ownerId;
-        this.recoveryTimeoutMs = recoveryTimeoutMs;
+        this.recoveryTimeoutMs = config.recoveryTimeoutMs();
+        this.recoveryIntervalSeconds = config.recoveryIntervalSeconds();
+        this.compensationGracePeriod = config.compensationGracePeriod();
+        this.clock = config.clock();
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "saga-recovery");
             t.setDaemon(true);
@@ -2773,14 +2864,8 @@ public class SagaRecoveryManager {
         // Look up the EXACT definition version the saga was started with.
         // Using a different version during recovery would corrupt business data
         // if steps were added, removed, or reordered.
-        // 1. In-memory versioned lookup (fast path)
-        // 2. saga_definitions table (if unregistered from memory, e.g., after redeploy)
-        SagaDefinition def = definitions.get(
-            saga.getSagaName() + ":" + saga.getDefinitionVersion());
-        if (def == null) {
-            def = store.getDefinition(saga.getSagaName(), saga.getDefinitionVersion())
-                .orElse(null);
-        }
+        SagaDefinition def = registry.resolve(
+            saga.getSagaName(), saga.getDefinitionVersion());
         if (def == null) {
             // Escalate — recovering with a wrong definition version would corrupt data.
             // Admin must re-register the required version or manually resolve.
@@ -2917,40 +3002,14 @@ Without timeouts, a hanging step runs indefinitely — no other replica can know
 
 ### Timeout Enforcement in executeSagaSteps()
 
-Timeout enforcement is integrated into the canonical `executeSagaSteps()` loop (see [Core Engine](#sagaengine-core-execution-logic) for the full method). The additions are:
+Timeout enforcement is integrated directly into the canonical `executeSagaSteps()` loop (see [Core Engine](#sagaengine-core-execution-logic)). The loop computes `sagaDeadline` from `sagaTimeoutMs` at entry, checks it before each step, and passes a per-step `stepDeadline` (the minimum of step timeout and saga deadline) to `executeWithRetry()`. `SagaTimeoutException` and `StepTimeoutException` are caught by the existing pivot-based failure handling — they trigger compensation (at or before pivot) or `STEP_FAILED` (after pivot), same as any other step failure. No separate timeout catch block needed.
 
 ```java
-// In executeSagaSteps() — timeout additions to the canonical pivot-based loop:
-
-// 1. Compute saga deadline at loop entry:
-long sagaDeadline = def.getTimeoutMs() > 0
-    ? System.currentTimeMillis() + def.getTimeoutMs() : 0;
-
-// 2. Check saga deadline before each step:
-if (sagaDeadline > 0 && System.currentTimeMillis() > sagaDeadline) {
-    throw new SagaTimeoutException(
-        "Saga " + sagaId + " exceeded deadline of " + def.getTimeoutMs() + "ms");
-}
-
-// 3. Compute per-step deadline (minimum of step timeout and saga deadline):
-long stepDeadline = calculateStepDeadline(stepDef, sagaDeadline);
-
-// 4. Pass deadline to executeWithRetry:
-StepResult result = executeWithRetry(step, context, policy, stepDeadline);
-
-// 5. SagaTimeoutException and StepTimeoutException are caught by the
-//    existing pivot-based failure handling in the inner catch block —
-//    they trigger compensation (at or before pivot) or STEP_FAILED (after pivot),
-//    same as any other step failure. No separate timeout catch block needed.
-```
-
-```java
-private long calculateStepDeadline(StepDefinition stepDef, long sagaDeadline) {
-    long stepTimeout = stepDef.getTimeoutMs();
-    if (stepTimeout > 0 && sagaDeadline > 0) {
-        return Math.min(System.currentTimeMillis() + stepTimeout, sagaDeadline);
-    } else if (stepTimeout > 0) {
-        return System.currentTimeMillis() + stepTimeout;
+private long calculateStepDeadline(long stepTimeoutMs, long sagaDeadline) {
+    if (stepTimeoutMs > 0 && sagaDeadline > 0) {
+        return Math.min(System.currentTimeMillis() + stepTimeoutMs, sagaDeadline);
+    } else if (stepTimeoutMs > 0) {
+        return System.currentTimeMillis() + stepTimeoutMs;
     } else {
         return sagaDeadline;  // 0 means no timeout
     }
@@ -3025,6 +3084,33 @@ public class SagaConcurrentModificationException extends RuntimeException {
     public SagaConcurrentModificationException(String sagaId) {
         super("Saga is being processed by another replica: " + sagaId);
     }
+}
+
+// --- exception/StepCompensationException.java ---
+public class StepCompensationException extends RuntimeException {
+    private final String stepName;
+    private final int stepIndex;
+
+    public StepCompensationException(String message) {
+        super(message);
+        this.stepName = null;
+        this.stepIndex = -1;
+    }
+
+    public StepCompensationException(Throwable cause) {
+        super(cause);
+        this.stepName = null;
+        this.stepIndex = -1;
+    }
+
+    public StepCompensationException(String stepName, int stepIndex, Throwable cause) {
+        super("Compensation failed for step '" + stepName + "' at index " + stepIndex, cause);
+        this.stepName = stepName;
+        this.stepIndex = stepIndex;
+    }
+
+    public String getStepName() { return stepName; }
+    public int getStepIndex() { return stepIndex; }
 }
 ```
 
@@ -3154,13 +3240,13 @@ public class SagaEngine implements AutoCloseable {
 ```java
 // Automatic cleanup via shutdown hook
 Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-    sagaManager.shutdown();
+    sagaManager.close();
 }));
 
 // Or via Spring @PreDestroy / Quarkus @Shutdown
 @PreDestroy
 void onShutdown() {
-    sagaManager.shutdown();
+    sagaManager.close();
 }
 ```
 
@@ -3292,7 +3378,7 @@ public SagaStateSnapshot completeStep(String sagaId, String stepName,
         return saga;  // saga already moved on (compensating, escalated, etc.) — ignore late callback
     }
 
-    SagaDefinition def = loadDefinition(saga);
+    SagaDefinition def = registry.resolve(saga.getSagaName(), saga.getDefinitionVersion());
     List<SagaEvent> events = store.getEvents(sagaId);
     ExecutionContext context = engine.replayEvents(saga, events);
 
@@ -3305,11 +3391,14 @@ public SagaStateSnapshot completeStep(String sagaId, String stepName,
         return saga;  // idempotent: callback already processed
     }
 
-    // Append step completed event with the callback result
+    // Validate output types before persisting (merge throws on invalid types)
+    StepResult stepResult = StepResult.of(output);
+    context.merge(stepResult);
+
+    // Persist event after validation succeeds
     store.appendEvent(sagaId, context.nextSequence(),
-        SagaEvent.stepCompleted(stepIndex, stepName, StepResult.of(output)));
+        SagaEvent.stepCompleted(stepIndex, stepName, stepResult));
     context.advanceSequence();
-    context.merge(StepResult.of(output));
 
     return engine.resumeFrom(def, context, stepIndex + 1);
 }
@@ -3464,10 +3553,11 @@ if (def.getMode() == SagaMode.TCC) {
     plan = expandTccPlan(def);
 } else {
     plan = def.getSteps().stream()
-        .map(stepDef -> new StepWithPolicy(instantiate(stepDef), resolveRetryPolicy(stepDef, def)))
+        .map(stepDef -> new StepWithPolicy(instantiate(stepDef), resolveRetryPolicy(stepDef, def),
+                                            stepDef.getTimeoutMs()))
         .toList();
 }
-executeSagaSteps(plan, def.getPivotPolicy(), context, startIndex);
+executeSagaSteps(plan, def.getPivotPolicy(), context, startIndex, def.getTimeoutMs());
 ```
 
 The mode-specific behavior is encapsulated in `PivotPolicy`: for TCC, `getPivotPolicy()` returns a `crossingEvent` of `SagaEvent.sagaConfirming()`; for Saga modes, `crossingEvent` is null. The unified loop handles both modes identically:
@@ -3527,7 +3617,7 @@ Note: In the unified model, TCC `CONFIRMING` recovery uses the same `resumeFrom(
 
 ### Event Types for TCC
 
-In the unified model, both try and confirm steps emit `STEP_COMPLETED` events — they are all just `Step.execute()` calls from the loop's perspective. The step name suffix (`.try` vs `.confirm`) distinguishes phases. On recovery, the event indices map directly to positions in the expanded plan: indices `0..N-1` are try steps, `N..2N-1` are confirm steps.
+In the unified model, both try and confirm steps emit `STEP_COMPLETED` events — they are all just `Step.execute()` calls from the loop's perspective. The step name suffix (`.reserve` vs `.confirm`) distinguishes phases. On recovery, the event indices map directly to positions in the expanded plan: indices `0..N-1` are try steps, `N..2N-1` are confirm steps.
 
 ### When to Use TCC vs Saga
 
@@ -4261,8 +4351,14 @@ public @interface SagaCompensation {
 public class SagaAutoConfiguration {
 
     @Bean
-    public SagaManager sagaManager(DistributedTransactionManager txManager) {
-        return new DefaultSagaManager(txManager);
+    public SagaManager sagaManager(DistributedTransactionManager txManager,
+                                    SagaProperties props) {
+        return new SagaManagerBuilder()
+            .store(new ScalarDbSagaStore(txManager, props.getMaxEventPayloadBytes()))
+            .ownerId(props.getOwnerId())
+            .recoveryTimeoutMs(props.getRecoveryTimeoutMs())
+            .recoveryIntervalSeconds(props.getRecoveryIntervalSeconds())
+            .build();
     }
 
     @Bean
@@ -4673,6 +4769,8 @@ public class SagaManagerBuilder {
     private int maxEventPayloadBytes = 64 * 1024;  // 64 KB default
     private SagaEngine.ShutdownMode shutdownMode;  // null → engine default (WAIT_CURRENT_STEP)
     private Long shutdownTimeoutMs;                 // null → engine default (30s or 300s)
+    private Duration compensationGracePeriod = Duration.ofMinutes(10);
+    private Clock clock = Clock.systemUTC();
     private List<SagaEventListener> eventListeners = new ArrayList<>();
 
     public SagaManagerBuilder store(SagaStore store) {
@@ -4710,6 +4808,16 @@ public class SagaManagerBuilder {
         return this;
     }
 
+    public SagaManagerBuilder compensationGracePeriod(Duration compensationGracePeriod) {
+        this.compensationGracePeriod = compensationGracePeriod;
+        return this;
+    }
+
+    public SagaManagerBuilder clock(Clock clock) {
+        this.clock = clock;
+        return this;
+    }
+
     public SagaManagerBuilder addEventListener(SagaEventListener listener) {
         this.eventListeners.add(listener);
         return this;
@@ -4717,13 +4825,16 @@ public class SagaManagerBuilder {
 
     public SagaManager build() {
         Objects.requireNonNull(store, "SagaStore is required");
+        SagaDefinitionRegistry registry = new SagaDefinitionRegistry(store);
         CompensationManager compensationManager = new CompensationManager(store);
         SagaEngine engine = new SagaEngine(store, compensationManager,
                                             ownerId, eventListeners,
                                             shutdownMode, shutdownTimeoutMs);
         SagaRecoveryManager recovery = new SagaRecoveryManager(
-            store, engine, ownerId, recoveryTimeoutMs, recoveryIntervalSeconds);
-        return new DefaultSagaManager(engine, store, recovery);
+            store, engine, registry, ownerId,
+            new RecoveryConfig(recoveryTimeoutMs, recoveryIntervalSeconds,
+                               compensationGracePeriod, clock));
+        return new DefaultSagaManager(engine, store, registry, recovery);
     }
 }
 ```
@@ -5142,9 +5253,10 @@ public class DefaultSagaAdminService implements SagaAdminService {
 
     @Override
     public SagaStateSnapshot triggerCompensation(String sagaId) {
-        requireStatus(sagaId, SagaStatus.RUNNING);
-        requireHasEvent(sagaId, SagaEvent.STEP_FAILED);
         SagaStateSnapshot saga = store.getStateSnapshot(sagaId);
+        if (saga == null) throw new SagaNotFoundException(sagaId);
+        requireStatus(saga, SagaStatus.RUNNING);
+        requireHasEvent(sagaId, SagaEvent.STEP_FAILED);
         SagaStateSnapshot claimed = store.claimForRecovery(saga, ownerId);
         if (claimed == null) {
             throw new SagaConcurrentModificationException(sagaId);
@@ -5154,17 +5266,23 @@ public class DefaultSagaAdminService implements SagaAdminService {
 
     @Override
     public SagaStateSnapshot forceComplete(String sagaId) {
-        requireStatus(sagaId, SagaStatus.ESCALATED);
         SagaStateSnapshot saga = store.getStateSnapshot(sagaId);
-        List<SagaEvent> events = store.getEvents(sagaId);
-        return store.recordTransition(saga, events.size(), SagaEvent.sagaCompleted());
+        if (saga == null) throw new SagaNotFoundException(sagaId);
+        requireStatus(saga, SagaStatus.ESCALATED);
+        SagaStateSnapshot claimed = store.claimForRecovery(saga, ownerId);
+        if (claimed == null) {
+            throw new SagaConcurrentModificationException(sagaId);
+        }
+        int nextSeq = store.getEventCount(sagaId);
+        return store.recordTransition(claimed, nextSeq, SagaEvent.sagaCompleted());
     }
 
     @Override
     public SagaStateSnapshot retrySaga(String sagaId) {
-        requireStatus(sagaId, SagaStatus.RUNNING);
-        requireHasEvent(sagaId, SagaEvent.STEP_FAILED);
         SagaStateSnapshot saga = store.getStateSnapshot(sagaId);
+        if (saga == null) throw new SagaNotFoundException(sagaId);
+        requireStatus(saga, SagaStatus.RUNNING);
+        requireHasEvent(sagaId, SagaEvent.STEP_FAILED);
         SagaStateSnapshot claimed = store.claimForRecovery(saga, ownerId);
         if (claimed == null) {
             throw new SagaConcurrentModificationException(sagaId);
@@ -5186,7 +5304,7 @@ public class DefaultSagaAdminService implements SagaAdminService {
             SagaPage<SagaStateSnapshot> page = store.listStateSnapshots(pageQuery);
             for (SagaStateSnapshot saga : page.getItems()) {
                 store.recordTransition(saga,
-                    store.getEvents(saga.getSagaId()).size(),
+                    store.getEventCount(saga.getSagaId()),
                     SagaEvent.sagaCompensating());
                 count++;
             }
@@ -5201,6 +5319,24 @@ public class DefaultSagaAdminService implements SagaAdminService {
     @Override
     public SagaMetrics getMetrics() {
         return new SagaMetrics(store.countByStatus(), store.countBySagaName());
+    }
+
+    private void requireStatus(SagaStateSnapshot saga, SagaStatus expected) {
+        if (saga.getStatus() != expected) {
+            throw new IllegalStateException(
+                "Saga " + saga.getSagaId() + " is " + saga.getStatus()
+                    + ", expected " + expected);
+        }
+    }
+
+    private void requireHasEvent(String sagaId, String eventType) {
+        List<SagaEvent> events = store.getEvents(sagaId);
+        boolean found = events.stream()
+            .anyMatch(e -> e.getEventType().equals(eventType));
+        if (!found) {
+            throw new IllegalStateException(
+                "Saga " + sagaId + " has no " + eventType + " events");
+        }
     }
 }
 ```
@@ -5506,7 +5642,7 @@ When a step returns `StepResult.pending()`, the engine generates a step-scoped H
 ```java
 long issuedAt = Instant.now().getEpochSecond();
 String token = HmacUtils.hmacSha256Hex(callbackSecret,
-    sagaId + ":" + stepName + ":" + stepIndex + ":" + issuedAt);
+    sagaId + ":" + stepName + ":" + issuedAt);
 ```
 
 The token and timestamp are included in the callback URL returned to the participant:
@@ -5516,7 +5652,7 @@ POST /api/sagas/{sagaId}/steps/{stepName}/complete?token={hmac}&iat={issuedAt}
 ```
 
 The callback endpoint validates the token before processing:
-1. Recompute the HMAC from the URL parameters (`sagaId`, `stepName`, `stepIndex`, `iat`)
+1. Recompute the HMAC from the URL parameters (`sagaId`, `stepName`, `iat`)
 2. Compare using `MessageDigest.isEqual()` (constant-time) to prevent timing attacks
 3. Reject if `iat` is older than the step timeout (default: saga-level `timeoutMs`)
 
@@ -5849,33 +5985,35 @@ A money transfer sample application grows with each phase, serving as E2E valida
 | File | What to Build | Est. LoC | Complexity |
 |---|---|---|---|
 | **api/** | | | |
-| `Step.java` | Interface (2 methods) | ~15 | Trivial |
+| `Step.java` | Interface (3 methods: `getName`, `execute`, `compensate`) | ~15 | Trivial |
 | `TccStep.java` | Standalone TCC interface: `reserve()`, `confirm()`, `cancel()` | ~15 | Trivial |
 | `StepResult.java` | Simple data class | ~30 | Trivial |
 | `SagaContext.java` | Public interface (3 methods: `getSagaId`, `get`, `put`) — what Step implementations see | ~10 | Trivial |
-| `ExecutionContext.java` | Engine-internal: implements `SagaContext`, adds type validation + event sequencing + state tracking + failure tracking | ~70 | Trivial |
 | `SagaStatus.java` | Enum (6 values: RUNNING, CONFIRMING, COMPLETED, COMPENSATING, COMPENSATED, ESCALATED) | ~10 | Trivial |
 | `SagaDefinition.java` | POJO + inner `StepDefinition` (with `pivot` flag) + SagaMode + RecoveryStrategy (BACKWARD/FORWARD/MIXED) + `getPivotIndex()` + validation | ~80 | Trivial |
 | `SagaStateSnapshot.java` | Read-only view of saga state | ~40 | Trivial |
-| `SagaManager.java` | Interface (8 methods incl. start, startAsync ×2; completeStep is daemon mode only) | ~25 | Trivial |
+| `SagaManager.java` | Interface (13 methods incl. register ×2, start ×2, startAsync ×4, resume, compensate, getStateSnapshot, completeStep, startRecovery) | ~35 | Trivial |
 | `SagaCallback.java` | Callback interface (onCompleted, onCompensated, onEscalated) | ~10 | Trivial |
 | **engine/** | | | |
+| `ExecutionContext.java` | Engine-internal: implements `SagaContext`, adds type validation + event sequencing + state tracking + failure tracking | ~70 | Trivial |
 | `RetryPolicy.java` | Config POJO + default/compensation/confirm factories | ~50 | Trivial |
 | `CompensationManager.java` | Reverse-loop + retry + stop on failure (throws `StepCompensationException`) | ~70 | Low |
 | `SagaEngine.java` | createSaga (server- or client-supplied ID) + executeSaga + execute (convenience) + resumeFrom + unified pivot-based loop (`executeSagaSteps`) + `expandTccPlan` (TCC→StepWithPolicy expansion) + retry + timeout + async step handling + error routing | ~310 | **Medium** |
-| `StepWithPolicy.java` | Record bundling `Step` + `RetryPolicy` (internal) | ~5 | Trivial |
+| `StepWithPolicy.java` | Record bundling `Step` + `RetryPolicy` + `stepTimeoutMs` (internal) | ~5 | Trivial |
 | `TccReserveStep.java` | Wraps `TccStep.reserve()`/`cancel()` → `Step.execute()`/`compensate()` | ~20 | Trivial |
 | `TccConfirmStep.java` | Wraps `TccStep.confirm()` → `Step.execute()`, compensate = no-op | ~20 | Trivial |
+| `SagaDefinitionRegistry.java` | Definition registration + two-tier versioned lookup (in-memory → store fallback) | ~40 | Trivial |
 | `DefaultSagaManager.java` | Delegates to engine + recovery + startAsync (virtual thread submission + callback dispatch). completeStep is daemon mode only. | ~140 | Low |
 | `SagaManagerBuilder.java` | DI-free builder for wiring | ~60 | Low |
 | **parser/** | | | |
 | `SagaDefinitionParser.java` | Jackson JSON/YAML → SagaDefinition (detects format by file extension; uses `jackson-dataformat-yaml`) | ~80 | Low |
 | **store/** | | | |
-| `SagaStore.java` | Interface (appendEvent, recordTransition, findRecoverableByBucket, claimForRecovery, getEvents, registerDefinition, getDefinition) | ~40 | Trivial |
+| `SagaStore.java` | Interface (15 methods: createSaga, registerDefinition, getDefinition, appendEvent, recordTransition, findRecoverableByBucket, claimForRecovery, markForRecovery, getEvents, getEventCount, getStateSnapshot, listStateSnapshots, countByStatus, countBySagaName, deleteSaga) | ~50 | Trivial |
 | `SagaEvent.java` | Event types + factory methods (each saga-level event carries its `targetStatus`) | ~90 | Low |
 | `SagaSchema.java` | 3 TableMetadata definitions (saga_events, saga_state, saga_definitions) + bucketOf() + createAll | ~100 | Low |
 | `ScalarDbSagaStore.java` | Append-only events + bucket-partitioned saga_state (DELETE+INSERT for status transitions) + bucket-parallel recovery scan + conflict-based claiming + definition persistence | ~450 | **Medium** |
 | **recovery/** | | | |
+| `RecoveryConfig.java` | Record (4 fields: recoveryTimeoutMs, recoveryIntervalSeconds, compensationGracePeriod, clock) | ~5 | Trivial |
 | `SagaRecoveryManager.java` | Periodic scan of saga_state + event replay + resume via `resumeFrom()` (handles all modes uniformly: RUNNING, CONFIRMING, COMPENSATING) + time-based escalation | ~220 | **Medium** |
 | **timeout/** | | | |
 | `TimeoutPolicy.java` | Per-step and per-saga deadline calculation | ~30 | Trivial |
