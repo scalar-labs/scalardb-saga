@@ -84,6 +84,23 @@ com.scalar.db.saga/
 - **Testing harness in Phase 1**: `SagaTestHarness` with `ScalarDbSagaStore` backed by in-memory SQLite.
 - **Two-phase compensation retry**: Immediate retry (CompensationManager) then periodic recovery retry (SagaRecoveryManager) with time-based escalation.
 
+### Project Structure (Gradle Multi-Module)
+
+Subproject directories use short names. Published artifacts are prefixed with `scalardb-saga-` via `base.archivesName`.
+
+| Directory | Artifact | Phase | Purpose |
+|-----------|----------|-------|---------|
+| `core` | `scalardb-saga-core` | 1 | Core engine, API, store, recovery, testing harness |
+| `spring` | `scalardb-saga-spring` | 2 | Spring Boot auto-config |
+| `quarkus` | `scalardb-saga-quarkus` | 2 | Quarkus extension |
+| `participant` | `scalardb-saga-participant` | 2 | Participant SDK |
+| `daemon` | `scalardb-saga-daemon` | 3 | Standalone coordinator server |
+| `client` | `scalardb-saga-client` | 3 | Client SDK (Java 8) |
+| `dev-server` | `scalardb-saga-dev-server` | 4 | Local dev server (SQLite + web UI) |
+| `lra` | `scalardb-saga-lra` | 6 | MicroProfile LRA coordinator |
+
+Modules are added to `settings.gradle.kts` as each phase begins.
+
 ### Implementation Phases
 
 ---
@@ -104,7 +121,7 @@ com.scalar.db.saga/
 **Files:**
 - `build.gradle.kts` (root)
 - `settings.gradle.kts`
-- `scalardb-saga-engine/build.gradle.kts`
+- `core/build.gradle.kts`
 
 ##### Task 1.2: API Layer — Interfaces, Enums, POJOs
 
