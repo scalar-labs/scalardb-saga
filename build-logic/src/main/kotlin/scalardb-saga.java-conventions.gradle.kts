@@ -50,7 +50,7 @@ spotbugs {
     ignoreFailures = false
     showStackTraces = true
     maxHeapSize = "1g"
-    excludeFilter = file("${rootDir}/config/spotbugs/exclude.xml")
+    excludeFilter = rootProject.file("config/spotbugs/exclude.xml")
 }
 
 dependencies {

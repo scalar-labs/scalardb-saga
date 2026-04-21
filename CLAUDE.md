@@ -2,7 +2,7 @@
 
 A saga-based distributed transaction coordination engine.
 
-Refer to `docs/scalardb-saga-design.md` for architecture decisions and implementation details.
+Refer to `~/git/scalardb-saga-design/docs/scalardb-saga-design.md` for architecture decisions and implementation details.
 
 ## Language
 
