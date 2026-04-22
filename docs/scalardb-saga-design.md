@@ -163,7 +163,7 @@ com.scalar.db.saga/
     └── SagaDevServerConfig.java
 ```
 
-**Naming convention**: Classes that users import or interact with directly are prefixed with `Saga` (e.g., `SagaManager`, `SagaStore`, `SagaStateSnapshot`, `SagaTestHarness`, `SagaAdminService`). Internal engine components use domain-specific names without the prefix (e.g., `CompensationManager`, `RetryPolicy`, `TimeoutPolicy`) since they live inside the engine package and are not part of the public API.
+**Naming convention**: Public API classes use the `Saga` prefix when the remainder is too generic to stand alone (e.g., `SagaManager`, `SagaStore`, `SagaContext`, `SagaStatus`, `SagaTestHarness`). Domain-specific names that are already unambiguous within the package omit the prefix (e.g., `Step`, `StepResult`, `RetryPolicy`, `TccStep`). Internal engine components also use domain-specific names without the prefix (e.g., `CompensationManager`, `TimeoutPolicy`) since they live inside the engine package and are not part of the public API.
 
 ## Component Summary
 
@@ -842,9 +842,8 @@ steps:
 For embedded mode, a type-safe Java builder provides compile-time checks and IDE auto-completion:
 
 ```java
-SagaDefinition def = SagaDefinition.newBuilder("MoneyTransfer")
+SagaDefinition def = SagaDefinition.newBuilder("MoneyTransfer", SagaMode.SAGA)
     .version("1.0")
-    .mode(SagaMode.SAGA)
     .recoveryStrategy(RecoveryStrategy.BACKWARD)
     .timeoutMs(300000)
     .defaultRetryPolicy(RetryPolicy.newBuilder()
@@ -853,13 +852,11 @@ SagaDefinition def = SagaDefinition.newBuilder("MoneyTransfer")
         .backoffMultiplier(2.0)
         .maxIntervalMs(30000)
         .build())
-    .step("debit")
-        .stepClass(DebitAccountStep.class)
+    .step("debit", DebitAccountStep.class)
         .timeoutMs(60000)
         .retryPolicy(RetryPolicy.newBuilder().maxAttempts(5).build())
         .add()
-    .step("credit")
-        .stepClass(CreditAccountStep.class)
+    .step("credit", CreditAccountStep.class)
         .timeoutMs(30000)
         .add()
     .build();
@@ -870,26 +867,21 @@ sagaManager.register(def);
 **Mixed recovery (pivot transaction) example:**
 
 ```java
-SagaDefinition def = SagaDefinition.newBuilder("PlaceOrder")
+SagaDefinition def = SagaDefinition.newBuilder("PlaceOrder", SagaMode.SAGA)
     .version("1.0")
-    .mode(SagaMode.SAGA)
     .recoveryStrategy(RecoveryStrategy.MIXED)
     .timeoutMs(300000)
-    .step("reserveInventory")
-        .stepClass(ReserveInventoryStep.class)
+    .step("reserveInventory", ReserveInventoryStep.class)
         .timeoutMs(60000)
         .add()
-    .step("chargePayment")          // pivot — the go/no-go step
-        .stepClass(ChargePaymentStep.class)
+    .step("chargePayment", ChargePaymentStep.class)  // pivot — the go/no-go step
         .pivot(true)
         .timeoutMs(60000)
         .add()
-    .step("sendConfirmationEmail")  // retriable — after pivot
-        .stepClass(SendConfirmationEmailStep.class)
+    .step("sendConfirmationEmail", SendConfirmationEmailStep.class)  // retriable — after pivot
         .timeoutMs(30000)
         .add()
-    .step("updateAnalytics")        // retriable — after pivot
-        .stepClass(UpdateAnalyticsStep.class)
+    .step("updateAnalytics", UpdateAnalyticsStep.class)  // retriable — after pivot
         .timeoutMs(10000)
         .add()
     .build();
@@ -933,7 +925,9 @@ public class SagaDefinition {
 
     public static class StepDefinition {
         String name;                 // unique within the saga (used as idempotency key with sagaId)
-        String stepClass;            // FQCN of Step implementation
+        String stepClass;            // FQCN of Step implementation (always non-null).
+                                     // For user-written steps: user-provided FQCN (e.g., "com.example.DebitAccountStep").
+                                     // For declarative steps: auto-set to DeclarativeStepAdapter by the definition parser.
         long timeoutMs;              // per-step timeout (0 = use saga-level timeout only)
         RetryPolicy retryPolicy;     // per-step override (nullable)
         boolean pivot;               // true = this is the pivot step (at most one per saga)
@@ -3842,7 +3836,40 @@ The JSON format now supports **both** `stepClass` (Layer 1) and `service`/`metho
 }
 ```
 
-When `service`/`method` is specified, the engine uses `ServiceInvokerRegistry` to dispatch. When `stepClass` is specified, the engine instantiates the `Step` class directly (existing behavior). Both can be mixed in the same saga.
+**Step dispatch — single path for all step types:**
+
+`stepClass` is always non-null in `StepDefinition`. The definition parser ensures this:
+
+**Startup (registration):**
+
+For **Layer 1** (user's Step class):
+1. User writes: `DebitAccountStep implements Step`
+2. Definition: `{ "name": "debit", "stepClass": "com.example.DebitAccountStep" }`
+3. Parser reads definition → `StepDefinition(name="debit", stepClass="com.example.DebitAccountStep")`
+4. Registry: `stepRegistry.register("debit", DebitAccountStep instance)` (from DI container, reflection, or explicit registration)
+
+For **Layer 2b** (declarative):
+1. User writes no Java code
+2. Definition: `{ "name": "debit", "call": { "service": "account-service", ... }, "compensate": { ... } }`
+3. Parser reads definition:
+   a. Parses `call`/`compensate` blocks
+   b. Creates `DeclarativeStepAdapter("debit", transport, callDef, compensateDef)`
+   c. Sets `stepClass = "com.scalar.db.saga.invoker.DeclarativeStepAdapter"`
+   → `StepDefinition(name="debit", stepClass="...DeclarativeStepAdapter")`
+4. Registry: `stepRegistry.register("debit", the DeclarativeStepAdapter instance)`
+
+**Runtime (execution) — same path for both:**
+
+```
+instantiate(stepDef)
+  → stepRegistry.get(stepDef.getName())
+  → returns Step (either DebitAccountStep or DeclarativeStepAdapter)
+  → engine calls step.execute(ctx) / step.compensate(ctx)
+```
+
+The engine never branches. Both `DebitAccountStep` and `DeclarativeStepAdapter` implement `Step`, so the engine treats them identically. The registration logic differs (reflection/DI vs parser-created adapter), but that's in the parser/registry — not in the engine. At runtime, it's a single `stepRegistry.get(name)` call.
+
+Both step types can be mixed in the same saga.
 
 ### Layer 2b: Declarative Step Communication
 
@@ -6457,7 +6484,7 @@ service SagaService {
 }
 ```
 
-In daemon mode, `StepDefinition` uses declarative `call`/`compensate` blocks — the same format as JSON/YAML declarative communication (see [Declarative Communication](#solution-declarative-communication-in-the-saga-definition)). No `stepClass` field because daemon-mode clients don't run Java Step classes.
+In daemon mode, `StepDefinition` uses declarative `call`/`compensate` blocks — the same format as JSON/YAML declarative communication (see [Declarative Communication](#solution-declarative-communication-in-the-saga-definition)). The definition parser auto-sets `stepClass` to `DeclarativeStepAdapter`, keeping the single dispatch path consistent across embedded and daemon modes.
 
 #### Client Usage Examples
 
@@ -6677,17 +6704,17 @@ The following features are not included in the initial phases but planned for fu
 
    ```java
    // v2 Java builder
-   SagaDefinition.newBuilder("PlaceOrder")
+   SagaDefinition.newBuilder("PlaceOrder", SagaMode.SAGA)
        .version("2.0")
        .recoveryStrategy(RecoveryStrategy.MIXED)
        .parallelSteps()
-           .step("reserveInventory").stepClass(ReserveInventoryStep.class).add()
-           .step("reserveShipping").stepClass(ReserveShippingStep.class).add()
+           .step("reserveInventory", ReserveInventoryStep.class).add()
+           .step("reserveShipping", ReserveShippingStep.class).add()
            .add()
-       .step("chargePayment").stepClass(ChargePaymentStep.class).pivot(true).add()
+       .step("chargePayment", ChargePaymentStep.class).pivot(true).add()
        .parallelSteps()
-           .step("sendConfirmationEmail").stepClass(SendConfirmationEmailStep.class).add()
-           .step("updateAnalytics").stepClass(UpdateAnalyticsStep.class).add()
+           .step("sendConfirmationEmail", SendConfirmationEmailStep.class).add()
+           .step("updateAnalytics", UpdateAnalyticsStep.class).add()
            .add()
        .build();
    ```
