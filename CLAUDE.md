@@ -35,8 +35,8 @@ Refer to `~/git/scalardb-saga-design/docs/scalardb-saga-design.md` for architect
 ## Package Naming
 
 - Base package: `com.scalar.db.saga`
-- Public API classes use `Saga` prefix (e.g., `SagaManager`, `SagaStore`)
-- Internal classes use domain-specific names without prefix (e.g., `CompensationManager`, `RetryPolicy`)
+- Public API classes use `Saga` prefix when the remainder is too generic to stand alone (e.g., `SagaManager`, `SagaContext`, `SagaStatus`). Domain-specific names that are already unambiguous within the package omit the prefix (e.g., `Step`, `StepResult`, `RetryPolicy`, `TccStep`).
+- Internal classes use domain-specific names without prefix (e.g., `CompensationManager`)
 
 ## Design Principles
 
@@ -53,11 +53,20 @@ Refer to `~/git/scalardb-saga-design/docs/scalardb-saga-design.md` for architect
 - **Test all public methods** — every public method must have at least one test. Important private methods should also be tested (via public API or package-private access).
 - **Cover both success and failure cases** — test normal (success) paths and abnormal (failure) paths. Failure cases should be covered **extensively** — they are where bugs hide. Include edge cases, invalid inputs, exception paths, concurrency errors, and timeout scenarios.
 - Test method naming: `methodName_condition_expectedResult()`
+  - The condition must read as a scenario, not a method-overload label
+  - Use `Given` suffix for **inputs/arguments** passed to the method: `of_mapGiven_...`, `constructor_messageOnlyGiven_...`
+  - Use `with` prefix for **configuration/state** set via builder or setup: `build_withDefaults_...`, `step_withRetryPolicy_...`
+  - Conditions that naturally read as states need neither: `insufficientBalance`, `noSteps`, `duplicateStepNames`
   ```java
   @Test
   public void transfer_insufficientBalance_throwsException() { ... }
+  @Test
+  public void of_singleKeyValueGiven_returnsResultWithEntry() { ... }
+  @Test
+  public void build_withAllOptions_setsAllFields() { ... }
   ```
 - Group test code by `// Arrange`, `// Act`, and `// Assert`
+- **Exception assertions** — assert `isInstanceOf` (required) but omit `hasMessageContaining` unless the same exception type is thrown by multiple validation paths that the test input could trigger. Craft test inputs to be specific enough that only one path fires; message assertions couple tests to wording and hurt maintainability.
 
 ## Module Structure
 

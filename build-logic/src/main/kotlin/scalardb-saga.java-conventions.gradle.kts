@@ -35,7 +35,6 @@ repositories {
 spotless {
     java {
         googleJavaFormat()
-        removeUnusedImports()
         formatAnnotations()
     }
 }
@@ -45,9 +44,8 @@ spotless {
 // ---------------------------------------------------------------------------
 
 spotbugs {
-    effort = Effort.valueOf("MAX")
-    reportLevel = Confidence.valueOf("MEDIUM")
-    ignoreFailures = false
+    effort = Effort.MAX
+    reportLevel = Confidence.MEDIUM
     showStackTraces = true
     maxHeapSize = "1g"
     excludeFilter = rootProject.file("config/spotbugs/exclude.xml")
@@ -104,14 +102,14 @@ tasks.compileJava {
 testing {
     suites {
         val test by getting(JvmTestSuite::class) {
-            useJUnitJupiter()
+            useJUnitJupiter(libs.versions.junit.jupiter.get())
         }
     }
 }
 
 dependencies {
-    implementation(platform(libs.jackson.bom))
     compileOnly(libs.jspecify)
+    compileOnly(libs.spotbugs.annotations)
 
     testImplementation(libs.mockito.core)
     testImplementation(libs.mockito.junit.jupiter)
