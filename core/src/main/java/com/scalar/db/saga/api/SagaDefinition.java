@@ -162,7 +162,9 @@ public final class SagaDefinition {
         }
         if (pivotIndex == 0 || pivotIndex == steps.size() - 1) {
           throw new SagaDefinitionException(
-              "MIXED pivot must not be the first or last step — use FORWARD or BACKWARD instead");
+              "MIXED pivot must not be the first or last step; a pivot at the first step is"
+                  + " FORWARD, and a pivot at the last step is BACKWARD. MIXED requires at least"
+                  + " one step before the pivot and one after");
         }
       }
     }
@@ -356,6 +358,10 @@ public final class SagaDefinition {
       Objects.requireNonNull(stepClass, "stepClass must not be null");
       if (name.isBlank()) {
         throw new IllegalArgumentException("step name must not be blank");
+      }
+      if (!Step.class.isAssignableFrom(stepClass) && !TccStep.class.isAssignableFrom(stepClass)) {
+        throw new IllegalArgumentException(
+            "stepClass must implement Step or TccStep: " + stepClass.getName());
       }
       return new StepBuilder(this, name, stepClass.getName());
     }

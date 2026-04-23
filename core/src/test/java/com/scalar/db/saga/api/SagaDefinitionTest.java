@@ -88,10 +88,21 @@ class SagaDefinitionTest {
     void step_classObjectGiven_setsFullyQualifiedName() {
       // Arrange & Act
       SagaDefinition definition =
-          SagaDefinition.newBuilder("test", SagaMode.SAGA).step("s1", String.class).add().build();
+          SagaDefinition.newBuilder("test", SagaMode.SAGA)
+              .step("s1", DummyStep.class)
+              .add()
+              .build();
 
       // Assert
-      assertThat(definition.getSteps().get(0).getStepClass()).isEqualTo("java.lang.String");
+      assertThat(definition.getSteps().get(0).getStepClass()).isEqualTo(DummyStep.class.getName());
+    }
+
+    @Test
+    void step_classNotImplementingStepOrTccStep_throwsIllegalArgumentException() {
+      // Arrange & Act & Assert
+      assertThatThrownBy(
+              () -> SagaDefinition.newBuilder("test", SagaMode.SAGA).step("s1", String.class))
+          .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
@@ -673,4 +684,6 @@ class SagaDefinitionTest {
       assertThat(definition.getPivotIndex()).isEqualTo(0);
     }
   }
+
+  abstract static class DummyStep implements Step {}
 }
