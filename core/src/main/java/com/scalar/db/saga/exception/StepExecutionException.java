@@ -1,5 +1,7 @@
 package com.scalar.db.saga.exception;
 
+import java.util.Objects;
+
 /**
  * Thrown when a step's forward action ({@code execute} or {@code reserve}) fails.
  *
@@ -20,17 +22,19 @@ public class StepExecutionException extends Exception {
   }
 
   public StepExecutionException(String message, boolean retryable) {
-    super(message);
+    super(Objects.requireNonNull(message, "message must not be null"));
     this.retryable = retryable;
   }
 
   public StepExecutionException(Throwable cause, boolean retryable) {
-    super(cause);
+    super(Objects.requireNonNull(cause, "cause must not be null"));
     this.retryable = retryable;
   }
 
   public StepExecutionException(String message, Throwable cause, boolean retryable) {
-    super(message, cause);
+    super(
+        Objects.requireNonNull(message, "message must not be null"),
+        Objects.requireNonNull(cause, "cause must not be null"));
     this.retryable = retryable;
   }
 

@@ -1,6 +1,7 @@
 package com.scalar.db.saga.exception;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import org.junit.jupiter.api.Test;
 
@@ -64,6 +65,20 @@ class StepExecutionExceptionTest {
     assertThat(e.getMessage()).isEqualTo("wrapper");
     assertThat(e.getCause()).isSameAs(cause);
     assertThat(e.isRetryable()).isTrue();
+  }
+
+  @Test
+  void constructor_nullMessageGiven_throwsNullPointerException() {
+    // Arrange & Act & Assert
+    assertThatThrownBy(() -> new StepExecutionException((String) null))
+        .isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void constructor_nullCauseGiven_throwsNullPointerException() {
+    // Arrange & Act & Assert
+    assertThatThrownBy(() -> new StepExecutionException((Throwable) null))
+        .isInstanceOf(NullPointerException.class);
   }
 
   @Test

@@ -2,7 +2,6 @@ package com.scalar.db.saga.api;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import org.jspecify.annotations.Nullable;
@@ -42,7 +41,7 @@ public final class StepResult {
   /** Creates a result with multiple key-value pairs. The map is defensively copied. */
   public static StepResult of(Map<String, Object> output) {
     Objects.requireNonNull(output, "output must not be null");
-    return new StepResult(false, Collections.unmodifiableMap(new LinkedHashMap<>(output)));
+    return new StepResult(false, Map.copyOf(output));
   }
 
   /** Creates a result with no output data. */

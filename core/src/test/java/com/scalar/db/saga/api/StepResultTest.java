@@ -3,6 +3,7 @@ package com.scalar.db.saga.api;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -61,6 +62,26 @@ class StepResultTest {
     // Act & Assert
     assertThatThrownBy(() -> result.getOutput().put("new", "value"))
         .isInstanceOf(UnsupportedOperationException.class);
+  }
+
+  @Test
+  void of_mapWithNullKeyGiven_throwsNullPointerException() {
+    // Arrange
+    Map<String, Object> data = new HashMap<>();
+    data.put(null, "value");
+
+    // Act & Assert
+    assertThatThrownBy(() -> StepResult.of(data)).isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void of_mapWithNullValueGiven_throwsNullPointerException() {
+    // Arrange
+    Map<String, Object> data = new HashMap<>();
+    data.put("key", null);
+
+    // Act & Assert
+    assertThatThrownBy(() -> StepResult.of(data)).isInstanceOf(NullPointerException.class);
   }
 
   @Test
