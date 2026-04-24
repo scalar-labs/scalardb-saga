@@ -144,10 +144,6 @@ public final class SagaDefinition {
       return;
     }
 
-    if (recoveryStrategy == RecoveryStrategy.PREDEFINED) {
-      throw new SagaDefinitionException("PREDEFINED recovery strategy is reserved for TCC mode");
-    }
-
     switch (recoveryStrategy) {
       case BACKWARD, FORWARD -> {
         if (pivotCount != 0) {
@@ -167,6 +163,9 @@ public final class SagaDefinition {
                   + " one step before the pivot and one after");
         }
       }
+      case PREDEFINED ->
+          throw new SagaDefinitionException(
+              "PREDEFINED recovery strategy is reserved for TCC mode");
     }
   }
 

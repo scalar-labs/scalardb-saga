@@ -83,14 +83,6 @@ tasks.withType<JavaCompile>().configureEach {
             "UnusedVariable",
             "FieldCanBeFinal",
         )
-        if (name.contains("Test", ignoreCase = true)) {
-            disable("NullAway")
-        }
-    }
-}
-
-tasks.compileJava {
-    options.errorprone {
         error("NullAway")
     }
 }

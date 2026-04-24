@@ -47,6 +47,7 @@ class StepCompensationExceptionTest {
     assertThat(e.getMessage()).contains("refund").contains("2");
   }
 
+  @SuppressWarnings("NullAway")
   @Test
   void constructor_nullMessageGiven_throwsNullPointerException() {
     // Arrange & Act & Assert
@@ -54,6 +55,7 @@ class StepCompensationExceptionTest {
         .isInstanceOf(NullPointerException.class);
   }
 
+  @SuppressWarnings("NullAway")
   @Test
   void constructor_nullCauseGiven_throwsNullPointerException() {
     // Arrange & Act & Assert
@@ -61,6 +63,7 @@ class StepCompensationExceptionTest {
         .isInstanceOf(NullPointerException.class);
   }
 
+  @SuppressWarnings("NullAway")
   @Test
   void constructor_nullStepNameGiven_throwsNullPointerException() {
     // Arrange & Act & Assert

@@ -30,6 +30,7 @@ class SagaDefinitionExceptionTest {
     assertThat(e.getCause()).isSameAs(cause);
   }
 
+  @SuppressWarnings("NullAway")
   @Test
   void constructor_nullMessageGiven_throwsNullPointerException() {
     // Arrange & Act & Assert
@@ -37,6 +38,7 @@ class SagaDefinitionExceptionTest {
         .isInstanceOf(NullPointerException.class);
   }
 
+  @SuppressWarnings("NullAway")
   @Test
   void constructor_nullMessageWithCauseGiven_throwsNullPointerException() {
     // Arrange & Act & Assert
@@ -44,6 +46,7 @@ class SagaDefinitionExceptionTest {
         .isInstanceOf(NullPointerException.class);
   }
 
+  @SuppressWarnings("NullAway")
   @Test
   void constructor_nullCauseGiven_throwsNullPointerException() {
     // Arrange & Act & Assert

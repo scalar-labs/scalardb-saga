@@ -67,6 +67,7 @@ class StepExecutionExceptionTest {
     assertThat(e.isRetryable()).isTrue();
   }
 
+  @SuppressWarnings("NullAway")
   @Test
   void constructor_nullMessageGiven_throwsNullPointerException() {
     // Arrange & Act & Assert
@@ -74,6 +75,7 @@ class StepExecutionExceptionTest {
         .isInstanceOf(NullPointerException.class);
   }
 
+  @SuppressWarnings("NullAway")
   @Test
   void constructor_nullCauseGiven_throwsNullPointerException() {
     // Arrange & Act & Assert
