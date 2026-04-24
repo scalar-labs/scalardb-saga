@@ -3,7 +3,6 @@ scalardb = "3.17.3"
 jackson = "2.18.6"
 slf4j = "2.0.17"
 logback = "1.5.32"
-junit-jupiter = "5.13.4"
 mockito = "5.23.0"
 assertj = "3.27.6"
 sqlite-jdbc = "3.53.0.0"
@@ -13,7 +12,6 @@ errorprone = "2.49.0"
 errorprone-plugin = "5.1.0"
 nullaway = "0.13.3"
 nullaway-plugin = "3.0.0"
-spotbugs-annotations = "4.9.8"
 findsecbugs = "1.14.0"
 jspecify = "1.0.0"
 
@@ -30,6 +28,11 @@ assertj-core = { module = "org.assertj:assertj-core", version.ref = "assertj" }
 sqlite-jdbc = { module = "org.xerial:sqlite-jdbc", version.ref = "sqlite-jdbc" }
 errorprone-core = { module = "com.google.errorprone:error_prone_core", version.ref = "errorprone" }
 nullaway = { module = "com.uber.nullaway:nullaway", version.ref = "nullaway" }
-spotbugs-annotations = { module = "com.github.spotbugs:spotbugs-annotations", version.ref = "spotbugs-annotations" }
 findsecbugs-plugin = { module = "com.h3xstream.findsecbugs:findsecbugs-plugin", version.ref = "findsecbugs" }
 jspecify = { module = "org.jspecify:jspecify", version.ref = "jspecify" }
+
+[plugins]
+spotless = { id = "com.diffplug.spotless", version.ref = "spotless" }
+spotbugs = { id = "com.github.spotbugs", version.ref = "spotbugs-plugin" }
+errorprone = { id = "net.ltgt.errorprone", version.ref = "errorprone-plugin" }
+nullaway = { id = "net.ltgt.nullaway", version.ref = "nullaway-plugin" }

@@ -35,6 +35,7 @@ repositories {
 spotless {
     java {
         googleJavaFormat()
+        removeUnusedImports()
         formatAnnotations()
     }
 }
@@ -44,8 +45,9 @@ spotless {
 // ---------------------------------------------------------------------------
 
 spotbugs {
-    effort = Effort.MAX
-    reportLevel = Confidence.MEDIUM
+    effort = Effort.valueOf("MAX")
+    reportLevel = Confidence.valueOf("MEDIUM")
+    ignoreFailures = false
     showStackTraces = true
     maxHeapSize = "1g"
     excludeFilter = rootProject.file("config/spotbugs/exclude.xml")
@@ -83,6 +85,14 @@ tasks.withType<JavaCompile>().configureEach {
             "UnusedVariable",
             "FieldCanBeFinal",
         )
+        if (name.contains("Test", ignoreCase = true)) {
+            disable("NullAway")
+        }
+    }
+}
+
+tasks.compileJava {
+    options.errorprone {
         error("NullAway")
     }
 }
@@ -94,14 +104,14 @@ tasks.withType<JavaCompile>().configureEach {
 testing {
     suites {
         val test by getting(JvmTestSuite::class) {
-            useJUnitJupiter(libs.versions.junit.jupiter.get())
+            useJUnitJupiter()
         }
     }
 }
 
 dependencies {
+    implementation(platform(libs.jackson.bom))
     compileOnly(libs.jspecify)
-    compileOnly(libs.spotbugs.annotations)
 
     testImplementation(libs.mockito.core)
     testImplementation(libs.mockito.junit.jupiter)
