@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FindBugsFilter>
+  <!-- Suppress in test classes -->
+  <Match>
+    <Class name="~.*Test$"/>
+    <Bug pattern="SE_BAD_FIELD"/>
+  </Match>
+</FindBugsFilter>
