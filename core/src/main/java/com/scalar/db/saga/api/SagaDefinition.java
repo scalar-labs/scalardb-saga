@@ -13,7 +13,7 @@ import org.jspecify.annotations.Nullable;
  * configuration.
  *
  * <p>Use {@link #newBuilder(String, SagaMode)} to create definitions programmatically. Definitions
- * are validated at registration time via {@link #validate()}.
+ * are validated at build time.
  */
 public final class SagaDefinition {
 
@@ -97,12 +97,7 @@ public final class SagaDefinition {
     return -1;
   }
 
-  /**
-   * Validates this definition. Called at registration time.
-   *
-   * @throws SagaDefinitionException if the definition is invalid
-   */
-  public void validate() {
+  private void validate() {
     if (steps.isEmpty()) {
       throw new SagaDefinitionException(
           "Saga definition '" + name + "' must have at least one step");
