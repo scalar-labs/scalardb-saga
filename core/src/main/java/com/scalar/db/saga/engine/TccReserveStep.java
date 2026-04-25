@@ -7,7 +7,6 @@ import com.scalar.db.saga.api.TccStep;
 import com.scalar.db.saga.exception.StepCompensationException;
 import com.scalar.db.saga.exception.StepExecutionException;
 import java.util.Objects;
-import net.jcip.annotations.Immutable;
 
 /**
  * Wraps a {@link TccStep} for the Reserve (Try) phase.
@@ -16,7 +15,6 @@ import net.jcip.annotations.Immutable;
  * TccStep#cancel}. This adapter allows TCC steps to run through the same pivot-based execution loop
  * as regular Saga steps.
  */
-@Immutable
 class TccReserveStep implements Step {
 
   private final TccStep tccStep;

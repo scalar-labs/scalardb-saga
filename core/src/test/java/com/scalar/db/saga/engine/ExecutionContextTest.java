@@ -313,6 +313,27 @@ class ExecutionContextTest {
   }
 
   @Test
+  void get_numericCoercionDoubleToInteger_throwsClassCastException() {
+    // Arrange
+    ExecutionContext ctx = createContext();
+    ctx.put("value", 99.95);
+
+    // Act & Assert
+    assertThatThrownBy(() -> ctx.get("value", Integer.class))
+        .isInstanceOf(ClassCastException.class);
+  }
+
+  @Test
+  void get_numericCoercionDoubleToLong_throwsClassCastException() {
+    // Arrange
+    ExecutionContext ctx = createContext();
+    ctx.put("value", 99.95);
+
+    // Act & Assert
+    assertThatThrownBy(() -> ctx.get("value", Long.class)).isInstanceOf(ClassCastException.class);
+  }
+
+  @Test
   void get_incompatibleTypeRequested_throwsClassCastException() {
     // Arrange
     ExecutionContext ctx = createContext();

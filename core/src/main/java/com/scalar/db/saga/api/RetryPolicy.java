@@ -176,9 +176,9 @@ public final class RetryPolicy {
         throw new IllegalArgumentException(
             "initialIntervalMillis must be > 0, got " + initialIntervalMillis);
       }
-      if (backoffMultiplier < 1.0) {
+      if (!Double.isFinite(backoffMultiplier) || backoffMultiplier < 1.0) {
         throw new IllegalArgumentException(
-            "backoffMultiplier must be >= 1.0, got " + backoffMultiplier);
+            "backoffMultiplier must be finite and >= 1.0, got " + backoffMultiplier);
       }
       if (maxIntervalMillis < initialIntervalMillis) {
         throw new IllegalArgumentException(

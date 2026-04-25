@@ -109,6 +109,21 @@ class RetryPolicyTest {
   }
 
   @Test
+  void build_withNanBackoffMultiplierGiven_throwsIllegalArgumentException() {
+    // Arrange & Act & Assert
+    assertThatThrownBy(() -> RetryPolicy.newBuilder().backoffMultiplier(Double.NaN).build())
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void build_withInfinityBackoffMultiplierGiven_throwsIllegalArgumentException() {
+    // Arrange & Act & Assert
+    assertThatThrownBy(
+            () -> RetryPolicy.newBuilder().backoffMultiplier(Double.POSITIVE_INFINITY).build())
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void build_withMaxIntervalLessThanInitial_throwsIllegalArgumentException() {
     // Arrange & Act & Assert
     assertThatThrownBy(

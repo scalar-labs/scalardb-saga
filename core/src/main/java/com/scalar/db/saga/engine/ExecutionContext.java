@@ -166,11 +166,14 @@ class ExecutionContext implements SagaContext {
   }
 
   // Handles type drift after crash recovery: JSON may deserialize Integer as Long (or vice versa)
-  // and Float as Double. Range checks guard the two narrowing paths that occur in practice
-  // (Long→Integer, Double→Float). Other narrowing paths (e.g., Double→Integer) are programming
-  // errors in step code and will produce truncated results — no range check is added for those.
+  // and Float as Double. Floating-point → integral conversions are rejected to prevent silent
+  // truncation (e.g., 99.95 → 99). Range checks guard the narrowing Long→Integer path.
   private static @Nullable Object coerceNumber(Number number, Class<?> targetType) {
     if (targetType == Integer.class || targetType == int.class) {
+      if (number instanceof Double || number instanceof Float) {
+        throw new ClassCastException(
+            "Cannot convert " + number.getClass().getName() + " to Integer: lossy conversion");
+      }
       long longValue = number.longValue();
       if (longValue < Integer.MIN_VALUE || longValue > Integer.MAX_VALUE) {
         throw new ClassCastException(
@@ -179,6 +182,10 @@ class ExecutionContext implements SagaContext {
       return number.intValue();
     }
     if (targetType == Long.class || targetType == long.class) {
+      if (number instanceof Double || number instanceof Float) {
+        throw new ClassCastException(
+            "Cannot convert " + number.getClass().getName() + " to Long: lossy conversion");
+      }
       return number.longValue();
     }
     if (targetType == Double.class || targetType == double.class) {

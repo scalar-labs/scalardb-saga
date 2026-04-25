@@ -7,7 +7,6 @@ import com.scalar.db.saga.api.TccStep;
 import com.scalar.db.saga.exception.StepCompensationException;
 import com.scalar.db.saga.exception.StepExecutionException;
 import java.util.Objects;
-import net.jcip.annotations.Immutable;
 
 /**
  * Wraps a {@link TccStep} for the Confirm phase.
@@ -15,7 +14,6 @@ import net.jcip.annotations.Immutable;
  * <p>Forward action delegates to {@link TccStep#confirm}, compensation is a no-op. Confirm steps
  * are always after the pivot boundary, so they are retriable and never compensated.
  */
-@Immutable
 class TccConfirmStep implements Step {
 
   private final TccStep tccStep;

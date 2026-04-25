@@ -3,14 +3,12 @@ package com.scalar.db.saga.engine;
 import com.scalar.db.saga.api.RetryPolicy;
 import com.scalar.db.saga.api.Step;
 import java.util.Objects;
-import net.jcip.annotations.Immutable;
 
 /**
  * Bundles a {@link Step} with its resolved {@link RetryPolicy} and per-step timeout.
  *
  * <p>Internal record — not part of the public API.
  */
-@Immutable
 record StepWithPolicy(Step step, RetryPolicy retryPolicy, long stepTimeoutMillis) {
 
   StepWithPolicy {
