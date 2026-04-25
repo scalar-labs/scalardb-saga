@@ -16,6 +16,7 @@ nullaway-plugin = "3.0.0"
 spotbugs-annotations = "4.9.8"
 findsecbugs = "1.14.0"
 jspecify = "1.0.0"
+jcip = "1.0-1"
 
 [libraries]
 scalardb = { module = "com.scalar-labs:scalardb", version.ref = "scalardb" }
@@ -33,3 +34,4 @@ nullaway = { module = "com.uber.nullaway:nullaway", version.ref = "nullaway" }
 spotbugs-annotations = { module = "com.github.spotbugs:spotbugs-annotations", version.ref = "spotbugs-annotations" }
 findsecbugs-plugin = { module = "com.h3xstream.findsecbugs:findsecbugs-plugin", version.ref = "findsecbugs" }
 jspecify = { module = "org.jspecify:jspecify", version.ref = "jspecify" }
+jcip-annotations = { module = "com.github.stephenc.jcip:jcip-annotations", version.ref = "jcip" }

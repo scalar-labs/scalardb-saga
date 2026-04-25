@@ -83,9 +83,6 @@ tasks.withType<JavaCompile>().configureEach {
             "UnusedVariable",
             "FieldCanBeFinal",
         )
-        if (name.contains("Test", ignoreCase = true)) {
-            disable("NullAway")
-        }
     }
 }
 
@@ -109,6 +106,7 @@ testing {
 
 dependencies {
     compileOnly(libs.jspecify)
+    compileOnly(libs.jcip.annotations)
     compileOnly(libs.spotbugs.annotations)
 
     testImplementation(libs.mockito.core)

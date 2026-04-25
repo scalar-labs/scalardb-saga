@@ -2,6 +2,7 @@ package com.scalar.db.saga.api;
 
 import java.time.Instant;
 import java.util.Objects;
+import net.jcip.annotations.Immutable;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -11,6 +12,7 @@ import org.jspecify.annotations.Nullable;
  * <b>not</b> increment the version. Version is only incremented by {@code SagaStore} on transaction
  * writes, ensuring safe optimistic concurrency control across recovery boundaries.
  */
+@Immutable
 public final class SagaStateSnapshot {
 
   private final String sagaId;

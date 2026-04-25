@@ -28,7 +28,7 @@ class SagaDefinitionTest {
       assertThat(definition.getVersion()).isEqualTo("1.0");
       assertThat(definition.getMode()).isEqualTo(SagaMode.SAGA);
       assertThat(definition.getRecoveryStrategy()).isEqualTo(RecoveryStrategy.BACKWARD);
-      assertThat(definition.getTimeoutMs()).isZero();
+      assertThat(definition.getTimeoutMillis()).isZero();
       assertThat(definition.getDefaultRetryPolicy()).isNull();
     }
 
@@ -55,10 +55,10 @@ class SagaDefinitionTest {
       SagaDefinition definition =
           SagaDefinition.newBuilder("order-saga", SagaMode.TCC)
               .version("2.0")
-              .timeoutMs(30_000)
+              .timeoutMillis(30_000)
               .defaultRetryPolicy(policy)
               .step("reserve", "com.example.ReserveStep")
-              .timeoutMs(5000)
+              .timeoutMillis(5000)
               .add()
               .build();
 
@@ -67,7 +67,7 @@ class SagaDefinitionTest {
       assertThat(definition.getVersion()).isEqualTo("2.0");
       assertThat(definition.getMode()).isEqualTo(SagaMode.TCC);
       assertThat(definition.getRecoveryStrategy()).isEqualTo(RecoveryStrategy.PREDEFINED);
-      assertThat(definition.getTimeoutMs()).isEqualTo(30_000);
+      assertThat(definition.getTimeoutMillis()).isEqualTo(30_000);
       assertThat(definition.getDefaultRetryPolicy()).isSameAs(policy);
     }
 
@@ -108,7 +108,8 @@ class SagaDefinitionTest {
     @Test
     void step_withRetryPolicy_setsPolicy() {
       // Arrange
-      RetryPolicy policy = RetryPolicy.newBuilder().maxAttempts(5).initialIntervalMs(2000).build();
+      RetryPolicy policy =
+          RetryPolicy.newBuilder().maxAttempts(5).initialIntervalMillis(2000).build();
 
       // Act
       SagaDefinition definition =
@@ -195,7 +196,7 @@ class SagaDefinitionTest {
       assertThatThrownBy(
               () ->
                   SagaDefinition.newBuilder("test", SagaMode.SAGA)
-                      .timeoutMs(-1)
+                      .timeoutMillis(-1)
                       .step("s1", "com.example.S1")
                       .add()
                       .build())
@@ -209,7 +210,7 @@ class SagaDefinitionTest {
               () ->
                   SagaDefinition.newBuilder("test", SagaMode.SAGA)
                       .step("s1", "com.example.S1")
-                      .timeoutMs(-100)
+                      .timeoutMillis(-100)
                       .add()
                       .build())
           .isInstanceOf(SagaDefinitionException.class);
@@ -220,15 +221,15 @@ class SagaDefinitionTest {
       // Arrange & Act — 0 means no timeout, should be valid
       SagaDefinition definition =
           SagaDefinition.newBuilder("test", SagaMode.SAGA)
-              .timeoutMs(0)
+              .timeoutMillis(0)
               .step("s1", "com.example.S1")
-              .timeoutMs(0)
+              .timeoutMillis(0)
               .add()
               .build();
 
       // Assert
-      assertThat(definition.getTimeoutMs()).isZero();
-      assertThat(definition.getSteps().get(0).getTimeoutMs()).isZero();
+      assertThat(definition.getTimeoutMillis()).isZero();
+      assertThat(definition.getSteps().get(0).getTimeoutMillis()).isZero();
     }
 
     @Test

@@ -14,9 +14,9 @@ class RetryPolicyTest {
 
     // Assert
     assertThat(policy.getMaxAttempts()).isEqualTo(3);
-    assertThat(policy.getInitialIntervalMs()).isEqualTo(1000);
+    assertThat(policy.getInitialIntervalMillis()).isEqualTo(1000);
     assertThat(policy.getBackoffMultiplier()).isEqualTo(2.0);
-    assertThat(policy.getMaxIntervalMs()).isEqualTo(30_000);
+    assertThat(policy.getMaxIntervalMillis()).isEqualTo(30_000);
   }
 
   @Test
@@ -26,9 +26,9 @@ class RetryPolicyTest {
 
     // Assert
     assertThat(policy.getMaxAttempts()).isEqualTo(3);
-    assertThat(policy.getInitialIntervalMs()).isEqualTo(1000);
+    assertThat(policy.getInitialIntervalMillis()).isEqualTo(1000);
     assertThat(policy.getBackoffMultiplier()).isEqualTo(2.0);
-    assertThat(policy.getMaxIntervalMs()).isEqualTo(10_000);
+    assertThat(policy.getMaxIntervalMillis()).isEqualTo(10_000);
   }
 
   @Test
@@ -38,9 +38,9 @@ class RetryPolicyTest {
 
     // Assert
     assertThat(policy.getMaxAttempts()).isEqualTo(10);
-    assertThat(policy.getInitialIntervalMs()).isEqualTo(500);
+    assertThat(policy.getInitialIntervalMillis()).isEqualTo(500);
     assertThat(policy.getBackoffMultiplier()).isEqualTo(2.0);
-    assertThat(policy.getMaxIntervalMs()).isEqualTo(60_000);
+    assertThat(policy.getMaxIntervalMillis()).isEqualTo(60_000);
   }
 
   @Test
@@ -49,16 +49,16 @@ class RetryPolicyTest {
     RetryPolicy policy =
         RetryPolicy.newBuilder()
             .maxAttempts(5)
-            .initialIntervalMs(2000)
+            .initialIntervalMillis(2000)
             .backoffMultiplier(1.5)
-            .maxIntervalMs(10_000)
+            .maxIntervalMillis(10_000)
             .build();
 
     // Assert
     assertThat(policy.getMaxAttempts()).isEqualTo(5);
-    assertThat(policy.getInitialIntervalMs()).isEqualTo(2000);
+    assertThat(policy.getInitialIntervalMillis()).isEqualTo(2000);
     assertThat(policy.getBackoffMultiplier()).isEqualTo(1.5);
-    assertThat(policy.getMaxIntervalMs()).isEqualTo(10_000);
+    assertThat(policy.getMaxIntervalMillis()).isEqualTo(10_000);
   }
 
   @Test
@@ -68,9 +68,9 @@ class RetryPolicyTest {
 
     // Assert
     assertThat(policy.getMaxAttempts()).isEqualTo(3);
-    assertThat(policy.getInitialIntervalMs()).isEqualTo(1000);
+    assertThat(policy.getInitialIntervalMillis()).isEqualTo(1000);
     assertThat(policy.getBackoffMultiplier()).isEqualTo(2.0);
-    assertThat(policy.getMaxIntervalMs()).isEqualTo(30_000);
+    assertThat(policy.getMaxIntervalMillis()).isEqualTo(30_000);
   }
 
   @Test
@@ -90,14 +90,14 @@ class RetryPolicyTest {
   @Test
   void build_withZeroInitialIntervalMs_throwsIllegalArgumentException() {
     // Arrange & Act & Assert
-    assertThatThrownBy(() -> RetryPolicy.newBuilder().initialIntervalMs(0).build())
+    assertThatThrownBy(() -> RetryPolicy.newBuilder().initialIntervalMillis(0).build())
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
   void build_withNegativeInitialIntervalMs_throwsIllegalArgumentException() {
     // Arrange & Act & Assert
-    assertThatThrownBy(() -> RetryPolicy.newBuilder().initialIntervalMs(-100).build())
+    assertThatThrownBy(() -> RetryPolicy.newBuilder().initialIntervalMillis(-100).build())
         .isInstanceOf(IllegalArgumentException.class);
   }
 
@@ -112,7 +112,11 @@ class RetryPolicyTest {
   void build_withMaxIntervalLessThanInitial_throwsIllegalArgumentException() {
     // Arrange & Act & Assert
     assertThatThrownBy(
-            () -> RetryPolicy.newBuilder().initialIntervalMs(5000).maxIntervalMs(1000).build())
+            () ->
+                RetryPolicy.newBuilder()
+                    .initialIntervalMillis(5000)
+                    .maxIntervalMillis(1000)
+                    .build())
         .isInstanceOf(IllegalArgumentException.class);
   }
 
@@ -122,16 +126,16 @@ class RetryPolicyTest {
     RetryPolicy a =
         RetryPolicy.newBuilder()
             .maxAttempts(5)
-            .initialIntervalMs(2000)
+            .initialIntervalMillis(2000)
             .backoffMultiplier(1.5)
-            .maxIntervalMs(10_000)
+            .maxIntervalMillis(10_000)
             .build();
     RetryPolicy b =
         RetryPolicy.newBuilder()
             .maxAttempts(5)
-            .initialIntervalMs(2000)
+            .initialIntervalMillis(2000)
             .backoffMultiplier(1.5)
-            .maxIntervalMs(10_000)
+            .maxIntervalMillis(10_000)
             .build();
 
     // Act & Assert
@@ -170,11 +174,87 @@ class RetryPolicyTest {
   @Test
   void hashCode_equalObjects_sameHashCode() {
     // Arrange
-    RetryPolicy a = RetryPolicy.newBuilder().maxAttempts(5).initialIntervalMs(500).build();
-    RetryPolicy b = RetryPolicy.newBuilder().maxAttempts(5).initialIntervalMs(500).build();
+    RetryPolicy a = RetryPolicy.newBuilder().maxAttempts(5).initialIntervalMillis(500).build();
+    RetryPolicy b = RetryPolicy.newBuilder().maxAttempts(5).initialIntervalMillis(500).build();
 
     // Act & Assert
     assertThat(a.hashCode()).isEqualTo(b.hashCode());
+  }
+
+  // --- sleepWithBackoff ---
+
+  @Test
+  void sleepWithBackoff_called_returnsNextInterval() throws InterruptedException {
+    // Arrange
+    RetryPolicy policy =
+        RetryPolicy.newBuilder()
+            .initialIntervalMillis(100)
+            .backoffMultiplier(2.0)
+            .maxIntervalMillis(10_000)
+            .build();
+
+    // Act
+    long nextInterval = policy.sleepWithBackoff(100);
+
+    // Assert — next = min(100 * 2.0, 10_000) = 200
+    assertThat(nextInterval).isEqualTo(200);
+  }
+
+  @Test
+  void sleepWithBackoff_intervalExceedsMax_returnsCappedInterval() throws InterruptedException {
+    // Arrange
+    RetryPolicy policy =
+        RetryPolicy.newBuilder()
+            .initialIntervalMillis(100)
+            .backoffMultiplier(2.0)
+            .maxIntervalMillis(500)
+            .build();
+
+    // Act
+    long nextInterval = policy.sleepWithBackoff(400);
+
+    // Assert — next = min(400 * 2.0, 500) = 500
+    assertThat(nextInterval).isEqualTo(500);
+  }
+
+  @Test
+  void sleepWithBackoff_calledRepeatedly_jitterBoundsHold() throws InterruptedException {
+    // Arrange
+    RetryPolicy policy =
+        RetryPolicy.newBuilder()
+            .initialIntervalMillis(100)
+            .backoffMultiplier(2.0)
+            .maxIntervalMillis(10_000)
+            .build();
+
+    // Act & Assert — run multiple times to verify jitter doesn't cause issues
+    long interval = 2;
+    for (int i = 0; i < 5; i++) {
+      long nextInterval = policy.sleepWithBackoff(interval);
+      assertThat(nextInterval).isGreaterThan(0);
+      assertThat(nextInterval).isLessThanOrEqualTo(policy.getMaxIntervalMillis());
+      interval = nextInterval;
+    }
+  }
+
+  @Test
+  void sleepWithBackoff_zeroIntervalGiven_throwsIllegalArgumentException() {
+    // Arrange
+    RetryPolicy policy = RetryPolicy.defaultPolicy();
+
+    // Act & Assert
+    assertThatThrownBy(() -> policy.sleepWithBackoff(0))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void sleepWithBackoff_negativeIntervalGiven_throwsIllegalArgumentException() {
+    // Arrange
+    RetryPolicy policy = RetryPolicy.defaultPolicy();
+
+    // Act & Assert
+    assertThatThrownBy(() -> policy.sleepWithBackoff(-1))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
@@ -187,8 +267,8 @@ class RetryPolicyTest {
 
     // Assert
     assertThat(result).contains("maxAttempts=3");
-    assertThat(result).contains("initialIntervalMs=1000");
+    assertThat(result).contains("initialIntervalMillis=1000");
     assertThat(result).contains("backoffMultiplier=2.0");
-    assertThat(result).contains("maxIntervalMs=30000");
+    assertThat(result).contains("maxIntervalMillis=30000");
   }
 }

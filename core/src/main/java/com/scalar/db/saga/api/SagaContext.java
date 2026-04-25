@@ -37,8 +37,8 @@ public interface SagaContext {
    *
    * <ul>
    *   <li>Primitives and their wrappers: {@code Boolean}, {@code Integer}, {@code Long}, {@code
-   *       Double}, {@code Float}, {@code Short}, {@code Byte}
-   *   <li>{@code String}
+   *       Double}, {@code Float}
+   *   <li>{@code String} and {@code java.math.BigDecimal}
    *   <li>{@code List} and {@code Map} containing only the above types (nested collections are
    *       allowed)
    * </ul>

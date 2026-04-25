@@ -1,6 +1,8 @@
 package com.scalar.db.saga.api;
 
 import java.util.Objects;
+import java.util.concurrent.ThreadLocalRandom;
+import net.jcip.annotations.Immutable;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -15,36 +17,51 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@link #confirmDefault()} — TCC confirm phase (10 attempts, 500ms initial, 60s max)
  * </ul>
  */
+@Immutable
 public final class RetryPolicy {
 
+  // General step execution — conservative defaults for forward-path steps. Three attempts handle
+  // common transient failures (network blips, connection pool exhaustion) without holding saga
+  // resources too long.
   private static final RetryPolicy DEFAULT = new RetryPolicy(3, 1000, 2.0, 30_000);
+
+  // Compensation — lower interval cap than the default. Compensations run after a failure;
+  // spending less time per attempt means faster overall failure handling. If compensation still
+  // fails, the saga stays in COMPENSATING for recovery to retry later.
   private static final RetryPolicy COMPENSATION_DEFAULT = new RetryPolicy(3, 1000, 2.0, 10_000);
+
+  // TCC confirm — confirms must succeed since resources are already reserved by the Try phase.
+  // More attempts and a higher interval cap allow the engine to ride out sustained outages before
+  // handing off to recovery.
   private static final RetryPolicy CONFIRM_DEFAULT = new RetryPolicy(10, 500, 2.0, 60_000);
 
   private final int maxAttempts;
-  private final long initialIntervalMs;
+  private final long initialIntervalMillis;
   private final double backoffMultiplier;
-  private final long maxIntervalMs;
+  private final long maxIntervalMillis;
 
   private RetryPolicy(
-      int maxAttempts, long initialIntervalMs, double backoffMultiplier, long maxIntervalMs) {
+      int maxAttempts,
+      long initialIntervalMillis,
+      double backoffMultiplier,
+      long maxIntervalMillis) {
     this.maxAttempts = maxAttempts;
-    this.initialIntervalMs = initialIntervalMs;
+    this.initialIntervalMillis = initialIntervalMillis;
     this.backoffMultiplier = backoffMultiplier;
-    this.maxIntervalMs = maxIntervalMs;
+    this.maxIntervalMillis = maxIntervalMillis;
   }
 
-  /** General step execution: 3 attempts, 1s initial, 2.0x multiplier, 30s max. */
+  /** Returns the default retry policy for general step execution. */
   public static RetryPolicy defaultPolicy() {
     return DEFAULT;
   }
 
-  /** Compensation retry: 3 attempts, 1s initial, 2.0x multiplier, 10s max. */
+  /** Returns the default retry policy for compensation. */
   public static RetryPolicy compensationDefault() {
     return COMPENSATION_DEFAULT;
   }
 
-  /** TCC confirm phase: 10 attempts, 500ms initial, 2.0x multiplier, 60s max. */
+  /** Returns the default retry policy for the TCC confirm phase. */
   public static RetryPolicy confirmDefault() {
     return CONFIRM_DEFAULT;
   }
@@ -57,16 +74,40 @@ public final class RetryPolicy {
     return maxAttempts;
   }
 
-  public long getInitialIntervalMs() {
-    return initialIntervalMs;
+  public long getInitialIntervalMillis() {
+    return initialIntervalMillis;
   }
 
   public double getBackoffMultiplier() {
     return backoffMultiplier;
   }
 
-  public long getMaxIntervalMs() {
-    return maxIntervalMs;
+  public long getMaxIntervalMillis() {
+    return maxIntervalMillis;
+  }
+
+  /**
+   * Sleeps with exponential backoff and equal jitter, then returns the next interval.
+   *
+   * <p>Jitter strategy: "Equal Jitter" from the <a
+   * href="https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/">AWS
+   * Architecture Blog</a>. The sleep duration is {@code half + random(0, half)} where {@code half =
+   * currentInterval / 2}. This guarantees a minimum wait of {@code half} while spreading retry
+   * attempts to mitigate thundering herds.
+   *
+   * @param currentInterval the current backoff interval in milliseconds (must be &gt; 0)
+   * @return the next backoff interval (capped at {@link #getMaxIntervalMillis()})
+   * @throws IllegalArgumentException if {@code currentInterval} is not positive
+   * @throws InterruptedException if the thread is interrupted while sleeping
+   */
+  public long sleepWithBackoff(long currentInterval) throws InterruptedException {
+    if (currentInterval <= 0) {
+      throw new IllegalArgumentException("currentInterval must be > 0, got " + currentInterval);
+    }
+    long half = currentInterval / 2;
+    long jitter = half > 0 ? ThreadLocalRandom.current().nextLong(half) : 0;
+    Thread.sleep(half + jitter);
+    return Math.min((long) (currentInterval * backoffMultiplier), maxIntervalMillis);
   }
 
   @Override
@@ -74,14 +115,14 @@ public final class RetryPolicy {
     if (this == o) return true;
     if (!(o instanceof RetryPolicy that)) return false;
     return maxAttempts == that.maxAttempts
-        && initialIntervalMs == that.initialIntervalMs
+        && initialIntervalMillis == that.initialIntervalMillis
         && Double.compare(backoffMultiplier, that.backoffMultiplier) == 0
-        && maxIntervalMs == that.maxIntervalMs;
+        && maxIntervalMillis == that.maxIntervalMillis;
   }
 
   @Override
   public int hashCode() {
-    return Objects.hash(maxAttempts, initialIntervalMs, backoffMultiplier, maxIntervalMs);
+    return Objects.hash(maxAttempts, initialIntervalMillis, backoffMultiplier, maxIntervalMillis);
   }
 
   @Override
@@ -89,21 +130,21 @@ public final class RetryPolicy {
     return "RetryPolicy{"
         + "maxAttempts="
         + maxAttempts
-        + ", initialIntervalMs="
-        + initialIntervalMs
+        + ", initialIntervalMillis="
+        + initialIntervalMillis
         + ", backoffMultiplier="
         + backoffMultiplier
-        + ", maxIntervalMs="
-        + maxIntervalMs
+        + ", maxIntervalMillis="
+        + maxIntervalMillis
         + '}';
   }
 
   public static final class Builder {
 
     private int maxAttempts = 3;
-    private long initialIntervalMs = 1000;
+    private long initialIntervalMillis = 1000;
     private double backoffMultiplier = 2.0;
-    private long maxIntervalMs = 30_000;
+    private long maxIntervalMillis = 30_000;
 
     private Builder() {}
 
@@ -112,8 +153,8 @@ public final class RetryPolicy {
       return this;
     }
 
-    public Builder initialIntervalMs(long initialIntervalMs) {
-      this.initialIntervalMs = initialIntervalMs;
+    public Builder initialIntervalMillis(long initialIntervalMillis) {
+      this.initialIntervalMillis = initialIntervalMillis;
       return this;
     }
 
@@ -122,8 +163,8 @@ public final class RetryPolicy {
       return this;
     }
 
-    public Builder maxIntervalMs(long maxIntervalMs) {
-      this.maxIntervalMs = maxIntervalMs;
+    public Builder maxIntervalMillis(long maxIntervalMillis) {
+      this.maxIntervalMillis = maxIntervalMillis;
       return this;
     }
 
@@ -131,23 +172,24 @@ public final class RetryPolicy {
       if (maxAttempts < 1) {
         throw new IllegalArgumentException("maxAttempts must be >= 1, got " + maxAttempts);
       }
-      if (initialIntervalMs <= 0) {
+      if (initialIntervalMillis <= 0) {
         throw new IllegalArgumentException(
-            "initialIntervalMs must be > 0, got " + initialIntervalMs);
+            "initialIntervalMillis must be > 0, got " + initialIntervalMillis);
       }
       if (backoffMultiplier < 1.0) {
         throw new IllegalArgumentException(
             "backoffMultiplier must be >= 1.0, got " + backoffMultiplier);
       }
-      if (maxIntervalMs < initialIntervalMs) {
+      if (maxIntervalMillis < initialIntervalMillis) {
         throw new IllegalArgumentException(
-            "maxIntervalMs ("
-                + maxIntervalMs
-                + ") must be >= initialIntervalMs ("
-                + initialIntervalMs
+            "maxIntervalMillis ("
+                + maxIntervalMillis
+                + ") must be >= initialIntervalMillis ("
+                + initialIntervalMillis
                 + ")");
       }
-      return new RetryPolicy(maxAttempts, initialIntervalMs, backoffMultiplier, maxIntervalMs);
+      return new RetryPolicy(
+          maxAttempts, initialIntervalMillis, backoffMultiplier, maxIntervalMillis);
     }
   }
 }
