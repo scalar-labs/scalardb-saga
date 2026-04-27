@@ -52,9 +52,13 @@ public interface SagaStore {
   /**
    * Appends a step-level event to the event stream (no state transition).
    *
+   * <p>The event must be a step-level event (i.e., {@link SagaEvent#getTargetStatus()} is {@code
+   * null} and {@link SagaEvent#getStepIndex()} is non-negative). Use {@link #recordTransition} for
+   * saga-level events that change the saga status.
+   *
    * @param sagaId the saga instance ID
    * @param sequence the event sequence number (tracked by the caller)
-   * @param event the event to append
+   * @param event the step-level event to append
    */
   void appendEvent(String sagaId, int sequence, SagaEvent event);
 

@@ -173,7 +173,7 @@ public final class SagaEvent {
   }
 
   /** Returns a new {@code SagaEvent} with the given timestamp set. */
-  SagaEvent withTimestamp(Instant timestamp) {
+  public SagaEvent withTimestamp(Instant timestamp) {
     Objects.requireNonNull(timestamp, "timestamp must not be null");
     return new SagaEvent(eventType, stepIndex, stepName, payload, targetStatus, timestamp);
   }
