@@ -469,7 +469,7 @@ However, the saga workload is safe under SNAPSHOT because no transaction perform
 | `recordTransition` | 0 (caller provides state) | INSERT event + DELETE/INSERT state | Writes only |
 | `claimForRecovery` | 1 Get | DELETE/INSERT state | Single read — no second read to skew against. Concurrent claims produce write-write conflict. |
 | `getEvents` | 1 Scan (single partition) | 0 | Single scan operation |
-| `findRecoverableByBucket` | 3 Scans (1 bucket × 3 statuses) | 0 | Called per bucket from `recover()`. Each result is independently validated by a separate `claimForRecovery` transaction. |
+| `findRecoverable` | 3 Scans (1 bucket × 3 statuses) per page | 0 | Called with cursor from `recover()`. Each result is independently validated by a separate `claimForRecovery` transaction. |
 
 Write-skew requires reading row X and writing row Y based on that read — no saga transaction does this. The read-only anomaly requires an invariant spanning multiple data items with concurrent write transactions — no invariant spans multiple sagas, and within a single saga, only one replica executes at a time (after claiming).
 
@@ -628,6 +628,15 @@ class ExecutionContext implements SagaContext {
     private SagaStateSnapshot currentState;   // current saga state (replaced after each transition)
     private final Set<Integer> failedStepIndices = new HashSet<>();  // populated during replayEvents()
 
+    // 3-arg constructor: used both for new sagas (empty input map) and crash
+    // recovery (pre-populated input map from the SAGA_STARTED event payload).
+    // currentState is the latest snapshot loaded before constructing this context.
+    ExecutionContext(String sagaId, Map<String, Object> input, SagaStateSnapshot currentState) {
+        this.sagaId = Objects.requireNonNull(sagaId);
+        this.data = new HashMap<>(Objects.requireNonNull(input));
+        this.currentState = Objects.requireNonNull(currentState);
+    }
+
     // --- SagaContext interface (user-facing) ---
     @Override public String getSagaId() { return sagaId; }
     @Override public <T> T get(String key, Class<T> type) { ... }
@@ -635,6 +644,8 @@ class ExecutionContext implements SagaContext {
         validateType(value);  // throws IllegalArgumentException if not allowed
         data.put(key, value);
     }
+    // Returns a defensive copy of the data map (for serialization / event payload).
+    Map<String, Object> getData() { return Map.copyOf(data); }
 
     // --- Engine-internal (not accessible from Step implementations) ---
     int nextSequence() { return nextEventSequence; }
@@ -647,20 +658,49 @@ class ExecutionContext implements SagaContext {
     void merge(StepResult result) { ... }
 
     private void validateType(Object value) {
-        if (value == null) return;
+        if (value == null) {
+            // Null values are rejected: the type is ambiguous after JSON round-trip
+            // (e.g., null Integer vs null String are indistinguishable).
+            throw new IllegalArgumentException(
+                "SagaContext does not accept null values; use explicit removal instead.");
+        }
         if (ALLOWED_TYPES.contains(value.getClass())) return;
         if (value instanceof List) {
-            ((List<?>) value).forEach(this::validateType);
+            for (Object element : (List<?>) value) {
+                if (element == null) {
+                    throw new IllegalArgumentException(
+                        "SagaContext does not accept null elements inside a List.");
+                }
+                validateType(element);
+            }
             return;
         }
         if (value instanceof Map) {
-            ((Map<?, ?>) value).values().forEach(this::validateType);
+            for (Map.Entry<?, ?> entry : ((Map<?, ?>) value).entrySet()) {
+                if (!(entry.getKey() instanceof String)) {
+                    throw new IllegalArgumentException(
+                        "SagaContext Map keys must be Strings. Got: "
+                        + (entry.getKey() == null ? "null" : entry.getKey().getClass().getName()));
+                }
+                if (entry.getValue() == null) {
+                    throw new IllegalArgumentException(
+                        "SagaContext does not accept null values inside a Map.");
+                }
+                validateType(entry.getValue());
+            }
             return;
         }
         throw new IllegalArgumentException(
             "SagaContext only accepts primitives, strings, and collections thereof. "
             + "Got: " + value.getClass().getName());
     }
+
+    // --- Crash-recovery helper ---
+    // After replayEvents() re-populates `data` from stored JSON, numeric values
+    // may have drifted types (e.g., an Integer stored as Long by the JSON library).
+    // coerceNumber(key, Integer.class) handles this transparently so that step
+    // code using get("count", Integer.class) continues to work after recovery.
+    <N extends Number> N coerceNumber(String key, Class<N> targetType) { ... }
 }
 
 // --- api/SagaStateSnapshot.java ---
@@ -721,24 +761,24 @@ Saga definitions can be written in JSON or YAML. YAML is often preferred for han
   "version": "1.0",
   "mode": "SAGA",
   "recoveryStrategy": "BACKWARD",
-  "timeoutMs": 300000,
+  "timeoutMillis": 300000,
   "defaultRetryPolicy": {
     "maxAttempts": 3,
-    "initialIntervalMs": 1000,
+    "initialIntervalMillis": 1000,
     "backoffMultiplier": 2.0,
-    "maxIntervalMs": 30000
+    "maxIntervalMillis": 30000
   },
   "steps": [
     {
       "name": "debit",
       "stepClass": "com.example.DebitAccountStep",
-      "timeoutMs": 60000,
+      "timeoutMillis": 60000,
       "retryPolicy": { "maxAttempts": 5 }
     },
     {
       "name": "credit",
       "stepClass": "com.example.CreditAccountStep",
-      "timeoutMs": 30000
+      "timeoutMillis": 30000
     }
   ]
 }
@@ -752,24 +792,24 @@ name: MoneyTransfer
 version: "1.0"
 mode: SAGA
 recoveryStrategy: BACKWARD
-timeoutMs: 300000
+timeoutMillis: 300000
 
 defaultRetryPolicy:
   maxAttempts: 3
-  initialIntervalMs: 1000
+  initialIntervalMillis: 1000
   backoffMultiplier: 2.0
-  maxIntervalMs: 30000
+  maxIntervalMillis: 30000
 
 steps:
   - name: debit
     stepClass: com.example.DebitAccountStep
-    timeoutMs: 60000
+    timeoutMillis: 60000
     retryPolicy:
       maxAttempts: 5  # more retries for the debit step
 
   - name: credit
     stepClass: com.example.CreditAccountStep
-    timeoutMs: 30000
+    timeoutMillis: 30000
 ```
 
 **Mixed recovery (pivot transaction) example — JSON:**
@@ -780,28 +820,28 @@ steps:
   "version": "1.0",
   "mode": "SAGA",
   "recoveryStrategy": "MIXED",
-  "timeoutMs": 300000,
+  "timeoutMillis": 300000,
   "steps": [
     {
       "name": "reserveInventory",
       "stepClass": "com.example.ReserveInventoryStep",
-      "timeoutMs": 60000
+      "timeoutMillis": 60000
     },
     {
       "name": "chargePayment",
       "stepClass": "com.example.ChargePaymentStep",
       "pivot": true,
-      "timeoutMs": 60000
+      "timeoutMillis": 60000
     },
     {
       "name": "sendConfirmationEmail",
       "stepClass": "com.example.SendConfirmationEmailStep",
-      "timeoutMs": 30000
+      "timeoutMillis": 30000
     },
     {
       "name": "updateAnalytics",
       "stepClass": "com.example.UpdateAnalyticsStep",
-      "timeoutMs": 10000
+      "timeoutMillis": 10000
     }
   ]
 }
@@ -816,25 +856,25 @@ name: PlaceOrder
 version: "1.0"
 mode: SAGA
 recoveryStrategy: MIXED
-timeoutMs: 300000
+timeoutMillis: 300000
 
 steps:
   - name: reserveInventory
     stepClass: com.example.ReserveInventoryStep
-    timeoutMs: 60000
+    timeoutMillis: 60000
 
   - name: chargePayment         # pivot — if this fails, compensate above
     stepClass: com.example.ChargePaymentStep
     pivot: true
-    timeoutMs: 60000
+    timeoutMillis: 60000
 
   - name: sendConfirmationEmail  # retriable — must eventually succeed
     stepClass: com.example.SendConfirmationEmailStep
-    timeoutMs: 30000
+    timeoutMillis: 30000
 
   - name: updateAnalytics        # retriable — must eventually succeed
     stepClass: com.example.UpdateAnalyticsStep
-    timeoutMs: 10000
+    timeoutMillis: 10000
 ```
 
 ### Saga Definition (Java Builder API)
@@ -845,19 +885,19 @@ For embedded mode, a type-safe Java builder provides compile-time checks and IDE
 SagaDefinition def = SagaDefinition.newBuilder("MoneyTransfer", SagaMode.SAGA)
     .version("1.0")
     .recoveryStrategy(RecoveryStrategy.BACKWARD)
-    .timeoutMs(300000)
+    .timeoutMillis(300000)
     .defaultRetryPolicy(RetryPolicy.newBuilder()
         .maxAttempts(3)
-        .initialIntervalMs(1000)
+        .initialIntervalMillis(1000)
         .backoffMultiplier(2.0)
-        .maxIntervalMs(30000)
+        .maxIntervalMillis(30000)
         .build())
     .step("debit", DebitAccountStep.class)
-        .timeoutMs(60000)
+        .timeoutMillis(60000)
         .retryPolicy(RetryPolicy.newBuilder().maxAttempts(5).build())
         .add()
     .step("credit", CreditAccountStep.class)
-        .timeoutMs(30000)
+        .timeoutMillis(30000)
         .add()
     .build();
 
@@ -870,19 +910,19 @@ sagaManager.register(def);
 SagaDefinition def = SagaDefinition.newBuilder("PlaceOrder", SagaMode.SAGA)
     .version("1.0")
     .recoveryStrategy(RecoveryStrategy.MIXED)
-    .timeoutMs(300000)
+    .timeoutMillis(300000)
     .step("reserveInventory", ReserveInventoryStep.class)
-        .timeoutMs(60000)
+        .timeoutMillis(60000)
         .add()
     .step("chargePayment", ChargePaymentStep.class)  // pivot — the go/no-go step
         .pivot(true)
-        .timeoutMs(60000)
+        .timeoutMillis(60000)
         .add()
     .step("sendConfirmationEmail", SendConfirmationEmailStep.class)  // retriable — after pivot
-        .timeoutMs(30000)
+        .timeoutMillis(30000)
         .add()
     .step("updateAnalytics", UpdateAnalyticsStep.class)  // retriable — after pivot
-        .timeoutMs(10000)
+        .timeoutMillis(10000)
         .add()
     .build();
 ```
@@ -909,7 +949,7 @@ public class SagaDefinition {
     private SagaMode mode;                    // SAGA (default) or TCC
     private List<StepDefinition> steps;
     private RecoveryStrategy recoveryStrategy;  // Saga mode only: BACKWARD, FORWARD, or MIXED (null for TCC)
-    private long timeoutMs;                   // saga-level timeout (0 = no timeout)
+    private long timeoutMillis;                   // saga-level timeout (0 = no timeout)
     private RetryPolicy defaultRetryPolicy;
 
     public enum SagaMode { SAGA, TCC }
@@ -928,7 +968,7 @@ public class SagaDefinition {
         String stepClass;            // FQCN of Step implementation (always non-null).
                                      // For user-written steps: user-provided FQCN (e.g., "com.example.DebitAccountStep").
                                      // For declarative steps: auto-set to DeclarativeStepAdapter by the definition parser.
-        long timeoutMs;              // per-step timeout (0 = use saga-level timeout only)
+        long timeoutMillis;              // per-step timeout (0 = use saga-level timeout only)
         RetryPolicy retryPolicy;     // per-step override (nullable)
         boolean pivot;               // true = this is the pivot step (at most one per saga)
     }
@@ -1152,12 +1192,12 @@ public class SagaEngine {
                 plan = def.getSteps().stream()
                     .map(stepDef -> new StepWithPolicy(
                         instantiate(stepDef), resolveRetryPolicy(stepDef, def),
-                        stepDef.getTimeoutMs()))
+                        stepDef.getTimeoutMillis()))
                     .toList();
             }
 
             executeSagaSteps(plan, def.getPivotPolicy(), context, startIndex,
-                             def.getTimeoutMs());
+                             def.getTimeoutMillis());
         } finally {
             unregisterActive(sagaId);
         }
@@ -1175,47 +1215,49 @@ public class SagaEngine {
      * same step indices), which is required for crash recovery correctness.
      */
     // --- engine/TccReserveStep.java ---
+    // Top-level package-private class (not nested in SagaEngine).
 
     /**
      * Wraps TccStep for the Reserve (Try) phase: forward = reserve(), compensate = cancel().
-     * Internal class — not part of the public API.
+     * Package-private — not part of the public API.
      */
     class TccReserveStep implements Step {
         private final TccStep tccStep;
 
         TccReserveStep(TccStep tccStep) {
-            this.tccStep = tccStep;
+            this.tccStep = Objects.requireNonNull(tccStep);
         }
 
         @Override public String getName() { return tccStep.getName() + ".reserve"; }
-        @Override public StepResult execute(SagaContext ctx) throws StepExecutionException {
-            return tccStep.reserve(ctx);
+        @Override public StepResult execute(SagaContext context) throws StepExecutionException {
+            return tccStep.reserve(context);
         }
-        @Override public void compensate(SagaContext ctx) throws StepCompensationException {
-            tccStep.cancel(ctx);
+        @Override public void compensate(SagaContext context) throws StepCompensationException {
+            tccStep.cancel(context);
         }
     }
 
     // --- engine/TccConfirmStep.java ---
+    // Top-level package-private class (not nested in SagaEngine).
 
     /**
      * Wraps TccStep for the Confirm phase: forward = confirm(), compensate = no-op.
      * Confirm steps are always after the pivot, so compensate() should never be called.
-     * Internal class — not part of the public API.
+     * Package-private — not part of the public API.
      */
     class TccConfirmStep implements Step {
         private final TccStep tccStep;
 
         TccConfirmStep(TccStep tccStep) {
-            this.tccStep = tccStep;
+            this.tccStep = Objects.requireNonNull(tccStep);
         }
 
         @Override public String getName() { return tccStep.getName() + ".confirm"; }
-        @Override public StepResult execute(SagaContext ctx) throws StepExecutionException {
-            tccStep.confirm(ctx);
+        @Override public StepResult execute(SagaContext context) throws StepExecutionException {
+            tccStep.confirm(context);
             return StepResult.empty();
         }
-        @Override public void compensate(SagaContext ctx) throws StepCompensationException {
+        @Override public void compensate(SagaContext context) throws StepCompensationException {
             // No-op: confirm steps are retriable (after the pivot), never compensated.
         }
     }
@@ -1224,7 +1266,16 @@ public class SagaEngine {
      * Bundles a Step with its resolved RetryPolicy.
      * Internal record — not part of the public API.
      */
-    record StepWithPolicy(Step step, RetryPolicy retryPolicy, long stepTimeoutMs) {}
+    record StepWithPolicy(Step step, RetryPolicy retryPolicy, long stepTimeoutMillis) {
+        // Compact constructor validates invariants at construction time.
+        StepWithPolicy {
+            Objects.requireNonNull(step, "step");
+            Objects.requireNonNull(retryPolicy, "retryPolicy");
+            if (stepTimeoutMillis < 0) {
+                throw new IllegalArgumentException("stepTimeoutMillis must be >= 0");
+            }
+        }
+    }
 
     private List<StepWithPolicy> expandTccPlan(SagaDefinition def) {
         List<StepWithPolicy> reserves = new ArrayList<>();
@@ -1235,12 +1286,12 @@ public class SagaEngine {
             // users need control over retry attempts and backoff intervals.
             reserves.add(new StepWithPolicy(
                 new TccReserveStep(tccStep), resolveRetryPolicy(stepDef, def),
-                stepDef.getTimeoutMs()));
+                stepDef.getTimeoutMillis()));
             // Confirm: hardcoded aggressive retry. Confirms MUST succeed — resources are
             // already reserved. confirmDefault() = 10 attempts, 500ms initial, 60s max.
             confirms.add(new StepWithPolicy(
                 new TccConfirmStep(tccStep), RetryPolicy.confirmDefault(),
-                stepDef.getTimeoutMs()));
+                stepDef.getTimeoutMillis()));
         }
         List<StepWithPolicy> plan = new ArrayList<>(reserves);
         plan.addAll(confirms);
@@ -1280,11 +1331,11 @@ public class SagaEngine {
      */
     private void executeSagaSteps(List<StepWithPolicy> plan, PivotPolicy pivot,
                                    ExecutionContext context, int startIndex,
-                                   long sagaTimeoutMs) {
+                                   long sagaTimeoutMillis) {
         String sagaId = context.getSagaId();
         int completedIndex = startIndex - 1;
-        long sagaDeadline = sagaTimeoutMs > 0
-            ? System.currentTimeMillis() + sagaTimeoutMs : 0;
+        long sagaDeadline = sagaTimeoutMillis > 0
+            ? System.currentTimeMillis() + sagaTimeoutMillis : 0;
 
         try {
             for (int i = startIndex; i < plan.size(); i++) {
@@ -1296,7 +1347,7 @@ public class SagaEngine {
                 // Saga-level timeout: check before each step
                 if (sagaDeadline > 0 && System.currentTimeMillis() > sagaDeadline) {
                     throw new SagaTimeoutException(
-                        "Saga " + sagaId + " exceeded deadline of " + sagaTimeoutMs + "ms");
+                        "Saga " + sagaId + " exceeded deadline of " + sagaTimeoutMillis + "ms");
                 }
 
                 // Emit the crossing event once when transitioning past the pivot.
@@ -1307,7 +1358,7 @@ public class SagaEngine {
                 }
 
                 StepWithPolicy entry = plan.get(i);
-                long stepDeadline = calculateStepDeadline(entry.stepTimeoutMs(), sagaDeadline);
+                long stepDeadline = calculateStepDeadline(entry.stepTimeoutMillis(), sagaDeadline);
 
                 try {
                     StepResult result = executeWithRetry(entry.step(), context,
@@ -1386,7 +1437,7 @@ public class SagaEngine {
             plan = def.getSteps().stream()
                 .map(stepDef -> new StepWithPolicy(
                     instantiate(stepDef), resolveRetryPolicy(stepDef, def),
-                    stepDef.getTimeoutMs()))
+                    stepDef.getTimeoutMillis()))
                 .toList();
         }
         // Only transition if not already COMPENSATING (recovery resumes mid-compensation)
@@ -1781,7 +1832,7 @@ public class CompensationManager {
     private void compensateWithRetry(Step step, ExecutionContext context,
                                       int stepIndex) throws StepCompensationException {
         int attempt = 0;
-        long interval = compensationRetryPolicy.getInitialIntervalMs();
+        long interval = compensationRetryPolicy.getInitialIntervalMillis();
 
         while (attempt < compensationRetryPolicy.getMaxAttempts()) {
             try {
@@ -1822,7 +1873,7 @@ The compensation retry policy is separate from the forward step retry policy. De
 ```java
 // In RetryPolicy.java
 public static RetryPolicy compensationDefault() {
-    return new RetryPolicy(3, 1000, 2.0, 10000, Set.of());
+    return new RetryPolicy(3, 1000, 2.0, 10000);
 }
 ```
 
@@ -1898,11 +1949,12 @@ public class StepExecutionException extends Exception {
 
 ```java
 // --- engine/RetryPolicy.java ---
-public class RetryPolicy {
-    private int maxAttempts;            // default: 3
-    private long initialIntervalMs;     // default: 1000
-    private double backoffMultiplier;   // default: 2.0
-    private long maxIntervalMs;         // default: 30000
+@Immutable
+public final class RetryPolicy {
+    private final int maxAttempts;            // default: 3
+    private final long initialIntervalMillis; // default: 1000
+    private final double backoffMultiplier;   // default: 2.0
+    private final long maxIntervalMillis;     // default: 30000
 
     public static RetryPolicy defaultPolicy() {
         return new RetryPolicy(3, 1000, 2.0, 30000);
@@ -1926,9 +1978,11 @@ public class RetryPolicy {
      *   - Stateless — each call depends only on the current interval
      */
     public long sleepWithBackoff(long currentInterval) throws InterruptedException {
+        if (currentInterval <= 0) throw new IllegalArgumentException("currentInterval must be positive");
         long half = currentInterval / 2;
-        Thread.sleep(half + ThreadLocalRandom.current().nextLong(half));
-        return Math.min((long) (currentInterval * backoffMultiplier), maxIntervalMs);
+        long jitter = half > 0 ? ThreadLocalRandom.current().nextLong(half) : 0;
+        Thread.sleep(half + jitter);
+        return Math.min((long) (currentInterval * backoffMultiplier), maxIntervalMillis);
     }
 }
 ```
@@ -1954,7 +2008,7 @@ private StepResult executeWithRetry(Step step, ExecutionContext ctx, RetryPolicy
         throws StepExecutionException, StepTimeoutException {
 
     int attempt = 0;
-    long interval = policy.getInitialIntervalMs();
+    long interval = policy.getInitialIntervalMillis();
 
     while (true) {
         attempt++;
@@ -2125,13 +2179,14 @@ public class SagaSchema {
 
 ```java
 // --- store/SagaEvent.java ---
-public class SagaEvent {
+@Immutable
+public final class SagaEvent {
     private final String eventType;
-    private final int stepIndex;        // -1 for saga-level events
-    private final String stepName;      // null for saga-level events
-    private final String payload;       // JSON
-    private final SagaStatus targetStatus;  // non-null for transition events, null for step-level events
-    private final Instant timestamp;    // set from saga_events.created_at when loaded from store
+    private final int stepIndex;            // -1 for saga-level events
+    private final @Nullable String stepName;     // null for saga-level events
+    private final @Nullable String payload;      // event-specific data (serialized JSON for step results, plain text for escalation reasons)
+    private final @Nullable SagaStatus targetStatus;  // non-null for transition events, null for step-level events
+    private final @Nullable Instant timestamp;   // set from saga_events.created_at when loaded from store
 
     // --- Saga lifecycle (6) ---
     // In-progress states use present participle; terminal states use past participle.
@@ -2148,15 +2203,15 @@ public class SagaEvent {
     public static final String STEP_COMPENSATED         = "STEP_COMPENSATED";
     public static final String STEP_COMPENSATION_FAILED = "STEP_COMPENSATION_FAILED";
 
-    public SagaStatus getTargetStatus() { return targetStatus; }
-    public Instant getTimestamp() { return timestamp; }
+    public @Nullable SagaStatus getTargetStatus() { return targetStatus; }
+    public @Nullable Instant getTimestamp() { return timestamp; }
 
     // Step-level factory methods (no status transition)
-    public static SagaEvent sagaStarted(String sagaName, Map<String, Object> input) { ... }
-    public static SagaEvent stepCompleted(int stepIndex, String stepName, StepResult result) { ... }
-    public static SagaEvent stepFailed(int stepIndex, String stepName, Exception e) { ... }
-    public static SagaEvent stepCompensated(int stepIndex) { ... }
-    public static SagaEvent stepCompensationFailed(int stepIndex, Exception e) { ... }
+    public static SagaEvent sagaStarted(@Nullable String payload) { ... }
+    public static SagaEvent stepCompleted(int stepIndex, String stepName, @Nullable String payload) { ... }
+    public static SagaEvent stepFailed(int stepIndex, String stepName, @Nullable String payload) { ... }
+    public static SagaEvent stepCompensated(int stepIndex, String stepName) { ... }
+    public static SagaEvent stepCompensationFailed(int stepIndex, String stepName, @Nullable String payload) { ... }
 
     // Saga-level factory methods (each carries its target SagaStatus)
     public static SagaEvent sagaCompensating() { ... }  // → COMPENSATING
@@ -2164,6 +2219,12 @@ public class SagaEvent {
     public static SagaEvent sagaCompleted() { ... }     // → COMPLETED
     public static SagaEvent sagaCompensated() { ... }   // → COMPENSATED
     public static SagaEvent sagaEscalated(String reason) { ... }  // → ESCALATED
+
+    // Package-private — used by store implementation to attach the persisted timestamp
+    SagaEvent withTimestamp(Instant timestamp) { ... }
+
+    // Validates that stepIndex >= 0; throws IllegalArgumentException for saga-level events
+    private void validateStepIndex(int stepIndex) { ... }
 }
 ```
 
@@ -2237,8 +2298,9 @@ public interface SagaStore {
     SagaStateSnapshot recordTransition(SagaStateSnapshot current, int sequence,
                                         SagaEvent event);
 
-    // Recovery — scan a single bucket of saga_state for stale in-progress sagas
-    List<SagaStateSnapshot> findRecoverableByBucket(int bucket, long recoveryTimeoutMs);
+    // Recovery — finds sagas in RUNNING, CONFIRMING, or COMPENSATING status whose
+    // updated_at is older than the threshold. Cursor-based pagination hides internal partitioning.
+    Recoverables findRecoverable(long recoveryTimeoutMillis, @Nullable RecoverablesCursor cursor);
     @Nullable SagaStateSnapshot claimForRecovery(SagaStateSnapshot saga, String newOwnerId);
     void markForRecovery(String sagaId);  // sets updated_at to epoch 0 for immediate recovery
     List<SagaEvent> getEvents(String sagaId);
@@ -2246,13 +2308,19 @@ public interface SagaStore {
 
     // Queries
     SagaStateSnapshot getStateSnapshot(String sagaId);
-    SagaPage<SagaStateSnapshot> listStateSnapshots(SagaQuery query);
-    Map<SagaStatus, Long> countByStatus();
-    Map<String, Long> countBySagaName();
+
+    // Admin query methods — deferred to Admin API phase (Phase 5)
+    // SagaPage<SagaStateSnapshot> listStateSnapshots(SagaQuery query);
+    // Map<SagaStatus, Long> countByStatus();
+    // Map<String, Long> countBySagaName();
 
     // Data retention — deletes all events and state for a terminal saga.
     // Only sagas in COMPLETED, COMPENSATED, or ESCALATED status may be deleted.
     void deleteSaga(String sagaId);
+
+    // Nested types for cursor-based recovery pagination
+    record Recoverables(List<SagaStateSnapshot> sagas, @Nullable RecoverablesCursor nextCursor) {}
+    interface RecoverablesCursor {}
 }
 ```
 
@@ -2453,18 +2521,18 @@ public class ScalarDbSagaStore implements SagaStore {
     }
 
     /**
-     * Find sagas stuck in RUNNING or COMPENSATING with stale updated_at.
+     * Find sagas stuck in RUNNING, CONFIRMING, or COMPENSATING with stale updated_at.
      *
-     * Scans each bucket with clustering key range status=RUNNING (or
-     * COMPENSATING) and updated_at <= threshold. Both non-active statuses
-     * and recently-updated sagas are skipped at the storage layer.
+     * Scans one bucket per call (determined by the cursor), with clustering key
+     * range status=RUNNING/CONFIRMING/COMPENSATING and updated_at <= threshold.
+     * Cursor-based pagination hides internal bucket partitioning from the caller.
      *
      * Bucket-based partitioning distributes scans across database nodes —
      * no hot-partition problem.
      */
-    public List<SagaStateSnapshot> findRecoverableByBucket(int bucket, long recoveryTimeoutMs) {
+    public Recoverables findRecoverable(long recoveryTimeoutMillis, @Nullable RecoverablesCursor cursor) {
         List<SagaStateSnapshot> result = new ArrayList<>();
-        Instant threshold = Instant.now().minusMillis(recoveryTimeoutMs);
+        Instant threshold = Instant.now().minusMillis(recoveryTimeoutMillis);
         DistributedTransaction tx = null;
         try {
             tx = txManager.begin();
@@ -2499,7 +2567,7 @@ public class ScalarDbSagaStore implements SagaStore {
 
     /**
      * Claim a saga for recovery: read current row to verify it hasn't been
-     * claimed since findRecoverableByBucket, then DELETE old row + INSERT with updated
+     * claimed since findRecoverable, then DELETE old row + INSERT with updated
      * owner_id and incremented version.
      *
      * The read serves two purposes:
@@ -2517,7 +2585,7 @@ public class ScalarDbSagaStore implements SagaStore {
             int status = saga.getStatus().ordinal();
             Instant now = Instant.now();
 
-            // Read current row to verify it hasn't been claimed since findRecoverableByBucket
+            // Read current row to verify it hasn't been claimed since findRecoverable
             Optional<Result> current = tx.get(Get.newBuilder()
                 .namespace(SagaSchema.NAMESPACE).table("saga_state")
                 .partitionKey(Key.ofInt("bucket", bucket))
@@ -2775,7 +2843,7 @@ On application startup, scans `saga_state` for sagas stuck in `RUNNING` or `COMP
 
 ```java
 // --- recovery/RecoveryConfig.java ---
-record RecoveryConfig(long recoveryTimeoutMs, long recoveryIntervalSeconds,
+record RecoveryConfig(long recoveryTimeoutMillis, long recoveryIntervalSeconds,
                       Duration compensationGracePeriod, Clock clock) {}
 ```
 
@@ -2786,7 +2854,7 @@ public class SagaRecoveryManager {
     private final SagaEngine engine;
     private final SagaDefinitionRegistry registry;
     private final String ownerId;
-    private final long recoveryTimeoutMs;
+    private final long recoveryTimeoutMillis;
     private final ScheduledExecutorService scheduler;
     private final long recoveryIntervalSeconds;
     private final Duration compensationGracePeriod;
@@ -2799,7 +2867,7 @@ public class SagaRecoveryManager {
         this.engine = engine;
         this.registry = registry;
         this.ownerId = ownerId;
-        this.recoveryTimeoutMs = config.recoveryTimeoutMs();
+        this.recoveryTimeoutMillis = config.recoveryTimeoutMillis();
         this.recoveryIntervalSeconds = config.recoveryIntervalSeconds();
         this.compensationGracePeriod = config.compensationGracePeriod();
         this.clock = config.clock();
@@ -2833,11 +2901,12 @@ public class SagaRecoveryManager {
      * Per-bucket transactions avoid a single long transaction spanning all buckets.
      */
     void recover() {
-        for (int bucket = 0; bucket < SagaSchema.NUM_BUCKETS; bucket++) {
-            List<SagaStateSnapshot> stale = store.findRecoverableByBucket(
-                bucket, recoveryTimeoutMs);
+        RecoverablesCursor cursor = null;
+        do {
+            SagaStore.Recoverables page = store.findRecoverable(recoveryTimeoutMillis, cursor);
+            cursor = page.nextCursor();
 
-            for (SagaStateSnapshot saga : stale) {
+            for (SagaStateSnapshot saga : page.sagas()) {
                 try {
                     // Claim via read + DELETE + INSERT in one transaction.
                     // If another instance claims it concurrently, returns null.
@@ -2851,7 +2920,7 @@ public class SagaRecoveryManager {
                     logger.error("Failed to recover saga {}", saga.getSagaId(), e);
                 }
             }
-        }
+        } while (cursor != null);
     }
 
     private void recoverOne(SagaStateSnapshot saga) {
@@ -2975,35 +3044,53 @@ Without timeouts, a hanging step runs indefinitely — no other replica can know
 {
   "name": "MoneyTransfer",
   "version": "1.0",
-  "timeoutMs": 300000,
+  "timeoutMillis": 300000,
   "steps": [
     {
       "name": "debit",
-      "timeoutMs": 60000,
+      "timeoutMillis": 60000,
       "stepClass": "com.example.DebitAccountStep"
     },
     {
       "name": "credit",
-      "timeoutMs": 30000,
+      "timeoutMillis": 30000,
       "stepClass": "com.example.CreditAccountStep"
     }
   ]
 }
 ```
 
-- **`timeoutMs` (saga-level)**: Total time allowed for the entire saga. Stored as `deadline` in the `SAGA_STARTED` event payload at creation time.
-- **`timeoutMs` (step-level)**: Maximum time for a single step execution (including all retry attempts). If exceeded, the step is interrupted and compensation begins.
+- **`timeoutMillis` (saga-level)**: Total time allowed for the entire saga. Stored as `deadline` in the `SAGA_STARTED` event payload at creation time.
+- **`timeoutMillis` (step-level)**: Maximum time for a single step execution (including all retry attempts). If exceeded, the step is interrupted and compensation begins.
 
 ### Timeout Enforcement in executeSagaSteps()
 
-Timeout enforcement is integrated directly into the canonical `executeSagaSteps()` loop (see [Core Engine](#sagaengine-core-execution-logic)). The loop computes `sagaDeadline` from `sagaTimeoutMs` at entry, checks it before each step, and passes a per-step `stepDeadline` (the minimum of step timeout and saga deadline) to `executeWithRetry()`. `SagaTimeoutException` and `StepTimeoutException` are caught by the existing pivot-based failure handling — they trigger compensation (at or before pivot) or `STEP_FAILED` (after pivot), same as any other step failure. No separate timeout catch block needed.
+Timeout enforcement is integrated directly into the canonical `executeSagaSteps()` loop (see [Core Engine](#sagaengine-core-execution-logic)). The loop computes `sagaDeadline` via `calculateSagaDeadline()` at entry, checks it via `isSagaTimedOut()` before each step, and passes a per-step `stepDeadline` (the minimum of step timeout and saga deadline) to `executeWithRetry()`. `SagaTimeoutException` and `StepTimeoutException` are caught by the existing pivot-based failure handling — they trigger compensation (at or before pivot) or `STEP_FAILED` (after pivot), same as any other step failure. No separate timeout catch block needed.
+
+All three helpers live in the `engine` package (alongside `SagaEngine`) and accept an explicit `nowMillis` parameter instead of calling `System.currentTimeMillis()` internally. This makes them pure functions that are trivial to unit-test without mocking the clock.
 
 ```java
-private long calculateStepDeadline(long stepTimeoutMs, long sagaDeadline) {
-    if (stepTimeoutMs > 0 && sagaDeadline > 0) {
-        return Math.min(System.currentTimeMillis() + stepTimeoutMs, sagaDeadline);
-    } else if (stepTimeoutMs > 0) {
-        return System.currentTimeMillis() + stepTimeoutMs;
+// --- engine/TimeoutPolicy.java (package-private) ---
+
+/** Returns the saga deadline epoch-ms, or 0 if no saga-level timeout is configured. */
+static long calculateSagaDeadline(long sagaTimeoutMillis, long nowMillis) {
+    return sagaTimeoutMillis > 0 ? nowMillis + sagaTimeoutMillis : 0;
+}
+
+/** Returns true when the saga deadline has been reached. Always false when sagaDeadline == 0. */
+static boolean isSagaTimedOut(long sagaDeadline, long nowMillis) {
+    return sagaDeadline > 0 && nowMillis > sagaDeadline;
+}
+
+/**
+ * Returns the effective step deadline epoch-ms: the minimum of the step-level deadline
+ * and the saga deadline. 0 means no timeout for that dimension; the tighter bound wins.
+ */
+static long calculateStepDeadline(long stepTimeoutMillis, long sagaDeadline, long nowMillis) {
+    if (stepTimeoutMillis > 0 && sagaDeadline > 0) {
+        return Math.min(nowMillis + stepTimeoutMillis, sagaDeadline);
+    } else if (stepTimeoutMillis > 0) {
+        return nowMillis + stepTimeoutMillis;
     } else {
         return sagaDeadline;  // 0 means no timeout
     }
@@ -3016,11 +3103,13 @@ private long calculateStepDeadline(long stepTimeoutMs, long sagaDeadline) {
 // --- exception/StepTimeoutException.java ---
 public class StepTimeoutException extends StepExecutionException {
     public StepTimeoutException(String message) { super(message, false); }  // never retryable
+    public StepTimeoutException(String message, Throwable cause) { super(message, cause, false); }
 }
 
 // --- exception/SagaTimeoutException.java ---
 public class SagaTimeoutException extends RuntimeException {
     public SagaTimeoutException(String message) { super(message); }
+    public SagaTimeoutException(String message, Throwable cause) { super(message, cause); }
 }
 
 // --- exception/SagaAlreadyExistsException.java ---
@@ -3030,19 +3119,19 @@ public class SagaTimeoutException extends RuntimeException {
 // or treat the retry as a no-op. See "Client-Supplied Saga IDs" section.
 public class SagaAlreadyExistsException extends RuntimeException {
     private final String sagaId;
-    private final SagaStateSnapshot existing;  // may be null if lookup failed
+    private final SagaStateSnapshot existing;  // non-null; required snapshot of the conflicting saga
 
     public SagaAlreadyExistsException(String sagaId, SagaStateSnapshot existing) {
         super("Saga already exists: " + sagaId);
-        this.sagaId = sagaId;
-        this.existing = existing;
+        this.sagaId = Objects.requireNonNull(sagaId, "sagaId");
+        this.existing = Objects.requireNonNull(existing, "existing");
     }
 
     public SagaAlreadyExistsException(String sagaId, SagaStateSnapshot existing,
                                        Throwable cause) {
         super("Saga already exists: " + sagaId, cause);
-        this.sagaId = sagaId;
-        this.existing = existing;
+        this.sagaId = Objects.requireNonNull(sagaId, "sagaId");
+        this.existing = Objects.requireNonNull(existing, "existing");
     }
 
     public String getSagaId() { return sagaId; }
@@ -3057,32 +3146,53 @@ public class SagaPersistenceException extends RuntimeException {
 // --- exception/SagaDefinitionException.java ---
 public class SagaDefinitionException extends RuntimeException {
     public SagaDefinitionException(String message) { super(message); }
+    public SagaDefinitionException(String message, Throwable cause) { super(message, cause); }
 }
 
 // --- exception/SagaDefinitionNotFoundException.java ---
 public class SagaDefinitionNotFoundException extends RuntimeException {
+    private final String sagaName;
+
     public SagaDefinitionNotFoundException(String sagaName) {
         super("No saga definition registered for: " + sagaName);
+        this.sagaName = sagaName;
     }
+
+    public String getSagaName() { return sagaName; }
 }
 
 // --- exception/SagaNotFoundException.java ---
 public class SagaNotFoundException extends RuntimeException {
+    private final String sagaId;
+
     public SagaNotFoundException(String sagaId) {
         super("Saga not found: " + sagaId);
+        this.sagaId = sagaId;
     }
+
+    public String getSagaId() { return sagaId; }
 }
 
 // --- exception/SagaConcurrentModificationException.java ---
 public class SagaConcurrentModificationException extends RuntimeException {
+    private final String sagaId;
+
     public SagaConcurrentModificationException(String sagaId) {
         super("Saga is being processed by another replica: " + sagaId);
+        this.sagaId = sagaId;
     }
+
+    public SagaConcurrentModificationException(String sagaId, Throwable cause) {
+        super("Saga is being processed by another replica: " + sagaId, cause);
+        this.sagaId = sagaId;
+    }
+
+    public String getSagaId() { return sagaId; }
 }
 
 // --- exception/StepCompensationException.java ---
 public class StepCompensationException extends RuntimeException {
-    private final String stepName;
+    @Nullable private final String stepName;
     private final int stepIndex;
 
     public StepCompensationException(String message) {
@@ -3099,11 +3209,12 @@ public class StepCompensationException extends RuntimeException {
 
     public StepCompensationException(String stepName, int stepIndex, Throwable cause) {
         super("Compensation failed for step '" + stepName + "' at index " + stepIndex, cause);
+        if (stepIndex < 0) throw new IllegalArgumentException("stepIndex must be >= 0: " + stepIndex);
         this.stepName = stepName;
         this.stepIndex = stepIndex;
     }
 
-    public String getStepName() { return stepName; }
+    @Nullable public String getStepName() { return stepName; }
     public int getStepIndex() { return stepIndex; }
 }
 ```
@@ -3148,15 +3259,15 @@ public class SagaEngine implements AutoCloseable {
     private final Object shutdownLock = new Object();
     private final Set<String> activeSagas = ConcurrentHashMap.newKeySet();
     private final ShutdownMode shutdownMode;   // default: WAIT_CURRENT_STEP
-    private final long shutdownTimeoutMs;
+    private final long shutdownTimeoutMillis;
 
     public enum ShutdownMode { WAIT_CURRENT_STEP, WAIT_ALL_SAGAS }
 
     public SagaEngine(SagaStore store, ShutdownMode shutdownMode,
-                      Long shutdownTimeoutMs, ...) {
+                      Long shutdownTimeoutMillis, ...) {
         this.shutdownMode = shutdownMode != null ? shutdownMode : ShutdownMode.WAIT_CURRENT_STEP;
-        this.shutdownTimeoutMs = shutdownTimeoutMs != null
-            ? shutdownTimeoutMs
+        this.shutdownTimeoutMillis = shutdownTimeoutMillis != null
+            ? shutdownTimeoutMillis
             : (this.shutdownMode == ShutdownMode.WAIT_ALL_SAGAS ? 300_000L : 30_000L);
     }
 
@@ -3191,7 +3302,7 @@ public class SagaEngine implements AutoCloseable {
 
         // activeSagas is now frozen (no new additions possible).
         // Wait for in-flight sagas to drain.
-        long deadline = System.currentTimeMillis() + shutdownTimeoutMs;
+        long deadline = System.currentTimeMillis() + shutdownTimeoutMillis;
         while (!activeSagas.isEmpty() && System.currentTimeMillis() < deadline) {
             try {
                 Thread.sleep(100);
@@ -3511,17 +3622,17 @@ public class TccDebitStep implements TccStep {
   "name": "MoneyTransfer",
   "version": "1.0",
   "mode": "TCC",
-  "timeoutMs": 300000,
+  "timeoutMillis": 300000,
   "steps": [
     {
       "name": "debit",
       "stepClass": "com.example.TccDebitStep",
-      "timeoutMs": 60000
+      "timeoutMillis": 60000
     },
     {
       "name": "credit",
       "stepClass": "com.example.TccCreditStep",
-      "timeoutMs": 30000
+      "timeoutMillis": 30000
     }
   ]
 }
@@ -3548,10 +3659,10 @@ if (def.getMode() == SagaMode.TCC) {
 } else {
     plan = def.getSteps().stream()
         .map(stepDef -> new StepWithPolicy(instantiate(stepDef), resolveRetryPolicy(stepDef, def),
-                                            stepDef.getTimeoutMs()))
+                                            stepDef.getTimeoutMillis()))
         .toList();
 }
-executeSagaSteps(plan, def.getPivotPolicy(), context, startIndex, def.getTimeoutMs());
+executeSagaSteps(plan, def.getPivotPolicy(), context, startIndex, def.getTimeoutMillis());
 ```
 
 The mode-specific behavior is encapsulated in `PivotPolicy`: for TCC, `getPivotPolicy()` returns a `crossingEvent` of `SagaEvent.sagaConfirming()`; for Saga modes, `crossingEvent` is null. The unified loop handles both modes identically:
@@ -4383,7 +4494,7 @@ public class SagaAutoConfiguration {
         return new SagaManagerBuilder()
             .store(new ScalarDbSagaStore(txManager, props.getMaxEventPayloadBytes()))
             .ownerId(props.getOwnerId())
-            .recoveryTimeoutMs(props.getRecoveryTimeoutMs())
+            .recoveryTimeoutMillis(props.getRecoveryTimeoutMs())
             .recoveryIntervalSeconds(props.getRecoveryIntervalSeconds())
             .build();
     }
@@ -4791,11 +4902,11 @@ The core engine has zero dependency on any DI framework. All wiring is done via 
 public class SagaManagerBuilder {
     private SagaStore store;
     private String ownerId = UUID.randomUUID().toString();  // random on each startup; override with pod name for observability
-    private long recoveryTimeoutMs = 60_000;       // stale saga threshold (1 min)
+    private long recoveryTimeoutMillis = 60_000;       // stale saga threshold (1 min)
     private long recoveryIntervalSeconds = 30;
     private int maxEventPayloadBytes = 64 * 1024;  // 64 KB default
     private SagaEngine.ShutdownMode shutdownMode;  // null → engine default (WAIT_CURRENT_STEP)
-    private Long shutdownTimeoutMs;                 // null → engine default (30s or 300s)
+    private Long shutdownTimeoutMillis;                 // null → engine default (30s or 300s)
     private Duration compensationGracePeriod = Duration.ofMinutes(10);
     private Clock clock = Clock.systemUTC();
     private List<SagaEventListener> eventListeners = new ArrayList<>();
@@ -4810,8 +4921,8 @@ public class SagaManagerBuilder {
         return this;
     }
 
-    public SagaManagerBuilder recoveryTimeoutMs(long recoveryTimeoutMs) {
-        this.recoveryTimeoutMs = recoveryTimeoutMs;
+    public SagaManagerBuilder recoveryTimeoutMillis(long recoveryTimeoutMillis) {
+        this.recoveryTimeoutMillis = recoveryTimeoutMillis;
         return this;
     }
 
@@ -4830,8 +4941,8 @@ public class SagaManagerBuilder {
         return this;
     }
 
-    public SagaManagerBuilder shutdownTimeoutMs(long shutdownTimeoutMs) {
-        this.shutdownTimeoutMs = shutdownTimeoutMs;
+    public SagaManagerBuilder shutdownTimeoutMillis(long shutdownTimeoutMillis) {
+        this.shutdownTimeoutMillis = shutdownTimeoutMillis;
         return this;
     }
 
@@ -4856,10 +4967,10 @@ public class SagaManagerBuilder {
         CompensationManager compensationManager = new CompensationManager(store);
         SagaEngine engine = new SagaEngine(store, compensationManager,
                                             ownerId, eventListeners,
-                                            shutdownMode, shutdownTimeoutMs);
+                                            shutdownMode, shutdownTimeoutMillis);
         SagaRecoveryManager recovery = new SagaRecoveryManager(
             store, engine, registry, ownerId,
-            new RecoveryConfig(recoveryTimeoutMs, recoveryIntervalSeconds,
+            new RecoveryConfig(recoveryTimeoutMillis, recoveryIntervalSeconds,
                                compensationGracePeriod, clock));
         return new DefaultSagaManager(engine, store, registry, recovery);
     }
@@ -4889,7 +5000,7 @@ SagaSchema.createAll(admin);
 SagaStore store = new ScalarDbSagaStore(txManager, 64 * 1024, 10_000, Duration.ofMinutes(5));
 SagaManager sagaManager = SagaManagerBuilder.newBuilder()
     .store(store)
-    .recoveryTimeoutMs(60_000)     // stale saga threshold (1 min)
+    .recoveryTimeoutMillis(60_000)     // stale saga threshold (1 min)
     .recoveryIntervalSeconds(30)
     .build();
 
@@ -5681,7 +5792,7 @@ POST /api/sagas/{sagaId}/steps/{stepName}/complete?token={hmac}&iat={issuedAt}
 The callback endpoint validates the token before processing:
 1. Recompute the HMAC from the URL parameters (`sagaId`, `stepName`, `iat`)
 2. Compare using `MessageDigest.isEqual()` (constant-time) to prevent timing attacks
-3. Reject if `iat` is older than the step timeout (default: saga-level `timeoutMs`)
+3. Reject if `iat` is older than the step timeout (default: saga-level `timeoutMillis`)
 
 Requests with missing, invalid, or expired tokens are rejected with `401 Unauthorized`. The `callbackSecret` is configured per coordinator instance:
 
@@ -6026,7 +6137,7 @@ A money transfer sample application grows with each phase, serving as E2E valida
 | `RetryPolicy.java` | Config POJO + default/compensation/confirm factories | ~50 | Trivial |
 | `CompensationManager.java` | Reverse-loop + retry + stop on failure (throws `StepCompensationException`) | ~70 | Low |
 | `SagaEngine.java` | createSaga (server- or client-supplied ID) + executeSaga + execute (convenience) + resumeFrom + unified pivot-based loop (`executeSagaSteps`) + `expandTccPlan` (TCC→StepWithPolicy expansion) + retry + timeout + async step handling + error routing | ~310 | **Medium** |
-| `StepWithPolicy.java` | Record bundling `Step` + `RetryPolicy` + `stepTimeoutMs` (internal) | ~5 | Trivial |
+| `StepWithPolicy.java` | Record bundling `Step` + `RetryPolicy` + `stepTimeoutMillis` (internal) | ~5 | Trivial |
 | `TccReserveStep.java` | Wraps `TccStep.reserve()`/`cancel()` → `Step.execute()`/`compensate()` | ~20 | Trivial |
 | `TccConfirmStep.java` | Wraps `TccStep.confirm()` → `Step.execute()`, compensate = no-op | ~20 | Trivial |
 | `SagaDefinitionRegistry.java` | Definition registration + two-tier versioned lookup (in-memory → store fallback) | ~40 | Trivial |
@@ -6035,12 +6146,12 @@ A money transfer sample application grows with each phase, serving as E2E valida
 | **parser/** | | | |
 | `SagaDefinitionParser.java` | Jackson JSON/YAML → SagaDefinition (detects format by file extension; uses `jackson-dataformat-yaml`) | ~80 | Low |
 | **store/** | | | |
-| `SagaStore.java` | Interface (15 methods: createSaga, registerDefinition, getDefinition, appendEvent, recordTransition, findRecoverableByBucket, claimForRecovery, markForRecovery, getEvents, getEventCount, getStateSnapshot, listStateSnapshots, countByStatus, countBySagaName, deleteSaga) | ~50 | Trivial |
+| `SagaStore.java` | Interface (13 methods: createSaga, registerDefinition, getDefinition, appendEvent, recordTransition, findRecoverable, claimForRecovery, markForRecovery, getEvents, getEventCount, getStateSnapshot, deleteSaga; + nested Recoverables record + RecoverablesCursor interface) | ~50 | Trivial |
 | `SagaEvent.java` | Event types + factory methods (each saga-level event carries its `targetStatus`) | ~90 | Low |
 | `SagaSchema.java` | 3 TableMetadata definitions (saga_events, saga_state, saga_definitions) + bucketOf() + createAll | ~100 | Low |
 | `ScalarDbSagaStore.java` | Append-only events + bucket-partitioned saga_state (DELETE+INSERT for status transitions) + bucket-parallel recovery scan + conflict-based claiming + definition persistence | ~450 | **Medium** |
 | **recovery/** | | | |
-| `RecoveryConfig.java` | Record (4 fields: recoveryTimeoutMs, recoveryIntervalSeconds, compensationGracePeriod, clock) | ~5 | Trivial |
+| `RecoveryConfig.java` | Record (4 fields: recoveryTimeoutMillis, recoveryIntervalSeconds, compensationGracePeriod, clock) | ~5 | Trivial |
 | `SagaRecoveryManager.java` | Periodic scan of saga_state + event replay + resume via `resumeFrom()` (handles all modes uniformly: RUNNING, CONFIRMING, COMPENSATING) + time-based escalation | ~220 | **Medium** |
 | **timeout/** | | | |
 | `TimeoutPolicy.java` | Per-step and per-saga deadline calculation | ~30 | Trivial |
@@ -6499,7 +6610,7 @@ stub.registerSaga(SagaDefinition.newBuilder()
     .setVersion("1.0")
     .setMode(SagaMode.SAGA)
     .setRecoveryStrategy(RecoveryStrategy.BACKWARD)
-    .setTimeoutMs(300000)
+    .setTimeoutMillis(300000)
     .addSteps(StepDefinition.newBuilder()
         .setName("debit")
         .setCall(CallDefinition.newBuilder()
@@ -6523,7 +6634,7 @@ stub.registerSaga(SagaDefinition.newBuilder()
                     .setStringValue("${debitId}").build())
                 .build())
             .build())
-        .setTimeoutMs(60000)
+        .setTimeoutMillis(60000)
         .build())
     .addSteps(StepDefinition.newBuilder()
         .setName("credit")
@@ -6548,7 +6659,7 @@ stub.registerSaga(SagaDefinition.newBuilder()
                     .setStringValue("${creditId}").build())
                 .build())
             .build())
-        .setTimeoutMs(30000)
+        .setTimeoutMillis(30000)
         .build())
     .build());
 
@@ -6747,7 +6858,7 @@ The following features are not included in the initial phases but planned for fu
    public static class StepDefinition {
        String name;
        String stepClass;
-       long timeoutMs;
+       long timeoutMillis;
        RetryPolicy retryPolicy;
        boolean pivot;
    }
@@ -6756,7 +6867,7 @@ The following features are not included in the initial phases but planned for fu
    public sealed interface StepDefinition permits SingleStep, ParallelSteps {}
 
    public record SingleStep(
-       String name, String stepClass, long timeoutMs, RetryPolicy retryPolicy, boolean pivot
+       String name, String stepClass, long timeoutMillis, RetryPolicy retryPolicy, boolean pivot
    ) implements StepDefinition {}
 
    public record ParallelSteps(

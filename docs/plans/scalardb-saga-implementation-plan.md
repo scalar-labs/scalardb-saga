@@ -192,43 +192,42 @@ Total: ~80 LoC
 >
 > Consider providing a `TccBarrier` utility class that participants can use to solve all three problems with two INSERT-IGNORE operations against a local barrier table. Document these patterns prominently in the TCC documentation.
 
-##### Task 1.5: Store Layer — SagaStore Interface, SagaEvent, SagaSchema
+##### Task 1.5: Store Layer — SagaStore Interface, SagaEvent
 
 - [ ] `store/SagaStore.java` — Core interface (~35 LoC): createSaga, appendEvent, recordTransition, getEvents, getEventCount, getStateSnapshot, registerDefinition, getDefinition, deleteSaga
 - [ ] `store/SagaRecoveryStore.java` — Recovery-specific interface (~15 LoC): findRecoverableByBucket, claimForRecovery, markForRecovery
 - [ ] `store/SagaAdminStore.java` — Admin query interface (~15 LoC): listStateSnapshots, countByStatus, countBySagaName (defer implementation to Phase 5)
 - [ ] `store/SagaEvent.java` — 10 event types with factory methods. Each saga-level event carries `targetStatus`. Step-level events carry `stepIndex` + `stepName`. (~90 LoC)
-- [ ] `store/SagaSchema.java` — 3 `TableMetadata` definitions: `saga_events` (PK=saga_id, CK=sequence ASC), `saga_state` (PK=bucket, CK=(status ASC, updated_at ASC, saga_id ASC), secondary index on saga_id), `saga_definitions` (PK=saga_name, CK=definition_version). `bucketOf()` hash function, `createAll()` method. NUM_BUCKETS configurable (default 16). (~100 LoC)
 - [ ] **Unit tests** (~100 LoC):
   - SagaEvent: factory methods for all 10 event types, `targetStatus` correctness
-  - SagaSchema: `bucketOf()` hash distribution, table metadata structure
 
 > **Research Insight (Architecture + Simplicity + Data Integrity):**
 > - **Split SagaStore into focused interfaces**: `SagaStore` (core CRUD), `SagaRecoveryStore` (recovery-specific), `SagaAdminStore` (admin queries). `ScalarDbSagaStore` implements all three, but consumers depend only on what they need. This defers 4 admin methods from Phase 1 scope.
-> - **Make NUM_BUCKETS configurable** via `SagaSchema.Builder` or constructor parameter. Document that changing it requires data migration. 16 is the right default; power-of-2 for uniform hash distribution.
-> - **Bucket hash quality**: `String.hashCode() % N` has known distribution issues for client-supplied IDs with common patterns (sequential numbers, shared prefixes). Apply MurmurHash3 finalization mix: `int h = sagaId.hashCode(); h ^= h >>> 16; h *= 0x85ebca6b; h ^= h >>> 13; return (h & 0x7FFFFFFF) % numBuckets;`
-> - **markForRecovery() signature**: Accept `SagaStateSnapshot` as parameter instead of `String sagaId` to avoid secondary index read during shutdown. The engine has the snapshot in `ExecutionContext` for active sagas.
+> - **SagaSchema deferred to Task 1.6**: SagaSchema depends on ScalarDB API (TableMetadata, DataType, etc.). Moved to Task 1.6 alongside ScalarDbSagaStore to avoid adding ScalarDB dependency in Task 1.5.
+> - **markForRecovery(String sagaId) — not SagaStateSnapshot**: The original insight suggested accepting `SagaStateSnapshot` to avoid a secondary index read. However, skipping the DB read is unsafe for concurrency: another replica may have claimed the saga, changing the `saga_state` row. A blind DELETE + INSERT with a stale snapshot could create duplicate rows. `markForRecovery` must read within its transaction for concurrency safety. The secondary index read is acceptable since this is only called during graceful shutdown.
 
-##### Task 1.6: ScalarDbSagaStore Implementation
+##### Task 1.6: SagaSchema + ScalarDbSagaStore Implementation
 
+- [ ] `store/SagaSchema.java` — 3 `TableMetadata` definitions: `saga_events` (PK=saga_id, CK=sequence ASC), `saga_state` (PK=bucket, CK=(status ASC, updated_at ASC, saga_id ASC), secondary index on saga_id), `saga_definitions` (PK=saga_name, CK=definition_version). `bucketOf()` hash function with MurmurHash3 mix, `createAll()` method. NUM_BUCKETS configurable (default 16). (~100 LoC)
 - [ ] `store/ScalarDbSagaStore.java` — Full implementation (~450 LoC, **medium complexity**):
   - `createSaga()`: 1 tx — 2 ops (INSERT event + INSERT state). Server-generated UUID or client-supplied ID with strict validation (`[a-zA-Z0-9._-]{1,128}`, must start with alphanumeric). Throws `SagaAlreadyExistsException` on collision.
   - `appendEvent()`: 1 tx — 1 op (INSERT event)
   - `recordTransition()`: 1 tx — 3 ops (INSERT event + DELETE old status row + INSERT new status row). Accepts cached `SagaStateSnapshot` to avoid reads.
   - `findRecoverableByBucket()`: Scan per bucket with status=RUNNING, CONFIRMING, COMPENSATING and updated_at <= threshold. **Add per-bucket claim limit (100)** to prevent one bucket from monopolizing recovery.
   - `claimForRecovery()`: Read current saga_state row, verify version, DELETE + INSERT with new owner_id and incremented version in one transaction
-  - `markForRecovery(SagaStateSnapshot)`: Accept snapshot parameter (not saga ID) to avoid secondary index read during shutdown
+  - `markForRecovery(String sagaId)`: Read current row within transaction for concurrency safety, then DELETE + INSERT with updated_at = epoch 0
   - `registerDefinition()` / `getDefinition()`: PUT/GET to saga_definitions table
   - `getStateSnapshot()`: Lookup via secondary index on saga_id. Handle multi-row case: collect all results, pick highest version, log warning.
   - `getEvents()`: Scan saga_events partition by saga_id
   - Admin methods deferred to Phase 5: `listStateSnapshots`, `countByStatus`, `countBySagaName`, `deleteSaga`
 - [ ] **Unit tests** (~400 LoC):
+  - SagaSchema: `bucketOf()` hash distribution, table metadata structure, configurable NUM_BUCKETS
   - `createSaga()`: server-generated ID, client-supplied ID, duplicate ID collision (`SagaAlreadyExistsException`), invalid ID format rejection
   - `appendEvent()`: normal append, sequence ordering
   - `recordTransition()`: status transitions, event + state consistency
   - `findRecoverableByBucket()`: stale saga detection, per-bucket scanning, threshold filtering
   - `claimForRecovery()`: version-based optimistic concurrency, concurrent claim rejection
-  - `markForRecovery()`: snapshot parameter usage, immediate recovery pickup
+  - `markForRecovery()`: sagaId lookup, immediate recovery pickup, concurrent claim handling
   - `registerDefinition()` / `getDefinition()`: PUT idempotency, versioned lookup
 
 > **Research Insight (Data Integrity):**
