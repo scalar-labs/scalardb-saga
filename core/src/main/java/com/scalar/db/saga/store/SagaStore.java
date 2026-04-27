@@ -81,7 +81,7 @@ public interface SagaStore {
   // ---------------------------------------------------------------------------
 
   /** Looks up the current state snapshot for the given saga. */
-  SagaStateSnapshot getStateSnapshot(String sagaId);
+  Optional<SagaStateSnapshot> getStateSnapshot(String sagaId);
 
   // Admin query methods (listStateSnapshots, countByStatus, countBySagaName) will be added
   // in the Admin API phase once SagaQuery and SagaPage are defined.
@@ -106,14 +106,15 @@ public interface SagaStore {
   Recoverables findRecoverable(long recoveryTimeoutMillis, @Nullable RecoverablesCursor cursor);
 
   /**
-   * Attempts to claim a saga for recovery by updating its owner. Returns {@code null} if the saga
-   * has already been claimed by another recovery process (optimistic concurrency check).
+   * Attempts to claim a saga for recovery by updating its owner. Returns an empty {@link Optional}
+   * if the saga has already been claimed by another recovery process (optimistic concurrency
+   * check).
    *
    * @param saga the saga snapshot to claim
    * @param newOwnerId the new owner (recovery process) ID
-   * @return the claimed snapshot, or {@code null} if already claimed
+   * @return the claimed snapshot, or empty if already claimed
    */
-  @Nullable SagaStateSnapshot claimForRecovery(SagaStateSnapshot saga, String newOwnerId);
+  Optional<SagaStateSnapshot> claimForRecovery(SagaStateSnapshot saga, String newOwnerId);
 
   /**
    * Marks a saga for immediate recovery by setting its {@code updated_at} to epoch 0, ensuring it
