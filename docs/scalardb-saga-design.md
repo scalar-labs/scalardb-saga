@@ -1080,7 +1080,7 @@ public interface SagaManager extends AutoCloseable {
     SagaStateSnapshot compensate(String sagaId);
 
     // Query saga instance state
-    SagaStateSnapshot getStateSnapshot(String sagaId);
+    Optional<SagaStateSnapshot> getStateSnapshot(String sagaId);
 
     // Daemon mode only: complete an async step via external callback (resumes parked saga)
     SagaStateSnapshot completeStep(String sagaId, String stepName, Map<String, Object> output);
@@ -1639,7 +1639,7 @@ public class DefaultSagaManager implements SagaManager {
 
                 if (callback != null) {
                     // getStateSnapshot hits cache (populated by recordTransition) — no DB read
-                    SagaStateSnapshot result = store.getStateSnapshot(saga.getSagaId());
+                    SagaStateSnapshot result = store.getStateSnapshot(saga.getSagaId()).orElseThrow();
                     switch (result.getStatus()) {
                         case COMPLETED    -> callback.onCompleted(result);
                         case COMPENSATED  -> callback.onCompensated(result);
@@ -2301,13 +2301,13 @@ public interface SagaStore {
     // Recovery — finds sagas in RUNNING, CONFIRMING, or COMPENSATING status whose
     // updated_at is older than the threshold. Cursor-based pagination hides internal partitioning.
     Recoverables findRecoverable(long recoveryTimeoutMillis, @Nullable RecoverablesCursor cursor);
-    @Nullable SagaStateSnapshot claimForRecovery(SagaStateSnapshot saga, String newOwnerId);
+    Optional<SagaStateSnapshot> claimForRecovery(SagaStateSnapshot saga, String newOwnerId);
     void markForRecovery(String sagaId);  // sets updated_at to epoch 0 for immediate recovery
     List<SagaEvent> getEvents(String sagaId);
-    int getEventCount(String sagaId);  // COUNT query — avoids materializing all events
+    int getEventCount(String sagaId);  // avoids materializing all events
 
     // Queries
-    SagaStateSnapshot getStateSnapshot(String sagaId);
+    Optional<SagaStateSnapshot> getStateSnapshot(String sagaId);
 
     // Admin query methods — deferred to Admin API phase (Phase 5)
     // SagaPage<SagaStateSnapshot> listStateSnapshots(SagaQuery query);
@@ -2404,7 +2404,7 @@ public class ScalarDbSagaStore implements SagaStore {
             abortQuietly(tx);
             if (isAlreadyExists(e, sagaId)) {
                 // 1 read, ONLY on the (rare) collision path.
-                SagaStateSnapshot existing = getStateSnapshot(sagaId);
+                SagaStateSnapshot existing = getStateSnapshot(sagaId).orElse(null);
                 throw new SagaAlreadyExistsException(sagaId, existing, e);
             }
             throw new SagaPersistenceException("Failed to create saga", e);
@@ -2575,8 +2575,7 @@ public class ScalarDbSagaStore implements SagaStore {
      * - Concurrent case: the read creates a read-set entry in ScalarDB's
      *   transaction, so overlapping claims on the same row conflict reliably.
      */
-    @Nullable
-    public SagaStateSnapshot claimForRecovery(SagaStateSnapshot saga, String newOwnerId) {
+    public Optional<SagaStateSnapshot> claimForRecovery(SagaStateSnapshot saga, String newOwnerId) {
         DistributedTransaction tx = null;
         try {
             tx = txManager.begin();
@@ -2599,7 +2598,7 @@ public class ScalarDbSagaStore implements SagaStore {
                     || current.get().getInt("version") != saga.getVersion()) {
                 // Row was already claimed or changed — skip
                 tx.abort();
-                return null;
+                return Optional.empty();
             }
 
             // DELETE old row + INSERT with updated owner and version
@@ -2633,7 +2632,7 @@ public class ScalarDbSagaStore implements SagaStore {
                 saga.getVersion() + 1, saga.getDefinitionVersion(),
                 saga.getCreatedAt(), now);
             cache.put(sagaId, claimed);
-            return claimed;
+            return Optional.of(claimed);
 
         } catch (CommitConflictException e) {
             // Another replica claimed it concurrently
@@ -2777,13 +2776,12 @@ public class ScalarDbSagaStore implements SagaStore {
      * Get saga status from saga_state — single point-read.
      * For full state (including step results), use getEvents() and replay.
      */
-    @Nullable
-    public SagaStateSnapshot getStateSnapshot(String sagaId) {
+    public Optional<SagaStateSnapshot> getStateSnapshot(String sagaId) {
         SagaStateSnapshot cached = cache.getIfPresent(sagaId);
-        if (cached != null) return cached;
+        if (cached != null) return Optional.of(cached);
         SagaStateSnapshot loaded = loadFromDb(sagaId);
         if (loaded != null) cache.put(sagaId, loaded);
-        return loaded;  // null if saga doesn't exist
+        return Optional.ofNullable(loaded);
     }
 
     private SagaStateSnapshot loadFromDb(String sagaId) {
@@ -2909,12 +2907,12 @@ public class SagaRecoveryManager {
             for (SagaStateSnapshot saga : page.sagas()) {
                 try {
                     // Claim via read + DELETE + INSERT in one transaction.
-                    // If another instance claims it concurrently, returns null.
-                    SagaStateSnapshot claimed = store.claimForRecovery(saga, ownerId);
-                    if (claimed == null) {
+                    // If another instance claims it concurrently, returns empty.
+                    Optional<SagaStateSnapshot> claimed = store.claimForRecovery(saga, ownerId);
+                    if (claimed.isEmpty()) {
                         continue;
                     }
-                    recoverOne(claimed);
+                    recoverOne(claimed.get());
                 } catch (Exception e) {
                     // Log and continue — don't let one stuck saga block others
                     logger.error("Failed to recover saga {}", saga.getSagaId(), e);
@@ -3446,7 +3444,7 @@ if (result.isPending()) {
     // (lastCompleted + 1). The saga will be resumed either by:
     //   1. completeStep() when the callback arrives, or
     //   2. Recovery, which re-dispatches the step (participant is idempotent).
-    return store.getStateSnapshot(sagaId);
+    return store.getStateSnapshot(sagaId).orElseThrow();
 }
 
 // Synchronous completion — continue as before
@@ -3477,8 +3475,8 @@ SagaStateSnapshot completeStep(String sagaId, String stepName, Map<String, Objec
 @Override
 public SagaStateSnapshot completeStep(String sagaId, String stepName,
                                   Map<String, Object> output) {
-    SagaStateSnapshot saga = store.getStateSnapshot(sagaId);
-    if (saga == null) throw new SagaNotFoundException(sagaId);
+    SagaStateSnapshot saga = store.getStateSnapshot(sagaId)
+        .orElseThrow(() -> new SagaNotFoundException(sagaId));
     if (saga.getStatus() != SagaStatus.RUNNING) {
         return saga;  // saga already moved on (compensating, escalated, etc.) — ignore late callback
     }
@@ -5382,8 +5380,8 @@ public class DefaultSagaAdminService implements SagaAdminService {
 
     @Override
     public SagaDetail getSagaDetail(String sagaId) {
-        SagaStateSnapshot saga = store.getStateSnapshot(sagaId);
-        if (saga == null) throw new SagaNotFoundException(sagaId);
+        SagaStateSnapshot saga = store.getStateSnapshot(sagaId)
+            .orElseThrow(() -> new SagaNotFoundException(sagaId));
         List<SagaEvent> events = store.getEvents(sagaId);
         List<TimelineEvent> timeline = TimelineBuilder.from(events);
         return new SagaDetail(saga, events, timeline);
@@ -5391,40 +5389,34 @@ public class DefaultSagaAdminService implements SagaAdminService {
 
     @Override
     public SagaStateSnapshot triggerCompensation(String sagaId) {
-        SagaStateSnapshot saga = store.getStateSnapshot(sagaId);
-        if (saga == null) throw new SagaNotFoundException(sagaId);
+        SagaStateSnapshot saga = store.getStateSnapshot(sagaId)
+            .orElseThrow(() -> new SagaNotFoundException(sagaId));
         requireStatus(saga, SagaStatus.RUNNING);
         requireHasEvent(sagaId, SagaEvent.STEP_FAILED);
-        SagaStateSnapshot claimed = store.claimForRecovery(saga, ownerId);
-        if (claimed == null) {
-            throw new SagaConcurrentModificationException(sagaId);
-        }
+        SagaStateSnapshot claimed = store.claimForRecovery(saga, ownerId)
+            .orElseThrow(() -> new SagaConcurrentModificationException(sagaId));
         return sagaManager.compensate(sagaId);
     }
 
     @Override
     public SagaStateSnapshot forceComplete(String sagaId) {
-        SagaStateSnapshot saga = store.getStateSnapshot(sagaId);
-        if (saga == null) throw new SagaNotFoundException(sagaId);
+        SagaStateSnapshot saga = store.getStateSnapshot(sagaId)
+            .orElseThrow(() -> new SagaNotFoundException(sagaId));
         requireStatus(saga, SagaStatus.ESCALATED);
-        SagaStateSnapshot claimed = store.claimForRecovery(saga, ownerId);
-        if (claimed == null) {
-            throw new SagaConcurrentModificationException(sagaId);
-        }
+        SagaStateSnapshot claimed = store.claimForRecovery(saga, ownerId)
+            .orElseThrow(() -> new SagaConcurrentModificationException(sagaId));
         int nextSeq = store.getEventCount(sagaId);
         return store.recordTransition(claimed, nextSeq, SagaEvent.sagaCompleted());
     }
 
     @Override
     public SagaStateSnapshot retrySaga(String sagaId) {
-        SagaStateSnapshot saga = store.getStateSnapshot(sagaId);
-        if (saga == null) throw new SagaNotFoundException(sagaId);
+        SagaStateSnapshot saga = store.getStateSnapshot(sagaId)
+            .orElseThrow(() -> new SagaNotFoundException(sagaId));
         requireStatus(saga, SagaStatus.RUNNING);
         requireHasEvent(sagaId, SagaEvent.STEP_FAILED);
-        SagaStateSnapshot claimed = store.claimForRecovery(saga, ownerId);
-        if (claimed == null) {
-            throw new SagaConcurrentModificationException(sagaId);
-        }
+        SagaStateSnapshot claimed = store.claimForRecovery(saga, ownerId)
+            .orElseThrow(() -> new SagaConcurrentModificationException(sagaId));
         return sagaManager.resume(sagaId);
     }
 
