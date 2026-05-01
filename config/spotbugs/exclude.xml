@@ -5,4 +5,13 @@
     <Class name="~.*Test$"/>
     <Bug pattern="SE_BAD_FIELD"/>
   </Match>
+  <Match>
+    <Class name="~.*Test$"/>
+    <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
+  </Match>
+  <!-- Constructors called inside assertThatThrownBy lambdas are not meant to be thrown -->
+  <Match>
+    <Class name="~.*Test(\$.*)?"/>
+    <Bug pattern="RV_EXCEPTION_NOT_THROWN"/>
+  </Match>
 </FindBugsFilter>

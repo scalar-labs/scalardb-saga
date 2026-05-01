@@ -3,6 +3,7 @@ plugins {
 }
 
 dependencies {
+    implementation(platform(libs.jackson.bom))
     implementation(libs.scalardb)
     implementation(libs.jackson.databind)
     implementation(libs.jackson.dataformat.yaml)
