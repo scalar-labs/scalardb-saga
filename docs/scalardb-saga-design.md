@@ -1356,90 +1356,85 @@ public class SagaEngine {
         long sagaDeadline = sagaTimeoutMillis > 0
             ? System.currentTimeMillis() + sagaTimeoutMillis : 0;
 
-        try {
-            for (int i = startIndex; i < plan.size(); i++) {
-                // Graceful shutdown: stop between steps (saga stays RUNNING for recovery)
-                if (shouldStopBetweenSteps()) {
-                    break;
-                }
+        for (int i = startIndex; i < plan.size(); i++) {
+            // Graceful shutdown: stop between steps (saga stays RUNNING for recovery)
+            if (shouldStopBetweenSteps()) {
+                break;
+            }
 
-                // Saga-level timeout: check before each step
-                if (sagaDeadline > 0 && System.currentTimeMillis() > sagaDeadline) {
-                    throw new SagaTimeoutException(
-                        "Saga " + sagaId + " exceeded deadline of " + sagaTimeoutMillis + "ms");
-                }
-
-                // Emit the crossing event once when transitioning past the pivot.
-                // All sagas are RUNNING before crossing, so this is idempotent on recovery.
-                if (pivot.crossingEvent() != null && i == pivot.index() + 1
-                        && context.getCurrentState().getStatus() == SagaStatus.RUNNING) {
-                    transition(context, pivot.crossingEvent());
-                }
-
-                StepWithPolicy entry = plan.get(i);
-                long stepDeadline = calculateStepDeadline(entry.stepTimeoutMillis(), sagaDeadline);
-
-                try {
-                    StepResult result = executeWithRetry(entry.step(), context,
-                                                         entry.retryPolicy(), stepDeadline);
-
-                    // Append-only: 1 INSERT per step. No "step started"
-                    // write, no lease renewal — recovery uses saga_state scan.
-                    store.appendEvent(sagaId, context.nextSequence(),
-                        SagaEvent.stepCompleted(i, entry.step().getName(), result));
-                    context.advanceSequence();
-                    context.merge(result);
-                    completedIndex = i;
-                } catch (Exception e) {
-                    // Failure handling depends on where we are relative to the pivot.
-                    if (i <= pivot.index()) {
-                        // Failed at or before the pivot — compensate backward.
-                        // For TCC: this means cancel all completed try steps.
-                        transition(context, SagaEvent.sagaCompensating());
-                        try {
-                            compensationManager.compensate(plan, context, completedIndex);
-                            transition(context, SagaEvent.sagaCompensated());
-                        } catch (StepCompensationException ce) {
-                            // Compensation failed — saga stays in COMPENSATING.
-                            // Recovery will retry from the failed compensation step.
-                        }
-                    } else {
-                        // Failed after the pivot — stay RUNNING for recovery retry.
-                        // Emit STEP_FAILED (at most once per step) for observability
-                        // and escalation timing.
-                        if (!context.hasFailureEvent(i)) {
-                            store.appendEvent(sagaId, context.nextSequence(),
-                                SagaEvent.stepFailed(i, entry.step().getName(), e));
-                            context.advanceSequence();
-                        }
+            // Saga-level timeout: check before each step
+            if (sagaDeadline > 0 && System.currentTimeMillis() > sagaDeadline) {
+                // Timeout before/at pivot → compensate; after pivot → stay for recovery.
+                if (i <= pivot.index()) {
+                    transition(context, SagaEvent.sagaCompensating());
+                    try {
+                        compensationManager.compensate(plan, context, completedIndex);
+                        transition(context, SagaEvent.sagaCompensated());
+                    } catch (StepCompensationException ce) {
+                        // Saga stays in COMPENSATING for recovery.
                     }
-                    return;
                 }
+                // After pivot: saga stays RUNNING for recovery retry.
+                return;
             }
 
-            if (completedIndex == plan.size() - 1) {
-                transition(context, SagaEvent.sagaCompleted());
+            // Emit the crossing event once when transitioning past the pivot.
+            // All sagas are RUNNING before crossing, so this is idempotent on recovery.
+            if (pivot.crossingEvent() != null && i == pivot.index() + 1
+                    && context.getCurrentState().getStatus() == SagaStatus.RUNNING) {
+                transition(context, pivot.crossingEvent());
             }
 
-        } catch (Exception e) {
-            // Unexpected error outside the per-step try/catch (e.g., persistence failure).
-            // Fall back to the same pivot-based logic.
-            if (completedIndex <= pivot.index()) {
-                transition(context, SagaEvent.sagaCompensating());
-                try {
-                    compensationManager.compensate(plan, context, completedIndex);
-                    transition(context, SagaEvent.sagaCompensated());
-                } catch (StepCompensationException ce) {
-                    // Saga stays in COMPENSATING for recovery.
+            StepWithPolicy entry = plan.get(i);
+            long stepDeadline = calculateStepDeadline(entry.stepTimeoutMillis(), sagaDeadline);
+
+            // Execute the step. Only step execution exceptions trigger compensation.
+            StepResult result;
+            try {
+                result = executeWithRetry(entry.step(), context,
+                                           entry.retryPolicy(), stepDeadline);
+            } catch (Exception e) {
+                // Step execution failed — compensate or stay for recovery based on pivot.
+                if (i <= pivot.index()) {
+                    // Failed at or before the pivot — compensate backward.
+                    // For TCC: this means cancel all completed try steps.
+                    transition(context, SagaEvent.sagaCompensating());
+                    try {
+                        compensationManager.compensate(plan, context, completedIndex);
+                        transition(context, SagaEvent.sagaCompensated());
+                    } catch (StepCompensationException ce) {
+                        // Compensation failed — saga stays in COMPENSATING.
+                        // Recovery will retry from the failed compensation step.
+                    }
+                } else {
+                    // Failed after the pivot — stay RUNNING for recovery retry.
+                    // Emit STEP_FAILED (at most once per step) for observability
+                    // and escalation timing.
+                    if (!context.hasFailureEvent(i)) {
+                        store.appendEvent(sagaId, context.nextSequence(),
+                            SagaEvent.stepFailed(i, entry.step().getName(), e));
+                        context.advanceSequence();
+                    }
                 }
-            } else {
-                // Persistence failure after the pivot — stay RUNNING for recovery.
-                if (!context.hasFailureEvent(completedIndex + 1)) {
-                    store.appendEvent(context.getSagaId(), context.nextSequence(),
-                        SagaEvent.stepFailed(completedIndex + 1, "unknown", e));
-                    context.advanceSequence();
-                }
+                return;
             }
+
+            // Record step completion. If this fails (SagaPersistenceException),
+            // the exception propagates out — no compensation. Recovery re-reads
+            // the actual database state and resumes correctly. The step may be
+            // re-executed, so steps must tolerate at-least-once delivery
+            // (consistent with the 1-write-per-step design choice).
+            store.appendEvent(sagaId, context.nextSequence(),
+                SagaEvent.stepCompleted(i, entry.step().getName(), result));
+            context.advanceSequence();
+            context.merge(result);
+            completedIndex = i;
+        }
+
+        // All steps completed — record terminal transition.
+        // If this fails, the saga stays RUNNING and recovery completes it.
+        if (completedIndex == plan.size() - 1) {
+            transition(context, SagaEvent.sagaCompleted());
         }
     }
 
