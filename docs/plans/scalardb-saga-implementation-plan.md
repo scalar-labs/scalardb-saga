@@ -18,7 +18,7 @@ deepened: 2026-04-20
 2. **Data integrity hardening**: Reverse `register()` order (persist before memory), add tombstone records for idempotent-create preservation, handle multi-row secondary index results, guard `markForRecovery()` against stale reads
 3. **Security tightening**: SSRF protection for callback URLs (allowlist), HTTP body size limits, Jackson ObjectMapper safety (`disableDefaultTyping`), saga/step name validation, recovery timeout constraint (`recoveryTimeoutMs > max(stepTimeoutMs)`)
 4. **Architecture refinement**: Split `SagaStore` into 4 focused interfaces, define `SagaEventListener` in Phase 1, replace `startAsync()` overloads with `StartSagaRequest` builder, make `NUM_BUCKETS` configurable
-5. **Missing flows identified**: Saga cancellation flow absent from engine, `StepResult.pending()` behavior undefined in embedded mode, definition resolution failure handling missing, data retention mechanism unspecified
+5. **Missing flows identified**: Saga cancellation flow absent from engine, `StepResult.pending()` behavior undefined in embedded mode, definition resolution failure handling missing, data retention mechanism now specified (SagaRetentionManager with configurable retention period)
 
 ### New Considerations Discovered
 
@@ -45,7 +45,7 @@ Teams building microservices need eventual consistency across services (e.g., or
 
 A 7-phase incremental build:
 
-1. **Phase 1 — Core Engine**: API interfaces, SagaEngine (unified pivot-based execution), CompensationManager, ScalarDbSagaStore (append-only events + bucket-partitioned saga_state), SagaRecoveryManager, TCC mode, testing harness
+1. **Phase 1 — Core Engine**: API interfaces, SagaEngine (unified pivot-based execution), CompensationManager, ScalarDbSagaStore (append-only events + bucket-partitioned saga_state), SagaRecoveryManager, SagaRetentionManager (periodic cleanup of resolved sagas), TCC mode, testing harness
 2. **Phase 2 — Communication & Frameworks**: ServiceInvoker (Layer 2), declarative step communication (Layer 2b), Spring Boot integration, Quarkus integration, participant SDK
 3. **Phase 3 — Daemon Mode**: Standalone coordinator process with REST API, RemoteSagaManager client SDK
 4. **Phase 4 — DX & Observability**: OpenTelemetry listener, SagaDevServer (local dev with SQLite + web UI)
@@ -64,6 +64,7 @@ com.scalar.db.saga/
 ├── parser/                      # JSON/YAML → SagaDefinition
 ├── store/                       # SagaStore interface + ScalarDbSagaStore
 ├── recovery/                    # SagaRecoveryManager + RecoveryConfig
+├── retention/                   # SagaRetentionManager + RetentionConfig
 ├── exception/                   # 10 exception classes
 ├── timeout/                     # TimeoutPolicy
 ├── observability/               # SagaEventListener + OpenTelemetrySagaListener
@@ -83,6 +84,8 @@ com.scalar.db.saga/
 - **SagaDefinitionRegistry**: Two-tier versioned lookup (in-memory → store fallback) for recovery.
 - **Testing harness in Phase 1**: `SagaTestHarness` with `ScalarDbSagaStore` backed by in-memory SQLite.
 - **Two-phase compensation retry**: Immediate retry (CompensationManager) then periodic recovery retry (SagaRecoveryManager) with time-based escalation.
+- **Existence check (not version check)**: `recordTransition` and `claimForRecovery` verify the row still exists at the snapshot's CK. Version comparison is redundant because every saga_state mutation DELETEs the old CK and INSERTs at a new CK.
+- **Data retention**: `SagaRetentionManager` periodically purges resolved sagas (COMPLETED, COMPENSATED) older than a configurable retention period. ESCALATED sagas excluded (require admin resolution). Uses `ScalarDbSagaStore.findByStatusOlderThan()` (package-private, not in `SagaStore` interface — overlaps with admin queries planned for Phase 5).
 
 ### Project Structure (Gradle Multi-Module)
 
@@ -107,7 +110,7 @@ Modules are added to `settings.gradle.kts` as each phase begins.
 
 #### Phase 1: Core Engine
 
-**Scope:** Core engine + SagaStore + recovery + timeouts + virtual threads + graceful shutdown + saga versioning + compensation retry + SagaContext validation + TCC mode + MIXED recovery strategy (pivot transaction) + testing harness.
+**Scope:** Core engine + SagaStore + recovery + data retention (periodic cleanup) + timeouts + virtual threads + graceful shutdown + saga versioning + compensation retry + SagaContext validation + TCC mode + MIXED recovery strategy (pivot transaction) + testing harness.
 
 **Estimated: ~4,235 LoC, ~5.5-7.5 working days**
 
@@ -194,46 +197,52 @@ Total: ~80 LoC
 
 ##### Task 1.5: Store Layer — SagaStore Interface, SagaEvent
 
-- [ ] `store/SagaStore.java` — Core interface (~35 LoC): createSaga, appendEvent, recordTransition, getEvents, getEventCount, getStateSnapshot, registerDefinition, getDefinition, deleteSaga
-- [ ] `store/SagaRecoveryStore.java` — Recovery-specific interface (~15 LoC): findRecoverableByBucket, claimForRecovery, markForRecovery
-- [ ] `store/SagaAdminStore.java` — Admin query interface (~15 LoC): listStateSnapshots, countByStatus, countBySagaName (defer implementation to Phase 5)
-- [ ] `store/SagaEvent.java` — 10 event types with factory methods. Each saga-level event carries `targetStatus`. Step-level events carry `stepIndex` + `stepName`. (~90 LoC)
-- [ ] **Unit tests** (~100 LoC):
+- [x] `store/SagaStore.java` — Single unified interface (~50 LoC): createSaga, appendEvent, recordTransition, getEvents, getEventCount, getStateSnapshot, registerDefinition, getDefinition, findRecoverable, claimForRecovery, markForRecovery, deleteSaga; + nested Recoverables record + RecoverablesCursor interface. Admin query methods (listStateSnapshots, countByStatus, countBySagaName) deferred to Phase 5.
+- [x] `store/SagaEvent.java` — 10 event types with factory methods. Each saga-level event carries `targetStatus`. Step-level events carry `stepIndex` + `stepName`. (~90 LoC)
+- [x] **Unit tests** (~100 LoC):
   - SagaEvent: factory methods for all 10 event types, `targetStatus` correctness
 
-> **Research Insight (Architecture + Simplicity + Data Integrity):**
-> - **Split SagaStore into focused interfaces**: `SagaStore` (core CRUD), `SagaRecoveryStore` (recovery-specific), `SagaAdminStore` (admin queries). `ScalarDbSagaStore` implements all three, but consumers depend only on what they need. This defers 4 admin methods from Phase 1 scope.
+> **Design Decisions:**
+> - **Single SagaStore interface**: The original plan split SagaStore into 3 focused interfaces (SagaStore, SagaRecoveryStore, SagaAdminStore). After implementation, a single interface was simpler — the split added indirection without clear benefit since all consumers use the same `ScalarDbSagaStore` instance.
 > - **SagaSchema deferred to Task 1.6**: SagaSchema depends on ScalarDB API (TableMetadata, DataType, etc.). Moved to Task 1.6 alongside ScalarDbSagaStore to avoid adding ScalarDB dependency in Task 1.5.
-> - **markForRecovery(String sagaId) — not SagaStateSnapshot**: The original insight suggested accepting `SagaStateSnapshot` to avoid a secondary index read. However, skipping the DB read is unsafe for concurrency: another replica may have claimed the saga, changing the `saga_state` row. A blind DELETE + INSERT with a stale snapshot could create duplicate rows. `markForRecovery` must read within its transaction for concurrency safety. The secondary index read is acceptable since this is only called during graceful shutdown.
+> - **markForRecovery(String sagaId) — not SagaStateSnapshot**: Skipping the DB read is unsafe for concurrency: another replica may have claimed the saga. `markForRecovery` must read within its transaction. The secondary index read is acceptable since this is only called during graceful shutdown.
 
 ##### Task 1.6: SagaSchema + ScalarDbSagaStore Implementation
 
-- [ ] `store/SagaSchema.java` — 3 `TableMetadata` definitions: `saga_events` (PK=saga_id, CK=sequence ASC), `saga_state` (PK=bucket, CK=(status ASC, updated_at ASC, saga_id ASC), secondary index on saga_id), `saga_definitions` (PK=saga_name, CK=definition_version). `bucketOf()` hash function with MurmurHash3 mix, `createAll()` method. NUM_BUCKETS configurable (default 16). (~100 LoC)
-- [ ] `store/ScalarDbSagaStore.java` — Full implementation (~450 LoC, **medium complexity**):
-  - `createSaga()`: 1 tx — 2 ops (INSERT event + INSERT state). Server-generated UUID or client-supplied ID with strict validation (`[a-zA-Z0-9._-]{1,128}`, must start with alphanumeric). Throws `SagaAlreadyExistsException` on collision.
+- [x] `store/SagaSchema.java` — 3 `TableMetadata` definitions: `saga_events` (PK=saga_id, CK=sequence ASC), `saga_state` (PK=bucket, CK=(status ASC, updated_at ASC, saga_id ASC), secondary index on saga_id), `saga_definitions` (PK=saga_name, CK=definition_version). `bucketOf()` hash function with MurmurHash3 mix, `createAll()` method. NUM_BUCKETS configurable (default 16). (~100 LoC)
+- [x] `store/ScalarDbSagaStoreConfig.java` — Builder-based configuration: cacheMaxSize, cacheExpireAfterWrite, maxEventPayloadBytes with validation (~60 LoC)
+- [x] `store/SagaDefinitionSerializer.java` — Jackson-based serializer/deserializer for SagaDefinition with enum validation and field presence checks (~100 LoC)
+- [x] `store/ScalarDbSagaStore.java` — Full implementation (~500 LoC, **medium complexity**):
+  - `createSaga()`: 1 tx — 2 ops (INSERT event + INSERT state). Server-generated UUID or client-supplied ID with strict validation (`[a-zA-Z0-9._-]{1,128}`). Throws `SagaAlreadyExistsException` on collision (with existing snapshot lookup).
   - `appendEvent()`: 1 tx — 1 op (INSERT event)
-  - `recordTransition()`: 1 tx — 3 ops (INSERT event + DELETE old status row + INSERT new status row). Accepts cached `SagaStateSnapshot` to avoid reads.
-  - `findRecoverableByBucket()`: Scan per bucket with status=RUNNING, CONFIRMING, COMPENSATING and updated_at <= threshold. **Add per-bucket claim limit (100)** to prevent one bucket from monopolizing recovery.
-  - `claimForRecovery()`: Read current saga_state row, verify version, DELETE + INSERT with new owner_id and incremented version in one transaction
-  - `markForRecovery(String sagaId)`: Read current row within transaction for concurrency safety, then DELETE + INSERT with updated_at = epoch 0
-  - `registerDefinition()` / `getDefinition()`: PUT/GET to saga_definitions table
-  - `getStateSnapshot()`: Lookup via secondary index on saga_id. Handle multi-row case: collect all results, pick highest version, log warning.
-  - `getEvents()`: Scan saga_events partition by saga_id
-  - Admin methods deferred to Phase 5: `listStateSnapshots`, `countByStatus`, `countBySagaName`, `deleteSaga`
-- [ ] **Unit tests** (~400 LoC):
+  - `recordTransition()`: 1 tx — 4 ops (GET existence check + INSERT event + DELETE old status row + INSERT new status row). The GET verifies the row still exists at the snapshot's CK — if missing (already transitioned/claimed by another replica), throws `SagaConcurrentModificationException`. A separate version check is not needed because status and updated_at are in the CK, so every mutation DELETEs the old CK and INSERTs at a new CK.
+  - `findRecoverable()`: Scan per bucket with CK prefix for status=RUNNING, CONFIRMING, COMPENSATING and updated_at <= threshold. Cursor-based pagination (one bucket per page).
+  - `claimForRecovery()`: Read current saga_state row at snapshot's CK to verify existence (version check redundant — same reasoning as recordTransition), DELETE + INSERT with new owner_id, incremented version, and new updated_at in one transaction
+  - `markForRecovery(String sagaId)`: Read current row via secondary index within transaction for concurrency safety, then DELETE + INSERT with updated_at = epoch 0
+  - `registerDefinition()` / `getDefinition()`: INSERT/GET to saga_definitions table
+  - `getStateSnapshot()`: Lookup via secondary index on saga_id with Caffeine cache
+  - `getEvents()` / `getEventCount()`: Scan saga_events partition by saga_id
+  - `deleteSaga()`: Terminal-status guard, then delete saga_state row + all saga_events rows in one transaction
+  - `findByStatusOlderThan()`: Package-private CK prefix scan per (bucket, status) with updated_at <= threshold. Used by `SagaRetentionManager` for periodic cleanup. Not part of `SagaStore` interface — overlaps with admin query methods planned for Phase 5.
+- [x] **Unit tests** (~500 LoC):
   - SagaSchema: `bucketOf()` hash distribution, table metadata structure, configurable NUM_BUCKETS
   - `createSaga()`: server-generated ID, client-supplied ID, duplicate ID collision (`SagaAlreadyExistsException`), invalid ID format rejection
-  - `appendEvent()`: normal append, sequence ordering
-  - `recordTransition()`: status transitions, event + state consistency
-  - `findRecoverableByBucket()`: stale saga detection, per-bucket scanning, threshold filtering
-  - `claimForRecovery()`: version-based optimistic concurrency, concurrent claim rejection
-  - `markForRecovery()`: sagaId lookup, immediate recovery pickup, concurrent claim handling
-  - `registerDefinition()` / `getDefinition()`: PUT idempotency, versioned lookup
+  - `appendEvent()`: normal append, transaction failure
+  - `recordTransition()`: valid transition (with existence check), row not found → `SagaConcurrentModificationException`, transaction failure
+  - `findRecoverable()`: stale saga detection, per-bucket scanning, threshold filtering, cursor pagination, empty results
+  - `claimForRecovery()`: existence-based optimistic concurrency, row not found → empty, commit conflict → empty
+  - `markForRecovery()`: sagaId lookup, immediate recovery pickup, transaction failure (best-effort)
+  - `deleteSaga()`: terminal saga deletion, non-terminal rejection, saga not found
+  - `findByStatusOlderThan()`: matching sagas, empty results, transaction failure
+  - `registerDefinition()` / `getDefinition()`: round-trip with retry policies
+  - SagaDefinitionSerializer: round-trip, missing fields, invalid enum, malformed JSON
+  - SagaStatus: fromStatusCode, getStatusCode, isTerminal, isPurgeable
 
-> **Research Insight (Data Integrity):**
-> - **Event sequence gaps**: If `appendEvent()` throws after ScalarDB has committed (e.g., network timeout on response path), the engine enters failure handling and may try to write a STEP_FAILED event at the same sequence number. The Insert "fail-if-exists" semantics reject this, leaving the saga stuck. **Mitigation**: After `SagaPersistenceException` from `appendEvent()`, verify whether the event was actually persisted before proceeding to failure handling. Alternatively, treat Insert conflicts on matching event type/sequence as success.
+> **Design Decisions:**
+> - **Existence check, not version check**: `recordTransition` and `claimForRecovery` use a GET at the snapshot's CK to verify the row still exists. A version comparison is redundant because every saga_state mutation (recordTransition, claimForRecovery, markForRecovery) DELETEs the old CK and INSERTs at a new CK (status or updated_at always changes). If the row exists at the old CK, it is guaranteed unchanged.
+> - **Event sequence gaps**: If `appendEvent()` throws after ScalarDB has committed (e.g., network timeout on response path), the engine enters failure handling and may try to write a STEP_FAILED event at the same sequence number. The Insert "fail-if-exists" semantics reject this. **Mitigation**: Treat Insert conflicts on matching event type/sequence as success.
 > - **saga_state double transition**: If `recordTransition()` commits but throws after commit (OOM, etc.), the catch block may attempt a second `transition()` call. Guard all `transition()` calls with a status check against the last known status.
-> - **Secondary index staleness**: On eventually-consistent backends (Cassandra, DynamoDB), `getStateSnapshot()` via secondary index may return stale results. Document this behavior. For consistent reads, provide `getStateSnapshotConsistent(sagaId)` that computes the bucket and scans the partition directly.
+> - **Secondary index staleness**: On eventually-consistent backends (Cassandra, DynamoDB), `getStateSnapshot()` via secondary index may return stale results. Document this behavior.
 > - **Recovery claiming delay**: If `claimForRecovery()` commits but the process crashes before `recoverOne()`, the saga's `updated_at` has been refreshed, delaying re-claim by `recoveryTimeoutMs`. This is a known liveness property — document it.
 
 ##### Task 1.7: SagaEngine — Core Execution Logic
@@ -305,7 +314,7 @@ Total: ~80 LoC
   - YAML parsing: valid definition, comments preserved (ignored)
   - Validation errors: missing name, empty steps, invalid stepClass, unknown fields (`FAIL_ON_UNKNOWN_PROPERTIES`)
 
-##### Task 1.11: SagaRecoveryManager
+##### Task 1.11: SagaRecoveryManager + SagaRetentionManager
 
 - [ ] `recovery/RecoveryConfig.java` (~5 LoC): Record: `recoveryTimeoutMs`, `recoveryIntervalSeconds`, `compensationGracePeriod`, `clock`
 - [ ] `recovery/SagaRecoveryManager.java` (~220 LoC, **medium complexity**):
@@ -315,11 +324,16 @@ Total: ~80 LoC
   - Time-based escalation: if stuck in COMPENSATING longer than `compensationGracePeriod` (default: 4 hours), escalate to ESCALATED
   - Definition lookup via `SagaDefinitionRegistry.resolve()` (versioned, with store fallback)
   - `start()` / `stop()` lifecycle methods
-- [ ] **Unit tests** (~200 LoC):
-  - Scan + claim + resume: recoverable saga detected and resumed
-  - Escalation timing: saga in COMPENSATING beyond `compensationGracePeriod` escalates to ESCALATED
-  - Definition lookup: versioned resolution with store fallback
-  - Lifecycle: `start()`/`stop()` idempotency
+- [ ] `retention/RetentionConfig.java` (~5 LoC): Record: `retentionPeriod` (default 7 days), `cleanupIntervalSeconds` (default 3600), `batchSize` (default 100), `clock`
+- [ ] `retention/SagaRetentionManager.java` (~100 LoC, **low complexity**):
+  - Periodic cleanup of resolved sagas (COMPLETED, COMPENSATED) older than the retention period. ESCALATED sagas are excluded — they require manual admin resolution.
+  - Scans `saga_state` using `ScalarDbSagaStore.findByStatusOlderThan()` (package-private) per (bucket, status) with CK prefix scan. Oldest entries first, stops when entries are newer than threshold.
+  - Deletes both `saga_state` row and all `saga_events` rows per expired saga via `deleteSaga()`.
+  - Batch-limited to prevent long-running cleanup from competing with normal execution.
+  - `start()` / `stop()` lifecycle methods
+- [ ] **Unit tests** (~250 LoC):
+  - SagaRecoveryManager: scan + claim + resume, escalation timing, definition lookup, lifecycle
+  - SagaRetentionManager: purge completed/compensated, skip escalated, batch limiting, lifecycle
 
 > **Research Insight (Security + Performance):**
 > - **Constraint**: Enforce `recoveryTimeoutMs > max(stepTimeoutMs)` across all step definitions. Otherwise, a saga may be claimed for recovery while a step is still executing within its timeout, leading to duplicate step execution.
@@ -568,7 +582,8 @@ Total: ~80 LoC
 
 - `SagaManager.start()` → `SagaEngine.createSaga()` → `SagaStore.createSaga()` (persist) → `SagaEngine.executeSaga()` → `executeSagaSteps()` (loop) → `Step.execute()` per step → `SagaStore.appendEvent()` per step → `SagaStore.recordTransition()` on terminal
 - On failure: `CompensationManager.compensate()` → `Step.compensate()` in reverse → `SagaStore.appendEvent()` per compensation
-- `SagaRecoveryManager` (periodic) → `SagaStore.findRecoverableByBucket()` → `SagaStore.claimForRecovery()` → `SagaEngine.replayEvents()` → `SagaEngine.resumeFrom()`
+- `SagaRecoveryManager` (periodic) → `SagaStore.findRecoverable()` → `SagaStore.claimForRecovery()` → `SagaEngine.replayEvents()` → `SagaEngine.resumeFrom()`
+- `SagaRetentionManager` (periodic) → `ScalarDbSagaStore.findByStatusOlderThan()` (package-private) → `SagaStore.deleteSaga()` per expired saga
 - `SagaEventListener` callbacks fire at each lifecycle point (saga start, step start/end, compensation, completion)
 
 ### Error & Failure Propagation
@@ -583,12 +598,12 @@ Total: ~80 LoC
 
 - **Crash between step execution and event persistence**: Step may have completed externally but event not persisted. On recovery, step is re-executed → steps MUST be idempotent.
 - **Crash between event append and saga_state transition**: Events are source of truth; saga_state is rebuilt from events during recovery.
-- **Concurrent recovery claims**: Handled by version-based optimistic concurrency + ScalarDB transaction conflict detection.
-- **Terminal state cleanup**: COMPLETED/COMPENSATED/ESCALATED rows in saga_state can be cleaned up after configurable retention period.
+- **Concurrent recovery claims**: Handled by existence check at snapshot's CK (row not found = already claimed/transitioned) + ScalarDB transaction conflict detection for concurrent claims.
+- **Terminal state retention & cleanup**: COMPLETED/COMPENSATED sagas retained in saga_state for configurable period (default 7 days) for caller visibility. `SagaRetentionManager` periodically purges expired entries using CK prefix scan per (bucket, status). ESCALATED sagas excluded from auto-cleanup (require admin resolution).
 
 > **Research Insight (Data Integrity):**
 > - **Terminal state cleanup breaks idempotency**: Deleting a completed saga via `deleteSaga()` destroys the data needed for idempotent-create. A client retry after cleanup creates a new saga, causing duplicate business effects (double charges). **Mitigation**: Use tombstone records — retain a minimal saga_state row (`saga_id`, `status=COMPLETED`, `deleted_at`) after event deletion. Tombstones preserve the idempotency check and can be cleaned on a longer schedule (90 days).
-> - **Effective recovery SLA**: `findRecoverableByBucket()` scans 3 status ranges sequentially in one transaction. A concurrent status transition may cause a saga to be missed in one scan cycle (caught in the next). The effective SLA is `recoveryIntervalSeconds + recoveryTimeoutMs`, not just `recoveryTimeoutMs`. Document this.
+> - **Effective recovery SLA**: `findRecoverable()` scans 3 status ranges sequentially in one transaction. A concurrent status transition may cause a saga to be missed in one scan cycle (caught in the next). The effective SLA is `recoveryIntervalSeconds + recoveryTimeoutMs`, not just `recoveryTimeoutMs`. Document this.
 > - **Caffeine cache inconsistency**: In multi-replica deployments, `getStateSnapshot()` may return a locally cached result that is stale because another replica has since transitioned the saga. This is acceptable for informational queries — document as known behavior.
 
 ## Acceptance Criteria
@@ -655,7 +670,7 @@ Total: ~80 LoC
 | LRA TCK compliance (Phase 6) may surface unexpected spec requirements | Medium | Start with spec analysis before coding; incremental compliance testing |
 | ScalarDB secondary index eventual consistency (Cassandra/DynamoDB) | Medium | Pass `SagaStateSnapshot` to `markForRecovery()`; handle multi-row results in `getStateSnapshot()` |
 | SSRF via participant callback URLs in declarative steps | High | Allowlist permitted hosts/CIDRs in `ServiceInvokerRegistry` |
-| Terminal state cleanup breaking idempotent-create contract | High | Tombstone records; separate saga_events cleanup from saga_state retention |
+| Terminal state cleanup breaking idempotent-create contract | High | Tombstone records; SagaRetentionManager handles periodic purge with configurable retention period |
 
 ## Cumulative Timeline
 

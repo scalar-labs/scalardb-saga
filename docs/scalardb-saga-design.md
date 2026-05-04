@@ -65,6 +65,7 @@ Typical user profiles:
   - [Crash Recovery](#crash-recovery)
   - [Timeout Management](#timeout-management)
   - [Graceful Shutdown](#graceful-shutdown)
+  - [Data Retention & Periodic Cleanup](#data-retention--periodic-cleanup)
   - [Async Step Completion (Daemon Mode Only)](#async-step-completion-daemon-mode-only)
   - [TCC (Try-Confirm-Cancel) Mode](#tcc-try-confirm-cancel-mode)
 - [Part III: Communication & Integration](#part-iii-communication--integration)
@@ -132,6 +133,9 @@ com.scalar.db.saga/
 ├── recovery/                    # Crash recovery
 │   ├── RecoveryConfig.java         # Record: recovery timing + clock config
 │   └── SagaRecoveryManager.java
+├── retention/                   # Data retention & cleanup
+│   ├── RetentionConfig.java        # Record: retention period + cleanup schedule
+│   └── SagaRetentionManager.java
 ├── exception/                   # Exception types
 │   ├── SagaPersistenceException.java
 │   ├── SagaAlreadyExistsException.java
@@ -174,6 +178,7 @@ com.scalar.db.saga/
 | 3 | **RetryPolicy** | Exponential backoff + jitter. Participant-driven error classification (`StepExecutionException.isRetryable()`). Virtual thread execution. |
 | 4 | **SagaStore** (interface) | Append-only event persistence: 1 INSERT per step. Bucket-partitioned `saga_state` table with `status` as clustering key for efficient recovery scans and distributed writes. Default implementation: `ScalarDbSagaStore`. |
 | 5 | **SagaRecoveryManager** | Scans each `saga_state` bucket for `status=RUNNING` with stale `updated_at` (similar to Seata's model). Bucket partitioning distributes scans across database nodes. Replays events to reconstruct state. Conflict-based claiming via ScalarDB transaction conflict detection. |
+| 5b | **SagaRetentionManager** | Periodically purges resolved sagas (COMPLETED, COMPENSATED) older than a configurable retention period. Scans `saga_state` using CK prefix per (bucket, status), then deletes both `saga_state` and `saga_events` rows via `deleteSaga()`. ESCALATED sagas are excluded (require manual admin resolution). |
 | 6 | **ServiceInvoker** | Framework-agnostic typed lambdas for step dispatch. Declarative JSON communication (Layer 2b). |
 | 7 | **SagaTestHarness** | Integration testing: mock steps, crash simulation, assertion helpers. Uses `ScalarDbSagaStore` backed by in-memory SQLite. |
 | 8 | **SagaAdminService** | Production operations API: list, inspect, compensate, retry, force-complete. |
@@ -466,7 +471,7 @@ However, the saga workload is safe under SNAPSHOT because no transaction perform
 |---|---|---|---|
 | `createSaga` | 0 | INSERT event + INSERT state | Writes only |
 | `appendEvent` | 0 | INSERT event | Writes only |
-| `recordTransition` | 0 (caller provides state) | INSERT event + DELETE/INSERT state | Writes only |
+| `recordTransition` | 1 Get (existence check) | INSERT event + DELETE/INSERT state | Single read — verifies row still exists at snapshot's CK. Row not found → abort. Concurrent transitions on same row produce write-write conflict. |
 | `claimForRecovery` | 1 Get | DELETE/INSERT state | Single read — no second read to skew against. Concurrent claims produce write-write conflict. |
 | `getEvents` | 1 Scan (single partition) | 0 | Single scan operation |
 | `findRecoverable` | 3 Scans (1 bucket × 3 statuses) per page | 0 | Called with cursor from `recover()`. Each result is independently validated by a separate `claimForRecovery` transaction. |
@@ -744,7 +749,21 @@ public enum SagaStatus {
     COMPLETED,      // all steps succeeded (and confirmed, in TCC mode)
     COMPENSATING,   // executing compensation steps (Saga) or Cancel phase (TCC)
     COMPENSATED,    // all compensations/cancellations completed
-    ESCALATED       // stuck beyond grace period, needs manual intervention
+    ESCALATED;      // stuck beyond grace period, needs manual intervention
+
+    /** Returns true if the engine will not autonomously process this saga further. */
+    public boolean isTerminal() {
+        return this == COMPLETED || this == COMPENSATED || this == ESCALATED;
+    }
+
+    /**
+     * Returns true if sagas in this status may be automatically purged after
+     * the retention period. ESCALATED sagas are excluded — they require manual
+     * admin resolution before cleanup.
+     */
+    public boolean isPurgeable() {
+        return this == COMPLETED || this == COMPENSATED;
+    }
 }
 
 ```
@@ -2242,27 +2261,27 @@ Event stream for a 5-step saga (happy path):
   seq=6  SAGA_COMPLETED    {}                                    ← saga end
 
 Transactions and operations:
-  1. createSaga:       1 tx — 2 ops (1 INSERT event + 1 INSERT status)
+  1. createSaga:       1 tx — 2 ops (1 INSERT event + 1 INSERT state)
   2. steps 0-4:        5 tx — 5 ops (1 INSERT event each)
-  3. sagaCompleted:    1 tx — 3 ops (1 INSERT event + 1 DELETE old status + 1 INSERT new status)
+  3. sagaCompleted:    1 tx — 4 ops (1 GET state + 1 INSERT event + 1 DELETE old state + 1 INSERT new state)
 
-Total: 7 transactions, 10 operations
+Total: 7 transactions, 11 operations
   - saga_events:  7 INSERTs
-  - saga_state:  2 INSERTs + 1 DELETE
+  - saga_state:  1 GET + 2 INSERTs + 1 DELETE
 
-Note: registerDefinition (1 tx, 1 PUT) is a one-time cost per definition version, not per saga.
+Note: registerDefinition (1 tx, 1 GET + 1 INSERT) is a one-time cost per definition version, not per saga.
 ```
 
 | Framework | Transactions | Operations | Model |
 |---|---|---|---|
-| **This design** | 7 tx | 10 ops (7 events + 3 status) | Append-only events + mutable status |
+| **This design** | 7 tx | 11 ops (7 events + 4 status) | Append-only events + mutable status |
 | **Axon** | ~7 tx | ~7 ops | Append-only event store |
 | **Eventuate** | ~7 tx | ~7 ops | Append-only events + CDC |
 | **Temporal** | ~7 tx (batched) | ~7 ops | Append-only event history |
 | **Seata** | ~7 tx | ~12 ops | Mutable rows (STARTED + COMPLETED) |
 | **Previous design** | ~7 tx | ~17 ops | Mutable rows (UPSERT + UPDATE + INSERT) |
 
-The 3 additional operations in this design maintain the `saga_state` table, which enables efficient recovery scans (clustering key prefix scan by status) without requiring CDC infrastructure or eventual-consistency projections.
+The 4 additional operations in this design maintain the `saga_state` table (1 GET existence check + 1 DELETE + 1 INSERT per transition), which enables efficient recovery scans (clustering key prefix scan by status) and prevents stale writes after recovery claiming, without requiring CDC infrastructure or eventual-consistency projections.
 
 ### SagaStore Interface
 
@@ -2279,21 +2298,25 @@ public interface SagaStore {
     SagaStateSnapshot createSaga(@Nullable String sagaId, String sagaName, String ownerId,
                              Map<String, Object> input, String definitionVersion);
 
-    // Definition persistence — called once per definition version at registration time
+    // Definition persistence — called once per definition version at registration time.
+    // GET-then-conditional-write: idempotent on restart, fail-fast on version conflict.
     void registerDefinition(SagaDefinition definition);
     Optional<SagaDefinition> getDefinition(String sagaName, String definitionVersion);
 
-    // Append-only event write — 1 INSERT to saga_events (no status table update)
-    // Used for step-level events (STEP_COMPLETED, STEP_COMPENSATED, etc.)
+    // Append-only event write — 1 INSERT to saga_events (no status table update).
+    // Accepts only step-level events (targetStatus == null). Throws IllegalArgumentException
+    // if a saga-level event is passed — use recordTransition() for those.
     // Caller provides the sequence number (tracked in SagaContext).
     void appendEvent(String sagaId, int sequence, SagaEvent event);
 
     // Append event + transition saga_state status atomically in ONE transaction.
+    // Accepts only saga-level events (targetStatus != null). Throws IllegalArgumentException
+    // if a step-level event is passed — use appendEvent() for those.
     // The new status is derived from event.getTargetStatus().
-    // The current state snapshot is provided by the caller (tracked in SagaContext),
-    // so no reads are needed — 3 pure writes:
-    // 1 INSERT (event) + 1 DELETE (old status row) + 1 INSERT (new status row).
-    // Used for status transitions (COMPENSATING, COMPLETED, ESCALATED, etc.)
+    // Reads the current saga_state row first to verify it still exists at the
+    // snapshot's CK (prevents stale writes after recovery claiming):
+    // 1 GET (existence check) + 1 INSERT (event) + 1 DELETE (old row) + 1 INSERT (new row).
+    // Throws SagaConcurrentModificationException if row not found.
     // Returns the post-transition snapshot.
     SagaStateSnapshot recordTransition(SagaStateSnapshot current, int sequence,
                                         SagaEvent event);
@@ -2419,13 +2442,19 @@ public class ScalarDbSagaStore implements SagaStore {
     }
 
     /**
-     * Append a single event to saga_events.
+     * Append a single step-level event to saga_events.
      * This is the hot-path write — 1 INSERT per step.
      *
+     * Throws IllegalArgumentException if a saga-level event (targetStatus != null) is passed.
      * The sequence number is provided by the caller (tracked in SagaContext),
      * avoiding a scan to find the max sequence.
      */
     public void appendEvent(String sagaId, int sequence, SagaEvent event) {
+        if (event.getTargetStatus() != null) {
+            throw new IllegalArgumentException(
+                "appendEvent() accepts only step-level events (targetStatus must be null). "
+                + "Use recordTransition() for saga-level events that change status.");
+        }
         DistributedTransaction tx = null;
         try {
             tx = txManager.begin();
@@ -2456,15 +2485,36 @@ public class ScalarDbSagaStore implements SagaStore {
      * a status transition = DELETE old row + INSERT new row with the new status.
      * Both happen in the same transaction with the event append.
      *
-     * The current state snapshot is provided by the caller (tracked in SagaContext).
-     * It contains the old status, old updated_at, and all immutable columns. This means the
-     * transaction needs zero reads — it's 3 pure writes:
-     *   1 INSERT (event) + 1 DELETE (old status row) + 1 INSERT (new status row)
+     * Reads the current saga_state row first at the snapshot's CK to verify
+     * the row still exists. This prevents stale writes after another replica
+     * has claimed or transitioned the saga. Without this check, a stale
+     * DELETE would be a no-op (row already moved to a new CK by the other
+     * replica), and the INSERT would create a duplicate row — corrupting
+     * the saga_state table.
      *
-     * Reduced from the original 5 ops (2 scans + 2 inserts + 1 delete).
+     * The GET uses the snapshot's CK (old status + old updated_at + saga_id):
+     * - Row found → no other replica has touched it, safe to proceed
+     * - Row not found → already claimed or transitioned → abort
+     *
+     * A separate version check is not needed: because status and updated_at
+     * are in the clustering key, every mutation DELETEs the old CK and
+     * INSERTs at a new CK. If the row exists at the old CK, it is
+     * guaranteed to be unchanged.
+     *
+     * The GET also creates a read-set entry in ScalarDB's transaction, so
+     * concurrent transitions on the same row produce a CommitConflictException.
+     *
+     * Throws IllegalArgumentException if a step-level event (targetStatus == null) is passed.
+     *
+     * Total: 1 GET + 1 INSERT (event) + 1 DELETE (old row) + 1 INSERT (new row)
      */
     public SagaStateSnapshot recordTransition(SagaStateSnapshot current, int sequence,
                                                SagaEvent event) {
+        if (event.getTargetStatus() == null) {
+            throw new IllegalArgumentException(
+                "recordTransition() requires a saga-level event (targetStatus must not be null). "
+                + "Use appendEvent() for step-level events.");
+        }
         String sagaId = current.getSagaId();
         SagaStatus newStatus = event.getTargetStatus();
         DistributedTransaction tx = null;
@@ -2473,7 +2523,26 @@ public class ScalarDbSagaStore implements SagaStore {
             int bucket = SagaSchema.bucketOf(sagaId);
             Instant now = Instant.now();
 
-            // 1. Append event
+            // 1. Verify the row still exists at the snapshot's CK.
+            // Because status and updated_at are part of the clustering key,
+            // every mutation (recordTransition, claimForRecovery, markForRecovery)
+            // DELETEs the old CK and INSERTs at a new CK. So if the row exists
+            // here, no other replica has touched it — a separate version check
+            // is redundant.
+            Optional<Result> row = tx.get(Get.newBuilder()
+                .namespace(SagaSchema.NAMESPACE).table("saga_state")
+                .partitionKey(Key.ofInt("bucket", bucket))
+                .clusteringKey(Key.of(
+                    Key.ofInt("status", current.getStatus().ordinal()),
+                    Key.ofTimestampTZ("updated_at", current.getUpdatedAt()),
+                    Key.ofText("saga_id", sagaId)))
+                .build());
+            if (row.isEmpty()) {
+                tx.abort();
+                throw new SagaConcurrentModificationException(sagaId);
+            }
+
+            // 2. Append event
             tx.insert(Insert.newBuilder()
                 .namespace(SagaSchema.NAMESPACE).table("saga_events")
                 .partitionKey(Key.ofText("saga_id", sagaId))
@@ -2485,7 +2554,7 @@ public class ScalarDbSagaStore implements SagaStore {
                 .timestampTZValue("created_at", now)
                 .build());
 
-            // 2. DELETE old row (old status + old updated_at in clustering key)
+            // 3. DELETE old row (old status + old updated_at in clustering key)
             tx.delete(Delete.newBuilder()
                 .namespace(SagaSchema.NAMESPACE).table("saga_state")
                 .partitionKey(Key.ofInt("bucket", bucket))
@@ -2495,7 +2564,7 @@ public class ScalarDbSagaStore implements SagaStore {
                     Key.ofText("saga_id", sagaId)))
                 .build());
 
-            // 3. INSERT new row (new status + new updated_at in clustering key, columns from metadata)
+            // 4. INSERT new row (new status + new updated_at in clustering key)
             tx.insert(Insert.newBuilder()
                 .namespace(SagaSchema.NAMESPACE).table("saga_state")
                 .partitionKey(Key.ofInt("bucket", bucket))
@@ -2514,6 +2583,8 @@ public class ScalarDbSagaStore implements SagaStore {
             SagaStateSnapshot updated = current.withTransition(newStatus, now);
             cache.put(sagaId, updated);
             return updated;
+        } catch (SagaConcurrentModificationException e) {
+            throw e;  // don't wrap
         } catch (Exception e) {
             abortQuietly(tx);
             throw new SagaPersistenceException("Failed to record transition", e);
@@ -2566,12 +2637,12 @@ public class ScalarDbSagaStore implements SagaStore {
     }
 
     /**
-     * Claim a saga for recovery: read current row to verify it hasn't been
-     * claimed since findRecoverable, then DELETE old row + INSERT with updated
+     * Claim a saga for recovery: read current row at the snapshot's CK to
+     * verify it still exists, then DELETE old row + INSERT with updated
      * owner_id and incremented version.
      *
      * The read serves two purposes:
-     * - Serial case: version check detects a prior claim by another process.
+     * - Serial case: row-not-found detects a prior claim or transition.
      * - Concurrent case: the read creates a read-set entry in ScalarDB's
      *   transaction, so overlapping claims on the same row conflict reliably.
      */
@@ -2584,7 +2655,8 @@ public class ScalarDbSagaStore implements SagaStore {
             int status = saga.getStatus().ordinal();
             Instant now = Instant.now();
 
-            // Read current row to verify it hasn't been claimed since findRecoverable
+            // Verify the row still exists at the snapshot's CK.
+            // A separate version check is redundant — see recordTransition comment.
             Optional<Result> current = tx.get(Get.newBuilder()
                 .namespace(SagaSchema.NAMESPACE).table("saga_state")
                 .partitionKey(Key.ofInt("bucket", bucket))
@@ -2594,9 +2666,8 @@ public class ScalarDbSagaStore implements SagaStore {
                     Key.ofText("saga_id", sagaId)))
                 .build());
 
-            if (current.isEmpty()
-                    || current.get().getInt("version") != saga.getVersion()) {
-                // Row was already claimed or changed — skip
+            if (current.isEmpty()) {
+                // Row was already claimed or transitioned — skip
                 tx.abort();
                 return Optional.empty();
             }
@@ -2708,21 +2779,48 @@ public class ScalarDbSagaStore implements SagaStore {
     }
 
     /**
-     * Persist a saga definition. Called once per definition version at registration
-     * time. Uses PUT (idempotent) so safe to call on every startup.
+     * Persist a saga definition. Called once per definition version at registration time.
+     * Uses GET-then-conditional-write: idempotent on restart, fail-fast on version conflict.
+     *
+     * - Not found → INSERT (first registration)
+     * - Found, same content → no-op (safe restart / second replica)
+     * - Found, different content → throw SagaDefinitionException (bump the version)
      */
     public void registerDefinition(SagaDefinition definition) {
         DistributedTransaction tx = null;
         try {
             tx = txManager.begin();
-            tx.put(Put.newBuilder()
+            String json = definitionSerializer.serialize(definition);
+
+            Optional<Result> existing = tx.get(Get.newBuilder()
                 .namespace(SagaSchema.NAMESPACE).table("saga_definitions")
                 .partitionKey(Key.ofText("saga_name", definition.getName()))
                 .clusteringKey(Key.ofText("definition_version", definition.getVersion()))
-                .textValue("definition_json", definition.toJson())
+                .build());
+
+            if (existing.isPresent()) {
+                String existingJson = existing.get().getText("definition_json");
+                if (json.equals(existingJson)) {
+                    tx.commit();  // idempotent no-op
+                    return;
+                }
+                tx.abort();
+                throw new SagaDefinitionException(
+                    "Definition '" + definition.getName() + "' version '"
+                    + definition.getVersion() + "' is already registered with different content. "
+                    + "Bump the version instead.");
+            }
+
+            tx.insert(Insert.newBuilder()
+                .namespace(SagaSchema.NAMESPACE).table("saga_definitions")
+                .partitionKey(Key.ofText("saga_name", definition.getName()))
+                .clusteringKey(Key.ofText("definition_version", definition.getVersion()))
+                .textValue("definition_json", json)
                 .timestampTZValue("registered_at", Instant.now())
                 .build());
             tx.commit();
+        } catch (SagaDefinitionException e) {
+            throw e;
         } catch (Exception e) {
             abortQuietly(tx);
             throw new SagaPersistenceException("Failed to register definition", e);
@@ -3351,6 +3449,148 @@ Runtime.getRuntime().addShutdownHook(new Thread(() -> {
 void onShutdown() {
     sagaManager.close();
 }
+```
+
+## Data Retention & Periodic Cleanup
+
+### What It Does
+
+Terminal sagas (COMPLETED, COMPENSATED) remain in `saga_state` and `saga_events` after completion. This allows callers to query saga outcomes (especially important for async and crash recovery scenarios). Over time, these rows accumulate and must be purged.
+
+The retention manager periodically scans `saga_state` for successfully resolved entries (COMPLETED, COMPENSATED) whose `updated_at` is older than a configurable retention period, then deletes both the `saga_state` row and all `saga_events` rows for each expired saga in a single transaction.
+
+ESCALATED sagas are excluded from automatic cleanup — they represent unresolved failures that require manual intervention. Admins delete them explicitly via `deleteSaga()` through the Admin API after investigation.
+
+### Why Not Immediate Deletion?
+
+- **Caller visibility:** Async callers and crash-recovered processes need to query saga status after completion. If the saga and events are deleted immediately on terminal transition, these callers have no way to determine the outcome.
+- **OTel is not a database:** OpenTelemetry traces capture execution data during runtime, but querying OTel for saga status is not practical for programmatic lookups.
+- **Cleanup efficiency:** `saga_state` uses `status` as the first clustering key, so scanning terminal entries is a CK prefix scan — efficient even with millions of rows. Scanning `saga_events` directly (without `saga_state` as the index) would require scanning the entire table, which ScalarDB is not optimized for.
+
+### Retention Configuration
+
+```java
+// --- retention/RetentionConfig.java ---
+record RetentionConfig(Duration retentionPeriod, long cleanupIntervalSeconds,
+                       int batchSize, Clock clock) {
+
+    /** Default: 7-day retention, cleanup every 60 minutes, 100 sagas per batch. */
+    static RetentionConfig defaults() {
+        return new RetentionConfig(Duration.ofDays(7), 3600, 100, Clock.systemUTC());
+    }
+}
+```
+
+| Parameter | Default | Description |
+|---|---|---|
+| `retentionPeriod` | 7 days | How long terminal sagas are retained before purging |
+| `cleanupIntervalSeconds` | 3600 (1h) | How often the cleanup job runs |
+| `batchSize` | 100 | Max sagas purged per cleanup pass (limits transaction size) |
+
+### Cleanup Logic
+
+```java
+// --- retention/SagaRetentionManager.java ---
+public class SagaRetentionManager {
+    private final ScalarDbSagaStore store;  // package-private access for findByStatusOlderThan
+    private final RetentionConfig config;
+    private final ScheduledExecutorService scheduler;
+
+    public SagaRetentionManager(ScalarDbSagaStore store, RetentionConfig config) {
+        this.store = store;
+        this.config = config;
+        this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "saga-retention");
+            t.setDaemon(true);
+            return t;
+        });
+    }
+
+    public void start() {
+        scheduler.scheduleWithFixedDelay(
+            this::cleanup, config.cleanupIntervalSeconds(),
+            config.cleanupIntervalSeconds(), TimeUnit.SECONDS);
+    }
+
+    public void stop() {
+        scheduler.shutdown();
+    }
+
+    /**
+     * Single cleanup pass: for each bucket, scan resolved statuses
+     * (COMPLETED, COMPENSATED) for entries older than the retention
+     * period, then delete both saga_state and saga_events for each
+     * expired saga. ESCALATED sagas are excluded — they require
+     * manual intervention and explicit admin deletion.
+     *
+     * Uses CK prefix scan per (bucket, status) — reads only matching
+     * entries with ascending updated_at, stopping as soon as entries
+     * are newer than the threshold. This is efficient because the
+     * clustering key orders by (status, updated_at, saga_id).
+     */
+    void cleanup() {
+        Instant threshold = config.clock().instant().minus(config.retentionPeriod());
+        int purged = 0;
+
+        for (int bucket = 0; bucket < SagaSchema.NUM_BUCKETS; bucket++) {
+            for (SagaStatus status : Arrays.stream(SagaStatus.values())
+                    .filter(SagaStatus::isPurgeable).toList()) {
+                purged += purgeTerminalEntries(bucket, status, threshold);
+                if (purged >= config.batchSize()) {
+                    return;  // batch limit reached — continue in next pass
+                }
+            }
+        }
+    }
+
+    /**
+     * Scan one (bucket, status) partition for entries with updated_at <= threshold.
+     * For each match, call store.deleteSaga(sagaId) which deletes both the
+     * saga_state row and all saga_events rows in a single transaction.
+     *
+     * Uses ScalarDbSagaStore.findByStatusOlderThan (package-private) — not
+     * part of the SagaStore interface. Admin query methods will be added in
+     * a later phase; the retention manager can switch to those when available.
+     */
+    private int purgeTerminalEntries(int bucket, SagaStatus status, Instant threshold) {
+        int purged = 0;
+        List<SagaStateSnapshot> expired = store.findByStatusOlderThan(
+            bucket, status, threshold, config.batchSize());
+        for (SagaStateSnapshot saga : expired) {
+            try {
+                store.deleteSaga(saga.getSagaId());
+                purged++;
+            } catch (Exception e) {
+                // Log and continue — one failed purge shouldn't block others
+                logger.warn("Failed to purge saga {}", saga.getSagaId(), e);
+            }
+        }
+        return purged;
+    }
+}
+```
+
+**Scan efficiency:** The cleanup scan uses CK prefix `(bucket, status)` with `updated_at ASC` ordering. For a bucket with 1,000 terminal entries and only 10 older than the threshold, the scan reads just those 10 rows — the storage engine stops at the first row where `updated_at > threshold`. This is the key advantage of keeping `status` in the clustering key.
+
+**`deleteSaga()` transaction:** Each `deleteSaga(sagaId)` call runs a single transaction that:
+1. Reads the `saga_state` row via the secondary index on `saga_id` (to get the full CK)
+2. Deletes the `saga_state` row
+3. Scans and deletes all `saga_events` rows for the saga (partitioned by `saga_id`, so this is a single-partition scan)
+
+**Batch limiting:** The `batchSize` parameter limits how many sagas are purged per cleanup pass. This prevents long-running cleanup jobs from competing with normal saga execution. With 100 sagas per batch and hourly cleanup, the system purges up to 2,400 sagas/day — sufficient for most workloads. Increase `batchSize` or decrease `cleanupIntervalSeconds` for busier systems.
+
+### Lifecycle Integration
+
+The retention manager is started and stopped alongside the recovery manager:
+
+```java
+// In SagaManager (bootstrap):
+SagaRetentionManager retentionManager = new SagaRetentionManager(store, retentionConfig);
+retentionManager.start();
+
+// On shutdown:
+retentionManager.stop();
+recoveryManager.stop();
 ```
 
 ## Async Step Completion (Daemon Mode Only)
@@ -6145,6 +6385,9 @@ A money transfer sample application grows with each phase, serving as E2E valida
 | **recovery/** | | | |
 | `RecoveryConfig.java` | Record (4 fields: recoveryTimeoutMillis, recoveryIntervalSeconds, compensationGracePeriod, clock) | ~5 | Trivial |
 | `SagaRecoveryManager.java` | Periodic scan of saga_state + event replay + resume via `resumeFrom()` (handles all modes uniformly: RUNNING, CONFIRMING, COMPENSATING) + time-based escalation | ~220 | **Medium** |
+| **retention/** | | | |
+| `RetentionConfig.java` | Record (4 fields: retentionPeriod, cleanupIntervalSeconds, batchSize, clock) | ~5 | Trivial |
+| `SagaRetentionManager.java` | Periodic scan of terminal saga_state entries (CK prefix per bucket + status) + delete via `deleteSaga()` | ~100 | Low |
 | **timeout/** | | | |
 | `TimeoutPolicy.java` | Per-step and per-saga deadline calculation | ~30 | Trivial |
 | **exception/** | | | |
@@ -6166,7 +6409,7 @@ A money transfer sample application grows with each phase, serving as E2E valida
 | API layer: all interfaces, enums, POJOs | 0.25 day |
 | SagaSchema + ScalarDbSagaStore | 1-1.5 days |
 | SagaEngine + CompensationManager + RetryPolicy (Saga + TCC modes) | 1-1.5 days |
-| SagaRecoveryManager + graceful shutdown | 0.5 day |
+| SagaRecoveryManager + SagaRetentionManager + graceful shutdown | 0.5 day |
 | Parser + Builder wiring + timeout enforcement | 0.25 day |
 | SagaTestHarness + MockStep + CrashingStoreDecorator | 0.5 day |
 | Tests: unit tests for all classes + integration tests (via harness) | 1.5-2.5 days |
