@@ -2348,571 +2348,337 @@ public interface SagaStore {
 // --- store/ScalarDbSagaStore.java ---
 public class ScalarDbSagaStore implements SagaStore {
     private final DistributedTransactionManager txManager;
-    private final int maxEventPayloadBytes;
+    private final SagaSchema schema;
+    private final ScalarDbSagaStoreConfig config;
     private final Cache<String, SagaStateSnapshot> cache;
 
-    public ScalarDbSagaStore(DistributedTransactionManager txManager,
-                             int maxEventPayloadBytes,
-                             int cacheMaxSize, Duration cacheExpireAfterWrite) {
-        this.txManager = txManager;
-        this.maxEventPayloadBytes = maxEventPayloadBytes;
-        this.cache = Caffeine.newBuilder()
-            .maximumSize(cacheMaxSize)
-            .expireAfterWrite(cacheExpireAfterWrite)
-            .build();
+    // --- Transaction execution helper ---
+
+    /** Action to execute within a transaction. */
+    @FunctionalInterface
+    interface TransactionAction<T> {
+        T execute(DistributedTransaction tx) throws Exception;
     }
+
+    /** Verifier to check whether a transaction was committed after unknown status. */
+    @FunctionalInterface
+    interface CommitVerifier<T> {
+        Optional<T> verify() throws Exception;
+    }
+
+    /**
+     * Executes the given action in a ScalarDB transaction with retry logic.
+     *
+     * Retries on CrudConflictException and CommitConflictException (transient
+     * conflicts) up to transactionRetryCount attempts with exponential backoff.
+     *
+     * On UnknownTransactionStatusException:
+     * - If commitVerifier is non-null (write operations): uses the verifier
+     *   to re-read and confirm whether the transaction was committed.
+     *   The verifier has its own retry loop. Outcomes:
+     *   (1) Verified committed → return the result
+     *   (2) Verified not committed → break and retry the transaction
+     *   (3) All verifier retries failed → throw immediately (ambiguous state)
+     * - If commitVerifier is null: retry the whole transaction. Used for
+     *   read-only operations and best-effort writes (e.g., markForRecovery).
+     *
+     * RuntimeExceptions from the action propagate as-is (business exceptions
+     * like SagaConcurrentModificationException, SagaDefinitionException).
+     * Checked exceptions are wrapped in SagaPersistenceException.
+     */
+    <T> T runInTransaction(TransactionAction<T> action,
+                           @Nullable CommitVerifier<T> commitVerifier,
+                           String operationName) {
+        return runInTransaction(action, commitVerifier, operationName, true);
+    }
+
+    /**
+     * 4-arg overload: retryOnCommitConflict=false makes CommitConflictException
+     * a permanent failure (used by createSaga to treat conflicts as duplicate IDs).
+     */
+    <T> T runInTransaction(TransactionAction<T> action,
+                           @Nullable CommitVerifier<T> commitVerifier,
+                           String operationName,
+                           boolean retryOnCommitConflict) {
+        int maxAttempts = config.getTransactionRetryCount();
+        Exception lastException = null;
+
+        for (int attempt = 0; attempt < maxAttempts; attempt++) {
+            if (attempt > 0) sleepForRetry(attempt - 1);
+            DistributedTransaction tx = null;
+            try {
+                tx = txManager.begin();
+                T result = action.execute(tx);
+                tx.commit();
+                return result;
+            } catch (UnknownTransactionStatusException e) {
+                if (commitVerifier == null) {
+                    lastException = e;
+                    continue; // read-only — retry whole transaction
+                }
+                for (int v = 0; v < maxAttempts; v++) {
+                    try {
+                        Optional<T> verified = commitVerifier.verify();
+                        if (verified.isPresent()) return verified.get();
+                        break; // verified not committed — retry transaction
+                    } catch (Exception ve) {
+                        e.addSuppressed(ve);
+                        if (v < maxAttempts - 1) { sleepForRetry(v); continue; }
+                        throw new SagaPersistenceException(
+                            "Failed to " + operationName
+                            + ": commit status unknown and verification failed", e);
+                    }
+                }
+                lastException = e;
+            } catch (CommitConflictException e) {
+                abortQuietly(tx);
+                if (!retryOnCommitConflict) {
+                    throw new SagaPersistenceException("Failed to " + operationName, e);
+                }
+                lastException = e;
+            } catch (CrudConflictException e) {
+                abortQuietly(tx);
+                lastException = e;
+            } catch (Exception e) {
+                abortQuietly(tx);
+                if (e instanceof RuntimeException re) throw re;
+                throw new SagaPersistenceException("Failed to " + operationName, e);
+            }
+        }
+        throw new SagaPersistenceException(
+            "Failed to " + operationName + " after " + maxAttempts + " attempts",
+            lastException);
+    }
+
+    // --- Saga lifecycle ---
 
     /**
      * Create a new saga. Writes to both saga_events (SAGA_STARTED event)
      * and saga_state (RUNNING status) in one transaction.
      *
-     * If sagaId is null, a UUID is generated. If non-null, the caller-supplied
-     * ID is validated and used. Duplicate IDs are detected via ScalarDB's
-     * Insert "fail if exists" semantics — no extra read on the happy path.
-     * On collision, throws SagaAlreadyExistsException carrying a fresh
-     * snapshot of the existing saga.
+     * Duplicate IDs detected via ScalarDB Insert "fail if exists" semantics —
+     * no extra read on the happy path.
+     *
+     * Uses runInTransaction with commitVerifier = loadFromDb(sagaId).
+     * On CrudException after retries, checks if the saga already exists and
+     * throws SagaAlreadyExistsException with a fresh snapshot.
      */
-    public SagaStateSnapshot createSaga(@Nullable String sagaId, String sagaName, String ownerId,
-                                    Map<String, Object> input, String definitionVersion) {
-        if (sagaId == null) {
-            sagaId = UUID.randomUUID().toString();
-        } else {
-            validateSagaId(sagaId);  // non-null, 1-128 chars, [a-zA-Z0-9._-] only
-        }
-        Instant now = Instant.now();
-        DistributedTransaction tx = null;
+    public SagaStateSnapshot createSaga(@Nullable String sagaId, String sagaName,
+                                         String ownerId, Map<String, Object> input,
+                                         String definitionVersion) {
+        // ... validate sagaId, prepare payload ...
+        String id = sagaId;
         try {
-            tx = txManager.begin();
-
-            // 1. Append SAGA_STARTED event (sequence = 0).
-            //    ScalarDB Insert fails atomically if the row already exists,
-            //    so duplicate IDs are detected here without an extra read on
-            //    the happy path.
-            tx.insert(Insert.newBuilder()
-                .namespace(SagaSchema.NAMESPACE).table("saga_events")
-                .partitionKey(Key.ofText("saga_id", sagaId))
-                .clusteringKey(Key.ofInt("sequence", 0))
-                .textValue("event_type", SagaEvent.SAGA_STARTED)
-                .intValue("step_index", -1)
-                .textValue("payload", toJson(Map.of(
-                    "sagaName", sagaName, "input", input)))
-                .timestampTZValue("created_at", now)
-                .build());
-
-            // 2. Insert saga_state row (bucket + status=RUNNING)
-            tx.insert(Insert.newBuilder()
-                .namespace(SagaSchema.NAMESPACE).table("saga_state")
-                .partitionKey(Key.ofInt("bucket", SagaSchema.bucketOf(sagaId)))
-                .clusteringKey(Key.of(
-                    Key.ofInt("status", SagaStatus.RUNNING.ordinal()),
-                    Key.ofTimestampTZ("updated_at", now),
-                    Key.ofText("saga_id", sagaId)))
-                .textValue("saga_name", sagaName)
-                .textValue("owner_id", ownerId)
-                .intValue("version", 0)
-                .textValue("definition_version", definitionVersion)
-                .timestampTZValue("created_at", now)
-                .build());
-
-            tx.commit();
-        } catch (CrudConflictException | CrudException e) {
-            // ScalarDB throws on Insert when the record already exists, or on
-            // a write-write conflict. Both deterministically resolve to
-            // "duplicate ID": a retry would observe the existing row.
-            abortQuietly(tx);
-            if (isAlreadyExists(e, sagaId)) {
-                // 1 read, ONLY on the (rare) collision path.
-                SagaStateSnapshot existing = getStateSnapshot(sagaId).orElse(null);
-                throw new SagaAlreadyExistsException(sagaId, existing, e);
+            SagaStateSnapshot snapshot = runInTransaction(
+                tx -> {
+                    Instant now = Instant.now();
+                    tx.insert(/* SAGA_STARTED event */);
+                    tx.insert(/* saga_state row with RUNNING status */);
+                    return new SagaStateSnapshot(id, sagaName, SagaStatus.RUNNING,
+                        ownerId, 0, definitionVersion, now, now);
+                },
+                () -> loadFromDb(id),  // commitVerifier
+                "create saga " + id);
+            cache.put(id, snapshot);
+            return snapshot;
+        } catch (SagaPersistenceException e) {
+            if (e.getCause() instanceof CrudException) {
+                // Check for duplicate ID on (rare) collision path
+                Optional<SagaStateSnapshot> existing = getStateSnapshot(id);
+                if (existing.isPresent()) {
+                    throw new SagaAlreadyExistsException(id, existing.get(), e);
+                }
             }
-            throw new SagaPersistenceException("Failed to create saga", e);
-        } catch (Exception e) {
-            abortQuietly(tx);
-            throw new SagaPersistenceException("Failed to create saga", e);
+            throw e;
         }
-        SagaStateSnapshot saga = new SagaStateSnapshot(sagaId, sagaName, SagaStatus.RUNNING,
-            ownerId, 0, definitionVersion, now, now);
-        cache.put(sagaId, saga);
-        return saga;
     }
 
     /**
      * Append a single step-level event to saga_events.
-     * This is the hot-path write — 1 INSERT per step.
+     * Hot-path write — 1 INSERT per step.
      *
-     * Throws IllegalArgumentException if a saga-level event (targetStatus != null) is passed.
-     * The sequence number is provided by the caller (tracked in SagaContext),
-     * avoiding a scan to find the max sequence.
+     * Uses runInTransaction with commitVerifier that re-reads the event by key
+     * to confirm whether the INSERT was committed.
      */
     public void appendEvent(String sagaId, int sequence, SagaEvent event) {
-        if (event.getTargetStatus() != null) {
-            throw new IllegalArgumentException(
-                "appendEvent() accepts only step-level events (targetStatus must be null). "
-                + "Use recordTransition() for saga-level events that change status.");
-        }
-        DistributedTransaction tx = null;
-        try {
-            tx = txManager.begin();
-
-            tx.insert(Insert.newBuilder()
-                .namespace(SagaSchema.NAMESPACE).table("saga_events")
-                .partitionKey(Key.ofText("saga_id", sagaId))
-                .clusteringKey(Key.ofInt("sequence", sequence))
-                .textValue("event_type", event.getEventType())
-                .intValue("step_index", event.getStepIndex())
-                .textValue("step_name", event.getStepName())
-                .textValue("payload", event.getPayload())
-                .timestampTZValue("created_at", Instant.now())
-                .build());
-
-            tx.commit();
-        } catch (Exception e) {
-            abortQuietly(tx);
-            throw new SagaPersistenceException("Failed to append event", e);
-        }
+        // ... validate step-level event ...
+        runInTransaction(
+            tx -> {
+                tx.insert(/* event INSERT */);
+                return Boolean.TRUE;
+            },
+            () -> {
+                // Verify by re-reading the event in a new transaction
+                return runInTransaction(
+                    tx -> {
+                        Optional<Result> result = tx.get(/* GET by sagaId + sequence */);
+                        return result.isPresent() ? Optional.of(Boolean.TRUE) : Optional.empty();
+                    },
+                    null,  // verifier is read-only
+                    "verify event " + sagaId + " seq " + sequence);
+            },
+            "append event for saga " + sagaId);
     }
 
     /**
      * Atomically: append event + transition saga_state status in ONE transaction.
-     * Used for status transitions to ensure event and status are always consistent.
      *
-     * Because status is part of the clustering key (immutable in ScalarDB),
-     * a status transition = DELETE old row + INSERT new row with the new status.
-     * Both happen in the same transaction with the event append.
-     *
-     * Reads the current saga_state row first at the snapshot's CK to verify
-     * the row still exists. This prevents stale writes after another replica
-     * has claimed or transitioned the saga. Without this check, a stale
-     * DELETE would be a no-op (row already moved to a new CK by the other
-     * replica), and the INSERT would create a duplicate row — corrupting
-     * the saga_state table.
-     *
-     * The GET uses the snapshot's CK (old status + old updated_at + saga_id):
-     * - Row found → no other replica has touched it, safe to proceed
-     * - Row not found → already claimed or transitioned → abort
-     *
-     * A separate version check is not needed: because status and updated_at
-     * are in the clustering key, every mutation DELETEs the old CK and
-     * INSERTs at a new CK. If the row exists at the old CK, it is
-     * guaranteed to be unchanged.
-     *
-     * The GET also creates a read-set entry in ScalarDB's transaction, so
-     * concurrent transitions on the same row produce a CommitConflictException.
-     *
-     * Throws IllegalArgumentException if a step-level event (targetStatus == null) is passed.
-     *
-     * Total: 1 GET + 1 INSERT (event) + 1 DELETE (old row) + 1 INSERT (new row)
+     * Uses runInTransaction with commitVerifier = loadFromDb filtered by newStatus.
+     * Throws SagaConcurrentModificationException if the row at the snapshot's CK
+     * no longer exists (another replica claimed or transitioned it).
      */
     public SagaStateSnapshot recordTransition(SagaStateSnapshot current, int sequence,
                                                SagaEvent event) {
-        if (event.getTargetStatus() == null) {
-            throw new IllegalArgumentException(
-                "recordTransition() requires a saga-level event (targetStatus must not be null). "
-                + "Use appendEvent() for step-level events.");
-        }
+        // ... validate saga-level event ...
         String sagaId = current.getSagaId();
         SagaStatus newStatus = event.getTargetStatus();
-        DistributedTransaction tx = null;
+
         try {
-            tx = txManager.begin();
-            int bucket = SagaSchema.bucketOf(sagaId);
-            Instant now = Instant.now();
-
-            // 1. Verify the row still exists at the snapshot's CK.
-            // Because status and updated_at are part of the clustering key,
-            // every mutation (recordTransition, claimForRecovery, markForRecovery)
-            // DELETEs the old CK and INSERTs at a new CK. So if the row exists
-            // here, no other replica has touched it — a separate version check
-            // is redundant.
-            Optional<Result> row = tx.get(Get.newBuilder()
-                .namespace(SagaSchema.NAMESPACE).table("saga_state")
-                .partitionKey(Key.ofInt("bucket", bucket))
-                .clusteringKey(Key.of(
-                    Key.ofInt("status", current.getStatus().ordinal()),
-                    Key.ofTimestampTZ("updated_at", current.getUpdatedAt()),
-                    Key.ofText("saga_id", sagaId)))
-                .build());
-            if (row.isEmpty()) {
-                tx.abort();
-                throw new SagaConcurrentModificationException(sagaId);
-            }
-
-            // 2. Append event
-            tx.insert(Insert.newBuilder()
-                .namespace(SagaSchema.NAMESPACE).table("saga_events")
-                .partitionKey(Key.ofText("saga_id", sagaId))
-                .clusteringKey(Key.ofInt("sequence", sequence))
-                .textValue("event_type", event.getEventType())
-                .intValue("step_index", event.getStepIndex())
-                .textValue("step_name", event.getStepName())
-                .textValue("payload", event.getPayload())
-                .timestampTZValue("created_at", now)
-                .build());
-
-            // 3. DELETE old row (old status + old updated_at in clustering key)
-            tx.delete(Delete.newBuilder()
-                .namespace(SagaSchema.NAMESPACE).table("saga_state")
-                .partitionKey(Key.ofInt("bucket", bucket))
-                .clusteringKey(Key.of(
-                    Key.ofInt("status", current.getStatus().ordinal()),
-                    Key.ofTimestampTZ("updated_at", current.getUpdatedAt()),
-                    Key.ofText("saga_id", sagaId)))
-                .build());
-
-            // 4. INSERT new row (new status + new updated_at in clustering key)
-            tx.insert(Insert.newBuilder()
-                .namespace(SagaSchema.NAMESPACE).table("saga_state")
-                .partitionKey(Key.ofInt("bucket", bucket))
-                .clusteringKey(Key.of(
-                    Key.ofInt("status", newStatus.ordinal()),
-                    Key.ofTimestampTZ("updated_at", now),
-                    Key.ofText("saga_id", sagaId)))
-                .textValue("saga_name", current.getSagaName())
-                .textValue("owner_id", current.getOwnerId())
-                .intValue("version", current.getVersion())
-                .textValue("definition_version", current.getDefinitionVersion())
-                .timestampTZValue("created_at", current.getCreatedAt())
-                .build());
-
-            tx.commit();
-            SagaStateSnapshot updated = current.withTransition(newStatus, now);
+            SagaStateSnapshot updated = runInTransaction(
+                tx -> {
+                    // 1. Verify row still exists at snapshot's CK
+                    // 2. Append event
+                    // 3. DELETE old row (old status + old updated_at in CK)
+                    // 4. INSERT new row (new status + new updated_at in CK)
+                    return current.withTransition(newStatus, now);
+                },
+                () -> {
+                    Optional<SagaStateSnapshot> state = loadFromDb(sagaId);
+                    if (state.isPresent() && state.get().getStatus() == newStatus) {
+                        return state;
+                    }
+                    return Optional.empty();
+                },
+                "record transition for saga " + sagaId);
             cache.put(sagaId, updated);
             return updated;
         } catch (SagaConcurrentModificationException e) {
-            throw e;  // don't wrap
-        } catch (Exception e) {
-            abortQuietly(tx);
-            throw new SagaPersistenceException("Failed to record transition", e);
+            cache.invalidate(sagaId);
+            throw e;
         }
     }
 
     /**
-     * Find sagas stuck in RUNNING, CONFIRMING, or COMPENSATING with stale updated_at.
+     * Claim a saga for recovery: verify row at snapshot's CK, then DELETE old +
+     * INSERT with updated owner_id and incremented version.
      *
-     * Scans one bucket per call (determined by the cursor), with clustering key
-     * range status=RUNNING/CONFIRMING/COMPENSATING and updated_at <= threshold.
-     * Cursor-based pagination hides internal bucket partitioning from the caller.
-     *
-     * Bucket-based partitioning distributes scans across database nodes —
-     * no hot-partition problem.
+     * Uses runInTransaction with commitVerifier = loadFromDb filtered by newOwnerId.
+     * Throws SagaConcurrentModificationException if row not found (caught by
+     * caller → returns Optional.empty()), enabling retry on CommitConflictException.
      */
-    public Recoverables findRecoverable(long recoveryTimeoutMillis, @Nullable RecoverablesCursor cursor) {
-        List<SagaStateSnapshot> result = new ArrayList<>();
-        Instant threshold = Instant.now().minusMillis(recoveryTimeoutMillis);
-        DistributedTransaction tx = null;
+    public Optional<SagaStateSnapshot> claimForRecovery(SagaStateSnapshot saga,
+                                                         String newOwnerId) {
+        String sagaId = saga.getSagaId();
         try {
-            tx = txManager.begin();
-
-            for (int status : new int[]{
-                    SagaStatus.RUNNING.ordinal(),
-                    SagaStatus.CONFIRMING.ordinal(),
-                    SagaStatus.COMPENSATING.ordinal()}) {
-                Scan scan = Scan.newBuilder()
-                    .namespace(SagaSchema.NAMESPACE).table("saga_state")
-                    .partitionKey(Key.ofInt("bucket", bucket))
-                    .start(Key.ofInt("status", status), true)
-                    .end(Key.of(
-                        Key.ofInt("status", status),
-                        Key.ofTimestampTZ("updated_at", threshold)), true)
-                    .build();
-                try (Scanner scanner = tx.getScanner(scan)) {
-                    Optional<Result> r;
-                    while ((r = scanner.one()).isPresent()) {
-                        result.add(toSagaStateSnapshot(r.get()));
+            SagaStateSnapshot claimed = runInTransaction(
+                tx -> {
+                    // 1. Verify row at snapshot's CK → throw if empty
+                    // 2. DELETE old row + INSERT with new owner and version+1
+                    return new SagaStateSnapshot(/* claimed state */);
+                },
+                () -> {
+                    Optional<SagaStateSnapshot> state = loadFromDb(sagaId);
+                    if (state.isPresent() && newOwnerId.equals(state.get().getOwnerId())) {
+                        return state;
                     }
-                }
-            }
-
-            tx.commit();
-        } catch (Exception e) {
-            abortQuietly(tx);
-            throw new SagaPersistenceException("Failed to find recoverable sagas", e);
-        }
-        return result;
-    }
-
-    /**
-     * Claim a saga for recovery: read current row at the snapshot's CK to
-     * verify it still exists, then DELETE old row + INSERT with updated
-     * owner_id and incremented version.
-     *
-     * The read serves two purposes:
-     * - Serial case: row-not-found detects a prior claim or transition.
-     * - Concurrent case: the read creates a read-set entry in ScalarDB's
-     *   transaction, so overlapping claims on the same row conflict reliably.
-     */
-    public Optional<SagaStateSnapshot> claimForRecovery(SagaStateSnapshot saga, String newOwnerId) {
-        DistributedTransaction tx = null;
-        try {
-            tx = txManager.begin();
-            String sagaId = saga.getSagaId();
-            int bucket = SagaSchema.bucketOf(sagaId);
-            int status = saga.getStatus().ordinal();
-            Instant now = Instant.now();
-
-            // Verify the row still exists at the snapshot's CK.
-            // A separate version check is redundant — see recordTransition comment.
-            Optional<Result> current = tx.get(Get.newBuilder()
-                .namespace(SagaSchema.NAMESPACE).table("saga_state")
-                .partitionKey(Key.ofInt("bucket", bucket))
-                .clusteringKey(Key.of(
-                    Key.ofInt("status", status),
-                    Key.ofTimestampTZ("updated_at", saga.getUpdatedAt()),
-                    Key.ofText("saga_id", sagaId)))
-                .build());
-
-            if (current.isEmpty()) {
-                // Row was already claimed or transitioned — skip
-                tx.abort();
-                return Optional.empty();
-            }
-
-            // DELETE old row + INSERT with updated owner and version
-            tx.delete(Delete.newBuilder()
-                .namespace(SagaSchema.NAMESPACE).table("saga_state")
-                .partitionKey(Key.ofInt("bucket", bucket))
-                .clusteringKey(Key.of(
-                    Key.ofInt("status", status),
-                    Key.ofTimestampTZ("updated_at", saga.getUpdatedAt()),
-                    Key.ofText("saga_id", sagaId)))
-                .build());
-
-            tx.insert(Insert.newBuilder()
-                .namespace(SagaSchema.NAMESPACE).table("saga_state")
-                .partitionKey(Key.ofInt("bucket", bucket))
-                .clusteringKey(Key.of(
-                    Key.ofInt("status", status),
-                    Key.ofTimestampTZ("updated_at", now),
-                    Key.ofText("saga_id", sagaId)))
-                .textValue("saga_name", saga.getSagaName())
-                .textValue("owner_id", newOwnerId)
-                .intValue("version", saga.getVersion() + 1)
-                .textValue("definition_version", saga.getDefinitionVersion())
-                .timestampTZValue("created_at", saga.getCreatedAt())
-                .build());
-
-            tx.commit();
-            // Return snapshot reflecting the claimed state (version+1, new owner, new updated_at)
-            SagaStateSnapshot claimed = new SagaStateSnapshot(
-                sagaId, saga.getSagaName(), saga.getStatus(), newOwnerId,
-                saga.getVersion() + 1, saga.getDefinitionVersion(),
-                saga.getCreatedAt(), now);
+                    return Optional.empty();
+                },
+                "claim saga " + sagaId + " for recovery");
             cache.put(sagaId, claimed);
             return Optional.of(claimed);
-
-        } catch (CommitConflictException e) {
-            // Another replica claimed it concurrently
-            abortQuietly(tx);
-            return null;
-        } catch (Exception e) {
-            abortQuietly(tx);
-            throw new SagaPersistenceException("Failed to claim saga for recovery", e);
+        } catch (SagaConcurrentModificationException e) {
+            return Optional.empty();
         }
     }
 
     /**
      * Mark a saga for immediate recovery by setting updated_at to epoch 0.
-     * Called during shutdown for sagas that couldn't finish on this replica.
+     * Best-effort — conflict with executing thread is expected and harmless.
      *
-     * Best-effort: if the executing thread concurrently completes or transitions
-     * the saga, ScalarDB's conflict detection will reject this transaction.
-     * That's fine — it means the saga no longer needs recovery.
+     * Uses runInTransaction with null verifier (best-effort, no verification).
+     * Outer catch swallows all exceptions.
      */
     public void markForRecovery(String sagaId) {
-        DistributedTransaction tx = null;
         try {
-            tx = txManager.begin();
-
-            // Read current state (in same transaction for atomicity)
-            Optional<Result> result = tx.get(Get.newBuilder()
-                .namespace(SagaSchema.NAMESPACE).table("saga_state")
-                .indexKey(Key.ofText("saga_id", sagaId))
-                .build());
-
-            if (result.isEmpty()) {
-                tx.commit();
-                return;
-            }
-
-            Result r = result.get();
-            int bucket = r.getInt("bucket");
-            int status = r.getInt("status");
-            Instant updatedAt = r.getTimestampTZ("updated_at");
-
-            // DELETE old row
-            tx.delete(Delete.newBuilder()
-                .namespace(SagaSchema.NAMESPACE).table("saga_state")
-                .partitionKey(Key.ofInt("bucket", bucket))
-                .clusteringKey(Key.of(
-                    Key.ofInt("status", status),
-                    Key.ofTimestampTZ("updated_at", updatedAt),
-                    Key.ofText("saga_id", sagaId)))
-                .build());
-
-            // INSERT new row with updated_at = EPOCH for immediate recovery pickup
-            tx.insert(Insert.newBuilder()
-                .namespace(SagaSchema.NAMESPACE).table("saga_state")
-                .partitionKey(Key.ofInt("bucket", bucket))
-                .clusteringKey(Key.of(
-                    Key.ofInt("status", status),
-                    Key.ofTimestampTZ("updated_at", Instant.EPOCH),
-                    Key.ofText("saga_id", sagaId)))
-                .textValue("saga_name", r.getText("saga_name"))
-                .textValue("owner_id", r.getText("owner_id"))
-                .intValue("version", r.getInt("version"))
-                .textValue("definition_version", r.getText("definition_version"))
-                .timestampTZValue("created_at", r.getTimestampTZ("created_at"))
-                .build());
-
-            tx.commit();
+            runInTransaction(
+                tx -> {
+                    // 1. Read current state via secondary index
+                    // 2. DELETE old row
+                    // 3. INSERT with updated_at = EPOCH
+                    return Boolean.TRUE;
+                },
+                null,  // best-effort — no verifier
+                "mark for recovery " + sagaId);
             cache.invalidate(sagaId);
         } catch (Exception e) {
-            // Best effort — if this fails (e.g., conflict with executing thread),
-            // the saga will still be picked up by the normal recovery timeout scan.
-            abortQuietly(tx);
+            logger.debug("markForRecovery failed for saga {} (best-effort)", sagaId, e);
         }
     }
 
     /**
-     * Persist a saga definition. Called once per definition version at registration time.
-     * Uses GET-then-conditional-write: idempotent on restart, fail-fast on version conflict.
-     *
-     * - Not found → INSERT (first registration)
-     * - Found, same content → no-op (safe restart / second replica)
-     * - Found, different content → throw SagaDefinitionException (bump the version)
-     */
-    public void registerDefinition(SagaDefinition definition) {
-        DistributedTransaction tx = null;
-        try {
-            tx = txManager.begin();
-            String json = definitionSerializer.serialize(definition);
-
-            Optional<Result> existing = tx.get(Get.newBuilder()
-                .namespace(SagaSchema.NAMESPACE).table("saga_definitions")
-                .partitionKey(Key.ofText("saga_name", definition.getName()))
-                .clusteringKey(Key.ofText("definition_version", definition.getVersion()))
-                .build());
-
-            if (existing.isPresent()) {
-                String existingJson = existing.get().getText("definition_json");
-                if (json.equals(existingJson)) {
-                    tx.commit();  // idempotent no-op
-                    return;
-                }
-                tx.abort();
-                throw new SagaDefinitionException(
-                    "Definition '" + definition.getName() + "' version '"
-                    + definition.getVersion() + "' is already registered with different content. "
-                    + "Bump the version instead.");
-            }
-
-            tx.insert(Insert.newBuilder()
-                .namespace(SagaSchema.NAMESPACE).table("saga_definitions")
-                .partitionKey(Key.ofText("saga_name", definition.getName()))
-                .clusteringKey(Key.ofText("definition_version", definition.getVersion()))
-                .textValue("definition_json", json)
-                .timestampTZValue("registered_at", Instant.now())
-                .build());
-            tx.commit();
-        } catch (SagaDefinitionException e) {
-            throw e;
-        } catch (Exception e) {
-            abortQuietly(tx);
-            throw new SagaPersistenceException("Failed to register definition", e);
-        }
-    }
-
-    /**
-     * Look up a saga definition by name and version. Used as a fallback during
-     * recovery when the definition is no longer in the in-memory registry.
+     * Read-only methods (getDefinition, getEvents, getEventCount, findRecoverable,
+     * findByStatusOlderThan, loadFromDb) all pass null as commitVerifier.
+     * On UTSE, the entire transaction is simply retried because read results
+     * are only valid after a successful commit.
      */
     public Optional<SagaDefinition> getDefinition(String sagaName, String definitionVersion) {
-        DistributedTransaction tx = null;
-        try {
-            tx = txManager.begin();
-            Optional<Result> result = tx.get(Get.newBuilder()
-                .namespace(SagaSchema.NAMESPACE).table("saga_definitions")
-                .partitionKey(Key.ofText("saga_name", sagaName))
-                .clusteringKey(Key.ofText("definition_version", definitionVersion))
-                .build());
-            tx.commit();
-            return result.map(r ->
-                SagaDefinitionParser.parse(r.getText("definition_json")));
-        } catch (Exception e) {
-            abortQuietly(tx);
-            throw new SagaPersistenceException("Failed to get definition", e);
-        }
+        return runInTransaction(
+            tx -> {
+                Optional<Result> result = tx.get(/* definition lookup */);
+                return result.map(r -> definitionSerializer.deserialize(r.getText("definition_json")));
+            },
+            null,  // read-only — retry whole transaction on UTSE
+            "get definition " + sagaName + " " + definitionVersion);
     }
 
-    /**
-     * Replay all events for a saga — single partition scan, ordered by sequence.
-     * Used for state reconstruction during recovery and admin queries.
-     */
     public List<SagaEvent> getEvents(String sagaId) {
-        DistributedTransaction tx = null;
-        try {
-            tx = txManager.begin();
-            List<Result> results = tx.scan(Scan.newBuilder()
-                .namespace(SagaSchema.NAMESPACE).table("saga_events")
-                .partitionKey(Key.ofText("saga_id", sagaId))
-                .all()
-                .build());
-            tx.commit();
-            return results.stream().map(this::toSagaEvent).collect(Collectors.toList());
-        } catch (Exception e) {
-            abortQuietly(tx);
-            throw new SagaPersistenceException("Failed to get saga events", e);
-        }
+        return runInTransaction(
+            tx -> {
+                List<Result> results = tx.scan(/* all events for sagaId */);
+                return results.stream().map(this::toSagaEvent).toList();
+            },
+            null,
+            "get events for saga " + sagaId);
     }
 
-    /**
-     * Get saga status from saga_state — single point-read.
-     * For full state (including step results), use getEvents() and replay.
-     */
-    public Optional<SagaStateSnapshot> getStateSnapshot(String sagaId) {
-        SagaStateSnapshot cached = cache.getIfPresent(sagaId);
-        if (cached != null) return Optional.of(cached);
-        SagaStateSnapshot loaded = loadFromDb(sagaId);
-        if (loaded != null) cache.put(sagaId, loaded);
-        return Optional.ofNullable(loaded);
+    private Optional<SagaStateSnapshot> loadFromDb(String sagaId) {
+        return runInTransaction(
+            tx -> {
+                List<Result> results = tx.scan(/* secondary index on saga_id */);
+                return results.stream().findFirst().map(this::toSagaStateSnapshot);
+            },
+            null,
+            "load saga state " + sagaId);
     }
 
-    private SagaStateSnapshot loadFromDb(String sagaId) {
-        DistributedTransaction tx = null;
-        try {
-            tx = txManager.begin();
-
-            // Lookup via secondary index on saga_id
-            Optional<Result> result = tx.scan(Scan.newBuilder()
-                .namespace(SagaSchema.NAMESPACE).table("saga_state")
-                .indexKey(Key.ofText("saga_id", sagaId))
-                .build())
-                .stream().findFirst();
-
-            tx.commit();
-            return result.map(this::toSagaStateSnapshot).orElse(null);
-        } catch (Exception e) {
-            abortQuietly(tx);
-            throw new SagaPersistenceException("Failed to get saga state", e);
-        }
+    public void deleteSaga(String sagaId) {
+        runInTransaction(
+            tx -> {
+                // 1. Scan saga_state by index, verify terminal status
+                // 2. DELETE state row
+                // 3. Scan and DELETE all event rows
+                return Boolean.TRUE;
+            },
+            () -> {
+                // Verify deletion: state row should be absent
+                Optional<SagaStateSnapshot> state = loadFromDb(sagaId);
+                return state.isEmpty() ? Optional.of(Boolean.TRUE) : Optional.empty();
+            },
+            "delete saga " + sagaId);
+        cache.invalidate(sagaId);
     }
 
-    private void abortQuietly(DistributedTransaction tx) {
+    // --- Helpers ---
+
+    private void sleepForRetry(int retryIndex) {
+        long delay = Math.min(100L * (1L << retryIndex), 5000L);  // 100, 200, 400, ..., max 5s
+        Thread.sleep(delay);
+    }
+
+    private void abortQuietly(@Nullable DistributedTransaction tx) {
         if (tx != null) {
             try { tx.abort(); } catch (AbortException ignored) {}
         }
-    }
-
-    // Serializes to JSON with payload size validation. Prevents database bloat,
-    // memory pressure during replayEvents(), and DoS via large step outputs or saga inputs.
-    private String toJson(Object obj) {
-        String json = /* Jackson serialization */;
-        int byteSize = json.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
-        if (byteSize > maxEventPayloadBytes) {
-            throw new IllegalArgumentException(
-                "Event payload exceeds limit: " + byteSize + " bytes > " + maxEventPayloadBytes);
-        }
-        return json;
     }
 }
 ```
