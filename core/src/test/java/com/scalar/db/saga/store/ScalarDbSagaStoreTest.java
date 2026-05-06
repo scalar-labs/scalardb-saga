@@ -116,7 +116,7 @@ class ScalarDbSagaStoreTest {
     DistributedTransaction txLookup = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(txLookup);
     Result stateResult = mockStateResult("saga-1", SagaStatus.RUNNING);
-    when(txLookup.scan(any(Scan.class))).thenReturn(List.of(stateResult));
+    when(txLookup.get(any(Get.class))).thenReturn(Optional.of(stateResult));
 
     // Act & Assert
     assertThatThrownBy(() -> store.createSaga("saga-1", "order-saga", "engine-1", Map.of(), "v1"))
@@ -129,7 +129,7 @@ class ScalarDbSagaStoreTest {
     doThrow(mock(CommitConflictException.class)).when(tx).commit();
     DistributedTransaction txLookup = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(txLookup);
-    when(txLookup.scan(any(Scan.class))).thenReturn(List.of());
+    when(txLookup.get(any(Get.class))).thenReturn(Optional.empty());
 
     // Act & Assert
     assertThatThrownBy(() -> store.createSaga("saga-1", "order-saga", "engine-1", Map.of(), "v1"))
@@ -462,7 +462,7 @@ class ScalarDbSagaStoreTest {
   void getStateSnapshot_existsInDb_returnsSnapshot() throws Exception {
     // Arrange
     Result result = mockStateResult("saga-1", SagaStatus.RUNNING);
-    when(tx.scan(any(Scan.class))).thenReturn(List.of(result));
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(result));
 
     // Act
     Optional<SagaStateSnapshot> snapshot = store.getStateSnapshot("saga-1");
@@ -483,7 +483,7 @@ class ScalarDbSagaStoreTest {
   @Test
   void getStateSnapshot_notFound_returnsEmpty() throws Exception {
     // Arrange
-    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    when(tx.get(any(Get.class))).thenReturn(Optional.empty());
 
     // Act
     Optional<SagaStateSnapshot> snapshot = store.getStateSnapshot("unknown");
@@ -496,7 +496,7 @@ class ScalarDbSagaStoreTest {
   void getStateSnapshot_calledTwice_returnsCachedResult() throws Exception {
     // Arrange
     Result result = mockStateResult("saga-1", SagaStatus.RUNNING);
-    when(tx.scan(any(Scan.class))).thenReturn(List.of(result));
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(result));
 
     // Act
     store.getStateSnapshot("saga-1");
@@ -687,7 +687,7 @@ class ScalarDbSagaStoreTest {
   void markForRecovery_existingSaga_deletesAndReinserts() throws Exception {
     // Arrange
     Result r = mockStateResult("saga-1", SagaStatus.RUNNING);
-    when(tx.scan(any(Scan.class))).thenReturn(List.of(r));
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(r));
 
     // Act
     store.markForRecovery("saga-1");
@@ -701,7 +701,7 @@ class ScalarDbSagaStoreTest {
   @Test
   void markForRecovery_noSaga_commitsWithoutModification() throws Exception {
     // Arrange
-    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    when(tx.get(any(Get.class))).thenReturn(Optional.empty());
 
     // Act
     store.markForRecovery("saga-1");
@@ -714,7 +714,7 @@ class ScalarDbSagaStoreTest {
   @Test
   void markForRecovery_transactionFails_doesNotThrow() throws Exception {
     // Arrange — markForRecovery is best-effort
-    when(tx.scan(any(Scan.class))).thenThrow(new RuntimeException("db error"));
+    when(tx.get(any(Get.class))).thenThrow(new RuntimeException("db error"));
 
     // Act — should not throw
     store.markForRecovery("saga-1");
@@ -730,9 +730,8 @@ class ScalarDbSagaStoreTest {
     Result stateRow = mockStateResult("saga-1", SagaStatus.COMPLETED);
     Result eventRow1 = mockEventRow(0);
     Result eventRow2 = mockEventRow(1);
-    when(tx.scan(any(Scan.class)))
-        .thenReturn(List.of(stateRow)) // state scan
-        .thenReturn(List.of(eventRow1, eventRow2)); // event scan
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(stateRow));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(eventRow1, eventRow2));
 
     // Act
     store.deleteSaga("saga-1");
@@ -747,9 +746,8 @@ class ScalarDbSagaStoreTest {
     // Arrange
     Result stateRow = mockStateResult("saga-1", SagaStatus.COMPENSATED);
     Result eventRow1 = mockEventRow(0);
-    when(tx.scan(any(Scan.class)))
-        .thenReturn(List.of(stateRow)) // state scan
-        .thenReturn(List.of(eventRow1)); // event scan
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(stateRow));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(eventRow1));
 
     // Act
     store.deleteSaga("saga-1");
@@ -764,9 +762,8 @@ class ScalarDbSagaStoreTest {
     // Arrange
     Result stateRow = mockStateResult("saga-1", SagaStatus.ESCALATED);
     Result eventRow1 = mockEventRow(0);
-    when(tx.scan(any(Scan.class)))
-        .thenReturn(List.of(stateRow)) // state scan
-        .thenReturn(List.of(eventRow1)); // event scan
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(stateRow));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(eventRow1));
 
     // Act
     store.deleteSaga("saga-1");
@@ -780,7 +777,7 @@ class ScalarDbSagaStoreTest {
   void deleteSaga_runningSaga_throwsIllegalStateException() throws Exception {
     // Arrange
     Result stateRow = mockStateResult("saga-1", SagaStatus.RUNNING);
-    when(tx.scan(any(Scan.class))).thenReturn(List.of(stateRow));
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(stateRow));
 
     // Act & Assert
     assertThatThrownBy(() -> store.deleteSaga("saga-1")).isInstanceOf(IllegalStateException.class);
@@ -790,7 +787,7 @@ class ScalarDbSagaStoreTest {
   void deleteSaga_compensatingSaga_throwsIllegalStateException() throws Exception {
     // Arrange
     Result stateRow = mockStateResult("saga-1", SagaStatus.COMPENSATING);
-    when(tx.scan(any(Scan.class))).thenReturn(List.of(stateRow));
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(stateRow));
 
     // Act & Assert
     assertThatThrownBy(() -> store.deleteSaga("saga-1")).isInstanceOf(IllegalStateException.class);
@@ -800,7 +797,7 @@ class ScalarDbSagaStoreTest {
   void deleteSaga_confirmingSaga_throwsIllegalStateException() throws Exception {
     // Arrange
     Result stateRow = mockStateResult("saga-1", SagaStatus.CONFIRMING);
-    when(tx.scan(any(Scan.class))).thenReturn(List.of(stateRow));
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(stateRow));
 
     // Act & Assert
     assertThatThrownBy(() -> store.deleteSaga("saga-1")).isInstanceOf(IllegalStateException.class);
@@ -809,7 +806,7 @@ class ScalarDbSagaStoreTest {
   @Test
   void deleteSaga_transactionFails_throwsSagaPersistenceException() throws Exception {
     // Arrange
-    when(tx.scan(any(Scan.class))).thenThrow(mock(CrudException.class));
+    when(tx.get(any(Get.class))).thenThrow(mock(CrudException.class));
 
     // Act & Assert
     assertThatThrownBy(() -> store.deleteSaga("saga-1"))
@@ -1052,7 +1049,7 @@ class ScalarDbSagaStoreTest {
     DistributedTransaction tx2 = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(tx2);
     Result stateResult = mockStateResult("saga-1", SagaStatus.RUNNING);
-    when(tx2.scan(any(Scan.class))).thenReturn(List.of(stateResult));
+    when(tx2.get(any(Get.class))).thenReturn(Optional.of(stateResult));
 
     // Act
     SagaStateSnapshot result = store.createSaga("saga-1", "order-saga", "engine-1", Map.of(), "v1");
@@ -1070,7 +1067,7 @@ class ScalarDbSagaStoreTest {
     when(txManager.begin()).thenReturn(tx).thenReturn(tx2).thenReturn(tx3);
     doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
     // Verifier (loadFromDb via tx2): saga not found → not committed
-    when(tx2.scan(any(Scan.class))).thenReturn(List.of());
+    when(tx2.get(any(Get.class))).thenReturn(Optional.empty());
     // Retry (tx3): succeeds
 
     // Act
@@ -1096,8 +1093,8 @@ class ScalarDbSagaStoreTest {
     DistributedTransaction tx2 = mock(DistributedTransaction.class);
     DistributedTransaction tx3 = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(tx2).thenReturn(tx3);
-    when(tx2.scan(any(Scan.class))).thenThrow(mock(CrudException.class));
-    when(tx3.scan(any(Scan.class))).thenThrow(mock(CrudException.class));
+    when(tx2.get(any(Get.class))).thenThrow(mock(CrudException.class));
+    when(tx3.get(any(Get.class))).thenThrow(mock(CrudException.class));
 
     // Act & Assert
     assertThatThrownBy(
@@ -1137,6 +1134,32 @@ class ScalarDbSagaStoreTest {
   // ---------------------------------------------------------------------------
   // ScalarDbSagaStoreConfig
   // ---------------------------------------------------------------------------
+
+  @Test
+  void build_withDefaults_hasDefaultMaxEventPayloadBytes() {
+    // Act
+    ScalarDbSagaStoreConfig config = ScalarDbSagaStoreConfig.builder().build();
+
+    // Assert
+    assertThat(config.getMaxEventPayloadBytes()).isEqualTo(0);
+  }
+
+  @Test
+  void maxEventPayloadBytes_positiveValueGiven_setsValue() {
+    // Act
+    ScalarDbSagaStoreConfig config =
+        ScalarDbSagaStoreConfig.builder().maxEventPayloadBytes(1024).build();
+
+    // Assert
+    assertThat(config.getMaxEventPayloadBytes()).isEqualTo(1024);
+  }
+
+  @Test
+  void maxEventPayloadBytes_negativeValueGiven_throwsIllegalArgumentException() {
+    // Act & Assert
+    assertThatThrownBy(() -> ScalarDbSagaStoreConfig.builder().maxEventPayloadBytes(-1))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
 
   @Test
   void build_withDefaults_hasDefaultTransactionRetryCount() {
@@ -1229,6 +1252,32 @@ class ScalarDbSagaStoreTest {
     // Act & Assert
     assertThatThrownBy(() -> ScalarDbSagaStoreConfig.builder().cacheExpireAfterWrite(null))
         .isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void build_withDefaults_hasDefaultRecoveryScanLimit() {
+    // Act
+    ScalarDbSagaStoreConfig config = ScalarDbSagaStoreConfig.builder().build();
+
+    // Assert
+    assertThat(config.getRecoveryScanLimit()).isEqualTo(1000);
+  }
+
+  @Test
+  void recoveryScanLimit_positiveValueGiven_setsValue() {
+    // Act
+    ScalarDbSagaStoreConfig config =
+        ScalarDbSagaStoreConfig.builder().recoveryScanLimit(500).build();
+
+    // Assert
+    assertThat(config.getRecoveryScanLimit()).isEqualTo(500);
+  }
+
+  @Test
+  void recoveryScanLimit_zeroGiven_throwsIllegalArgumentException() {
+    // Act & Assert
+    assertThatThrownBy(() -> ScalarDbSagaStoreConfig.builder().recoveryScanLimit(0))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   // ---------------------------------------------------------------------------

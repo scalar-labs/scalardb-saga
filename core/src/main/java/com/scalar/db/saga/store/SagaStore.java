@@ -2,6 +2,7 @@ package com.scalar.db.saga.store;
 
 import com.scalar.db.saga.api.SagaDefinition;
 import com.scalar.db.saga.api.SagaStateSnapshot;
+import com.scalar.db.saga.api.SagaStatus;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;

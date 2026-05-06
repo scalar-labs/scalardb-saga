@@ -138,7 +138,7 @@ final class SagaDefinitionSerializer {
   private static void requireFields(JsonNode node, String... fieldNames) {
     for (String fieldName : fieldNames) {
       if (!node.has(fieldName) || node.get(fieldName).isNull()) {
-        throw new SagaPersistenceException(
+        throw new IllegalArgumentException(
             "Missing required field '" + fieldName + "' in definition JSON");
       }
     }
@@ -152,7 +152,7 @@ final class SagaDefinitionSerializer {
         return constant;
       }
     }
-    throw new SagaPersistenceException(
+    throw new IllegalArgumentException(
         "Invalid value for field '" + fieldName + "' in definition JSON");
   }
 }

@@ -24,6 +24,7 @@ import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -44,8 +45,9 @@ import org.slf4j.LoggerFactory;
  * transactions for atomicity.
  *
  * <p>All transaction operations are executed through {@link #runInTransaction}, which provides
- * unified retry logic for {@link TransactionException} (including {@link CrudConflictException},
- * {@link CommitConflictException}, and {@link UnknownTransactionStatusException}).
+ * unified retry logic for {@link TransactionException} (including {@link CrudConflictException} and
+ * {@link UnknownTransactionStatusException}). {@link CommitConflictException} is retried by default
+ * but can be disabled per operation (e.g., {@code createSaga} treats it as a permanent conflict).
  */
 public class ScalarDbSagaStore implements SagaStore {
 
@@ -328,13 +330,20 @@ public class ScalarDbSagaStore implements SagaStore {
         runInTransaction(
             tx -> {
               List<SagaStateSnapshot> snapshots = new ArrayList<>();
+              // Cap each status scan to avoid unbounded memory usage in large buckets.
+              // Any sagas beyond the limit are picked up on the next recovery cycle.
+              int scanLimit = config.getRecoveryScanLimit();
               for (int status :
                   new int[] {
                     SagaStatus.RUNNING.getStatusCode(),
                     SagaStatus.CONFIRMING.getStatusCode(),
                     SagaStatus.COMPENSATING.getStatusCode()
                   }) {
-                List<Result> rows = tx.scan(buildStateRangeScan(bucket, status, threshold));
+                List<Result> rows =
+                    tx.scan(
+                        Scan.newBuilder(buildStateRangeScan(bucket, status, threshold))
+                            .limit(scanLimit)
+                            .build());
                 for (Result r : rows) {
                   snapshots.add(toSagaStateSnapshot(r));
                 }
@@ -405,13 +414,13 @@ public class ScalarDbSagaStore implements SagaStore {
     try {
       runInTransaction(
           tx -> {
-            List<Result> results = tx.scan(buildStateIndexScan(sagaId));
+            Optional<Result> result = tx.get(buildStateIndexGet(sagaId));
 
-            if (results.isEmpty()) {
+            if (result.isEmpty()) {
               return Boolean.TRUE; // no-op
             }
 
-            Result r = results.get(0);
+            Result r = result.get();
             int bucket = r.getInt("bucket");
             SagaStateSnapshot current = toSagaStateSnapshot(r);
 
@@ -471,10 +480,10 @@ public class ScalarDbSagaStore implements SagaStore {
   public void deleteSaga(String sagaId) {
     runInTransaction(
         tx -> {
-          List<Result> stateResults = tx.scan(buildStateIndexScan(sagaId));
+          Optional<Result> stateResult = tx.get(buildStateIndexGet(sagaId));
 
-          if (!stateResults.isEmpty()) {
-            Result r = stateResults.get(0);
+          if (stateResult.isPresent()) {
+            Result r = stateResult.get();
             SagaStatus status = SagaStatus.fromStatusCode(r.getInt("status"));
             if (!status.isTerminal()) {
               throw new IllegalStateException(
@@ -530,11 +539,12 @@ public class ScalarDbSagaStore implements SagaStore {
    *
    * <p>Retries on {@link TransactionException} (including {@link CrudConflictException} and {@link
    * CommitConflictException}). On {@link UnknownTransactionStatusException}, uses the commit
-   * verifier to determine whether the transaction was committed. If the verifier is {@code null}
-   * (read-only operations), the entire transaction is retried.
+   * verifier to determine whether the transaction was committed. If the verifier is {@code null},
+   * the entire transaction is retried.
    *
    * @param action the transaction action to run
-   * @param commitVerifier verifier to check commit status on UTSE, or {@code null} for read-only
+   * @param commitVerifier verifier to check commit status on UTSE, or {@code null} to retry the
+   *     whole transaction
    * @param operationName description for error messages
    * @return the result of the action
    */
@@ -549,7 +559,8 @@ public class ScalarDbSagaStore implements SagaStore {
    * Runs a transaction with an option to skip retry on {@link CommitConflictException}.
    *
    * @param action the transaction action to run
-   * @param commitVerifier verifier to check commit status on UTSE, or {@code null} for read-only
+   * @param commitVerifier verifier to check commit status on UTSE, or {@code null} to retry the
+   *     whole transaction
    * @param operationName description for error messages
    * @param retryOnCommitConflict if {@code false}, {@link CommitConflictException} is not retried
    * @return the result of the action
@@ -690,8 +701,8 @@ public class ScalarDbSagaStore implements SagaStore {
         .build();
   }
 
-  private Scan buildStateIndexScan(String sagaId) {
-    return Scan.newBuilder()
+  private Get buildStateIndexGet(String sagaId) {
+    return Get.newBuilder()
         .namespace(SagaSchema.NAMESPACE)
         .table(SagaSchema.STATE_TABLE)
         .indexKey(Key.ofText("saga_id", sagaId))
@@ -830,10 +841,7 @@ public class ScalarDbSagaStore implements SagaStore {
 
   private Optional<SagaStateSnapshot> loadStateSnapshot(String sagaId) {
     return runInTransaction(
-        tx -> {
-          List<Result> results = tx.scan(buildStateIndexScan(sagaId));
-          return results.stream().findFirst().map(this::toSagaStateSnapshot);
-        },
+        tx -> tx.get(buildStateIndexGet(sagaId)).map(this::toSagaStateSnapshot),
         null,
         "load saga state " + sagaId);
   }
@@ -848,7 +856,7 @@ public class ScalarDbSagaStore implements SagaStore {
   private void validatePayloadSize(@Nullable String payload) {
     int limit = config.getMaxEventPayloadBytes();
     if (limit > 0 && payload != null) {
-      int byteSize = payload.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+      int byteSize = payload.getBytes(StandardCharsets.UTF_8).length;
       if (byteSize > limit) {
         throw new IllegalArgumentException(
             "Event payload exceeds limit: " + byteSize + " bytes > " + limit);
