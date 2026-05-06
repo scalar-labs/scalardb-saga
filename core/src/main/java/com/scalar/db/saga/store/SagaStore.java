@@ -2,7 +2,6 @@ package com.scalar.db.saga.store;
 
 import com.scalar.db.saga.api.SagaDefinition;
 import com.scalar.db.saga.api.SagaStateSnapshot;
-import com.scalar.db.saga.api.SagaStatus;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -39,7 +38,13 @@ public interface SagaStore {
       Map<String, Object> input,
       String definitionVersion);
 
-  /** Persists a saga definition. Called once per definition version at registration time. */
+  /**
+   * Persists a saga definition. Called once per definition version at registration time.
+   *
+   * <p>Idempotent: registering the same {@code (sagaName, version)} with identical content is a
+   * no-op. If the same {@code (sagaName, version)} is registered with different content, throws
+   * {@link com.scalar.db.saga.exception.SagaDefinitionException} to fail fast on version conflicts.
+   */
   void registerDefinition(SagaDefinition definition);
 
   /** Looks up a saga definition by name and version. */
@@ -65,9 +70,12 @@ public interface SagaStore {
   /**
    * Appends a saga-level event and transitions the saga state atomically in one transaction.
    *
-   * <p>The new status is derived from {@link SagaEvent#getTargetStatus()}.
+   * <p>The new status is derived from {@link SagaEvent#getTargetStatus()}. If the saga has been
+   * modified since the given {@code current} snapshot was taken (e.g., by another replica), throws
+   * {@link com.scalar.db.saga.exception.SagaConcurrentModificationException}.
    *
-   * @param current the current state snapshot (used for optimistic concurrency)
+   * @param current the caller's view of the current state; the transition is rejected if it is
+   *     stale
    * @param sequence the event sequence number
    * @param event the transition event (must have a non-null target status)
    * @return the post-transition state snapshot
@@ -77,7 +85,7 @@ public interface SagaStore {
   /** Returns all events for the given saga, ordered by sequence number. */
   List<SagaEvent> getEvents(String sagaId);
 
-  /** Returns the event count for the given saga without materializing all events. */
+  /** Returns the event count for the given saga without deserializing full event payloads. */
   int getEventCount(String sagaId);
 
   // ---------------------------------------------------------------------------
