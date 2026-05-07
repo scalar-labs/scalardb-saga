@@ -11,6 +11,7 @@ import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 class ExecutionContextTest {
@@ -48,7 +49,7 @@ class ExecutionContextTest {
     ctx.put("name", "Alice");
 
     // Assert
-    assertThat(ctx.get("name", String.class)).isEqualTo("Alice");
+    assertThat(ctx.get("name", String.class)).hasValue("Alice");
   }
 
   @Test
@@ -60,7 +61,7 @@ class ExecutionContextTest {
     ctx.put("count", 42);
 
     // Assert
-    assertThat(ctx.get("count", Integer.class)).isEqualTo(42);
+    assertThat(ctx.get("count", Integer.class)).hasValue(42);
   }
 
   @Test
@@ -72,7 +73,7 @@ class ExecutionContextTest {
     ctx.put("timestamp", 123456789L);
 
     // Assert
-    assertThat(ctx.get("timestamp", Long.class)).isEqualTo(123456789L);
+    assertThat(ctx.get("timestamp", Long.class)).hasValue(123456789L);
   }
 
   @Test
@@ -84,7 +85,7 @@ class ExecutionContextTest {
     ctx.put("rate", 2.5);
 
     // Assert
-    assertThat(ctx.get("rate", Double.class)).isEqualTo(2.5);
+    assertThat(ctx.get("rate", Double.class)).hasValue(2.5);
   }
 
   @Test
@@ -96,7 +97,7 @@ class ExecutionContextTest {
     ctx.put("score", 1.5f);
 
     // Assert
-    assertThat(ctx.get("score", Float.class)).isEqualTo(1.5f);
+    assertThat(ctx.get("score", Float.class)).hasValue(1.5f);
   }
 
   @Test
@@ -108,7 +109,7 @@ class ExecutionContextTest {
     ctx.put("active", true);
 
     // Assert
-    assertThat(ctx.get("active", Boolean.class)).isTrue();
+    assertThat(ctx.get("active", Boolean.class)).hasValue(true);
   }
 
   @Test
@@ -121,7 +122,7 @@ class ExecutionContextTest {
     ctx.put("amount", amount);
 
     // Assert
-    assertThat(ctx.get("amount", BigDecimal.class)).isEqualTo(amount);
+    assertThat(ctx.get("amount", BigDecimal.class)).hasValue(amount);
   }
 
   @SuppressWarnings("unchecked")
@@ -135,7 +136,7 @@ class ExecutionContextTest {
     ctx.put("items", items);
 
     // Assert
-    assertThat(ctx.get("items", List.class)).isEqualTo(items);
+    assertThat(ctx.get("items", List.class)).hasValue(items);
   }
 
   @SuppressWarnings("unchecked")
@@ -149,7 +150,7 @@ class ExecutionContextTest {
     ctx.put("scores", scores);
 
     // Assert
-    assertThat(ctx.get("scores", Map.class)).isEqualTo(scores);
+    assertThat(ctx.get("scores", Map.class)).hasValue(scores);
   }
 
   @SuppressWarnings("unchecked")
@@ -163,7 +164,7 @@ class ExecutionContextTest {
     ctx.put("nested", nested);
 
     // Assert
-    assertThat(ctx.get("nested", List.class)).isEqualTo(nested);
+    assertThat(ctx.get("nested", List.class)).hasValue(nested);
   }
 
   @Test
@@ -232,12 +233,12 @@ class ExecutionContextTest {
   }
 
   @Test
-  void get_missingKey_returnsNull() {
+  void get_missingKey_returnsEmpty() {
     // Arrange
     ExecutionContext ctx = createContext();
 
     // Act & Assert
-    assertThat(ctx.get("missing", String.class)).isNull();
+    assertThat(ctx.get("missing", String.class)).isEmpty();
   }
 
   @Test
@@ -246,11 +247,8 @@ class ExecutionContextTest {
     ExecutionContext ctx = createContext();
     ctx.put("value", 42);
 
-    // Act
-    Long result = ctx.get("value", Long.class);
-
-    // Assert
-    assertThat(result).isEqualTo(42L);
+    // Act & Assert
+    assertThat(ctx.get("value", Long.class)).hasValue(42L);
   }
 
   @Test
@@ -259,11 +257,8 @@ class ExecutionContextTest {
     ExecutionContext ctx = createContext();
     ctx.put("value", 42L);
 
-    // Act
-    Integer result = ctx.get("value", Integer.class);
-
-    // Assert
-    assertThat(result).isEqualTo(42);
+    // Act & Assert
+    assertThat(ctx.get("value", Integer.class)).hasValue(42);
   }
 
   @Test
@@ -272,11 +267,8 @@ class ExecutionContextTest {
     ExecutionContext ctx = createContext();
     ctx.put("value", 42);
 
-    // Act
-    Double result = ctx.get("value", Double.class);
-
-    // Assert
-    assertThat(result).isEqualTo(42.0);
+    // Act & Assert
+    assertThat(ctx.get("value", Double.class)).hasValue(42.0);
   }
 
   @Test
@@ -286,10 +278,11 @@ class ExecutionContextTest {
     ctx.put("amount", 99.95);
 
     // Act
-    BigDecimal result = ctx.get("amount", BigDecimal.class);
+    Optional<BigDecimal> result = ctx.get("amount", BigDecimal.class);
 
     // Assert
-    assertThat(result).isEqualByComparingTo(new BigDecimal("99.95"));
+    assertThat(result).isPresent();
+    assertThat(result.get()).isEqualByComparingTo(new BigDecimal("99.95"));
   }
 
   @Test
@@ -331,6 +324,27 @@ class ExecutionContextTest {
 
     // Act & Assert
     assertThatThrownBy(() -> ctx.get("value", Long.class)).isInstanceOf(ClassCastException.class);
+  }
+
+  @Test
+  void get_bigDecimalToInteger_throwsClassCastException() {
+    // Arrange
+    ExecutionContext ctx = createContext();
+    ctx.put("amount", new BigDecimal("99.95"));
+
+    // Act & Assert
+    assertThatThrownBy(() -> ctx.get("amount", Integer.class))
+        .isInstanceOf(ClassCastException.class);
+  }
+
+  @Test
+  void get_bigDecimalToLong_throwsClassCastException() {
+    // Arrange
+    ExecutionContext ctx = createContext();
+    ctx.put("amount", new BigDecimal("99.95"));
+
+    // Act & Assert
+    assertThatThrownBy(() -> ctx.get("amount", Long.class)).isInstanceOf(ClassCastException.class);
   }
 
   @Test
@@ -427,9 +441,9 @@ class ExecutionContextTest {
     ctx.merge(result);
 
     // Assert
-    assertThat(ctx.get("existing", String.class)).isEqualTo("value");
-    assertThat(ctx.get("new_key", String.class)).isEqualTo("new_value");
-    assertThat(ctx.get("count", Integer.class)).isEqualTo(42);
+    assertThat(ctx.get("existing", String.class)).hasValue("value");
+    assertThat(ctx.get("new_key", String.class)).hasValue("new_value");
+    assertThat(ctx.get("count", Integer.class)).hasValue(42);
   }
 
   @Test
@@ -442,7 +456,7 @@ class ExecutionContextTest {
     ctx.merge(StepResult.empty());
 
     // Assert
-    assertThat(ctx.get("existing", String.class)).isEqualTo("value");
+    assertThat(ctx.get("existing", String.class)).hasValue("value");
   }
 
   @Test
@@ -454,8 +468,8 @@ class ExecutionContextTest {
     ExecutionContext ctx = createContext(input);
 
     // Assert
-    assertThat(ctx.get("orderId", String.class)).isEqualTo("order-123");
-    assertThat(ctx.get("amount", Integer.class)).isEqualTo(100);
+    assertThat(ctx.get("orderId", String.class)).hasValue("order-123");
+    assertThat(ctx.get("amount", Integer.class)).hasValue(100);
   }
 
   @Test

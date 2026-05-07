@@ -88,14 +88,14 @@ class RetryPolicyTest {
   }
 
   @Test
-  void build_withZeroInitialIntervalMs_throwsIllegalArgumentException() {
+  void build_withZeroInitialIntervalMillis_throwsIllegalArgumentException() {
     // Arrange & Act & Assert
     assertThatThrownBy(() -> RetryPolicy.newBuilder().initialIntervalMillis(0).build())
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
-  void build_withNegativeInitialIntervalMs_throwsIllegalArgumentException() {
+  void build_withNegativeInitialIntervalMillis_throwsIllegalArgumentException() {
     // Arrange & Act & Assert
     assertThatThrownBy(() -> RetryPolicy.newBuilder().initialIntervalMillis(-100).build())
         .isInstanceOf(IllegalArgumentException.class);

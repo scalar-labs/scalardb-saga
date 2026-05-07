@@ -9,6 +9,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import net.jcip.annotations.NotThreadSafe;
 import org.jspecify.annotations.Nullable;
@@ -64,21 +65,21 @@ class ExecutionContext implements SagaContext {
 
   @SuppressWarnings("unchecked")
   @Override
-  public <T> @Nullable T get(String key, Class<T> type) {
+  public <T> Optional<T> get(String key, Class<T> type) {
     Objects.requireNonNull(key, "key must not be null");
     Objects.requireNonNull(type, "type must not be null");
     Object value = data.get(key);
     if (value == null) {
-      return null;
+      return Optional.empty();
     }
     if (type.isInstance(value)) {
-      return (T) value;
+      return Optional.of((T) value);
     }
     // Numeric coercion: after crash recovery, numeric types may differ from what was stored
     if (value instanceof Number number) {
       Object coerced = coerceNumber(number, type);
       if (coerced != null) {
-        return (T) coerced;
+        return Optional.of((T) coerced);
       }
     }
     throw new ClassCastException(
@@ -170,7 +171,7 @@ class ExecutionContext implements SagaContext {
   // truncation (e.g., 99.95 → 99). Range checks guard the narrowing Long→Integer path.
   private static @Nullable Object coerceNumber(Number number, Class<?> targetType) {
     if (targetType == Integer.class || targetType == int.class) {
-      if (number instanceof Double || number instanceof Float) {
+      if (number instanceof Double || number instanceof Float || number instanceof BigDecimal) {
         throw new ClassCastException(
             "Cannot convert " + number.getClass().getName() + " to Integer: lossy conversion");
       }
@@ -182,7 +183,7 @@ class ExecutionContext implements SagaContext {
       return number.intValue();
     }
     if (targetType == Long.class || targetType == long.class) {
-      if (number instanceof Double || number instanceof Float) {
+      if (number instanceof Double || number instanceof Float || number instanceof BigDecimal) {
         throw new ClassCastException(
             "Cannot convert " + number.getClass().getName() + " to Long: lossy conversion");
       }
