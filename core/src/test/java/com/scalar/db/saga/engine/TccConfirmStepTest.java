@@ -44,17 +44,15 @@ class TccConfirmStepTest {
   }
 
   @Test
-  void compensate_called_isNoOp() throws StepCompensationException {
+  void compensate_called_throwsUnsupportedOperationException() {
     // Arrange
     TccStep tccStep = mock(TccStep.class);
     SagaContext context = mock(SagaContext.class);
     TccConfirmStep step = new TccConfirmStep(tccStep);
 
-    // Act
-    step.compensate(context);
-
-    // Assert
-    verifyNoInteractions(tccStep);
+    // Act & Assert
+    assertThatThrownBy(() -> step.compensate(context))
+        .isInstanceOf(UnsupportedOperationException.class);
   }
 
   @Test
