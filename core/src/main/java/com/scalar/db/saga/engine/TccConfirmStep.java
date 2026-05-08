@@ -11,8 +11,9 @@ import java.util.Objects;
 /**
  * Wraps a {@link TccStep} for the Confirm phase.
  *
- * <p>Forward action delegates to {@link TccStep#confirm}, compensation is a no-op. Confirm steps
- * are always after the pivot boundary, so they are retriable and never compensated.
+ * <p>Forward action delegates to {@link TccStep#confirm}. Confirm steps are always after the pivot
+ * boundary, so they are retriable and never compensated; calling {@link #compensate} throws {@link
+ * UnsupportedOperationException}.
  */
 class TccConfirmStep implements Step {
 
@@ -35,6 +36,7 @@ class TccConfirmStep implements Step {
 
   @Override
   public void compensate(SagaContext context) throws StepCompensationException {
-    // No-op: confirm steps are retriable (after the pivot), never compensated.
+    throw new UnsupportedOperationException(
+        "TCC confirm steps are after the pivot and must not be compensated");
   }
 }

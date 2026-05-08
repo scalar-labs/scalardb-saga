@@ -11,7 +11,7 @@ import org.jspecify.annotations.Nullable;
 /**
  * Persistence interface for saga operations.
  *
- * <p>Implementations must guarantee atomicity: {@link #createSaga} and {@link #recordTransition}
+ * <p>Implementations must guarantee atomicity: {@link #createSaga} and {@link #recordStatusEvent}
  * write to both the event stream and the state table in a single transaction.
  */
 public interface SagaStore {
@@ -21,7 +21,7 @@ public interface SagaStore {
   // ---------------------------------------------------------------------------
 
   /**
-   * Creates a new saga instance, writing both a {@link SagaEvent#SAGA_STARTED} event and an initial
+   * Creates a new saga instance, writing both a {@link EventType#SAGA_STARTED} event and an initial
    * {@code saga_state} row in one transaction.
    *
    * @param sagaId caller-supplied saga ID, or {@code null} to generate a UUID. When provided, the
@@ -39,13 +39,7 @@ public interface SagaStore {
       Map<String, Object> input,
       String definitionVersion);
 
-  /**
-   * Persists a saga definition. Called once per definition version at registration time.
-   *
-   * <p>Idempotent: registering the same {@code (sagaName, version)} with identical content is a
-   * no-op. If the same {@code (sagaName, version)} is registered with different content, throws
-   * {@link com.scalar.db.saga.exception.SagaDefinitionException} to fail fast on version conflicts.
-   */
+  /** Persists a saga definition. Called once per definition version at registration time. */
   void registerDefinition(SagaDefinition definition);
 
   /** Looks up a saga definition by name and version. */
@@ -56,37 +50,30 @@ public interface SagaStore {
   // ---------------------------------------------------------------------------
 
   /**
-   * Appends a step-level event to the event stream (no state transition).
-   *
-   * <p>The event must be a step-level event (i.e., {@link SagaEvent#getTargetStatus()} is {@code
-   * null} and {@link SagaEvent#getStepIndex()} is non-negative). Use {@link #recordTransition} for
-   * saga-level events that change the saga status.
+   * Records a step-level event in the event stream (no state transition).
    *
    * @param sagaId the saga instance ID
    * @param sequence the event sequence number (tracked by the caller)
-   * @param event the step-level event to append
+   * @param event the step event to record
    */
-  void appendEvent(String sagaId, int sequence, SagaEvent event);
+  void recordStepEvent(String sagaId, int sequence, StepEvent event);
 
   /**
-   * Appends a saga-level event and transitions the saga state atomically in one transaction.
+   * Records a saga-level status event and transitions the saga state atomically in one transaction.
    *
-   * <p>The new status is derived from {@link SagaEvent#getTargetStatus()}. If the saga has been
-   * modified since the given {@code current} snapshot was taken (e.g., by another replica), throws
-   * {@link com.scalar.db.saga.exception.SagaConcurrentModificationException}.
+   * <p>The new status is derived from {@link StatusEvent#getTargetStatus()}.
    *
-   * @param current the caller's view of the current state; the transition is rejected if it is
-   *     stale
+   * @param current the current state snapshot (used for optimistic concurrency)
    * @param sequence the event sequence number
-   * @param event the transition event (must have a non-null target status)
+   * @param event the status event to record
    * @return the post-transition state snapshot
    */
-  SagaStateSnapshot recordTransition(SagaStateSnapshot current, int sequence, SagaEvent event);
+  SagaStateSnapshot recordStatusEvent(SagaStateSnapshot current, int sequence, StatusEvent event);
 
   /** Returns all events for the given saga, ordered by sequence number. */
   List<SagaEvent> getEvents(String sagaId);
 
-  /** Returns the event count for the given saga without deserializing full event payloads. */
+  /** Returns the event count for the given saga without materializing all events. */
   int getEventCount(String sagaId);
 
   // ---------------------------------------------------------------------------
