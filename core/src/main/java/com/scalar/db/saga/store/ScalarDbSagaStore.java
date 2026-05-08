@@ -117,7 +117,7 @@ public class ScalarDbSagaStore implements SagaStore {
                 tx.insert(buildEventInsert(id, 0, startedEvent, now));
                 SagaStateSnapshot snapshot =
                     new SagaStateSnapshot(
-                        id, sagaName, SagaStatus.RUNNING, ownerId, 0, definitionVersion, now, now);
+                        id, sagaName, SagaStatus.RUNNING, ownerId, definitionVersion, now, now);
                 tx.insert(buildStateInsert(bucket, snapshot));
                 return snapshot;
               },
@@ -380,7 +380,6 @@ public class ScalarDbSagaStore implements SagaStore {
                         saga.getSagaName(),
                         saga.getStatus(),
                         newOwnerId,
-                        saga.getVersion() + 1,
                         saga.getDefinitionVersion(),
                         saga.getCreatedAt(),
                         now);
@@ -427,7 +426,6 @@ public class ScalarDbSagaStore implements SagaStore {
                     current.getSagaName(),
                     current.getStatus(),
                     current.getOwnerId(),
-                    current.getVersion(),
                     current.getDefinitionVersion(),
                     current.getCreatedAt(),
                     Instant.EPOCH);
@@ -689,7 +687,6 @@ public class ScalarDbSagaStore implements SagaStore {
                 snapshot.getSagaId()))
         .textValue("saga_name", snapshot.getSagaName())
         .textValue("owner_id", snapshot.getOwnerId())
-        .intValue("version", snapshot.getVersion())
         .textValue("definition_version", snapshot.getDefinitionVersion())
         .timestampTZValue("created_at", snapshot.getCreatedAt())
         .build();
@@ -840,7 +837,6 @@ public class ScalarDbSagaStore implements SagaStore {
         r.getText("saga_name"),
         SagaStatus.fromStatusCode(r.getInt("status")),
         r.getText("owner_id"),
-        r.getInt("version"),
         r.getText("definition_version"),
         r.getTimestampTZ("created_at"),
         r.getTimestampTZ("updated_at"));

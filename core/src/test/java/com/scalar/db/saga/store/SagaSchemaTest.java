@@ -123,7 +123,6 @@ class SagaSchemaTest {
             "saga_id",
             "saga_name",
             "owner_id",
-            "version",
             "definition_version",
             "created_at");
     assertThat(metadata.getPartitionKeyNames()).containsExactly("bucket");

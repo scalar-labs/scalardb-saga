@@ -108,7 +108,6 @@ public final class SagaSchema {
         .addColumn("saga_id", DataType.TEXT) // CK3: unique identifier
         .addColumn("saga_name", DataType.TEXT)
         .addColumn("owner_id", DataType.TEXT) // replica processing this saga (observability)
-        .addColumn("version", DataType.INT) // incremented on each recovery claim
         .addColumn("definition_version", DataType.TEXT) // saga definition version at creation
         .addColumn("created_at", DataType.TIMESTAMPTZ)
         .addPartitionKey("bucket")

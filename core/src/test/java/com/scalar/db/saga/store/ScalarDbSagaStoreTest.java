@@ -82,7 +82,6 @@ class ScalarDbSagaStoreTest {
     assertThat(result.getSagaName()).isEqualTo("order-saga");
     assertThat(result.getStatus()).isEqualTo(SagaStatus.RUNNING);
     assertThat(result.getOwnerId()).isEqualTo("engine-1");
-    assertThat(result.getVersion()).isEqualTo(0);
     assertThat(result.getDefinitionVersion()).isEqualTo("v1");
     // event insert + state insert
     verify(tx, times(2)).insert(any(Insert.class));
@@ -314,7 +313,7 @@ class ScalarDbSagaStoreTest {
     Instant now = Instant.now();
     SagaStateSnapshot current =
         new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", 0, "v1", now, now);
+            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
     StatusEvent event = StatusEvent.completed();
     Result existingRow = mock(Result.class);
     when(tx.get(any(Get.class))).thenReturn(Optional.of(existingRow));
@@ -339,7 +338,7 @@ class ScalarDbSagaStoreTest {
     Instant now = Instant.now();
     SagaStateSnapshot current =
         new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", 0, "v1", now, now);
+            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
     when(tx.get(any(Get.class))).thenReturn(Optional.empty());
 
     // Act & Assert
@@ -353,7 +352,7 @@ class ScalarDbSagaStoreTest {
     Instant now = Instant.now();
     SagaStateSnapshot current =
         new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", 0, "v1", now, now);
+            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
     Result existingRow = mock(Result.class);
     when(tx.get(any(Get.class))).thenReturn(Optional.of(existingRow));
     doThrow(mock(CommitConflictException.class)).when(tx).commit();
@@ -458,7 +457,6 @@ class ScalarDbSagaStoreTest {
     assertThat(s.getSagaName()).isEqualTo("order-saga");
     assertThat(s.getStatus()).isEqualTo(SagaStatus.RUNNING);
     assertThat(s.getOwnerId()).isEqualTo("engine-1");
-    assertThat(s.getVersion()).isEqualTo(0);
     assertThat(s.getDefinitionVersion()).isEqualTo("v1");
     assertThat(s.getCreatedAt()).isEqualTo(Instant.parse("2026-01-01T00:00:00Z"));
     assertThat(s.getUpdatedAt()).isEqualTo(Instant.parse("2026-01-01T00:00:00Z"));
@@ -593,7 +591,7 @@ class ScalarDbSagaStoreTest {
     Instant now = Instant.now();
     SagaStateSnapshot saga =
         new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "old-owner", 1, "v1", now, now);
+            "saga-1", "order-saga", SagaStatus.RUNNING, "old-owner", "v1", now, now);
     Result currentRow = mock(Result.class);
     when(tx.get(any(Get.class))).thenReturn(Optional.of(currentRow));
 
@@ -603,7 +601,6 @@ class ScalarDbSagaStoreTest {
     // Assert
     assertThat(claimed).isPresent();
     assertThat(claimed.get().getOwnerId()).isEqualTo("new-owner");
-    assertThat(claimed.get().getVersion()).isEqualTo(2);
     verify(tx).delete(any(Delete.class));
     verify(tx).commit();
   }
@@ -614,7 +611,7 @@ class ScalarDbSagaStoreTest {
     Instant now = Instant.now();
     SagaStateSnapshot saga =
         new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "old-owner", 1, "v1", now, now);
+            "saga-1", "order-saga", SagaStatus.RUNNING, "old-owner", "v1", now, now);
     when(tx.get(any(Get.class))).thenReturn(Optional.empty());
 
     // Act
@@ -630,7 +627,7 @@ class ScalarDbSagaStoreTest {
     Instant now = Instant.now();
     SagaStateSnapshot saga =
         new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "old-owner", 1, "v1", now, now);
+            "saga-1", "order-saga", SagaStatus.RUNNING, "old-owner", "v1", now, now);
 
     DistributedTransaction tx2 = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx, tx2);
@@ -655,7 +652,7 @@ class ScalarDbSagaStoreTest {
     Instant now = Instant.now();
     SagaStateSnapshot saga =
         new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "old-owner", 1, "v1", now, now);
+            "saga-1", "order-saga", SagaStatus.RUNNING, "old-owner", "v1", now, now);
     when(tx.get(any(Get.class))).thenThrow(mock(CrudException.class));
 
     // Act & Assert
@@ -1302,7 +1299,6 @@ class ScalarDbSagaStoreTest {
     lenient().when(r.getText("saga_name")).thenReturn("order-saga");
     lenient().when(r.getInt("status")).thenReturn(status.getStatusCode());
     lenient().when(r.getText("owner_id")).thenReturn("engine-1");
-    lenient().when(r.getInt("version")).thenReturn(0);
     lenient().when(r.getText("definition_version")).thenReturn("v1");
     lenient().when(r.getInt("bucket")).thenReturn(0);
     lenient()
