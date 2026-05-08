@@ -243,8 +243,7 @@ public class ScalarDbSagaStore implements SagaStore {
               () -> {
                 return runInTransaction(
                     tx -> {
-                      Optional<Result> result = tx.get(buildEventGet(sagaId, sequence));
-                      if (result.isPresent()) {
+                      if (tx.get(buildEventGet(sagaId, sequence)).isPresent()) {
                         return loadStateSnapshot(sagaId);
                       }
                       return Optional.empty();
