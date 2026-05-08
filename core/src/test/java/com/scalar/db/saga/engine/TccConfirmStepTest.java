@@ -5,13 +5,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.scalar.db.saga.api.SagaContext;
 import com.scalar.db.saga.api.StepResult;
 import com.scalar.db.saga.api.TccStep;
-import com.scalar.db.saga.exception.StepCompensationException;
 import com.scalar.db.saga.exception.StepExecutionException;
 import org.junit.jupiter.api.Test;
 
@@ -44,17 +42,15 @@ class TccConfirmStepTest {
   }
 
   @Test
-  void compensate_called_isNoOp() throws StepCompensationException {
+  void compensate_called_throwsUnsupportedOperationException() {
     // Arrange
     TccStep tccStep = mock(TccStep.class);
     SagaContext context = mock(SagaContext.class);
     TccConfirmStep step = new TccConfirmStep(tccStep);
 
-    // Act
-    step.compensate(context);
-
-    // Assert
-    verifyNoInteractions(tccStep);
+    // Act & Assert
+    assertThatThrownBy(() -> step.compensate(context))
+        .isInstanceOf(UnsupportedOperationException.class);
   }
 
   @Test
