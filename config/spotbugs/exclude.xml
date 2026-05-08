@@ -14,4 +14,10 @@
     <Class name="~.*Test(\$.*)?"/>
     <Bug pattern="RV_EXCEPTION_NOT_THROWN"/>
   </Match>
+  <!-- ThreadLocalRandom in RetryPolicy.sleepWithBackoff is for retry jitter, not security -->
+  <Match>
+    <Class name="com.scalar.db.saga.api.RetryPolicy"/>
+    <Method name="sleepWithBackoff"/>
+    <Bug pattern="PREDICTABLE_RANDOM"/>
+  </Match>
 </FindBugsFilter>

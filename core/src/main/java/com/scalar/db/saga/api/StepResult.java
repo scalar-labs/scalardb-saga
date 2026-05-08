@@ -4,6 +4,7 @@ import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.util.Collections;
 import java.util.Map;
 import java.util.Objects;
+import net.jcip.annotations.Immutable;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -18,6 +19,7 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@link #pending()} — daemon mode: step is not done yet, engine should park the saga
  * </ul>
  */
+@Immutable
 public final class StepResult {
 
   private static final StepResult EMPTY = new StepResult(false, Collections.emptyMap());

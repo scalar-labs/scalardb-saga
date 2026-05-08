@@ -1,6 +1,6 @@
 package com.scalar.db.saga.api;
 
-import org.jspecify.annotations.Nullable;
+import java.util.Optional;
 
 /**
  * Shared data context passed to {@link Step} and {@link TccStep} implementations.
@@ -24,10 +24,10 @@ public interface SagaContext {
    * @param key the data key
    * @param type the expected value type
    * @param <T> the value type
-   * @return the value, or {@code null} if not present
+   * @return an {@link Optional} containing the value, or empty if not present
    * @throws ClassCastException if the stored value cannot be converted to the requested type
    */
-  <T> @Nullable T get(String key, Class<T> type);
+  <T> Optional<T> get(String key, Class<T> type);
 
   /**
    * Stores a value in the saga data map, available to subsequent steps.
@@ -37,8 +37,8 @@ public interface SagaContext {
    *
    * <ul>
    *   <li>Primitives and their wrappers: {@code Boolean}, {@code Integer}, {@code Long}, {@code
-   *       Double}, {@code Float}, {@code Short}, {@code Byte}
-   *   <li>{@code String}
+   *       Double}, {@code Float}
+   *   <li>{@code String} and {@code java.math.BigDecimal}
    *   <li>{@code List} and {@code Map} containing only the above types (nested collections are
    *       allowed)
    * </ul>

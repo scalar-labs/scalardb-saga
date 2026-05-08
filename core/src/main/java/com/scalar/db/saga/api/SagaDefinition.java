@@ -6,6 +6,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import net.jcip.annotations.Immutable;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -15,6 +16,7 @@ import org.jspecify.annotations.Nullable;
  * <p>Use {@link #newBuilder(String, SagaMode)} to create definitions programmatically. Definitions
  * are validated at build time.
  */
+@Immutable
 public final class SagaDefinition {
 
   /** Execution mode: Saga (compensate on failure) or TCC (Try-Confirm-Cancel). */
@@ -42,7 +44,7 @@ public final class SagaDefinition {
   private final SagaMode mode;
   private final List<StepDefinition> steps;
   private final RecoveryStrategy recoveryStrategy;
-  private final long timeoutMs;
+  private final long timeoutMillis;
   private final @Nullable RetryPolicy defaultRetryPolicy;
   private final int pivotIndex;
 
@@ -52,7 +54,7 @@ public final class SagaDefinition {
     this.mode = builder.mode;
     this.steps = List.copyOf(builder.steps);
     this.recoveryStrategy = builder.recoveryStrategy;
-    this.timeoutMs = builder.timeoutMs;
+    this.timeoutMillis = builder.timeoutMillis;
     this.defaultRetryPolicy = builder.defaultRetryPolicy;
     this.pivotIndex = computePivotIndex();
   }
@@ -103,9 +105,9 @@ public final class SagaDefinition {
           "Saga definition '" + name + "' must have at least one step");
     }
 
-    if (timeoutMs < 0) {
+    if (timeoutMillis < 0) {
       throw new SagaDefinitionException(
-          "Saga definition '" + name + "' timeoutMs must be >= 0, got " + timeoutMs);
+          "Saga definition '" + name + "' timeoutMillis must be >= 0, got " + timeoutMillis);
     }
 
     // Single-pass: check name uniqueness, step timeouts, and count pivots
@@ -116,9 +118,12 @@ public final class SagaDefinition {
         throw new SagaDefinitionException(
             "Duplicate step name '" + step.getName() + "' in saga '" + name + "'");
       }
-      if (step.getTimeoutMs() < 0) {
+      if (step.getTimeoutMillis() < 0) {
         throw new SagaDefinitionException(
-            "Step '" + step.getName() + "' timeoutMs must be >= 0, got " + step.getTimeoutMs());
+            "Step '"
+                + step.getName()
+                + "' timeoutMillis must be >= 0, got "
+                + step.getTimeoutMillis());
       }
       if (step.isPivot()) {
         pivotCount++;
@@ -188,8 +193,8 @@ public final class SagaDefinition {
    * Returns the saga-level timeout in milliseconds. {@code 0} means no timeout (the saga runs until
    * completion or escalation).
    */
-  public long getTimeoutMs() {
-    return timeoutMs;
+  public long getTimeoutMillis() {
+    return timeoutMillis;
   }
 
   public @Nullable RetryPolicy getDefaultRetryPolicy() {
@@ -200,7 +205,7 @@ public final class SagaDefinition {
   public boolean equals(@Nullable Object o) {
     if (this == o) return true;
     if (!(o instanceof SagaDefinition that)) return false;
-    return timeoutMs == that.timeoutMs
+    return timeoutMillis == that.timeoutMillis
         && name.equals(that.name)
         && version.equals(that.version)
         && mode == that.mode
@@ -212,7 +217,7 @@ public final class SagaDefinition {
   @Override
   public int hashCode() {
     return Objects.hash(
-        name, version, mode, steps, recoveryStrategy, timeoutMs, defaultRetryPolicy);
+        name, version, mode, steps, recoveryStrategy, timeoutMillis, defaultRetryPolicy);
   }
 
   @Override
@@ -231,18 +236,19 @@ public final class SagaDefinition {
   }
 
   /** Defines a single step within a saga definition. */
+  @Immutable
   public static final class StepDefinition {
 
     private final String name;
     private final String stepClass;
-    private final long timeoutMs;
+    private final long timeoutMillis;
     private final @Nullable RetryPolicy retryPolicy;
     private final boolean pivot;
 
     private StepDefinition(StepBuilder builder) {
       this.name = builder.name;
       this.stepClass = builder.stepClass;
-      this.timeoutMs = builder.timeoutMs;
+      this.timeoutMillis = builder.timeoutMillis;
       this.retryPolicy = builder.retryPolicy;
       this.pivot = builder.pivot;
     }
@@ -259,8 +265,8 @@ public final class SagaDefinition {
      * Returns the step-level timeout in milliseconds. {@code 0} means no step-level timeout
      * (inherits the saga-level timeout).
      */
-    public long getTimeoutMs() {
-      return timeoutMs;
+    public long getTimeoutMillis() {
+      return timeoutMillis;
     }
 
     public @Nullable RetryPolicy getRetryPolicy() {
@@ -275,7 +281,7 @@ public final class SagaDefinition {
     public boolean equals(@Nullable Object o) {
       if (this == o) return true;
       if (!(o instanceof StepDefinition that)) return false;
-      return timeoutMs == that.timeoutMs
+      return timeoutMillis == that.timeoutMillis
           && pivot == that.pivot
           && name.equals(that.name)
           && stepClass.equals(that.stepClass)
@@ -284,7 +290,7 @@ public final class SagaDefinition {
 
     @Override
     public int hashCode() {
-      return Objects.hash(name, stepClass, timeoutMs, retryPolicy, pivot);
+      return Objects.hash(name, stepClass, timeoutMillis, retryPolicy, pivot);
     }
 
     @Override
@@ -301,7 +307,7 @@ public final class SagaDefinition {
     private String version = "1.0";
     private final List<StepDefinition> steps = new ArrayList<>();
     private RecoveryStrategy recoveryStrategy;
-    private long timeoutMs;
+    private long timeoutMillis;
     private @Nullable RetryPolicy defaultRetryPolicy;
 
     private Builder(String name, SagaMode mode) {
@@ -322,8 +328,8 @@ public final class SagaDefinition {
       return this;
     }
 
-    public Builder timeoutMs(long timeoutMs) {
-      this.timeoutMs = timeoutMs;
+    public Builder timeoutMillis(long timeoutMillis) {
+      this.timeoutMillis = timeoutMillis;
       return this;
     }
 
@@ -373,7 +379,7 @@ public final class SagaDefinition {
     private final Builder parent;
     private final String name;
     private final String stepClass;
-    private long timeoutMs;
+    private long timeoutMillis;
     private @Nullable RetryPolicy retryPolicy;
     private boolean pivot;
 
@@ -383,8 +389,8 @@ public final class SagaDefinition {
       this.stepClass = stepClass;
     }
 
-    public StepBuilder timeoutMs(long timeoutMs) {
-      this.timeoutMs = timeoutMs;
+    public StepBuilder timeoutMillis(long timeoutMillis) {
+      this.timeoutMillis = timeoutMillis;
       return this;
     }
 
