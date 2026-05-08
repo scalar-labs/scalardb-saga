@@ -54,6 +54,11 @@ public class ScalarDbSagaStore implements SagaStore {
   private static final Logger logger = LoggerFactory.getLogger(ScalarDbSagaStore.class);
 
   private static final Pattern SAGA_ID_PATTERN = Pattern.compile("[a-zA-Z0-9._-]{1,128}");
+  private static final int[] RECOVERABLE_STATUS_CODES = {
+    SagaStatus.RUNNING.getStatusCode(),
+    SagaStatus.CONFIRMING.getStatusCode(),
+    SagaStatus.COMPENSATING.getStatusCode()
+  };
 
   private final DistributedTransactionManager txManager;
   private final ObjectMapper objectMapper;
@@ -327,12 +332,7 @@ public class ScalarDbSagaStore implements SagaStore {
               // Cap each status scan to avoid unbounded memory usage in large buckets.
               // Any sagas beyond the limit are picked up on the next recovery cycle.
               int scanLimit = config.getRecoveryScanLimit();
-              for (int status :
-                  new int[] {
-                    SagaStatus.RUNNING.getStatusCode(),
-                    SagaStatus.CONFIRMING.getStatusCode(),
-                    SagaStatus.COMPENSATING.getStatusCode()
-                  }) {
+              for (int status : RECOVERABLE_STATUS_CODES) {
                 List<Result> rows =
                     tx.scan(
                         Scan.newBuilder(buildStateRangeScan(bucket, status, threshold))
