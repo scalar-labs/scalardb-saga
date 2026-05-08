@@ -5,13 +5,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.scalar.db.saga.api.SagaContext;
 import com.scalar.db.saga.api.StepResult;
 import com.scalar.db.saga.api.TccStep;
-import com.scalar.db.saga.exception.StepCompensationException;
 import com.scalar.db.saga.exception.StepExecutionException;
 import org.junit.jupiter.api.Test;
 
