@@ -105,7 +105,7 @@ public class ScalarDbSagaStore implements SagaStore {
     }
     String payload = toJson(Map.of("sagaName", sagaName, "input", input));
     validatePayloadSize(payload);
-    SagaEvent startedEvent = SagaEvent.sagaStarted(payload);
+    StatusEvent startedEvent = StatusEvent.started(payload);
     String id = sagaId; // effectively final for lambda
     int bucket = schema.bucketOf(id);
 
@@ -189,12 +189,7 @@ public class ScalarDbSagaStore implements SagaStore {
   // ---------------------------------------------------------------------------
 
   @Override
-  public void appendEvent(String sagaId, int sequence, SagaEvent event) {
-    if (event.getTargetStatus() != null) {
-      throw new IllegalArgumentException(
-          "appendEvent() accepts only step-level events (targetStatus must be null). "
-              + "Use recordTransition() for saga-level events that change status.");
-    }
+  public void recordStepEvent(String sagaId, int sequence, StepEvent event) {
     validatePayloadSize(event.getPayload());
     runInTransaction(
         tx -> {
@@ -215,13 +210,8 @@ public class ScalarDbSagaStore implements SagaStore {
   }
 
   @Override
-  public SagaStateSnapshot recordTransition(
-      SagaStateSnapshot current, int sequence, SagaEvent event) {
-    if (event.getTargetStatus() == null) {
-      throw new IllegalArgumentException(
-          "recordTransition() requires a saga-level event (targetStatus must not be null). "
-              + "Use appendEvent() for step-level events.");
-    }
+  public SagaStateSnapshot recordStatusEvent(
+      SagaStateSnapshot current, int sequence, StatusEvent event) {
     validatePayloadSize(event.getPayload());
     String sagaId = current.getSagaId();
     SagaStatus newStatus = event.getTargetStatus();
@@ -757,17 +747,23 @@ public class ScalarDbSagaStore implements SagaStore {
   }
 
   private Insert buildEventInsert(String sagaId, int sequence, SagaEvent event, Instant now) {
-    return Insert.newBuilder()
-        .namespace(SagaSchema.NAMESPACE)
-        .table(SagaSchema.EVENTS_TABLE)
-        .partitionKey(Key.ofText("saga_id", sagaId))
-        .clusteringKey(Key.ofInt("sequence", sequence))
-        .textValue("event_type", event.getEventType())
-        .intValue("step_index", event.getStepIndex())
-        .textValue("step_name", event.getStepName())
-        .textValue("payload", event.getPayload())
-        .timestampTZValue("created_at", now)
-        .build();
+    var builder =
+        Insert.newBuilder()
+            .namespace(SagaSchema.NAMESPACE)
+            .table(SagaSchema.EVENTS_TABLE)
+            .partitionKey(Key.ofText("saga_id", sagaId))
+            .clusteringKey(Key.ofInt("sequence", sequence))
+            .textValue("event_type", event.getEventType().name())
+            .textValue("payload", event.getPayload())
+            .timestampTZValue("created_at", now);
+    switch (event) {
+      case StatusEvent se -> builder.intValue("step_index", -1);
+      case StepEvent ste ->
+          builder
+              .intValue("step_index", ste.getStepIndex())
+              .textValue("step_name", ste.getStepName());
+    }
+    return builder.build();
   }
 
   private Get buildEventGet(String sagaId, int sequence) {
@@ -789,42 +785,49 @@ public class ScalarDbSagaStore implements SagaStore {
   }
 
   private SagaEvent toSagaEvent(Result r) {
-    String eventType = r.getText("event_type");
+    String eventTypeStr = r.getText("event_type");
     int stepIndex = r.getInt("step_index");
     @Nullable String stepName = r.isNull("step_name") ? null : r.getText("step_name");
     @Nullable String payload = r.isNull("payload") ? null : r.getText("payload");
     Instant createdAt = r.getTimestampTZ("created_at");
 
-    SagaEvent event;
+    EventType eventType;
+    try {
+      eventType = EventType.valueOf(eventTypeStr);
+    } catch (IllegalArgumentException e) {
+      throw new SagaPersistenceException("Unknown event type: " + eventTypeStr, e);
+    }
+
     if (stepIndex >= 0) {
       String name = Objects.requireNonNull(stepName, "stepName must not be null for step events");
-      event =
+      StepEvent event =
           switch (eventType) {
-            case SagaEvent.STEP_COMPLETED -> SagaEvent.stepCompleted(stepIndex, name, payload);
-            case SagaEvent.STEP_FAILED -> SagaEvent.stepFailed(stepIndex, name, payload);
-            case SagaEvent.STEP_COMPENSATED -> SagaEvent.stepCompensated(stepIndex, name);
-            case SagaEvent.STEP_COMPENSATION_FAILED ->
-                SagaEvent.stepCompensationFailed(stepIndex, name, payload);
+            case STEP_COMPLETED -> StepEvent.completed(stepIndex, name, payload);
+            case STEP_FAILED -> StepEvent.failed(stepIndex, name, payload);
+            case STEP_COMPENSATED -> StepEvent.compensated(stepIndex, name);
+            case STEP_COMPENSATION_FAILED -> StepEvent.compensationFailed(stepIndex, name, payload);
             default ->
                 throw new SagaPersistenceException(
-                    "Unknown step event type: " + eventType, new IllegalStateException(eventType));
+                    "Unknown step event type: " + eventType,
+                    new IllegalStateException(eventTypeStr));
           };
+      return event.withTimestamp(createdAt);
     } else {
-      event =
+      StatusEvent event =
           switch (eventType) {
-            case SagaEvent.SAGA_STARTED -> SagaEvent.sagaStarted(payload);
-            case SagaEvent.SAGA_CONFIRMING -> SagaEvent.sagaConfirming();
-            case SagaEvent.SAGA_COMPENSATING -> SagaEvent.sagaCompensating();
-            case SagaEvent.SAGA_COMPLETED -> SagaEvent.sagaCompleted();
-            case SagaEvent.SAGA_COMPENSATED -> SagaEvent.sagaCompensated();
-            case SagaEvent.SAGA_ESCALATED ->
-                SagaEvent.sagaEscalated(payload != null ? payload : "");
+            case SAGA_STARTED -> StatusEvent.started(payload);
+            case SAGA_CONFIRMING -> StatusEvent.confirming();
+            case SAGA_COMPENSATING -> StatusEvent.compensating();
+            case SAGA_COMPLETED -> StatusEvent.completed();
+            case SAGA_COMPENSATED -> StatusEvent.compensated();
+            case SAGA_ESCALATED -> StatusEvent.escalated(payload != null ? payload : "");
             default ->
                 throw new SagaPersistenceException(
-                    "Unknown saga event type: " + eventType, new IllegalStateException(eventType));
+                    "Unknown saga event type: " + eventType,
+                    new IllegalStateException(eventTypeStr));
           };
+      return event.withTimestamp(createdAt);
     }
-    return event.withTimestamp(createdAt);
   }
 
   private SagaStateSnapshot toSagaStateSnapshot(Result r) {

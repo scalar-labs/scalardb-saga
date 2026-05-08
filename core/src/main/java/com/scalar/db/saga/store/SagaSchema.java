@@ -38,7 +38,7 @@ public final class SagaSchema {
    *
    * <p><b>Important:</b> {@code numBuckets} must remain constant once data has been written to the
    * {@code saga_state} table. Changing it causes existing sagas to map to different bucket
-   * partitions, breaking lookups in {@code recordTransition} and {@code claimForRecovery}.
+   * partitions, breaking lookups in {@code recordStatusEvent} and {@code claimForRecovery}.
    *
    * @param numBuckets the number of bucket partitions (must be &gt; 0)
    */

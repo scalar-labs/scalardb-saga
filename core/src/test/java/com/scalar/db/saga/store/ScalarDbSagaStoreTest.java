@@ -277,16 +277,16 @@ class ScalarDbSagaStoreTest {
   }
 
   // ---------------------------------------------------------------------------
-  // appendEvent
+  // recordStepEvent
   // ---------------------------------------------------------------------------
 
   @Test
-  void appendEvent_validEventGiven_insertsAndCommits() throws Exception {
+  void recordStepEvent_validEventGiven_insertsAndCommits() throws Exception {
     // Arrange
-    SagaEvent event = SagaEvent.stepCompleted(0, "debit", "{\"ok\":true}");
+    StepEvent event = StepEvent.completed(0, "debit", "{\"ok\":true}");
 
     // Act
-    store.appendEvent("saga-1", 1, event);
+    store.recordStepEvent("saga-1", 1, event);
 
     // Assert
     verify(tx).insert(any(Insert.class));
@@ -294,40 +294,33 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
-  void appendEvent_commitConflict_throwsSagaPersistenceException() throws Exception {
+  void recordStepEvent_commitConflict_throwsSagaPersistenceException() throws Exception {
     // Arrange — insert succeeds (OCC buffers locally), but commit fails
     doThrow(mock(CommitConflictException.class)).when(tx).commit();
 
     // Act & Assert
-    assertThatThrownBy(() -> store.appendEvent("saga-1", 1, SagaEvent.stepCompleted(0, "s", null)))
+    assertThatThrownBy(() -> store.recordStepEvent("saga-1", 1, StepEvent.completed(0, "s", null)))
         .isInstanceOf(SagaPersistenceException.class);
   }
 
-  @Test
-  void appendEvent_sagaLevelEventGiven_throwsIllegalArgumentException() {
-    // Act & Assert — saga-level events must go through recordTransition()
-    assertThatThrownBy(() -> store.appendEvent("saga-1", 1, SagaEvent.sagaCompleted()))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
   // ---------------------------------------------------------------------------
-  // recordTransition
+  // recordStatusEvent
   // ---------------------------------------------------------------------------
 
   @Test
-  void recordTransition_validTransition_deletesOldInsertsNewAndReturnsUpdatedSnapshot()
+  void recordStatusEvent_validTransition_deletesOldInsertsNewAndReturnsUpdatedSnapshot()
       throws Exception {
     // Arrange
     Instant now = Instant.now();
     SagaStateSnapshot current =
         new SagaStateSnapshot(
             "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", 0, "v1", now, now);
-    SagaEvent event = SagaEvent.sagaCompleted();
+    StatusEvent event = StatusEvent.completed();
     Result existingRow = mock(Result.class);
     when(tx.get(any(Get.class))).thenReturn(Optional.of(existingRow));
 
     // Act
-    SagaStateSnapshot result = store.recordTransition(current, 5, event);
+    SagaStateSnapshot result = store.recordStatusEvent(current, 5, event);
 
     // Assert
     assertThat(result.getSagaId()).isEqualTo("saga-1");
@@ -341,7 +334,7 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
-  void recordTransition_rowNotFound_throwsSagaConcurrentModificationException() throws Exception {
+  void recordStatusEvent_rowNotFound_throwsSagaConcurrentModificationException() throws Exception {
     // Arrange
     Instant now = Instant.now();
     SagaStateSnapshot current =
@@ -350,12 +343,12 @@ class ScalarDbSagaStoreTest {
     when(tx.get(any(Get.class))).thenReturn(Optional.empty());
 
     // Act & Assert
-    assertThatThrownBy(() -> store.recordTransition(current, 1, SagaEvent.sagaCompleted()))
+    assertThatThrownBy(() -> store.recordStatusEvent(current, 1, StatusEvent.completed()))
         .isInstanceOf(SagaConcurrentModificationException.class);
   }
 
   @Test
-  void recordTransition_commitConflict_throwsSagaPersistenceException() throws Exception {
+  void recordStatusEvent_commitConflict_throwsSagaPersistenceException() throws Exception {
     // Arrange — insert succeeds (OCC buffers locally), but commit fails
     Instant now = Instant.now();
     SagaStateSnapshot current =
@@ -366,22 +359,8 @@ class ScalarDbSagaStoreTest {
     doThrow(mock(CommitConflictException.class)).when(tx).commit();
 
     // Act & Assert
-    assertThatThrownBy(() -> store.recordTransition(current, 1, SagaEvent.sagaCompleted()))
+    assertThatThrownBy(() -> store.recordStatusEvent(current, 1, StatusEvent.completed()))
         .isInstanceOf(SagaPersistenceException.class);
-  }
-
-  @Test
-  void recordTransition_stepLevelEventGiven_throwsIllegalArgumentException() {
-    // Arrange
-    Instant now = Instant.now();
-    SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", 0, "v1", now, now);
-
-    // Act & Assert — step-level events must go through appendEvent()
-    assertThatThrownBy(
-            () -> store.recordTransition(current, 1, SagaEvent.stepCompleted(0, "debit", null)))
-        .isInstanceOf(IllegalArgumentException.class);
   }
 
   // ---------------------------------------------------------------------------
@@ -401,16 +380,21 @@ class ScalarDbSagaStoreTest {
 
     // Assert
     assertThat(events).hasSize(2);
-    assertThat(events.get(0).getEventType()).isEqualTo(SagaEvent.SAGA_STARTED);
-    assertThat(events.get(0).getStepIndex()).isEqualTo(-1);
-    assertThat(events.get(0).getStepName()).isNull();
-    assertThat(events.get(0).getPayload()).isEqualTo("{\"input\":1}");
-    assertThat(events.get(0).getTimestamp()).isNotNull();
-    assertThat(events.get(1).getEventType()).isEqualTo(SagaEvent.STEP_COMPLETED);
-    assertThat(events.get(1).getStepIndex()).isEqualTo(0);
-    assertThat(events.get(1).getStepName()).isEqualTo("debit");
-    assertThat(events.get(1).getPayload()).isNull();
-    assertThat(events.get(1).getTimestamp()).isNotNull();
+
+    assertThat(events.get(0)).isInstanceOf(StatusEvent.class);
+    StatusEvent statusEvent = (StatusEvent) events.get(0);
+    assertThat(statusEvent.getEventType()).isEqualTo(EventType.SAGA_STARTED);
+    assertThat(statusEvent.getTargetStatus()).isEqualTo(SagaStatus.RUNNING);
+    assertThat(statusEvent.getPayload()).isEqualTo("{\"input\":1}");
+    assertThat(statusEvent.getTimestamp()).isNotNull();
+
+    assertThat(events.get(1)).isInstanceOf(StepEvent.class);
+    StepEvent stepEvent = (StepEvent) events.get(1);
+    assertThat(stepEvent.getEventType()).isEqualTo(EventType.STEP_COMPLETED);
+    assertThat(stepEvent.getStepIndex()).isEqualTo(0);
+    assertThat(stepEvent.getStepName()).isEqualTo("debit");
+    assertThat(stepEvent.getPayload()).isNull();
+    assertThat(stepEvent.getTimestamp()).isNotNull();
   }
 
   @Test
@@ -889,12 +873,12 @@ class ScalarDbSagaStoreTest {
 
     // Assert
     assertThat(events).hasSize(6);
-    assertThat(events.get(0).getEventType()).isEqualTo(SagaEvent.SAGA_STARTED);
-    assertThat(events.get(1).getEventType()).isEqualTo(SagaEvent.SAGA_CONFIRMING);
-    assertThat(events.get(2).getEventType()).isEqualTo(SagaEvent.SAGA_COMPENSATING);
-    assertThat(events.get(3).getEventType()).isEqualTo(SagaEvent.SAGA_COMPLETED);
-    assertThat(events.get(4).getEventType()).isEqualTo(SagaEvent.SAGA_COMPENSATED);
-    assertThat(events.get(5).getEventType()).isEqualTo(SagaEvent.SAGA_ESCALATED);
+    assertThat(events.get(0).getEventType()).isEqualTo(EventType.SAGA_STARTED);
+    assertThat(events.get(1).getEventType()).isEqualTo(EventType.SAGA_CONFIRMING);
+    assertThat(events.get(2).getEventType()).isEqualTo(EventType.SAGA_COMPENSATING);
+    assertThat(events.get(3).getEventType()).isEqualTo(EventType.SAGA_COMPLETED);
+    assertThat(events.get(4).getEventType()).isEqualTo(EventType.SAGA_COMPENSATED);
+    assertThat(events.get(5).getEventType()).isEqualTo(EventType.SAGA_ESCALATED);
   }
 
   @SuppressWarnings("NullAway")
@@ -912,10 +896,10 @@ class ScalarDbSagaStoreTest {
 
     // Assert
     assertThat(events).hasSize(4);
-    assertThat(events.get(0).getEventType()).isEqualTo(SagaEvent.STEP_COMPLETED);
-    assertThat(events.get(1).getEventType()).isEqualTo(SagaEvent.STEP_FAILED);
-    assertThat(events.get(2).getEventType()).isEqualTo(SagaEvent.STEP_COMPENSATED);
-    assertThat(events.get(3).getEventType()).isEqualTo(SagaEvent.STEP_COMPENSATION_FAILED);
+    assertThat(events.get(0).getEventType()).isEqualTo(EventType.STEP_COMPLETED);
+    assertThat(events.get(1).getEventType()).isEqualTo(EventType.STEP_FAILED);
+    assertThat(events.get(2).getEventType()).isEqualTo(EventType.STEP_COMPENSATED);
+    assertThat(events.get(3).getEventType()).isEqualTo(EventType.STEP_COMPENSATION_FAILED);
   }
 
   @SuppressWarnings("NullAway")
@@ -1001,7 +985,7 @@ class ScalarDbSagaStoreTest {
     doThrow(mock(CrudConflictException.class)).when(tx).insert(any(Insert.class));
 
     // Act
-    store.appendEvent("saga-1", 1, SagaEvent.stepCompleted(0, "debit", null));
+    store.recordStepEvent("saga-1", 1, StepEvent.completed(0, "debit", null));
 
     // Assert — second transaction succeeds
     verify(tx2).insert(any(Insert.class));
@@ -1016,7 +1000,7 @@ class ScalarDbSagaStoreTest {
     doThrow(mock(CommitConflictException.class)).when(tx).commit();
 
     // Act
-    store.appendEvent("saga-1", 1, SagaEvent.stepCompleted(0, "debit", null));
+    store.recordStepEvent("saga-1", 1, StepEvent.completed(0, "debit", null));
 
     // Assert — second transaction succeeds
     verify(tx2).insert(any(Insert.class));
@@ -1036,7 +1020,7 @@ class ScalarDbSagaStoreTest {
 
     // Act & Assert
     assertThatThrownBy(
-            () -> retryStore.appendEvent("saga-1", 1, SagaEvent.stepCompleted(0, "s", null)))
+            () -> retryStore.recordStepEvent("saga-1", 1, StepEvent.completed(0, "s", null)))
         .isInstanceOf(SagaPersistenceException.class);
   }
 
@@ -1125,7 +1109,7 @@ class ScalarDbSagaStoreTest {
     doThrow(mock(CrudException.class)).when(tx).insert(any(Insert.class));
 
     // Act & Assert
-    assertThatThrownBy(() -> store.appendEvent("saga-1", 1, SagaEvent.stepCompleted(0, "s", null)))
+    assertThatThrownBy(() -> store.recordStepEvent("saga-1", 1, StepEvent.completed(0, "s", null)))
         .isInstanceOf(SagaPersistenceException.class);
     // Should retry all attempts (default 3)
     verify(txManager, times(3)).begin();
