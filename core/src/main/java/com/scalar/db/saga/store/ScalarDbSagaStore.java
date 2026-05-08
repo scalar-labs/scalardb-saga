@@ -241,11 +241,16 @@ public class ScalarDbSagaStore implements SagaStore {
                 return updated;
               },
               () -> {
-                Optional<SagaStateSnapshot> state = loadStateSnapshot(sagaId);
-                if (state.isPresent() && state.get().getStatus() == newStatus) {
-                  return state;
-                }
-                return Optional.empty();
+                return runInTransaction(
+                    tx -> {
+                      Optional<Result> result = tx.get(buildEventGet(sagaId, sequence));
+                      if (result.isPresent()) {
+                        return loadStateSnapshot(sagaId);
+                      }
+                      return Optional.empty();
+                    },
+                    null,
+                    "verify transition " + sagaId + " seq " + sequence);
               },
               "record transition for saga " + sagaId);
       cache.put(sagaId, result);
