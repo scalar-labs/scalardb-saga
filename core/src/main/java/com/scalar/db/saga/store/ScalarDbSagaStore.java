@@ -699,7 +699,12 @@ public class ScalarDbSagaStore implements SagaStore {
         .namespace(SagaSchema.NAMESPACE)
         .table(SagaSchema.STATE_TABLE)
         .partitionKey(Key.ofInt("bucket", bucket))
-        .start(Key.ofInt("status", status), true)
+        .start(
+            Key.newBuilder()
+                .addInt("status", status)
+                .addTimestampTZ("updated_at", Instant.EPOCH)
+                .build(),
+            true)
         .end(
             Key.newBuilder()
                 .addInt("status", status)
