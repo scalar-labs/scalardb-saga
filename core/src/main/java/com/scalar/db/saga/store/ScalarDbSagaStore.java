@@ -426,7 +426,7 @@ public class ScalarDbSagaStore implements SagaStore {
           "mark for recovery " + sagaId);
     } catch (Exception e) {
       // Best effort — conflict with executing thread is expected and harmless
-      logger.debug("markForRecovery failed for saga {} (best-effort)", sagaId, e);
+      logger.warn("markForRecovery failed for saga {} (best-effort)", sagaId, e);
     }
   }
 
