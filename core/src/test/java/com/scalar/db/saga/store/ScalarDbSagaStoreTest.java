@@ -227,8 +227,15 @@ class ScalarDbSagaStoreTest {
             .step("debit", "com.example.DebitStep")
             .add()
             .build();
+    SagaDefinition differentDef =
+        SagaDefinition.newBuilder("order-saga", SagaMode.SAGA)
+            .version("v1")
+            .step("credit", "com.example.CreditStep")
+            .add()
+            .build();
+    String differentJson = definitionSerializer.serialize(differentDef);
     Result existingRow = mock(Result.class);
-    when(existingRow.getText("definition_json")).thenReturn("{\"different\":\"content\"}");
+    when(existingRow.getText("definition_json")).thenReturn(differentJson);
     when(tx.get(any(Get.class))).thenReturn(Optional.of(existingRow));
 
     // Act & Assert

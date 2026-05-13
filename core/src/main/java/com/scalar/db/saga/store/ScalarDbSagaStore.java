@@ -156,8 +156,9 @@ public class ScalarDbSagaStore implements SagaStore {
           Optional<Result> existing = tx.get(buildDefinitionGet(name, version));
 
           if (existing.isPresent()) {
-            String existingJson = existing.get().getText("definition_json");
-            if (json.equals(existingJson)) {
+            SagaDefinition existingDef =
+                definitionSerializer.deserialize(existing.get().getText("definition_json"));
+            if (definition.equals(existingDef)) {
               return Boolean.TRUE; // idempotent no-op
             }
             throw new SagaDefinitionException(
