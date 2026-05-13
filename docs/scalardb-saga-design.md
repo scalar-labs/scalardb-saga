@@ -1652,7 +1652,6 @@ public class DefaultSagaManager implements SagaManager {
                 engine.executeSaga(def, saga, input);
 
                 if (callback != null) {
-                    // getStateSnapshot hits cache (populated by recordTransition) — no DB read
                     SagaStateSnapshot result = store.getStateSnapshot(saga.getSagaId()).orElseThrow();
                     switch (result.getStatus()) {
                         case COMPLETED    -> callback.onCompleted(result);
@@ -2350,7 +2349,6 @@ public class ScalarDbSagaStore implements SagaStore {
     private final DistributedTransactionManager txManager;
     private final SagaSchema schema;
     private final ScalarDbSagaStoreConfig config;
-    private final Cache<String, SagaStateSnapshot> cache;
 
     // --- Transaction execution helper ---
 
@@ -2384,6 +2382,9 @@ public class ScalarDbSagaStore implements SagaStore {
      *
      * RuntimeExceptions from the action propagate as-is (business exceptions
      * like SagaConcurrentModificationException, SagaDefinitionException).
+     * RuntimeExceptions from the verifier also propagate immediately, except
+     * SagaPersistenceException (infrastructure failure from inner transactions)
+     * which is retried.
      * Checked exceptions are wrapped in SagaPersistenceException.
      */
     <T> T runInTransaction(TransactionAction<T> action,
@@ -2422,6 +2423,10 @@ public class ScalarDbSagaStore implements SagaStore {
                         if (verified.isPresent()) return verified.get();
                         break; // verified not committed — retry transaction
                     } catch (Exception ve) {
+                        if (ve instanceof RuntimeException re
+                                && !(ve instanceof SagaPersistenceException)) {
+                            throw re;  // business-logic / programming errors propagate
+                        }
                         e.addSuppressed(ve);
                         if (v < maxAttempts - 1) { sleepForRetry(v); continue; }
                         throw new SagaPersistenceException(
@@ -2479,7 +2484,6 @@ public class ScalarDbSagaStore implements SagaStore {
                 },
                 () -> loadFromDb(id),  // commitVerifier
                 "create saga " + id);
-            cache.put(id, snapshot);
             return snapshot;
         } catch (SagaPersistenceException e) {
             if (e.getCause() instanceof CrudException) {
@@ -2550,10 +2554,8 @@ public class ScalarDbSagaStore implements SagaStore {
                     return Optional.empty();
                 },
                 "record transition for saga " + sagaId);
-            cache.put(sagaId, updated);
             return updated;
         } catch (SagaConcurrentModificationException e) {
-            cache.invalidate(sagaId);
             throw e;
         }
     }
@@ -2584,7 +2586,6 @@ public class ScalarDbSagaStore implements SagaStore {
                     return Optional.empty();
                 },
                 "claim saga " + sagaId + " for recovery");
-            cache.put(sagaId, claimed);
             return Optional.of(claimed);
         } catch (SagaConcurrentModificationException e) {
             return Optional.empty();
@@ -2609,9 +2610,8 @@ public class ScalarDbSagaStore implements SagaStore {
                 },
                 null,  // best-effort — no verifier
                 "mark for recovery " + sagaId);
-            cache.invalidate(sagaId);
         } catch (Exception e) {
-            logger.debug("markForRecovery failed for saga {} (best-effort)", sagaId, e);
+            logger.warn("markForRecovery failed for saga {} (best-effort)", sagaId, e);
         }
     }
 
@@ -2665,7 +2665,6 @@ public class ScalarDbSagaStore implements SagaStore {
                 return state.isEmpty() ? Optional.of(Boolean.TRUE) : Optional.empty();
             },
             "delete saga " + sagaId);
-        cache.invalidate(sagaId);
     }
 
     // --- Helpers ---
