@@ -34,7 +34,6 @@ import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.store.SagaStore.Recoverables;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -541,22 +540,6 @@ class ScalarDbSagaStoreTest {
 
     // Assert
     assertThat(snapshot).isEmpty();
-  }
-
-  @Test
-  void getStateSnapshot_calledTwice_returnsCachedResult() throws Exception {
-    // Arrange
-    Result result = mockStateResult("saga-1", SagaStatus.RUNNING);
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(result));
-
-    // Act
-    store.getStateSnapshot("saga-1");
-    Optional<SagaStateSnapshot> cached = store.getStateSnapshot("saga-1");
-
-    // Assert — second call should use cache, so txManager.begin() called only once
-    assertThat(cached).isPresent();
-    assertThat(cached.get().getSagaId()).isEqualTo("saga-1");
-    verify(txManager, times(1)).begin();
   }
 
   // ---------------------------------------------------------------------------
@@ -1260,73 +1243,6 @@ class ScalarDbSagaStoreTest {
     // Act & Assert
     assertThatThrownBy(() -> ScalarDbSagaStoreConfig.builder().transactionRetryCount(0))
         .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void build_withDefaults_hasDefaultCacheMaxSize() {
-    // Act
-    ScalarDbSagaStoreConfig config = ScalarDbSagaStoreConfig.builder().build();
-
-    // Assert
-    assertThat(config.getCacheMaxSize()).isEqualTo(1000);
-  }
-
-  @Test
-  void cacheMaxSize_positiveValueGiven_setsValue() {
-    // Act
-    ScalarDbSagaStoreConfig config = ScalarDbSagaStoreConfig.builder().cacheMaxSize(500).build();
-
-    // Assert
-    assertThat(config.getCacheMaxSize()).isEqualTo(500);
-  }
-
-  @Test
-  void cacheMaxSize_negativeValueGiven_throwsIllegalArgumentException() {
-    // Act & Assert
-    assertThatThrownBy(() -> ScalarDbSagaStoreConfig.builder().cacheMaxSize(-1))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void build_withDefaults_hasDefaultCacheExpireAfterWrite() {
-    // Act
-    ScalarDbSagaStoreConfig config = ScalarDbSagaStoreConfig.builder().build();
-
-    // Assert
-    assertThat(config.getCacheExpireAfterWrite()).isEqualTo(Duration.ofMinutes(5));
-  }
-
-  @Test
-  void cacheExpireAfterWrite_customValueGiven_setsValue() {
-    // Act
-    ScalarDbSagaStoreConfig config =
-        ScalarDbSagaStoreConfig.builder().cacheExpireAfterWrite(Duration.ofSeconds(30)).build();
-
-    // Assert
-    assertThat(config.getCacheExpireAfterWrite()).isEqualTo(Duration.ofSeconds(30));
-  }
-
-  @Test
-  void cacheExpireAfterWrite_zeroGiven_throwsIllegalArgumentException() {
-    // Act & Assert
-    assertThatThrownBy(() -> ScalarDbSagaStoreConfig.builder().cacheExpireAfterWrite(Duration.ZERO))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void cacheExpireAfterWrite_negativeGiven_throwsIllegalArgumentException() {
-    // Act & Assert
-    assertThatThrownBy(
-            () -> ScalarDbSagaStoreConfig.builder().cacheExpireAfterWrite(Duration.ofSeconds(-1)))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  @SuppressWarnings("NullAway")
-  void cacheExpireAfterWrite_nullGiven_throwsNullPointerException() {
-    // Act & Assert
-    assertThatThrownBy(() -> ScalarDbSagaStoreConfig.builder().cacheExpireAfterWrite(null))
-        .isInstanceOf(NullPointerException.class);
   }
 
   @Test

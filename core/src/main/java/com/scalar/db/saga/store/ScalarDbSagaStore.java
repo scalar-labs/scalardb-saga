@@ -2,8 +2,6 @@ package com.scalar.db.saga.store;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.github.benmanes.caffeine.cache.Cache;
-import com.github.benmanes.caffeine.cache.Caffeine;
 import com.scalar.db.api.Delete;
 import com.scalar.db.api.DistributedTransaction;
 import com.scalar.db.api.DistributedTransactionManager;
@@ -65,7 +63,6 @@ public class ScalarDbSagaStore implements SagaStore {
   private final SagaSchema schema;
   private final ScalarDbSagaStoreConfig config;
   private final SagaDefinitionSerializer definitionSerializer;
-  private final Cache<String, SagaStateSnapshot> cache;
 
   /**
    * Creates a new store instance.
@@ -85,11 +82,6 @@ public class ScalarDbSagaStore implements SagaStore {
     this.schema = Objects.requireNonNull(schema, "schema must not be null");
     this.config = Objects.requireNonNull(config, "config must not be null");
     this.definitionSerializer = new SagaDefinitionSerializer(objectMapper);
-    this.cache =
-        Caffeine.newBuilder()
-            .maximumSize(config.getCacheMaxSize())
-            .expireAfterWrite(config.getCacheExpireAfterWrite())
-            .build();
   }
 
   // ---------------------------------------------------------------------------
@@ -129,7 +121,6 @@ public class ScalarDbSagaStore implements SagaStore {
               () -> loadStateSnapshot(id),
               "create saga " + id,
               false);
-      cache.put(id, result);
       return result;
     } catch (SagaPersistenceException e) {
       Optional<SagaStateSnapshot> existing = Optional.empty();
@@ -269,10 +260,8 @@ public class ScalarDbSagaStore implements SagaStore {
                     "verify transition " + sagaId + " seq " + sequence);
               },
               "record transition for saga " + sagaId);
-      cache.put(sagaId, result);
       return result;
     } catch (SagaConcurrentModificationException | SagaPersistenceException e) {
-      cache.invalidate(sagaId);
       throw e;
     }
   }
@@ -306,16 +295,7 @@ public class ScalarDbSagaStore implements SagaStore {
 
   @Override
   public Optional<SagaStateSnapshot> getStateSnapshot(String sagaId) {
-    SagaStateSnapshot cached = cache.getIfPresent(sagaId);
-    if (cached != null) {
-      return Optional.of(cached);
-    }
-    return loadStateSnapshot(sagaId)
-        .map(
-            loaded -> {
-              cache.put(sagaId, loaded);
-              return loaded;
-            });
+    return loadStateSnapshot(sagaId);
   }
 
   // ---------------------------------------------------------------------------
@@ -406,10 +386,8 @@ public class ScalarDbSagaStore implements SagaStore {
                 return Optional.empty();
               },
               "claim saga " + sagaId + " for recovery");
-      cache.put(sagaId, result);
       return Optional.of(result);
     } catch (SagaConcurrentModificationException e) {
-      cache.invalidate(sagaId);
       return Optional.empty();
     }
   }
@@ -446,7 +424,6 @@ public class ScalarDbSagaStore implements SagaStore {
           },
           null, // best-effort — no verifier
           "mark for recovery " + sagaId);
-      cache.invalidate(sagaId);
     } catch (Exception e) {
       // Best effort — conflict with executing thread is expected and harmless
       logger.debug("markForRecovery failed for saga {} (best-effort)", sagaId, e);
@@ -519,7 +496,6 @@ public class ScalarDbSagaStore implements SagaStore {
           return state.isEmpty() ? Optional.of(Boolean.TRUE) : Optional.empty();
         },
         "delete saga " + sagaId);
-    cache.invalidate(sagaId);
   }
 
   // ---------------------------------------------------------------------------
