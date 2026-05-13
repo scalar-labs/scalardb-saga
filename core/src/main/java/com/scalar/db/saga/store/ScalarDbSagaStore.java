@@ -173,7 +173,18 @@ public class ScalarDbSagaStore implements SagaStore {
         },
         () -> {
           Optional<SagaDefinition> found = getDefinition(name, version);
-          return found.isPresent() ? Optional.of(Boolean.TRUE) : Optional.empty();
+          if (found.isEmpty()) {
+            return Optional.empty();
+          }
+          // Verify the found definition matches what we tried to register.
+          // A different definition means a concurrent registration won;
+          // our insert did not commit. Return empty so the retry's primary
+          // action detects the conflict and throws SagaDefinitionException.
+          String foundJson = definitionSerializer.serialize(found.get());
+          if (!json.equals(foundJson)) {
+            return Optional.empty();
+          }
+          return Optional.of(Boolean.TRUE);
         },
         "register definition " + name + " " + version);
   }
@@ -594,6 +605,12 @@ public class ScalarDbSagaStore implements SagaStore {
             }
             break; // Verified not committed — retry the transaction
           } catch (Exception ve) {
+            // Business-logic or programming errors propagate immediately.
+            // Only SagaPersistenceException (infrastructure failure from inner
+            // transactions) and checked exceptions are retried.
+            if (ve instanceof RuntimeException re && !(ve instanceof SagaPersistenceException)) {
+              throw re;
+            }
             e.addSuppressed(ve);
             if (v < maxAttempts - 1) {
               sleepForRetry(v);

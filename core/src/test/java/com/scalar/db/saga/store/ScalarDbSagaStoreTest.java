@@ -239,6 +239,68 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
+  void registerDefinition_unknownStatusAndVerifierFindsMatchingDefinition_succeeds()
+      throws Exception {
+    // Arrange — commit throws UTSE, verifier finds the same definition
+    SagaDefinition def =
+        SagaDefinition.newBuilder("order-saga", SagaMode.SAGA)
+            .version("v1")
+            .step("debit", "com.example.DebitStep")
+            .add()
+            .build();
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    // Verifier uses a new transaction to re-read the definition
+    DistributedTransaction tx2 = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(tx2);
+    String json = definitionSerializer.serialize(def);
+    Result defResult = mock(Result.class);
+    when(defResult.getText("definition_json")).thenReturn(json);
+    when(tx2.get(any(Get.class))).thenReturn(Optional.of(defResult));
+
+    // Act
+    store.registerDefinition(def);
+
+    // Assert — verifier confirmed committed (no exception)
+    verify(tx2).get(any(Get.class));
+  }
+
+  @Test
+  void
+      registerDefinition_unknownStatusAndVerifierFindsDifferentDefinition_throwsSagaDefinitionException()
+          throws Exception {
+    // Arrange — commit throws UTSE, verifier finds a different definition.
+    // Verifier returns empty (our insert didn't commit), retry's primary action
+    // detects the conflict and throws SagaDefinitionException.
+    SagaDefinition def =
+        SagaDefinition.newBuilder("order-saga", SagaMode.SAGA)
+            .version("v1")
+            .step("debit", "com.example.DebitStep")
+            .add()
+            .build();
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    // tx2: verifier's getDefinition — finds different content
+    DistributedTransaction tx2 = mock(DistributedTransaction.class);
+    // tx3: retry's primary action — finds existing different definition
+    DistributedTransaction tx3 = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(tx2).thenReturn(tx3);
+    SagaDefinition differentDef =
+        SagaDefinition.newBuilder("order-saga", SagaMode.SAGA)
+            .version("v1")
+            .step("credit", "com.example.CreditStep")
+            .add()
+            .build();
+    String differentJson = definitionSerializer.serialize(differentDef);
+    Result defResult = mock(Result.class);
+    when(defResult.getText("definition_json")).thenReturn(differentJson);
+    when(tx2.get(any(Get.class))).thenReturn(Optional.of(defResult));
+    when(tx3.get(any(Get.class))).thenReturn(Optional.of(defResult));
+
+    // Act & Assert
+    assertThatThrownBy(() -> store.registerDefinition(def))
+        .isInstanceOf(SagaDefinitionException.class);
+  }
+
+  @Test
   void getDefinition_existingDefinition_returnsDefinition() throws Exception {
     // Arrange
     SagaDefinition def =
@@ -1082,6 +1144,31 @@ class ScalarDbSagaStoreTest {
             () -> retryStore.createSaga("saga-1", "order-saga", "engine-1", Map.of(), "v1"))
         .isInstanceOf(SagaPersistenceException.class)
         .hasMessageContaining("commit status unknown and verification failed");
+  }
+
+  @Test
+  void runInTransaction_unknownStatusWithVerifierThrowsRuntimeException_propagatesImmediately()
+      throws Exception {
+    // Arrange — UTSE on commit, verifier throws a non-SagaPersistenceException RuntimeException.
+    // Should propagate immediately without retrying.
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    IllegalStateException verifierError = new IllegalStateException("unexpected state");
+    ScalarDbSagaStore spyStore =
+        new ScalarDbSagaStore(
+            txManager, objectMapper, schema, ScalarDbSagaStoreConfig.builder().build());
+
+    // Act & Assert
+    assertThatThrownBy(
+            () ->
+                spyStore.runInTransaction(
+                    tx -> Boolean.TRUE,
+                    () -> {
+                      throw verifierError;
+                    },
+                    "test operation"))
+        .isSameAs(verifierError);
+    // Only one transaction attempt — no retries after RuntimeException from verifier
+    verify(txManager, times(1)).begin();
   }
 
   @Test
