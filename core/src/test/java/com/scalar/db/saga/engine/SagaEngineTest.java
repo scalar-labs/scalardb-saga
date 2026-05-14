@@ -31,6 +31,7 @@ import com.scalar.db.saga.store.StatusEvent;
 import com.scalar.db.saga.store.StepEvent;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.AfterEach;
@@ -46,22 +47,18 @@ class SagaEngineTest {
 
   private SagaStore store;
   private StepRegistry stepRegistry;
-  private CompensationManager compensationManager;
   private SagaEngine engine;
 
   @BeforeEach
   void setUp() {
     store = mock(SagaStore.class);
     stepRegistry = new StepRegistry();
-    compensationManager = new CompensationManager(store, fastRetryPolicy());
     engine =
         new SagaEngine(
             store,
-            compensationManager,
             stepRegistry,
             OWNER_ID,
-            SagaEngine.ShutdownMode.WAIT_CURRENT_STEP,
-            5000);
+            new SagaEngine.ShutdownConfig(SagaEngine.ShutdownMode.WAIT_CURRENT_STEP, 5000));
   }
 
   @AfterEach
@@ -492,11 +489,9 @@ class SagaEngineTest {
       SagaEngine clockEngine =
           new SagaEngine(
               store,
-              compensationManager,
               stepRegistry,
               OWNER_ID,
-              SagaEngine.ShutdownMode.WAIT_CURRENT_STEP,
-              5000,
+              new SagaEngine.ShutdownConfig(SagaEngine.ShutdownMode.WAIT_CURRENT_STEP, 5000),
               mockClock);
 
       Step step0 = successStep("s0");
@@ -539,11 +534,9 @@ class SagaEngineTest {
       SagaEngine clockEngine =
           new SagaEngine(
               store,
-              compensationManager,
               stepRegistry,
               OWNER_ID,
-              SagaEngine.ShutdownMode.WAIT_CURRENT_STEP,
-              5000,
+              new SagaEngine.ShutdownConfig(SagaEngine.ShutdownMode.WAIT_CURRENT_STEP, 5000),
               mockClock);
 
       Step step0 = successStep("s0");
@@ -613,11 +606,9 @@ class SagaEngineTest {
       engine =
           new SagaEngine(
               store,
-              compensationManager,
               stepRegistry,
               OWNER_ID,
-              SagaEngine.ShutdownMode.WAIT_CURRENT_STEP,
-              5000);
+              new SagaEngine.ShutdownConfig(SagaEngine.ShutdownMode.WAIT_CURRENT_STEP, 5000));
 
       // Act
       engine.executeSaga(def, saga, Map.of());
@@ -647,11 +638,10 @@ class SagaEngineTest {
       engine =
           new SagaEngine(
               store,
-              compensationManager,
               stepRegistry,
               OWNER_ID,
-              SagaEngine.ShutdownMode.WAIT_ALL_SAGAS,
-              100); // 100ms timeout
+              new SagaEngine.ShutdownConfig(
+                  SagaEngine.ShutdownMode.WAIT_ALL_SAGAS, 100)); // 100ms timeout
 
       // Start saga in background
       Thread sagaThread = new Thread(() -> engine.executeSaga(def, saga, Map.of()));
@@ -883,6 +873,167 @@ class SagaEngineTest {
       // Assert — no SAGA_COMPENSATED transition (stays COMPENSATING)
       ArgumentCaptor<StatusEvent> eventCaptor = ArgumentCaptor.forClass(StatusEvent.class);
       verify(store, never()).recordStatusEvent(any(), anyInt(), eventCaptor.capture());
+    }
+  }
+
+  // =========================================================================
+  // compensateSteps (migrated from CompensationManagerTest)
+  // =========================================================================
+
+  @Nested
+  class CompensateSteps {
+
+    private ExecutionContext createCompensatingContext() {
+      SagaStateSnapshot state = compensatingSnapshot("saga-1");
+      return new ExecutionContext("saga-1", Map.of(), state);
+    }
+
+    private Step createStep(String name) {
+      Step step = mock(Step.class);
+      when(step.getName()).thenReturn(name);
+      return step;
+    }
+
+    private List<StepWithPolicy> createPlan(Step... steps) {
+      List<StepWithPolicy> plan = new ArrayList<>();
+      for (Step step : steps) {
+        plan.add(new StepWithPolicy(step, fastRetryPolicy(), fastRetryPolicy(), 0));
+      }
+      return plan;
+    }
+
+    @Test
+    void compensateSteps_threeStepsGiven_compensatesInReverseOrder() throws Exception {
+      // Arrange
+      Step step0 = createStep("step0");
+      Step step1 = createStep("step1");
+      Step step2 = createStep("step2");
+      List<StepWithPolicy> plan = createPlan(step0, step1, step2);
+      ExecutionContext context = createCompensatingContext();
+
+      // Act
+      engine.compensateSteps(plan, context, 2);
+
+      // Assert — verify LIFO order
+      var inOrder = org.mockito.Mockito.inOrder(step2, step1, step0);
+      inOrder.verify(step2).compensate(context);
+      inOrder.verify(step1).compensate(context);
+      inOrder.verify(step0).compensate(context);
+    }
+
+    @Test
+    void compensateSteps_retryableFailure_retriesUpToMaxAttempts() throws Exception {
+      // Arrange
+      Step step0 = createStep("step0");
+      doThrow(new StepCompensationException("transient"))
+          .doThrow(new StepCompensationException("transient"))
+          .doNothing()
+          .when(step0)
+          .compensate(any(SagaContext.class));
+      List<StepWithPolicy> plan = createPlan(step0);
+      ExecutionContext context = createCompensatingContext();
+
+      // Act
+      engine.compensateSteps(plan, context, 0);
+
+      // Assert — 3 attempts total (2 failures + 1 success)
+      verify(step0, times(3)).compensate(context);
+      verify(store).recordStepEvent(eq("saga-1"), anyInt(), any(StepEvent.class));
+    }
+
+    @Test
+    void compensateSteps_allRetriesExhausted_appendsFailedEventAndThrows() throws Exception {
+      // Arrange
+      Step step0 = createStep("step0");
+      doThrow(new StepCompensationException("persistent"))
+          .when(step0)
+          .compensate(any(SagaContext.class));
+      List<StepWithPolicy> plan = createPlan(step0);
+      ExecutionContext context = createCompensatingContext();
+
+      // Act & Assert
+      assertThatThrownBy(() -> engine.compensateSteps(plan, context, 0))
+          .isInstanceOf(StepCompensationException.class);
+
+      // Verify all 3 retry attempts were made
+      verify(step0, times(3)).compensate(any(SagaContext.class));
+
+      // Verify STEP_COMPENSATION_FAILED event appended
+      ArgumentCaptor<StepEvent> eventCaptor = ArgumentCaptor.forClass(StepEvent.class);
+      verify(store).recordStepEvent(eq("saga-1"), anyInt(), eventCaptor.capture());
+      assertThat(eventCaptor.getValue().getEventType())
+          .isEqualTo(EventType.STEP_COMPENSATION_FAILED);
+    }
+
+    @Test
+    void compensateSteps_singleStepGiven_compensatesSuccessfully() throws Exception {
+      // Arrange
+      Step step0 = createStep("step0");
+      List<StepWithPolicy> plan = createPlan(step0);
+      ExecutionContext context = createCompensatingContext();
+
+      // Act
+      engine.compensateSteps(plan, context, 0);
+
+      // Assert
+      verify(step0).compensate(context);
+      ArgumentCaptor<StepEvent> eventCaptor = ArgumentCaptor.forClass(StepEvent.class);
+      verify(store).recordStepEvent(eq("saga-1"), anyInt(), eventCaptor.capture());
+      assertThat(eventCaptor.getValue().getEventType()).isEqualTo(EventType.STEP_COMPENSATED);
+    }
+
+    @Test
+    void compensateSteps_noSteps_completesImmediately() throws Exception {
+      // Arrange
+      Step step0 = createStep("step0");
+      List<StepWithPolicy> plan = createPlan(step0);
+      ExecutionContext context = createCompensatingContext();
+
+      // Act — fromStepIndex = -1 means no steps to compensate
+      engine.compensateSteps(plan, context, -1);
+
+      // Assert
+      verify(step0, never()).compensate(any(SagaContext.class));
+      verify(store, never()).recordStepEvent(anyString(), anyInt(), any(StepEvent.class));
+    }
+
+    @Test
+    void compensateSteps_alreadyCompensatedStep_skipped() throws Exception {
+      // Arrange
+      Step step0 = createStep("step0");
+      Step step1 = createStep("step1");
+      List<StepWithPolicy> plan = createPlan(step0, step1);
+      ExecutionContext context = createCompensatingContext();
+      context.markStepCompensated(1); // step1 already compensated
+
+      // Act
+      engine.compensateSteps(plan, context, 1);
+
+      // Assert — step1 skipped, step0 compensated
+      verify(step1, never()).compensate(any(SagaContext.class));
+      verify(step0).compensate(context);
+    }
+
+    @Test
+    void compensateSteps_success_appendsStepCompensatedEvents() throws Exception {
+      // Arrange
+      Step step0 = createStep("step0");
+      Step step1 = createStep("step1");
+      List<StepWithPolicy> plan = createPlan(step0, step1);
+      ExecutionContext context = createCompensatingContext();
+
+      // Act
+      engine.compensateSteps(plan, context, 1);
+
+      // Assert — two STEP_COMPENSATED events
+      ArgumentCaptor<StepEvent> eventCaptor = ArgumentCaptor.forClass(StepEvent.class);
+      verify(store, times(2)).recordStepEvent(eq("saga-1"), anyInt(), eventCaptor.capture());
+      List<StepEvent> events = eventCaptor.getAllValues();
+      assertThat(events).hasSize(2);
+      assertThat(events.get(0).getEventType()).isEqualTo(EventType.STEP_COMPENSATED);
+      assertThat(events.get(0).getStepIndex()).isEqualTo(1);
+      assertThat(events.get(1).getEventType()).isEqualTo(EventType.STEP_COMPENSATED);
+      assertThat(events.get(1).getStepIndex()).isEqualTo(0);
     }
   }
 

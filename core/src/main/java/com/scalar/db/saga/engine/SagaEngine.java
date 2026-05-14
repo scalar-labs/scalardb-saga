@@ -44,7 +44,6 @@ import org.slf4j.LoggerFactory;
 public class SagaEngine implements AutoCloseable {
 
   private static final Logger logger = LoggerFactory.getLogger(SagaEngine.class);
-  private static final long DEFAULT_WAIT_CURRENT_STEP_TIMEOUT_MILLIS = 30_000;
 
   /** Shutdown strategy for in-flight sagas. */
   public enum ShutdownMode {
@@ -54,65 +53,54 @@ public class SagaEngine implements AutoCloseable {
     WAIT_ALL_SAGAS
   }
 
+  /** Shutdown configuration for the engine. */
+  public record ShutdownConfig(ShutdownMode mode, long timeoutMillis) {
+
+    public ShutdownConfig {
+      Objects.requireNonNull(mode, "mode must not be null");
+      if (timeoutMillis < 0) {
+        throw new IllegalArgumentException("timeoutMillis must be >= 0, got " + timeoutMillis);
+      }
+    }
+
+    private static final ShutdownConfig DEFAULT =
+        new ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 30_000);
+
+    public static ShutdownConfig defaultConfig() {
+      return DEFAULT;
+    }
+  }
+
   private final SagaStore store;
-  private final CompensationManager compensationManager;
   private final StepRegistry stepRegistry;
   private final String ownerId;
-  private final ShutdownMode shutdownMode;
-  private final long shutdownTimeoutMillis;
+  private final ShutdownConfig shutdownConfig;
   private final Clock clock;
   private volatile boolean shuttingDown = false;
   private final Object shutdownLock = new Object();
   private final Set<String> activeSagas = ConcurrentHashMap.newKeySet();
-  private final ExecutorService stepExecutor = Executors.newVirtualThreadPerTaskExecutor();
+  private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
 
   public SagaEngine(
       SagaStore store,
-      CompensationManager compensationManager,
       StepRegistry stepRegistry,
       String ownerId,
-      ShutdownMode shutdownMode,
-      long shutdownTimeoutMillis,
+      ShutdownConfig shutdownConfig,
       Clock clock) {
     this.store = Objects.requireNonNull(store, "store must not be null");
-    this.compensationManager =
-        Objects.requireNonNull(compensationManager, "compensationManager must not be null");
     this.stepRegistry = Objects.requireNonNull(stepRegistry, "stepRegistry must not be null");
     this.ownerId = Objects.requireNonNull(ownerId, "ownerId must not be null");
-    this.shutdownMode = Objects.requireNonNull(shutdownMode, "shutdownMode must not be null");
-    this.shutdownTimeoutMillis = shutdownTimeoutMillis;
+    this.shutdownConfig = Objects.requireNonNull(shutdownConfig, "shutdownConfig must not be null");
     this.clock = Objects.requireNonNull(clock, "clock must not be null");
   }
 
   public SagaEngine(
-      SagaStore store,
-      CompensationManager compensationManager,
-      StepRegistry stepRegistry,
-      String ownerId,
-      ShutdownMode shutdownMode,
-      long shutdownTimeoutMillis) {
-    this(
-        store,
-        compensationManager,
-        stepRegistry,
-        ownerId,
-        shutdownMode,
-        shutdownTimeoutMillis,
-        Clock.systemUTC());
+      SagaStore store, StepRegistry stepRegistry, String ownerId, ShutdownConfig shutdownConfig) {
+    this(store, stepRegistry, ownerId, shutdownConfig, Clock.systemUTC());
   }
 
-  public SagaEngine(
-      SagaStore store,
-      CompensationManager compensationManager,
-      StepRegistry stepRegistry,
-      String ownerId) {
-    this(
-        store,
-        compensationManager,
-        stepRegistry,
-        ownerId,
-        ShutdownMode.WAIT_CURRENT_STEP,
-        DEFAULT_WAIT_CURRENT_STEP_TIMEOUT_MILLIS);
+  public SagaEngine(SagaStore store, StepRegistry stepRegistry, String ownerId) {
+    this(store, stepRegistry, ownerId, ShutdownConfig.defaultConfig());
   }
 
   // ---------------------------------------------------------------------------
@@ -221,7 +209,7 @@ public class SagaEngine implements AutoCloseable {
       shuttingDown = true;
     }
 
-    long deadline = clock.millis() + shutdownTimeoutMillis;
+    long deadline = clock.millis() + shutdownConfig.timeoutMillis();
 
     while (!activeSagas.isEmpty()) {
       long remaining = deadline - clock.millis();
@@ -246,7 +234,7 @@ public class SagaEngine implements AutoCloseable {
       }
     }
 
-    stepExecutor.shutdownNow();
+    executor.shutdownNow();
   }
 
   @Override
@@ -312,7 +300,10 @@ public class SagaEngine implements AutoCloseable {
       try {
         StepResult result =
             executeWithRetry(
-                stepWithPolicy.step(), context, stepWithPolicy.retryPolicy(), stepDeadline);
+                stepWithPolicy.step(),
+                context,
+                stepWithPolicy.executionRetryPolicy(),
+                stepDeadline);
         recordStepCompleted(context, i, stepWithPolicy.step().getName(), result);
       } catch (StepExecutionException e) {
         recordStepFailed(context, i, stepWithPolicy.step().getName(), e);
@@ -357,14 +348,14 @@ public class SagaEngine implements AutoCloseable {
    * @throws StepExecutionException if the step fails after all retries or is non-retryable
    */
   private StepResult executeWithRetry(
-      Step step, ExecutionContext context, RetryPolicy policy, long stepDeadline)
+      Step step, ExecutionContext context, RetryPolicy retryPolicy, long stepDeadline)
       throws StepExecutionException {
 
-    int maxAttempts = policy.getMaxAttempts();
-    long interval = policy.getInitialIntervalMillis();
+    int maxAttempts = retryPolicy.getMaxAttempts();
+    long interval = retryPolicy.getInitialIntervalMillis();
 
     for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-      Future<StepResult> future = stepExecutor.submit(() -> step.execute(context));
+      Future<StepResult> future = executor.submit(() -> step.execute(context));
 
       try {
         if (stepDeadline <= 0) {
@@ -390,13 +381,14 @@ public class SagaEngine implements AutoCloseable {
         Throwable cause = e.getCause();
         if (cause instanceof StepExecutionException see) {
           if (see.isRetryable() && attempt < maxAttempts) {
-            logger.debug(
+            logger.warn(
                 "Retryable failure on step '{}', attempt {}/{}",
                 step.getName(),
                 attempt,
-                maxAttempts);
+                maxAttempts,
+                see);
             try {
-              interval = policy.sleepWithBackoff(interval);
+              interval = retryPolicy.sleepWithBackoff(interval);
             } catch (InterruptedException ie) {
               Thread.currentThread().interrupt();
               throw new StepExecutionException(
@@ -425,11 +417,12 @@ public class SagaEngine implements AutoCloseable {
     if (def.getMode() == SagaMode.TCC) {
       return expandTccPlan(def);
     }
+    RetryPolicy compensationPolicy = RetryPolicy.compensationDefault();
     List<StepWithPolicy> plan = new ArrayList<>();
     for (StepDefinition stepDef : def.getSteps()) {
       Step step = stepRegistry.getStep(stepDef.getName());
       RetryPolicy policy = resolveRetryPolicy(stepDef, def);
-      plan.add(new StepWithPolicy(step, policy, stepDef.getTimeoutMillis()));
+      plan.add(new StepWithPolicy(step, policy, compensationPolicy, stepDef.getTimeoutMillis()));
     }
     return plan;
   }
@@ -437,20 +430,27 @@ public class SagaEngine implements AutoCloseable {
   private List<StepWithPolicy> expandTccPlan(SagaDefinition def) {
     List<StepWithPolicy> plan = new ArrayList<>();
     RetryPolicy confirmPolicy = RetryPolicy.confirmDefault();
+    RetryPolicy compensationPolicy = RetryPolicy.compensationDefault();
 
     for (StepDefinition stepDef : def.getSteps()) {
       TccStep tccStep = stepRegistry.getTccStep(stepDef.getName());
       RetryPolicy reservePolicy = resolveRetryPolicy(stepDef, def);
       plan.add(
           new StepWithPolicy(
-              new TccReserveStep(tccStep), reservePolicy, stepDef.getTimeoutMillis()));
+              new TccReserveStep(tccStep),
+              reservePolicy,
+              compensationPolicy,
+              stepDef.getTimeoutMillis()));
     }
 
     for (StepDefinition stepDef : def.getSteps()) {
       TccStep tccStep = stepRegistry.getTccStep(stepDef.getName());
       plan.add(
           new StepWithPolicy(
-              new TccConfirmStep(tccStep), confirmPolicy, stepDef.getTimeoutMillis()));
+              new TccConfirmStep(tccStep),
+              confirmPolicy,
+              compensationPolicy,
+              stepDef.getTimeoutMillis()));
     }
 
     return plan;
@@ -476,7 +476,46 @@ public class SagaEngine implements AutoCloseable {
   }
 
   // ---------------------------------------------------------------------------
-  // Private — compensation and state transitions
+  // Package-private — compensation
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Compensates steps in reverse order (LIFO) from {@code fromStepIndex} down to 0.
+   *
+   * <p>Package-private for testing.
+   *
+   * @param plan the execution plan
+   * @param context the execution context
+   * @param fromStepIndex the highest step index to compensate (inclusive)
+   * @throws StepCompensationException if compensation fails after retries exhausted
+   */
+  void compensateSteps(List<StepWithPolicy> plan, ExecutionContext context, int fromStepIndex) {
+    for (int i = fromStepIndex; i >= 0; i--) {
+      if (context.isStepCompensated(i)) {
+        logger.debug("Skipping already-compensated step at index {}", i);
+        continue;
+      }
+
+      StepWithPolicy stepWithPolicy = plan.get(i);
+      Step step = stepWithPolicy.step();
+      String stepName = step.getName();
+
+      try {
+        long stepDeadline =
+            stepWithPolicy.stepTimeoutMillis() <= 0
+                ? 0
+                : clock.millis() + stepWithPolicy.stepTimeoutMillis();
+        compensateWithRetry(step, context, stepWithPolicy.compensationRetryPolicy(), stepDeadline);
+        recordStepCompensated(context, i, stepName);
+      } catch (StepCompensationException e) {
+        recordStepCompensationFailed(context, i, stepName);
+        throw new StepCompensationException(stepName, i, e);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Private — compensation helpers
   // ---------------------------------------------------------------------------
 
   /**
@@ -488,13 +527,104 @@ public class SagaEngine implements AutoCloseable {
       transition(context, StatusEvent.compensating());
     }
     try {
-      compensationManager.compensate(plan, context, fromStepIndex);
+      compensateSteps(plan, context, fromStepIndex);
       transition(context, StatusEvent.compensated());
     } catch (StepCompensationException e) {
       // Saga stays COMPENSATING — recovery will retry
       logger.warn("Compensation incomplete for saga {}: {}", context.getSagaId(), e.getMessage());
     }
   }
+
+  private void compensateWithRetry(
+      Step step, ExecutionContext context, RetryPolicy retryPolicy, long stepDeadline)
+      throws StepCompensationException {
+    int maxAttempts = retryPolicy.getMaxAttempts();
+    long interval = retryPolicy.getInitialIntervalMillis();
+
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+      Future<?> future =
+          executor.submit(
+              () -> {
+                step.compensate(context);
+                return null;
+              });
+
+      try {
+        if (stepDeadline <= 0) {
+          future.get();
+        } else {
+          long remaining = stepDeadline - clock.millis();
+          if (remaining <= 0) {
+            future.cancel(true);
+            throw new StepCompensationException(
+                "Compensation of step '"
+                    + step.getName()
+                    + "' timed out (deadline already passed)");
+          }
+          future.get(remaining, TimeUnit.MILLISECONDS);
+        }
+        return;
+      } catch (TimeoutException e) {
+        future.cancel(true);
+        throw new StepCompensationException(
+            "Compensation of step '"
+                + step.getName()
+                + "' timed out after "
+                + stepDeadline
+                + "ms deadline");
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        future.cancel(true);
+        throw new StepCompensationException(
+            "Compensation of step '" + step.getName() + "' interrupted");
+      } catch (ExecutionException e) {
+        Throwable cause = e.getCause();
+        StepCompensationException sce;
+        if (cause instanceof StepCompensationException s) {
+          sce = s;
+        } else {
+          sce = new StepCompensationException(cause != null ? cause : e);
+        }
+
+        logger.warn(
+            "Compensation attempt {}/{} failed for step '{}'",
+            attempt,
+            maxAttempts,
+            step.getName(),
+            sce);
+        if (attempt < maxAttempts) {
+          try {
+            interval = retryPolicy.sleepWithBackoff(interval);
+          } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw sce;
+          }
+        } else {
+          throw sce;
+        }
+      }
+    }
+  }
+
+  private void recordStepCompensated(ExecutionContext context, int stepIndex, String stepName) {
+    store.recordStepEvent(
+        context.getSagaId(), context.nextSequence(), StepEvent.compensated(stepIndex, stepName));
+    context.advanceSequence();
+    context.markStepCompensated(stepIndex);
+  }
+
+  private void recordStepCompensationFailed(
+      ExecutionContext context, int stepIndex, String stepName) {
+    store.recordStepEvent(
+        context.getSagaId(),
+        context.nextSequence(),
+        StepEvent.compensationFailed(stepIndex, stepName, null));
+    context.advanceSequence();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Private — state transitions
+  // ---------------------------------------------------------------------------
 
   private void transition(ExecutionContext context, StatusEvent event) {
     SagaStateSnapshot newState =
@@ -522,6 +652,6 @@ public class SagaEngine implements AutoCloseable {
   }
 
   private boolean shouldStopBetweenSteps() {
-    return shuttingDown && shutdownMode == ShutdownMode.WAIT_CURRENT_STEP;
+    return shuttingDown && shutdownConfig.mode() == ShutdownMode.WAIT_CURRENT_STEP;
   }
 }

@@ -15,13 +15,15 @@ class StepWithPolicyTest {
     // Arrange
     Step step = mock(Step.class);
     RetryPolicy policy = RetryPolicy.defaultPolicy();
+    RetryPolicy compensationPolicy = RetryPolicy.compensationDefault();
 
     // Act
-    StepWithPolicy entry = new StepWithPolicy(step, policy, 5000);
+    StepWithPolicy entry = new StepWithPolicy(step, policy, compensationPolicy, 5000);
 
     // Assert
     assertThat(entry.step()).isSameAs(step);
-    assertThat(entry.retryPolicy()).isSameAs(policy);
+    assertThat(entry.executionRetryPolicy()).isSameAs(policy);
+    assertThat(entry.compensationRetryPolicy()).isSameAs(compensationPolicy);
     assertThat(entry.stepTimeoutMillis()).isEqualTo(5000);
   }
 
@@ -32,7 +34,7 @@ class StepWithPolicyTest {
     RetryPolicy policy = RetryPolicy.defaultPolicy();
 
     // Act
-    StepWithPolicy entry = new StepWithPolicy(step, policy, 0);
+    StepWithPolicy entry = new StepWithPolicy(step, policy, RetryPolicy.compensationDefault(), 0);
 
     // Assert
     assertThat(entry.stepTimeoutMillis()).isEqualTo(0);
@@ -41,7 +43,13 @@ class StepWithPolicyTest {
   @Test
   void constructor_negativeTimeoutGiven_throwsIllegalArgumentException() {
     // Arrange & Act & Assert
-    assertThatThrownBy(() -> new StepWithPolicy(mock(Step.class), RetryPolicy.defaultPolicy(), -1))
+    assertThatThrownBy(
+            () ->
+                new StepWithPolicy(
+                    mock(Step.class),
+                    RetryPolicy.defaultPolicy(),
+                    RetryPolicy.compensationDefault(),
+                    -1))
         .isInstanceOf(IllegalArgumentException.class);
   }
 }
