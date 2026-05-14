@@ -155,13 +155,13 @@ class ScalarDbSagaStoreTest {
 
   @Test
   void createSaga_payloadExceedsLimit_throwsIllegalArgumentException() {
-    // Arrange — 10-byte limit is too small for any valid payload
+    // Arrange — 5-byte limit is too small for any valid payload
     ScalarDbSagaStore limitedStore =
         new ScalarDbSagaStore(
             txManager,
             objectMapper,
             schema,
-            ScalarDbSagaStoreConfig.builder().maxEventPayloadBytes(10).build());
+            ScalarDbSagaStoreConfig.builder().maxEventPayloadBytes(5).build());
 
     // Act & Assert
     assertThatThrownBy(

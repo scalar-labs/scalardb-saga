@@ -100,7 +100,7 @@ public class ScalarDbSagaStore implements SagaStore {
     } else {
       validateSagaId(sagaId);
     }
-    String payload = toJson(Map.of("sagaName", sagaName, "input", input));
+    String payload = toJson(input);
     validatePayloadSize(payload);
     StatusEvent startedEvent = StatusEvent.started(payload);
     String id = sagaId; // effectively final for lambda
