@@ -236,6 +236,25 @@ class SagaEngineTest {
     }
 
     @Test
+    void execute_convenienceMethod_createsThenExecutesAndReturnsSagaId() throws Exception {
+      // Arrange
+      Step step1 = successStep("s1");
+      stepRegistry.register("s1", step1);
+      SagaDefinition def = sagaDefinitionWithRetry("s1");
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      when(store.createSaga(any(), anyString(), anyString(), any(), anyString())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+
+      // Act
+      String sagaId = engine.execute(def, "saga-1", Map.of("key", "val"));
+
+      // Assert
+      assertThat(sagaId).isEqualTo("saga-1");
+      verify(store).createSaga("saga-1", "test-saga", OWNER_ID, Map.of("key", "val"), "1.0");
+      verify(step1).execute(any(SagaContext.class));
+    }
+
+    @Test
     void execute_stepsProduceOutput_mergedIntoContext() throws Exception {
       // Arrange
       Step step1 = outputStep("s1", Map.of("key1", "val1"));
@@ -260,6 +279,41 @@ class SagaEngineTest {
 
       // Assert
       verify(step2).execute(any(SagaContext.class));
+    }
+  }
+
+  // =========================================================================
+  // resumeFrom
+  // =========================================================================
+
+  @Nested
+  class ResumeFrom {
+
+    @Test
+    void resumeFrom_middleStep_executesRemainingStepsAndReturnsState() throws Exception {
+      // Arrange — 3 steps, resume from step 1 (step 0 already completed)
+      Step step0 = successStep("s0");
+      Step step1 = successStep("s1");
+      Step step2 = successStep("s2");
+      stepRegistry.register("s0", step0);
+      stepRegistry.register("s1", step1);
+      stepRegistry.register("s2", step2);
+      SagaDefinition def = sagaDefinitionWithRetry("s0", "s1", "s2");
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      SagaStateSnapshot completedSaga =
+          new SagaStateSnapshot(
+              "saga-1", "test-saga", SagaStatus.COMPLETED, OWNER_ID, "v1", NOW, NOW);
+      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(completedSaga);
+      ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
+
+      // Act
+      SagaStateSnapshot result = engine.resumeFrom(def, context, 1);
+
+      // Assert — step 0 skipped, steps 1 and 2 executed
+      verify(step0, never()).execute(any(SagaContext.class));
+      verify(step1).execute(any(SagaContext.class));
+      verify(step2).execute(any(SagaContext.class));
+      assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPLETED);
     }
   }
 
