@@ -2,8 +2,6 @@ package com.scalar.db.saga.store;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.github.benmanes.caffeine.cache.Cache;
-import com.github.benmanes.caffeine.cache.Caffeine;
 import com.scalar.db.api.Delete;
 import com.scalar.db.api.DistributedTransaction;
 import com.scalar.db.api.DistributedTransactionManager;
@@ -65,7 +63,6 @@ public class ScalarDbSagaStore implements SagaStore {
   private final SagaSchema schema;
   private final ScalarDbSagaStoreConfig config;
   private final SagaDefinitionSerializer definitionSerializer;
-  private final Cache<String, SagaStateSnapshot> cache;
 
   /**
    * Creates a new store instance.
@@ -85,11 +82,6 @@ public class ScalarDbSagaStore implements SagaStore {
     this.schema = Objects.requireNonNull(schema, "schema must not be null");
     this.config = Objects.requireNonNull(config, "config must not be null");
     this.definitionSerializer = new SagaDefinitionSerializer(objectMapper);
-    this.cache =
-        Caffeine.newBuilder()
-            .maximumSize(config.getCacheMaxSize())
-            .expireAfterWrite(config.getCacheExpireAfterWrite())
-            .build();
   }
 
   // ---------------------------------------------------------------------------
@@ -115,22 +107,19 @@ public class ScalarDbSagaStore implements SagaStore {
     int bucket = schema.bucketOf(id);
 
     try {
-      SagaStateSnapshot result =
-          runInTransaction(
-              tx -> {
-                Instant now = Instant.now();
-                tx.insert(buildEventInsert(id, 0, startedEvent, now));
-                SagaStateSnapshot snapshot =
-                    new SagaStateSnapshot(
-                        id, sagaName, SagaStatus.RUNNING, ownerId, definitionVersion, now, now);
-                tx.insert(buildStateInsert(bucket, snapshot));
-                return snapshot;
-              },
-              () -> loadStateSnapshot(id),
-              "create saga " + id,
-              false);
-      cache.put(id, result);
-      return result;
+      return runInTransaction(
+          tx -> {
+            Instant now = Instant.now();
+            tx.insert(buildEventInsert(id, 0, startedEvent, now));
+            SagaStateSnapshot snapshot =
+                new SagaStateSnapshot(
+                    id, sagaName, SagaStatus.RUNNING, ownerId, definitionVersion, now, now);
+            tx.insert(buildStateInsert(bucket, snapshot));
+            return snapshot;
+          },
+          () -> loadStateSnapshot(id),
+          "create saga " + id,
+          false);
     } catch (SagaPersistenceException e) {
       Optional<SagaStateSnapshot> existing = Optional.empty();
       try {
@@ -156,8 +145,9 @@ public class ScalarDbSagaStore implements SagaStore {
           Optional<Result> existing = tx.get(buildDefinitionGet(name, version));
 
           if (existing.isPresent()) {
-            String existingJson = existing.get().getText("definition_json");
-            if (json.equals(existingJson)) {
+            SagaDefinition existingDef =
+                definitionSerializer.deserialize(existing.get().getText("definition_json"));
+            if (definition.equals(existingDef)) {
               return Boolean.TRUE; // idempotent no-op
             }
             throw new SagaDefinitionException(
@@ -173,7 +163,18 @@ public class ScalarDbSagaStore implements SagaStore {
         },
         () -> {
           Optional<SagaDefinition> found = getDefinition(name, version);
-          return found.isPresent() ? Optional.of(Boolean.TRUE) : Optional.empty();
+          if (found.isEmpty()) {
+            return Optional.empty();
+          }
+          // Verify the found definition matches what we tried to register.
+          // A different definition means a concurrent registration won;
+          // our insert did not commit. Return empty so the retry's primary
+          // action detects the conflict and throws SagaDefinitionException.
+          String foundJson = definitionSerializer.serialize(found.get());
+          if (!json.equals(foundJson)) {
+            return Optional.empty();
+          }
+          return Optional.of(Boolean.TRUE);
         },
         "register definition " + name + " " + version);
   }
@@ -223,44 +224,39 @@ public class ScalarDbSagaStore implements SagaStore {
     int bucket = schema.bucketOf(sagaId);
 
     try {
-      SagaStateSnapshot result =
-          runInTransaction(
-              tx -> {
-                Instant now = Instant.now();
+      return runInTransaction(
+          tx -> {
+            Instant now = Instant.now();
 
-                // Verify the row still exists at the snapshot's CK.
-                // Because status and updated_at are part of the clustering key,
-                // every mutation DELETEs the old CK and INSERTs at a new CK.
-                // If the row exists here, no other replica has touched it.
-                int oldStatus = current.getStatus().getStatusCode();
-                Optional<Result> row =
-                    tx.get(buildStateGet(bucket, oldStatus, current.getUpdatedAt(), sagaId));
-                if (row.isEmpty()) {
-                  throw new SagaConcurrentModificationException(sagaId);
-                }
+            // Verify the row still exists at the snapshot's CK.
+            // Because status and updated_at are part of the clustering key,
+            // every mutation DELETEs the old CK and INSERTs at a new CK.
+            // If the row exists here, no other replica has touched it.
+            int oldStatus = current.getStatus().getStatusCode();
+            Optional<Result> row =
+                tx.get(buildStateGet(bucket, oldStatus, current.getUpdatedAt(), sagaId));
+            if (row.isEmpty()) {
+              throw new SagaConcurrentModificationException(sagaId);
+            }
 
-                tx.insert(buildEventInsert(sagaId, sequence, event, now));
-                tx.delete(buildStateDelete(bucket, oldStatus, current.getUpdatedAt(), sagaId));
-                SagaStateSnapshot updated = current.withTransition(newStatus, now);
-                tx.insert(buildStateInsert(bucket, updated));
-                return updated;
-              },
-              () -> {
-                return runInTransaction(
-                    tx -> {
-                      if (tx.get(buildEventGet(sagaId, sequence)).isPresent()) {
-                        return loadStateSnapshot(sagaId);
-                      }
-                      return Optional.empty();
-                    },
-                    null,
-                    "verify transition " + sagaId + " seq " + sequence);
-              },
-              "record transition for saga " + sagaId);
-      cache.put(sagaId, result);
-      return result;
+            tx.insert(buildEventInsert(sagaId, sequence, event, now));
+            tx.delete(buildStateDelete(bucket, oldStatus, current.getUpdatedAt(), sagaId));
+            SagaStateSnapshot updated = current.withTransition(newStatus, now);
+            tx.insert(buildStateInsert(bucket, updated));
+            return updated;
+          },
+          () ->
+              runInTransaction(
+                  tx -> {
+                    if (tx.get(buildEventGet(sagaId, sequence)).isPresent()) {
+                      return loadStateSnapshot(sagaId);
+                    }
+                    return Optional.empty();
+                  },
+                  null,
+                  "verify transition " + sagaId + " seq " + sequence),
+          "record transition for saga " + sagaId);
     } catch (SagaConcurrentModificationException | SagaPersistenceException e) {
-      cache.invalidate(sagaId);
       throw e;
     }
   }
@@ -294,16 +290,7 @@ public class ScalarDbSagaStore implements SagaStore {
 
   @Override
   public Optional<SagaStateSnapshot> getStateSnapshot(String sagaId) {
-    SagaStateSnapshot cached = cache.getIfPresent(sagaId);
-    if (cached != null) {
-      return Optional.of(cached);
-    }
-    return loadStateSnapshot(sagaId)
-        .map(
-            loaded -> {
-              cache.put(sagaId, loaded);
-              return loaded;
-            });
+    return loadStateSnapshot(sagaId);
   }
 
   // ---------------------------------------------------------------------------
@@ -314,8 +301,8 @@ public class ScalarDbSagaStore implements SagaStore {
   public Recoverables findRecoverable(
       long recoveryTimeoutMillis, @Nullable RecoverablesCursor cursor) {
     int startBucket = 0;
-    if (cursor instanceof BucketCursor bc) {
-      startBucket = bc.nextBucket();
+    if (cursor instanceof BucketCursor(int nextBucket)) {
+      startBucket = nextBucket;
     }
 
     if (startBucket >= schema.getNumBuckets()) {
@@ -394,10 +381,8 @@ public class ScalarDbSagaStore implements SagaStore {
                 return Optional.empty();
               },
               "claim saga " + sagaId + " for recovery");
-      cache.put(sagaId, result);
       return Optional.of(result);
     } catch (SagaConcurrentModificationException e) {
-      cache.invalidate(sagaId);
       return Optional.empty();
     }
   }
@@ -434,10 +419,9 @@ public class ScalarDbSagaStore implements SagaStore {
           },
           null, // best-effort — no verifier
           "mark for recovery " + sagaId);
-      cache.invalidate(sagaId);
     } catch (Exception e) {
       // Best effort — conflict with executing thread is expected and harmless
-      logger.debug("markForRecovery failed for saga {} (best-effort)", sagaId, e);
+      logger.warn("markForRecovery failed for saga {} (best-effort)", sagaId, e);
     }
   }
 
@@ -507,7 +491,6 @@ public class ScalarDbSagaStore implements SagaStore {
           return state.isEmpty() ? Optional.of(Boolean.TRUE) : Optional.empty();
         },
         "delete saga " + sagaId);
-    cache.invalidate(sagaId);
   }
 
   // ---------------------------------------------------------------------------
@@ -594,6 +577,12 @@ public class ScalarDbSagaStore implements SagaStore {
             }
             break; // Verified not committed — retry the transaction
           } catch (Exception ve) {
+            // Business-logic or programming errors propagate immediately.
+            // Only SagaPersistenceException (infrastructure failure from inner
+            // transactions) and checked exceptions are retried.
+            if (ve instanceof RuntimeException re && !(ve instanceof SagaPersistenceException)) {
+              throw re;
+            }
             e.addSuppressed(ve);
             if (v < maxAttempts - 1) {
               sleepForRetry(v);
@@ -705,7 +694,12 @@ public class ScalarDbSagaStore implements SagaStore {
         .namespace(SagaSchema.NAMESPACE)
         .table(SagaSchema.STATE_TABLE)
         .partitionKey(Key.ofInt("bucket", bucket))
-        .start(Key.ofInt("status", status), true)
+        .start(
+            Key.newBuilder()
+                .addInt("status", status)
+                .addTimestampTZ("updated_at", Instant.EPOCH)
+                .build(),
+            true)
         .end(
             Key.newBuilder()
                 .addInt("status", status)

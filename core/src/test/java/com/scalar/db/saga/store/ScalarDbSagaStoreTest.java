@@ -34,7 +34,6 @@ import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.store.SagaStore.Recoverables;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -227,8 +226,15 @@ class ScalarDbSagaStoreTest {
             .step("debit", "com.example.DebitStep")
             .add()
             .build();
+    SagaDefinition differentDef =
+        SagaDefinition.newBuilder("order-saga", SagaMode.SAGA)
+            .version("v1")
+            .step("credit", "com.example.CreditStep")
+            .add()
+            .build();
+    String differentJson = definitionSerializer.serialize(differentDef);
     Result existingRow = mock(Result.class);
-    when(existingRow.getText("definition_json")).thenReturn("{\"different\":\"content\"}");
+    when(existingRow.getText("definition_json")).thenReturn(differentJson);
     when(tx.get(any(Get.class))).thenReturn(Optional.of(existingRow));
 
     // Act & Assert
@@ -236,6 +242,68 @@ class ScalarDbSagaStoreTest {
         .isInstanceOf(SagaDefinitionException.class);
     verify(tx, never()).insert(any(Insert.class));
     verify(tx, never()).commit();
+  }
+
+  @Test
+  void registerDefinition_unknownStatusAndVerifierFindsMatchingDefinition_succeeds()
+      throws Exception {
+    // Arrange — commit throws UTSE, verifier finds the same definition
+    SagaDefinition def =
+        SagaDefinition.newBuilder("order-saga", SagaMode.SAGA)
+            .version("v1")
+            .step("debit", "com.example.DebitStep")
+            .add()
+            .build();
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    // Verifier uses a new transaction to re-read the definition
+    DistributedTransaction tx2 = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(tx2);
+    String json = definitionSerializer.serialize(def);
+    Result defResult = mock(Result.class);
+    when(defResult.getText("definition_json")).thenReturn(json);
+    when(tx2.get(any(Get.class))).thenReturn(Optional.of(defResult));
+
+    // Act
+    store.registerDefinition(def);
+
+    // Assert — verifier confirmed committed (no exception)
+    verify(tx2).get(any(Get.class));
+  }
+
+  @Test
+  void
+      registerDefinition_unknownStatusAndVerifierFindsDifferentDefinition_throwsSagaDefinitionException()
+          throws Exception {
+    // Arrange — commit throws UTSE, verifier finds a different definition.
+    // Verifier returns empty (our insert didn't commit), retry's primary action
+    // detects the conflict and throws SagaDefinitionException.
+    SagaDefinition def =
+        SagaDefinition.newBuilder("order-saga", SagaMode.SAGA)
+            .version("v1")
+            .step("debit", "com.example.DebitStep")
+            .add()
+            .build();
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    // tx2: verifier's getDefinition — finds different content
+    DistributedTransaction tx2 = mock(DistributedTransaction.class);
+    // tx3: retry's primary action — finds existing different definition
+    DistributedTransaction tx3 = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(tx2).thenReturn(tx3);
+    SagaDefinition differentDef =
+        SagaDefinition.newBuilder("order-saga", SagaMode.SAGA)
+            .version("v1")
+            .step("credit", "com.example.CreditStep")
+            .add()
+            .build();
+    String differentJson = definitionSerializer.serialize(differentDef);
+    Result defResult = mock(Result.class);
+    when(defResult.getText("definition_json")).thenReturn(differentJson);
+    when(tx2.get(any(Get.class))).thenReturn(Optional.of(defResult));
+    when(tx3.get(any(Get.class))).thenReturn(Optional.of(defResult));
+
+    // Act & Assert
+    assertThatThrownBy(() -> store.registerDefinition(def))
+        .isInstanceOf(SagaDefinitionException.class);
   }
 
   @Test
@@ -472,22 +540,6 @@ class ScalarDbSagaStoreTest {
 
     // Assert
     assertThat(snapshot).isEmpty();
-  }
-
-  @Test
-  void getStateSnapshot_calledTwice_returnsCachedResult() throws Exception {
-    // Arrange
-    Result result = mockStateResult("saga-1", SagaStatus.RUNNING);
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(result));
-
-    // Act
-    store.getStateSnapshot("saga-1");
-    Optional<SagaStateSnapshot> cached = store.getStateSnapshot("saga-1");
-
-    // Assert — second call should use cache, so txManager.begin() called only once
-    assertThat(cached).isPresent();
-    assertThat(cached.get().getSagaId()).isEqualTo("saga-1");
-    verify(txManager, times(1)).begin();
   }
 
   // ---------------------------------------------------------------------------
@@ -1085,6 +1137,31 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
+  void runInTransaction_unknownStatusWithVerifierThrowsRuntimeException_propagatesImmediately()
+      throws Exception {
+    // Arrange — UTSE on commit, verifier throws a non-SagaPersistenceException RuntimeException.
+    // Should propagate immediately without retrying.
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    IllegalStateException verifierError = new IllegalStateException("unexpected state");
+    ScalarDbSagaStore spyStore =
+        new ScalarDbSagaStore(
+            txManager, objectMapper, schema, ScalarDbSagaStoreConfig.builder().build());
+
+    // Act & Assert
+    assertThatThrownBy(
+            () ->
+                spyStore.runInTransaction(
+                    tx -> Boolean.TRUE,
+                    () -> {
+                      throw verifierError;
+                    },
+                    "test operation"))
+        .isSameAs(verifierError);
+    // Only one transaction attempt — no retries after RuntimeException from verifier
+    verify(txManager, times(1)).begin();
+  }
+
+  @Test
   void runInTransaction_unknownStatusReadOnly_retriesWholeTransaction() throws Exception {
     // Arrange — first tx: UTSE on commit (read-only, null verifier). Second tx: succeeds.
     DistributedTransaction tx2 = mock(DistributedTransaction.class);
@@ -1166,73 +1243,6 @@ class ScalarDbSagaStoreTest {
     // Act & Assert
     assertThatThrownBy(() -> ScalarDbSagaStoreConfig.builder().transactionRetryCount(0))
         .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void build_withDefaults_hasDefaultCacheMaxSize() {
-    // Act
-    ScalarDbSagaStoreConfig config = ScalarDbSagaStoreConfig.builder().build();
-
-    // Assert
-    assertThat(config.getCacheMaxSize()).isEqualTo(1000);
-  }
-
-  @Test
-  void cacheMaxSize_positiveValueGiven_setsValue() {
-    // Act
-    ScalarDbSagaStoreConfig config = ScalarDbSagaStoreConfig.builder().cacheMaxSize(500).build();
-
-    // Assert
-    assertThat(config.getCacheMaxSize()).isEqualTo(500);
-  }
-
-  @Test
-  void cacheMaxSize_negativeValueGiven_throwsIllegalArgumentException() {
-    // Act & Assert
-    assertThatThrownBy(() -> ScalarDbSagaStoreConfig.builder().cacheMaxSize(-1))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void build_withDefaults_hasDefaultCacheExpireAfterWrite() {
-    // Act
-    ScalarDbSagaStoreConfig config = ScalarDbSagaStoreConfig.builder().build();
-
-    // Assert
-    assertThat(config.getCacheExpireAfterWrite()).isEqualTo(Duration.ofMinutes(5));
-  }
-
-  @Test
-  void cacheExpireAfterWrite_customValueGiven_setsValue() {
-    // Act
-    ScalarDbSagaStoreConfig config =
-        ScalarDbSagaStoreConfig.builder().cacheExpireAfterWrite(Duration.ofSeconds(30)).build();
-
-    // Assert
-    assertThat(config.getCacheExpireAfterWrite()).isEqualTo(Duration.ofSeconds(30));
-  }
-
-  @Test
-  void cacheExpireAfterWrite_zeroGiven_throwsIllegalArgumentException() {
-    // Act & Assert
-    assertThatThrownBy(() -> ScalarDbSagaStoreConfig.builder().cacheExpireAfterWrite(Duration.ZERO))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void cacheExpireAfterWrite_negativeGiven_throwsIllegalArgumentException() {
-    // Act & Assert
-    assertThatThrownBy(
-            () -> ScalarDbSagaStoreConfig.builder().cacheExpireAfterWrite(Duration.ofSeconds(-1)))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  @SuppressWarnings("NullAway")
-  void cacheExpireAfterWrite_nullGiven_throwsNullPointerException() {
-    // Act & Assert
-    assertThatThrownBy(() -> ScalarDbSagaStoreConfig.builder().cacheExpireAfterWrite(null))
-        .isInstanceOf(NullPointerException.class);
   }
 
   @Test
