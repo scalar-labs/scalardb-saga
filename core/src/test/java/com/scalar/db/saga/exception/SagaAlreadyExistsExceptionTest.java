@@ -13,7 +13,7 @@ class SagaAlreadyExistsExceptionTest {
   private static SagaStateSnapshot createSnapshot(String sagaId) {
     Instant now = Instant.now();
     return new SagaStateSnapshot(
-        sagaId, "order-saga", SagaStatus.RUNNING, "owner-1", 0, "v1", now, now);
+        sagaId, "order-saga", SagaStatus.RUNNING, "owner-1", "v1", now, now);
   }
 
   @Test

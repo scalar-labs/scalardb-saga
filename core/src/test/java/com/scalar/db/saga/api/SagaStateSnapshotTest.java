@@ -10,14 +10,13 @@ class SagaStateSnapshotTest {
   private static final String SAGA_ID = "saga-001";
   private static final String SAGA_NAME = "order-saga";
   private static final String OWNER_ID = "node-1";
-  private static final int VERSION = 3;
   private static final String DEFINITION_VERSION = "1.0";
   private static final Instant CREATED_AT = Instant.parse("2026-01-01T00:00:00Z");
   private static final Instant UPDATED_AT = Instant.parse("2026-01-01T01:00:00Z");
 
   private SagaStateSnapshot createSnapshot(SagaStatus status) {
     return new SagaStateSnapshot(
-        SAGA_ID, SAGA_NAME, status, OWNER_ID, VERSION, DEFINITION_VERSION, CREATED_AT, UPDATED_AT);
+        SAGA_ID, SAGA_NAME, status, OWNER_ID, DEFINITION_VERSION, CREATED_AT, UPDATED_AT);
   }
 
   @Test
@@ -30,7 +29,6 @@ class SagaStateSnapshotTest {
     assertThat(snapshot.getSagaName()).isEqualTo(SAGA_NAME);
     assertThat(snapshot.getStatus()).isEqualTo(SagaStatus.RUNNING);
     assertThat(snapshot.getOwnerId()).isEqualTo(OWNER_ID);
-    assertThat(snapshot.getVersion()).isEqualTo(VERSION);
     assertThat(snapshot.getDefinitionVersion()).isEqualTo(DEFINITION_VERSION);
     assertThat(snapshot.getCreatedAt()).isEqualTo(CREATED_AT);
     assertThat(snapshot.getUpdatedAt()).isEqualTo(UPDATED_AT);
@@ -65,19 +63,6 @@ class SagaStateSnapshotTest {
     assertThat(transitioned.getOwnerId()).isEqualTo(OWNER_ID);
     assertThat(transitioned.getDefinitionVersion()).isEqualTo(DEFINITION_VERSION);
     assertThat(transitioned.getCreatedAt()).isEqualTo(CREATED_AT);
-  }
-
-  @Test
-  void withTransition_called_doesNotIncrementVersion() {
-    // Arrange
-    SagaStateSnapshot original = createSnapshot(SagaStatus.RUNNING);
-    Instant newUpdatedAt = Instant.parse("2026-01-01T02:00:00Z");
-
-    // Act
-    SagaStateSnapshot transitioned = original.withTransition(SagaStatus.COMPLETED, newUpdatedAt);
-
-    // Assert — version must remain unchanged; only SagaStore increments it
-    assertThat(transitioned.getVersion()).isEqualTo(VERSION);
   }
 
   @Test
@@ -125,7 +110,6 @@ class SagaStateSnapshotTest {
             SAGA_NAME,
             SagaStatus.RUNNING,
             OWNER_ID,
-            VERSION,
             DEFINITION_VERSION,
             CREATED_AT,
             UPDATED_AT);

@@ -13,9 +13,10 @@ Refer to `~/git/scalardb-saga-design/docs/scalardb-saga-design.md` for architect
 ## Build
 
 - **Gradle 9.x with Kotlin DSL** (`build.gradle.kts`)
+- Format apply: `./gradlew spotlessApply`
 - Check (test + format + static analysis): `./gradlew check`
 - Check for compiler warnings (hidden when cached): `./gradlew clean compileTestJava --no-build-cache`
-- Format apply: `./gradlew spotlessApply`
+- **Always run all three in order (`spotlessApply` → `check` → `clean compileTestJava --no-build-cache`) before confirming code changes are OK**
 - **Convention plugins** in `build-logic/` — shared build logic lives here, not in `subprojects {}` / `allprojects {}`
 - **Version catalog** in `gradle/libs.versions.toml` — single source of truth for dependency versions
 - **Configuration cache** enabled (`org.gradle.configuration-cache=true`)
