@@ -169,7 +169,7 @@ class SagaEngineTest {
     }
 
     @Test
-    void createSaga_nullSagaId_passesNull() {
+    void createSaga_nullSagaIdGiven_passesNull() {
       // Arrange
       SagaDefinition def = sagaDefinition("s1");
       SagaStateSnapshot expected = runningSnapshot("auto-generated");
@@ -192,7 +192,7 @@ class SagaEngineTest {
   class ExecuteHappyPath {
 
     @Test
-    void execute_threeStepSaga_completesAllSteps() throws Exception {
+    void executeSaga_threeStepsGiven_completesAllSteps() throws Exception {
       // Arrange
       Step step1 = successStep("s1");
       Step step2 = successStep("s2");
@@ -219,7 +219,7 @@ class SagaEngineTest {
     }
 
     @Test
-    void execute_singleStep_completesSuccessfully() throws Exception {
+    void executeSaga_singleStepGiven_completesSuccessfully() throws Exception {
       // Arrange
       Step step1 = successStep("s1");
       stepRegistry.register("s1", step1);
@@ -255,19 +255,10 @@ class SagaEngineTest {
     }
 
     @Test
-    void execute_stepsProduceOutput_mergedIntoContext() throws Exception {
+    void executeSaga_stepsProduceOutput_mergedIntoContext() throws Exception {
       // Arrange
       Step step1 = outputStep("s1", Map.of("key1", "val1"));
-      Step step2 = mock(Step.class);
-      when(step2.getName()).thenReturn("s2");
-      when(step2.execute(any(SagaContext.class)))
-          .thenAnswer(
-              invocation -> {
-                SagaContext ctx = invocation.getArgument(0);
-                // Verify step1's output is available
-                assertThat(ctx.get("key1", String.class)).contains("val1");
-                return StepResult.empty();
-              });
+      Step step2 = successStep("s2");
       stepRegistry.register("s1", step1);
       stepRegistry.register("s2", step2);
       SagaDefinition def = sagaDefinitionWithRetry("s1", "s2");
@@ -277,8 +268,34 @@ class SagaEngineTest {
       // Act
       engine.executeSaga(def, saga, Map.of());
 
-      // Assert
-      verify(step2).execute(any(SagaContext.class));
+      // Assert — step2 received the context with step1's output
+      ArgumentCaptor<SagaContext> ctxCaptor = ArgumentCaptor.forClass(SagaContext.class);
+      verify(step2).execute(ctxCaptor.capture());
+      assertThat(ctxCaptor.getValue().get("key1", String.class)).contains("val1");
+    }
+
+    @Test
+    void executeSaga_stepReturnsPending_parksWithoutRecordingCompletion() throws Exception {
+      // Arrange — step1 returns pending, step2 should not be reached
+      Step step1 = mock(Step.class);
+      when(step1.getName()).thenReturn("s1");
+      when(step1.execute(any(SagaContext.class))).thenReturn(StepResult.pending());
+      Step step2 = successStep("s2");
+      stepRegistry.register("s1", step1);
+      stepRegistry.register("s2", step2);
+      SagaDefinition def = sagaDefinitionWithRetry("s1", "s2");
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+
+      // Act
+      engine.executeSaga(def, saga, Map.of());
+
+      // Assert — step2 never executed (saga parked)
+      verify(step2, never()).execute(any(SagaContext.class));
+      // No STEP_COMPLETED event recorded for step1
+      verify(store, never()).recordStepEvent(anyString(), anyInt(), any(StepEvent.class));
+      // No SAGA_COMPLETED transition
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any(StatusEvent.class));
     }
   }
 
@@ -325,7 +342,7 @@ class SagaEngineTest {
   class PivotBoundary {
 
     @Test
-    void execute_failureBeforePivot_compensatesBackward() throws Exception {
+    void executeSaga_failureBeforePivot_compensatesBackward() throws Exception {
       // Arrange — 3 steps: s1 succeeds, s2 fails (all are compensatable: BACKWARD strategy)
       Step step1 = successStep("s1");
       Step step2 = failingStep("s2", false);
@@ -350,7 +367,7 @@ class SagaEngineTest {
     }
 
     @Test
-    void execute_failureAfterPivot_emitsStepFailedAndReturns() throws Exception {
+    void executeSaga_failureAfterPivot_emitsStepFailedAndReturns() throws Exception {
       // Arrange — MIXED: pivot at step1 (index 1), step2 (index 2) is after pivot
       Step step0 = successStep("s0");
       Step step1 = successStep("s1");
@@ -407,7 +424,7 @@ class SagaEngineTest {
     }
 
     @Test
-    void execute_tccDefinition_expandsToTwoNPlan() throws Exception {
+    void executeSaga_tccDefinitionGiven_expandsToTwoNPlan() throws Exception {
       // Arrange — 2 TCC steps → 4 execution slots (2 reserves + 2 confirms)
       TccStep tcc1 = createTccStep("t1");
       TccStep tcc2 = createTccStep("t2");
@@ -435,7 +452,7 @@ class SagaEngineTest {
     }
 
     @Test
-    void execute_tccAllReservesSucceed_emitsConfirmingAndConfirms() throws Exception {
+    void executeSaga_tccAllReservesSucceed_emitsConfirmingAndConfirms() throws Exception {
       // Arrange
       TccStep tcc1 = createTccStep("t1");
       stepRegistry.register("t1", tcc1);
@@ -460,7 +477,7 @@ class SagaEngineTest {
     }
 
     @Test
-    void execute_tccReserveFailure_cancelsCompletedReserves() throws Exception {
+    void executeSaga_tccReserveFailure_cancelsCompletedReserves() throws Exception {
       // Arrange — 2 TCC steps, second reserve fails
       TccStep tcc1 = createTccStep("t1");
       TccStep tcc2 = mock(TccStep.class);
@@ -498,7 +515,7 @@ class SagaEngineTest {
   class Timeout {
 
     @Test
-    void execute_stepTimeout_treatedAsFailure() throws Exception {
+    void executeSaga_stepTimeout_treatedAsFailure() throws Exception {
       // Arrange — step that blocks forever
       Step step1 = mock(Step.class);
       when(step1.getName()).thenReturn("s1");
@@ -533,7 +550,7 @@ class SagaEngineTest {
     }
 
     @Test
-    void execute_sagaTimeoutBeforePivot_compensatesCompletedSteps() throws Exception {
+    void executeSaga_sagaTimeoutBeforePivot_compensatesCompletedSteps() throws Exception {
       // Arrange — clock advances past saga deadline between steps
       Clock mockClock = mock(Clock.class);
       // First call: calculateSagaDeadline, second: between-steps check (not expired),
@@ -577,7 +594,7 @@ class SagaEngineTest {
     }
 
     @Test
-    void execute_sagaTimeoutAfterPivot_noCompensation() throws Exception {
+    void executeSaga_sagaTimeoutAfterPivot_noCompensation() throws Exception {
       // Arrange — clock advances past saga deadline after the pivot
       Clock mockClock = mock(Clock.class);
       // clock.millis() calls: (1) calculateSagaDeadline, (2) isSagaTimedOut i=0,
@@ -637,7 +654,7 @@ class SagaEngineTest {
   class GracefulShutdown {
 
     @Test
-    void execute_shuttingDownWaitCurrentStep_stopsBetweenSteps() throws Exception {
+    void executeSaga_shuttingDownWaitCurrentStep_stopsBetweenSteps() throws Exception {
       // Arrange
       Step step1 = mock(Step.class);
       when(step1.getName()).thenReturn("s1");
@@ -844,7 +861,7 @@ class SagaEngineTest {
     }
 
     @Test
-    void replayEvents_setsNextEventSequence() {
+    void replayEvents_twoEventsGiven_setsNextEventSequence() {
       // Arrange
       SagaStateSnapshot saga = runningSnapshot("saga-1");
       List<SagaEvent> events =
@@ -1099,7 +1116,7 @@ class SagaEngineTest {
   class ResolveRetryPolicyTests {
 
     @Test
-    void execute_stepWithOverridePolicy_usesStepPolicy() throws Exception {
+    void executeSaga_stepWithOverridePolicy_usesStepPolicy() throws Exception {
       // Arrange — step with custom policy (1 attempt)
       RetryPolicy oneAttempt =
           RetryPolicy.newBuilder()
@@ -1130,7 +1147,7 @@ class SagaEngineTest {
     }
 
     @Test
-    void execute_noStepOverride_usesDefinitionDefault() throws Exception {
+    void executeSaga_noStepOverride_usesDefinitionDefault() throws Exception {
       // Arrange — no step-level policy
       Step step1 = mock(Step.class);
       when(step1.getName()).thenReturn("s1");
@@ -1150,7 +1167,7 @@ class SagaEngineTest {
     }
 
     @Test
-    void execute_noDefault_usesGlobalDefault() throws Exception {
+    void executeSaga_noDefault_usesGlobalDefault() throws Exception {
       // Arrange — no step policy, no definition default
       Step step1 = mock(Step.class);
       when(step1.getName()).thenReturn("s1");

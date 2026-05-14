@@ -304,6 +304,11 @@ public class SagaEngine implements AutoCloseable {
                 context,
                 stepWithPolicy.executionRetryPolicy(),
                 stepDeadline);
+        if (result.isPending()) {
+          // Park the saga — release the thread without appending an event.
+          // The saga stays RUNNING; recovery or a callback will resume it.
+          return;
+        }
         recordStepCompleted(context, i, stepWithPolicy.step().getName(), result);
       } catch (StepExecutionException e) {
         recordStepFailed(context, i, stepWithPolicy.step().getName(), e);
