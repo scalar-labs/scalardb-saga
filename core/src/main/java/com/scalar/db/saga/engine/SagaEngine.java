@@ -115,7 +115,7 @@ public class SagaEngine implements AutoCloseable {
    * @param input the saga input data
    * @return the initial state snapshot
    */
-  public SagaStateSnapshot createSaga(
+  SagaStateSnapshot createSaga(
       SagaDefinition def, @Nullable String sagaId, Map<String, Object> input) {
     if (shuttingDown) {
       throw new IllegalStateException("Engine is shutting down; cannot create new sagas");
@@ -130,7 +130,7 @@ public class SagaEngine implements AutoCloseable {
    * @param saga the initial state snapshot (from {@link #createSaga})
    * @param input the saga input data
    */
-  public void executeSaga(SagaDefinition def, SagaStateSnapshot saga, Map<String, Object> input) {
+  void executeSaga(SagaDefinition def, SagaStateSnapshot saga, Map<String, Object> input) {
     ExecutionContext context = new ExecutionContext(saga.getSagaId(), input, saga);
     context.setNextEventSequence(1); // SAGA_STARTED was seq 0
     executeSteps(def, context, 0);
@@ -141,7 +141,7 @@ public class SagaEngine implements AutoCloseable {
    *
    * @return the saga ID
    */
-  public String execute(SagaDefinition def, @Nullable String sagaId, Map<String, Object> input) {
+  String execute(SagaDefinition def, @Nullable String sagaId, Map<String, Object> input) {
     SagaStateSnapshot saga = createSaga(def, sagaId, input);
     executeSaga(def, saga, input);
     return saga.getSagaId();
@@ -204,7 +204,7 @@ public class SagaEngine implements AutoCloseable {
   }
 
   /** Initiates graceful shutdown. */
-  public void shutdown() {
+  void shutdown() {
     synchronized (shutdownLock) {
       shuttingDown = true;
     }
