@@ -81,7 +81,7 @@ public class SagaEngine implements AutoCloseable {
   private final Set<String> activeSagas = ConcurrentHashMap.newKeySet();
   private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
 
-  public SagaEngine(
+  SagaEngine(
       SagaStore store,
       StepRegistry stepRegistry,
       String ownerId,
@@ -94,12 +94,12 @@ public class SagaEngine implements AutoCloseable {
     this.clock = Objects.requireNonNull(clock, "clock must not be null");
   }
 
-  public SagaEngine(
+  SagaEngine(
       SagaStore store, StepRegistry stepRegistry, String ownerId, ShutdownConfig shutdownConfig) {
     this(store, stepRegistry, ownerId, shutdownConfig, Clock.systemUTC());
   }
 
-  public SagaEngine(SagaStore store, StepRegistry stepRegistry, String ownerId) {
+  SagaEngine(SagaStore store, StepRegistry stepRegistry, String ownerId) {
     this(store, stepRegistry, ownerId, ShutdownConfig.defaultConfig());
   }
 
@@ -152,7 +152,7 @@ public class SagaEngine implements AutoCloseable {
    *
    * @return the final state snapshot
    */
-  public SagaStateSnapshot resumeFrom(SagaDefinition def, ExecutionContext context, int fromStep) {
+  SagaStateSnapshot resumeFrom(SagaDefinition def, ExecutionContext context, int fromStep) {
     executeSteps(def, context, fromStep);
     return context.getCurrentState();
   }
@@ -160,7 +160,7 @@ public class SagaEngine implements AutoCloseable {
   /**
    * Triggers compensation from a specific step (used by recovery for sagas stuck in COMPENSATING).
    */
-  public void compensateFrom(SagaDefinition def, ExecutionContext context, int fromStep) {
+  void compensateFrom(SagaDefinition def, ExecutionContext context, int fromStep) {
     List<StepWithPolicy> plan = buildPlan(def);
     compensate(plan, context, fromStep);
   }
