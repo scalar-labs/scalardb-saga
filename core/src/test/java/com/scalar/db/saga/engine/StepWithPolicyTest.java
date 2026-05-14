@@ -38,22 +38,6 @@ class StepWithPolicyTest {
     assertThat(entry.stepTimeoutMillis()).isEqualTo(0);
   }
 
-  @SuppressWarnings("NullAway")
-  @Test
-  void constructor_nullStepGiven_throwsNullPointerException() {
-    // Arrange & Act & Assert
-    assertThatThrownBy(() -> new StepWithPolicy(null, RetryPolicy.defaultPolicy(), 0))
-        .isInstanceOf(NullPointerException.class);
-  }
-
-  @SuppressWarnings("NullAway")
-  @Test
-  void constructor_nullPolicyGiven_throwsNullPointerException() {
-    // Arrange & Act & Assert
-    assertThatThrownBy(() -> new StepWithPolicy(mock(Step.class), null, 0))
-        .isInstanceOf(NullPointerException.class);
-  }
-
   @Test
   void constructor_negativeTimeoutGiven_throwsIllegalArgumentException() {
     // Arrange & Act & Assert

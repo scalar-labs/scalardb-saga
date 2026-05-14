@@ -6,7 +6,6 @@ import com.scalar.db.saga.api.StepResult;
 import com.scalar.db.saga.api.TccStep;
 import com.scalar.db.saga.exception.StepCompensationException;
 import com.scalar.db.saga.exception.StepExecutionException;
-import java.util.Objects;
 
 /**
  * Wraps a {@link TccStep} for the Reserve (Try) phase.
@@ -20,7 +19,7 @@ class TccReserveStep implements Step {
   private final TccStep tccStep;
 
   TccReserveStep(TccStep tccStep) {
-    this.tccStep = Objects.requireNonNull(tccStep, "tccStep must not be null");
+    this.tccStep = tccStep;
   }
 
   @Override

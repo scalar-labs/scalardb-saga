@@ -5,9 +5,10 @@ import java.util.Optional;
 /**
  * Shared data context passed to {@link Step} and {@link TccStep} implementations.
  *
- * <p>Provides read/write access to the saga's key-value data map. Engine-internal tracking (event
- * sequencing, state transitions, failure tracking) is in the {@code ExecutionContext}
- * implementation.
+ * <p>Provides read-only access to the saga's key-value data map. Steps return output via {@link
+ * StepResult}, which the engine merges into the context for subsequent steps. Engine-internal
+ * tracking (event sequencing, state transitions, failure tracking) is in the {@code
+ * ExecutionContext} implementation.
  */
 public interface SagaContext {
 
@@ -28,24 +29,4 @@ public interface SagaContext {
    * @throws ClassCastException if the stored value cannot be converted to the requested type
    */
   <T> Optional<T> get(String key, Class<T> type);
-
-  /**
-   * Stores a value in the saga data map, available to subsequent steps.
-   *
-   * <p>Only the following types are allowed to ensure reliable JSON serialization across crash
-   * recovery boundaries:
-   *
-   * <ul>
-   *   <li>Primitives and their wrappers: {@code Boolean}, {@code Integer}, {@code Long}, {@code
-   *       Double}, {@code Float}
-   *   <li>{@code String} and {@code java.math.BigDecimal}
-   *   <li>{@code List} and {@code Map} containing only the above types (nested collections are
-   *       allowed)
-   * </ul>
-   *
-   * @param key the data key
-   * @param value the value to store
-   * @throws IllegalArgumentException if the value type is not one of the allowed types listed above
-   */
-  void put(String key, Object value);
 }

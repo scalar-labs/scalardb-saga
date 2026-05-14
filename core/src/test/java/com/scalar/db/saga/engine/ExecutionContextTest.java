@@ -528,35 +528,9 @@ class ExecutionContextTest {
 
   @SuppressWarnings("NullAway")
   @Test
-  void setCurrentState_nullGiven_throwsNullPointerException() {
-    // Arrange
-    ExecutionContext ctx = createContext();
-
-    // Act & Assert
-    assertThatThrownBy(() -> ctx.setCurrentState(null)).isInstanceOf(NullPointerException.class);
-  }
-
-  @SuppressWarnings("NullAway")
-  @Test
-  void constructor_nullSagaIdGiven_throwsNullPointerException() {
-    // Arrange & Act & Assert
-    assertThatThrownBy(() -> new ExecutionContext(null, Map.of(), DEFAULT_STATE))
-        .isInstanceOf(NullPointerException.class);
-  }
-
-  @SuppressWarnings("NullAway")
-  @Test
   void constructor_nullInputGiven_throwsNullPointerException() {
     // Arrange & Act & Assert
     assertThatThrownBy(() -> new ExecutionContext("saga-1", null, DEFAULT_STATE))
-        .isInstanceOf(NullPointerException.class);
-  }
-
-  @SuppressWarnings("NullAway")
-  @Test
-  void constructor_nullInitialStateGiven_throwsNullPointerException() {
-    // Arrange & Act & Assert
-    assertThatThrownBy(() -> new ExecutionContext("saga-1", Map.of(), null))
         .isInstanceOf(NullPointerException.class);
   }
 

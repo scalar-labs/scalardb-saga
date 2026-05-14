@@ -47,16 +47,16 @@ class ExecutionContext implements SagaContext {
   private int nextEventSequence;
   private SagaStateSnapshot currentState;
   private final Set<Integer> failedStepIndices = new HashSet<>();
+  private final Set<Integer> compensatedStepIndices = new HashSet<>();
 
   ExecutionContext(String sagaId, Map<String, Object> input, SagaStateSnapshot currentState) {
-    this.sagaId = Objects.requireNonNull(sagaId, "sagaId must not be null");
-    Objects.requireNonNull(input, "input must not be null");
+    this.sagaId = sagaId;
     input.values().forEach(this::validateType);
     this.data = new HashMap<>(input);
-    this.currentState = Objects.requireNonNull(currentState, "currentState must not be null");
+    this.currentState = currentState;
   }
 
-  // --- SagaContext interface (user-facing) ---
+  // --- SagaContext interface (read-only, user-facing) ---
 
   @Override
   public String getSagaId() {
@@ -86,8 +86,12 @@ class ExecutionContext implements SagaContext {
         "Cannot convert " + value.getClass().getName() + " to " + type.getName());
   }
 
-  @Override
-  public void put(String key, Object value) {
+  /**
+   * Stores a value in the saga data map. Package-private — used by the engine internally; not
+   * exposed to {@link com.scalar.db.saga.api.Step} implementations (steps return data via {@link
+   * com.scalar.db.saga.api.StepResult}).
+   */
+  void put(String key, Object value) {
     Objects.requireNonNull(key, "key must not be null");
     Objects.requireNonNull(value, "value must not be null");
     validateType(value);
@@ -113,7 +117,7 @@ class ExecutionContext implements SagaContext {
   }
 
   void setCurrentState(SagaStateSnapshot state) {
-    this.currentState = Objects.requireNonNull(state, "state must not be null");
+    this.currentState = state;
   }
 
   void markStepFailed(int stepIndex) {
@@ -124,8 +128,15 @@ class ExecutionContext implements SagaContext {
     return failedStepIndices.contains(stepIndex);
   }
 
+  void markStepCompensated(int stepIndex) {
+    compensatedStepIndices.add(stepIndex);
+  }
+
+  boolean isStepCompensated(int stepIndex) {
+    return compensatedStepIndices.contains(stepIndex);
+  }
+
   void merge(StepResult result) {
-    Objects.requireNonNull(result, "result must not be null");
     result.getOutput().values().forEach(this::validateType);
     data.putAll(result.getOutput());
   }
