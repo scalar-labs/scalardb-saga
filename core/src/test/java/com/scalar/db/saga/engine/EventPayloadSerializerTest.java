@@ -2,6 +2,7 @@ package com.scalar.db.saga.engine;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.math.BigDecimal;
 import java.util.Collections;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -97,5 +98,19 @@ class EventPayloadSerializerTest {
 
     // Assert
     assertThat(restored).isEqualTo(original);
+  }
+
+  @Test
+  void roundTrip_bigDecimalGiven_preservesPrecision() {
+    // Arrange
+    Map<String, Object> original = Map.of("amount", new BigDecimal("100.50"));
+
+    // Act
+    String json = EventPayloadSerializer.serialize(original);
+    Map<String, Object> restored = EventPayloadSerializer.deserializeMap(json);
+
+    // Assert — deserialized as BigDecimal, not Double
+    assertThat(restored.get("amount")).isInstanceOf(BigDecimal.class);
+    assertThat(restored.get("amount")).isEqualTo(new BigDecimal("100.50"));
   }
 }

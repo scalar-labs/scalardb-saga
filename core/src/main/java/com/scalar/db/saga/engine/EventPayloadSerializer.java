@@ -2,6 +2,7 @@ package com.scalar.db.saga.engine;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import java.util.Collections;
@@ -11,7 +12,8 @@ import org.jspecify.annotations.Nullable;
 /** Package-private utility for serializing/deserializing SagaEvent payloads. */
 final class EventPayloadSerializer {
 
-  private static final ObjectMapper MAPPER = new ObjectMapper();
+  private static final ObjectMapper MAPPER =
+      new ObjectMapper().enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
   private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
 
   private EventPayloadSerializer() {}
