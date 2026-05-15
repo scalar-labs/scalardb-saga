@@ -53,9 +53,7 @@ public class ScalarDbSagaStore implements SagaStore {
 
   private static final Pattern SAGA_ID_PATTERN = Pattern.compile("[a-zA-Z0-9._-]{1,128}");
   private static final int[] RECOVERABLE_STATUS_CODES = {
-    SagaStatus.RUNNING.getStatusCode(),
-    SagaStatus.CONFIRMING.getStatusCode(),
-    SagaStatus.COMPENSATING.getStatusCode()
+    SagaStatus.RUNNING.getStatusCode(), SagaStatus.COMPENSATING.getStatusCode()
   };
 
   private final DistributedTransactionManager txManager;
@@ -811,7 +809,6 @@ public class ScalarDbSagaStore implements SagaStore {
       StatusEvent event =
           switch (eventType) {
             case SAGA_STARTED -> StatusEvent.started(payload);
-            case SAGA_CONFIRMING -> StatusEvent.confirming();
             case SAGA_COMPENSATING -> StatusEvent.compensating();
             case SAGA_COMPLETED -> StatusEvent.completed();
             case SAGA_COMPENSATED -> StatusEvent.compensated();

@@ -452,7 +452,7 @@ class SagaEngineTest {
     }
 
     @Test
-    void executeSaga_tccAllReservesSucceed_emitsConfirmingAndConfirms() throws Exception {
+    void executeSaga_tccAllStepsSucceed_emitsOnlyCompleted() throws Exception {
       // Arrange
       TccStep tcc1 = createTccStep("t1");
       stepRegistry.register("t1", tcc1);
@@ -468,12 +468,10 @@ class SagaEngineTest {
       // Act
       engine.executeSaga(def, saga, Map.of());
 
-      // Assert — SAGA_CONFIRMING transition emitted between reserves and confirms
+      // Assert — only SAGA_COMPLETED transition (no CONFIRMING status)
       ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
-      verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture());
-      List<StatusEvent> transitions = transitionCaptor.getAllValues();
-      assertThat(transitions.get(0).getEventType()).isEqualTo(EventType.SAGA_CONFIRMING);
-      assertThat(transitions.get(1).getEventType()).isEqualTo(EventType.SAGA_COMPLETED);
+      verify(store, times(1)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture());
+      assertThat(transitionCaptor.getValue().getEventType()).isEqualTo(EventType.SAGA_COMPLETED);
     }
 
     @Test

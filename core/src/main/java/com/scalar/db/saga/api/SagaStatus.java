@@ -6,11 +6,8 @@ import java.util.Map;
 /** Lifecycle status of a saga instance. */
 public enum SagaStatus {
 
-  /** Executing forward steps (Saga) or Try phase (TCC). */
+  /** Executing forward steps (Saga) or Try/Confirm phase (TCC). */
   RUNNING(0),
-
-  /** TCC only: all Try steps succeeded, executing Confirm phase. */
-  CONFIRMING(1),
 
   /** All steps succeeded (and confirmed, in TCC mode). */
   COMPLETED(2),

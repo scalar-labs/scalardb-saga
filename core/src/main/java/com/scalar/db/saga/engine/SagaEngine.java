@@ -193,7 +193,7 @@ public class SagaEngine implements AutoCloseable {
           // Tracked for logging; saga stays COMPENSATING
         }
         default -> {
-          // Saga-level events (SAGA_CONFIRMING, etc.) — status tracked via snapshot
+          // Saga-level events (SAGA_COMPENSATING, etc.) — status tracked via snapshot
         }
       }
     }
@@ -255,8 +255,8 @@ public class SagaEngine implements AutoCloseable {
 
     try {
       List<StepWithPolicy> plan = buildPlan(def);
-      PivotPolicy pivot = buildPivotPolicy(def);
-      executeSagaSteps(plan, pivot, context, startIndex, def.getTimeoutMillis());
+      int pivotIndex = resolvePivotIndex(def);
+      executeSagaSteps(plan, pivotIndex, context, startIndex, def.getTimeoutMillis());
     } finally {
       unregisterActive(sagaId);
     }
@@ -264,7 +264,7 @@ public class SagaEngine implements AutoCloseable {
 
   private void executeSagaSteps(
       List<StepWithPolicy> plan,
-      PivotPolicy pivot,
+      int pivotIndex,
       ExecutionContext context,
       int startIndex,
       long sagaTimeoutMillis) {
@@ -281,15 +281,10 @@ public class SagaEngine implements AutoCloseable {
       // Check saga timeout
       if (TimeoutPolicy.isSagaTimedOut(sagaDeadline, clock.millis())) {
         logger.info("Saga {} timed out before step {}", context.getSagaId(), i);
-        if (i <= pivot.index()) {
+        if (i <= pivotIndex) {
           compensate(plan, context, i - 1);
         }
         return;
-      }
-
-      // Emit crossing event when transitioning past pivot
-      if (i == pivot.index() + 1 && pivot.crossingEvent() != null) {
-        transition(context, pivot.crossingEvent());
       }
 
       StepWithPolicy stepWithPolicy = plan.get(i);
@@ -312,7 +307,7 @@ public class SagaEngine implements AutoCloseable {
         recordStepCompleted(context, i, stepWithPolicy.step().getName(), result);
       } catch (StepExecutionException e) {
         recordStepFailed(context, i, stepWithPolicy.step().getName(), e);
-        if (i <= pivot.index()) {
+        if (i <= pivotIndex) {
           compensate(plan, context, i - 1);
         }
         return;
@@ -461,13 +456,12 @@ public class SagaEngine implements AutoCloseable {
     return plan;
   }
 
-  private PivotPolicy buildPivotPolicy(SagaDefinition def) {
+  private int resolvePivotIndex(SagaDefinition def) {
     if (def.getMode() == SagaMode.TCC) {
       // Pivot is at the last reserve step (index = N-1 for N TCC steps)
-      int pivotIndex = def.getSteps().size() - 1;
-      return new PivotPolicy(pivotIndex, StatusEvent.confirming());
+      return def.getSteps().size() - 1;
     }
-    return new PivotPolicy(def.getPivotIndex(), null);
+    return def.getPivotIndex();
   }
 
   private RetryPolicy resolveRetryPolicy(StepDefinition stepDef, SagaDefinition def) {

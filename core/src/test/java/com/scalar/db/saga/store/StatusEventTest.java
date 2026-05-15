@@ -36,17 +36,6 @@ class StatusEventTest {
   }
 
   @Test
-  void confirming_called_createsEventWithConfirmingStatus() {
-    // Act
-    StatusEvent event = StatusEvent.confirming();
-
-    // Assert
-    assertThat(event.getEventType()).isEqualTo(EventType.SAGA_CONFIRMING);
-    assertThat(event.getTargetStatus()).isEqualTo(SagaStatus.CONFIRMING);
-    assertThat(event.getPayload()).isNull();
-  }
-
-  @Test
   void compensating_called_createsEventWithCompensatingStatus() {
     // Act
     StatusEvent event = StatusEvent.compensating();

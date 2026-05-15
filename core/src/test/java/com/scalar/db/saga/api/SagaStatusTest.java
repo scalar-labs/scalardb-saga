@@ -11,7 +11,6 @@ class SagaStatusTest {
   void fromStatusCode_validCodesGiven_returnsCorrectStatus() {
     // Act & Assert
     assertThat(SagaStatus.fromStatusCode(0)).isEqualTo(SagaStatus.RUNNING);
-    assertThat(SagaStatus.fromStatusCode(1)).isEqualTo(SagaStatus.CONFIRMING);
     assertThat(SagaStatus.fromStatusCode(2)).isEqualTo(SagaStatus.COMPLETED);
     assertThat(SagaStatus.fromStatusCode(3)).isEqualTo(SagaStatus.COMPENSATING);
     assertThat(SagaStatus.fromStatusCode(4)).isEqualTo(SagaStatus.COMPENSATED);
@@ -36,7 +35,6 @@ class SagaStatusTest {
   void getStatusCode_allStatuses_returnsExpectedCodes() {
     // Act & Assert
     assertThat(SagaStatus.RUNNING.getStatusCode()).isEqualTo(0);
-    assertThat(SagaStatus.CONFIRMING.getStatusCode()).isEqualTo(1);
     assertThat(SagaStatus.COMPLETED.getStatusCode()).isEqualTo(2);
     assertThat(SagaStatus.COMPENSATING.getStatusCode()).isEqualTo(3);
     assertThat(SagaStatus.COMPENSATED.getStatusCode()).isEqualTo(4);
@@ -55,7 +53,6 @@ class SagaStatusTest {
   void isTerminal_nonTerminalStatuses_returnsFalse() {
     // Act & Assert
     assertThat(SagaStatus.RUNNING.isTerminal()).isFalse();
-    assertThat(SagaStatus.CONFIRMING.isTerminal()).isFalse();
     assertThat(SagaStatus.COMPENSATING.isTerminal()).isFalse();
   }
 
@@ -70,7 +67,6 @@ class SagaStatusTest {
   void isPurgeable_nonPurgeableStatuses_returnsFalse() {
     // Act & Assert
     assertThat(SagaStatus.RUNNING.isPurgeable()).isFalse();
-    assertThat(SagaStatus.CONFIRMING.isPurgeable()).isFalse();
     assertThat(SagaStatus.COMPENSATING.isPurgeable()).isFalse();
     assertThat(SagaStatus.ESCALATED.isPurgeable()).isFalse();
   }

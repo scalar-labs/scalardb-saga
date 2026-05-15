@@ -12,7 +12,6 @@ public enum EventType {
   // --- Saga-level (StatusEvent) ---
   // In-progress states use present participle; terminal states use past participle.
   SAGA_STARTED,
-  SAGA_CONFIRMING,
   SAGA_COMPENSATING,
   SAGA_COMPLETED,
   SAGA_COMPENSATED,
