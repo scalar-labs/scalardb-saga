@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -34,11 +35,13 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 class SagaEngineTest {
 
@@ -232,7 +235,9 @@ class SagaEngineTest {
 
       // Assert
       verify(step1).execute(any(SagaContext.class));
-      verify(store).recordStatusEvent(any(), anyInt(), any(StatusEvent.class));
+      ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
+      verify(store).recordStatusEvent(any(), anyInt(), transitionCaptor.capture());
+      assertThat(transitionCaptor.getValue().getEventType()).isEqualTo(EventType.SAGA_COMPLETED);
     }
 
     @Test
@@ -362,8 +367,13 @@ class SagaEngineTest {
       verify(step3, never()).execute(any(SagaContext.class));
       // Compensation was triggered: step1 compensated
       verify(step1).compensate(any(SagaContext.class));
-      // Two transitions: SAGA_COMPENSATING + SAGA_COMPENSATED
-      verify(store, times(2)).recordStatusEvent(any(), anyInt(), any(StatusEvent.class));
+      // Two transitions in order: SAGA_COMPENSATING → SAGA_COMPENSATED
+      ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
+      verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture());
+      assertThat(transitionCaptor.getAllValues().get(0).getEventType())
+          .isEqualTo(EventType.SAGA_COMPENSATING);
+      assertThat(transitionCaptor.getAllValues().get(1).getEventType())
+          .isEqualTo(EventType.SAGA_COMPENSATED);
     }
 
     @Test
@@ -444,11 +454,12 @@ class SagaEngineTest {
       // Act
       engine.executeSaga(def, saga, Map.of());
 
-      // Assert — reserves + confirms all executed
-      verify(tcc1).reserve(any(SagaContext.class));
-      verify(tcc2).reserve(any(SagaContext.class));
-      verify(tcc1).confirm(any(SagaContext.class));
-      verify(tcc2).confirm(any(SagaContext.class));
+      // Assert — all reserves execute before any confirms
+      InOrder inOrder = inOrder(tcc1, tcc2);
+      inOrder.verify(tcc1).reserve(any(SagaContext.class));
+      inOrder.verify(tcc2).reserve(any(SagaContext.class));
+      inOrder.verify(tcc1).confirm(any(SagaContext.class));
+      inOrder.verify(tcc2).confirm(any(SagaContext.class));
     }
 
     @Test
@@ -502,6 +513,13 @@ class SagaEngineTest {
       verify(tcc1).cancel(any(SagaContext.class));
       // tcc1.confirm never called
       verify(tcc1, never()).confirm(any(SagaContext.class));
+      // Transitions: SAGA_COMPENSATING → SAGA_COMPENSATED
+      ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
+      verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture());
+      assertThat(transitionCaptor.getAllValues().get(0).getEventType())
+          .isEqualTo(EventType.SAGA_COMPENSATING);
+      assertThat(transitionCaptor.getAllValues().get(1).getEventType())
+          .isEqualTo(EventType.SAGA_COMPENSATED);
     }
   }
 
@@ -520,7 +538,7 @@ class SagaEngineTest {
       when(step1.execute(any(SagaContext.class)))
           .thenAnswer(
               invocation -> {
-                Thread.sleep(10_000); // Block long enough to trigger timeout
+                Thread.sleep(500); // Block long enough to trigger 50ms timeout
                 return StepResult.empty();
               });
       stepRegistry.register("s1", step1);
@@ -543,18 +561,25 @@ class SagaEngineTest {
       engine.executeSaga(def, saga, Map.of());
 
       // Assert — STEP_FAILED event appended (timeout is non-retryable failure at/before pivot)
-      // Compensation triggered: SAGA_COMPENSATING + SAGA_COMPENSATED
-      verify(store, times(2)).recordStatusEvent(any(), anyInt(), any(StatusEvent.class));
+      // Compensation triggered: SAGA_COMPENSATING → SAGA_COMPENSATED
+      ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
+      verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture());
+      assertThat(transitionCaptor.getAllValues().get(0).getEventType())
+          .isEqualTo(EventType.SAGA_COMPENSATING);
+      assertThat(transitionCaptor.getAllValues().get(1).getEventType())
+          .isEqualTo(EventType.SAGA_COMPENSATED);
     }
 
     @Test
     void executeSaga_sagaTimeoutBeforePivot_compensatesCompletedSteps() throws Exception {
       // Arrange — clock advances past saga deadline between steps
       Clock mockClock = mock(Clock.class);
-      // First call: calculateSagaDeadline, second: between-steps check (not expired),
-      // third: calculateStepDeadline for step 0, fourth: executeWithRetry for step 0,
-      // fifth: between-steps check for step 1 (expired)
-      when(mockClock.millis()).thenReturn(0L, 0L, 0L, 0L, 2000L);
+      // Timeline: saga starts at t=0, deadline = 0+1000 = 1000ms
+      // t=100: timeout check for step 0 (not expired)
+      // t=200: step deadline calculation for step 0
+      // t=300: executeWithRetry for step 0
+      // t=1100: timeout check for step 1 (expired, 1100 > 1000)
+      when(mockClock.millis()).thenReturn(0L, 100L, 200L, 300L, 1100L);
       SagaEngine clockEngine =
           new SagaEngine(
               store,
@@ -587,19 +612,28 @@ class SagaEngineTest {
       // Assert — step 0 executed, step 1 NOT executed (saga timed out before it)
       verify(step0).execute(any(SagaContext.class));
       verify(step1, never()).execute(any(SagaContext.class));
-      // Compensation triggered: SAGA_COMPENSATING + SAGA_COMPENSATED
-      verify(store, times(2)).recordStatusEvent(any(), anyInt(), any(StatusEvent.class));
+      // Compensation triggered: SAGA_COMPENSATING → SAGA_COMPENSATED
+      ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
+      verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture());
+      assertThat(transitionCaptor.getAllValues().get(0).getEventType())
+          .isEqualTo(EventType.SAGA_COMPENSATING);
+      assertThat(transitionCaptor.getAllValues().get(1).getEventType())
+          .isEqualTo(EventType.SAGA_COMPENSATED);
     }
 
     @Test
     void executeSaga_sagaTimeoutAfterPivot_noCompensation() throws Exception {
       // Arrange — clock advances past saga deadline after the pivot
       Clock mockClock = mock(Clock.class);
-      // clock.millis() calls: (1) calculateSagaDeadline, (2) isSagaTimedOut i=0,
-      // (3) calculateStepDeadline i=0, (4) calculateRemaining i=0,
-      // (5) isSagaTimedOut i=1, (6) calculateStepDeadline i=1,
-      // (7) calculateRemaining i=1, (8) isSagaTimedOut i=2 → expired
-      when(mockClock.millis()).thenReturn(0L, 0L, 0L, 0L, 0L, 0L, 0L, 2000L);
+      // Timeline: saga starts at t=0, deadline = 0+1000 = 1000ms
+      // t=100: timeout check for step 0 (OK)
+      // t=200: step deadline for step 0
+      // t=300: executeWithRetry for step 0
+      // t=400: timeout check for step 1 (OK)
+      // t=500: step deadline for step 1
+      // t=600: executeWithRetry for step 1
+      // t=1100: timeout check for step 2 (expired, 1100 > 1000)
+      when(mockClock.millis()).thenReturn(0L, 100L, 200L, 300L, 400L, 500L, 600L, 1100L);
       SagaEngine clockEngine =
           new SagaEngine(
               store,
@@ -687,14 +721,16 @@ class SagaEngineTest {
     }
 
     @Test
-    void shutdown_activeSagas_marksForRecoveryAfterDrain() throws Exception {
-      // Arrange — Start a long-running saga that outlasts the shutdown timeout
+    void shutdown_sagaOutlastsTimeout_marksForRecovery() throws Exception {
+      // Arrange — step blocks until signaled, outlasting the shutdown timeout
+      CountDownLatch stepStarted = new CountDownLatch(1);
       Step step1 = mock(Step.class);
       when(step1.getName()).thenReturn("s1");
       when(step1.execute(any(SagaContext.class)))
           .thenAnswer(
               invocation -> {
-                Thread.sleep(2000); // Block for 2s
+                stepStarted.countDown(); // Signal that the step is running
+                Thread.sleep(500); // Block longer than shutdown timeout
                 return StepResult.empty();
               });
       stepRegistry.register("s1", step1);
@@ -702,7 +738,7 @@ class SagaEngineTest {
       SagaStateSnapshot saga = runningSnapshot("saga-1");
       when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
 
-      // Re-create engine with very short timeout
+      // Re-create engine with very short shutdown timeout
       engine.close();
       engine =
           new SagaEngine(
@@ -710,17 +746,17 @@ class SagaEngineTest {
               stepRegistry,
               OWNER_ID,
               new SagaEngine.ShutdownConfig(
-                  SagaEngine.ShutdownMode.WAIT_ALL_SAGAS, 100)); // 100ms timeout
+                  SagaEngine.ShutdownMode.WAIT_ALL_SAGAS, 50)); // 50ms timeout
 
-      // Start saga in background
+      // Start saga in background and wait until it's actively running
       Thread sagaThread = new Thread(() -> engine.executeSaga(def, saga, Map.of()));
       sagaThread.start();
-      Thread.sleep(50); // Let it register as active
+      stepStarted.await(); // Reliable: only proceeds once step is executing
 
       // Act
       engine.shutdown();
 
-      // Assert — saga marked for recovery
+      // Assert — saga still active when timeout expired, so marked for recovery
       verify(store).markForRecovery("saga-1");
       sagaThread.join(5000);
     }
@@ -771,12 +807,17 @@ class SagaEngineTest {
 
       // Assert — step called once (non-retryable), compensating triggered
       verify(step1, times(1)).execute(any(SagaContext.class));
-      // SAGA_COMPENSATING + SAGA_COMPENSATED (even with no steps to compensate, the first step)
-      verify(store, times(2)).recordStatusEvent(any(), anyInt(), any(StatusEvent.class));
+      // SAGA_COMPENSATING → SAGA_COMPENSATED
+      ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
+      verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture());
+      assertThat(transitionCaptor.getAllValues().get(0).getEventType())
+          .isEqualTo(EventType.SAGA_COMPENSATING);
+      assertThat(transitionCaptor.getAllValues().get(1).getEventType())
+          .isEqualTo(EventType.SAGA_COMPENSATED);
     }
 
     @Test
-    void executeWithRetry_retriesExhausted_throwsLastException() throws Exception {
+    void executeWithRetry_retriesExhausted_compensates() throws Exception {
       // Arrange — always fails
       Step step1 = mock(Step.class);
       when(step1.getName()).thenReturn("s1");
@@ -792,6 +833,14 @@ class SagaEngineTest {
 
       // Assert — 3 attempts (maxAttempts=3), then compensation
       verify(step1, times(3)).execute(any(SagaContext.class));
+
+      // SAGA_COMPENSATING → SAGA_COMPENSATED
+      ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
+      verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture());
+      assertThat(transitionCaptor.getAllValues().get(0).getEventType())
+          .isEqualTo(EventType.SAGA_COMPENSATING);
+      assertThat(transitionCaptor.getAllValues().get(1).getEventType())
+          .isEqualTo(EventType.SAGA_COMPENSATED);
     }
   }
 
@@ -940,8 +989,7 @@ class SagaEngineTest {
       engine.compensateFrom(def, context, 0);
 
       // Assert — no SAGA_COMPENSATED transition (stays COMPENSATING)
-      ArgumentCaptor<StatusEvent> eventCaptor = ArgumentCaptor.forClass(StatusEvent.class);
-      verify(store, never()).recordStatusEvent(any(), anyInt(), eventCaptor.capture());
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any(StatusEvent.class));
     }
   }
 
