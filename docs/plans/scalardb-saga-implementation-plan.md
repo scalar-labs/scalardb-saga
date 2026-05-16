@@ -18,7 +18,7 @@ deepened: 2026-04-20
 2. **Data integrity hardening**: Reverse `register()` order (persist before memory), add tombstone records for idempotent-create preservation, handle multi-row secondary index results, guard `markForRecovery()` against stale reads
 3. **Security tightening**: SSRF protection for callback URLs (allowlist), HTTP body size limits, Jackson ObjectMapper safety (`disableDefaultTyping`), saga/step name validation, recovery timeout constraint (`recoveryTimeoutMs > max(stepTimeoutMs)`)
 4. **Architecture refinement**: Split `SagaStore` into 4 focused interfaces, define `SagaEventListener` in Phase 1, replace `startAsync()` overloads with `StartSagaRequest` builder, make `NUM_BUCKETS` configurable
-5. **Missing flows identified**: Saga cancellation flow absent from engine, `StepResult.pending()` behavior undefined in embedded mode, definition resolution failure handling missing, data retention mechanism now specified (SagaRetentionManager with configurable retention period)
+5. **Missing flows identified**: Saga cancellation flow absent from engine, ~~`StepResult.pending()` behavior undefined in embedded mode~~ (resolved: parks saga without recording events), definition resolution failure handling missing, data retention mechanism now specified (SagaRetentionManager with configurable retention period)
 
 ### New Considerations Discovered
 
@@ -128,22 +128,22 @@ Modules are added to `settings.gradle.kts` as each phase begins.
 
 ##### Task 1.2: API Layer — Interfaces, Enums, POJOs
 
-- [ ] `api/package-info.java` — `@NullMarked` for null-safety enforcement
-- [ ] `api/Step.java` — Interface: `getName()`, `execute(SagaContext)`, `compensate(SagaContext)` (~15 LoC)
-- [ ] `api/TccStep.java` — Interface: `getName()`, `reserve(SagaContext)`, `confirm(SagaContext)`, `cancel(SagaContext)` (~15 LoC)
-- [ ] `api/SagaContext.java` — Public interface: `getSagaId()`, `get(key, type)`, `put(key, value)` (~10 LoC)
-- [ ] `api/StepResult.java` — Data class with `of()`, `empty()`, `pending()` factory methods (~30 LoC)
-- [ ] `api/SagaStatus.java` — Enum: RUNNING, CONFIRMING, COMPLETED, COMPENSATING, COMPENSATED, ESCALATED (~10 LoC)
-- [ ] `api/RetryPolicy.java` — Config POJO with builder, `defaultPolicy()`, `compensationDefault()`, `confirmDefault()` factories (~40 LoC). Execution logic (`sleepWithBackoff()`) deferred to Task 1.4.
-- [ ] `api/SagaDefinition.java` — POJO with `StepDefinition` inner class, `SagaMode` (SAGA/TCC), `RecoveryStrategy` (BACKWARD/FORWARD/MIXED), `getPivotIndex()`, validation, builder API (~80 LoC). `getPivotPolicy()` deferred to Task 1.4 (depends on `SagaEvent` from Task 1.5).
-- [ ] `api/SagaStateSnapshot.java` — Immutable read-only view with `withTransition()` (~40 LoC)
-- [ ] `api/SagaManager.java` — Interface: register ×2, start ×2, startAsync ×4, resume, compensate, getStateSnapshot, completeStep, startRecovery (~35 LoC)
-- [ ] `api/SagaCallback.java` — Callback interface: onCompleted, onCompensated, onEscalated (~10 LoC)
-- [ ] `exception/package-info.java` — `@NullMarked` for null-safety enforcement
-- [ ] `exception/StepExecutionException.java` — Minimal stub with `retryable` flag (default: true). Full constructors added in Task 1.3.
-- [ ] `exception/StepCompensationException.java` — Minimal stub. Full constructors added in Task 1.3.
-- [ ] `exception/SagaDefinitionException.java` — Minimal stub. Needed for `SagaDefinition.validate()`.
-- [ ] **Unit tests** (~200 LoC):
+- [x] `api/package-info.java` — `@NullMarked` for null-safety enforcement
+- [x] `api/Step.java` — Interface: `getName()`, `execute(SagaContext)`, `compensate(SagaContext)` (~15 LoC)
+- [x] `api/TccStep.java` — Interface: `getName()`, `reserve(SagaContext)`, `confirm(SagaContext)`, `cancel(SagaContext)` (~15 LoC)
+- [x] `api/SagaContext.java` — Public read-only interface: `getSagaId()`, `get(key, type)` (~10 LoC). Steps return data via `StepResult`.
+- [x] `api/StepResult.java` — Data class with `of()`, `empty()`, `pending()` factory methods (~30 LoC)
+- [x] `api/SagaStatus.java` — Enum: RUNNING, CONFIRMING, COMPLETED, COMPENSATING, COMPENSATED, ESCALATED (~10 LoC)
+- [x] `api/RetryPolicy.java` — Config POJO with builder, `defaultPolicy()`, `compensationDefault()`, `confirmDefault()` factories (~40 LoC). Execution logic (`sleepWithBackoff()`) deferred to Task 1.4.
+- [x] `api/SagaDefinition.java` — POJO with `StepDefinition` inner class, `SagaMode` (SAGA/TCC), `RecoveryStrategy` (BACKWARD/FORWARD/MIXED), `getPivotIndex()`, validation, builder API (~80 LoC). `getPivotPolicy()` deferred to Task 1.4 (depends on `SagaEvent` from Task 1.5).
+- [x] `api/SagaStateSnapshot.java` — Immutable read-only view with `withTransition()` (~40 LoC)
+- [x] `api/SagaManager.java` — Interface: register ×2, start ×2, startAsync ×4, resume, compensate, getStateSnapshot, completeStep, startRecovery (~35 LoC)
+- [x] `api/SagaCallback.java` — Callback interface: onCompleted, onCompensated, onEscalated (~10 LoC)
+- [x] `exception/package-info.java` — `@NullMarked` for null-safety enforcement
+- [x] `exception/StepExecutionException.java` — Minimal stub with `retryable` flag (default: true). Full constructors added in Task 1.3.
+- [x] `exception/StepCompensationException.java` — Minimal stub. Full constructors added in Task 1.3.
+- [x] `exception/SagaDefinitionException.java` — Minimal stub. Needed for `SagaDefinition.validate()`.
+- [x] **Unit tests** (~200 LoC):
   - SagaDefinition: `getPivotIndex` for all strategies (BACKWARD/FORWARD/MIXED), validation rules (no steps, duplicate names, invalid pivot index), builder API
   - StepResult: factory methods (`of`, `empty`, `pending`), immutability
   - SagaStateSnapshot: `withTransition()` state transitions, version propagation
@@ -157,34 +157,34 @@ Modules are added to `settings.gradle.kts` as each phase begins.
 
 > Note: `StepExecutionException`, `StepCompensationException`, and `SagaDefinitionException` stubs are created in Task 1.2. This task adds full constructors and the remaining exception classes.
 
-- [ ] `exception/StepExecutionException.java` — Add full constructor variants (message+cause+retryable, etc.)
-- [ ] `exception/StepCompensationException.java` — Add `stepName`/`stepIndex` fields and constructors
-- [ ] `exception/StepTimeoutException.java`
-- [ ] `exception/SagaTimeoutException.java` (extends StepTimeoutException)
-- [ ] `exception/SagaPersistenceException.java`
-- [ ] `exception/SagaAlreadyExistsException.java` — carries existing `SagaStateSnapshot`
-- [ ] `exception/SagaDefinitionException.java`
-- [ ] `exception/SagaDefinitionNotFoundException.java`
-- [ ] `exception/SagaNotFoundException.java`
-- [ ] `exception/SagaConcurrentModificationException.java`
+- [x] `exception/StepExecutionException.java` — Add full constructor variants (message+cause+retryable, etc.)
+- [x] `exception/StepCompensationException.java` — Add `stepName`/`stepIndex` fields and constructors
+- [x] `exception/StepTimeoutException.java`
+- [x] `exception/SagaTimeoutException.java` (extends StepTimeoutException)
+- [x] `exception/SagaPersistenceException.java`
+- [x] `exception/SagaAlreadyExistsException.java` — carries existing `SagaStateSnapshot`
+- [x] `exception/SagaDefinitionException.java`
+- [x] `exception/SagaDefinitionNotFoundException.java`
+- [x] `exception/SagaNotFoundException.java`
+- [x] `exception/SagaConcurrentModificationException.java`
 
 Total: ~80 LoC
 
-- [ ] **Unit tests** (~50 LoC):
+- [x] **Unit tests** (~50 LoC):
   - Exception classes: `retryable` flag default and override, `SagaAlreadyExistsException` snapshot attachment, inheritance hierarchy
 
 > **Research Insight (Simplicity + Spec Flow):** Consider collapsing to 7 exceptions: (1) merge `SagaDefinitionException` and `SagaDefinitionNotFoundException` — a missing definition IS a definition error, (2) reconsider `SagaTimeoutException extends StepTimeoutException` — a saga-level timeout is semantically different from a step-level timeout (a saga timeout fires *between* steps, a step timeout fires *within* a step). If kept, document clearly that catch blocks for `StepTimeoutException` will also catch `SagaTimeoutException`.
 
 ##### Task 1.4: Engine Internals — ExecutionContext, RetryPolicy, StepWithPolicy, TCC Adapters
 
-- [ ] `engine/ExecutionContext.java` — Implements `SagaContext`, adds type validation (strict allowlist: primitives, String, BigDecimal, List, Map), event sequencing, state tracking, failure tracking (~70 LoC)
-- [ ] `engine/RetryPolicy.java` — Add `sleepWithBackoff()` execution logic (equal jitter backoff, virtual thread execution) to `api/RetryPolicy` created in Task 1.2 (~20 LoC). Add `getPivotPolicy()` to `SagaDefinition`.
-- [ ] `engine/StepWithPolicy.java` — Record: `Step` + `RetryPolicy` + `stepTimeoutMs` (~5 LoC)
-- [ ] `engine/TccReserveStep.java` — Wraps `TccStep`: `execute()` → `reserve()`, `compensate()` → `cancel()` (~20 LoC)
-- [ ] `engine/TccConfirmStep.java` — Wraps `TccStep`: `execute()` → `confirm()`, `compensate()` → no-op (~20 LoC)
-- [ ] `timeout/TimeoutPolicy.java` — Per-step and per-saga deadline calculation (~30 LoC)
-- [ ] **Unit tests** (~250 LoC):
-  - ExecutionContext: type validation (allowed/rejected types), `merge()`, sequence tracking, `put()`/`get()` round-trip
+- [x] `engine/ExecutionContext.java` — Implements `SagaContext`, adds type validation (strict allowlist: primitives, String, BigDecimal, List, Map), event sequencing, state tracking, failure tracking (~70 LoC). `put()` is package-private (not on `SagaContext` interface).
+- [x] `engine/RetryPolicy.java` — Add `sleepWithBackoff()` execution logic (equal jitter backoff, virtual thread execution) to `api/RetryPolicy` created in Task 1.2 (~20 LoC). Add `getPivotPolicy()` to `SagaDefinition`.
+- [x] `engine/StepWithPolicy.java` — Record: `Step` + `executionRetryPolicy` + `compensationRetryPolicy` + `stepTimeoutMs` (~5 LoC)
+- [x] `engine/TccReserveStep.java` — Wraps `TccStep`: `execute()` → `reserve()`, `compensate()` → `cancel()` (~20 LoC)
+- [x] `engine/TccConfirmStep.java` — Wraps `TccStep`: `execute()` → `confirm()`, `compensate()` → no-op (~20 LoC)
+- [x] `timeout/TimeoutPolicy.java` — Per-step and per-saga deadline calculation (~30 LoC)
+- [x] **Unit tests** (~250 LoC):
+  - ExecutionContext: type validation (allowed/rejected types), `merge()`, sequence tracking, `get()` round-trip
   - RetryPolicy: backoff calculation, jitter bounds within `[half, currentInterval)`, `defaultPolicy()`/`compensationDefault()`/`confirmDefault()` factory values
   - TccReserveStep/TccConfirmStep: delegation to `TccStep.reserve()`/`confirm()`/`cancel()`, compensate behavior
 
@@ -247,7 +247,7 @@ Total: ~80 LoC
 
 ##### Task 1.7: SagaEngine — Core Execution Logic
 
-- [ ] `engine/SagaEngine.java` (~310 LoC, **medium complexity**):
+- [x] `engine/SagaEngine.java` (~660 LoC, **medium complexity**):
   - `createSaga()`: Persist saga (rejects if shutting down). Server- or client-supplied ID.
   - `executeSaga()`: Execute from known SagaStateSnapshot (avoids read-back)
   - `execute()`: Convenience create + execute
@@ -259,37 +259,40 @@ Total: ~80 LoC
     - PivotPolicy crossing event (e.g., CONFIRMING for TCC) emitted when crossing the pivot boundary
     - Graceful shutdown check between steps
     - Saga-level timeout check before each step
+    - `StepResult.pending()` parks the saga (returns without recording events; saga stays RUNNING for recovery/callback)
   - `expandTccPlan()`: N TccSteps → 2N StepWithPolicy entries (reserves with user retry policy, confirms with aggressive `confirmDefault()`)
   - `executeWithRetry()`: Virtual thread execution with per-step timeout via `Future.get(timeout)`, participant-driven error classification
-  - `compensateFrom()`: Trigger compensation from a given step index downward
+  - `compensateFrom()`: Trigger compensation from a given step index downward (merged from CompensationManager — see Task 1.8)
+  - `compensateWithRetry()`: Per-step compensation with retry policy, aligned with `executeWithRetry()` for consistency
   - `replayEvents()`: Reconstruct `ExecutionContext` from event stream (for recovery + completeStep). **Track STEP_COMPENSATED events** to skip already-compensated steps during recovery.
   - `registerActive()` / `unregisterActive()`: Track active sagas for graceful shutdown
-- [ ] **Unit tests** (~500 LoC):
-  - All execution paths: happy path (3-step saga completes), failure at each step position, pivot boundary behavior
-  - TCC expansion: `expandTccPlan()` produces correct 2N-step plan
-  - Graceful shutdown: rejects new sagas, drains active
-  - Timeout enforcement: saga-level, step-level via `Future.get(timeout)`
-  - Client-supplied IDs: accepted when valid, rejected when invalid
-  - `replayEvents()`: state reconstruction from event stream, compensated step tracking
+  - `ShutdownConfig`: Nested record grouping `ShutdownMode` and `timeoutMillis` with `defaultConfig()` factory
+- [x] `engine/StepRegistry.java` (~79 LoC): Thread-safe registry mapping step names to `Step`/`TccStep` instances. Package-private.
+- [x] `engine/EventPayloadSerializer.java` (~58 LoC): JSON serialization/deserialization for saga event payloads. Uses `USE_BIG_DECIMAL_FOR_FLOATS` for type-stable deserialization across crash recovery.
+- [x] `engine/PivotPolicy.java` (~13 LoC): Determines whether compensation should run based on which step failed relative to the pivot index.
+- [x] **Unit tests** (~1,460 LoC):
+  - SagaEngineTest (~1,188 LoC): All execution paths (happy path, failure at each step position, pivot boundary), TCC expansion, graceful shutdown, timeout enforcement, client-supplied IDs, `replayEvents()`, `StepResult.pending()` parking, compensation retry, convenience methods
+  - StepRegistryTest (~115 LoC): Registration, lookup, duplicate, type-mismatch
+  - EventPayloadSerializerTest (~116 LoC): Serialization, deserialization, round-trip, `BigDecimal` precision
+  - PivotPolicyTest (~42 LoC): Boundary tests for pivot index compensation logic
 
 > **Research Insight (Best Practices + Security + Spec Flow):**
 > - **Saga cancellation flow**: The engine currently has no explicit cancellation mechanism. Add a `cancelSaga(sagaId)` method that sets a cancellation flag checked between steps in `executeSagaSteps()`. When the flag is set, skip remaining steps and trigger compensation.
-> - **`StepResult.pending()` in embedded mode**: Define behavior — in embedded mode, `pending()` should either throw `UnsupportedOperationException` (fail-fast) or be treated as `empty()` (permissive). Document this clearly.
+> - **`StepResult.pending()` behavior**: ~~Undefined in embedded mode.~~ **Resolved**: On pending, the engine returns without recording any event — the saga stays RUNNING and will be resumed by a callback or recovery. No embedded/daemon mode flag needed; callers simply don't return `pending()` in embedded mode.
 > - **Definition resolution failure**: If `SagaDefinitionRegistry.resolve()` returns null during recovery (definition not in memory or store), the saga cannot be recovered. Add explicit handling — either escalate the saga with a clear reason or retry definition resolution.
 > - **Event replay completeness**: Track compensated step indices during `replayEvents()` to provide defense-in-depth against re-compensating already-compensated steps, even though compensation idempotency is required.
 > - **Validate step/saga names**: Restrict to `[a-zA-Z0-9._-]{1,64}` to prevent injection into log messages, metrics labels, and trace attributes.
+>
+> **Design Decisions:**
+> - **CompensationManager merged into SagaEngine**: The separate `CompensationManager` class (originally Task 1.8) was merged into `SagaEngine` as `compensateFrom()` + `compensateWithRetry()`. This eliminated a second executor and simplified shutdown — one virtual-thread executor, one shutdown path.
+> - **`SagaContext` made read-only**: Removed `put()` from the public `SagaContext` interface. Steps return data via `StepResult.success(output)`, which the engine merges into the context. `put()` remains as a package-private method on `ExecutionContext`.
+> - **`StepWithPolicy` has dual retry policies**: `executionRetryPolicy` for forward execution, `compensationRetryPolicy` for compensation. This allows different retry strategies per direction.
+> - **`EventPayloadSerializer` uses `USE_BIG_DECIMAL_FOR_FLOATS`**: Ensures monetary values survive crash recovery without precision loss (BigDecimal → JSON → BigDecimal, not Double).
+> - **All SagaEngine constructors and methods are package-private** except `close()` (AutoCloseable). `SagaManager` (Task 1.9) will be the public entry point.
 
-##### Task 1.8: CompensationManager
+##### ~~Task 1.8: CompensationManager~~ — Merged into Task 1.7
 
-- [ ] `engine/CompensationManager.java` (~70 LoC):
-  - Reverse-loop compensation (LIFO order) with `compensationRetryPolicy` (default: 3 attempts, 1s initial, 2.0x backoff)
-  - Stop on failure — throws `StepCompensationException`, saga stays in COMPENSATING for recovery
-  - Works with both Saga and TCC steps (TccReserveStep.compensate → cancel)
-  - Appends STEP_COMPENSATED / STEP_COMPENSATION_FAILED events
-- [ ] **Unit tests** (~100 LoC):
-  - Reverse ordering (LIFO): compensations execute in correct order
-  - Retry behavior: transient failures retried up to `maxAttempts`
-  - Stop on failure: loop stops on non-retryable compensation failure, saga stays COMPENSATING
+> **Note:** CompensationManager was merged into `SagaEngine` as `compensateFrom()` + `compensateWithRetry()`. This eliminated a separate class and executor, simplifying shutdown coordination. All compensation logic (LIFO ordering, retry, event appending) is covered in SagaEngine and its tests.
 
 ##### Task 1.9: SagaDefinitionRegistry + DefaultSagaManager + Builder
 

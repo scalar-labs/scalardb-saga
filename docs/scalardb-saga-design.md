@@ -600,13 +600,14 @@ public interface TccStep {
 
 // --- api/SagaContext.java ---
 // Public interface — what Step and TccStep implementations receive.
-// Provides read/write access to the saga's shared data map and the saga ID.
-// Engine-internal tracking (event sequencing, state transitions, failure tracking)
-// is in ExecutionContext, which implements this interface.
+// Provides read-only access to the saga's shared data map and the saga ID.
+// Steps return output via StepResult, which the engine merges into the context
+// for subsequent steps. Engine-internal tracking (event sequencing, state
+// transitions, failure tracking) is in ExecutionContext, which implements this
+// interface.
 public interface SagaContext {
     String getSagaId();
     <T> T get(String key, Class<T> type);
-    void put(String key, Object value);
 }
 
 // --- engine/ExecutionContext.java ---
@@ -642,10 +643,12 @@ class ExecutionContext implements SagaContext {
         this.currentState = Objects.requireNonNull(currentState);
     }
 
-    // --- SagaContext interface (user-facing) ---
+    // --- SagaContext interface (read-only, user-facing) ---
     @Override public String getSagaId() { return sagaId; }
     @Override public <T> T get(String key, Class<T> type) { ... }
-    @Override public void put(String key, Object value) {
+
+    // --- Engine-internal write access (not exposed via SagaContext) ---
+    void put(String key, Object value) {
         validateType(value);  // throws IllegalArgumentException if not allowed
         data.put(key, value);
     }
@@ -1285,11 +1288,10 @@ public class SagaEngine {
      * Bundles a Step with its resolved RetryPolicy.
      * Internal record — not part of the public API.
      */
-    record StepWithPolicy(Step step, RetryPolicy retryPolicy, long stepTimeoutMillis) {
+    record StepWithPolicy(Step step, RetryPolicy executionRetryPolicy,
+                          RetryPolicy compensationRetryPolicy, long stepTimeoutMillis) {
         // Compact constructor validates invariants at construction time.
         StepWithPolicy {
-            Objects.requireNonNull(step, "step");
-            Objects.requireNonNull(retryPolicy, "retryPolicy");
             if (stepTimeoutMillis < 0) {
                 throw new IllegalArgumentException("stepTimeoutMillis must be >= 0");
             }
