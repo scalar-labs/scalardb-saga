@@ -2,7 +2,6 @@ package com.scalar.db.saga.engine;
 
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Objects;
 import java.util.StringJoiner;
 import net.jcip.annotations.Immutable;
 import org.jspecify.annotations.Nullable;
@@ -78,9 +77,6 @@ class ResourceRegistry {
      *     registered
      */
     <T> Builder add(Class<T> type, T instance, String name) {
-      Objects.requireNonNull(type, "type must not be null");
-      Objects.requireNonNull(instance, "instance must not be null");
-      Objects.requireNonNull(name, "name must not be null");
       return addInternal(new ResourceKey(type, name), instance);
     }
 
@@ -91,8 +87,6 @@ class ResourceRegistry {
      *     registered
      */
     <T> Builder add(Class<T> type, T instance) {
-      Objects.requireNonNull(type, "type must not be null");
-      Objects.requireNonNull(instance, "instance must not be null");
       return addInternal(new ResourceKey(type, null), instance);
     }
 
