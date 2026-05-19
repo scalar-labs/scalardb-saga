@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
@@ -275,6 +276,28 @@ class EmbeddedSagaManagerTest {
 
       // Assert
       verify(callback, timeout(5000)).onEscalated(escalatedSaga);
+    }
+
+    @Test
+    void startAsync_executionFails_stillDispatchesCallback() throws Exception {
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot runningSaga = snapshot("saga-1", SagaStatus.RUNNING);
+      SagaStateSnapshot compensatedSaga = snapshot("saga-1", SagaStatus.COMPENSATED);
+      SagaCallback callback = mock(SagaCallback.class);
+
+      when(registry.get("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(runningSaga);
+      doThrow(new RuntimeException("engine failure"))
+          .when(engine)
+          .executeSaga(eq(def), any(), any());
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(compensatedSaga));
+
+      // Act
+      manager.startAsync("transfer", Map.of(), callback);
+
+      // Assert — callback still dispatched despite engine failure
+      verify(callback, timeout(5000)).onCompensated(compensatedSaga);
     }
 
     @Test

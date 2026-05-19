@@ -157,10 +157,15 @@ class EmbeddedSagaManager implements SagaManager {
         () -> {
           try {
             engine.executeSaga(def, saga, input);
-            dispatchCallback(saga.getSagaId(), callback);
           } catch (Exception e) {
             // Saga state is persisted — recovery will pick it up
             logger.error("Async saga {} failed unexpectedly", saga.getSagaId(), e);
+          } finally {
+            try {
+              dispatchCallback(saga.getSagaId(), callback);
+            } catch (Exception e) {
+              logger.error("Failed to dispatch callback for saga {}", saga.getSagaId(), e);
+            }
           }
         });
   }
