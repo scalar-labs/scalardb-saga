@@ -105,6 +105,30 @@ class SagaDefinitionParserTest {
     }
 
     @Test
+    void parseJson_nullOptionalFieldsGiven_usesDefaults() {
+      // Arrange
+      String json =
+          """
+          {
+            "name": "nullFields",
+            "version": null,
+            "timeoutMillis": null,
+            "steps": [
+              { "name": "s1", "stepClass": "com.example.Step1", "timeoutMillis": null, "pivot": null }
+            ]
+          }
+          """;
+
+      // Act
+      SagaDefinition def = SagaDefinitionParser.parseJson(json);
+
+      // Assert — null fields treated as absent, defaults applied
+      assertThat(def.getVersion()).isEqualTo("1.0");
+      assertThat(def.getTimeoutMillis()).isEqualTo(0);
+      assertThat(def.getSteps().get(0).getTimeoutMillis()).isEqualTo(0);
+    }
+
+    @Test
     void parseJson_tccModeGiven_parsesCorrectly() {
       // Arrange
       String json =

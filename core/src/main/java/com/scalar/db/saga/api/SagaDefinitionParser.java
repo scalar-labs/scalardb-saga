@@ -124,16 +124,16 @@ public final class SagaDefinitionParser {
 
     SagaDefinition.Builder builder = SagaDefinition.newBuilder(name, mode);
 
-    if (root.has("version")) {
+    if (root.has("version") && !root.get("version").isNull()) {
       builder.version(root.get("version").asText());
     }
-    if (root.has("recoveryStrategy")) {
+    if (root.has("recoveryStrategy") && !root.get("recoveryStrategy").isNull()) {
       builder.recoveryStrategy(parseEnum(root, "recoveryStrategy", RecoveryStrategy.class, null));
     }
-    if (root.has("timeoutMillis")) {
+    if (root.has("timeoutMillis") && !root.get("timeoutMillis").isNull()) {
       builder.timeoutMillis(root.get("timeoutMillis").asLong());
     }
-    if (root.has("defaultRetryPolicy")) {
+    if (root.has("defaultRetryPolicy") && !root.get("defaultRetryPolicy").isNull()) {
       builder.defaultRetryPolicy(parseRetryPolicy(root.get("defaultRetryPolicy")));
     }
 
@@ -146,13 +146,13 @@ public final class SagaDefinitionParser {
       String stepClass = requireText(stepNode, "stepClass");
       SagaDefinition.StepBuilder stepBuilder = builder.step(stepName, stepClass);
 
-      if (stepNode.has("timeoutMillis")) {
+      if (stepNode.has("timeoutMillis") && !stepNode.get("timeoutMillis").isNull()) {
         stepBuilder.timeoutMillis(stepNode.get("timeoutMillis").asLong());
       }
-      if (stepNode.has("retryPolicy")) {
+      if (stepNode.has("retryPolicy") && !stepNode.get("retryPolicy").isNull()) {
         stepBuilder.retryPolicy(parseRetryPolicy(stepNode.get("retryPolicy")));
       }
-      if (stepNode.has("pivot")) {
+      if (stepNode.has("pivot") && !stepNode.get("pivot").isNull()) {
         stepBuilder.pivot(stepNode.get("pivot").asBoolean());
       }
       stepBuilder.add();
