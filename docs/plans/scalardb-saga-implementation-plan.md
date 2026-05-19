@@ -294,14 +294,21 @@ Total: ~80 LoC
 
 > **Note:** CompensationManager was merged into `SagaEngine` as `compensateFrom()` + `compensateWithRetry()`. This eliminated a separate class and executor, simplifying shutdown coordination. All compensation logic (LIFO ordering, retry, event appending) is covered in SagaEngine and its tests.
 
-##### Task 1.9: SagaDefinitionRegistry + DefaultSagaManager + Builder
+##### Task 1.9: SagaDefinitionRegistry + EmbeddedSagaManager + Builder
 
-- [ ] `engine/SagaDefinitionRegistry.java` (~40 LoC): ConcurrentHashMap + store fallback. Two-tier lookup: by name (latest), by name:version (recovery). **Persist to store BEFORE putting in memory** to ensure recoverability by other replicas.
-- [ ] `engine/DefaultSagaManager.java` (~140 LoC): Implements SagaManager. Delegates to SagaEngine + SagaRecoveryManager. startAsync via virtual thread executor with SagaCallback dispatch. completeStep (daemon mode only).
-- [ ] `engine/SagaManagerBuilder.java` (~60 LoC): DI-free builder: `.store()`, `.retryPolicy()`, `.compensationRetryPolicy()`, `.recoveryConfig()`, `.addEventListener()`, `.build()`.
-- [ ] **Unit tests** (~100 LoC):
+- [x] `engine/SagaDefinitionRegistry.java` (~40 LoC): ConcurrentHashMap + store fallback. Two-tier lookup: by name (latest), by name:version (recovery). **Persist to store BEFORE putting in memory** to ensure recoverability by other replicas.
+- [x] `engine/EmbeddedSagaManager.java` (~140 LoC): Implements SagaManager. Delegates to SagaEngine. startAsync via virtual thread executor with SagaCallback dispatch. `completeStep()` throws `UnsupportedOperationException` (daemon mode only). `resume()` validates RUNNING status; `compensate()` validates COMPENSATING status — prevents race conditions with concurrent execution.
+- [x] `engine/SagaManagerBuilder.java` (~60 LoC): DI-free builder: `.store()`, `.retryPolicy()`, `.compensationRetryPolicy()`, `.addEventListener()`, `.build()`.
+- [x] **Unit tests** (~100 LoC):
   - SagaDefinitionRegistry: two-tier lookup (name, name:version), store fallback, registration order (persist before memory)
   - SagaManagerBuilder: wiring correctness, missing required fields throw
+  - EmbeddedSagaManager: sync/async start, resume/compensate with status validation, callback dispatch, register(Path)
+
+> **Implementation Notes:**
+> - **Renamed `DefaultSagaManager` → `EmbeddedSagaManager`**: Clarifies that this is the embedded-mode implementation. A separate daemon-mode `SagaManager` will be added later.
+> - **Replaced `registerFromClasspath` with `register(Path)`**: The classpath scanning approach was complex for questionable value. `register(Path)` is a thin convenience over `SagaDefinitionParser.parseFile()`. `SagaDefinitionParser.parseResource()` still serves the classpath resource use case (e.g., JARs).
+> - **Status validation in `resume()` and `compensate()`**: `resume()` only allows RUNNING; `compensate()` only allows COMPENSATING. Prevents race conditions where `compensate()` is called while a saga is still actively executing.
+> - **`StartSagaRequest` builder deferred**: Kept the overload-based API for now. Can revisit if the overload count grows.
 
 > **Research Insight (Architecture + Data Integrity):**
 > - **Definition registration order**: The current pseudocode does `definitions.put()` before `store.registerDefinition()`. If the store write fails, the definition is in memory but not persisted. Sagas created with this definition cannot be recovered by other replicas. **Reverse the order**: persist first, then put in memory. If the store write throws, the definition is not available — fail-fast.
@@ -311,11 +318,15 @@ Total: ~80 LoC
 
 ##### Task 1.10: SagaDefinitionParser
 
-- [ ] `parser/SagaDefinitionParser.java` (~80 LoC): Jackson-based JSON/YAML → SagaDefinition. Detects format by file extension. Uses `jackson-dataformat-yaml`. Validates definition at parse time.
-- [ ] **Unit tests** (~100 LoC):
-  - JSON parsing: valid definition, minimal definition
-  - YAML parsing: valid definition, comments preserved (ignored)
-  - Validation errors: missing name, empty steps, invalid stepClass, unknown fields (`FAIL_ON_UNKNOWN_PROPERTIES`)
+- [x] `api/SagaDefinitionParser.java` (~80 LoC): Jackson-based JSON/YAML → SagaDefinition. Detects format by file extension. Uses `jackson-dataformat-yaml`. Validates definition at parse time. Provides `parseJson()`, `parseYaml()`, `parseFile()`, `parseResource()`.
+- [x] **Unit tests** (~100 LoC):
+  - JSON parsing: valid definition, minimal definition, TCC mode, mixed strategy
+  - YAML parsing: valid definition
+  - Resource parsing: JSON and YAML from classpath
+  - Validation errors: missing name, empty steps, unknown fields (`FAIL_ON_UNKNOWN_PROPERTIES`)
+
+> **Implementation Note:**
+> - **Moved from `parser/` to `api/` package**: `SagaDefinitionParser` is part of the public API (used by `SagaManager.register(Path)`), so it belongs in the `api` package rather than a separate `parser` package.
 
 ##### Task 1.11: SagaRecoveryManager + SagaRetentionManager
 
@@ -342,6 +353,7 @@ Total: ~80 LoC
 > - **Constraint**: Enforce `recoveryTimeoutMs > max(stepTimeoutMs)` across all step definitions. Otherwise, a saga may be claimed for recovery while a step is still executing within its timeout, leading to duplicate step execution.
 > - **Shutdown signal**: Replace shutdown polling loop with `CountDownLatch` or `CompletableFuture` for cleaner thread wakeup. `ScheduledExecutorService.awaitTermination()` with the latch avoids busy-waiting.
 > - **Clock skew**: The recovery scan uses `Instant.now().minusMillis(recoveryTimeoutMs)`. If the scanning replica's clock is ahead of the original replica's clock, sagas may be prematurely claimed. In cloud environments (NTP), skew is typically <1s vs. 60s default timeout — negligible. Document that `recoveryTimeoutMs` should include a safety margin for edge environments.
+> - **TODO: Add saga timeout event**: `SagaEngine` transitions RUNNING → COMPENSATING on timeout without recording a timeout-specific event. Recovery is time-based (stale `updated_at`), so this is not a correctness issue, but adding a `SAGA_TIMED_OUT` event would improve observability (logging, debugging, metrics). Consider adding this alongside recovery implementation.
 
 ##### Task 1.12: Testing Harness (Phase 1 scope)
 
