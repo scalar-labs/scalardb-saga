@@ -3,7 +3,6 @@ package com.scalar.db.saga.engine;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
@@ -443,7 +442,7 @@ class EmbeddedSagaManagerTest {
     }
 
     @Test
-    void compensate_noCompletedSteps_doesNotCallEngine() {
+    void compensate_noCompletedSteps_transitionsToCompensated() {
       // Arrange
       SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.COMPENSATING);
       SagaDefinition def = definition("test-saga");
@@ -458,8 +457,8 @@ class EmbeddedSagaManagerTest {
       // Act
       manager.compensate("saga-1");
 
-      // Assert — nothing to compensate
-      verify(engine, never()).compensateFrom(any(), any(), anyInt());
+      // Assert — no steps to compensate, but still transitions to COMPENSATED
+      verify(engine).compensateFrom(def, context, -1);
     }
 
     @Test

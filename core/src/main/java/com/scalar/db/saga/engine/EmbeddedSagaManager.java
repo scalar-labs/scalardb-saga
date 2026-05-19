@@ -211,9 +211,7 @@ class EmbeddedSagaManager implements SagaManager {
       fromStep = stepIndices(events, EventType.STEP_COMPLETED).max().orElse(-1);
     }
 
-    if (fromStep >= 0) {
-      engine.compensateFrom(def, context, fromStep);
-    }
+    engine.compensateFrom(def, context, fromStep);
     return context.getCurrentState();
   }
 
