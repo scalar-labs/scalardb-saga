@@ -9,6 +9,7 @@ import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.api.Step;
 import com.scalar.db.saga.api.StepResult;
 import com.scalar.db.saga.api.TccStep;
+import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.StepCompensationException;
 import com.scalar.db.saga.exception.StepExecutionException;
 import com.scalar.db.saga.exception.StepTimeoutException;
@@ -72,7 +73,7 @@ public class SagaEngine implements AutoCloseable {
   }
 
   private final SagaStore store;
-  private final StepRegistry stepRegistry;
+  private final StepResolver stepResolver;
   private final String ownerId;
   private final ShutdownConfig shutdownConfig;
   private final Clock clock;
@@ -80,27 +81,20 @@ public class SagaEngine implements AutoCloseable {
   private final Object shutdownLock = new Object();
   private final Set<String> activeSagas = ConcurrentHashMap.newKeySet();
   private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+  private final ConcurrentHashMap<String, List<StepWithPolicy>> planCache =
+      new ConcurrentHashMap<>();
 
   SagaEngine(
       SagaStore store,
-      StepRegistry stepRegistry,
+      StepResolver stepResolver,
       String ownerId,
       ShutdownConfig shutdownConfig,
       Clock clock) {
     this.store = Objects.requireNonNull(store, "store must not be null");
-    this.stepRegistry = Objects.requireNonNull(stepRegistry, "stepRegistry must not be null");
+    this.stepResolver = Objects.requireNonNull(stepResolver, "stepResolver must not be null");
     this.ownerId = Objects.requireNonNull(ownerId, "ownerId must not be null");
     this.shutdownConfig = Objects.requireNonNull(shutdownConfig, "shutdownConfig must not be null");
     this.clock = Objects.requireNonNull(clock, "clock must not be null");
-  }
-
-  SagaEngine(
-      SagaStore store, StepRegistry stepRegistry, String ownerId, ShutdownConfig shutdownConfig) {
-    this(store, stepRegistry, ownerId, shutdownConfig, Clock.systemUTC());
-  }
-
-  SagaEngine(SagaStore store, StepRegistry stepRegistry, String ownerId) {
-    this(store, stepRegistry, ownerId, ShutdownConfig.defaultConfig());
   }
 
   // ---------------------------------------------------------------------------
@@ -161,14 +155,14 @@ public class SagaEngine implements AutoCloseable {
    * Triggers compensation from a specific step (used by recovery for sagas stuck in COMPENSATING).
    */
   void compensateFrom(SagaDefinition def, ExecutionContext context, int fromStep) {
-    List<StepWithPolicy> plan = buildPlan(def);
+    List<StepWithPolicy> plan = getOrBuildPlan(def);
     compensate(plan, context, fromStep);
   }
 
   /**
    * Replays events to reconstruct an ExecutionContext for crash recovery.
    *
-   * <p>Package-private: used by SagaRecoveryManager and DefaultSagaManager.
+   * <p>Package-private: used by SagaRecoveryManager and EmbeddedSagaManager.
    */
   ExecutionContext replayEvents(SagaStateSnapshot saga, List<SagaEvent> events) {
     ExecutionContext context = new ExecutionContext(saga.getSagaId(), Map.of(), saga);
@@ -254,7 +248,7 @@ public class SagaEngine implements AutoCloseable {
     }
 
     try {
-      List<StepWithPolicy> plan = buildPlan(def);
+      List<StepWithPolicy> plan = getOrBuildPlan(def);
       int pivotIndex = resolvePivotIndex(def);
       executeSagaSteps(plan, pivotIndex, context, startIndex, def.getTimeoutMillis());
     } finally {
@@ -420,7 +414,7 @@ public class SagaEngine implements AutoCloseable {
     RetryPolicy compensationPolicy = RetryPolicy.compensationDefault();
     List<StepWithPolicy> plan = new ArrayList<>();
     for (StepDefinition stepDef : def.getSteps()) {
-      Step step = stepRegistry.getStep(stepDef.getName());
+      Step step = resolveStep(stepDef, Step.class);
       RetryPolicy policy = resolveRetryPolicy(stepDef, def);
       plan.add(new StepWithPolicy(step, policy, compensationPolicy, stepDef.getTimeoutMillis()));
     }
@@ -428,24 +422,21 @@ public class SagaEngine implements AutoCloseable {
   }
 
   private List<StepWithPolicy> expandTccPlan(SagaDefinition def) {
-    List<StepWithPolicy> plan = new ArrayList<>();
+    List<StepWithPolicy> reserveSteps = new ArrayList<>();
+    List<StepWithPolicy> confirmSteps = new ArrayList<>();
     RetryPolicy confirmPolicy = RetryPolicy.confirmDefault();
     RetryPolicy compensationPolicy = RetryPolicy.compensationDefault();
 
     for (StepDefinition stepDef : def.getSteps()) {
-      TccStep tccStep = stepRegistry.getTccStep(stepDef.getName());
+      TccStep tccStep = resolveStep(stepDef, TccStep.class);
       RetryPolicy reservePolicy = resolveRetryPolicy(stepDef, def);
-      plan.add(
+      reserveSteps.add(
           new StepWithPolicy(
               new TccReserveStep(tccStep),
               reservePolicy,
               compensationPolicy,
               stepDef.getTimeoutMillis()));
-    }
-
-    for (StepDefinition stepDef : def.getSteps()) {
-      TccStep tccStep = stepRegistry.getTccStep(stepDef.getName());
-      plan.add(
+      confirmSteps.add(
           new StepWithPolicy(
               new TccConfirmStep(tccStep),
               confirmPolicy,
@@ -453,7 +444,37 @@ public class SagaEngine implements AutoCloseable {
               stepDef.getTimeoutMillis()));
     }
 
-    return plan;
+    reserveSteps.addAll(confirmSteps);
+    return reserveSteps;
+  }
+
+  private <T> T resolveStep(StepDefinition stepDef, Class<T> expectedType) {
+    Object resolved = stepResolver.resolve(stepDef.getName(), stepDef.getStepClass());
+    if (expectedType.isInstance(resolved)) {
+      return expectedType.cast(resolved);
+    }
+    throw new SagaDefinitionException(
+        "Step '"
+            + stepDef.getName()
+            + "' (class "
+            + stepDef.getStepClass()
+            + ") does not implement "
+            + expectedType.getName()
+            + ". Found: "
+            + resolved.getClass().getName());
+  }
+
+  /**
+   * Returns the cached execution plan for the given definition, building and caching it on first
+   * access. Called during registration to fail fast on missing resources or unresolvable
+   * constructors, and reused on every execution to avoid repeated resolution and allocation.
+   */
+  List<StepWithPolicy> getOrBuildPlan(SagaDefinition def) {
+    return planCache.computeIfAbsent(planCacheKey(def), k -> List.copyOf(buildPlan(def)));
+  }
+
+  private static String planCacheKey(SagaDefinition def) {
+    return def.getName() + ":" + def.getVersion();
   }
 
   private int resolvePivotIndex(SagaDefinition def) {

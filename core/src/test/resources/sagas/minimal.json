@@ -1,0 +1,6 @@
+{
+  "name": "minimal",
+  "steps": [
+    { "name": "s1", "stepClass": "com.example.Step1" }
+  ]
+}

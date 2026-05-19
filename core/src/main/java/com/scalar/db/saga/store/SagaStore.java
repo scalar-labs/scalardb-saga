@@ -45,6 +45,12 @@ public interface SagaStore {
   /** Looks up a saga definition by name and version. */
   Optional<SagaDefinition> getDefinition(String sagaName, String definitionVersion);
 
+  /**
+   * Looks up the latest version of a saga definition by name. "Latest" is determined by the most
+   * recent {@code registered_at} timestamp.
+   */
+  Optional<SagaDefinition> getDefinition(String sagaName);
+
   // ---------------------------------------------------------------------------
   // Events
   // ---------------------------------------------------------------------------

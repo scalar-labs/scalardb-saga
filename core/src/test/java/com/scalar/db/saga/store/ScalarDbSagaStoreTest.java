@@ -343,6 +343,47 @@ class ScalarDbSagaStoreTest {
     assertThat(found).isEmpty();
   }
 
+  @Test
+  void getDefinition_multipleVersionsExist_returnsLatestByRegisteredAt() throws Exception {
+    // Arrange — two versions, v1 registered earlier, v2 registered later
+    SagaDefinition defV2 =
+        SagaDefinition.newBuilder("order-saga", SagaMode.SAGA)
+            .version("v2")
+            .step("debit", "com.example.DebitStep")
+            .add()
+            .step("credit", "com.example.CreditStep")
+            .add()
+            .build();
+    Result resultV1 = mock(Result.class);
+    when(resultV1.getTimestampTZ("registered_at"))
+        .thenReturn(Instant.parse("2026-01-01T00:00:00Z"));
+    Result resultV2 = mock(Result.class);
+    when(resultV2.getText("definition_json")).thenReturn(definitionSerializer.serialize(defV2));
+    when(resultV2.getTimestampTZ("registered_at"))
+        .thenReturn(Instant.parse("2026-01-02T00:00:00Z"));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(resultV1, resultV2));
+
+    // Act
+    Optional<SagaDefinition> found = store.getDefinition("order-saga");
+
+    // Assert — returns v2 (latest by registered_at)
+    assertThat(found).isPresent();
+    assertThat(found.get().getVersion()).isEqualTo("v2");
+    assertThat(found.get().getSteps()).hasSize(2);
+  }
+
+  @Test
+  void getDefinition_noVersionsExist_returnsEmpty() throws Exception {
+    // Arrange
+    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+
+    // Act
+    Optional<SagaDefinition> found = store.getDefinition("unknown");
+
+    // Assert
+    assertThat(found).isEmpty();
+  }
+
   // ---------------------------------------------------------------------------
   // recordStepEvent
   // ---------------------------------------------------------------------------

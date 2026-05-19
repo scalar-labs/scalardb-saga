@@ -17,14 +17,16 @@ import com.scalar.db.saga.exception.StepExecutionException;
 class TccReserveStep implements Step {
 
   private final TccStep tccStep;
+  private final String name;
 
   TccReserveStep(TccStep tccStep) {
     this.tccStep = tccStep;
+    this.name = tccStep.getName() + ".reserve";
   }
 
   @Override
   public String getName() {
-    return tccStep.getName() + ".reserve";
+    return name;
   }
 
   @Override

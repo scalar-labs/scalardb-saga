@@ -25,6 +25,7 @@ import com.scalar.db.saga.exception.SagaPersistenceException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -188,6 +189,19 @@ public class ScalarDbSagaStore implements SagaStore {
         "get definition " + sagaName + " " + definitionVersion);
   }
 
+  @Override
+  public Optional<SagaDefinition> getDefinition(String sagaName) {
+    return runInTransaction(
+        tx -> {
+          List<Result> results = tx.scan(buildDefinitionScan(sagaName));
+          return results.stream()
+              .max(Comparator.comparing(r -> r.getTimestampTZ("registered_at")))
+              .map(r -> definitionSerializer.deserialize(r.getText("definition_json")));
+        },
+        null, // read-only
+        "get latest definition " + sagaName);
+  }
+
   // ---------------------------------------------------------------------------
   // Events
   // ---------------------------------------------------------------------------
@@ -221,42 +235,38 @@ public class ScalarDbSagaStore implements SagaStore {
     SagaStatus newStatus = event.getTargetStatus();
     int bucket = schema.bucketOf(sagaId);
 
-    try {
-      return runInTransaction(
-          tx -> {
-            Instant now = Instant.now();
+    return runInTransaction(
+        tx -> {
+          Instant now = Instant.now();
 
-            // Verify the row still exists at the snapshot's CK.
-            // Because status and updated_at are part of the clustering key,
-            // every mutation DELETEs the old CK and INSERTs at a new CK.
-            // If the row exists here, no other replica has touched it.
-            int oldStatus = current.getStatus().getStatusCode();
-            Optional<Result> row =
-                tx.get(buildStateGet(bucket, oldStatus, current.getUpdatedAt(), sagaId));
-            if (row.isEmpty()) {
-              throw new SagaConcurrentModificationException(sagaId);
-            }
+          // Verify the row still exists at the snapshot's CK.
+          // Because status and updated_at are part of the clustering key,
+          // every mutation DELETEs the old CK and INSERTs at a new CK.
+          // If the row exists here, no other replica has touched it.
+          int oldStatus = current.getStatus().getStatusCode();
+          Optional<Result> row =
+              tx.get(buildStateGet(bucket, oldStatus, current.getUpdatedAt(), sagaId));
+          if (row.isEmpty()) {
+            throw new SagaConcurrentModificationException(sagaId);
+          }
 
-            tx.insert(buildEventInsert(sagaId, sequence, event, now));
-            tx.delete(buildStateDelete(bucket, oldStatus, current.getUpdatedAt(), sagaId));
-            SagaStateSnapshot updated = current.withTransition(newStatus, now);
-            tx.insert(buildStateInsert(bucket, updated));
-            return updated;
-          },
-          () ->
-              runInTransaction(
-                  tx -> {
-                    if (tx.get(buildEventGet(sagaId, sequence)).isPresent()) {
-                      return loadStateSnapshot(sagaId);
-                    }
-                    return Optional.empty();
-                  },
-                  null,
-                  "verify transition " + sagaId + " seq " + sequence),
-          "record transition for saga " + sagaId);
-    } catch (SagaConcurrentModificationException | SagaPersistenceException e) {
-      throw e;
-    }
+          tx.insert(buildEventInsert(sagaId, sequence, event, now));
+          tx.delete(buildStateDelete(bucket, oldStatus, current.getUpdatedAt(), sagaId));
+          SagaStateSnapshot updated = current.withTransition(newStatus, now);
+          tx.insert(buildStateInsert(bucket, updated));
+          return updated;
+        },
+        () ->
+            runInTransaction(
+                tx -> {
+                  if (tx.get(buildEventGet(sagaId, sequence)).isPresent()) {
+                    return loadStateSnapshot(sagaId);
+                  }
+                  return Optional.empty();
+                },
+                null,
+                "verify transition " + sagaId + " seq " + sequence),
+        "record transition for saga " + sagaId);
   }
 
   @Override
@@ -717,6 +727,14 @@ public class ScalarDbSagaStore implements SagaStore {
         .clusteringKey(Key.ofText("definition_version", version))
         .textValue("definition_json", json)
         .timestampTZValue("registered_at", Instant.now())
+        .build();
+  }
+
+  private Scan buildDefinitionScan(String sagaName) {
+    return Scan.newBuilder()
+        .namespace(SagaSchema.NAMESPACE)
+        .table(SagaSchema.DEFINITIONS_TABLE)
+        .partitionKey(Key.ofText("saga_name", sagaName))
         .build();
   }
 

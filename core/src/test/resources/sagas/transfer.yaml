@@ -1,0 +1,12 @@
+# Transfer money saga definition
+name: transferMoney
+mode: SAGA
+version: "2.0"
+recoveryStrategy: BACKWARD
+timeoutMillis: 30000
+steps:
+  - name: debit
+    stepClass: com.example.DebitStep
+    timeoutMillis: 5000
+  - name: credit
+    stepClass: com.example.CreditStep

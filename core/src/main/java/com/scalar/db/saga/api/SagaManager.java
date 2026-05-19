@@ -1,6 +1,7 @@
 package com.scalar.db.saga.api;
 
 import com.scalar.db.saga.exception.SagaDefinitionException;
+import java.nio.file.Path;
 import java.util.Map;
 
 /**
@@ -19,12 +20,13 @@ public interface SagaManager extends AutoCloseable {
   void register(SagaDefinition definition);
 
   /**
-   * Loads and registers all saga definitions ({@code .json}, {@code .yaml}, {@code .yml}) from a
-   * classpath path.
+   * Parses a saga definition from a file and registers it. Detects JSON or YAML by file extension
+   * ({@code .json}, {@code .yaml}, {@code .yml}).
    *
-   * @param resourcePath the classpath path to scan
+   * @param definitionFile the path to the definition file
+   * @throws SagaDefinitionException if the file cannot be parsed or fails validation
    */
-  void registerFromClasspath(String resourcePath);
+  void register(Path definitionFile);
 
   /**
    * Starts a new saga instance with a server-generated ID (synchronous — blocks until the saga

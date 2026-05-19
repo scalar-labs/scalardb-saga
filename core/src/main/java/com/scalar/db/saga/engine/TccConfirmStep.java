@@ -17,14 +17,16 @@ import com.scalar.db.saga.exception.StepExecutionException;
 class TccConfirmStep implements Step {
 
   private final TccStep tccStep;
+  private final String name;
 
   TccConfirmStep(TccStep tccStep) {
     this.tccStep = tccStep;
+    this.name = tccStep.getName() + ".confirm";
   }
 
   @Override
   public String getName() {
-    return tccStep.getName() + ".confirm";
+    return name;
   }
 
   @Override
