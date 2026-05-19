@@ -52,7 +52,7 @@ class EmbeddedSagaManagerTest {
 
   @BeforeEach
   void setUp() {
-    manager = new EmbeddedSagaManager(engine, store, registry);
+    manager = new EmbeddedSagaManager(engine, store, registry, 30_000);
   }
 
   @AfterEach
@@ -565,9 +565,9 @@ class EmbeddedSagaManagerTest {
     void close_always_shutsDownEngineAndExecutor() throws InterruptedException {
       // Arrange
       ExecutorService mockExecutor = mock(ExecutorService.class);
-      when(mockExecutor.awaitTermination(10, TimeUnit.SECONDS)).thenReturn(true);
+      when(mockExecutor.awaitTermination(30_000, TimeUnit.MILLISECONDS)).thenReturn(true);
       EmbeddedSagaManager managerWithMockExecutor =
-          new EmbeddedSagaManager(engine, store, registry, mockExecutor);
+          new EmbeddedSagaManager(engine, store, registry, 30_000, mockExecutor);
 
       // Act
       managerWithMockExecutor.close();

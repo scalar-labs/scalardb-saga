@@ -37,10 +37,20 @@ class EmbeddedSagaManager implements SagaManager {
   private final SagaEngine engine;
   private final SagaStore store;
   private final SagaDefinitionRegistry registry;
+  private final long shutdownTimeoutMillis;
   private final ExecutorService asyncExecutor;
 
-  EmbeddedSagaManager(SagaEngine engine, SagaStore store, SagaDefinitionRegistry registry) {
-    this(engine, store, registry, Executors.newVirtualThreadPerTaskExecutor());
+  EmbeddedSagaManager(
+      SagaEngine engine,
+      SagaStore store,
+      SagaDefinitionRegistry registry,
+      long shutdownTimeoutMillis) {
+    this(
+        engine,
+        store,
+        registry,
+        shutdownTimeoutMillis,
+        Executors.newVirtualThreadPerTaskExecutor());
   }
 
   // Visible for testing
@@ -48,10 +58,12 @@ class EmbeddedSagaManager implements SagaManager {
       SagaEngine engine,
       SagaStore store,
       SagaDefinitionRegistry registry,
+      long shutdownTimeoutMillis,
       ExecutorService asyncExecutor) {
     this.engine = engine;
     this.store = store;
     this.registry = registry;
+    this.shutdownTimeoutMillis = shutdownTimeoutMillis;
     this.asyncExecutor = asyncExecutor;
   }
 
@@ -256,7 +268,7 @@ class EmbeddedSagaManager implements SagaManager {
     asyncExecutor.shutdown();
     engine.shutdown();
     try {
-      if (!asyncExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+      if (!asyncExecutor.awaitTermination(shutdownTimeoutMillis, TimeUnit.MILLISECONDS)) {
         asyncExecutor.shutdownNow();
       }
     } catch (InterruptedException e) {

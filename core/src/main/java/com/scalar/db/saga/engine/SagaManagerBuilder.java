@@ -184,7 +184,7 @@ public class SagaManagerBuilder {
     SagaEngine engine = new SagaEngine(store, resolver, ownerId, shutdownConfig, clock);
     SagaDefinitionRegistry registry = new SagaDefinitionRegistry(store);
 
-    return new EmbeddedSagaManager(engine, store, registry);
+    return new EmbeddedSagaManager(engine, store, registry, shutdownTimeoutMillis);
   }
 
   private StepResolver buildStepResolver() {
