@@ -303,6 +303,13 @@ class SagaDefinitionParserTest {
           .isInstanceOf(SagaDefinitionException.class)
           .hasMessageContaining("not found");
     }
+
+    @Test
+    void parseResource_unsupportedExtensionGiven_throwsException() {
+      // Act & Assert
+      assertThatThrownBy(() -> SagaDefinitionParser.parseResource("sagas/transfer.txt"))
+          .isInstanceOf(SagaDefinitionException.class);
+    }
   }
 
   // =========================================================================

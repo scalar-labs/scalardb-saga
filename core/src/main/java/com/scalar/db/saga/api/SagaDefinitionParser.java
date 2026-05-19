@@ -249,7 +249,11 @@ public final class SagaDefinitionParser {
     if (fileNameOrPath.endsWith(".yaml") || fileNameOrPath.endsWith(".yml")) {
       return YAML_MAPPER;
     }
-    return JSON_MAPPER;
+    if (fileNameOrPath.endsWith(".json")) {
+      return JSON_MAPPER;
+    }
+    throw new SagaDefinitionException(
+        "Unsupported file extension: '" + fileNameOrPath + "'; expected .json, .yaml, or .yml");
   }
 
   private static ObjectMapper createMapper(@Nullable JsonFactory factory) {
