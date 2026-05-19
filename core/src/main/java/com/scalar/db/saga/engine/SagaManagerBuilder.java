@@ -16,7 +16,7 @@ import org.jspecify.annotations.Nullable;
  * <ol>
  *   <li><b>No dependencies (default):</b> Steps must have a single public no-arg constructor.
  *   <li><b>Resource injection:</b> Register shared resources via {@link #resource(Class, Object)}
- *       or {@link #resource(String, Class, Object)}. Steps must have exactly one public constructor
+ *       or {@link #resource(Class, Object, String)}. Steps must have exactly one public constructor
  *       whose parameter types match registered resources.
  *   <li><b>Custom resolver:</b> Supply a {@link StepResolver} via {@link
  *       #stepResolver(StepResolver)} for full control over step instantiation (e.g., manual lookup,
@@ -136,7 +136,7 @@ public class SagaManagerBuilder {
    * Registers an unnamed resource for constructor injection during step resolution.
    *
    * <p>Use this when only one resource of a given type is needed. If multiple resources of the same
-   * type are required, use {@link #resource(String, Class, Object)} with a qualifier name.
+   * type are required, use {@link #resource(Class, Object, String)} with a qualifier name.
    *
    * @param type the resource type (exact type match during resolution)
    * @param instance the resource instance
