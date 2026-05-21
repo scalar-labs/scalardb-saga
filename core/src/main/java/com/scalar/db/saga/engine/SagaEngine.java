@@ -41,12 +41,12 @@ import org.slf4j.LoggerFactory;
  * <p>Manages saga lifecycle from creation through execution, compensation, and graceful shutdown.
  */
 @ThreadSafe
-public class SagaEngine implements AutoCloseable {
+class SagaEngine implements AutoCloseable {
 
   private static final Logger logger = LoggerFactory.getLogger(SagaEngine.class);
 
   /** Shutdown strategy for in-flight sagas. */
-  public enum ShutdownMode {
+  enum ShutdownMode {
     /** Complete the current step, then stop between steps and mark for recovery. */
     WAIT_CURRENT_STEP,
     /** Wait for all active sagas to reach a terminal state. */
@@ -54,9 +54,9 @@ public class SagaEngine implements AutoCloseable {
   }
 
   /** Shutdown configuration for the engine. */
-  public record ShutdownConfig(ShutdownMode mode, long timeoutMillis) {
+  record ShutdownConfig(ShutdownMode mode, long timeoutMillis) {
 
-    public ShutdownConfig {
+    ShutdownConfig {
       Objects.requireNonNull(mode, "mode must not be null");
       if (timeoutMillis < 0) {
         throw new IllegalArgumentException("timeoutMillis must be >= 0, got " + timeoutMillis);
