@@ -255,7 +255,7 @@ public class SagaEngine implements AutoCloseable {
 
     try {
       List<StepWithPolicy> plan = buildPlan(def);
-      int pivotIndex = resolvePivotIndex(def);
+      int pivotIndex = def.getPivotIndex();
       executeSagaSteps(plan, pivotIndex, context, startIndex, def.getTimeoutMillis());
     } finally {
       unregisterActive(sagaId);
@@ -454,14 +454,6 @@ public class SagaEngine implements AutoCloseable {
     }
 
     return plan;
-  }
-
-  private int resolvePivotIndex(SagaDefinition def) {
-    if (def.getMode() == SagaMode.TCC) {
-      // Pivot is at the last reserve step (index = N-1 for N TCC steps)
-      return def.getSteps().size() - 1;
-    }
-    return def.getPivotIndex();
   }
 
   private RetryPolicy resolveRetryPolicy(StepDefinition stepDef, SagaDefinition def) {
