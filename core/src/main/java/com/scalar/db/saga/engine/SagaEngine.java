@@ -190,7 +190,7 @@ public class SagaEngine implements AutoCloseable {
         case STEP_FAILED -> context.markStepFailed(((StepEvent) event).getStepIndex());
         case STEP_COMPENSATED -> context.markStepCompensated(((StepEvent) event).getStepIndex());
         case STEP_COMPENSATION_FAILED -> {
-          // Tracked for logging; saga stays COMPENSATING
+          // Tracked for future observability; saga stays COMPENSATING
         }
         default -> {
           // Saga-level events (SAGA_COMPENSATING, etc.) — status tracked via snapshot
