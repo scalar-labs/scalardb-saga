@@ -11,10 +11,10 @@ class SagaStatusTest {
   void fromStatusCode_validCodesGiven_returnsCorrectStatus() {
     // Act & Assert
     assertThat(SagaStatus.fromStatusCode(0)).isEqualTo(SagaStatus.RUNNING);
-    assertThat(SagaStatus.fromStatusCode(2)).isEqualTo(SagaStatus.COMPLETED);
-    assertThat(SagaStatus.fromStatusCode(3)).isEqualTo(SagaStatus.COMPENSATING);
-    assertThat(SagaStatus.fromStatusCode(4)).isEqualTo(SagaStatus.COMPENSATED);
-    assertThat(SagaStatus.fromStatusCode(5)).isEqualTo(SagaStatus.ESCALATED);
+    assertThat(SagaStatus.fromStatusCode(1)).isEqualTo(SagaStatus.COMPLETED);
+    assertThat(SagaStatus.fromStatusCode(2)).isEqualTo(SagaStatus.COMPENSATING);
+    assertThat(SagaStatus.fromStatusCode(3)).isEqualTo(SagaStatus.COMPENSATED);
+    assertThat(SagaStatus.fromStatusCode(4)).isEqualTo(SagaStatus.ESCALATED);
   }
 
   @Test
@@ -35,10 +35,10 @@ class SagaStatusTest {
   void getStatusCode_allStatuses_returnsExpectedCodes() {
     // Act & Assert
     assertThat(SagaStatus.RUNNING.getStatusCode()).isEqualTo(0);
-    assertThat(SagaStatus.COMPLETED.getStatusCode()).isEqualTo(2);
-    assertThat(SagaStatus.COMPENSATING.getStatusCode()).isEqualTo(3);
-    assertThat(SagaStatus.COMPENSATED.getStatusCode()).isEqualTo(4);
-    assertThat(SagaStatus.ESCALATED.getStatusCode()).isEqualTo(5);
+    assertThat(SagaStatus.COMPLETED.getStatusCode()).isEqualTo(1);
+    assertThat(SagaStatus.COMPENSATING.getStatusCode()).isEqualTo(2);
+    assertThat(SagaStatus.COMPENSATED.getStatusCode()).isEqualTo(3);
+    assertThat(SagaStatus.ESCALATED.getStatusCode()).isEqualTo(4);
   }
 
   @Test

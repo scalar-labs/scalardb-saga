@@ -10,16 +10,16 @@ public enum SagaStatus {
   RUNNING(0),
 
   /** All steps succeeded (and confirmed, in TCC mode). */
-  COMPLETED(2),
+  COMPLETED(1),
 
   /** Executing compensation steps (Saga) or Cancel phase (TCC). */
-  COMPENSATING(3),
+  COMPENSATING(2),
 
   /** All compensations/cancellations completed. */
-  COMPENSATED(4),
+  COMPENSATED(3),
 
   /** Stuck beyond grace period, needs manual intervention. */
-  ESCALATED(5);
+  ESCALATED(4);
 
   private static final Map<Integer, SagaStatus> BY_STATUS_CODE = new HashMap<>();
 
