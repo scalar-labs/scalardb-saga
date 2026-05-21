@@ -42,12 +42,12 @@ import org.slf4j.LoggerFactory;
  * <p>Manages saga lifecycle from creation through execution, compensation, and graceful shutdown.
  */
 @ThreadSafe
-public class SagaEngine implements AutoCloseable {
+class SagaEngine implements AutoCloseable {
 
   private static final Logger logger = LoggerFactory.getLogger(SagaEngine.class);
 
   /** Shutdown strategy for in-flight sagas. */
-  public enum ShutdownMode {
+  enum ShutdownMode {
     /** Complete the current step, then stop between steps and mark for recovery. */
     WAIT_CURRENT_STEP,
     /** Wait for all active sagas to reach a terminal state. */
@@ -55,9 +55,9 @@ public class SagaEngine implements AutoCloseable {
   }
 
   /** Shutdown configuration for the engine. */
-  public record ShutdownConfig(ShutdownMode mode, long timeoutMillis) {
+  record ShutdownConfig(ShutdownMode mode, long timeoutMillis) {
 
-    public ShutdownConfig {
+    ShutdownConfig {
       Objects.requireNonNull(mode, "mode must not be null");
       if (timeoutMillis < 0) {
         throw new IllegalArgumentException("timeoutMillis must be >= 0, got " + timeoutMillis);
@@ -184,7 +184,7 @@ public class SagaEngine implements AutoCloseable {
         case STEP_FAILED -> context.markStepFailed(((StepEvent) event).getStepIndex());
         case STEP_COMPENSATED -> context.markStepCompensated(((StepEvent) event).getStepIndex());
         case STEP_COMPENSATION_FAILED -> {
-          // Tracked for logging; saga stays COMPENSATING
+          // Tracked for future observability; saga stays COMPENSATING
         }
         default -> {
           // Saga-level events (SAGA_COMPENSATING, etc.) — status tracked via snapshot
@@ -249,7 +249,7 @@ public class SagaEngine implements AutoCloseable {
 
     try {
       List<StepWithPolicy> plan = getOrBuildPlan(def);
-      int pivotIndex = resolvePivotIndex(def);
+      int pivotIndex = def.getPivotIndex();
       executeSagaSteps(plan, pivotIndex, context, startIndex, def.getTimeoutMillis());
     } finally {
       unregisterActive(sagaId);
@@ -475,14 +475,6 @@ public class SagaEngine implements AutoCloseable {
 
   private static String planCacheKey(SagaDefinition def) {
     return def.getName() + ":" + def.getVersion();
-  }
-
-  private int resolvePivotIndex(SagaDefinition def) {
-    if (def.getMode() == SagaMode.TCC) {
-      // Pivot is at the last reserve step (index = N-1 for N TCC steps)
-      return def.getSteps().size() - 1;
-    }
-    return def.getPivotIndex();
   }
 
   private RetryPolicy resolveRetryPolicy(StepDefinition stepDef, SagaDefinition def) {
