@@ -432,6 +432,8 @@ public class SagaEngine implements AutoCloseable {
     RetryPolicy confirmPolicy = RetryPolicy.confirmDefault();
     RetryPolicy compensationPolicy = RetryPolicy.compensationDefault();
 
+    // Two separate loops because the plan must be ordered as [R1, R2, ..., RN, C1, C2, ..., CN];
+    // a single loop would interleave reserve and confirm steps.
     for (StepDefinition stepDef : def.getSteps()) {
       TccStep tccStep = stepRegistry.getTccStep(stepDef.getName());
       RetryPolicy reservePolicy = resolveRetryPolicy(stepDef, def);
