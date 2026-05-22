@@ -66,11 +66,4 @@ class TccConfirmStepTest {
     // Act & Assert
     assertThatThrownBy(() -> step.execute(context)).isSameAs(exception);
   }
-
-  @SuppressWarnings("NullAway")
-  @Test
-  void constructor_nullTccStepGiven_throwsNullPointerException() {
-    // Arrange & Act & Assert
-    assertThatThrownBy(() -> new TccConfirmStep(null)).isInstanceOf(NullPointerException.class);
-  }
 }

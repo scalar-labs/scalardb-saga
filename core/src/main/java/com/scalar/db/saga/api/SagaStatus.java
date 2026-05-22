@@ -6,23 +6,20 @@ import java.util.Map;
 /** Lifecycle status of a saga instance. */
 public enum SagaStatus {
 
-  /** Executing forward steps (Saga) or Try phase (TCC). */
+  /** Executing forward steps (Saga) or Try/Confirm phase (TCC). */
   RUNNING(0),
 
-  /** TCC only: all Try steps succeeded, executing Confirm phase. */
-  CONFIRMING(1),
-
   /** All steps succeeded (and confirmed, in TCC mode). */
-  COMPLETED(2),
+  COMPLETED(1),
 
   /** Executing compensation steps (Saga) or Cancel phase (TCC). */
-  COMPENSATING(3),
+  COMPENSATING(2),
 
   /** All compensations/cancellations completed. */
-  COMPENSATED(4),
+  COMPENSATED(3),
 
   /** Stuck beyond grace period, needs manual intervention. */
-  ESCALATED(5);
+  ESCALATED(4);
 
   private static final Map<Integer, SagaStatus> BY_STATUS_CODE = new HashMap<>();
 

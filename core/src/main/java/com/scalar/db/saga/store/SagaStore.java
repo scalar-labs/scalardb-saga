@@ -91,9 +91,8 @@ public interface SagaStore {
   // ---------------------------------------------------------------------------
 
   /**
-   * Finds sagas in {@link SagaStatus#RUNNING}, {@link SagaStatus#CONFIRMING}, or {@link
-   * SagaStatus#COMPENSATING} status whose {@code updated_at} is older than the recovery timeout
-   * threshold.
+   * Finds sagas in {@link SagaStatus#RUNNING} or {@link SagaStatus#COMPENSATING} status whose
+   * {@code updated_at} is older than the recovery timeout threshold.
    *
    * <p>Each call returns a batch of results. Pass the cursor from the previous result to continue
    * scanning, or {@code null} to start from the beginning. A {@code null} cursor in the returned

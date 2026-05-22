@@ -42,11 +42,6 @@ public final class StatusEvent implements SagaEvent {
     return new StatusEvent(EventType.SAGA_STARTED, SagaStatus.RUNNING, payload, null);
   }
 
-  /** Creates a {@link EventType#SAGA_CONFIRMING} event (TCC confirm phase). */
-  public static StatusEvent confirming() {
-    return new StatusEvent(EventType.SAGA_CONFIRMING, SagaStatus.CONFIRMING, null, null);
-  }
-
   /** Creates a {@link EventType#SAGA_COMPENSATING} event. */
   public static StatusEvent compensating() {
     return new StatusEvent(EventType.SAGA_COMPENSATING, SagaStatus.COMPENSATING, null, null);

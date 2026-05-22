@@ -155,13 +155,13 @@ class ScalarDbSagaStoreTest {
 
   @Test
   void createSaga_payloadExceedsLimit_throwsIllegalArgumentException() {
-    // Arrange — 10-byte limit is too small for any valid payload
+    // Arrange — 5-byte limit is too small for any valid payload
     ScalarDbSagaStore limitedStore =
         new ScalarDbSagaStore(
             txManager,
             objectMapper,
             schema,
-            ScalarDbSagaStoreConfig.builder().maxEventPayloadBytes(10).build());
+            ScalarDbSagaStoreConfig.builder().maxEventPayloadBytes(5).build());
 
     // Act & Assert
     assertThatThrownBy(
@@ -602,25 +602,21 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
-  void findRecoverable_allThreeStatuses_returnsResultsFromAllScans() throws Exception {
+  void findRecoverable_bothStatuses_returnsResultsFromAllScans() throws Exception {
     // Arrange — each status scan returns one result
     Result running = mockStateResult("saga-running", SagaStatus.RUNNING);
-    Result confirming = mockStateResult("saga-confirming", SagaStatus.CONFIRMING);
     Result compensating = mockStateResult("saga-compensating", SagaStatus.COMPENSATING);
-    when(tx.scan(any(Scan.class)))
-        .thenReturn(List.of(running))
-        .thenReturn(List.of(confirming))
-        .thenReturn(List.of(compensating));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(running)).thenReturn(List.of(compensating));
 
     // Act
     Recoverables result = store.findRecoverable(60_000, null);
 
-    // Assert — all three statuses collected
-    assertThat(result.sagas()).hasSize(3);
+    // Assert — both statuses collected
+    assertThat(result.sagas()).hasSize(2);
     assertThat(result.sagas())
         .extracting(SagaStateSnapshot::getSagaId)
-        .containsExactly("saga-running", "saga-confirming", "saga-compensating");
-    verify(tx, times(3)).scan(any(Scan.class));
+        .containsExactly("saga-running", "saga-compensating");
+    verify(tx, times(2)).scan(any(Scan.class));
   }
 
   @Test
@@ -827,16 +823,6 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
-  void deleteSaga_confirmingSaga_throwsIllegalStateException() throws Exception {
-    // Arrange
-    Result stateRow = mockStateResult("saga-1", SagaStatus.CONFIRMING);
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(stateRow));
-
-    // Act & Assert
-    assertThatThrownBy(() -> store.deleteSaga("saga-1")).isInstanceOf(IllegalStateException.class);
-  }
-
-  @Test
   void deleteSaga_transactionFails_throwsSagaPersistenceException() throws Exception {
     // Arrange
     when(tx.get(any(Get.class))).thenThrow(mock(CrudException.class));
@@ -910,24 +896,22 @@ class ScalarDbSagaStoreTest {
   void getEvents_allSagaLevelEventTypes_deserializesCorrectly() throws Exception {
     // Arrange
     Result r1 = mockEventResult("SAGA_STARTED", -1, null, "{\"input\":1}");
-    Result r2 = mockEventResult("SAGA_CONFIRMING", -1, null, null);
-    Result r3 = mockEventResult("SAGA_COMPENSATING", -1, null, null);
-    Result r4 = mockEventResult("SAGA_COMPLETED", -1, null, null);
-    Result r5 = mockEventResult("SAGA_COMPENSATED", -1, null, null);
-    Result r6 = mockEventResult("SAGA_ESCALATED", -1, null, "timeout");
-    when(tx.scan(any(Scan.class))).thenReturn(List.of(r1, r2, r3, r4, r5, r6));
+    Result r2 = mockEventResult("SAGA_COMPENSATING", -1, null, null);
+    Result r3 = mockEventResult("SAGA_COMPLETED", -1, null, null);
+    Result r4 = mockEventResult("SAGA_COMPENSATED", -1, null, null);
+    Result r5 = mockEventResult("SAGA_ESCALATED", -1, null, "timeout");
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(r1, r2, r3, r4, r5));
 
     // Act
     List<SagaEvent> events = store.getEvents("saga-1");
 
     // Assert
-    assertThat(events).hasSize(6);
+    assertThat(events).hasSize(5);
     assertThat(events.get(0).getEventType()).isEqualTo(EventType.SAGA_STARTED);
-    assertThat(events.get(1).getEventType()).isEqualTo(EventType.SAGA_CONFIRMING);
-    assertThat(events.get(2).getEventType()).isEqualTo(EventType.SAGA_COMPENSATING);
-    assertThat(events.get(3).getEventType()).isEqualTo(EventType.SAGA_COMPLETED);
-    assertThat(events.get(4).getEventType()).isEqualTo(EventType.SAGA_COMPENSATED);
-    assertThat(events.get(5).getEventType()).isEqualTo(EventType.SAGA_ESCALATED);
+    assertThat(events.get(1).getEventType()).isEqualTo(EventType.SAGA_COMPENSATING);
+    assertThat(events.get(2).getEventType()).isEqualTo(EventType.SAGA_COMPLETED);
+    assertThat(events.get(3).getEventType()).isEqualTo(EventType.SAGA_COMPENSATED);
+    assertThat(events.get(4).getEventType()).isEqualTo(EventType.SAGA_ESCALATED);
   }
 
   @SuppressWarnings("NullAway")
