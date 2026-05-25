@@ -30,7 +30,7 @@ import org.jspecify.annotations.Nullable;
  * deserialization across crash recovery boundaries.
  */
 @NotThreadSafe
-class ExecutionContext implements SagaContext {
+public class ExecutionContext implements SagaContext {
 
   private static final Set<Class<?>> ALLOWED_TYPES =
       Set.of(
@@ -100,7 +100,7 @@ class ExecutionContext implements SagaContext {
 
   // --- Engine-internal (not accessible from Step implementations) ---
 
-  int nextSequence() {
+  public int nextSequence() {
     return nextEventSequence;
   }
 
@@ -112,7 +112,7 @@ class ExecutionContext implements SagaContext {
     this.nextEventSequence = seq;
   }
 
-  SagaStateSnapshot getCurrentState() {
+  public SagaStateSnapshot getCurrentState() {
     return currentState;
   }
 

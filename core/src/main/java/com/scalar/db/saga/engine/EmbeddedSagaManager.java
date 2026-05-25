@@ -8,6 +8,8 @@ import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.recovery.SagaRecoveryManager;
+import com.scalar.db.saga.retention.SagaRetentionManager;
 import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaStore;
@@ -37,6 +39,8 @@ class EmbeddedSagaManager implements SagaManager {
   private final SagaEngine engine;
   private final SagaStore store;
   private final SagaDefinitionRegistry registry;
+  private final SagaRecoveryManager recoveryManager;
+  private final SagaRetentionManager retentionManager;
   private final long shutdownTimeoutMillis;
   private final ExecutorService asyncExecutor;
 
@@ -44,11 +48,15 @@ class EmbeddedSagaManager implements SagaManager {
       SagaEngine engine,
       SagaStore store,
       SagaDefinitionRegistry registry,
+      SagaRecoveryManager recoveryManager,
+      SagaRetentionManager retentionManager,
       long shutdownTimeoutMillis) {
     this(
         engine,
         store,
         registry,
+        recoveryManager,
+        retentionManager,
         shutdownTimeoutMillis,
         Executors.newVirtualThreadPerTaskExecutor());
   }
@@ -58,11 +66,15 @@ class EmbeddedSagaManager implements SagaManager {
       SagaEngine engine,
       SagaStore store,
       SagaDefinitionRegistry registry,
+      SagaRecoveryManager recoveryManager,
+      SagaRetentionManager retentionManager,
       long shutdownTimeoutMillis,
       ExecutorService asyncExecutor) {
     this.engine = engine;
     this.store = store;
     this.registry = registry;
+    this.recoveryManager = recoveryManager;
+    this.retentionManager = retentionManager;
     this.shutdownTimeoutMillis = shutdownTimeoutMillis;
     this.asyncExecutor = asyncExecutor;
   }
@@ -254,14 +266,13 @@ class EmbeddedSagaManager implements SagaManager {
   }
 
   // ---------------------------------------------------------------------------
-  // Recovery
+  // Background Tasks
   // ---------------------------------------------------------------------------
 
   @Override
-  public void startRecovery() {
-    // Recovery manager is not yet implemented (Task 1.11).
-    // This is a no-op placeholder until SagaRecoveryManager is available.
-    logger.info("Recovery not yet implemented — skipping startRecovery()");
+  public void startBackgroundTasks() {
+    recoveryManager.start();
+    retentionManager.start();
   }
 
   // ---------------------------------------------------------------------------
@@ -270,6 +281,8 @@ class EmbeddedSagaManager implements SagaManager {
 
   @Override
   public void close() {
+    retentionManager.stop();
+    recoveryManager.stop();
     asyncExecutor.shutdown();
     engine.shutdown();
     try {

@@ -35,7 +35,7 @@ Refer to `~/git/scalardb-saga-design/docs/scalardb-saga-design.md` for architect
 - Use `@NullMarked` on `package-info.java` to enable null-safety per package; annotate nullable types with `@Nullable` from `org.jspecify.annotations`
 - **Null-check policy:**
   - **Public API** — use `Objects.requireNonNull` for defense in depth (callers may not be compiled with NullAway)
-  - **Internal (package-private) classes** — rely on `@NullMarked` + NullAway; do not add redundant `Objects.requireNonNull`
+  - **Internal classes** (package-private, or `public` solely for cross-package access within the module) — rely on `@NullMarked` + NullAway; do not add redundant `Objects.requireNonNull`
 
 ## Package Naming
 

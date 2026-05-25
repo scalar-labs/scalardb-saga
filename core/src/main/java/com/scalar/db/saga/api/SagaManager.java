@@ -122,13 +122,13 @@ public interface SagaManager extends AutoCloseable {
   SagaStateSnapshot completeStep(String sagaId, String stepName, Map<String, Object> output);
 
   /**
-   * Starts periodic crash recovery scanning. Call after registering all saga definitions. Delegates
-   * to {@code SagaRecoveryManager.start()}.
+   * Starts periodic background tasks: crash recovery scanning and (if configured) retention cleanup
+   * of terminal sagas. Call after registering all saga definitions.
    */
-  void startRecovery();
+  void startBackgroundTasks();
 
   /**
-   * Shuts down the saga manager, stopping recovery scanning and waiting for in-flight sagas to
+   * Shuts down the saga manager, stopping background tasks and waiting for in-flight sagas to
    * complete.
    */
   @Override

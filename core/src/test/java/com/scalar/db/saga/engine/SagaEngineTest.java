@@ -5,7 +5,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -1245,6 +1247,167 @@ class SagaEngineTest {
 
       // Assert — 3 attempts (global RetryPolicy.defaultPolicy() has maxAttempts=3)
       verify(step1, times(3)).execute(any(SagaContext.class));
+    }
+  }
+
+  // =========================================================================
+  // recordStepCompleted failure handling
+  //
+  // executeWithRetry and recordStepCompleted have different compensation scopes:
+  //   - executeWithRetry failure   → step i did NOT run → compensate from i - 1
+  //   - recordStepCompleted failure → step i DID run    → compensate from i
+  // =========================================================================
+
+  @Nested
+  class RecordStepCompletedFailure {
+
+    @Test
+    void executeSagaSteps_recordStepCompletedThrows_compensatesIncludingCurrentStep()
+        throws Exception {
+      // Arrange — 2 steps, both execute successfully
+      Step step0 = successStep("s0");
+      Step step1 = successStep("s1");
+      registerStep("s0", step0);
+      registerStep("s1", step1);
+      SagaDefinition def = sagaDefinitionWithRetry("s0", "s1");
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+
+      // recordStepCompleted for step 1 throws — step 1 executed but recording failed.
+      // Compensation must include step 1 (compensate from i, not i-1).
+      doThrow(new RuntimeException("DB error"))
+          .when(store)
+          .recordStepEvent(
+              anyString(),
+              anyInt(),
+              argThat(
+                  event ->
+                      event != null
+                          && event.getStepIndex() == 1
+                          && event.getEventType() == EventType.STEP_COMPLETED));
+
+      // Act
+      engine.executeSaga(def, saga, Map.of());
+
+      // Assert — step 1 IS compensated (its side effect exists)
+      verify(step1).compensate(any(SagaContext.class));
+      verify(step0).compensate(any(SagaContext.class));
+      // SAGA_COMPENSATING → SAGA_COMPENSATED
+      ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
+      verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture());
+      assertThat(transitionCaptor.getAllValues().get(0).getEventType())
+          .isEqualTo(EventType.SAGA_COMPENSATING);
+      assertThat(transitionCaptor.getAllValues().get(1).getEventType())
+          .isEqualTo(EventType.SAGA_COMPENSATED);
+    }
+
+    @Test
+    void executeSagaSteps_executionFailure_doesNotCompensateCurrentStep() throws Exception {
+      // Regression: execution failure at step 1 compensates from i-1 (only step 0),
+      // NOT from i. This contrasts with the recordStepCompleted failure test above
+      // where step 1 IS compensated because its execute() already succeeded.
+
+      // Arrange
+      Step step0 = successStep("s0");
+      Step step1 = failingStep("s1", false);
+      registerStep("s0", step0);
+      registerStep("s1", step1);
+      SagaDefinition def = sagaDefinitionWithRetry("s0", "s1");
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+
+      // Act
+      engine.executeSaga(def, saga, Map.of());
+
+      // Assert — step 1 NOT compensated (it failed to execute, no side effect)
+      verify(step1, never()).compensate(any(SagaContext.class));
+      // step 0 IS compensated
+      verify(step0).compensate(any(SagaContext.class));
+    }
+
+    @Test
+    void executeSagaSteps_recordStepCompletedThrowsPastPivot_noCompensation() throws Exception {
+      // Arrange — MIXED strategy: s0, s1 (pivot), s2 (past pivot)
+      Step step0 = successStep("s0");
+      Step step1 = successStep("s1");
+      Step step2 = successStep("s2");
+      registerStep("s0", step0);
+      registerStep("s1", step1);
+      registerStep("s2", step2);
+      SagaDefinition def =
+          SagaDefinition.newBuilder("test-saga", SagaMode.SAGA)
+              .recoveryStrategy(SagaDefinition.RecoveryStrategy.MIXED)
+              .defaultRetryPolicy(fastRetryPolicy())
+              .step("s0", "com.example.s0")
+              .add()
+              .step("s1", "com.example.s1")
+              .pivot(true)
+              .add()
+              .step("s2", "com.example.s2")
+              .add()
+              .build();
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+
+      // recordStepCompleted for step 2 (past pivot) throws
+      doThrow(new RuntimeException("DB error"))
+          .when(store)
+          .recordStepEvent(
+              anyString(),
+              anyInt(),
+              argThat(
+                  event ->
+                      event != null
+                          && event.getStepIndex() == 2
+                          && event.getEventType() == EventType.STEP_COMPLETED));
+
+      // Act
+      engine.executeSaga(def, saga, Map.of());
+
+      // Assert — no compensation (i > pivotIndex), saga stays RUNNING for recovery
+      verify(step0, never()).compensate(any(SagaContext.class));
+      verify(step1, never()).compensate(any(SagaContext.class));
+      verify(step2, never()).compensate(any(SagaContext.class));
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any());
+    }
+
+    @Test
+    void executeSagaSteps_recordStepCompletedThrowsAndCompensationFails_staysCompensating()
+        throws Exception {
+      // Arrange — 1 step: execution succeeds, recording fails, compensation also fails.
+      // Saga should stay COMPENSATING for recovery to retry.
+      Step step0 = mock(Step.class);
+      when(step0.getName()).thenReturn("s0");
+      when(step0.execute(any(SagaContext.class))).thenReturn(StepResult.empty());
+      doThrow(new StepCompensationException("compensation failed"))
+          .when(step0)
+          .compensate(any(SagaContext.class));
+      registerStep("s0", step0);
+      SagaDefinition def = sagaDefinitionWithRetry("s0");
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      when(store.recordStatusEvent(any(), anyInt(), any()))
+          .thenReturn(compensatingSnapshot("saga-1"));
+
+      // recordStepCompleted for step 0 throws
+      doThrow(new RuntimeException("DB error"))
+          .when(store)
+          .recordStepEvent(
+              anyString(),
+              anyInt(),
+              argThat(
+                  event ->
+                      event != null
+                          && event.getStepIndex() == 0
+                          && event.getEventType() == EventType.STEP_COMPLETED));
+
+      // Act
+      engine.executeSaga(def, saga, Map.of());
+
+      // Assert — compensation attempted but failed
+      verify(step0, atLeastOnce()).compensate(any(SagaContext.class));
+      // Only SAGA_COMPENSATING transition (no SAGA_COMPENSATED)
+      ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
+      verify(store, times(1)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture());
+      assertThat(transitionCaptor.getValue().getEventType()).isEqualTo(EventType.SAGA_COMPENSATING);
     }
   }
 }

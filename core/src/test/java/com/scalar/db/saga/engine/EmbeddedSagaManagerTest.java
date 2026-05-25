@@ -20,6 +20,8 @@ import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.recovery.SagaRecoveryManager;
+import com.scalar.db.saga.retention.SagaRetentionManager;
 import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.StatusEvent;
@@ -48,12 +50,15 @@ class EmbeddedSagaManagerTest {
   @Mock private SagaEngine engine;
   @Mock private SagaStore store;
   @Mock private SagaDefinitionRegistry registry;
+  @Mock private SagaRecoveryManager recoveryManager;
+  @Mock private SagaRetentionManager retentionManager;
 
   private EmbeddedSagaManager manager;
 
   @BeforeEach
   void setUp() {
-    manager = new EmbeddedSagaManager(engine, store, registry, 30_000);
+    manager =
+        new EmbeddedSagaManager(engine, store, registry, recoveryManager, retentionManager, 30_000);
   }
 
   @AfterEach
@@ -564,16 +569,20 @@ class EmbeddedSagaManagerTest {
   }
 
   // =========================================================================
-  // startRecovery
+  // startBackgroundTasks
   // =========================================================================
 
   @Nested
-  class StartRecovery {
+  class StartBackgroundTasks {
 
     @Test
-    void startRecovery_always_doesNotThrow() {
-      // Act — no-op placeholder until SagaRecoveryManager is available
-      manager.startRecovery();
+    void startBackgroundTasks_always_startsBothManagers() {
+      // Act
+      manager.startBackgroundTasks();
+
+      // Assert
+      verify(recoveryManager).start();
+      verify(retentionManager).start();
     }
   }
 
@@ -590,7 +599,8 @@ class EmbeddedSagaManagerTest {
       ExecutorService mockExecutor = mock(ExecutorService.class);
       when(mockExecutor.awaitTermination(30_000, TimeUnit.MILLISECONDS)).thenReturn(true);
       EmbeddedSagaManager managerWithMockExecutor =
-          new EmbeddedSagaManager(engine, store, registry, 30_000, mockExecutor);
+          new EmbeddedSagaManager(
+              engine, store, registry, recoveryManager, retentionManager, 30_000, mockExecutor);
 
       // Act
       managerWithMockExecutor.close();

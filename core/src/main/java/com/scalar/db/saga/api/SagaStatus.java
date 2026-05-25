@@ -65,6 +65,14 @@ public enum SagaStatus {
   }
 
   /**
+   * Returns {@code true} if sagas in this status are eligible for crash recovery. Recovery resumes
+   * forward execution (RUNNING) or compensation (COMPENSATING).
+   */
+  public boolean isRecoverable() {
+    return this == RUNNING || this == COMPENSATING;
+  }
+
+  /**
    * Returns {@code true} if sagas in this status may be automatically purged after the retention
    * period. ESCALATED sagas are excluded — they require manual admin resolution before cleanup.
    */
