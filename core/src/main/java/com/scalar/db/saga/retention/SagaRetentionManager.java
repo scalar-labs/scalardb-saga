@@ -117,6 +117,10 @@ public class SagaRetentionManager {
   /**
    * Single cleanup pass: scan purgeable statuses for entries older than the retention period, then
    * delete each expired saga. Stops when the batch limit is reached.
+   *
+   * <p>Note: the batch budget counts <i>successful</i> purges only, so total attempted operations
+   * may exceed {@code batchSize} if many deletes fail. This is acceptable — widespread delete
+   * failures indicate a store-level issue, not a batch-sizing problem.
    */
   void cleanup() {
     Instant threshold = config.clock().instant().minus(config.retentionPeriod());
