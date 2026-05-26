@@ -29,22 +29,18 @@ public class SagaDefinitionRegistry {
    */
   void register(SagaDefinition definition) {
     store.registerDefinition(definition);
-    definitions.put(definition.getName(), definition);
     definitions.put(definition.getName() + ":" + definition.getVersion(), definition);
   }
 
   /**
-   * Looks up a definition by name only (latest registered version). Falls back to the store on
-   * cache miss (e.g., after a restart when definitions were registered in a previous run).
+   * Looks up a definition by name only (latest version). Always queries the store to avoid serving
+   * stale versions from the in-memory cache (another instance may have registered a newer version).
+   * The resolved definition is cached under its versioned key for subsequent {@link #resolve}
+   * calls.
    */
   @Nullable SagaDefinition get(String sagaName) {
-    SagaDefinition def = definitions.get(sagaName);
+    SagaDefinition def = store.getDefinition(sagaName).orElse(null);
     if (def != null) {
-      return def;
-    }
-    def = store.getDefinition(sagaName).orElse(null);
-    if (def != null) {
-      definitions.put(sagaName, def);
       definitions.put(sagaName + ":" + def.getVersion(), def);
     }
     return def;

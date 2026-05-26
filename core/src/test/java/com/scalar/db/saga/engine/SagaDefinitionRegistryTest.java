@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -42,17 +43,15 @@ class SagaDefinitionRegistryTest {
   // ---------------------------------------------------------------------------
 
   @Test
-  void register_validDefinitionGiven_persistsToStoreBeforeMemory() {
+  void register_validDefinitionGiven_persistsToStoreAndCachesVersionedKey() {
     // Arrange
     SagaDefinition def = definition("transfer", "1.0");
 
     // Act
     registry.register(def);
 
-    // Assert — store.registerDefinition called
+    // Assert — store.registerDefinition called, versioned key cached in memory
     verify(store).registerDefinition(def);
-    // Both name and name:version keys are available in memory
-    assertThat(registry.get("transfer")).isSameAs(def);
     assertThat(registry.resolve("transfer", "1.0")).isSameAs(def);
   }
 
@@ -63,17 +62,17 @@ class SagaDefinitionRegistryTest {
     doThrow(new SagaPersistenceException("store error", new RuntimeException("db down")))
         .when(store)
         .registerDefinition(any());
-    when(store.getDefinition("transfer")).thenReturn(Optional.empty());
+    when(store.getDefinition("transfer", "1.0")).thenReturn(Optional.empty());
 
     // Act & Assert — register fails
     assertThatThrownBy(() -> registry.register(def)).isInstanceOf(SagaPersistenceException.class);
     // Definition should NOT be in memory (persist before memory).
-    // get() falls back to store, which also returns empty since registration failed.
-    assertThat(registry.get("transfer")).isNull();
+    // resolve() falls back to store, which also returns empty since registration failed.
+    assertThat(registry.resolve("transfer", "1.0")).isNull();
   }
 
   @Test
-  void register_multipleVersions_latestWins() {
+  void register_multipleVersions_resolvesEachCorrectly() {
     // Arrange
     SagaDefinition v1 = definition("transfer", "1.0");
     SagaDefinition v2 = definition("transfer", "2.0");
@@ -82,29 +81,18 @@ class SagaDefinitionRegistryTest {
     registry.register(v1);
     registry.register(v2);
 
-    // Assert — get() returns the latest (v2), resolve() returns the exact version
-    assertThat(registry.get("transfer")).isSameAs(v2);
+    // Assert — resolve() returns the exact version
     assertThat(registry.resolve("transfer", "1.0")).isSameAs(v1);
     assertThat(registry.resolve("transfer", "2.0")).isSameAs(v2);
   }
 
   // ---------------------------------------------------------------------------
-  // get (by name)
+  // get (by name — always queries store for latest)
   // ---------------------------------------------------------------------------
 
   @Test
-  void get_registeredNameGiven_returnsDefinition() {
+  void get_definitionInStore_returnsDefinition() {
     // Arrange
-    SagaDefinition def = definition("transfer", "1.0");
-    registry.register(def);
-
-    // Act & Assert
-    assertThat(registry.get("transfer")).isSameAs(def);
-  }
-
-  @Test
-  void get_notInMemory_fallsBackToStore() {
-    // Arrange — definition only in store, not in memory
     SagaDefinition def = definition("transfer", "1.0");
     when(store.getDefinition("transfer")).thenReturn(Optional.of(def));
 
@@ -117,12 +105,26 @@ class SagaDefinitionRegistryTest {
   }
 
   @Test
-  void get_notInMemoryOrStore_returnsNull() {
+  void get_definitionNotInStore_returnsNull() {
     // Arrange
     when(store.getDefinition("unknown")).thenReturn(Optional.empty());
 
     // Act & Assert
     assertThat(registry.get("unknown")).isNull();
+  }
+
+  @Test
+  void get_definitionInStore_cachesVersionedKey() {
+    // Arrange
+    SagaDefinition def = definition("transfer", "1.0");
+    when(store.getDefinition("transfer")).thenReturn(Optional.of(def));
+
+    // Act — get() queries the store and caches the versioned key
+    registry.get("transfer");
+
+    // Assert — resolve() finds it in memory without hitting the versioned store lookup
+    assertThat(registry.resolve("transfer", "1.0")).isSameAs(def);
+    verify(store, never()).getDefinition("transfer", "1.0");
   }
 
   // ---------------------------------------------------------------------------
