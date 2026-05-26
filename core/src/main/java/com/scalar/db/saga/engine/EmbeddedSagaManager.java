@@ -358,8 +358,7 @@ class EmbeddedSagaManager implements SagaManager {
   private SagaDefinition resolveDefinition(SagaStateSnapshot saga) {
     SagaDefinition def = registry.resolve(saga.getSagaName(), saga.getDefinitionVersion());
     if (def == null) {
-      throw new SagaDefinitionNotFoundException(
-          new SagaDefinitionId(saga.getSagaName(), saga.getDefinitionVersion()));
+      throw new SagaDefinitionNotFoundException(saga.getSagaName(), saga.getDefinitionVersion());
     }
     return def;
   }

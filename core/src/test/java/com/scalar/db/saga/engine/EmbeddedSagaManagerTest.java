@@ -74,6 +74,14 @@ class EmbeddedSagaManagerTest {
         .build();
   }
 
+  private static SagaDefinition definition(String name, String version) {
+    return SagaDefinition.newBuilder(name, SagaMode.SAGA)
+        .version(version)
+        .step("s1", "com.example.Step1")
+        .add()
+        .build();
+  }
+
   private static SagaStateSnapshot snapshot(String sagaId, SagaStatus status) {
     return new SagaStateSnapshot(sagaId, "test-saga", status, "owner-1", "1.0", NOW, NOW);
   }
@@ -338,7 +346,7 @@ class EmbeddedSagaManagerTest {
     void start_serverGeneratedId_delegatesToEngineExecute() {
       // Arrange
       SagaDefinitionId id = new SagaDefinitionId("transfer", "2.0");
-      SagaDefinition def = definition("transfer");
+      SagaDefinition def = definition("transfer", "2.0");
       when(registry.resolve("transfer", "2.0")).thenReturn(def);
       when(engine.execute(eq(def), isNull(), any())).thenReturn("saga-1");
 
@@ -355,7 +363,7 @@ class EmbeddedSagaManagerTest {
     void start_clientSuppliedId_delegatesToEngineExecute() {
       // Arrange
       SagaDefinitionId id = new SagaDefinitionId("transfer", "2.0");
-      SagaDefinition def = definition("transfer");
+      SagaDefinition def = definition("transfer", "2.0");
       when(registry.resolve("transfer", "2.0")).thenReturn(def);
       when(engine.execute(eq(def), eq("my-id"), any())).thenReturn("my-id");
 
@@ -391,7 +399,7 @@ class EmbeddedSagaManagerTest {
     void startAsync_serverGeneratedId_returnsSagaIdImmediately() {
       // Arrange
       SagaDefinitionId id = new SagaDefinitionId("transfer", "2.0");
-      SagaDefinition def = definition("transfer");
+      SagaDefinition def = definition("transfer", "2.0");
       SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
       when(registry.resolve("transfer", "2.0")).thenReturn(def);
       when(engine.createSaga(eq(def), isNull(), any())).thenReturn(saga);
@@ -409,7 +417,7 @@ class EmbeddedSagaManagerTest {
     void startAsync_clientSuppliedId_persistsSynchronously() {
       // Arrange
       SagaDefinitionId id = new SagaDefinitionId("transfer", "2.0");
-      SagaDefinition def = definition("transfer");
+      SagaDefinition def = definition("transfer", "2.0");
       SagaStateSnapshot saga = snapshot("my-id", SagaStatus.RUNNING);
       when(registry.resolve("transfer", "2.0")).thenReturn(def);
       when(engine.createSaga(eq(def), eq("my-id"), any())).thenReturn(saga);
@@ -426,7 +434,7 @@ class EmbeddedSagaManagerTest {
     void startAsync_withCallback_dispatchesOnCompleted() throws Exception {
       // Arrange
       SagaDefinitionId id = new SagaDefinitionId("transfer", "2.0");
-      SagaDefinition def = definition("transfer");
+      SagaDefinition def = definition("transfer", "2.0");
       SagaStateSnapshot runningSaga = snapshot("saga-1", SagaStatus.RUNNING);
       SagaStateSnapshot completedSaga = snapshot("saga-1", SagaStatus.COMPLETED);
       SagaCallback callback = mock(SagaCallback.class);
