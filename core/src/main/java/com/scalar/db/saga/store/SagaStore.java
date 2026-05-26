@@ -144,7 +144,7 @@ public interface SagaStore {
    * @param status the terminal status to scan for
    * @param threshold the cutoff time — only sagas updated before this are returned
    * @param maxResults the maximum number of results to return
-   * @return matching saga snapshots, oldest first
+   * @return matching saga snapshots (order is not guaranteed across buckets)
    */
   List<SagaStateSnapshot> findByStatusOlderThan(
       SagaStatus status, Instant threshold, int maxResults);
