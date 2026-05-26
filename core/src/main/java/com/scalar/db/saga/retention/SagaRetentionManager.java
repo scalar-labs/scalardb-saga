@@ -95,6 +95,14 @@ public class SagaRetentionManager {
       Thread.currentThread().interrupt();
     }
     purgeExecutor.shutdown();
+    try {
+      if (!purgeExecutor.awaitTermination(30, TimeUnit.SECONDS)) {
+        purgeExecutor.shutdownNow();
+      }
+    } catch (InterruptedException e) {
+      purgeExecutor.shutdownNow();
+      Thread.currentThread().interrupt();
+    }
   }
 
   /** Wraps {@link #cleanup()} with exception handling so the scheduler never stops on failure. */
