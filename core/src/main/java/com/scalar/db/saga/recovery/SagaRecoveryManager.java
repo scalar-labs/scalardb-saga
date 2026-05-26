@@ -126,6 +126,14 @@ public class SagaRecoveryManager {
       Thread.currentThread().interrupt();
     }
     recoveryExecutor.shutdown();
+    try {
+      if (!recoveryExecutor.awaitTermination(30, TimeUnit.SECONDS)) {
+        recoveryExecutor.shutdownNow();
+      }
+    } catch (InterruptedException e) {
+      recoveryExecutor.shutdownNow();
+      Thread.currentThread().interrupt();
+    }
   }
 
   /** Wraps {@link #recover()} with exception handling so the scheduler never stops on failure. */
