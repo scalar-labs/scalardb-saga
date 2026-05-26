@@ -5,7 +5,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 
 import com.scalar.db.saga.api.SagaManager;
+import com.scalar.db.saga.recovery.RecoveryConfig;
+import com.scalar.db.saga.retention.RetentionConfig;
 import com.scalar.db.saga.store.SagaStore;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import org.junit.jupiter.api.Test;
 
 class SagaManagerBuilderTest {
@@ -136,5 +141,46 @@ class SagaManagerBuilderTest {
                     .resource(String.class, "second")
                     .build())
         .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void build_withCustomClock_propagatesClockToDefaultConfigs() {
+    // Arrange
+    SagaStore store = mock(SagaStore.class);
+    Clock fixedClock = Clock.fixed(Instant.parse("2025-06-01T00:00:00Z"), ZoneOffset.UTC);
+
+    // Act — build with custom clock but no explicit recovery/retention configs
+    SagaManager manager = SagaManagerBuilder.newBuilder().store(store).clock(fixedClock).build();
+
+    // Assert — verify defaults(Clock) propagates the clock correctly
+    assertThat(manager).isNotNull();
+    assertThat(RecoveryConfig.defaults(fixedClock).clock()).isSameAs(fixedClock);
+    assertThat(RetentionConfig.defaults(fixedClock).clock()).isSameAs(fixedClock);
+    manager.close();
+  }
+
+  @Test
+  void build_withExplicitConfigs_usesProvidedConfigs() {
+    // Arrange
+    SagaStore store = mock(SagaStore.class);
+    Clock builderClock = Clock.fixed(Instant.parse("2025-06-01T00:00:00Z"), ZoneOffset.UTC);
+    Clock configClock = Clock.fixed(Instant.parse("2025-01-01T00:00:00Z"), ZoneOffset.UTC);
+    RecoveryConfig explicitRecovery = RecoveryConfig.defaults(configClock);
+    RetentionConfig explicitRetention = RetentionConfig.defaults(configClock);
+
+    // Act — explicit configs should take precedence over builder clock
+    SagaManager manager =
+        SagaManagerBuilder.newBuilder()
+            .store(store)
+            .clock(builderClock)
+            .recoveryConfig(explicitRecovery)
+            .retentionConfig(explicitRetention)
+            .build();
+
+    // Assert
+    assertThat(manager).isNotNull();
+    assertThat(explicitRecovery.clock()).isSameAs(configClock);
+    assertThat(explicitRetention.clock()).isSameAs(configClock);
+    manager.close();
   }
 }

@@ -594,7 +594,8 @@ class EmbeddedSagaManagerTest {
   class Close {
 
     @Test
-    void close_always_shutsDownEngineAndExecutor() throws InterruptedException {
+    void close_always_stopsBackgroundTasksAndShutsDownEngineAndExecutor()
+        throws InterruptedException {
       // Arrange
       ExecutorService mockExecutor = mock(ExecutorService.class);
       when(mockExecutor.awaitTermination(30_000, TimeUnit.MILLISECONDS)).thenReturn(true);
@@ -606,6 +607,8 @@ class EmbeddedSagaManagerTest {
       managerWithMockExecutor.close();
 
       // Assert
+      verify(retentionManager).stop();
+      verify(recoveryManager).stop();
       verify(mockExecutor).shutdown();
       verify(engine).shutdown();
     }

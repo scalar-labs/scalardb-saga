@@ -47,6 +47,15 @@ public record RetentionConfig(
 
   /** Default: 7-day retention, cleanup every 60 seconds, 10,000 sagas per batch. */
   public static RetentionConfig defaults() {
-    return new RetentionConfig(Duration.ofDays(7), 60, 10_000, 10, Clock.systemUTC());
+    return defaults(Clock.systemUTC());
+  }
+
+  /**
+   * Default configuration with a custom clock. Useful for testing with a fixed clock.
+   *
+   * @param clock clock for time-based decisions
+   */
+  public static RetentionConfig defaults(Clock clock) {
+    return new RetentionConfig(Duration.ofDays(7), 60, 10_000, 10, clock);
   }
 }

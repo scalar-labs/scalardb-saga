@@ -72,8 +72,8 @@ public class SagaManagerBuilder {
   private Clock clock = Clock.systemUTC();
   private ResourceRegistry.@Nullable Builder resourceRegistryBuilder;
   private @Nullable StepResolver customStepResolver;
-  private RecoveryConfig recoveryConfig = RecoveryConfig.defaults();
-  private RetentionConfig retentionConfig = RetentionConfig.defaults();
+  private @Nullable RecoveryConfig recoveryConfig;
+  private @Nullable RetentionConfig retentionConfig;
 
   private SagaManagerBuilder() {}
 
@@ -202,14 +202,20 @@ public class SagaManagerBuilder {
 
     StepResolver resolver = buildStepResolver();
 
+    RecoveryConfig resolvedRecoveryConfig =
+        recoveryConfig != null ? recoveryConfig : RecoveryConfig.defaults(clock);
+    RetentionConfig resolvedRetentionConfig =
+        retentionConfig != null ? retentionConfig : RetentionConfig.defaults(clock);
+
     SagaEngine.ShutdownConfig shutdownConfig =
         new SagaEngine.ShutdownConfig(shutdownMode, shutdownTimeoutMillis);
     SagaEngine engine = new SagaEngine(store, resolver, ownerId, shutdownConfig, clock);
     SagaDefinitionRegistry registry = new SagaDefinitionRegistry(store);
 
     SagaRecoveryManager recoveryManager =
-        new SagaRecoveryManager(store, engine, registry, ownerId, recoveryConfig);
-    SagaRetentionManager retentionManager = new SagaRetentionManager(store, retentionConfig);
+        new SagaRecoveryManager(store, engine, registry, ownerId, resolvedRecoveryConfig);
+    SagaRetentionManager retentionManager =
+        new SagaRetentionManager(store, resolvedRetentionConfig);
 
     return new EmbeddedSagaManager(
         engine, store, registry, recoveryManager, retentionManager, shutdownTimeoutMillis);

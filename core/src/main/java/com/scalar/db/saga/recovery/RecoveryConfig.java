@@ -59,6 +59,15 @@ public record RecoveryConfig(
    * recoveries.
    */
   public static RecoveryConfig defaults() {
-    return new RecoveryConfig(60_000, 30, Duration.ofHours(4), 1000, 10, Clock.systemUTC());
+    return defaults(Clock.systemUTC());
+  }
+
+  /**
+   * Default configuration with a custom clock. Useful for testing with a fixed clock.
+   *
+   * @param clock clock for time-based decisions
+   */
+  public static RecoveryConfig defaults(Clock clock) {
+    return new RecoveryConfig(60_000, 30, Duration.ofHours(4), 1000, 10, clock);
   }
 }
