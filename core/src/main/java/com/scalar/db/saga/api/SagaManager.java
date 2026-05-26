@@ -1,6 +1,7 @@
 package com.scalar.db.saga.api;
 
 import com.scalar.db.saga.exception.SagaDefinitionException;
+import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import java.nio.file.Path;
 import java.util.Map;
 
@@ -32,6 +33,10 @@ public interface SagaManager extends AutoCloseable {
    * Starts a new saga instance with a server-generated ID (synchronous — blocks until the saga
    * completes or fails).
    *
+   * <p>This method queries the store on every call to resolve the latest definition version. If you
+   * know the exact version, prefer {@link #start(SagaDefinitionId, Map)} to avoid the store
+   * round-trip.
+   *
    * @param sagaName the registered saga definition name
    * @param input initial data for the saga context
    * @return the generated saga ID
@@ -42,6 +47,10 @@ public interface SagaManager extends AutoCloseable {
    * Starts a new saga instance with a client-supplied ID (synchronous). Enables idempotent retries:
    * if the caller crashes after the saga is persisted, it can retry with the same ID.
    *
+   * <p>This method queries the store on every call to resolve the latest definition version. If you
+   * know the exact version, prefer {@link #start(String, SagaDefinitionId, Map)} to avoid the store
+   * round-trip.
+   *
    * @param sagaId the client-supplied saga ID
    * @param sagaName the registered saga definition name
    * @param input initial data for the saga context
@@ -49,7 +58,35 @@ public interface SagaManager extends AutoCloseable {
   void start(String sagaId, String sagaName, Map<String, Object> input);
 
   /**
+   * Starts a new saga instance with a server-generated ID, using a specific definition version
+   * (synchronous). The definition is resolved from the in-memory cache first, falling back to the
+   * store only on a cache miss.
+   *
+   * @param id the saga definition name and version
+   * @param input initial data for the saga context
+   * @return the generated saga ID
+   * @throws SagaDefinitionNotFoundException if no definition matches the given name and version
+   */
+  String start(SagaDefinitionId id, Map<String, Object> input);
+
+  /**
+   * Starts a new saga instance with a client-supplied ID, using a specific definition version
+   * (synchronous). The definition is resolved from the in-memory cache first, falling back to the
+   * store only on a cache miss.
+   *
+   * @param sagaId the client-supplied saga ID
+   * @param id the saga definition name and version
+   * @param input initial data for the saga context
+   * @throws SagaDefinitionNotFoundException if no definition matches the given name and version
+   */
+  void start(String sagaId, SagaDefinitionId id, Map<String, Object> input);
+
+  /**
    * Starts a new saga instance with a server-generated ID (asynchronous — returns immediately).
+   *
+   * <p>This method queries the store on every call to resolve the latest definition version. If you
+   * know the exact version, prefer {@link #startAsync(SagaDefinitionId, Map)} to avoid the store
+   * round-trip.
    *
    * @param sagaName the registered saga definition name
    * @param input initial data for the saga context
@@ -59,6 +96,10 @@ public interface SagaManager extends AutoCloseable {
 
   /**
    * Starts a new saga instance with a server-generated ID (asynchronous with completion callback).
+   *
+   * <p>This method queries the store on every call to resolve the latest definition version. If you
+   * know the exact version, prefer {@link #startAsync(SagaDefinitionId, Map, SagaCallback)} to
+   * avoid the store round-trip.
    *
    * @param sagaName the registered saga definition name
    * @param input initial data for the saga context
@@ -70,6 +111,10 @@ public interface SagaManager extends AutoCloseable {
   /**
    * Starts a new saga instance with a client-supplied ID (asynchronous).
    *
+   * <p>This method queries the store on every call to resolve the latest definition version. If you
+   * know the exact version, prefer {@link #startAsync(String, SagaDefinitionId, Map)} to avoid the
+   * store round-trip.
+   *
    * @param sagaId the client-supplied saga ID
    * @param sagaName the registered saga definition name
    * @param input initial data for the saga context
@@ -79,12 +124,67 @@ public interface SagaManager extends AutoCloseable {
   /**
    * Starts a new saga instance with a client-supplied ID (asynchronous with completion callback).
    *
+   * <p>This method queries the store on every call to resolve the latest definition version. If you
+   * know the exact version, prefer {@link #startAsync(String, SagaDefinitionId, Map, SagaCallback)}
+   * to avoid the store round-trip.
+   *
    * @param sagaId the client-supplied saga ID
    * @param sagaName the registered saga definition name
    * @param input initial data for the saga context
    * @param callback callback for completion/compensation/escalation
    */
   void startAsync(String sagaId, String sagaName, Map<String, Object> input, SagaCallback callback);
+
+  /**
+   * Starts a new saga instance with a server-generated ID, using a specific definition version
+   * (asynchronous). The definition is resolved from the in-memory cache first, falling back to the
+   * store only on a cache miss.
+   *
+   * @param id the saga definition name and version
+   * @param input initial data for the saga context
+   * @return the generated saga ID
+   * @throws SagaDefinitionNotFoundException if no definition matches the given name and version
+   */
+  String startAsync(SagaDefinitionId id, Map<String, Object> input);
+
+  /**
+   * Starts a new saga instance with a server-generated ID, using a specific definition version
+   * (asynchronous with completion callback). The definition is resolved from the in-memory cache
+   * first, falling back to the store only on a cache miss.
+   *
+   * @param id the saga definition name and version
+   * @param input initial data for the saga context
+   * @param callback callback for completion/compensation/escalation
+   * @return the generated saga ID
+   * @throws SagaDefinitionNotFoundException if no definition matches the given name and version
+   */
+  String startAsync(SagaDefinitionId id, Map<String, Object> input, SagaCallback callback);
+
+  /**
+   * Starts a new saga instance with a client-supplied ID, using a specific definition version
+   * (asynchronous). The definition is resolved from the in-memory cache first, falling back to the
+   * store only on a cache miss.
+   *
+   * @param sagaId the client-supplied saga ID
+   * @param id the saga definition name and version
+   * @param input initial data for the saga context
+   * @throws SagaDefinitionNotFoundException if no definition matches the given name and version
+   */
+  void startAsync(String sagaId, SagaDefinitionId id, Map<String, Object> input);
+
+  /**
+   * Starts a new saga instance with a client-supplied ID, using a specific definition version
+   * (asynchronous with completion callback). The definition is resolved from the in-memory cache
+   * first, falling back to the store only on a cache miss.
+   *
+   * @param sagaId the client-supplied saga ID
+   * @param id the saga definition name and version
+   * @param input initial data for the saga context
+   * @param callback callback for completion/compensation/escalation
+   * @throws SagaDefinitionNotFoundException if no definition matches the given name and version
+   */
+  void startAsync(
+      String sagaId, SagaDefinitionId id, Map<String, Object> input, SagaCallback callback);
 
   /**
    * Resumes a failed or crashed saga (crash recovery).

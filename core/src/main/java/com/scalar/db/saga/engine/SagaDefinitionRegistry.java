@@ -35,10 +35,10 @@ public class SagaDefinitionRegistry {
   /**
    * Looks up a definition by name only (latest version). Always queries the store to avoid serving
    * stale versions from the in-memory cache (another instance may have registered a newer version).
-   * The resolved definition is cached under its versioned key for subsequent {@link #resolve}
-   * calls.
+   * The resolved definition is cached under its versioned key for subsequent {@link
+   * #resolve(String, String)} calls.
    */
-  @Nullable SagaDefinition get(String sagaName) {
+  @Nullable SagaDefinition resolve(String sagaName) {
     SagaDefinition def = store.getDefinition(sagaName).orElse(null);
     if (def != null) {
       definitions.put(sagaName + ":" + def.getVersion(), def);
