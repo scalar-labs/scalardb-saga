@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.IntStream;
 import net.jcip.annotations.ThreadSafe;
@@ -43,6 +44,7 @@ class EmbeddedSagaManager implements SagaManager {
   private final SagaRetentionManager retentionManager;
   private final long shutdownTimeoutMillis;
   private final ExecutorService asyncExecutor;
+  private volatile boolean closed;
 
   EmbeddedSagaManager(
       SagaEngine engine,
@@ -102,12 +104,14 @@ class EmbeddedSagaManager implements SagaManager {
 
   @Override
   public String start(String sagaName, Map<String, Object> input) {
+    ensureOpen();
     SagaDefinition def = requireDefinition(sagaName);
     return engine.execute(def, null, input);
   }
 
   @Override
   public void start(String sagaId, String sagaName, Map<String, Object> input) {
+    ensureOpen();
     SagaDefinition def = requireDefinition(sagaName);
     engine.execute(def, sagaId, input);
   }
@@ -146,6 +150,7 @@ class EmbeddedSagaManager implements SagaManager {
       String sagaName,
       Map<String, Object> input,
       @Nullable SagaCallback callback) {
+    ensureOpen();
     SagaDefinition def = requireDefinition(sagaName);
 
     // Persist synchronously — saga is recoverable from this point
@@ -165,21 +170,29 @@ class EmbeddedSagaManager implements SagaManager {
       SagaStateSnapshot saga,
       Map<String, Object> input,
       @Nullable SagaCallback callback) {
-    asyncExecutor.submit(
-        () -> {
-          try {
-            engine.executeSaga(def, saga, input);
-          } catch (Exception e) {
-            // Saga state is persisted — recovery will pick it up
-            logger.error("Async saga {} failed unexpectedly", saga.getSagaId(), e);
-          } finally {
+    try {
+      asyncExecutor.submit(
+          () -> {
             try {
-              dispatchCallback(saga.getSagaId(), callback);
+              engine.executeSaga(def, saga, input);
             } catch (Exception e) {
-              logger.error("Failed to dispatch callback for saga {}", saga.getSagaId(), e);
+              // Saga state is persisted — recovery will pick it up
+              logger.error("Async saga {} failed unexpectedly", saga.getSagaId(), e);
+            } finally {
+              try {
+                dispatchCallback(saga.getSagaId(), callback);
+              } catch (Exception e) {
+                logger.error("Failed to dispatch callback for saga {}", saga.getSagaId(), e);
+              }
             }
-          }
-        });
+          });
+    } catch (RejectedExecutionException e) {
+      // Race between close() and submit — saga is already persisted, recovery will handle it
+      logger.warn(
+          "Async executor rejected saga {} (shutting down); recovery will handle it",
+          saga.getSagaId(),
+          e);
+    }
   }
 
   private void dispatchCallback(String sagaId, @Nullable SagaCallback callback) {
@@ -281,12 +294,19 @@ class EmbeddedSagaManager implements SagaManager {
 
   @Override
   public void close() {
+    closed = true;
+    long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(shutdownTimeoutMillis);
+
     retentionManager.stop();
     recoveryManager.stop();
+
     asyncExecutor.shutdown();
     engine.shutdown();
+
+    long remainingNanos = deadline - System.nanoTime();
     try {
-      if (!asyncExecutor.awaitTermination(shutdownTimeoutMillis, TimeUnit.MILLISECONDS)) {
+      if (remainingNanos <= 0
+          || !asyncExecutor.awaitTermination(remainingNanos, TimeUnit.NANOSECONDS)) {
         asyncExecutor.shutdownNow();
       }
     } catch (InterruptedException e) {
@@ -298,6 +318,12 @@ class EmbeddedSagaManager implements SagaManager {
   // ---------------------------------------------------------------------------
   // Internal helpers
   // ---------------------------------------------------------------------------
+
+  private void ensureOpen() {
+    if (closed) {
+      throw new IllegalStateException("SagaManager is closed");
+    }
+  }
 
   private SagaDefinition requireDefinition(String sagaName) {
     SagaDefinition def = registry.get(sagaName);
