@@ -181,6 +181,26 @@ class EmbeddedSagaManagerTest {
       assertThatThrownBy(() -> manager.start("unknown", Map.of()))
           .isInstanceOf(SagaDefinitionNotFoundException.class);
     }
+
+    @Test
+    void start_afterClose_throwsIllegalState() {
+      // Arrange
+      manager.close();
+
+      // Act & Assert
+      assertThatThrownBy(() -> manager.start("transfer", Map.of()))
+          .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void start_clientSuppliedIdAfterClose_throwsIllegalState() {
+      // Arrange
+      manager.close();
+
+      // Act & Assert
+      assertThatThrownBy(() -> manager.start("my-id", "transfer", Map.of()))
+          .isInstanceOf(IllegalStateException.class);
+    }
   }
 
   // =========================================================================
@@ -308,6 +328,39 @@ class EmbeddedSagaManagerTest {
       // Act & Assert
       assertThatThrownBy(() -> manager.startAsync("unknown", Map.of()))
           .isInstanceOf(SagaDefinitionNotFoundException.class);
+    }
+
+    @Test
+    void startAsync_afterClose_throwsIllegalState() {
+      // Arrange
+      manager.close();
+
+      // Act & Assert
+      assertThatThrownBy(() -> manager.startAsync("transfer", Map.of()))
+          .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void startAsync_executorRejected_logsWarningAndDoesNotThrow() throws InterruptedException {
+      // Arrange — simulate race between close() and submit()
+      ExecutorService mockExecutor = mock(ExecutorService.class);
+      when(mockExecutor.submit(any(Runnable.class)))
+          .thenThrow(new java.util.concurrent.RejectedExecutionException("shutting down"));
+      when(mockExecutor.awaitTermination(30_000, TimeUnit.MILLISECONDS)).thenReturn(true);
+      EmbeddedSagaManager managerWithMockExecutor =
+          new EmbeddedSagaManager(engine, store, registry, 30_000, mockExecutor);
+
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
+      when(registry.get("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(saga);
+
+      // Act — should not throw; saga is already persisted, recovery will handle it
+      String sagaId = managerWithMockExecutor.startAsync("transfer", Map.of());
+
+      // Assert
+      assertThat(sagaId).isEqualTo("saga-1");
+      managerWithMockExecutor.close();
     }
   }
 
