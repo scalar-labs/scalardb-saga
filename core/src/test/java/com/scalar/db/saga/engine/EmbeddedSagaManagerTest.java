@@ -3,6 +3,7 @@ package com.scalar.db.saga.engine;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
@@ -346,7 +347,7 @@ class EmbeddedSagaManagerTest {
       ExecutorService mockExecutor = mock(ExecutorService.class);
       when(mockExecutor.submit(any(Runnable.class)))
           .thenThrow(new java.util.concurrent.RejectedExecutionException("shutting down"));
-      when(mockExecutor.awaitTermination(30_000, TimeUnit.MILLISECONDS)).thenReturn(true);
+      when(mockExecutor.awaitTermination(anyLong(), any())).thenReturn(true);
       EmbeddedSagaManager managerWithMockExecutor =
           new EmbeddedSagaManager(engine, store, registry, 30_000, mockExecutor);
 
@@ -641,7 +642,7 @@ class EmbeddedSagaManagerTest {
     void close_always_shutsDownEngineAndExecutor() throws InterruptedException {
       // Arrange
       ExecutorService mockExecutor = mock(ExecutorService.class);
-      when(mockExecutor.awaitTermination(30_000, TimeUnit.MILLISECONDS)).thenReturn(true);
+      when(mockExecutor.awaitTermination(anyLong(), any())).thenReturn(true);
       EmbeddedSagaManager managerWithMockExecutor =
           new EmbeddedSagaManager(engine, store, registry, 30_000, mockExecutor);
 
@@ -651,6 +652,7 @@ class EmbeddedSagaManagerTest {
       // Assert
       verify(mockExecutor).shutdown();
       verify(engine).shutdown();
+      verify(mockExecutor).awaitTermination(anyLong(), eq(TimeUnit.NANOSECONDS));
     }
   }
 }

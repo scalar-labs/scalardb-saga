@@ -284,10 +284,15 @@ class EmbeddedSagaManager implements SagaManager {
   @Override
   public void close() {
     closed = true;
+    long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(shutdownTimeoutMillis);
+
     asyncExecutor.shutdown();
     engine.shutdown();
+
+    long remainingNanos = deadline - System.nanoTime();
     try {
-      if (!asyncExecutor.awaitTermination(shutdownTimeoutMillis, TimeUnit.MILLISECONDS)) {
+      if (remainingNanos <= 0
+          || !asyncExecutor.awaitTermination(remainingNanos, TimeUnit.NANOSECONDS)) {
         asyncExecutor.shutdownNow();
       }
     } catch (InterruptedException e) {
