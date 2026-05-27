@@ -151,7 +151,7 @@ public class SagaRecoveryManager {
    * saga does not block recovery of others. Stops when the batch limit is reached — remaining sagas
    * are picked up on the next pass.
    */
-  void recover() {
+  public void recover() {
     List<Future<?>> futures = new ArrayList<>();
     @Nullable RecoverablesCursor cursor = null;
     int submitted = 0;
