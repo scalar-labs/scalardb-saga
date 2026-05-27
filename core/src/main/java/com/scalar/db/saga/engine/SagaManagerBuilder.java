@@ -81,7 +81,7 @@ public class SagaManagerBuilder {
       value = "EI_EXPOSE_REP2",
       justification = "SagaStore is an interface; storing a reference is intentional")
   public SagaManagerBuilder store(SagaStore store) {
-    this.store = store;
+    this.store = Objects.requireNonNull(store, "store must not be null");
     return this;
   }
 
