@@ -2,7 +2,6 @@ package com.scalar.db.saga.engine;
 
 import com.scalar.db.saga.api.SagaManager;
 import com.scalar.db.saga.store.SagaStore;
-import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.time.Clock;
 import java.util.Objects;
 import org.jspecify.annotations.Nullable;
@@ -77,9 +76,6 @@ public class SagaManagerBuilder {
   }
 
   /** Sets the saga store (required). */
-  @SuppressFBWarnings(
-      value = "EI_EXPOSE_REP2",
-      justification = "SagaStore is an interface; storing a reference is intentional")
   public SagaManagerBuilder store(SagaStore store) {
     this.store = Objects.requireNonNull(store, "store must not be null");
     return this;
