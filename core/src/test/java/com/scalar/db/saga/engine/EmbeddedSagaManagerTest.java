@@ -3,6 +3,7 @@ package com.scalar.db.saga.engine;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
@@ -197,6 +198,26 @@ class EmbeddedSagaManagerTest {
       assertThatThrownBy(() -> manager.start("unknown", Map.of()))
           .isInstanceOf(SagaDefinitionNotFoundException.class);
       verify(registry).resolve("unknown");
+    }
+
+    @Test
+    void start_afterClose_throwsIllegalState() {
+      // Arrange
+      manager.close();
+
+      // Act & Assert
+      assertThatThrownBy(() -> manager.start("transfer", Map.of()))
+          .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void start_clientSuppliedIdAfterClose_throwsIllegalState() {
+      // Arrange
+      manager.close();
+
+      // Act & Assert
+      assertThatThrownBy(() -> manager.start("my-id", "transfer", Map.of()))
+          .isInstanceOf(IllegalStateException.class);
     }
   }
 
@@ -461,6 +482,42 @@ class EmbeddedSagaManagerTest {
       assertThatThrownBy(() -> manager.startAsync(id, Map.of()))
           .isInstanceOf(SagaDefinitionNotFoundException.class);
       verify(registry).resolve("unknown", "1.0");
+    }
+
+    @Test
+    void startAsync_afterClose_throwsIllegalState() {
+      // Arrange
+      SagaDefinitionId id = new SagaDefinitionId("transfer", "2.0");
+      when(registry.resolve("transfer", "2.0")).thenReturn(definition("transfer", "2.0"));
+      manager.close();
+
+      // Act & Assert
+      assertThatThrownBy(() -> manager.startAsync(id, Map.of()))
+          .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void startAsync_executorRejected_logsWarningAndDoesNotThrow() throws InterruptedException {
+      // Arrange — simulate race between close() and submit()
+      ExecutorService mockExecutor = mock(ExecutorService.class);
+      when(mockExecutor.submit(any(Runnable.class)))
+          .thenThrow(new java.util.concurrent.RejectedExecutionException("shutting down"));
+      when(mockExecutor.awaitTermination(anyLong(), any())).thenReturn(true);
+      EmbeddedSagaManager managerWithMockExecutor =
+          new EmbeddedSagaManager(
+              engine, store, registry, recoveryManager, retentionManager, 30_000, mockExecutor);
+
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
+      when(registry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(saga);
+
+      // Act — should not throw; saga is already persisted, recovery will handle it
+      String sagaId = managerWithMockExecutor.startAsync("transfer", Map.of());
+
+      // Assert
+      assertThat(sagaId).isEqualTo("saga-1");
+      managerWithMockExecutor.close();
     }
   }
 
@@ -746,7 +803,7 @@ class EmbeddedSagaManagerTest {
         throws InterruptedException {
       // Arrange
       ExecutorService mockExecutor = mock(ExecutorService.class);
-      when(mockExecutor.awaitTermination(30_000, TimeUnit.MILLISECONDS)).thenReturn(true);
+      when(mockExecutor.awaitTermination(anyLong(), any())).thenReturn(true);
       EmbeddedSagaManager managerWithMockExecutor =
           new EmbeddedSagaManager(
               engine, store, registry, recoveryManager, retentionManager, 30_000, mockExecutor);
@@ -759,6 +816,7 @@ class EmbeddedSagaManagerTest {
       verify(recoveryManager).stop();
       verify(mockExecutor).shutdown();
       verify(engine).shutdown();
+      verify(mockExecutor).awaitTermination(anyLong(), eq(TimeUnit.NANOSECONDS));
     }
   }
 }
