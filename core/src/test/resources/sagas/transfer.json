@@ -1,0 +1,28 @@
+{
+  "name": "transferMoney",
+  "mode": "SAGA",
+  "version": "2.0",
+  "recoveryStrategy": "BACKWARD",
+  "timeoutMillis": 30000,
+  "defaultRetryPolicy": {
+    "maxAttempts": 5,
+    "initialIntervalMillis": 500,
+    "backoffMultiplier": 2.0,
+    "maxIntervalMillis": 10000
+  },
+  "steps": [
+    {
+      "name": "debit",
+      "stepClass": "com.example.DebitStep",
+      "timeoutMillis": 5000,
+      "retryPolicy": {
+        "maxAttempts": 3,
+        "initialIntervalMillis": 100
+      }
+    },
+    {
+      "name": "credit",
+      "stepClass": "com.example.CreditStep"
+    }
+  ]
+}

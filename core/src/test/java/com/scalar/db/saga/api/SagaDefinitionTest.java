@@ -184,6 +184,31 @@ class SagaDefinitionTest {
     }
 
     @Test
+    void validate_nameContainingColon_throwsSagaDefinitionException() {
+      // Arrange & Act & Assert
+      assertThatThrownBy(
+              () ->
+                  SagaDefinition.newBuilder("my:saga", SagaMode.SAGA)
+                      .step("s1", "com.example.Step1")
+                      .add()
+                      .build())
+          .isInstanceOf(SagaDefinitionException.class);
+    }
+
+    @Test
+    void validate_versionContainingColon_throwsSagaDefinitionException() {
+      // Arrange & Act & Assert
+      assertThatThrownBy(
+              () ->
+                  SagaDefinition.newBuilder("test", SagaMode.SAGA)
+                      .version("1:0")
+                      .step("s1", "com.example.Step1")
+                      .add()
+                      .build())
+          .isInstanceOf(SagaDefinitionException.class);
+    }
+
+    @Test
     void validate_noSteps_throwsSagaDefinitionException() {
       // Arrange & Act & Assert
       assertThatThrownBy(() -> SagaDefinition.newBuilder("empty", SagaMode.SAGA).build())

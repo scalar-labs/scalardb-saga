@@ -100,6 +100,13 @@ public final class SagaDefinition {
   }
 
   private void validate() {
+    if (name.contains(":")) {
+      throw new SagaDefinitionException("Saga name must not contain ':': '" + name + "'");
+    }
+    if (version.contains(":")) {
+      throw new SagaDefinitionException("Saga version must not contain ':': '" + version + "'");
+    }
+
     if (steps.isEmpty()) {
       throw new SagaDefinitionException(
           "Saga definition '" + name + "' must have at least one step");

@@ -49,19 +49,34 @@ class SagaEngineTest {
   private static final String OWNER_ID = "engine-1";
 
   private SagaStore store;
-  private StepRegistry stepRegistry;
+  private final java.util.concurrent.ConcurrentHashMap<String, Object> stepMap =
+      new java.util.concurrent.ConcurrentHashMap<>();
+  private final StepResolver stepResolver =
+      (name, cls) -> {
+        Object step = stepMap.get(name);
+        if (step == null) {
+          throw new IllegalArgumentException("No step registered: " + name);
+        }
+        return step;
+      };
   private SagaEngine engine;
 
   @BeforeEach
   void setUp() {
+    stepMap.clear();
     store = mock(SagaStore.class);
-    stepRegistry = new StepRegistry();
     engine =
         new SagaEngine(
             store,
-            stepRegistry,
+            stepResolver,
             OWNER_ID,
-            new SagaEngine.ShutdownConfig(SagaEngine.ShutdownMode.WAIT_CURRENT_STEP, 5000));
+            new SagaEngine.ShutdownConfig(SagaEngine.ShutdownMode.WAIT_CURRENT_STEP, 5000),
+            Clock.systemUTC());
+  }
+
+  /** Registers a step for resolution by name. */
+  private void registerStep(String name, Object step) {
+    stepMap.put(name, step);
   }
 
   @AfterEach
@@ -200,9 +215,9 @@ class SagaEngineTest {
       Step step1 = successStep("s1");
       Step step2 = successStep("s2");
       Step step3 = successStep("s3");
-      stepRegistry.register("s1", step1);
-      stepRegistry.register("s2", step2);
-      stepRegistry.register("s3", step3);
+      registerStep("s1", step1);
+      registerStep("s2", step2);
+      registerStep("s3", step3);
       SagaDefinition def = sagaDefinitionWithRetry("s1", "s2", "s3");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
       when(store.createSaga(any(), anyString(), anyString(), any(), anyString())).thenReturn(saga);
@@ -225,7 +240,7 @@ class SagaEngineTest {
     void executeSaga_singleStepGiven_completesSuccessfully() throws Exception {
       // Arrange
       Step step1 = successStep("s1");
-      stepRegistry.register("s1", step1);
+      registerStep("s1", step1);
       SagaDefinition def = sagaDefinitionWithRetry("s1");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
       when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
@@ -244,7 +259,7 @@ class SagaEngineTest {
     void execute_convenienceMethod_createsThenExecutesAndReturnsSagaId() throws Exception {
       // Arrange
       Step step1 = successStep("s1");
-      stepRegistry.register("s1", step1);
+      registerStep("s1", step1);
       SagaDefinition def = sagaDefinitionWithRetry("s1");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
       when(store.createSaga(any(), anyString(), anyString(), any(), anyString())).thenReturn(saga);
@@ -264,8 +279,8 @@ class SagaEngineTest {
       // Arrange
       Step step1 = outputStep("s1", Map.of("key1", "val1"));
       Step step2 = successStep("s2");
-      stepRegistry.register("s1", step1);
-      stepRegistry.register("s2", step2);
+      registerStep("s1", step1);
+      registerStep("s2", step2);
       SagaDefinition def = sagaDefinitionWithRetry("s1", "s2");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
       when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
@@ -286,8 +301,8 @@ class SagaEngineTest {
       when(step1.getName()).thenReturn("s1");
       when(step1.execute(any(SagaContext.class))).thenReturn(StepResult.pending());
       Step step2 = successStep("s2");
-      stepRegistry.register("s1", step1);
-      stepRegistry.register("s2", step2);
+      registerStep("s1", step1);
+      registerStep("s2", step2);
       SagaDefinition def = sagaDefinitionWithRetry("s1", "s2");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
       when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
@@ -317,9 +332,9 @@ class SagaEngineTest {
       Step step0 = successStep("s0");
       Step step1 = successStep("s1");
       Step step2 = successStep("s2");
-      stepRegistry.register("s0", step0);
-      stepRegistry.register("s1", step1);
-      stepRegistry.register("s2", step2);
+      registerStep("s0", step0);
+      registerStep("s1", step1);
+      registerStep("s2", step2);
       SagaDefinition def = sagaDefinitionWithRetry("s0", "s1", "s2");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
       SagaStateSnapshot completedSaga =
@@ -352,9 +367,9 @@ class SagaEngineTest {
       Step step1 = successStep("s1");
       Step step2 = failingStep("s2", false);
       Step step3 = successStep("s3");
-      stepRegistry.register("s1", step1);
-      stepRegistry.register("s2", step2);
-      stepRegistry.register("s3", step3);
+      registerStep("s1", step1);
+      registerStep("s2", step2);
+      registerStep("s3", step3);
       SagaDefinition def = sagaDefinitionWithRetry("s1", "s2", "s3");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
       // recordStatusEvent returns same snapshot for simplicity
@@ -382,9 +397,9 @@ class SagaEngineTest {
       Step step0 = successStep("s0");
       Step step1 = successStep("s1");
       Step step2 = failingStep("s2", false);
-      stepRegistry.register("s0", step0);
-      stepRegistry.register("s1", step1);
-      stepRegistry.register("s2", step2);
+      registerStep("s0", step0);
+      registerStep("s1", step1);
+      registerStep("s2", step2);
       SagaDefinition def =
           SagaDefinition.newBuilder("test-saga", SagaMode.SAGA)
               .recoveryStrategy(SagaDefinition.RecoveryStrategy.MIXED)
@@ -438,8 +453,8 @@ class SagaEngineTest {
       // Arrange — 2 TCC steps → 4 execution slots (2 reserves + 2 confirms)
       TccStep tcc1 = createTccStep("t1");
       TccStep tcc2 = createTccStep("t2");
-      stepRegistry.register("t1", tcc1);
-      stepRegistry.register("t2", tcc2);
+      registerStep("t1", tcc1);
+      registerStep("t2", tcc2);
       SagaDefinition def =
           SagaDefinition.newBuilder("tcc-saga", SagaMode.TCC)
               .defaultRetryPolicy(fastRetryPolicy())
@@ -466,7 +481,7 @@ class SagaEngineTest {
     void executeSaga_tccAllStepsSucceed_emitsOnlyCompleted() throws Exception {
       // Arrange
       TccStep tcc1 = createTccStep("t1");
-      stepRegistry.register("t1", tcc1);
+      registerStep("t1", tcc1);
       SagaDefinition def =
           SagaDefinition.newBuilder("tcc-saga", SagaMode.TCC)
               .defaultRetryPolicy(fastRetryPolicy())
@@ -493,8 +508,8 @@ class SagaEngineTest {
       when(tcc2.getName()).thenReturn("t2");
       when(tcc2.reserve(any(SagaContext.class)))
           .thenThrow(new StepExecutionException("reserve failed", false));
-      stepRegistry.register("t1", tcc1);
-      stepRegistry.register("t2", tcc2);
+      registerStep("t1", tcc1);
+      registerStep("t2", tcc2);
       SagaDefinition def =
           SagaDefinition.newBuilder("tcc-saga", SagaMode.TCC)
               .defaultRetryPolicy(fastRetryPolicy())
@@ -541,7 +556,7 @@ class SagaEngineTest {
                 Thread.sleep(500); // Block long enough to trigger 50ms timeout
                 return StepResult.empty();
               });
-      stepRegistry.register("s1", step1);
+      registerStep("s1", step1);
       SagaDefinition def =
           SagaDefinition.newBuilder("test-saga", SagaMode.SAGA)
               .defaultRetryPolicy(
@@ -583,15 +598,15 @@ class SagaEngineTest {
       SagaEngine clockEngine =
           new SagaEngine(
               store,
-              stepRegistry,
+              stepResolver,
               OWNER_ID,
               new SagaEngine.ShutdownConfig(SagaEngine.ShutdownMode.WAIT_CURRENT_STEP, 5000),
               mockClock);
 
       Step step0 = successStep("s0");
       Step step1 = successStep("s1");
-      stepRegistry.register("s0", step0);
-      stepRegistry.register("s1", step1);
+      registerStep("s0", step0);
+      registerStep("s1", step1);
 
       // pivot index = 1 (last step), so step 0 is before pivot
       SagaDefinition def =
@@ -637,7 +652,7 @@ class SagaEngineTest {
       SagaEngine clockEngine =
           new SagaEngine(
               store,
-              stepRegistry,
+              stepResolver,
               OWNER_ID,
               new SagaEngine.ShutdownConfig(SagaEngine.ShutdownMode.WAIT_CURRENT_STEP, 5000),
               mockClock);
@@ -645,9 +660,9 @@ class SagaEngineTest {
       Step step0 = successStep("s0");
       Step step1 = successStep("s1");
       Step step2 = successStep("s2");
-      stepRegistry.register("s0", step0);
-      stepRegistry.register("s1", step1);
-      stepRegistry.register("s2", step2);
+      registerStep("s0", step0);
+      registerStep("s1", step1);
+      registerStep("s2", step2);
 
       // MIXED strategy: s1 is the pivot. s0 is before pivot, s2 is after pivot.
       SagaDefinition def =
@@ -698,8 +713,8 @@ class SagaEngineTest {
                 return StepResult.empty();
               });
       Step step2 = successStep("s2");
-      stepRegistry.register("s1", step1);
-      stepRegistry.register("s2", step2);
+      registerStep("s1", step1);
+      registerStep("s2", step2);
       SagaDefinition def = sagaDefinitionWithRetry("s1", "s2");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
       when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
@@ -709,9 +724,10 @@ class SagaEngineTest {
       engine =
           new SagaEngine(
               store,
-              stepRegistry,
+              stepResolver,
               OWNER_ID,
-              new SagaEngine.ShutdownConfig(SagaEngine.ShutdownMode.WAIT_CURRENT_STEP, 5000));
+              new SagaEngine.ShutdownConfig(SagaEngine.ShutdownMode.WAIT_CURRENT_STEP, 5000),
+              Clock.systemUTC());
 
       // Act
       engine.executeSaga(def, saga, Map.of());
@@ -733,7 +749,7 @@ class SagaEngineTest {
                 Thread.sleep(500); // Block longer than shutdown timeout
                 return StepResult.empty();
               });
-      stepRegistry.register("s1", step1);
+      registerStep("s1", step1);
       SagaDefinition def = sagaDefinitionWithRetry("s1");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
       when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
@@ -743,10 +759,10 @@ class SagaEngineTest {
       engine =
           new SagaEngine(
               store,
-              stepRegistry,
+              stepResolver,
               OWNER_ID,
-              new SagaEngine.ShutdownConfig(
-                  SagaEngine.ShutdownMode.WAIT_ALL_SAGAS, 50)); // 50ms timeout
+              new SagaEngine.ShutdownConfig(SagaEngine.ShutdownMode.WAIT_ALL_SAGAS, 50),
+              Clock.systemUTC()); // 50ms timeout
 
       // Start saga in background and wait until it's actively running
       Thread sagaThread = new Thread(() -> engine.executeSaga(def, saga, Map.of()));
@@ -778,7 +794,7 @@ class SagaEngineTest {
           .thenThrow(new StepExecutionException("transient", true))
           .thenThrow(new StepExecutionException("transient", true))
           .thenReturn(StepResult.empty());
-      stepRegistry.register("s1", step1);
+      registerStep("s1", step1);
       SagaDefinition def = sagaDefinitionWithRetry("s1");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
       when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
@@ -797,7 +813,7 @@ class SagaEngineTest {
     void executeWithRetry_nonRetryableFailure_throwsImmediately() throws Exception {
       // Arrange
       Step step1 = failingStep("s1", false);
-      stepRegistry.register("s1", step1);
+      registerStep("s1", step1);
       SagaDefinition def = sagaDefinitionWithRetry("s1");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
       when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
@@ -823,7 +839,7 @@ class SagaEngineTest {
       when(step1.getName()).thenReturn("s1");
       when(step1.execute(any(SagaContext.class)))
           .thenThrow(new StepExecutionException("always fails", true));
-      stepRegistry.register("s1", step1);
+      registerStep("s1", step1);
       SagaDefinition def = sagaDefinitionWithRetry("s1");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
       when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
@@ -933,7 +949,7 @@ class SagaEngineTest {
     void compensateFrom_sagaMode_transitionsAndCompensates() throws Exception {
       // Arrange
       Step step0 = successStep("s1");
-      stepRegistry.register("s1", step0);
+      registerStep("s1", step0);
       SagaDefinition def = sagaDefinitionWithRetry("s1");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
       ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
@@ -955,7 +971,7 @@ class SagaEngineTest {
     void compensateFrom_alreadyCompensating_skipsTransition() throws Exception {
       // Arrange
       Step step0 = successStep("s1");
-      stepRegistry.register("s1", step0);
+      registerStep("s1", step0);
       SagaDefinition def = sagaDefinitionWithRetry("s1");
       SagaStateSnapshot saga = compensatingSnapshot("saga-1");
       ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
@@ -979,7 +995,7 @@ class SagaEngineTest {
       doThrow(new StepCompensationException("persistent"))
           .when(step0)
           .compensate(any(SagaContext.class));
-      stepRegistry.register("s1", step0);
+      registerStep("s1", step0);
       SagaDefinition def = sagaDefinitionWithRetry("s1");
       SagaStateSnapshot saga = compensatingSnapshot("saga-1");
       ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
@@ -1174,7 +1190,7 @@ class SagaEngineTest {
       when(step1.getName()).thenReturn("s1");
       when(step1.execute(any(SagaContext.class)))
           .thenThrow(new StepExecutionException("fail", true));
-      stepRegistry.register("s1", step1);
+      registerStep("s1", step1);
       SagaDefinition def =
           SagaDefinition.newBuilder("test-saga", SagaMode.SAGA)
               .defaultRetryPolicy(fastRetryPolicy()) // default is 3 attempts
@@ -1199,7 +1215,7 @@ class SagaEngineTest {
       when(step1.getName()).thenReturn("s1");
       when(step1.execute(any(SagaContext.class)))
           .thenThrow(new StepExecutionException("fail", true));
-      stepRegistry.register("s1", step1);
+      registerStep("s1", step1);
       // fastRetryPolicy() has maxAttempts=3
       SagaDefinition def = sagaDefinitionWithRetry("s1");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
@@ -1219,7 +1235,7 @@ class SagaEngineTest {
       when(step1.getName()).thenReturn("s1");
       when(step1.execute(any(SagaContext.class)))
           .thenThrow(new StepExecutionException("fail", true));
-      stepRegistry.register("s1", step1);
+      registerStep("s1", step1);
       SagaDefinition def = sagaDefinition("s1"); // no defaultRetryPolicy
       SagaStateSnapshot saga = runningSnapshot("saga-1");
       when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
