@@ -11,4 +11,10 @@ dependencies {
 
     testRuntimeOnly(libs.logback.classic)
     testImplementation(libs.sqlite.jdbc)
+
+    "integrationTestRuntimeOnly"(libs.logback.classic)
+    "integrationTestImplementation"(platform(libs.jackson.bom))
+    "integrationTestImplementation"(libs.jackson.databind)
+    "integrationTestImplementation"(libs.scalardb)
+    "integrationTestImplementation"(libs.sqlite.jdbc)
 }

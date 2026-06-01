@@ -10,7 +10,7 @@ import com.scalar.db.saga.exception.StepExecutionException;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
-class MockTccStepTest {
+class FakeTccStepTest {
 
   private static SagaContext contextWith(String sagaId) {
     return new SagaContext() {
@@ -29,7 +29,7 @@ class MockTccStepTest {
   @Test
   void getName_returnsConfiguredName() {
     // Arrange
-    MockTccStep step = MockTccStep.newBuilder("inventory").build();
+    FakeTccStep step = FakeTccStep.newBuilder("inventory").build();
 
     // Act & Assert
     assertThat(step.getName()).isEqualTo("inventory");
@@ -38,7 +38,7 @@ class MockTccStepTest {
   @Test
   void reserve_withDefaults_returnsEmptyResultAndTracksHistory() throws StepExecutionException {
     // Arrange
-    MockTccStep step = MockTccStep.newBuilder("step1").build();
+    FakeTccStep step = FakeTccStep.newBuilder("step1").build();
 
     // Act
     StepResult result = step.reserve(contextWith("saga-1"));
@@ -52,7 +52,7 @@ class MockTccStepTest {
   void reserve_withCustomResult_returnsConfiguredResult() throws StepExecutionException {
     // Arrange
     StepResult expected = StepResult.of("reserved", true);
-    MockTccStep step = MockTccStep.newBuilder("step1").reserveReturns(expected).build();
+    FakeTccStep step = FakeTccStep.newBuilder("step1").reserveReturns(expected).build();
 
     // Act
     StepResult result = step.reserve(contextWith("saga-1"));
@@ -64,8 +64,8 @@ class MockTccStepTest {
   @Test
   void reserve_withReserveAction_invokesAction() throws StepExecutionException {
     // Arrange
-    MockTccStep step =
-        MockTccStep.newBuilder("step1")
+    FakeTccStep step =
+        FakeTccStep.newBuilder("step1")
             .reserveAction(ctx -> StepResult.of("id", ctx.getSagaId()))
             .build();
 
@@ -79,8 +79,8 @@ class MockTccStepTest {
   @Test
   void reserve_withFailure_throwsConfiguredException() {
     // Arrange
-    MockTccStep step =
-        MockTccStep.newBuilder("step1")
+    FakeTccStep step =
+        FakeTccStep.newBuilder("step1")
             .reserveFails(new StepExecutionException("reserve failed", false))
             .build();
 
@@ -93,7 +93,7 @@ class MockTccStepTest {
   @Test
   void confirm_withDefaults_tracksHistoryWithoutThrowing() throws StepExecutionException {
     // Arrange
-    MockTccStep step = MockTccStep.newBuilder("step1").build();
+    FakeTccStep step = FakeTccStep.newBuilder("step1").build();
 
     // Act
     step.confirm(contextWith("saga-1"));
@@ -105,8 +105,8 @@ class MockTccStepTest {
   @Test
   void confirm_withFailure_throwsConfiguredException() {
     // Arrange
-    MockTccStep step =
-        MockTccStep.newBuilder("step1")
+    FakeTccStep step =
+        FakeTccStep.newBuilder("step1")
             .confirmFails(new StepExecutionException("confirm failed", false))
             .build();
 
@@ -118,7 +118,7 @@ class MockTccStepTest {
   @Test
   void cancel_withDefaults_tracksHistoryWithoutThrowing() throws StepCompensationException {
     // Arrange
-    MockTccStep step = MockTccStep.newBuilder("step1").build();
+    FakeTccStep step = FakeTccStep.newBuilder("step1").build();
 
     // Act
     step.cancel(contextWith("saga-1"));
@@ -130,8 +130,8 @@ class MockTccStepTest {
   @Test
   void cancel_withFailure_throwsConfiguredException() {
     // Arrange
-    MockTccStep step =
-        MockTccStep.newBuilder("step1")
+    FakeTccStep step =
+        FakeTccStep.newBuilder("step1")
             .cancelFails(new StepCompensationException("cancel failed"))
             .build();
 
@@ -143,7 +143,7 @@ class MockTccStepTest {
   @Test
   void allPhases_trackIndependently() throws Exception {
     // Arrange
-    MockTccStep step = MockTccStep.newBuilder("step1").build();
+    FakeTccStep step = FakeTccStep.newBuilder("step1").build();
 
     // Act
     step.reserve(contextWith("saga-1"));

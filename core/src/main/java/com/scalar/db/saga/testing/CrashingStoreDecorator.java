@@ -8,12 +8,12 @@ import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.StatusEvent;
 import com.scalar.db.saga.store.StepEvent;
-import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import net.jcip.annotations.ThreadSafe;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -32,6 +32,7 @@ import org.jspecify.annotations.Nullable;
  * // Recovery picks up from the persisted events
  * }</pre>
  */
+@ThreadSafe
 public final class CrashingStoreDecorator implements SagaStore {
 
   private final SagaStore delegate;
@@ -49,14 +50,6 @@ public final class CrashingStoreDecorator implements SagaStore {
       throw new IllegalArgumentException("crashAfterStepIndex must be >= 0");
     }
     this.crashAfterStepIndex = crashAfterStepIndex;
-  }
-
-  /** Returns the underlying store (for use after "restart"). */
-  @SuppressFBWarnings(
-      value = "EI_EXPOSE_REP",
-      justification = "Intentional — test harness needs access to the unwrapped store for restart")
-  public SagaStore getDelegate() {
-    return delegate;
   }
 
   @Override

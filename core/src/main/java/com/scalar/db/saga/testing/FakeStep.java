@@ -20,7 +20,7 @@ import org.jspecify.annotations.Nullable;
  * <p>Usage:
  *
  * <pre>{@code
- * MockStep step = MockStep.newBuilder("payment")
+ * FakeStep step = FakeStep.newBuilder("payment")
  *     .executeReturns(StepResult.of("txId", "abc-123"))
  *     .build();
  *
@@ -30,7 +30,7 @@ import org.jspecify.annotations.Nullable;
  * }</pre>
  */
 @ThreadSafe
-public final class MockStep implements Step {
+public final class FakeStep implements Step {
 
   /** Action that may throw {@link StepExecutionException}. */
   @FunctionalInterface
@@ -44,7 +44,7 @@ public final class MockStep implements Step {
   private final CopyOnWriteArrayList<String> executions = new CopyOnWriteArrayList<>();
   private final CopyOnWriteArrayList<String> compensations = new CopyOnWriteArrayList<>();
 
-  private MockStep(Builder builder) {
+  private FakeStep(Builder builder) {
     this.name = builder.name;
     this.executeAction = builder.executeAction;
     this.compensationFailure = builder.compensationFailure;
@@ -91,7 +91,7 @@ public final class MockStep implements Step {
     return compensations.size();
   }
 
-  /** Builder for {@link MockStep}. */
+  /** Builder for {@link FakeStep}. */
   public static final class Builder {
 
     private final String name;
@@ -134,8 +134,8 @@ public final class MockStep implements Step {
       return this;
     }
 
-    public MockStep build() {
-      return new MockStep(this);
+    public FakeStep build() {
+      return new FakeStep(this);
     }
   }
 }

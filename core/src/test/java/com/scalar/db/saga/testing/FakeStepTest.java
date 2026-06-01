@@ -10,7 +10,7 @@ import com.scalar.db.saga.exception.StepExecutionException;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
-class MockStepTest {
+class FakeStepTest {
 
   private static SagaContext contextWith(String sagaId) {
     return new SagaContext() {
@@ -29,7 +29,7 @@ class MockStepTest {
   @Test
   void getName_returnsConfiguredName() {
     // Arrange
-    MockStep step = MockStep.newBuilder("payment").build();
+    FakeStep step = FakeStep.newBuilder("payment").build();
 
     // Act & Assert
     assertThat(step.getName()).isEqualTo("payment");
@@ -38,7 +38,7 @@ class MockStepTest {
   @Test
   void execute_withDefaults_returnsEmptyResultAndTracksHistory() throws StepExecutionException {
     // Arrange
-    MockStep step = MockStep.newBuilder("step1").build();
+    FakeStep step = FakeStep.newBuilder("step1").build();
 
     // Act
     StepResult result = step.execute(contextWith("saga-1"));
@@ -53,7 +53,7 @@ class MockStepTest {
   void execute_withCustomResult_returnsConfiguredResult() throws StepExecutionException {
     // Arrange
     StepResult expected = StepResult.of("txId", "abc-123");
-    MockStep step = MockStep.newBuilder("payment").executeReturns(expected).build();
+    FakeStep step = FakeStep.newBuilder("payment").executeReturns(expected).build();
 
     // Act
     StepResult result = step.execute(contextWith("saga-1"));
@@ -65,8 +65,8 @@ class MockStepTest {
   @Test
   void execute_withExecuteAction_invokesAction() throws StepExecutionException {
     // Arrange
-    MockStep step =
-        MockStep.newBuilder("step1")
+    FakeStep step =
+        FakeStep.newBuilder("step1")
             .executeAction(ctx -> StepResult.of("id", ctx.getSagaId()))
             .build();
 
@@ -81,7 +81,7 @@ class MockStepTest {
   void execute_withFailure_throwsConfiguredException() {
     // Arrange
     StepExecutionException failure = new StepExecutionException("timeout", true);
-    MockStep step = MockStep.newBuilder("step1").executeFails(failure).build();
+    FakeStep step = FakeStep.newBuilder("step1").executeFails(failure).build();
 
     // Act & Assert
     assertThatThrownBy(() -> step.execute(contextWith("saga-1")))
@@ -92,7 +92,7 @@ class MockStepTest {
   @Test
   void compensate_withDefaults_tracksHistoryWithoutThrowing() throws StepCompensationException {
     // Arrange
-    MockStep step = MockStep.newBuilder("step1").build();
+    FakeStep step = FakeStep.newBuilder("step1").build();
 
     // Act
     step.compensate(contextWith("saga-1"));
@@ -105,8 +105,8 @@ class MockStepTest {
   @Test
   void compensate_withFailure_throwsConfiguredException() {
     // Arrange
-    MockStep step =
-        MockStep.newBuilder("step1")
+    FakeStep step =
+        FakeStep.newBuilder("step1")
             .compensateFails(new StepCompensationException("compensate failed"))
             .build();
 
@@ -119,7 +119,7 @@ class MockStepTest {
   @Test
   void execute_multipleInvocations_tracksAll() throws StepExecutionException {
     // Arrange
-    MockStep step = MockStep.newBuilder("step1").build();
+    FakeStep step = FakeStep.newBuilder("step1").build();
 
     // Act
     step.execute(contextWith("saga-1"));
@@ -134,7 +134,7 @@ class MockStepTest {
   @Test
   void getExecutions_returnsCopy_notLiveView() throws StepExecutionException {
     // Arrange
-    MockStep step = MockStep.newBuilder("step1").build();
+    FakeStep step = FakeStep.newBuilder("step1").build();
     step.execute(contextWith("saga-1"));
     var snapshot = step.getExecutions();
 

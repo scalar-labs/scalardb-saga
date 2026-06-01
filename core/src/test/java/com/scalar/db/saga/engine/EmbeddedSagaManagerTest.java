@@ -823,8 +823,7 @@ class EmbeddedSagaManagerTest {
       manager.close();
 
       // Act & Assert
-      assertThatThrownBy(() -> manager.recover())
-          .isInstanceOf(IllegalStateException.class);
+      assertThatThrownBy(() -> manager.recover()).isInstanceOf(IllegalStateException.class);
     }
   }
 

@@ -20,7 +20,7 @@ import org.jspecify.annotations.Nullable;
  * <p>Usage:
  *
  * <pre>{@code
- * MockTccStep step = MockTccStep.newBuilder("inventory")
+ * FakeTccStep step = FakeTccStep.newBuilder("inventory")
  *     .reserveReturns(StepResult.of("reserved", true))
  *     .build();
  *
@@ -31,7 +31,7 @@ import org.jspecify.annotations.Nullable;
  * }</pre>
  */
 @ThreadSafe
-public final class MockTccStep implements TccStep {
+public final class FakeTccStep implements TccStep {
 
   /** Action that may throw {@link StepExecutionException}. */
   @FunctionalInterface
@@ -47,7 +47,7 @@ public final class MockTccStep implements TccStep {
   private final CopyOnWriteArrayList<String> confirmations = new CopyOnWriteArrayList<>();
   private final CopyOnWriteArrayList<String> cancellations = new CopyOnWriteArrayList<>();
 
-  private MockTccStep(Builder builder) {
+  private FakeTccStep(Builder builder) {
     this.name = builder.name;
     this.reserveAction = builder.reserveAction;
     this.confirmFailure = builder.confirmFailure;
@@ -100,7 +100,7 @@ public final class MockTccStep implements TccStep {
     return List.copyOf(cancellations);
   }
 
-  /** Builder for {@link MockTccStep}. */
+  /** Builder for {@link FakeTccStep}. */
   public static final class Builder {
 
     private final String name;
@@ -150,8 +150,8 @@ public final class MockTccStep implements TccStep {
       return this;
     }
 
-    public MockTccStep build() {
-      return new MockTccStep(this);
+    public FakeTccStep build() {
+      return new FakeTccStep(this);
     }
   }
 }

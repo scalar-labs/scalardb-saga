@@ -1,6 +1,5 @@
 package com.scalar.db.saga.testing;
 
-import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -56,15 +55,6 @@ class CrashingStoreDecoratorTest {
 
     // Assert — STEP_FAILED at crash index does NOT trigger crash (only STEP_COMPLETED does)
     verify(delegate).recordStepEvent("saga-1", 1, event);
-  }
-
-  @Test
-  void getDelegate_returnsUnderlyingStore() {
-    // Arrange
-    CrashingStoreDecorator decorator = new CrashingStoreDecorator(delegate, 0);
-
-    // Act & Assert
-    assertThat(decorator.getDelegate()).isSameAs(delegate);
   }
 
   @Test

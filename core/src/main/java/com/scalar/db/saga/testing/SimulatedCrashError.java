@@ -7,7 +7,7 @@ package com.scalar.db.saga.testing;
  * catch(RuntimeException)} blocks in {@code recordStepCompleted} do not intercept the crash — the
  * error propagates all the way up to the test, simulating a true process death.
  */
-public class SimulatedCrashError extends Error {
+public final class SimulatedCrashError extends Error {
 
   public SimulatedCrashError(String message) {
     super(message);
