@@ -85,9 +85,15 @@ class SagaIntegrationTest {
 
   @AfterEach
   void tearDown() throws Exception {
-    txManager.close();
-    txAdmin.close();
-    Files.deleteIfExists(tempDbPath);
+    try {
+      txManager.close();
+    } finally {
+      try {
+        txAdmin.close();
+      } finally {
+        Files.deleteIfExists(tempDbPath);
+      }
+    }
   }
 
   private SagaManager buildManager(SagaStore sagaStore, Map<String, Object> steps) {
