@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -28,6 +29,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -115,25 +117,31 @@ public class SagaRecoveryManager {
         this::recoverSafely, 0, config.recoveryIntervalSeconds(), TimeUnit.SECONDS);
   }
 
-  /** Stops the recovery scheduler and waits for any in-flight recovery pass to complete. */
-  public void stop() {
+  /**
+   * Stops the recovery scheduler and waits for any in-flight recovery pass to complete, respecting
+   * the given deadline. Both executors are signaled to shut down immediately; remaining time is
+   * used for graceful termination before force-stopping.
+   *
+   * @param deadlineNanos absolute {@link System#nanoTime()} deadline
+   */
+  public void stop(long deadlineNanos) {
     scheduler.shutdown();
-    try {
-      if (!scheduler.awaitTermination(30, TimeUnit.SECONDS)) {
-        scheduler.shutdownNow();
-      }
-    } catch (InterruptedException e) {
-      scheduler.shutdownNow();
-      Thread.currentThread().interrupt();
-    }
     recoveryExecutor.shutdown();
+
     try {
-      if (!recoveryExecutor.awaitTermination(30, TimeUnit.SECONDS)) {
-        recoveryExecutor.shutdownNow();
+      long remaining = deadlineNanos - System.nanoTime();
+      if (remaining > 0) {
+        scheduler.awaitTermination(remaining, TimeUnit.NANOSECONDS);
+      }
+      remaining = deadlineNanos - System.nanoTime();
+      if (remaining > 0) {
+        recoveryExecutor.awaitTermination(remaining, TimeUnit.NANOSECONDS);
       }
     } catch (InterruptedException e) {
-      recoveryExecutor.shutdownNow();
       Thread.currentThread().interrupt();
+    } finally {
+      scheduler.shutdownNow();
+      recoveryExecutor.shutdownNow();
     }
   }
 
@@ -237,7 +245,7 @@ public class SagaRecoveryManager {
       SagaDefinition def, ExecutionContext context, List<SagaEvent> events) {
     // Check if step failures have been stuck longer than the grace period.
     // Sagas with no STEP_FAILED events (crash recovery) skip escalation and proceed to resume.
-    if (isStuckLongerThanGracePeriod(events, EventType.STEP_FAILED)) {
+    if (isStuckLongerThanGracePeriod(events, EventType.STEP_FAILED, EventType.STEP_COMPLETED)) {
       escalate(context, "step retry stuck for over " + config.compensationGracePeriod());
       return;
     }
@@ -250,7 +258,8 @@ public class SagaRecoveryManager {
   private void recoverCompensating(
       SagaDefinition def, ExecutionContext context, List<SagaEvent> events) {
     // Check if compensation has been stuck longer than the grace period.
-    if (isStuckLongerThanGracePeriod(events, EventType.STEP_COMPENSATION_FAILED)) {
+    if (isStuckLongerThanGracePeriod(
+        events, EventType.STEP_COMPENSATION_FAILED, EventType.STEP_COMPENSATED)) {
       escalate(context, "compensation stuck for over " + config.compensationGracePeriod());
       return;
     }
@@ -274,15 +283,26 @@ public class SagaRecoveryManager {
    * events. Returns {@code false} if no matching failure events exist (e.g., crash recovery where
    * the saga was interrupted, not failed).
    */
-  private boolean isStuckLongerThanGracePeriod(List<SagaEvent> events, EventType failureEventType) {
-    Optional<Instant> firstFailure =
+  private boolean isStuckLongerThanGracePeriod(
+      List<SagaEvent> events, EventType failureEventType, EventType successEventType) {
+    // Step indices where the failure was later resolved by a success event.
+    // Since events are append-only and ordered, a success at the same index
+    // always follows the failure — the step cannot succeed before it fails.
+    Set<Integer> resolvedIndices =
+        stepIndices(events, successEventType).boxed().collect(Collectors.toSet());
+
+    Optional<Instant> firstUnresolvedFailure =
         events.stream()
-            .filter(e -> e.getEventType() == failureEventType)
+            .filter(
+                e ->
+                    e instanceof StepEvent step
+                        && step.getEventType() == failureEventType
+                        && !resolvedIndices.contains(step.getStepIndex()))
             .map(SagaEvent::getTimestamp)
             .filter(Objects::nonNull)
             .findFirst();
-    // no failure events — crash recovery, not stuck
-    return firstFailure
+    // no unresolved failure events — crash recovery or all failures resolved
+    return firstUnresolvedFailure
         .filter(
             instant ->
                 Duration.between(instant, config.clock().instant())

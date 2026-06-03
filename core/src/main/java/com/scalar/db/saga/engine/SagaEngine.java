@@ -119,9 +119,18 @@ public class SagaEngine implements AutoCloseable {
    * @param input the saga input data
    */
   void executeSaga(SagaDefinition def, SagaStateSnapshot saga, Map<String, Object> input) {
-    ExecutionContext context = new ExecutionContext(saga.getSagaId(), input, saga);
-    context.setNextEventSequence(1); // SAGA_STARTED was seq 0
-    executeSteps(def, context, 0);
+    String sagaId = saga.getSagaId();
+    if (!registerActive(sagaId)) {
+      store.markForRecovery(sagaId);
+      return;
+    }
+    try {
+      ExecutionContext context = new ExecutionContext(sagaId, input, saga);
+      context.setNextEventSequence(1); // SAGA_STARTED was seq 0
+      executeSteps(def, context, 0);
+    } finally {
+      unregisterActive(sagaId);
+    }
   }
 
   /**
@@ -141,7 +150,16 @@ public class SagaEngine implements AutoCloseable {
    * @return the final state snapshot
    */
   public SagaStateSnapshot resumeFrom(SagaDefinition def, ExecutionContext context, int fromStep) {
-    executeSteps(def, context, fromStep);
+    String sagaId = context.getSagaId();
+    if (!registerActive(sagaId)) {
+      store.markForRecovery(sagaId);
+      return context.getCurrentState();
+    }
+    try {
+      executeSteps(def, context, fromStep);
+    } finally {
+      unregisterActive(sagaId);
+    }
     return context.getCurrentState();
   }
 
@@ -149,8 +167,17 @@ public class SagaEngine implements AutoCloseable {
    * Triggers compensation from a specific step (used by recovery for sagas stuck in COMPENSATING).
    */
   public void compensateFrom(SagaDefinition def, ExecutionContext context, int fromStep) {
-    List<StepWithPolicy> plan = getOrBuildPlan(def);
-    compensate(plan, context, fromStep);
+    String sagaId = context.getSagaId();
+    if (!registerActive(sagaId)) {
+      store.markForRecovery(sagaId);
+      return;
+    }
+    try {
+      List<StepWithPolicy> plan = getOrBuildPlan(def);
+      compensate(plan, context, fromStep);
+    } finally {
+      unregisterActive(sagaId);
+    }
   }
 
   /** Replays events to reconstruct an ExecutionContext for crash recovery. */
@@ -231,19 +258,9 @@ public class SagaEngine implements AutoCloseable {
   // ---------------------------------------------------------------------------
 
   private void executeSteps(SagaDefinition def, ExecutionContext context, int startIndex) {
-    String sagaId = context.getSagaId();
-    if (!registerActive(sagaId)) {
-      store.markForRecovery(sagaId);
-      return;
-    }
-
-    try {
-      List<StepWithPolicy> plan = getOrBuildPlan(def);
-      int pivotIndex = def.getPivotIndex();
-      executeSagaSteps(plan, pivotIndex, context, startIndex, def.getTimeoutMillis());
-    } finally {
-      unregisterActive(sagaId);
-    }
+    List<StepWithPolicy> plan = getOrBuildPlan(def);
+    int pivotIndex = def.getPivotIndex();
+    executeSagaSteps(plan, pivotIndex, context, startIndex, def.getTimeoutMillis());
   }
 
   private void executeSagaSteps(
@@ -672,8 +689,7 @@ public class SagaEngine implements AutoCloseable {
       if (shuttingDown) {
         return false;
       }
-      activeSagas.add(sagaId);
-      return true;
+      return activeSagas.add(sagaId);
     }
   }
 

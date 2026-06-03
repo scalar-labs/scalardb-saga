@@ -251,8 +251,8 @@ public interface SagaManager extends AutoCloseable {
   void recover();
 
   /**
-   * Starts periodic background tasks: crash recovery scanning and (if configured) retention cleanup
-   * of terminal sagas. Call after registering all saga definitions.
+   * Starts periodic background tasks: crash recovery scanning and retention cleanup of terminal
+   * sagas. Call after registering all saga definitions.
    */
   void startBackgroundTasks();
 
