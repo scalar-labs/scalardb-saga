@@ -116,25 +116,31 @@ public class SagaRecoveryManager {
         this::recoverSafely, 0, config.recoveryIntervalSeconds(), TimeUnit.SECONDS);
   }
 
-  /** Stops the recovery scheduler and waits for any in-flight recovery pass to complete. */
-  public void stop() {
+  /**
+   * Stops the recovery scheduler and waits for any in-flight recovery pass to complete, respecting
+   * the given deadline. Both executors are signaled to shut down immediately; remaining time is
+   * used for graceful termination before force-stopping.
+   *
+   * @param deadlineNanos absolute {@link System#nanoTime()} deadline
+   */
+  public void stop(long deadlineNanos) {
     scheduler.shutdown();
-    try {
-      if (!scheduler.awaitTermination(30, TimeUnit.SECONDS)) {
-        scheduler.shutdownNow();
-      }
-    } catch (InterruptedException e) {
-      scheduler.shutdownNow();
-      Thread.currentThread().interrupt();
-    }
     recoveryExecutor.shutdown();
+
     try {
-      if (!recoveryExecutor.awaitTermination(30, TimeUnit.SECONDS)) {
-        recoveryExecutor.shutdownNow();
+      long remaining = deadlineNanos - System.nanoTime();
+      if (remaining > 0) {
+        scheduler.awaitTermination(remaining, TimeUnit.NANOSECONDS);
+      }
+      remaining = deadlineNanos - System.nanoTime();
+      if (remaining > 0) {
+        recoveryExecutor.awaitTermination(remaining, TimeUnit.NANOSECONDS);
       }
     } catch (InterruptedException e) {
-      recoveryExecutor.shutdownNow();
       Thread.currentThread().interrupt();
+    } finally {
+      scheduler.shutdownNow();
+      recoveryExecutor.shutdownNow();
     }
   }
 

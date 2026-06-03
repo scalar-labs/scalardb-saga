@@ -31,6 +31,7 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -617,24 +618,28 @@ class SagaRecoveryManagerTest {
     }
 
     @Test
-    void stop_shutsDownScheduler() throws InterruptedException {
+    void stop_shutsDownBothExecutors() throws InterruptedException {
       // Arrange
-      when(scheduler.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS)).thenReturn(true);
+      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+      when(scheduler.awaitTermination(anyLong(), any())).thenReturn(true);
 
       // Act
-      manager.stop();
+      manager.stop(deadline);
 
       // Assert
       verify(scheduler).shutdown();
+      // shutdownNow is always called in finally as a safety net
+      verify(scheduler).shutdownNow();
     }
 
     @Test
-    void stop_forcesShutdownOnTimeout() throws InterruptedException {
+    void stop_forceStopsInFinally() throws InterruptedException {
       // Arrange
-      when(scheduler.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS)).thenReturn(false);
+      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+      when(scheduler.awaitTermination(anyLong(), any())).thenReturn(false);
 
       // Act
-      manager.stop();
+      manager.stop(deadline);
 
       // Assert
       verify(scheduler).shutdown();
