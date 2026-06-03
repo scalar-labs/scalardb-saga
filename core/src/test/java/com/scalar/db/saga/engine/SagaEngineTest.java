@@ -739,6 +739,153 @@ class SagaEngineTest {
     }
 
     @Test
+    void executeSaga_alreadyActive_marksForRecoveryAndSkipsExecution() throws Exception {
+      // Arrange — start saga-1 on a background thread and block it
+      CountDownLatch stepStarted = new CountDownLatch(1);
+      CountDownLatch stepRelease = new CountDownLatch(1);
+      Step step1 = mock(Step.class);
+      when(step1.getName()).thenReturn("s1");
+      when(step1.execute(any(SagaContext.class)))
+          .thenAnswer(
+              invocation -> {
+                stepStarted.countDown();
+                stepRelease.await();
+                return StepResult.empty();
+              });
+      registerStep("s1", step1);
+      SagaDefinition def = sagaDefinitionWithRetry("s1");
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+
+      Thread sagaThread = new Thread(() -> engine.executeSaga(def, saga, Map.of()));
+      sagaThread.start();
+      stepStarted.await();
+
+      // Act — attempt to execute the same saga again
+      engine.executeSaga(def, saga, Map.of());
+
+      // Assert — duplicate was rejected and marked for recovery
+      verify(store).markForRecovery("saga-1");
+      // Only one step execution (the original, not the duplicate)
+      verify(step1, times(1)).execute(any(SagaContext.class));
+
+      // Cleanup
+      stepRelease.countDown();
+      sagaThread.join(5000);
+    }
+
+    @Test
+    void resumeFrom_alreadyActive_marksForRecoveryAndReturnsCurrentState() throws Exception {
+      // Arrange — start saga-1 on a background thread and block it
+      CountDownLatch stepStarted = new CountDownLatch(1);
+      CountDownLatch stepRelease = new CountDownLatch(1);
+      Step step1 = mock(Step.class);
+      when(step1.getName()).thenReturn("s1");
+      when(step1.execute(any(SagaContext.class)))
+          .thenAnswer(
+              invocation -> {
+                stepStarted.countDown();
+                stepRelease.await();
+                return StepResult.empty();
+              });
+      registerStep("s1", step1);
+      SagaDefinition def = sagaDefinitionWithRetry("s1");
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+
+      Thread sagaThread = new Thread(() -> engine.executeSaga(def, saga, Map.of()));
+      sagaThread.start();
+      stepStarted.await();
+
+      // Act — attempt to resume the same saga
+      ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
+      SagaStateSnapshot result = engine.resumeFrom(def, context, 0);
+
+      // Assert — duplicate was rejected, returns current state unchanged
+      verify(store).markForRecovery("saga-1");
+      assertThat(result).isEqualTo(saga);
+
+      // Cleanup
+      stepRelease.countDown();
+      sagaThread.join(5000);
+    }
+
+    @Test
+    void compensateFrom_alreadyActive_marksForRecoveryAndSkipsCompensation() throws Exception {
+      // Arrange — start saga-1 on a background thread and block it
+      CountDownLatch stepStarted = new CountDownLatch(1);
+      CountDownLatch stepRelease = new CountDownLatch(1);
+      Step step1 = mock(Step.class);
+      when(step1.getName()).thenReturn("s1");
+      when(step1.execute(any(SagaContext.class)))
+          .thenAnswer(
+              invocation -> {
+                stepStarted.countDown();
+                stepRelease.await();
+                return StepResult.empty();
+              });
+      registerStep("s1", step1);
+      SagaDefinition def = sagaDefinitionWithRetry("s1");
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+
+      Thread sagaThread = new Thread(() -> engine.executeSaga(def, saga, Map.of()));
+      sagaThread.start();
+      stepStarted.await();
+
+      // Act — attempt to compensate the same saga
+      ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
+      engine.compensateFrom(def, context, 0);
+
+      // Assert — duplicate was rejected and marked for recovery
+      verify(store).markForRecovery("saga-1");
+      // No compensation was triggered
+      verify(step1, never()).compensate(any(SagaContext.class));
+      // No status transitions recorded for the duplicate
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any(StatusEvent.class));
+
+      // Cleanup
+      stepRelease.countDown();
+      sagaThread.join(5000);
+    }
+
+    @Test
+    void resumeFrom_shuttingDown_marksForRecoveryAndReturnsCurrentState() {
+      // Arrange
+      Step step1 = successStep("s1");
+      registerStep("s1", step1);
+      SagaDefinition def = sagaDefinitionWithRetry("s1");
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
+      engine.shutdown();
+
+      // Act
+      SagaStateSnapshot result = engine.resumeFrom(def, context, 0);
+
+      // Assert
+      verify(store).markForRecovery("saga-1");
+      assertThat(result).isEqualTo(saga);
+    }
+
+    @Test
+    void compensateFrom_shuttingDown_marksForRecoveryAndSkipsCompensation() {
+      // Arrange
+      Step step1 = successStep("s1");
+      registerStep("s1", step1);
+      SagaDefinition def = sagaDefinitionWithRetry("s1");
+      SagaStateSnapshot saga = compensatingSnapshot("saga-1");
+      ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
+      engine.shutdown();
+
+      // Act
+      engine.compensateFrom(def, context, 0);
+
+      // Assert
+      verify(store).markForRecovery("saga-1");
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any(StatusEvent.class));
+    }
+
+    @Test
     void shutdown_sagaOutlastsTimeout_marksForRecovery() throws Exception {
       // Arrange — step blocks until signaled, outlasting the shutdown timeout
       CountDownLatch stepStarted = new CountDownLatch(1);

@@ -351,8 +351,8 @@ class EmbeddedSagaManager implements SagaManager {
     closed = true;
     long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(shutdownTimeoutMillis);
 
-    retentionManager.stop();
-    recoveryManager.stop();
+    retentionManager.stop(deadline);
+    recoveryManager.stop(deadline);
 
     asyncExecutor.shutdown();
     engine.shutdown();
