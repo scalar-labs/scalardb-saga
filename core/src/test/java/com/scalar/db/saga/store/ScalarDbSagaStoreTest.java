@@ -1342,4 +1342,26 @@ class ScalarDbSagaStoreTest {
         .thenReturn(Instant.parse("2026-01-01T00:00:00Z"));
     return r;
   }
+
+  // ---------------------------------------------------------------------------
+  // close
+  // ---------------------------------------------------------------------------
+
+  @Test
+  void close_always_closesTxManager() {
+    // Act
+    store.close();
+
+    // Assert
+    verify(txManager).close();
+  }
+
+  @Test
+  void close_txManagerThrows_throwsSagaPersistenceException() {
+    // Arrange
+    doThrow(new RuntimeException("connection error")).when(txManager).close();
+
+    // Act & Assert
+    assertThatThrownBy(() -> store.close()).isInstanceOf(SagaPersistenceException.class);
+  }
 }

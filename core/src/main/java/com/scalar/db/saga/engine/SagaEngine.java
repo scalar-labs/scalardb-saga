@@ -6,7 +6,9 @@ import com.scalar.db.saga.api.SagaDefinition.SagaMode;
 import com.scalar.db.saga.api.SagaDefinition.StepDefinition;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.api.ShutdownMode;
 import com.scalar.db.saga.api.Step;
+import com.scalar.db.saga.api.StepResolver;
 import com.scalar.db.saga.api.StepResult;
 import com.scalar.db.saga.api.TccStep;
 import com.scalar.db.saga.exception.SagaDefinitionException;
@@ -45,14 +47,6 @@ import org.slf4j.LoggerFactory;
 public class SagaEngine implements AutoCloseable {
 
   private static final Logger logger = LoggerFactory.getLogger(SagaEngine.class);
-
-  /** Shutdown strategy for in-flight sagas. */
-  enum ShutdownMode {
-    /** Complete the current step, then stop between steps and mark for recovery. */
-    WAIT_CURRENT_STEP,
-    /** Wait for all active sagas to reach a terminal state. */
-    WAIT_ALL_SAGAS
-  }
 
   /** Shutdown configuration for the engine. */
   record ShutdownConfig(ShutdownMode mode, long timeoutMillis) {

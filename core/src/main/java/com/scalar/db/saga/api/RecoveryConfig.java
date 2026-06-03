@@ -1,4 +1,4 @@
-package com.scalar.db.saga.recovery;
+package com.scalar.db.saga.api;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -11,7 +11,7 @@ import java.util.Objects;
  *     are considered stale and eligible for recovery
  * @param recoveryIntervalSeconds how often the recovery scan runs (in seconds)
  * @param compensationGracePeriod how long a saga can remain stuck (with step failure events) before
- *     being escalated to {@link com.scalar.db.saga.api.SagaStatus#ESCALATED}
+ *     being escalated to {@link SagaStatus#ESCALATED}
  * @param batchSize maximum number of sagas recovered per pass. Should be larger than the store's
  *     {@code recoveryScanLimit} (per-status per-bucket cap) multiplied by the number of recoverable
  *     statuses to ensure multiple buckets are covered per pass. For example, with {@code

@@ -62,4 +62,16 @@ class CrashingStoreDecoratorTest {
     assertThatThrownBy(() -> new CrashingStoreDecorator(delegate, -1))
         .isInstanceOf(IllegalArgumentException.class);
   }
+
+  @Test
+  void close_always_delegatesToDelegate() {
+    // Arrange
+    CrashingStoreDecorator decorator = new CrashingStoreDecorator(delegate, 0);
+
+    // Act
+    decorator.close();
+
+    // Assert
+    verify(delegate).close();
+  }
 }

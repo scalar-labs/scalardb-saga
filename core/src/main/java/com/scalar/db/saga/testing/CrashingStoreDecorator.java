@@ -137,4 +137,9 @@ public final class CrashingStoreDecorator implements SagaStore {
   public void deleteSaga(String sagaId) {
     delegate.deleteSaga(sagaId);
   }
+
+  @Override
+  public void close() {
+    delegate.close();
+  }
 }

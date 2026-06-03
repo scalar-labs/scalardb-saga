@@ -24,7 +24,7 @@ import java.lang.annotation.Target;
  *
  * <p>When only one resource of a given type is registered, {@code @Named} is not required.
  *
- * @see com.scalar.db.saga.engine.StepResolver
+ * @see StepResolver
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target(ElementType.PARAMETER)

@@ -366,6 +366,12 @@ class EmbeddedSagaManager implements SagaManager {
     } catch (InterruptedException e) {
       asyncExecutor.shutdownNow();
       Thread.currentThread().interrupt();
+    } finally {
+      try {
+        store.close();
+      } catch (Exception e) {
+        logger.error("Failed to close store", e);
+      }
     }
   }
 

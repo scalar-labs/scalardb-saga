@@ -853,6 +853,7 @@ class EmbeddedSagaManagerTest {
       verify(mockExecutor).shutdown();
       verify(engine).shutdown();
       verify(mockExecutor).awaitTermination(anyLong(), eq(TimeUnit.NANOSECONDS));
+      verify(store).close();
     }
   }
 }
