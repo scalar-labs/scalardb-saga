@@ -360,6 +360,65 @@ class SagaRecoveryManagerTest {
     }
 
     @Test
+    void recover_runningSagaWithResolvedFailure_resumesInsteadOfEscalating() {
+      // Arrange
+      SagaStateSnapshot saga = snapshot(SagaStatus.RUNNING);
+      SagaDefinition def = definition();
+      ExecutionContext ctx = mock(ExecutionContext.class);
+
+      // Step 1 failed, then succeeded on retry — failure is resolved.
+      // Even though the failure is older than grace period, the saga should NOT be escalated.
+      List<SagaEvent> events =
+          List.of(
+              StepEvent.completed(0, "debit", null).withTimestamp(NOW.minusSeconds(7200)),
+              StepEvent.failed(1, "credit", null).withTimestamp(NOW.minusSeconds(7200)),
+              StepEvent.completed(1, "credit", null).withTimestamp(NOW.minusSeconds(7100)));
+
+      setupSinglePageRecovery(saga);
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(engine.replayEvents(saga, events)).thenReturn(ctx);
+      when(ctx.getCurrentState()).thenReturn(saga);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(def);
+
+      // Act
+      manager.recover();
+
+      // Assert — failure resolved, resumes from step 2 (after last completed at index 1)
+      verify(engine).resumeFrom(def, ctx, 2);
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any());
+    }
+
+    @Test
+    void recover_runningSagaWithMixedResolvedAndUnresolvedFailures_escalatesOnUnresolved() {
+      // Arrange
+      SagaStateSnapshot saga = snapshot(SagaStatus.RUNNING);
+      ExecutionContext ctx = mock(ExecutionContext.class);
+      SagaStateSnapshot newState = snapshot(SagaStatus.ESCALATED);
+
+      // Step 0 failed and was resolved. Step 1 failed and is still unresolved.
+      List<SagaEvent> events =
+          List.of(
+              StepEvent.failed(0, "debit", null).withTimestamp(NOW.minusSeconds(7200)),
+              StepEvent.completed(0, "debit", null).withTimestamp(NOW.minusSeconds(7100)),
+              StepEvent.failed(1, "credit", null).withTimestamp(NOW.minusSeconds(7200)));
+
+      setupSinglePageRecovery(saga);
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(engine.replayEvents(saga, events)).thenReturn(ctx);
+      when(ctx.getCurrentState()).thenReturn(saga);
+      when(ctx.nextSequence()).thenReturn(3);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(definition());
+      when(store.recordStatusEvent(eq(saga), eq(3), any(StatusEvent.class))).thenReturn(newState);
+
+      // Act
+      manager.recover();
+
+      // Assert — step 1 failure is unresolved and beyond grace period → escalate
+      verify(store).recordStatusEvent(eq(saga), eq(3), any(StatusEvent.class));
+      verify(engine, never()).resumeFrom(any(), any(), anyInt());
+    }
+
+    @Test
     void recover_crashRecoveryWithNoFailureEvents_resumesWithoutEscalationCheck() {
       // Arrange
       SagaStateSnapshot saga = snapshot(SagaStatus.RUNNING);
@@ -439,6 +498,36 @@ class SagaRecoveryManagerTest {
 
       // Assert — no compensation events, last completed is index 1
       verify(engine).compensateFrom(def, ctx, 1);
+    }
+
+    @Test
+    void recover_compensatingSagaWithResolvedCompensationFailure_resumesInsteadOfEscalating() {
+      // Arrange
+      SagaStateSnapshot saga = snapshot(SagaStatus.COMPENSATING);
+      SagaDefinition def = definition();
+      ExecutionContext ctx = mock(ExecutionContext.class);
+
+      // Step 1 compensation failed, then succeeded on retry — failure is resolved.
+      // Even though the failure is older than grace period, the saga should NOT be escalated.
+      List<SagaEvent> events =
+          List.of(
+              StepEvent.completed(0, "debit", null).withTimestamp(NOW.minusSeconds(7200)),
+              StepEvent.completed(1, "credit", null).withTimestamp(NOW.minusSeconds(7200)),
+              StepEvent.compensationFailed(1, "credit", null).withTimestamp(NOW.minusSeconds(7200)),
+              StepEvent.compensated(1, "credit").withTimestamp(NOW.minusSeconds(7100)));
+
+      setupSinglePageRecovery(saga);
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(engine.replayEvents(saga, events)).thenReturn(ctx);
+      when(ctx.getCurrentState()).thenReturn(saga);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(def);
+
+      // Act
+      manager.recover();
+
+      // Assert — failure resolved, resumes compensation from step 0 (before last compensated at 1)
+      verify(engine).compensateFrom(def, ctx, 0);
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any());
     }
 
     @Test
