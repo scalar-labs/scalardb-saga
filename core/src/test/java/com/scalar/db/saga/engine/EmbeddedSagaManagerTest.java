@@ -812,8 +812,8 @@ class EmbeddedSagaManagerTest {
       managerWithMockExecutor.close();
 
       // Assert
-      verify(retentionManager).stop();
-      verify(recoveryManager).stop();
+      verify(retentionManager).stop(anyLong());
+      verify(recoveryManager).stop(anyLong());
       verify(mockExecutor).shutdown();
       verify(engine).shutdown();
       verify(mockExecutor).awaitTermination(anyLong(), eq(TimeUnit.NANOSECONDS));

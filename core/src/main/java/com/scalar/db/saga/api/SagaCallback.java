@@ -12,6 +12,12 @@ public interface SagaCallback {
   /** Called when the saga is fully compensated (all compensations succeeded). */
   void onCompensated(SagaStateSnapshot saga);
 
-  /** Called when the saga is escalated (stuck beyond grace period, needs manual intervention). */
+  /**
+   * Called when the saga is escalated (stuck beyond grace period, needs manual intervention).
+   *
+   * <p>Note: Currently, escalation only occurs during recovery, which runs asynchronously on a
+   * separate thread without access to the original callback. This method is provided for future
+   * use. To detect escalations, poll {@link SagaManager#getStateSnapshot}.
+   */
   void onEscalated(SagaStateSnapshot saga);
 }
