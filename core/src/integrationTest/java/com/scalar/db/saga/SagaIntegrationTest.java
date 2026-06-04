@@ -158,9 +158,9 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      SagaStore eventStore = ScalarDbSagaStoreFactory.create(props).createStore();
-      try (SagaManager manager =
-          buildManager(eventStore, Map.of("step1", step1, "step2", step2, "step3", step3))) {
+      try (SagaStore eventStore = ScalarDbSagaStoreFactory.create(props).createStore();
+          SagaManager manager =
+              buildManager(eventStore, Map.of("step1", step1, "step2", step2, "step3", step3))) {
         manager.register(def);
 
         // Act
@@ -507,9 +507,9 @@ class SagaIntegrationTest {
       String sagaId = "crash-test-saga-1";
 
       // First run — with crash decorator
-      SagaStore baseStore = ScalarDbSagaStoreFactory.create(props).createStore();
-      SagaStore crashingStore = new CrashingStoreDecorator(baseStore, 0);
-      try (SagaManager manager = buildManager(crashingStore, steps)) {
+      try (SagaStore baseStore = ScalarDbSagaStoreFactory.create(props).createStore();
+          SagaStore crashingStore = new CrashingStoreDecorator(baseStore, 0);
+          SagaManager manager = buildManager(crashingStore, steps)) {
         manager.register(def);
 
         try {
@@ -525,9 +525,9 @@ class SagaIntegrationTest {
       }
 
       // Restart — new manager with fresh store, no crash decorator
-      SagaStore recoveryStore = ScalarDbSagaStoreFactory.create(props).createStore();
-      recoveryStore.markForRecovery(sagaId);
-      try (SagaManager recovered = buildManager(recoveryStore, steps)) {
+      try (SagaStore recoveryStore = ScalarDbSagaStoreFactory.create(props).createStore();
+          SagaManager recovered = buildManager(recoveryStore, steps)) {
+        recoveryStore.markForRecovery(sagaId);
         recovered.recover();
 
         // Assert — saga completes after recovery
@@ -741,10 +741,10 @@ class SagaIntegrationTest {
       }
 
       // New manager with fresh store and a step1 that can compensate successfully
-      SagaStore store2 = ScalarDbSagaStoreFactory.create(props).createStore();
       FakeStep step1Fixed = FakeStep.newBuilder("step1").build();
-      try (SagaManager manager2 =
-          buildManager(store2, Map.of("step1", step1Fixed, "step2", step2))) {
+      try (SagaStore store2 = ScalarDbSagaStoreFactory.create(props).createStore();
+          SagaManager manager2 =
+              buildManager(store2, Map.of("step1", step1Fixed, "step2", step2))) {
 
         // Act — recovery picks up the COMPENSATING saga and completes compensation
         store2.markForRecovery(sagaId);
