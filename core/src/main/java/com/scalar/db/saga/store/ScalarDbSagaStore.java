@@ -710,6 +710,15 @@ public class ScalarDbSagaStore implements SagaStore {
         .build();
   }
 
+  /**
+   * Looks up a single state row by {@code saga_id} via the secondary index.
+   *
+   * <p>Uses a {@code Scan} with {@code limit(1)} rather than a {@code Get} on the index
+   * deliberately. ConsensusCommit's Get-with-index currently throws {@link
+   * IllegalArgumentException} when two physical rows transiently share the same {@code saga_id}
+   * during a status transition. Scan tolerates this and keeps the store always runnable. Once that
+   * limitation is resolved, this can be reverted to a single {@code Get} on the index.
+   */
   private Scan buildStateIndexScan(String sagaId) {
     return Scan.newBuilder()
         .namespace(SagaSchema.NAMESPACE)
