@@ -3,6 +3,7 @@ package com.scalar.db.saga.store;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
@@ -800,9 +801,8 @@ class ScalarDbSagaStoreTest {
     Result stateRow = mockStateResult("saga-1", SagaStatus.COMPLETED);
     Result eventRow1 = mockEventRow(0);
     Result eventRow2 = mockEventRow(1);
-    when(tx.scan(any(Scan.class)))
-        .thenReturn(List.of(stateRow))
-        .thenReturn(List.of(eventRow1, eventRow2));
+    when(tx.scan(scanForTable(SagaSchema.STATE_TABLE))).thenReturn(List.of(stateRow));
+    when(tx.scan(scanForTable(SagaSchema.EVENTS_TABLE))).thenReturn(List.of(eventRow1, eventRow2));
 
     // Act
     store.deleteSaga("saga-1");
@@ -817,7 +817,8 @@ class ScalarDbSagaStoreTest {
     // Arrange
     Result stateRow = mockStateResult("saga-1", SagaStatus.COMPENSATED);
     Result eventRow1 = mockEventRow(0);
-    when(tx.scan(any(Scan.class))).thenReturn(List.of(stateRow)).thenReturn(List.of(eventRow1));
+    when(tx.scan(scanForTable(SagaSchema.STATE_TABLE))).thenReturn(List.of(stateRow));
+    when(tx.scan(scanForTable(SagaSchema.EVENTS_TABLE))).thenReturn(List.of(eventRow1));
 
     // Act
     store.deleteSaga("saga-1");
@@ -832,7 +833,8 @@ class ScalarDbSagaStoreTest {
     // Arrange
     Result stateRow = mockStateResult("saga-1", SagaStatus.ESCALATED);
     Result eventRow1 = mockEventRow(0);
-    when(tx.scan(any(Scan.class))).thenReturn(List.of(stateRow)).thenReturn(List.of(eventRow1));
+    when(tx.scan(scanForTable(SagaSchema.STATE_TABLE))).thenReturn(List.of(stateRow));
+    when(tx.scan(scanForTable(SagaSchema.EVENTS_TABLE))).thenReturn(List.of(eventRow1));
 
     // Act
     store.deleteSaga("saga-1");
@@ -1311,6 +1313,14 @@ class ScalarDbSagaStoreTest {
     }
     when(r.getTimestampTZ("created_at")).thenReturn(Instant.now());
     return r;
+  }
+
+  /**
+   * Matches a {@link Scan} by its target table so stubs are independent of the order in which a
+   * method issues its scans (e.g., {@code deleteSaga} scans the state table then the events table).
+   */
+  private static Scan scanForTable(String table) {
+    return argThat(scan -> scan != null && scan.forTable().filter(table::equals).isPresent());
   }
 
   /** Creates a mock event row with only the sequence field (for deleteSaga). */
