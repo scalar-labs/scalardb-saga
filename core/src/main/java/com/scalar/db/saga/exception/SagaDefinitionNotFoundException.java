@@ -1,20 +1,35 @@
 package com.scalar.db.saga.exception;
 
-import java.util.Objects;
+import com.scalar.db.saga.api.SagaDefinitionId;
+import org.jspecify.annotations.Nullable;
 
-/** Thrown when looking up a saga definition by name that has not been registered. */
+/** Thrown when a saga definition cannot be found by name or by name and version. */
 public class SagaDefinitionNotFoundException extends RuntimeException {
 
   private final String sagaName;
+  private final @Nullable String version;
 
   public SagaDefinitionNotFoundException(String sagaName) {
-    super(
-        "No saga definition registered for: "
-            + Objects.requireNonNull(sagaName, "sagaName must not be null"));
+    super("No saga definition registered for: " + sagaName);
     this.sagaName = sagaName;
+    this.version = null;
+  }
+
+  public SagaDefinitionNotFoundException(String sagaName, String version) {
+    super("No saga definition registered for: " + sagaName + " (v" + version + ")");
+    this.sagaName = sagaName;
+    this.version = version;
+  }
+
+  public SagaDefinitionNotFoundException(SagaDefinitionId id) {
+    this(id.name(), id.version());
   }
 
   public String getSagaName() {
     return sagaName;
+  }
+
+  public @Nullable String getVersion() {
+    return version;
   }
 }

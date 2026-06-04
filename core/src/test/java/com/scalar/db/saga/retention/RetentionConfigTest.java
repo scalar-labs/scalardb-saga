@@ -35,6 +35,7 @@ class RetentionConfigTest {
   // =========================================================================
 
   @Test
+  @SuppressWarnings("NullAway")
   void constructor_nullRetentionPeriod_throwsException() {
     // Act & Assert
     assertThatThrownBy(() -> new RetentionConfig(null, 60, 10_000, 10, FIXED_CLOCK))
@@ -114,6 +115,7 @@ class RetentionConfigTest {
   // =========================================================================
 
   @Test
+  @SuppressWarnings("NullAway")
   void constructor_nullClock_throwsException() {
     // Act & Assert
     assertThatThrownBy(() -> new RetentionConfig(Duration.ofDays(7), 60, 10_000, 10, null))

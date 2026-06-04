@@ -2,6 +2,7 @@ package com.scalar.db.saga.engine;
 
 import com.scalar.db.saga.api.SagaCallback;
 import com.scalar.db.saga.api.SagaDefinition;
+import com.scalar.db.saga.api.SagaDefinitionId;
 import com.scalar.db.saga.api.SagaDefinitionParser;
 import com.scalar.db.saga.api.SagaManager;
 import com.scalar.db.saga.api.SagaStateSnapshot;
@@ -105,14 +106,28 @@ class EmbeddedSagaManager implements SagaManager {
   @Override
   public String start(String sagaName, Map<String, Object> input) {
     ensureOpen();
-    SagaDefinition def = requireDefinition(sagaName);
+    SagaDefinition def = requireLatestDefinition(sagaName);
     return engine.execute(def, null, input);
   }
 
   @Override
   public void start(String sagaId, String sagaName, Map<String, Object> input) {
     ensureOpen();
-    SagaDefinition def = requireDefinition(sagaName);
+    SagaDefinition def = requireLatestDefinition(sagaName);
+    engine.execute(def, sagaId, input);
+  }
+
+  @Override
+  public String start(SagaDefinitionId id, Map<String, Object> input) {
+    ensureOpen();
+    SagaDefinition def = requireVersionedDefinition(id);
+    return engine.execute(def, null, input);
+  }
+
+  @Override
+  public void start(String sagaId, SagaDefinitionId id, Map<String, Object> input) {
+    ensureOpen();
+    SagaDefinition def = requireVersionedDefinition(id);
     engine.execute(def, sagaId, input);
   }
 
@@ -122,23 +137,60 @@ class EmbeddedSagaManager implements SagaManager {
 
   @Override
   public String startAsync(String sagaName, Map<String, Object> input) {
-    return startAsyncInternal(null, sagaName, input, null).getSagaId();
+    ensureOpen();
+    SagaDefinition def = requireLatestDefinition(sagaName);
+    return startAsyncInternal(def, null, input, null).getSagaId();
   }
 
   @Override
   public String startAsync(String sagaName, Map<String, Object> input, SagaCallback callback) {
-    return startAsyncInternal(null, sagaName, input, callback).getSagaId();
+    ensureOpen();
+    SagaDefinition def = requireLatestDefinition(sagaName);
+    return startAsyncInternal(def, null, input, callback).getSagaId();
   }
 
   @Override
   public void startAsync(String sagaId, String sagaName, Map<String, Object> input) {
-    startAsyncInternal(sagaId, sagaName, input, null);
+    ensureOpen();
+    SagaDefinition def = requireLatestDefinition(sagaName);
+    startAsyncInternal(def, sagaId, input, null);
   }
 
   @Override
   public void startAsync(
       String sagaId, String sagaName, Map<String, Object> input, SagaCallback callback) {
-    startAsyncInternal(sagaId, sagaName, input, callback);
+    ensureOpen();
+    SagaDefinition def = requireLatestDefinition(sagaName);
+    startAsyncInternal(def, sagaId, input, callback);
+  }
+
+  @Override
+  public String startAsync(SagaDefinitionId id, Map<String, Object> input) {
+    ensureOpen();
+    SagaDefinition def = requireVersionedDefinition(id);
+    return startAsyncInternal(def, null, input, null).getSagaId();
+  }
+
+  @Override
+  public String startAsync(SagaDefinitionId id, Map<String, Object> input, SagaCallback callback) {
+    ensureOpen();
+    SagaDefinition def = requireVersionedDefinition(id);
+    return startAsyncInternal(def, null, input, callback).getSagaId();
+  }
+
+  @Override
+  public void startAsync(String sagaId, SagaDefinitionId id, Map<String, Object> input) {
+    ensureOpen();
+    SagaDefinition def = requireVersionedDefinition(id);
+    startAsyncInternal(def, sagaId, input, null);
+  }
+
+  @Override
+  public void startAsync(
+      String sagaId, SagaDefinitionId id, Map<String, Object> input, SagaCallback callback) {
+    ensureOpen();
+    SagaDefinition def = requireVersionedDefinition(id);
+    startAsyncInternal(def, sagaId, input, callback);
   }
 
   /**
@@ -146,13 +198,10 @@ class EmbeddedSagaManager implements SagaManager {
    * process crashes before the virtual thread starts), then submits execution to a virtual thread.
    */
   private SagaStateSnapshot startAsyncInternal(
+      SagaDefinition def,
       @Nullable String sagaId,
-      String sagaName,
       Map<String, Object> input,
       @Nullable SagaCallback callback) {
-    ensureOpen();
-    SagaDefinition def = requireDefinition(sagaName);
-
     // Persist synchronously — saga is recoverable from this point
     SagaStateSnapshot saga = engine.createSaga(def, sagaId, input);
 
@@ -325,10 +374,18 @@ class EmbeddedSagaManager implements SagaManager {
     }
   }
 
-  private SagaDefinition requireDefinition(String sagaName) {
-    SagaDefinition def = registry.get(sagaName);
+  private SagaDefinition requireLatestDefinition(String sagaName) {
+    SagaDefinition def = registry.resolve(sagaName);
     if (def == null) {
       throw new SagaDefinitionNotFoundException(sagaName);
+    }
+    return def;
+  }
+
+  private SagaDefinition requireVersionedDefinition(SagaDefinitionId id) {
+    SagaDefinition def = registry.resolve(id.name(), id.version());
+    if (def == null) {
+      throw new SagaDefinitionNotFoundException(id);
     }
     return def;
   }
@@ -336,7 +393,7 @@ class EmbeddedSagaManager implements SagaManager {
   private SagaDefinition resolveDefinition(SagaStateSnapshot saga) {
     SagaDefinition def = registry.resolve(saga.getSagaName(), saga.getDefinitionVersion());
     if (def == null) {
-      throw new SagaDefinitionNotFoundException(saga.getSagaName());
+      throw new SagaDefinitionNotFoundException(saga.getSagaName(), saga.getDefinitionVersion());
     }
     return def;
   }

@@ -4,6 +4,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -158,6 +159,7 @@ class SagaRetentionManagerTest {
       when(store.findByStatusOlderThan(eq(SagaStatus.COMPENSATED), eq(THRESHOLD), eq(99)))
           .thenReturn(List.of());
       doThrow(new RuntimeException("delete failed")).when(store).deleteSaga("saga-fail");
+      doNothing().when(store).deleteSaga("saga-ok");
 
       // Act
       manager.cleanup();

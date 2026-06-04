@@ -87,17 +87,17 @@ class SagaDefinitionRegistryTest {
   }
 
   // ---------------------------------------------------------------------------
-  // get (by name — always queries store for latest)
+  // resolve (by name only — always queries store for latest)
   // ---------------------------------------------------------------------------
 
   @Test
-  void get_definitionInStore_returnsDefinition() {
+  void resolve_nameOnlyGiven_definitionInStore_returnsDefinition() {
     // Arrange
     SagaDefinition def = definition("transfer", "1.0");
     when(store.getDefinition("transfer")).thenReturn(Optional.of(def));
 
     // Act
-    SagaDefinition result = registry.get("transfer");
+    SagaDefinition result = registry.resolve("transfer");
 
     // Assert
     assertThat(result).isSameAs(def);
@@ -105,24 +105,24 @@ class SagaDefinitionRegistryTest {
   }
 
   @Test
-  void get_definitionNotInStore_returnsNull() {
+  void resolve_nameOnlyGiven_definitionNotInStore_returnsNull() {
     // Arrange
     when(store.getDefinition("unknown")).thenReturn(Optional.empty());
 
     // Act & Assert
-    assertThat(registry.get("unknown")).isNull();
+    assertThat(registry.resolve("unknown")).isNull();
   }
 
   @Test
-  void get_definitionInStore_cachesVersionedKey() {
+  void resolve_nameOnlyGiven_definitionInStore_cachesVersionedKey() {
     // Arrange
     SagaDefinition def = definition("transfer", "1.0");
     when(store.getDefinition("transfer")).thenReturn(Optional.of(def));
 
-    // Act — get() queries the store and caches the versioned key
-    registry.get("transfer");
+    // Act — resolve(name) queries the store and caches the versioned key
+    registry.resolve("transfer");
 
-    // Assert — resolve() finds it in memory without hitting the versioned store lookup
+    // Assert — resolve(name, version) finds it in memory without hitting the versioned store lookup
     assertThat(registry.resolve("transfer", "1.0")).isSameAs(def);
     verify(store, never()).getDefinition("transfer", "1.0");
   }
