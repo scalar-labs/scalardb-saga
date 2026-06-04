@@ -488,7 +488,6 @@ class EmbeddedSagaManagerTest {
     void startAsync_afterClose_throwsIllegalState() {
       // Arrange
       SagaDefinitionId id = new SagaDefinitionId("transfer", "2.0");
-      when(registry.resolve("transfer", "2.0")).thenReturn(definition("transfer", "2.0"));
       manager.close();
 
       // Act & Assert
