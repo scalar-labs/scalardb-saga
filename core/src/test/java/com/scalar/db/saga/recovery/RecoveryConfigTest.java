@@ -75,6 +75,7 @@ class RecoveryConfigTest {
   // =========================================================================
 
   @Test
+  @SuppressWarnings("NullAway")
   void constructor_nullCompensationGracePeriod_throwsException() {
     // Act & Assert
     assertThatThrownBy(() -> new RecoveryConfig(30_000, 10, null, 500, 5, FIXED_CLOCK))
@@ -140,6 +141,7 @@ class RecoveryConfigTest {
   // =========================================================================
 
   @Test
+  @SuppressWarnings("NullAway")
   void constructor_nullClock_throwsException() {
     // Act & Assert
     assertThatThrownBy(() -> new RecoveryConfig(30_000, 10, Duration.ofHours(2), 500, 5, null))

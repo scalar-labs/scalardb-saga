@@ -40,6 +40,8 @@ public interface SagaManager extends AutoCloseable {
    * @param sagaName the registered saga definition name
    * @param input initial data for the saga context
    * @return the generated saga ID
+   * @throws SagaDefinitionNotFoundException if no definition matches the given name
+   * @throws SagaDefinitionException if step resolution fails
    */
   String start(String sagaName, Map<String, Object> input);
 
@@ -54,6 +56,8 @@ public interface SagaManager extends AutoCloseable {
    * @param sagaId the client-supplied saga ID
    * @param sagaName the registered saga definition name
    * @param input initial data for the saga context
+   * @throws SagaDefinitionNotFoundException if no definition matches the given name
+   * @throws SagaDefinitionException if step resolution fails
    */
   void start(String sagaId, String sagaName, Map<String, Object> input);
 
@@ -66,6 +70,7 @@ public interface SagaManager extends AutoCloseable {
    * @param input initial data for the saga context
    * @return the generated saga ID
    * @throws SagaDefinitionNotFoundException if no definition matches the given name and version
+   * @throws SagaDefinitionException if step resolution fails
    */
   String start(SagaDefinitionId id, Map<String, Object> input);
 
@@ -78,6 +83,7 @@ public interface SagaManager extends AutoCloseable {
    * @param id the saga definition name and version
    * @param input initial data for the saga context
    * @throws SagaDefinitionNotFoundException if no definition matches the given name and version
+   * @throws SagaDefinitionException if step resolution fails
    */
   void start(String sagaId, SagaDefinitionId id, Map<String, Object> input);
 
@@ -91,6 +97,7 @@ public interface SagaManager extends AutoCloseable {
    * @param sagaName the registered saga definition name
    * @param input initial data for the saga context
    * @return the generated saga ID
+   * @throws SagaDefinitionNotFoundException if no definition matches the given name
    */
   String startAsync(String sagaName, Map<String, Object> input);
 
@@ -105,6 +112,7 @@ public interface SagaManager extends AutoCloseable {
    * @param input initial data for the saga context
    * @param callback callback for completion/compensation/escalation
    * @return the generated saga ID
+   * @throws SagaDefinitionNotFoundException if no definition matches the given name
    */
   String startAsync(String sagaName, Map<String, Object> input, SagaCallback callback);
 
@@ -118,6 +126,7 @@ public interface SagaManager extends AutoCloseable {
    * @param sagaId the client-supplied saga ID
    * @param sagaName the registered saga definition name
    * @param input initial data for the saga context
+   * @throws SagaDefinitionNotFoundException if no definition matches the given name
    */
   void startAsync(String sagaId, String sagaName, Map<String, Object> input);
 
@@ -132,6 +141,7 @@ public interface SagaManager extends AutoCloseable {
    * @param sagaName the registered saga definition name
    * @param input initial data for the saga context
    * @param callback callback for completion/compensation/escalation
+   * @throws SagaDefinitionNotFoundException if no definition matches the given name
    */
   void startAsync(String sagaId, String sagaName, Map<String, Object> input, SagaCallback callback);
 
@@ -191,6 +201,8 @@ public interface SagaManager extends AutoCloseable {
    *
    * @param sagaId the saga instance ID
    * @return the saga state after resumption
+   * @throws SagaDefinitionNotFoundException if the saga's definition is no longer registered
+   * @throws SagaDefinitionException if step resolution fails
    */
   SagaStateSnapshot resume(String sagaId);
 
@@ -199,6 +211,8 @@ public interface SagaManager extends AutoCloseable {
    *
    * @param sagaId the saga instance ID
    * @return the saga state after compensation
+   * @throws SagaDefinitionNotFoundException if the saga's definition is no longer registered
+   * @throws SagaDefinitionException if step resolution fails
    */
   SagaStateSnapshot compensate(String sagaId);
 
