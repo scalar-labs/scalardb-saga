@@ -163,26 +163,30 @@ public class SagaManagerBuilder implements SagaManager.Builder {
     }
 
     SagaStore store = storeFactory.createStore();
+    try {
+      StepResolver resolver = buildStepResolver();
 
-    StepResolver resolver = buildStepResolver();
+      RecoveryConfig resolvedRecoveryConfig =
+          recoveryConfig != null ? recoveryConfig : RecoveryConfig.defaults(clock);
+      RetentionConfig resolvedRetentionConfig =
+          retentionConfig != null ? retentionConfig : RetentionConfig.defaults(clock);
 
-    RecoveryConfig resolvedRecoveryConfig =
-        recoveryConfig != null ? recoveryConfig : RecoveryConfig.defaults(clock);
-    RetentionConfig resolvedRetentionConfig =
-        retentionConfig != null ? retentionConfig : RetentionConfig.defaults(clock);
+      SagaEngine.ShutdownConfig shutdownConfig =
+          new SagaEngine.ShutdownConfig(shutdownMode, shutdownTimeoutMillis);
+      SagaEngine engine = new SagaEngine(store, resolver, ownerId, shutdownConfig, clock);
+      SagaDefinitionRegistry registry = new SagaDefinitionRegistry(store);
 
-    SagaEngine.ShutdownConfig shutdownConfig =
-        new SagaEngine.ShutdownConfig(shutdownMode, shutdownTimeoutMillis);
-    SagaEngine engine = new SagaEngine(store, resolver, ownerId, shutdownConfig, clock);
-    SagaDefinitionRegistry registry = new SagaDefinitionRegistry(store);
+      SagaRecoveryManager recoveryManager =
+          new SagaRecoveryManager(store, engine, registry, ownerId, resolvedRecoveryConfig);
+      SagaRetentionManager retentionManager =
+          new SagaRetentionManager(store, resolvedRetentionConfig);
 
-    SagaRecoveryManager recoveryManager =
-        new SagaRecoveryManager(store, engine, registry, ownerId, resolvedRecoveryConfig);
-    SagaRetentionManager retentionManager =
-        new SagaRetentionManager(store, resolvedRetentionConfig);
-
-    return new EmbeddedSagaManager(
-        engine, store, registry, recoveryManager, retentionManager, shutdownTimeoutMillis);
+      return new EmbeddedSagaManager(
+          engine, store, registry, recoveryManager, retentionManager, shutdownTimeoutMillis);
+    } catch (Exception e) {
+      store.close();
+      throw e;
+    }
   }
 
   private StepResolver buildStepResolver() {
