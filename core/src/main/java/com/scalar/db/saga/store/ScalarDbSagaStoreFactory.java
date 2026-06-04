@@ -98,20 +98,29 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
     ScalarDbSagaStoreConfig.Builder builder = ScalarDbSagaStoreConfig.builder();
     String maxPayload = properties.getProperty(PROP_PREFIX + "max_event_payload_bytes");
     if (maxPayload != null) {
-      builder.maxEventPayloadBytes(Integer.parseInt(maxPayload));
+      builder.maxEventPayloadBytes(parseIntProperty("max_event_payload_bytes", maxPayload));
     }
     String retryCount = properties.getProperty(PROP_PREFIX + "transaction_retry_count");
     if (retryCount != null) {
-      builder.transactionRetryCount(Integer.parseInt(retryCount));
+      builder.transactionRetryCount(parseIntProperty("transaction_retry_count", retryCount));
     }
     String scanLimit = properties.getProperty(PROP_PREFIX + "recovery_scan_limit");
     if (scanLimit != null) {
-      builder.recoveryScanLimit(Integer.parseInt(scanLimit));
+      builder.recoveryScanLimit(parseIntProperty("recovery_scan_limit", scanLimit));
     }
     String numBuckets = properties.getProperty(PROP_PREFIX + "num_buckets");
     if (numBuckets != null) {
-      builder.numBuckets(Integer.parseInt(numBuckets));
+      builder.numBuckets(parseIntProperty("num_buckets", numBuckets));
     }
     return builder.build();
+  }
+
+  private static int parseIntProperty(String key, String value) {
+    try {
+      return Integer.parseInt(value);
+    } catch (NumberFormatException e) {
+      throw new IllegalArgumentException(
+          "Invalid integer value for property '" + PROP_PREFIX + key + "': " + value, e);
+    }
   }
 }
