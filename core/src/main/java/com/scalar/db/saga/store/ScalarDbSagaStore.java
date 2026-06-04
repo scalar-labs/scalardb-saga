@@ -415,7 +415,7 @@ public class ScalarDbSagaStore implements SagaStore {
     try {
       runInTransaction(
           tx -> {
-            Optional<Result> result = tx.get(buildStateIndexGet(sagaId));
+            Optional<Result> result = tx.scan(buildStateIndexScan(sagaId)).stream().findFirst();
 
             if (result.isEmpty()) {
               return Boolean.TRUE; // no-op
@@ -485,7 +485,7 @@ public class ScalarDbSagaStore implements SagaStore {
   public void deleteSaga(String sagaId) {
     runInTransaction(
         tx -> {
-          Optional<Result> stateResult = tx.get(buildStateIndexGet(sagaId));
+          Optional<Result> stateResult = tx.scan(buildStateIndexScan(sagaId)).stream().findFirst();
 
           if (stateResult.isPresent()) {
             Result r = stateResult.get();
@@ -710,11 +710,12 @@ public class ScalarDbSagaStore implements SagaStore {
         .build();
   }
 
-  private Get buildStateIndexGet(String sagaId) {
-    return Get.newBuilder()
+  private Scan buildStateIndexScan(String sagaId) {
+    return Scan.newBuilder()
         .namespace(SagaSchema.NAMESPACE)
         .table(SagaSchema.STATE_TABLE)
         .indexKey(Key.ofText("saga_id", sagaId))
+        .limit(1)
         .build();
   }
 
@@ -874,7 +875,10 @@ public class ScalarDbSagaStore implements SagaStore {
 
   private Optional<SagaStateSnapshot> loadStateSnapshot(String sagaId) {
     return runInTransaction(
-        tx -> tx.get(buildStateIndexGet(sagaId)).map(this::toSagaStateSnapshot),
+        tx ->
+            tx.scan(buildStateIndexScan(sagaId)).stream()
+                .findFirst()
+                .map(this::toSagaStateSnapshot),
         null,
         "load saga state " + sagaId);
   }
