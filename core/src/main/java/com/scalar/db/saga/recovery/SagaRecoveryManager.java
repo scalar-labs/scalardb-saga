@@ -26,6 +26,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
@@ -164,17 +165,21 @@ public class SagaRecoveryManager {
     List<Future<?>> futures = new ArrayList<>();
     @Nullable RecoverablesCursor cursor = null;
     int submitted = 0;
-    do {
-      Recoverables page = store.findRecoverable(config.recoveryTimeoutMillis(), cursor);
-      cursor = page.nextCursor();
+    try {
+      do {
+        Recoverables page = store.findRecoverable(config.recoveryTimeoutMillis(), cursor);
+        cursor = page.nextCursor();
 
-      for (SagaStateSnapshot saga : page.sagas()) {
-        futures.add(recoveryExecutor.submit(() -> recoverOneSafely(saga)));
-        if (++submitted >= config.batchSize()) {
-          break;
+        for (SagaStateSnapshot saga : page.sagas()) {
+          futures.add(recoveryExecutor.submit(() -> recoverOneSafely(saga)));
+          if (++submitted >= config.batchSize()) {
+            break;
+          }
         }
-      }
-    } while (cursor != null && submitted < config.batchSize());
+      } while (cursor != null && submitted < config.batchSize());
+    } catch (RejectedExecutionException e) {
+      logger.warn("Recovery executor shut down; skipping remaining sagas", e);
+    }
     awaitAll(futures);
   }
 

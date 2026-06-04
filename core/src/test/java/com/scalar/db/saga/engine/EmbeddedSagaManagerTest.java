@@ -345,6 +345,27 @@ class EmbeddedSagaManagerTest {
     }
 
     @Test
+    void startAsync_clientSuppliedIdWithCallback_persistsAndDispatchesCallback() throws Exception {
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot runningSaga = snapshot("my-id", SagaStatus.RUNNING);
+      SagaStateSnapshot completedSaga = snapshot("my-id", SagaStatus.COMPLETED);
+      SagaCallback callback = mock(SagaCallback.class);
+
+      when(registry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), eq("my-id"), any())).thenReturn(runningSaga);
+      when(store.getStateSnapshot("my-id")).thenReturn(Optional.of(completedSaga));
+
+      // Act
+      manager.startAsync("my-id", "transfer", Map.of(), callback);
+
+      // Assert
+      verify(registry).resolve("transfer");
+      verify(engine).createSaga(def, "my-id", Map.of());
+      verify(callback, timeout(5000)).onCompleted(completedSaga);
+    }
+
+    @Test
     void startAsync_unknownDefinition_throwsDefinitionNotFound() {
       // Arrange
       when(registry.resolve("unknown")).thenReturn(null);
@@ -473,6 +494,28 @@ class EmbeddedSagaManagerTest {
     }
 
     @Test
+    void startAsync_clientSuppliedIdWithCallback_persistsAndDispatchesCallback() throws Exception {
+      // Arrange
+      SagaDefinitionId id = new SagaDefinitionId("transfer", "2.0");
+      SagaDefinition def = definition("transfer", "2.0");
+      SagaStateSnapshot runningSaga = snapshot("my-id", SagaStatus.RUNNING);
+      SagaStateSnapshot completedSaga = snapshot("my-id", SagaStatus.COMPLETED);
+      SagaCallback callback = mock(SagaCallback.class);
+
+      when(registry.resolve("transfer", "2.0")).thenReturn(def);
+      when(engine.createSaga(eq(def), eq("my-id"), any())).thenReturn(runningSaga);
+      when(store.getStateSnapshot("my-id")).thenReturn(Optional.of(completedSaga));
+
+      // Act
+      manager.startAsync("my-id", id, Map.of(), callback);
+
+      // Assert
+      verify(registry).resolve("transfer", "2.0");
+      verify(engine).createSaga(def, "my-id", Map.of());
+      verify(callback, timeout(5000)).onCompleted(completedSaga);
+    }
+
+    @Test
     void startAsync_unknownDefinition_throwsDefinitionNotFound() {
       // Arrange
       SagaDefinitionId id = new SagaDefinitionId("unknown", "1.0");
@@ -488,7 +531,6 @@ class EmbeddedSagaManagerTest {
     void startAsync_afterClose_throwsIllegalState() {
       // Arrange
       SagaDefinitionId id = new SagaDefinitionId("transfer", "2.0");
-      when(registry.resolve("transfer", "2.0")).thenReturn(definition("transfer", "2.0"));
       manager.close();
 
       // Act & Assert
