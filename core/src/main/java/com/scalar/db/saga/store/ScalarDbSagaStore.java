@@ -718,6 +718,12 @@ public class ScalarDbSagaStore implements SagaStore {
    * IllegalArgumentException} when two physical rows transiently share the same {@code saga_id}
    * during a status transition. Scan tolerates this and keeps the store always runnable. Once that
    * limitation is resolved, this can be reverted to a single {@code Get} on the index.
+   *
+   * <p>Callers can therefore treat the result as at most one visible row: {@code saga_id} is a
+   * unique UUID, and a status transition (delete old row + insert new row) is committed atomically
+   * by ConsensusCommit, so under snapshot isolation a reader sees either the pre-state or the
+   * post-state — never both. {@code stream().findFirst()} on the result is thus always the current
+   * state; there is no set of rows to order by {@code updated_at}.
    */
   private Scan buildStateIndexScan(String sagaId) {
     return Scan.newBuilder()
