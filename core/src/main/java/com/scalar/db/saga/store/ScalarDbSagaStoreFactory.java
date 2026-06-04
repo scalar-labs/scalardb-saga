@@ -117,7 +117,7 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
 
   private static int parseIntProperty(String key, String value) {
     try {
-      return Integer.parseInt(value);
+      return Integer.parseInt(value.trim());
     } catch (NumberFormatException e) {
       throw new IllegalArgumentException(
           "Invalid integer value for property '" + PROP_PREFIX + key + "': " + value, e);
