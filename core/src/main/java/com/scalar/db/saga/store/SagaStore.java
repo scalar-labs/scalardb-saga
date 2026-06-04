@@ -3,7 +3,6 @@ package com.scalar.db.saga.store;
 import com.scalar.db.saga.api.SagaDefinition;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
-import java.io.Closeable;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -16,7 +15,7 @@ import org.jspecify.annotations.Nullable;
  * <p>Implementations must guarantee atomicity: {@link #createSaga} and {@link #recordStatusEvent}
  * write to both the event stream and the state table in a single transaction.
  */
-public interface SagaStore extends Closeable {
+public interface SagaStore extends AutoCloseable {
 
   /** Releases resources held by this store (e.g., connection pools). Default is a no-op. */
   @Override
