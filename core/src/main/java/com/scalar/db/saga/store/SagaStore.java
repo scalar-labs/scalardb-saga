@@ -3,6 +3,7 @@ package com.scalar.db.saga.store;
 import com.scalar.db.saga.api.SagaDefinition;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -132,6 +133,21 @@ public interface SagaStore {
   // ---------------------------------------------------------------------------
   // Data retention
   // ---------------------------------------------------------------------------
+
+  /**
+   * Finds sagas in the given terminal status with {@code updated_at} older than the threshold. Used
+   * by the retention manager to find purgeable COMPLETED/COMPENSATED sagas.
+   *
+   * <p>This method may be removed once the Admin API's {@code listStateSnapshots} query is
+   * available (phase 5).
+   *
+   * @param status the terminal status to scan for
+   * @param threshold the cutoff time — only sagas updated before this are returned
+   * @param maxResults the maximum number of results to return
+   * @return matching saga snapshots (order is not guaranteed across buckets)
+   */
+  List<SagaStateSnapshot> findByStatusOlderThan(
+      SagaStatus status, Instant threshold, int maxResults);
 
   /**
    * Deletes all events and state for a terminal saga (COMPLETED, COMPENSATED, or ESCALATED).

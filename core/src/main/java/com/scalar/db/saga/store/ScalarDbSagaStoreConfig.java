@@ -5,7 +5,7 @@ public class ScalarDbSagaStoreConfig {
 
   private static final int DEFAULT_MAX_EVENT_PAYLOAD_BYTES = 0;
   private static final int DEFAULT_TRANSACTION_RETRY_COUNT = 3;
-  private static final int DEFAULT_RECOVERY_SCAN_LIMIT = 1000;
+  private static final int DEFAULT_RECOVERY_SCAN_LIMIT = 100;
 
   private final int maxEventPayloadBytes;
   private final int transactionRetryCount;
@@ -39,6 +39,11 @@ public class ScalarDbSagaStoreConfig {
   /**
    * Returns the maximum number of rows returned per status scan in {@code findRecoverable}. Any
    * sagas beyond this limit are picked up on the next recovery cycle.
+   *
+   * <p>This per-bucket cap works together with {@link
+   * com.scalar.db.saga.recovery.RecoveryConfig#batchSize()} (total cap per pass) to ensure fair
+   * distribution across buckets. Keep this value smaller than {@code batchSize /
+   * numRecoverableStatuses} so that a single hot bucket cannot consume the entire batch budget.
    *
    * @return the recovery scan limit
    */
@@ -94,6 +99,9 @@ public class ScalarDbSagaStoreConfig {
     /**
      * Sets the maximum number of rows returned per status scan in {@code findRecoverable}. Any
      * sagas beyond this limit are picked up on the next recovery cycle.
+     *
+     * <p>See {@link ScalarDbSagaStoreConfig#getRecoveryScanLimit()} for how this interacts with
+     * {@link com.scalar.db.saga.recovery.RecoveryConfig#batchSize()}.
      *
      * @param recoveryScanLimit the scan limit (must be &gt;= 1)
      * @return this builder

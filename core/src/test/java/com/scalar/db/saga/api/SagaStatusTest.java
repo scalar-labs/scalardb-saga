@@ -57,6 +57,21 @@ class SagaStatusTest {
   }
 
   @Test
+  void isRecoverable_recoverableStatuses_returnsTrue() {
+    // Act & Assert
+    assertThat(SagaStatus.RUNNING.isRecoverable()).isTrue();
+    assertThat(SagaStatus.COMPENSATING.isRecoverable()).isTrue();
+  }
+
+  @Test
+  void isRecoverable_nonRecoverableStatuses_returnsFalse() {
+    // Act & Assert
+    assertThat(SagaStatus.COMPLETED.isRecoverable()).isFalse();
+    assertThat(SagaStatus.COMPENSATED.isRecoverable()).isFalse();
+    assertThat(SagaStatus.ESCALATED.isRecoverable()).isFalse();
+  }
+
+  @Test
   void isPurgeable_purgeableStatuses_returnsTrue() {
     // Act & Assert
     assertThat(SagaStatus.COMPLETED.isPurgeable()).isTrue();

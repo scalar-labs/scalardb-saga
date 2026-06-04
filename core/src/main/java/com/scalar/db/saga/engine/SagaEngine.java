@@ -42,7 +42,7 @@ import org.slf4j.LoggerFactory;
  * <p>Manages saga lifecycle from creation through execution, compensation, and graceful shutdown.
  */
 @ThreadSafe
-class SagaEngine implements AutoCloseable {
+public class SagaEngine implements AutoCloseable {
 
   private static final Logger logger = LoggerFactory.getLogger(SagaEngine.class);
 
@@ -125,9 +125,18 @@ class SagaEngine implements AutoCloseable {
    * @param input the saga input data
    */
   void executeSaga(SagaDefinition def, SagaStateSnapshot saga, Map<String, Object> input) {
-    ExecutionContext context = new ExecutionContext(saga.getSagaId(), input, saga);
-    context.setNextEventSequence(1); // SAGA_STARTED was seq 0
-    executeSteps(def, context, 0);
+    String sagaId = saga.getSagaId();
+    if (!registerActive(sagaId)) {
+      store.markForRecovery(sagaId);
+      return;
+    }
+    try {
+      ExecutionContext context = new ExecutionContext(sagaId, input, saga);
+      context.setNextEventSequence(1); // SAGA_STARTED was seq 0
+      executeSteps(def, context, 0);
+    } finally {
+      unregisterActive(sagaId);
+    }
   }
 
   /**
@@ -146,25 +155,39 @@ class SagaEngine implements AutoCloseable {
    *
    * @return the final state snapshot
    */
-  SagaStateSnapshot resumeFrom(SagaDefinition def, ExecutionContext context, int fromStep) {
-    executeSteps(def, context, fromStep);
+  public SagaStateSnapshot resumeFrom(SagaDefinition def, ExecutionContext context, int fromStep) {
+    String sagaId = context.getSagaId();
+    if (!registerActive(sagaId)) {
+      store.markForRecovery(sagaId);
+      return context.getCurrentState();
+    }
+    try {
+      executeSteps(def, context, fromStep);
+    } finally {
+      unregisterActive(sagaId);
+    }
     return context.getCurrentState();
   }
 
   /**
    * Triggers compensation from a specific step (used by recovery for sagas stuck in COMPENSATING).
    */
-  void compensateFrom(SagaDefinition def, ExecutionContext context, int fromStep) {
-    List<StepWithPolicy> plan = getOrBuildPlan(def);
-    compensate(plan, context, fromStep);
+  public void compensateFrom(SagaDefinition def, ExecutionContext context, int fromStep) {
+    String sagaId = context.getSagaId();
+    if (!registerActive(sagaId)) {
+      store.markForRecovery(sagaId);
+      return;
+    }
+    try {
+      List<StepWithPolicy> plan = getOrBuildPlan(def);
+      compensate(plan, context, fromStep);
+    } finally {
+      unregisterActive(sagaId);
+    }
   }
 
-  /**
-   * Replays events to reconstruct an ExecutionContext for crash recovery.
-   *
-   * <p>Package-private: used by SagaRecoveryManager and EmbeddedSagaManager.
-   */
-  ExecutionContext replayEvents(SagaStateSnapshot saga, List<SagaEvent> events) {
+  /** Replays events to reconstruct an ExecutionContext for crash recovery. */
+  public ExecutionContext replayEvents(SagaStateSnapshot saga, List<SagaEvent> events) {
     ExecutionContext context = new ExecutionContext(saga.getSagaId(), Map.of(), saga);
 
     for (SagaEvent event : events) {
@@ -241,19 +264,9 @@ class SagaEngine implements AutoCloseable {
   // ---------------------------------------------------------------------------
 
   private void executeSteps(SagaDefinition def, ExecutionContext context, int startIndex) {
-    String sagaId = context.getSagaId();
-    if (!registerActive(sagaId)) {
-      store.markForRecovery(sagaId);
-      return;
-    }
-
-    try {
-      List<StepWithPolicy> plan = getOrBuildPlan(def);
-      int pivotIndex = def.getPivotIndex();
-      executeSagaSteps(plan, pivotIndex, context, startIndex, def.getTimeoutMillis());
-    } finally {
-      unregisterActive(sagaId);
-    }
+    List<StepWithPolicy> plan = getOrBuildPlan(def);
+    int pivotIndex = def.getPivotIndex();
+    executeSagaSteps(plan, pivotIndex, context, startIndex, def.getTimeoutMillis());
   }
 
   private void executeSagaSteps(
@@ -286,23 +299,51 @@ class SagaEngine implements AutoCloseable {
           TimeoutPolicy.calculateStepDeadline(
               stepWithPolicy.stepTimeoutMillis(), sagaDeadline, clock.millis());
 
+      // Execute and record are in SEPARATE try blocks because they have different
+      // compensation scopes:
+      //   - executeWithRetry fails  → step i did NOT run  → compensate from i - 1
+      //   - recordStepCompleted fails → step i DID run    → compensate from i
+      // A single try block with catch(StepExecutionException) would let the
+      // RuntimeException from recordStepCompleted escape entirely, orphaning
+      // step i's side effect with no compensation.
+
+      // 1. Execute the step
+      StepResult result;
       try {
-        StepResult result =
+        result =
             executeWithRetry(
                 stepWithPolicy.step(),
                 context,
                 stepWithPolicy.executionRetryPolicy(),
                 stepDeadline);
-        if (result.isPending()) {
-          // Park the saga — release the thread without appending an event.
-          // The saga stays RUNNING; recovery or a callback will resume it.
-          return;
-        }
-        recordStepCompleted(context, i, stepWithPolicy.step().getName(), result);
       } catch (StepExecutionException e) {
         recordStepFailed(context, i, stepWithPolicy.step().getName(), e);
         if (i <= pivotIndex) {
           compensate(plan, context, i - 1);
+        }
+        return;
+      }
+
+      if (result.isPending()) {
+        // Park the saga — release the thread without appending an event.
+        // The saga stays RUNNING; recovery or a callback will resume it.
+        return;
+      }
+
+      // 2. Record the completion event
+      try {
+        recordStepCompleted(context, i, stepWithPolicy.step().getName(), result);
+      } catch (RuntimeException e) {
+        // Step i's side effect is committed but recording failed. Compensation
+        // must include step i. If the event was actually persisted (e.g., network
+        // timeout after commit), the compensate() call below will fail with a
+        // write-write conflict at the same sequence number, causing the saga to
+        // stay RUNNING for recovery — which will replay the persisted completion
+        // event and correctly resume forward.
+        logger.error(
+            "Failed to record completion for step {} of saga {}", i, context.getSagaId(), e);
+        if (i <= pivotIndex) {
+          compensate(plan, context, i);
         }
         return;
       }
@@ -654,8 +695,7 @@ class SagaEngine implements AutoCloseable {
       if (shuttingDown) {
         return false;
       }
-      activeSagas.add(sagaId);
-      return true;
+      return activeSagas.add(sagaId);
     }
   }
 

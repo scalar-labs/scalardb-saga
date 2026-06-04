@@ -1,6 +1,10 @@
 package com.scalar.db.saga.engine;
 
 import com.scalar.db.saga.api.SagaManager;
+import com.scalar.db.saga.recovery.RecoveryConfig;
+import com.scalar.db.saga.recovery.SagaRecoveryManager;
+import com.scalar.db.saga.retention.RetentionConfig;
+import com.scalar.db.saga.retention.SagaRetentionManager;
 import com.scalar.db.saga.store.SagaStore;
 import java.time.Clock;
 import java.util.Objects;
@@ -67,6 +71,8 @@ public class SagaManagerBuilder {
   private Clock clock = Clock.systemUTC();
   private ResourceRegistry.@Nullable Builder resourceRegistryBuilder;
   private @Nullable StepResolver customStepResolver;
+  private @Nullable RecoveryConfig recoveryConfig;
+  private @Nullable RetentionConfig retentionConfig;
 
   private SagaManagerBuilder() {}
 
@@ -158,6 +164,23 @@ public class SagaManagerBuilder {
   }
 
   /**
+   * Overrides the default recovery configuration. Defaults to {@link RecoveryConfig#defaults()}.
+   */
+  public SagaManagerBuilder recoveryConfig(RecoveryConfig recoveryConfig) {
+    this.recoveryConfig = Objects.requireNonNull(recoveryConfig, "recoveryConfig must not be null");
+    return this;
+  }
+
+  /**
+   * Overrides the default retention configuration. Defaults to {@link RetentionConfig#defaults()}.
+   */
+  public SagaManagerBuilder retentionConfig(RetentionConfig retentionConfig) {
+    this.retentionConfig =
+        Objects.requireNonNull(retentionConfig, "retentionConfig must not be null");
+    return this;
+  }
+
+  /**
    * Builds and returns a configured {@link SagaManager}.
    *
    * @throws IllegalStateException if the store is not set, or if both {@code resource()} and {@code
@@ -175,12 +198,23 @@ public class SagaManagerBuilder {
 
     StepResolver resolver = buildStepResolver();
 
+    RecoveryConfig resolvedRecoveryConfig =
+        recoveryConfig != null ? recoveryConfig : RecoveryConfig.defaults(clock);
+    RetentionConfig resolvedRetentionConfig =
+        retentionConfig != null ? retentionConfig : RetentionConfig.defaults(clock);
+
     SagaEngine.ShutdownConfig shutdownConfig =
         new SagaEngine.ShutdownConfig(shutdownMode, shutdownTimeoutMillis);
     SagaEngine engine = new SagaEngine(store, resolver, ownerId, shutdownConfig, clock);
     SagaDefinitionRegistry registry = new SagaDefinitionRegistry(store);
 
-    return new EmbeddedSagaManager(engine, store, registry, shutdownTimeoutMillis);
+    SagaRecoveryManager recoveryManager =
+        new SagaRecoveryManager(store, engine, registry, ownerId, resolvedRecoveryConfig);
+    SagaRetentionManager retentionManager =
+        new SagaRetentionManager(store, resolvedRetentionConfig);
+
+    return new EmbeddedSagaManager(
+        engine, store, registry, recoveryManager, retentionManager, shutdownTimeoutMillis);
   }
 
   private StepResolver buildStepResolver() {

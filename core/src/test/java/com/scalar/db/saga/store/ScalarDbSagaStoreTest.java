@@ -1010,15 +1010,15 @@ class ScalarDbSagaStoreTest {
     Instant threshold = Instant.parse("2026-01-08T00:00:00Z");
     Result r1 = mockStateResult("saga-1", SagaStatus.COMPLETED);
     Result r2 = mockStateResult("saga-2", SagaStatus.COMPLETED);
-    when(tx.scan(any(Scan.class))).thenReturn(List.of(r1, r2));
+    // First bucket returns results; remaining buckets return empty
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(r1, r2)).thenReturn(List.of());
 
     // Act
     List<SagaStateSnapshot> result =
-        store.findByStatusOlderThan(0, SagaStatus.COMPLETED, threshold, 100);
+        store.findByStatusOlderThan(SagaStatus.COMPLETED, threshold, 100);
 
     // Assert
     assertThat(result).hasSize(2);
-    verify(tx).commit();
   }
 
   @Test
@@ -1029,11 +1029,10 @@ class ScalarDbSagaStoreTest {
 
     // Act
     List<SagaStateSnapshot> result =
-        store.findByStatusOlderThan(0, SagaStatus.COMPENSATED, threshold, 100);
+        store.findByStatusOlderThan(SagaStatus.COMPENSATED, threshold, 100);
 
     // Assert
     assertThat(result).isEmpty();
-    verify(tx).commit();
   }
 
   @Test
@@ -1042,8 +1041,7 @@ class ScalarDbSagaStoreTest {
     when(tx.scan(any(Scan.class))).thenThrow(mock(CrudException.class));
 
     // Act & Assert
-    assertThatThrownBy(
-            () -> store.findByStatusOlderThan(0, SagaStatus.COMPLETED, Instant.now(), 100))
+    assertThatThrownBy(() -> store.findByStatusOlderThan(SagaStatus.COMPLETED, Instant.now(), 100))
         .isInstanceOf(SagaPersistenceException.class);
   }
 
@@ -1276,7 +1274,7 @@ class ScalarDbSagaStoreTest {
     ScalarDbSagaStoreConfig config = ScalarDbSagaStoreConfig.builder().build();
 
     // Assert
-    assertThat(config.getRecoveryScanLimit()).isEqualTo(1000);
+    assertThat(config.getRecoveryScanLimit()).isEqualTo(100);
   }
 
   @Test

@@ -53,9 +53,11 @@ public class ScalarDbSagaStore implements SagaStore {
   private static final Logger logger = LoggerFactory.getLogger(ScalarDbSagaStore.class);
 
   private static final Pattern SAGA_ID_PATTERN = Pattern.compile("[a-zA-Z0-9._-]{1,128}");
-  private static final int[] RECOVERABLE_STATUS_CODES = {
-    SagaStatus.RUNNING.getStatusCode(), SagaStatus.COMPENSATING.getStatusCode()
-  };
+  private static final int[] RECOVERABLE_STATUS_CODES =
+      java.util.Arrays.stream(SagaStatus.values())
+          .filter(SagaStatus::isRecoverable)
+          .mapToInt(SagaStatus::getStatusCode)
+          .toArray();
 
   private final DistributedTransactionManager txManager;
   private final ObjectMapper objectMapper;
@@ -437,15 +439,21 @@ public class ScalarDbSagaStore implements SagaStore {
   // Data retention
   // ---------------------------------------------------------------------------
 
+  @Override
+  public List<SagaStateSnapshot> findByStatusOlderThan(
+      SagaStatus status, Instant threshold, int maxResults) {
+    List<SagaStateSnapshot> results = new ArrayList<>();
+    for (int bucket = 0; bucket < schema.getNumBuckets() && results.size() < maxResults; bucket++) {
+      results.addAll(findByStatusInBucket(bucket, status, threshold, maxResults - results.size()));
+    }
+    return results;
+  }
+
   /**
-   * Finds sagas in the given (bucket, status) partition with {@code updated_at} older than the
-   * threshold. Used by {@code SagaRetentionManager} to find purgeable COMPLETED/COMPENSATED sagas.
-   *
-   * <p>Package-private because this overlaps with admin query methods (e.g., {@code
-   * listStateSnapshots}) planned for Phase 5. Once those exist, the retention manager should switch
-   * to the admin API and this method can be removed.
+   * Finds sagas in a specific (bucket, status) partition with {@code updated_at} older than the
+   * threshold.
    */
-  List<SagaStateSnapshot> findByStatusOlderThan(
+  private List<SagaStateSnapshot> findByStatusInBucket(
       int bucket, SagaStatus status, Instant threshold, int maxResults) {
     return runInTransaction(
         tx -> {
