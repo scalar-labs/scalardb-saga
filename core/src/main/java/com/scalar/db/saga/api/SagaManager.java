@@ -1,5 +1,8 @@
 package com.scalar.db.saga.api;
 
+// Intentional api->engine reference: the newBuilder() convenience factory delegates to the builder
+// impl. api and engine ship together in `core`, so this never forms a cross-module cycle; if api is
+// ever published as a separate artifact, replace this with a ServiceLoader SPI.
 import com.scalar.db.saga.engine.SagaManagerBuilder;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
