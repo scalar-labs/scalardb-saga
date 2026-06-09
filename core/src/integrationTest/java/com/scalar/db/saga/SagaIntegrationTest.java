@@ -3,7 +3,6 @@ package com.scalar.db.saga;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.scalar.db.saga.api.RetryPolicy;
 import com.scalar.db.saga.api.SagaCallback;
 import com.scalar.db.saga.api.SagaDefinition;
@@ -14,16 +13,13 @@ import com.scalar.db.saga.api.SagaManager;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.api.StepResult;
-import com.scalar.db.saga.engine.SagaManagerBuilder;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.StepCompensationException;
 import com.scalar.db.saga.exception.StepExecutionException;
 import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
-import com.scalar.db.saga.store.SagaSchema;
 import com.scalar.db.saga.store.SagaStore;
-import com.scalar.db.saga.store.ScalarDbSagaStore;
-import com.scalar.db.saga.store.ScalarDbSagaStoreConfig;
+import com.scalar.db.saga.store.ScalarDbSagaStoreFactory;
 import com.scalar.db.saga.store.StepEvent;
 import com.scalar.db.saga.testing.CrashingStoreDecorator;
 import com.scalar.db.saga.testing.FakeStep;
@@ -52,53 +48,42 @@ class SagaIntegrationTest {
   private static final String TCC_STEP_CLASS = FakeTccStep.class.getName();
 
   private Path tempDbPath;
-  private AutoCloseable txAdmin;
-  private AutoCloseable txManager;
-  private SagaStore store;
+  private Properties props;
 
   @BeforeEach
   void setUp() throws Exception {
     tempDbPath = Files.createTempFile("saga-test-", ".db");
 
-    Properties props = new Properties();
+    props = new Properties();
     props.setProperty("scalar.db.storage", "jdbc");
     props.setProperty(
         "scalar.db.contact_points",
         "jdbc:sqlite:" + tempDbPath.toAbsolutePath() + "?busy_timeout=10000");
-
-    var factory = com.scalar.db.service.TransactionFactory.create(props);
-    var admin = factory.getTransactionAdmin();
-    txAdmin = admin;
-    var txMgr = factory.getTransactionManager();
-    txManager = txMgr;
-
-    admin.createCoordinatorTables(true);
-    SagaSchema.createAll(admin);
-
-    store =
-        new ScalarDbSagaStore(
-            txMgr,
-            new ObjectMapper(),
-            new SagaSchema(1),
-            ScalarDbSagaStoreConfig.builder().build());
+    props.setProperty("scalar.db.saga.store.num_buckets", "1");
   }
 
   @AfterEach
   void tearDown() throws Exception {
-    try {
-      txManager.close();
-    } finally {
-      try {
-        txAdmin.close();
-      } finally {
-        Files.deleteIfExists(tempDbPath);
-      }
-    }
+    Files.deleteIfExists(tempDbPath);
+  }
+
+  private SagaManager buildManager(Map<String, Object> steps) {
+    return SagaManager.newBuilder()
+        .storeFactory(ScalarDbSagaStoreFactory.create(props))
+        .stepResolver(
+            (name, cls) -> {
+              Object step = steps.get(name);
+              if (step == null) {
+                throw new IllegalArgumentException("No step registered for: " + name);
+              }
+              return step;
+            })
+        .build();
   }
 
   private SagaManager buildManager(SagaStore sagaStore, Map<String, Object> steps) {
-    return SagaManagerBuilder.newBuilder()
-        .store(sagaStore)
+    return SagaManager.newBuilder()
+        .storeFactory(() -> sagaStore)
         .stepResolver(
             (name, cls) -> {
               Object step = steps.get(name);
@@ -135,7 +120,7 @@ class SagaIntegrationTest {
               .build();
 
       try (SagaManager manager =
-          buildManager(store, Map.of("step1", step1, "step2", step2, "step3", step3))) {
+          buildManager(Map.of("step1", step1, "step2", step2, "step3", step3))) {
         manager.register(def);
 
         // Act
@@ -173,12 +158,13 @@ class SagaIntegrationTest {
               .add()
               .build();
 
+      String sagaId;
       try (SagaManager manager =
-          buildManager(store, Map.of("step1", step1, "step2", step2, "step3", step3))) {
+          buildManager(Map.of("step1", step1, "step2", step2, "step3", step3))) {
         manager.register(def);
 
         // Act
-        String sagaId = manager.start("test-saga", Map.of());
+        sagaId = manager.start("test-saga", Map.of());
         SagaStateSnapshot result = manager.getStateSnapshot(sagaId);
 
         // Assert
@@ -190,9 +176,12 @@ class SagaIntegrationTest {
         assertThat(step3.getCompensationCount()).isEqualTo(0);
         assertThat(step2.getCompensationCount()).isEqualTo(1);
         assertThat(step1.getCompensationCount()).isEqualTo(1);
+      }
 
-        // Verify compensation event ordering (LIFO: step2 before step1)
-        List<SagaEvent> events = store.getEvents(sagaId);
+      // Verify compensation event ordering (LIFO: step2 before step1) by reading persisted events
+      // through an independent store — the manager owns and has already closed its own store.
+      try (SagaStore eventStore = ScalarDbSagaStoreFactory.create(props).createStore()) {
+        List<SagaEvent> events = eventStore.getEvents(sagaId);
         List<StepEvent> compensatedEvents =
             events.stream()
                 .filter(e -> e.getEventType() == EventType.STEP_COMPENSATED)
@@ -219,7 +208,7 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (SagaManager manager = buildManager(store, Map.of("step1", step1, "step2", step2))) {
+      try (SagaManager manager = buildManager(Map.of("step1", step1, "step2", step2))) {
         manager.register(def);
 
         // Act
@@ -255,7 +244,7 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (SagaManager manager = buildManager(store, Map.of("step1", step1, "step2", step2))) {
+      try (SagaManager manager = buildManager(Map.of("step1", step1, "step2", step2))) {
         manager.register(def);
 
         // Act
@@ -291,7 +280,7 @@ class SagaIntegrationTest {
               .build();
 
       try (SagaManager manager =
-          buildManager(store, Map.of("step1", step1, "step2", step2, "step3", step3))) {
+          buildManager(Map.of("step1", step1, "step2", step2, "step3", step3))) {
         manager.register(def);
 
         // Act
@@ -333,7 +322,7 @@ class SagaIntegrationTest {
               .build();
 
       try (SagaManager manager =
-          buildManager(store, Map.of("step1", step1, "step2", step2, "step3", step3))) {
+          buildManager(Map.of("step1", step1, "step2", step2, "step3", step3))) {
         manager.register(def);
 
         // Act
@@ -370,7 +359,7 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (SagaManager manager = buildManager(store, Map.of("step1", step1, "step2", step2))) {
+      try (SagaManager manager = buildManager(Map.of("step1", step1, "step2", step2))) {
         manager.register(def);
 
         // Act
@@ -405,7 +394,7 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (SagaManager manager = buildManager(store, Map.of("step1", step1, "step2", step2))) {
+      try (SagaManager manager = buildManager(Map.of("step1", step1, "step2", step2))) {
         manager.register(def);
 
         // Act
@@ -440,7 +429,7 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (SagaManager manager = buildManager(store, Map.of("step1", step1, "step2", step2))) {
+      try (SagaManager manager = buildManager(Map.of("step1", step1, "step2", step2))) {
         manager.register(def);
 
         // Act
@@ -483,7 +472,7 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (SagaManager manager = buildManager(store, Map.of("step1", step1, "step2", step2))) {
+      try (SagaManager manager = buildManager(Map.of("step1", step1, "step2", step2))) {
         manager.register(def);
 
         // Act
@@ -521,8 +510,9 @@ class SagaIntegrationTest {
       String sagaId = "crash-test-saga-1";
 
       // First run — with crash decorator
-      SagaStore crashingStore = new CrashingStoreDecorator(store, 0);
-      try (SagaManager manager = buildManager(crashingStore, steps)) {
+      try (SagaStore baseStore = ScalarDbSagaStoreFactory.create(props).createStore();
+          SagaStore crashingStore = new CrashingStoreDecorator(baseStore, 0);
+          SagaManager manager = buildManager(crashingStore, steps)) {
         manager.register(def);
 
         try {
@@ -537,9 +527,10 @@ class SagaIntegrationTest {
         assertThat(step2.getExecutionCount()).isEqualTo(0);
       }
 
-      // Restart — new manager, raw store, no crash decorator
-      store.markForRecovery(sagaId);
-      try (SagaManager recovered = buildManager(store, steps)) {
+      // Restart — new manager with fresh store, no crash decorator
+      try (SagaStore recoveryStore = ScalarDbSagaStoreFactory.create(props).createStore();
+          SagaManager recovered = buildManager(recoveryStore, steps)) {
+        recoveryStore.markForRecovery(sagaId);
         recovered.recover();
 
         // Assert — saga completes after recovery
@@ -583,7 +574,7 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (SagaManager manager = buildManager(store, Map.of("step1", step1, "step2", step2))) {
+      try (SagaManager manager = buildManager(Map.of("step1", step1, "step2", step2))) {
         manager.register(def);
 
         // Act
@@ -613,7 +604,7 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (SagaManager manager = buildManager(store, Map.of("step1", step1))) {
+      try (SagaManager manager = buildManager(Map.of("step1", step1))) {
         manager.register(def);
 
         // Act
@@ -644,7 +635,7 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (SagaManager manager = buildManager(store, Map.of("step1", step1))) {
+      try (SagaManager manager = buildManager(Map.of("step1", step1))) {
         manager.register(def);
 
         // Act — first execution succeeds
@@ -670,7 +661,7 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (SagaManager manager = buildManager(store, Map.of("step1", step1, "step2", step2))) {
+      try (SagaManager manager = buildManager(Map.of("step1", step1, "step2", step2))) {
         manager.register(def);
 
         int numSagas = 5;
@@ -743,7 +734,7 @@ class SagaIntegrationTest {
               .build();
 
       String sagaId;
-      try (SagaManager manager1 = buildManager(store, Map.of("step1", step1, "step2", step2))) {
+      try (SagaManager manager1 = buildManager(Map.of("step1", step1, "step2", step2))) {
         manager1.register(def);
 
         // Act — start saga; step2 fails, step1 compensation also fails → COMPENSATING
@@ -752,13 +743,14 @@ class SagaIntegrationTest {
             .isEqualTo(SagaStatus.COMPENSATING);
       }
 
-      // New manager with a step1 that can compensate successfully
+      // New manager with fresh store and a step1 that can compensate successfully
       FakeStep step1Fixed = FakeStep.newBuilder("step1").build();
-      try (SagaManager manager2 =
-          buildManager(store, Map.of("step1", step1Fixed, "step2", step2))) {
+      try (SagaStore store2 = ScalarDbSagaStoreFactory.create(props).createStore();
+          SagaManager manager2 =
+              buildManager(store2, Map.of("step1", step1Fixed, "step2", step2))) {
 
         // Act — recovery picks up the COMPENSATING saga and completes compensation
-        store.markForRecovery(sagaId);
+        store2.markForRecovery(sagaId);
         manager2.recover();
 
         // Assert
@@ -790,7 +782,7 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (SagaManager manager = buildManager(store, Map.of("step1", step1, "step2", step2))) {
+      try (SagaManager manager = buildManager(Map.of("step1", step1, "step2", step2))) {
         manager.register(def);
 
         // Act — startAsync returns immediately
@@ -818,7 +810,7 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (SagaManager manager = buildManager(store, Map.of("step1", step1))) {
+      try (SagaManager manager = buildManager(Map.of("step1", step1))) {
         manager.register(def);
 
         CountDownLatch callbackLatch = new CountDownLatch(1);
@@ -902,7 +894,7 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (SagaManager manager = buildManager(store, Map.of("step1", step1))) {
+      try (SagaManager manager = buildManager(Map.of("step1", step1))) {
         manager.register(v1);
         manager.register(v2);
 
@@ -936,7 +928,7 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (SagaManager manager = buildManager(store, Map.of("step1", step1))) {
+      try (SagaManager manager = buildManager(Map.of("step1", step1))) {
         manager.register(v1);
         manager.register(v2);
 
@@ -970,7 +962,7 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (SagaManager manager = buildManager(store, Map.of("step1", step1))) {
+      try (SagaManager manager = buildManager(Map.of("step1", step1))) {
         manager.register(v1);
         manager.register(v2);
 

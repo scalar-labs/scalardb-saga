@@ -86,6 +86,19 @@ public class ScalarDbSagaStore implements SagaStore {
   }
 
   // ---------------------------------------------------------------------------
+  // Lifecycle
+  // ---------------------------------------------------------------------------
+
+  @Override
+  public void close() {
+    try {
+      txManager.close();
+    } catch (Exception e) {
+      throw new SagaPersistenceException("Failed to close transaction manager", e);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Saga lifecycle
   // ---------------------------------------------------------------------------
 

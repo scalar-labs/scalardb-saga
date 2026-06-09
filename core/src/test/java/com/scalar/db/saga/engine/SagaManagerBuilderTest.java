@@ -4,9 +4,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 
+import com.scalar.db.saga.api.RecoveryConfig;
+import com.scalar.db.saga.api.RetentionConfig;
 import com.scalar.db.saga.api.SagaManager;
-import com.scalar.db.saga.recovery.RecoveryConfig;
-import com.scalar.db.saga.retention.RetentionConfig;
+import com.scalar.db.saga.api.ShutdownMode;
+import com.scalar.db.saga.api.StepResolver;
 import com.scalar.db.saga.store.SagaStore;
 import java.time.Clock;
 import java.time.Instant;
@@ -21,7 +23,7 @@ class SagaManagerBuilderTest {
     SagaStore store = mock(SagaStore.class);
 
     // Act
-    SagaManager manager = SagaManagerBuilder.newBuilder().store(store).build();
+    SagaManager manager = SagaManagerBuilder.newBuilder().storeFactory(() -> store).build();
 
     // Assert
     assertThat(manager).isNotNull();
@@ -37,9 +39,9 @@ class SagaManagerBuilderTest {
     // Act
     SagaManager manager =
         SagaManagerBuilder.newBuilder()
-            .store(store)
+            .storeFactory(() -> store)
             .ownerId("pod-1")
-            .shutdownMode(SagaEngine.ShutdownMode.WAIT_ALL_SAGAS)
+            .shutdownMode(ShutdownMode.WAIT_ALL_SAGAS)
             .shutdownTimeoutMillis(60_000)
             .clock(java.time.Clock.systemUTC())
             .resource(String.class, "account-channel", "account")
@@ -52,7 +54,7 @@ class SagaManagerBuilderTest {
   }
 
   @Test
-  void build_missingStore_throwsIllegalStateException() {
+  void build_missingStoreFactory_throwsIllegalStateException() {
     // Act & Assert
     assertThatThrownBy(() -> SagaManagerBuilder.newBuilder().build())
         .isInstanceOf(IllegalStateException.class);
@@ -66,7 +68,7 @@ class SagaManagerBuilderTest {
     // Act
     SagaManager manager =
         SagaManagerBuilder.newBuilder()
-            .store(store)
+            .storeFactory(() -> store)
             .resource(String.class, "source-channel", "source")
             .resource(String.class, "target-channel", "target")
             .build();
@@ -87,7 +89,7 @@ class SagaManagerBuilderTest {
 
     // Act
     SagaManager manager =
-        SagaManagerBuilder.newBuilder().store(store).stepResolver(resolver).build();
+        SagaManagerBuilder.newBuilder().storeFactory(() -> store).stepResolver(resolver).build();
 
     // Assert
     assertThat(manager).isNotNull();
@@ -107,7 +109,7 @@ class SagaManagerBuilderTest {
     assertThatThrownBy(
             () ->
                 SagaManagerBuilder.newBuilder()
-                    .store(store)
+                    .storeFactory(() -> store)
                     .resource(String.class, "value")
                     .stepResolver(resolver)
                     .build())
@@ -120,7 +122,7 @@ class SagaManagerBuilderTest {
     SagaStore store = mock(SagaStore.class);
 
     // Act
-    SagaManager manager = SagaManagerBuilder.newBuilder().store(store).build();
+    SagaManager manager = SagaManagerBuilder.newBuilder().storeFactory(() -> store).build();
 
     // Assert — default mode uses ReflectiveStepResolver with empty registry (no-arg only)
     assertThat(manager).isNotNull();
@@ -136,7 +138,7 @@ class SagaManagerBuilderTest {
     assertThatThrownBy(
             () ->
                 SagaManagerBuilder.newBuilder()
-                    .store(store)
+                    .storeFactory(() -> store)
                     .resource(String.class, "first")
                     .resource(String.class, "second")
                     .build())
@@ -150,7 +152,8 @@ class SagaManagerBuilderTest {
     Clock fixedClock = Clock.fixed(Instant.parse("2025-06-01T00:00:00Z"), ZoneOffset.UTC);
 
     // Act — build with custom clock but no explicit recovery/retention configs
-    SagaManager manager = SagaManagerBuilder.newBuilder().store(store).clock(fixedClock).build();
+    SagaManager manager =
+        SagaManagerBuilder.newBuilder().storeFactory(() -> store).clock(fixedClock).build();
 
     // Assert — verify defaults(Clock) propagates the clock correctly
     assertThat(manager).isNotNull();
@@ -171,7 +174,7 @@ class SagaManagerBuilderTest {
     // Act — explicit configs should take precedence over builder clock
     SagaManager manager =
         SagaManagerBuilder.newBuilder()
-            .store(store)
+            .storeFactory(() -> store)
             .clock(builderClock)
             .recoveryConfig(explicitRecovery)
             .retentionConfig(explicitRetention)

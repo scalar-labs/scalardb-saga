@@ -1,9 +1,12 @@
 package com.scalar.db.saga.engine;
 
+import com.scalar.db.saga.api.RecoveryConfig;
+import com.scalar.db.saga.api.RetentionConfig;
 import com.scalar.db.saga.api.SagaManager;
-import com.scalar.db.saga.recovery.RecoveryConfig;
+import com.scalar.db.saga.api.SagaStoreFactory;
+import com.scalar.db.saga.api.ShutdownMode;
+import com.scalar.db.saga.api.StepResolver;
 import com.scalar.db.saga.recovery.SagaRecoveryManager;
-import com.scalar.db.saga.retention.RetentionConfig;
 import com.scalar.db.saga.retention.SagaRetentionManager;
 import com.scalar.db.saga.store.SagaStore;
 import java.time.Clock;
@@ -32,8 +35,8 @@ import org.jspecify.annotations.Nullable;
  * <p>Usage (resource injection):
  *
  * <pre>{@code
- * SagaManager manager = SagaManagerBuilder.newBuilder()
- *     .store(store)
+ * SagaManager manager = SagaManager.newBuilder()
+ *     .storeFactory(ScalarDbSagaStoreFactory.create(props))
  *     .resource(ManagedChannel.class, accountChannel, "account")
  *     .resource(ManagedChannel.class, shippingChannel, "shipping")
  *     .resource(EmailClient.class, emailClient)
@@ -44,8 +47,8 @@ import org.jspecify.annotations.Nullable;
  * thread-safe instances per the lifecycle contract of {@link com.scalar.db.saga.api.Step}:
  *
  * <pre>{@code
- * SagaManager manager = SagaManagerBuilder.newBuilder()
- *     .store(store)
+ * SagaManager manager = SagaManager.newBuilder()
+ *     .storeFactory(ScalarDbSagaStoreFactory.create(props))
  *     .stepResolver((name, className) -> applicationContext.getBean(Class.forName(className)))
  *     .build();
  * }</pre>
@@ -56,17 +59,17 @@ import org.jspecify.annotations.Nullable;
  * Map<String, Object> steps = Map.of(
  *     "payment", paymentStep,
  *     "shipping", shippingStep);
- * SagaManager manager = SagaManagerBuilder.newBuilder()
- *     .store(store)
+ * SagaManager manager = SagaManager.newBuilder()
+ *     .storeFactory(ScalarDbSagaStoreFactory.create(props))
  *     .stepResolver((name, className) -> steps.get(name))
  *     .build();
  * }</pre>
  */
-public class SagaManagerBuilder {
+public class SagaManagerBuilder implements SagaManager.Builder {
 
-  private @Nullable SagaStore store;
+  private @Nullable SagaStoreFactory storeFactory;
   private String ownerId = java.util.UUID.randomUUID().toString();
-  private SagaEngine.ShutdownMode shutdownMode = SagaEngine.ShutdownMode.WAIT_CURRENT_STEP;
+  private ShutdownMode shutdownMode = ShutdownMode.WAIT_CURRENT_STEP;
   private long shutdownTimeoutMillis = 30_000;
   private Clock clock = Clock.systemUTC();
   private ResourceRegistry.@Nullable Builder resourceRegistryBuilder;
@@ -81,51 +84,37 @@ public class SagaManagerBuilder {
     return new SagaManagerBuilder();
   }
 
-  /** Sets the saga store (required). */
-  public SagaManagerBuilder store(SagaStore store) {
-    this.store = Objects.requireNonNull(store, "store must not be null");
+  @Override
+  public SagaManagerBuilder storeFactory(SagaStoreFactory factory) {
+    this.storeFactory = Objects.requireNonNull(factory, "factory must not be null");
     return this;
   }
 
-  /**
-   * Sets the owner ID for this engine instance. Defaults to a random UUID. Override with a pod name
-   * or hostname for better observability.
-   */
+  @Override
   public SagaManagerBuilder ownerId(String ownerId) {
     this.ownerId = Objects.requireNonNull(ownerId, "ownerId must not be null");
     return this;
   }
 
-  /** Sets the shutdown mode. Defaults to {@link SagaEngine.ShutdownMode#WAIT_CURRENT_STEP}. */
-  public SagaManagerBuilder shutdownMode(SagaEngine.ShutdownMode shutdownMode) {
+  @Override
+  public SagaManagerBuilder shutdownMode(ShutdownMode shutdownMode) {
     this.shutdownMode = Objects.requireNonNull(shutdownMode, "shutdownMode must not be null");
     return this;
   }
 
-  /** Sets the shutdown timeout in milliseconds. Defaults to 30,000 (30 seconds). */
+  @Override
   public SagaManagerBuilder shutdownTimeoutMillis(long shutdownTimeoutMillis) {
     this.shutdownTimeoutMillis = shutdownTimeoutMillis;
     return this;
   }
 
-  /** Sets the clock (for testing). Defaults to {@link Clock#systemUTC()}. */
+  @Override
   public SagaManagerBuilder clock(Clock clock) {
     this.clock = Objects.requireNonNull(clock, "clock must not be null");
     return this;
   }
 
-  /**
-   * Registers a named resource for constructor injection during step resolution.
-   *
-   * <p>Use named resources when multiple resources of the same type are registered. Step
-   * constructors disambiguate via {@link com.scalar.db.saga.api.Named @Named}.
-   *
-   * @param type the resource type (exact type match during resolution)
-   * @param instance the resource instance
-   * @param name the qualifier name (must match {@code @Named} on constructor parameters)
-   * @throws IllegalArgumentException if a resource with the same type and name is already
-   *     registered
-   */
+  @Override
   public <T> SagaManagerBuilder resource(Class<T> type, T instance, String name) {
     Objects.requireNonNull(type, "type must not be null");
     Objects.requireNonNull(instance, "instance must not be null");
@@ -134,16 +123,7 @@ public class SagaManagerBuilder {
     return this;
   }
 
-  /**
-   * Registers an unnamed resource for constructor injection during step resolution.
-   *
-   * <p>Use this when only one resource of a given type is needed. If multiple resources of the same
-   * type are required, use {@link #resource(Class, Object, String)} with a qualifier name.
-   *
-   * @param type the resource type (exact type match during resolution)
-   * @param instance the resource instance
-   * @throws IllegalArgumentException if an unnamed resource of the same type is already registered
-   */
+  @Override
   public <T> SagaManagerBuilder resource(Class<T> type, T instance) {
     Objects.requireNonNull(type, "type must not be null");
     Objects.requireNonNull(instance, "instance must not be null");
@@ -151,70 +131,66 @@ public class SagaManagerBuilder {
     return this;
   }
 
-  /**
-   * Sets a custom step resolver for full control over step instantiation (e.g., manual lookup, DI
-   * framework integration).
-   *
-   * <p>Mutually exclusive with {@link #resource} — calling both causes {@link #build()} to throw.
-   */
+  @Override
   public SagaManagerBuilder stepResolver(StepResolver stepResolver) {
     Objects.requireNonNull(stepResolver, "stepResolver must not be null");
     this.customStepResolver = stepResolver;
     return this;
   }
 
-  /**
-   * Overrides the default recovery configuration. Defaults to {@link RecoveryConfig#defaults()}.
-   */
+  @Override
   public SagaManagerBuilder recoveryConfig(RecoveryConfig recoveryConfig) {
     this.recoveryConfig = Objects.requireNonNull(recoveryConfig, "recoveryConfig must not be null");
     return this;
   }
 
-  /**
-   * Overrides the default retention configuration. Defaults to {@link RetentionConfig#defaults()}.
-   */
+  @Override
   public SagaManagerBuilder retentionConfig(RetentionConfig retentionConfig) {
     this.retentionConfig =
         Objects.requireNonNull(retentionConfig, "retentionConfig must not be null");
     return this;
   }
 
-  /**
-   * Builds and returns a configured {@link SagaManager}.
-   *
-   * @throws IllegalStateException if the store is not set, or if both {@code resource()} and {@code
-   *     stepResolver()} were called
-   */
+  @Override
   public SagaManager build() {
-    if (store == null) {
-      throw new IllegalStateException("SagaStore is required — call store() before build()");
+    if (storeFactory == null) {
+      throw new IllegalStateException(
+          "SagaStoreFactory is required — call storeFactory() before build()");
     }
-
     if (resourceRegistryBuilder != null && customStepResolver != null) {
       throw new IllegalStateException(
           "resource() and stepResolver() are mutually exclusive — use one or the other");
     }
 
-    StepResolver resolver = buildStepResolver();
+    SagaStore store = storeFactory.createStore();
+    try {
+      StepResolver resolver = buildStepResolver();
 
-    RecoveryConfig resolvedRecoveryConfig =
-        recoveryConfig != null ? recoveryConfig : RecoveryConfig.defaults(clock);
-    RetentionConfig resolvedRetentionConfig =
-        retentionConfig != null ? retentionConfig : RetentionConfig.defaults(clock);
+      RecoveryConfig resolvedRecoveryConfig =
+          recoveryConfig != null ? recoveryConfig : RecoveryConfig.defaults(clock);
+      RetentionConfig resolvedRetentionConfig =
+          retentionConfig != null ? retentionConfig : RetentionConfig.defaults(clock);
 
-    SagaEngine.ShutdownConfig shutdownConfig =
-        new SagaEngine.ShutdownConfig(shutdownMode, shutdownTimeoutMillis);
-    SagaEngine engine = new SagaEngine(store, resolver, ownerId, shutdownConfig, clock);
-    SagaDefinitionRegistry registry = new SagaDefinitionRegistry(store);
+      SagaEngine.ShutdownConfig shutdownConfig =
+          new SagaEngine.ShutdownConfig(shutdownMode, shutdownTimeoutMillis);
+      SagaEngine engine = new SagaEngine(store, resolver, ownerId, shutdownConfig, clock);
+      SagaDefinitionRegistry registry = new SagaDefinitionRegistry(store);
 
-    SagaRecoveryManager recoveryManager =
-        new SagaRecoveryManager(store, engine, registry, ownerId, resolvedRecoveryConfig);
-    SagaRetentionManager retentionManager =
-        new SagaRetentionManager(store, resolvedRetentionConfig);
+      SagaRecoveryManager recoveryManager =
+          new SagaRecoveryManager(store, engine, registry, ownerId, resolvedRecoveryConfig);
+      SagaRetentionManager retentionManager =
+          new SagaRetentionManager(store, resolvedRetentionConfig);
 
-    return new EmbeddedSagaManager(
-        engine, store, registry, recoveryManager, retentionManager, shutdownTimeoutMillis);
+      return new EmbeddedSagaManager(
+          engine, store, registry, recoveryManager, retentionManager, shutdownTimeoutMillis);
+    } catch (Exception e) {
+      try {
+        store.close();
+      } catch (RuntimeException closeException) {
+        e.addSuppressed(closeException);
+      }
+      throw e;
+    }
   }
 
   private StepResolver buildStepResolver() {

@@ -15,7 +15,11 @@ import org.jspecify.annotations.Nullable;
  * <p>Implementations must guarantee atomicity: {@link #createSaga} and {@link #recordStatusEvent}
  * write to both the event stream and the state table in a single transaction.
  */
-public interface SagaStore {
+public interface SagaStore extends AutoCloseable {
+
+  /** Releases resources held by this store (e.g., connection pools). Default is a no-op. */
+  @Override
+  default void close() {}
 
   // ---------------------------------------------------------------------------
   // Saga lifecycle

@@ -22,7 +22,9 @@ import com.scalar.db.saga.api.SagaDefinition;
 import com.scalar.db.saga.api.SagaDefinition.SagaMode;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.api.ShutdownMode;
 import com.scalar.db.saga.api.Step;
+import com.scalar.db.saga.api.StepResolver;
 import com.scalar.db.saga.api.StepResult;
 import com.scalar.db.saga.api.TccStep;
 import com.scalar.db.saga.exception.StepCompensationException;
@@ -72,7 +74,7 @@ class SagaEngineTest {
             store,
             stepResolver,
             OWNER_ID,
-            new SagaEngine.ShutdownConfig(SagaEngine.ShutdownMode.WAIT_CURRENT_STEP, 5000),
+            new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
             Clock.systemUTC());
   }
 
@@ -602,7 +604,7 @@ class SagaEngineTest {
               store,
               stepResolver,
               OWNER_ID,
-              new SagaEngine.ShutdownConfig(SagaEngine.ShutdownMode.WAIT_CURRENT_STEP, 5000),
+              new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
               mockClock);
 
       Step step0 = successStep("s0");
@@ -656,7 +658,7 @@ class SagaEngineTest {
               store,
               stepResolver,
               OWNER_ID,
-              new SagaEngine.ShutdownConfig(SagaEngine.ShutdownMode.WAIT_CURRENT_STEP, 5000),
+              new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
               mockClock);
 
       Step step0 = successStep("s0");
@@ -728,7 +730,7 @@ class SagaEngineTest {
               store,
               stepResolver,
               OWNER_ID,
-              new SagaEngine.ShutdownConfig(SagaEngine.ShutdownMode.WAIT_CURRENT_STEP, 5000),
+              new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
               Clock.systemUTC());
 
       // Act
@@ -910,7 +912,7 @@ class SagaEngineTest {
               store,
               stepResolver,
               OWNER_ID,
-              new SagaEngine.ShutdownConfig(SagaEngine.ShutdownMode.WAIT_ALL_SAGAS, 50),
+              new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_ALL_SAGAS, 50),
               Clock.systemUTC()); // 50ms timeout
 
       // Start saga in background and wait until it's actively running

@@ -2,6 +2,7 @@ package com.scalar.db.saga.engine;
 
 import com.scalar.db.saga.api.Named;
 import com.scalar.db.saga.api.Step;
+import com.scalar.db.saga.api.StepResolver;
 import com.scalar.db.saga.api.TccStep;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import java.lang.reflect.Constructor;

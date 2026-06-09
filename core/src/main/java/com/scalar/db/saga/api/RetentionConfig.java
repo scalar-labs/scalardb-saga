@@ -1,4 +1,4 @@
-package com.scalar.db.saga.retention;
+package com.scalar.db.saga.api;
 
 import java.time.Clock;
 import java.time.Duration;

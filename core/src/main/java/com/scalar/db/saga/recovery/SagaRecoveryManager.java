@@ -1,5 +1,6 @@
 package com.scalar.db.saga.recovery;
 
+import com.scalar.db.saga.api.RecoveryConfig;
 import com.scalar.db.saga.api.SagaDefinition;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
