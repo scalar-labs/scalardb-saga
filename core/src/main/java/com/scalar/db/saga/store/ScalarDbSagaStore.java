@@ -415,7 +415,7 @@ public class ScalarDbSagaStore implements SagaStore {
     try {
       runInTransaction(
           tx -> {
-            Optional<Result> result = tx.get(buildStateIndexGet(sagaId));
+            Optional<Result> result = tx.scan(buildStateIndexScan(sagaId)).stream().findFirst();
 
             if (result.isEmpty()) {
               return Boolean.TRUE; // no-op
@@ -485,7 +485,7 @@ public class ScalarDbSagaStore implements SagaStore {
   public void deleteSaga(String sagaId) {
     runInTransaction(
         tx -> {
-          Optional<Result> stateResult = tx.get(buildStateIndexGet(sagaId));
+          Optional<Result> stateResult = tx.scan(buildStateIndexScan(sagaId)).stream().findFirst();
 
           if (stateResult.isPresent()) {
             Result r = stateResult.get();
@@ -710,11 +710,27 @@ public class ScalarDbSagaStore implements SagaStore {
         .build();
   }
 
-  private Get buildStateIndexGet(String sagaId) {
-    return Get.newBuilder()
+  /**
+   * Looks up a single state row by {@code saga_id} via the secondary index.
+   *
+   * <p>Uses a {@code Scan} with {@code limit(1)} rather than a {@code Get} on the index
+   * deliberately. ConsensusCommit's Get-with-index currently throws {@link
+   * IllegalArgumentException} when two physical rows transiently share the same {@code saga_id}
+   * during a status transition. Scan tolerates this and keeps the store always runnable. Once that
+   * limitation is resolved, this can be reverted to a single {@code Get} on the index.
+   *
+   * <p>Callers can therefore treat the result as at most one visible row: {@code saga_id} is a
+   * unique UUID, and a status transition (delete old row + insert new row) is committed atomically
+   * by ConsensusCommit, so under snapshot isolation a reader sees either the pre-state or the
+   * post-state — never both. {@code stream().findFirst()} on the result is thus always the current
+   * state; there is no set of rows to order by {@code updated_at}.
+   */
+  private Scan buildStateIndexScan(String sagaId) {
+    return Scan.newBuilder()
         .namespace(SagaSchema.NAMESPACE)
         .table(SagaSchema.STATE_TABLE)
         .indexKey(Key.ofText("saga_id", sagaId))
+        .limit(1)
         .build();
   }
 
@@ -874,7 +890,10 @@ public class ScalarDbSagaStore implements SagaStore {
 
   private Optional<SagaStateSnapshot> loadStateSnapshot(String sagaId) {
     return runInTransaction(
-        tx -> tx.get(buildStateIndexGet(sagaId)).map(this::toSagaStateSnapshot),
+        tx ->
+            tx.scan(buildStateIndexScan(sagaId)).stream()
+                .findFirst()
+                .map(this::toSagaStateSnapshot),
         null,
         "load saga state " + sagaId);
   }

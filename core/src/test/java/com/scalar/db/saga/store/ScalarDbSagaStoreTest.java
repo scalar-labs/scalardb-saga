@@ -3,6 +3,7 @@ package com.scalar.db.saga.store;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
@@ -114,7 +115,7 @@ class ScalarDbSagaStoreTest {
     DistributedTransaction txLookup = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(txLookup);
     Result stateResult = mockStateResult("saga-1", SagaStatus.RUNNING);
-    when(txLookup.get(any(Get.class))).thenReturn(Optional.of(stateResult));
+    when(txLookup.scan(any(Scan.class))).thenReturn(List.of(stateResult));
 
     // Act & Assert
     assertThatThrownBy(() -> store.createSaga("saga-1", "order-saga", "engine-1", Map.of(), "v1"))
@@ -127,7 +128,7 @@ class ScalarDbSagaStoreTest {
     doThrow(mock(CommitConflictException.class)).when(tx).commit();
     DistributedTransaction txLookup = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(txLookup);
-    when(txLookup.get(any(Get.class))).thenReturn(Optional.empty());
+    when(txLookup.scan(any(Scan.class))).thenReturn(List.of());
 
     // Act & Assert
     assertThatThrownBy(() -> store.createSaga("saga-1", "order-saga", "engine-1", Map.of(), "v1"))
@@ -554,7 +555,7 @@ class ScalarDbSagaStoreTest {
   void getStateSnapshot_existsInDb_returnsSnapshot() throws Exception {
     // Arrange
     Result result = mockStateResult("saga-1", SagaStatus.RUNNING);
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(result));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(result));
 
     // Act
     Optional<SagaStateSnapshot> snapshot = store.getStateSnapshot("saga-1");
@@ -574,7 +575,7 @@ class ScalarDbSagaStoreTest {
   @Test
   void getStateSnapshot_notFound_returnsEmpty() throws Exception {
     // Arrange
-    when(tx.get(any(Get.class))).thenReturn(Optional.empty());
+    when(tx.scan(any(Scan.class))).thenReturn(List.of());
 
     // Act
     Optional<SagaStateSnapshot> snapshot = store.getStateSnapshot("unknown");
@@ -757,7 +758,7 @@ class ScalarDbSagaStoreTest {
   void markForRecovery_existingSaga_deletesAndReinserts() throws Exception {
     // Arrange
     Result r = mockStateResult("saga-1", SagaStatus.RUNNING);
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(r));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(r));
 
     // Act
     store.markForRecovery("saga-1");
@@ -771,7 +772,7 @@ class ScalarDbSagaStoreTest {
   @Test
   void markForRecovery_noSaga_commitsWithoutModification() throws Exception {
     // Arrange
-    when(tx.get(any(Get.class))).thenReturn(Optional.empty());
+    when(tx.scan(any(Scan.class))).thenReturn(List.of());
 
     // Act
     store.markForRecovery("saga-1");
@@ -784,7 +785,7 @@ class ScalarDbSagaStoreTest {
   @Test
   void markForRecovery_transactionFails_doesNotThrow() throws Exception {
     // Arrange — markForRecovery is best-effort
-    when(tx.get(any(Get.class))).thenThrow(new RuntimeException("db error"));
+    when(tx.scan(any(Scan.class))).thenThrow(new RuntimeException("db error"));
 
     // Act — should not throw
     store.markForRecovery("saga-1");
@@ -800,8 +801,8 @@ class ScalarDbSagaStoreTest {
     Result stateRow = mockStateResult("saga-1", SagaStatus.COMPLETED);
     Result eventRow1 = mockEventRow(0);
     Result eventRow2 = mockEventRow(1);
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(stateRow));
-    when(tx.scan(any(Scan.class))).thenReturn(List.of(eventRow1, eventRow2));
+    when(tx.scan(scanForTable(SagaSchema.STATE_TABLE))).thenReturn(List.of(stateRow));
+    when(tx.scan(scanForTable(SagaSchema.EVENTS_TABLE))).thenReturn(List.of(eventRow1, eventRow2));
 
     // Act
     store.deleteSaga("saga-1");
@@ -816,8 +817,8 @@ class ScalarDbSagaStoreTest {
     // Arrange
     Result stateRow = mockStateResult("saga-1", SagaStatus.COMPENSATED);
     Result eventRow1 = mockEventRow(0);
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(stateRow));
-    when(tx.scan(any(Scan.class))).thenReturn(List.of(eventRow1));
+    when(tx.scan(scanForTable(SagaSchema.STATE_TABLE))).thenReturn(List.of(stateRow));
+    when(tx.scan(scanForTable(SagaSchema.EVENTS_TABLE))).thenReturn(List.of(eventRow1));
 
     // Act
     store.deleteSaga("saga-1");
@@ -832,8 +833,8 @@ class ScalarDbSagaStoreTest {
     // Arrange
     Result stateRow = mockStateResult("saga-1", SagaStatus.ESCALATED);
     Result eventRow1 = mockEventRow(0);
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(stateRow));
-    when(tx.scan(any(Scan.class))).thenReturn(List.of(eventRow1));
+    when(tx.scan(scanForTable(SagaSchema.STATE_TABLE))).thenReturn(List.of(stateRow));
+    when(tx.scan(scanForTable(SagaSchema.EVENTS_TABLE))).thenReturn(List.of(eventRow1));
 
     // Act
     store.deleteSaga("saga-1");
@@ -847,7 +848,7 @@ class ScalarDbSagaStoreTest {
   void deleteSaga_runningSaga_throwsIllegalStateException() throws Exception {
     // Arrange
     Result stateRow = mockStateResult("saga-1", SagaStatus.RUNNING);
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(stateRow));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(stateRow));
 
     // Act & Assert
     assertThatThrownBy(() -> store.deleteSaga("saga-1")).isInstanceOf(IllegalStateException.class);
@@ -857,7 +858,7 @@ class ScalarDbSagaStoreTest {
   void deleteSaga_compensatingSaga_throwsIllegalStateException() throws Exception {
     // Arrange
     Result stateRow = mockStateResult("saga-1", SagaStatus.COMPENSATING);
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(stateRow));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(stateRow));
 
     // Act & Assert
     assertThatThrownBy(() -> store.deleteSaga("saga-1")).isInstanceOf(IllegalStateException.class);
@@ -866,7 +867,7 @@ class ScalarDbSagaStoreTest {
   @Test
   void deleteSaga_transactionFails_throwsSagaPersistenceException() throws Exception {
     // Arrange
-    when(tx.get(any(Get.class))).thenThrow(mock(CrudException.class));
+    when(tx.scan(any(Scan.class))).thenThrow(mock(CrudException.class));
 
     // Act & Assert
     assertThatThrownBy(() -> store.deleteSaga("saga-1"))
@@ -1105,7 +1106,7 @@ class ScalarDbSagaStoreTest {
     DistributedTransaction tx2 = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(tx2);
     Result stateResult = mockStateResult("saga-1", SagaStatus.RUNNING);
-    when(tx2.get(any(Get.class))).thenReturn(Optional.of(stateResult));
+    when(tx2.scan(any(Scan.class))).thenReturn(List.of(stateResult));
 
     // Act
     SagaStateSnapshot result = store.createSaga("saga-1", "order-saga", "engine-1", Map.of(), "v1");
@@ -1123,7 +1124,7 @@ class ScalarDbSagaStoreTest {
     when(txManager.begin()).thenReturn(tx).thenReturn(tx2).thenReturn(tx3);
     doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
     // Verifier (loadFromDb via tx2): saga not found → not committed
-    when(tx2.get(any(Get.class))).thenReturn(Optional.empty());
+    when(tx2.scan(any(Scan.class))).thenReturn(List.of());
     // Retry (tx3): succeeds
 
     // Act
@@ -1149,8 +1150,8 @@ class ScalarDbSagaStoreTest {
     DistributedTransaction tx2 = mock(DistributedTransaction.class);
     DistributedTransaction tx3 = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(tx2).thenReturn(tx3);
-    when(tx2.get(any(Get.class))).thenThrow(mock(CrudException.class));
-    when(tx3.get(any(Get.class))).thenThrow(mock(CrudException.class));
+    when(tx2.scan(any(Scan.class))).thenThrow(mock(CrudException.class));
+    when(tx3.scan(any(Scan.class))).thenThrow(mock(CrudException.class));
 
     // Act & Assert
     assertThatThrownBy(
@@ -1312,6 +1313,14 @@ class ScalarDbSagaStoreTest {
     }
     when(r.getTimestampTZ("created_at")).thenReturn(Instant.now());
     return r;
+  }
+
+  /**
+   * Matches a {@link Scan} by its target table so stubs are independent of the order in which a
+   * method issues its scans (e.g., {@code deleteSaga} scans the state table then the events table).
+   */
+  private static Scan scanForTable(String table) {
+    return argThat(scan -> scan != null && scan.forTable().filter(table::equals).isPresent());
   }
 
   /** Creates a mock event row with only the sequence field (for deleteSaga). */
