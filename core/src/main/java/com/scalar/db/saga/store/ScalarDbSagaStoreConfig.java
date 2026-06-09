@@ -24,7 +24,7 @@ class ScalarDbSagaStoreConfig {
    *
    * @return the maximum payload size
    */
-  public int getMaxEventPayloadBytes() {
+  int getMaxEventPayloadBytes() {
     return maxEventPayloadBytes;
   }
 
@@ -34,7 +34,7 @@ class ScalarDbSagaStoreConfig {
    *
    * @return the transaction retry count
    */
-  public int getTransactionRetryCount() {
+  int getTransactionRetryCount() {
     return transactionRetryCount;
   }
 
@@ -49,7 +49,7 @@ class ScalarDbSagaStoreConfig {
    *
    * @return the recovery scan limit
    */
-  public int getRecoveryScanLimit() {
+  int getRecoveryScanLimit() {
     return recoveryScanLimit;
   }
 
@@ -68,7 +68,7 @@ class ScalarDbSagaStoreConfig {
    *
    * @return a new builder
    */
-  public static Builder builder() {
+  static Builder builder() {
     return new Builder();
   }
 
@@ -87,7 +87,7 @@ class ScalarDbSagaStoreConfig {
      * @param maxEventPayloadBytes the maximum payload size
      * @return this builder
      */
-    public Builder maxEventPayloadBytes(int maxEventPayloadBytes) {
+    Builder maxEventPayloadBytes(int maxEventPayloadBytes) {
       if (maxEventPayloadBytes < 0) {
         throw new IllegalArgumentException("maxEventPayloadBytes must be >= 0");
       }
@@ -101,7 +101,7 @@ class ScalarDbSagaStoreConfig {
      * @param transactionRetryCount the retry count (must be &gt;= 1)
      * @return this builder
      */
-    public Builder transactionRetryCount(int transactionRetryCount) {
+    Builder transactionRetryCount(int transactionRetryCount) {
       if (transactionRetryCount < 1) {
         throw new IllegalArgumentException("transactionRetryCount must be >= 1");
       }
@@ -119,7 +119,7 @@ class ScalarDbSagaStoreConfig {
      * @param recoveryScanLimit the scan limit (must be &gt;= 1)
      * @return this builder
      */
-    public Builder recoveryScanLimit(int recoveryScanLimit) {
+    Builder recoveryScanLimit(int recoveryScanLimit) {
       if (recoveryScanLimit < 1) {
         throw new IllegalArgumentException("recoveryScanLimit must be >= 1");
       }

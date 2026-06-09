@@ -184,7 +184,11 @@ public class SagaManagerBuilder implements SagaManager.Builder {
       return new EmbeddedSagaManager(
           engine, store, registry, recoveryManager, retentionManager, shutdownTimeoutMillis);
     } catch (Exception e) {
-      store.close();
+      try {
+        store.close();
+      } catch (RuntimeException closeException) {
+        e.addSuppressed(closeException);
+      }
       throw e;
     }
   }
