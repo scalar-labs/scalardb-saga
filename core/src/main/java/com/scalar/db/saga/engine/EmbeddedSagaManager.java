@@ -328,11 +328,22 @@ class EmbeddedSagaManager implements SagaManager {
   }
 
   // ---------------------------------------------------------------------------
+  // Recovery
+  // ---------------------------------------------------------------------------
+
+  @Override
+  public void recover() {
+    ensureOpen();
+    recoveryManager.recover();
+  }
+
+  // ---------------------------------------------------------------------------
   // Background Tasks
   // ---------------------------------------------------------------------------
 
   @Override
   public void startBackgroundTasks() {
+    ensureOpen();
     recoveryManager.start();
     retentionManager.start();
   }

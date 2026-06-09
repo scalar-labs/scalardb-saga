@@ -101,7 +101,19 @@ testing {
         val test by getting(JvmTestSuite::class) {
             useJUnitJupiter(libs.versions.junit.jupiter.get())
         }
+
+        val integrationTest by registering(JvmTestSuite::class) {
+            useJUnitJupiter(libs.versions.junit.jupiter.get())
+
+            dependencies {
+                implementation(project())
+            }
+        }
     }
+}
+
+tasks.named("check") {
+    dependsOn(testing.suites.named("integrationTest"))
 }
 
 dependencies {
@@ -112,6 +124,8 @@ dependencies {
     testImplementation(libs.mockito.core)
     testImplementation(libs.mockito.junit.jupiter)
     testImplementation(libs.assertj.core)
+
+    "integrationTestImplementation"(libs.assertj.core)
 }
 
 tasks.withType<Test>().configureEach {

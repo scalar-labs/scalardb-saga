@@ -236,6 +236,16 @@ public interface SagaManager extends AutoCloseable {
   SagaStateSnapshot completeStep(String sagaId, String stepName, Map<String, Object> output);
 
   /**
+   * Runs a single recovery pass: scans for stale sagas, claims them, and resumes or compensates as
+   * appropriate. This is the same logic that runs periodically when {@link #startBackgroundTasks()}
+   * is called.
+   *
+   * <p>Useful for on-demand recovery (e.g., admin tooling) or testing crash recovery without
+   * relying on the periodic background scanner.
+   */
+  void recover();
+
+  /**
    * Starts periodic background tasks: crash recovery scanning and retention cleanup of terminal
    * sagas. Call after registering all saga definitions.
    */

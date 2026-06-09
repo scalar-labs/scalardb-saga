@@ -831,6 +831,42 @@ class EmbeddedSagaManagerTest {
       verify(recoveryManager).start();
       verify(retentionManager).start();
     }
+
+    @Test
+    void startBackgroundTasks_afterClose_throwsIllegalState() {
+      // Arrange
+      manager.close();
+
+      // Act & Assert
+      assertThatThrownBy(() -> manager.startBackgroundTasks())
+          .isInstanceOf(IllegalStateException.class);
+    }
+  }
+
+  // =========================================================================
+  // recover
+  // =========================================================================
+
+  @Nested
+  class Recover {
+
+    @Test
+    void recover_always_delegatesToRecoveryManager() {
+      // Act
+      manager.recover();
+
+      // Assert
+      verify(recoveryManager).recover();
+    }
+
+    @Test
+    void recover_afterClose_throwsIllegalState() {
+      // Arrange
+      manager.close();
+
+      // Act & Assert
+      assertThatThrownBy(() -> manager.recover()).isInstanceOf(IllegalStateException.class);
+    }
   }
 
   // =========================================================================
