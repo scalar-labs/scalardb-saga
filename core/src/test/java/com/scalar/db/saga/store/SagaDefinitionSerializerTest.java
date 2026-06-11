@@ -113,6 +113,49 @@ class SagaDefinitionSerializerTest {
   }
 
   @Test
+  void deserialize_stepWithBothStepClassAndService_throwsSagaPersistenceException() {
+    // Arrange — a corrupted record defining both step kinds must fail fast, not silently pick one.
+    String json =
+        "{\"name\":\"test\",\"mode\":\"SAGA\",\"version\":\"1.0\","
+            + "\"recoveryStrategy\":\"BACKWARD\",\"timeoutMillis\":0,"
+            + "\"steps\":[{\"name\":\"s1\",\"stepClass\":\"com.example.S1\","
+            + "\"service\":\"svc\",\"operation\":\"op\","
+            + "\"timeoutMillis\":1000,\"pivot\":false}]}";
+
+    // Act & Assert
+    assertThatThrownBy(() -> serializer.deserialize(json))
+        .isInstanceOf(SagaPersistenceException.class);
+  }
+
+  @Test
+  void deserialize_serviceWithoutOperation_throwsSagaPersistenceException() {
+    // Arrange — a partially specified service step (service present, operation absent) is invalid.
+    String json =
+        "{\"name\":\"test\",\"mode\":\"SAGA\",\"version\":\"1.0\","
+            + "\"recoveryStrategy\":\"BACKWARD\",\"timeoutMillis\":0,"
+            + "\"steps\":[{\"name\":\"s1\",\"service\":\"svc\","
+            + "\"timeoutMillis\":1000,\"pivot\":false}]}";
+
+    // Act & Assert
+    assertThatThrownBy(() -> serializer.deserialize(json))
+        .isInstanceOf(SagaPersistenceException.class);
+  }
+
+  @Test
+  void deserialize_operationWithoutService_throwsSagaPersistenceException() {
+    // Arrange — a partially specified service step (operation present, service absent) is invalid.
+    String json =
+        "{\"name\":\"test\",\"mode\":\"SAGA\",\"version\":\"1.0\","
+            + "\"recoveryStrategy\":\"BACKWARD\",\"timeoutMillis\":0,"
+            + "\"steps\":[{\"name\":\"s1\",\"operation\":\"op\","
+            + "\"timeoutMillis\":1000,\"pivot\":false}]}";
+
+    // Act & Assert
+    assertThatThrownBy(() -> serializer.deserialize(json))
+        .isInstanceOf(SagaPersistenceException.class);
+  }
+
+  @Test
   void deserialize_missingRootField_throwsSagaPersistenceException() {
     // Arrange
     String json = "{\"name\":\"test\",\"version\":\"1.0\"}";

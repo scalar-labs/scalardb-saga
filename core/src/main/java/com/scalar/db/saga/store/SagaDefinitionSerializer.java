@@ -127,15 +127,26 @@ final class SagaDefinitionSerializer {
   private static SagaDefinition.StepBuilder newStepBuilder(
       SagaDefinition.Builder builder, JsonNode stepNode) {
     String name = stepNode.get(NAME).asText();
-    if (stepNode.has(STEP_CLASS) && !stepNode.get(STEP_CLASS).isNull()) {
+    boolean hasStepClass = stepNode.has(STEP_CLASS) && !stepNode.get(STEP_CLASS).isNull();
+    boolean hasService = stepNode.has(SERVICE) && !stepNode.get(SERVICE).isNull();
+    boolean hasOperation = stepNode.has(OPERATION) && !stepNode.get(OPERATION).isNull();
+
+    if (hasStepClass && (hasService || hasOperation)) {
+      throw new IllegalArgumentException(
+          "Step '"
+              + name
+              + "' defines both stepClass and service/operation; exactly one step kind is allowed");
+    }
+    if (hasStepClass) {
       return builder.step(name, stepNode.get(STEP_CLASS).asText());
     }
-    if (stepNode.has(SERVICE)
-        && !stepNode.get(SERVICE).isNull()
-        && stepNode.has(OPERATION)
-        && !stepNode.get(OPERATION).isNull()) {
+    if (hasService && hasOperation) {
       return builder.serviceStep(
           name, stepNode.get(SERVICE).asText(), stepNode.get(OPERATION).asText());
+    }
+    if (hasService || hasOperation) {
+      throw new IllegalArgumentException(
+          "Step '" + name + "' must define both service and operation, but only one is present");
     }
     throw new IllegalArgumentException(
         "Step '" + name + "' must define one of: stepClass or service/operation");
