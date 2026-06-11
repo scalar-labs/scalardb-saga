@@ -218,8 +218,16 @@ public class SagaManagerBuilder implements SagaManager.Builder {
       // managers constructed inside the try only hold executors that stay inert until started —
       // their threads spin up on start()/first task, never during build — so a failed build leaves
       // them with no live threads to stop, and GC reclaims them. Hence no engine.shutdown() here.
-      serviceInvokerRegistry.close();
-      store.close();
+      try {
+        serviceInvokerRegistry.close();
+      } catch (Exception closeException) {
+        e.addSuppressed(closeException);
+      }
+      try {
+        store.close();
+      } catch (Exception closeException) {
+        e.addSuppressed(closeException);
+      }
       throw e;
     }
   }
