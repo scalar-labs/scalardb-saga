@@ -8,10 +8,8 @@ import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.api.ShutdownMode;
 import com.scalar.db.saga.api.Step;
-import com.scalar.db.saga.api.StepResolver;
 import com.scalar.db.saga.api.StepResult;
 import com.scalar.db.saga.api.TccStep;
-import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.StepCompensationException;
 import com.scalar.db.saga.exception.StepExecutionException;
 import com.scalar.db.saga.exception.StepTimeoutException;
@@ -67,7 +65,7 @@ public class SagaEngine implements AutoCloseable {
   }
 
   private final SagaStore store;
-  private final StepResolver stepResolver;
+  private final StepInstantiator stepInstantiator;
   private final String ownerId;
   private final ShutdownConfig shutdownConfig;
   private final Clock clock;
@@ -80,15 +78,15 @@ public class SagaEngine implements AutoCloseable {
 
   SagaEngine(
       SagaStore store,
-      StepResolver stepResolver,
+      StepInstantiator stepInstantiator,
       String ownerId,
       ShutdownConfig shutdownConfig,
       Clock clock) {
-    this.store = Objects.requireNonNull(store, "store must not be null");
-    this.stepResolver = Objects.requireNonNull(stepResolver, "stepResolver must not be null");
-    this.ownerId = Objects.requireNonNull(ownerId, "ownerId must not be null");
-    this.shutdownConfig = Objects.requireNonNull(shutdownConfig, "shutdownConfig must not be null");
-    this.clock = Objects.requireNonNull(clock, "clock must not be null");
+    this.store = store;
+    this.stepInstantiator = stepInstantiator;
+    this.ownerId = ownerId;
+    this.shutdownConfig = shutdownConfig;
+    this.clock = clock;
   }
 
   // ---------------------------------------------------------------------------
@@ -484,19 +482,7 @@ public class SagaEngine implements AutoCloseable {
   }
 
   private <T> T resolveStep(StepDefinition stepDef, Class<T> expectedType) {
-    Object resolved = stepResolver.resolve(stepDef.getName(), stepDef.getStepClass());
-    if (expectedType.isInstance(resolved)) {
-      return expectedType.cast(resolved);
-    }
-    throw new SagaDefinitionException(
-        "Step '"
-            + stepDef.getName()
-            + "' (class "
-            + stepDef.getStepClass()
-            + ") does not implement "
-            + expectedType.getName()
-            + ". Found: "
-            + resolved.getClass().getName());
+    return stepInstantiator.instantiate(stepDef, expectedType);
   }
 
   /**

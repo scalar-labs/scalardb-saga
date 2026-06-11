@@ -75,7 +75,9 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
 
     TransactionFactory transactionFactory = TransactionFactory.create(properties);
     createSchema(transactionFactory);
-    return new ScalarDbSagaStoreFactory(transactionFactory, config, new ObjectMapper());
+    // Defense in depth against polymorphic-deserialization gadgets (off by default in Jackson 2.x).
+    ObjectMapper objectMapper = new ObjectMapper().deactivateDefaultTyping();
+    return new ScalarDbSagaStoreFactory(transactionFactory, config, objectMapper);
   }
 
   @Override

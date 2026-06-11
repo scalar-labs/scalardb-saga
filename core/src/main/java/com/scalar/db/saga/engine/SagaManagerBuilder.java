@@ -4,12 +4,15 @@ import com.scalar.db.saga.api.RecoveryConfig;
 import com.scalar.db.saga.api.RetentionConfig;
 import com.scalar.db.saga.api.SagaManager;
 import com.scalar.db.saga.api.SagaStoreFactory;
+import com.scalar.db.saga.api.ServiceInvokerFactory;
 import com.scalar.db.saga.api.ShutdownMode;
 import com.scalar.db.saga.api.StepResolver;
 import com.scalar.db.saga.recovery.SagaRecoveryManager;
 import com.scalar.db.saga.retention.SagaRetentionManager;
 import com.scalar.db.saga.store.SagaStore;
 import java.time.Clock;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
 import org.jspecify.annotations.Nullable;
 
@@ -74,6 +77,7 @@ public class SagaManagerBuilder implements SagaManager.Builder {
   private Clock clock = Clock.systemUTC();
   private ResourceRegistry.@Nullable Builder resourceRegistryBuilder;
   private @Nullable StepResolver customStepResolver;
+  private final Map<String, ServiceInvokerFactory> serviceInvokerFactories = new HashMap<>();
   private @Nullable RecoveryConfig recoveryConfig;
   private @Nullable RetentionConfig retentionConfig;
 
@@ -139,6 +143,18 @@ public class SagaManagerBuilder implements SagaManager.Builder {
   }
 
   @Override
+  public SagaManagerBuilder serviceInvokerFactory(
+      String serviceName, ServiceInvokerFactory factory) {
+    Objects.requireNonNull(serviceName, "serviceName must not be null");
+    Objects.requireNonNull(factory, "factory must not be null");
+    if (serviceName.isBlank()) {
+      throw new IllegalArgumentException("serviceName must not be blank");
+    }
+    serviceInvokerFactories.put(serviceName, factory);
+    return this;
+  }
+
+  @Override
   public SagaManagerBuilder recoveryConfig(RecoveryConfig recoveryConfig) {
     this.recoveryConfig = Objects.requireNonNull(recoveryConfig, "recoveryConfig must not be null");
     return this;
@@ -163,6 +179,10 @@ public class SagaManagerBuilder implements SagaManager.Builder {
     }
 
     SagaStore store = storeFactory.createStore();
+    // The manager owns the invokers created from the registered factories: they are closed on
+    // manager close (or here if build fails) — mirroring the store's lifecycle.
+    ServiceInvokerRegistry serviceInvokerRegistry =
+        ServiceInvokerRegistry.create(serviceInvokerFactories);
     try {
       StepResolver resolver = buildStepResolver();
 
@@ -173,17 +193,32 @@ public class SagaManagerBuilder implements SagaManager.Builder {
 
       SagaEngine.ShutdownConfig shutdownConfig =
           new SagaEngine.ShutdownConfig(shutdownMode, shutdownTimeoutMillis);
-      SagaEngine engine = new SagaEngine(store, resolver, ownerId, shutdownConfig, clock);
-      SagaDefinitionRegistry registry = new SagaDefinitionRegistry(store);
+      StepInstantiator stepInstantiator = new StepInstantiator(resolver, serviceInvokerRegistry);
+      SagaEngine engine = new SagaEngine(store, stepInstantiator, ownerId, shutdownConfig, clock);
+      SagaDefinitionRegistry definitionRegistry = new SagaDefinitionRegistry(store);
 
       SagaRecoveryManager recoveryManager =
-          new SagaRecoveryManager(store, engine, registry, ownerId, resolvedRecoveryConfig);
+          new SagaRecoveryManager(
+              store, engine, definitionRegistry, ownerId, resolvedRecoveryConfig);
       SagaRetentionManager retentionManager =
           new SagaRetentionManager(store, resolvedRetentionConfig);
 
       return new EmbeddedSagaManager(
-          engine, store, registry, recoveryManager, retentionManager, shutdownTimeoutMillis);
+          engine,
+          store,
+          serviceInvokerRegistry,
+          definitionRegistry,
+          recoveryManager,
+          retentionManager,
+          shutdownTimeoutMillis);
     } catch (Exception e) {
+      // Roll back only the resources that hold real external connections from the moment they are
+      // created: the store (DB sessions) and the invoker registry (HTTP clients). These are built
+      // before the try precisely so they are in scope here. The engine and the recovery/retention
+      // managers constructed inside the try only hold executors that stay inert until started —
+      // their threads spin up on start()/first task, never during build — so a failed build leaves
+      // them with no live threads to stop, and GC reclaims them. Hence no engine.shutdown() here.
+      serviceInvokerRegistry.close();
       store.close();
       throw e;
     }

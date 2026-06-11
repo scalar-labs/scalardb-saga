@@ -40,7 +40,8 @@ class EmbeddedSagaManager implements SagaManager {
 
   private final SagaEngine engine;
   private final SagaStore store;
-  private final SagaDefinitionRegistry registry;
+  private final ServiceInvokerRegistry serviceInvokerRegistry;
+  private final SagaDefinitionRegistry definitionRegistry;
   private final SagaRecoveryManager recoveryManager;
   private final SagaRetentionManager retentionManager;
   private final long shutdownTimeoutMillis;
@@ -50,14 +51,16 @@ class EmbeddedSagaManager implements SagaManager {
   EmbeddedSagaManager(
       SagaEngine engine,
       SagaStore store,
-      SagaDefinitionRegistry registry,
+      ServiceInvokerRegistry serviceInvokerRegistry,
+      SagaDefinitionRegistry definitionRegistry,
       SagaRecoveryManager recoveryManager,
       SagaRetentionManager retentionManager,
       long shutdownTimeoutMillis) {
     this(
         engine,
         store,
-        registry,
+        serviceInvokerRegistry,
+        definitionRegistry,
         recoveryManager,
         retentionManager,
         shutdownTimeoutMillis,
@@ -68,14 +71,16 @@ class EmbeddedSagaManager implements SagaManager {
   EmbeddedSagaManager(
       SagaEngine engine,
       SagaStore store,
-      SagaDefinitionRegistry registry,
+      ServiceInvokerRegistry serviceInvokerRegistry,
+      SagaDefinitionRegistry definitionRegistry,
       SagaRecoveryManager recoveryManager,
       SagaRetentionManager retentionManager,
       long shutdownTimeoutMillis,
       ExecutorService asyncExecutor) {
     this.engine = engine;
     this.store = store;
-    this.registry = registry;
+    this.serviceInvokerRegistry = serviceInvokerRegistry;
+    this.definitionRegistry = definitionRegistry;
     this.recoveryManager = recoveryManager;
     this.retentionManager = retentionManager;
     this.shutdownTimeoutMillis = shutdownTimeoutMillis;
@@ -91,7 +96,7 @@ class EmbeddedSagaManager implements SagaManager {
     // Eagerly resolve all steps — fail fast on missing resources or unresolvable constructors.
     // This must happen before persisting to the store, so invalid definitions are never stored.
     engine.getOrBuildPlan(definition);
-    registry.register(definition);
+    definitionRegistry.register(definition);
   }
 
   @Override
@@ -373,6 +378,13 @@ class EmbeddedSagaManager implements SagaManager {
       asyncExecutor.shutdownNow();
       Thread.currentThread().interrupt();
     } finally {
+      // Sagas are drained; release invoker resources (e.g. HTTP clients) created from the
+      // registered ServiceInvokerFactories, then the store. Both are resources the manager owns.
+      try {
+        serviceInvokerRegistry.close();
+      } catch (RuntimeException e) {
+        logger.error("Failed to close service invoker registry", e);
+      }
       try {
         store.close();
       } catch (Exception e) {
@@ -392,7 +404,7 @@ class EmbeddedSagaManager implements SagaManager {
   }
 
   private SagaDefinition requireLatestDefinition(String sagaName) {
-    SagaDefinition def = registry.resolve(sagaName);
+    SagaDefinition def = definitionRegistry.resolve(sagaName);
     if (def == null) {
       throw new SagaDefinitionNotFoundException(sagaName);
     }
@@ -400,7 +412,7 @@ class EmbeddedSagaManager implements SagaManager {
   }
 
   private SagaDefinition requireVersionedDefinition(SagaDefinitionId id) {
-    SagaDefinition def = registry.resolve(id.name(), id.version());
+    SagaDefinition def = definitionRegistry.resolve(id.name(), id.version());
     if (def == null) {
       throw new SagaDefinitionNotFoundException(id);
     }
@@ -408,7 +420,8 @@ class EmbeddedSagaManager implements SagaManager {
   }
 
   private SagaDefinition resolveDefinition(SagaStateSnapshot saga) {
-    SagaDefinition def = registry.resolve(saga.getSagaName(), saga.getDefinitionVersion());
+    SagaDefinition def =
+        definitionRegistry.resolve(saga.getSagaName(), saga.getDefinitionVersion());
     if (def == null) {
       throw new SagaDefinitionNotFoundException(saga.getSagaName(), saga.getDefinitionVersion());
     }

@@ -143,8 +143,7 @@ public final class SagaDefinitionParser {
 
     for (JsonNode stepNode : root.get("steps")) {
       String stepName = requireText(stepNode, "name");
-      String stepClass = requireText(stepNode, "stepClass");
-      SagaDefinition.StepBuilder stepBuilder = builder.step(stepName, stepClass);
+      SagaDefinition.StepBuilder stepBuilder = newStepBuilder(builder, stepNode, stepName);
 
       if (stepNode.has("timeoutMillis") && !stepNode.get("timeoutMillis").isNull()) {
         stepBuilder.timeoutMillis(stepNode.get("timeoutMillis").asLong());
@@ -161,6 +160,41 @@ public final class SagaDefinitionParser {
     checkUnknownFields(root, name);
 
     return builder.build();
+  }
+
+  private static SagaDefinition.StepBuilder newStepBuilder(
+      SagaDefinition.Builder builder, JsonNode stepNode, String stepName) {
+    boolean hasStepClass = isPresent(stepNode, "stepClass");
+    boolean hasService = isPresent(stepNode, "service");
+    boolean hasOperation = isPresent(stepNode, "operation");
+
+    if (hasStepClass) {
+      if (hasService || hasOperation) {
+        throw new SagaDefinitionException(
+            "Step '"
+                + stepName
+                + "' must define either 'stepClass' or 'service'/'operation', not both");
+      }
+      return builder.step(stepName, stepNode.get("stepClass").asText());
+    }
+    if (hasService || hasOperation) {
+      if (!hasService) {
+        throw new SagaDefinitionException(
+            "Step '" + stepName + "' has 'operation' but is missing 'service'");
+      }
+      if (!hasOperation) {
+        throw new SagaDefinitionException(
+            "Step '" + stepName + "' has 'service' but is missing 'operation'");
+      }
+      return builder.serviceStep(
+          stepName, stepNode.get("service").asText(), stepNode.get("operation").asText());
+    }
+    throw new SagaDefinitionException(
+        "Step '" + stepName + "' must define one of: 'stepClass' or 'service'/'operation'");
+  }
+
+  private static boolean isPresent(JsonNode node, String field) {
+    return node.has(field) && !node.get(field).isNull();
   }
 
   private static RetryPolicy parseRetryPolicy(JsonNode node) {
@@ -219,7 +253,9 @@ public final class SagaDefinitionParser {
             "timeoutMillis",
             "defaultRetryPolicy",
             "steps");
-    Set<String> stepKnown = Set.of("name", "stepClass", "timeoutMillis", "retryPolicy", "pivot");
+    Set<String> stepKnown =
+        Set.of(
+            "name", "stepClass", "service", "operation", "timeoutMillis", "retryPolicy", "pivot");
 
     root.fieldNames()
         .forEachRemaining(
@@ -257,6 +293,9 @@ public final class SagaDefinitionParser {
   }
 
   private static ObjectMapper createMapper(@Nullable JsonFactory factory) {
-    return factory != null ? new ObjectMapper(factory) : new ObjectMapper();
+    ObjectMapper mapper = factory != null ? new ObjectMapper(factory) : new ObjectMapper();
+    // Defense in depth against polymorphic-deserialization gadgets (off by default in Jackson 2.x).
+    mapper.deactivateDefaultTyping();
+    return mapper;
   }
 }
