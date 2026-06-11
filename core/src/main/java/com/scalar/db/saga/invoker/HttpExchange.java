@@ -124,18 +124,17 @@ final class HttpExchange {
     }
 
     long maxBodyBytes = policy.maxBodyBytes();
-    // Fail fast when an honest server declares an oversized body up front.
-    if (response.headers().firstValueAsLong(HttpHeaders.CONTENT_LENGTH).orElse(-1L)
-        > maxBodyBytes) {
-      throw new HttpCallException("Response body exceeds limit (> " + maxBodyBytes + ")", false);
-    }
-
     // Read at most maxBodyBytes + 1 bytes: enough to detect an oversized (or chunked/undeclared)
     // body and reject it WITHOUT ever buffering the whole stream. Closing the stream early
     // (try-with-resources) cancels the remaining download.
     int readCap = (int) Math.min(maxBodyBytes + 1, Integer.MAX_VALUE);
     byte[] responseBody;
     try (InputStream bodyStream = response.body()) {
+      // Fail fast when an honest server declares an oversized body up front.
+      if (response.headers().firstValueAsLong(HttpHeaders.CONTENT_LENGTH).orElse(-1L)
+          > maxBodyBytes) {
+        throw new HttpCallException("Response body exceeds limit (> " + maxBodyBytes + ")", false);
+      }
       responseBody = bodyStream.readNBytes(readCap);
     } catch (IOException e) {
       throw new HttpCallException("Failed to read response body: " + uri, e, true);
