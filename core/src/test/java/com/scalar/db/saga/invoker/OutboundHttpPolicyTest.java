@@ -34,6 +34,26 @@ class OutboundHttpPolicyTest {
   }
 
   @Test
+  void isAllowed_paddedHostGiven_matchesAfterTrim() {
+    OutboundHttpPolicy policy =
+        OutboundHttpPolicy.newBuilder().allowedHosts("  payment.internal  ").build();
+
+    assertThat(policy.isAllowed(URI.create("http://payment.internal/x"))).isTrue();
+  }
+
+  @Test
+  void allowedHosts_emptyHostGiven_throwsIllegalArgumentException() {
+    assertThatThrownBy(() -> OutboundHttpPolicy.newBuilder().allowedHosts(""))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void allowedHosts_whitespaceHostGiven_throwsIllegalArgumentException() {
+    assertThatThrownBy(() -> OutboundHttpPolicy.newBuilder().allowedHosts("   "))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void maxBodyBytes_customGiven_overridesDefault() {
     OutboundHttpPolicy policy = OutboundHttpPolicy.newBuilder().maxBodyBytes(2048).build();
 

@@ -17,7 +17,7 @@ final class OutboundHttpPolicy {
 
   static final long DEFAULT_MAX_BODY_BYTES = 1024L * 1024L; // 1 MB
 
-  private final Set<String> allowedHosts; // empty = allow all; stored lowercased
+  private final Set<String> allowedHosts; // empty = allow all; stored trimmed + lowercased
   private final long maxBodyBytes;
 
   private OutboundHttpPolicy(Set<String> allowedHosts, long maxBodyBytes) {
@@ -57,7 +57,11 @@ final class OutboundHttpPolicy {
     Builder allowedHosts(String... hosts) {
       for (String host : hosts) {
         Objects.requireNonNull(host, "host must not be null");
-        allowedHosts.add(host.toLowerCase(Locale.ROOT));
+        String normalized = host.trim().toLowerCase(Locale.ROOT);
+        if (normalized.isEmpty()) {
+          throw new IllegalArgumentException("host must not be blank");
+        }
+        allowedHosts.add(normalized);
       }
       return this;
     }
