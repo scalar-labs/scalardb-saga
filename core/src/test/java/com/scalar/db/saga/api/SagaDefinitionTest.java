@@ -81,7 +81,8 @@ class SagaDefinitionTest {
               .build();
 
       // Assert
-      assertThat(definition.getSteps().get(0).getStepClass()).isEqualTo("com.example.MyStep");
+      assertThat(((SagaDefinition.ClassStep) definition.getSteps().get(0)).getStepClass())
+          .isEqualTo("com.example.MyStep");
     }
 
     @Test
@@ -94,7 +95,8 @@ class SagaDefinitionTest {
               .build();
 
       // Assert
-      assertThat(definition.getSteps().get(0).getStepClass()).isEqualTo(DummyStep.class.getName());
+      assertThat(((SagaDefinition.ClassStep) definition.getSteps().get(0)).getStepClass())
+          .isEqualTo(DummyStep.class.getName());
     }
 
     @Test
@@ -155,6 +157,35 @@ class SagaDefinitionTest {
       // Act & Assert
       assertThatThrownBy(() -> definition.getSteps().add(null))
           .isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    @Test
+    void serviceStep_serviceAndMethodGiven_createsServiceStep() {
+      // Act
+      SagaDefinition definition =
+          SagaDefinition.newBuilder("test", SagaMode.SAGA)
+              .serviceStep("debit", "account-service", "debit")
+              .timeoutMillis(5000)
+              .add()
+              .build();
+
+      // Assert
+      SagaDefinition.StepDefinition step = definition.getSteps().get(0);
+      assertThat(step).isInstanceOf(SagaDefinition.ServiceStep.class);
+      SagaDefinition.ServiceStep serviceStep = (SagaDefinition.ServiceStep) step;
+      assertThat(serviceStep.getName()).isEqualTo("debit");
+      assertThat(serviceStep.getService()).isEqualTo("account-service");
+      assertThat(serviceStep.getOperation()).isEqualTo("debit");
+      assertThat(serviceStep.getTimeoutMillis()).isEqualTo(5000);
+    }
+
+    @Test
+    void serviceStep_blankService_throwsIllegalArgumentException() {
+      // Act & Assert
+      assertThatThrownBy(
+              () ->
+                  SagaDefinition.newBuilder("test", SagaMode.SAGA).serviceStep("debit", "  ", "m"))
+          .isInstanceOf(IllegalArgumentException.class);
     }
   }
 
@@ -427,6 +458,20 @@ class SagaDefinitionTest {
                       .add()
                       .build())
           .isInstanceOf(SagaDefinitionException.class);
+    }
+
+    @Test
+    void validate_tccWithServiceStep_succeeds() {
+      // A service step may participate in a TCC saga — whether the referenced operation actually
+      // supports reserve/confirm/cancel is validated against the invoker at registration, not here.
+      SagaDefinition definition =
+          SagaDefinition.newBuilder("test", SagaMode.TCC)
+              .serviceStep("s1", "account-service", "reserve")
+              .add()
+              .build();
+
+      assertThat(definition.getMode()).isEqualTo(SagaMode.TCC);
+      assertThat(definition.getSteps()).hasSize(1);
     }
 
     @Test

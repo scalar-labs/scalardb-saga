@@ -7,6 +7,7 @@ import static org.mockito.Mockito.mock;
 import com.scalar.db.saga.api.RecoveryConfig;
 import com.scalar.db.saga.api.RetentionConfig;
 import com.scalar.db.saga.api.SagaManager;
+import com.scalar.db.saga.api.ServiceInvoker;
 import com.scalar.db.saga.api.ShutdownMode;
 import com.scalar.db.saga.api.StepResolver;
 import com.scalar.db.saga.store.SagaStore;
@@ -51,6 +52,33 @@ class SagaManagerBuilderTest {
     // Assert
     assertThat(manager).isNotNull();
     manager.close();
+  }
+
+  @Test
+  void build_withServiceInvokerFactory_returnsSagaManager() {
+    // Arrange
+    SagaStore store = mock(SagaStore.class);
+
+    // Act
+    SagaManager manager =
+        SagaManagerBuilder.newBuilder()
+            .storeFactory(() -> store)
+            .serviceInvokerFactory("account", () -> mock(ServiceInvoker.class))
+            .build();
+
+    // Assert
+    assertThat(manager).isNotNull();
+    manager.close();
+  }
+
+  @Test
+  void serviceInvokerFactory_blankServiceName_throwsIllegalArgumentException() {
+    // Act & Assert
+    assertThatThrownBy(
+            () ->
+                SagaManagerBuilder.newBuilder()
+                    .serviceInvokerFactory(" ", () -> mock(ServiceInvoker.class)))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test

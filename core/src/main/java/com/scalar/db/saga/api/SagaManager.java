@@ -1,8 +1,5 @@
 package com.scalar.db.saga.api;
 
-// Intentional api->engine reference: the newBuilder() convenience factory delegates to the builder
-// impl. api and engine ship together in `core`, so this never forms a cross-module cycle; if api is
-// ever published as a separate artifact, replace this with a ServiceLoader SPI.
 import com.scalar.db.saga.engine.SagaManagerBuilder;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
@@ -347,6 +344,25 @@ public interface SagaManager extends AutoCloseable {
      * @return this builder
      */
     Builder stepResolver(StepResolver resolver);
+
+    /**
+     * Registers a {@link ServiceInvokerFactory} under {@code serviceName} for Layer 2 dispatch.
+     * Steps added via {@code SagaDefinition.Builder#serviceStep(name, serviceName, operation)} (or
+     * a {@code service}/{@code operation} entry in a parsed definition) are routed to the invoker
+     * this factory creates.
+     *
+     * <p>The factory is invoked once when the manager is built; the resulting {@link
+     * ServiceInvoker} is owned by the manager and {@linkplain ServiceInvoker#close() closed} on
+     * {@link SagaManager#close()} — the caller does not manage its lifecycle. Create a new invoker
+     * inside the factory; do not return a shared/pre-built instance you intend to reuse, as the
+     * manager will close it.
+     *
+     * @param serviceName the logical service name referenced by service steps
+     * @param factory creates the invoker (e.g. {@code () ->
+     *     HttpServiceInvoker.newBuilder(...).build()})
+     * @return this builder
+     */
+    Builder serviceInvokerFactory(String serviceName, ServiceInvokerFactory factory);
 
     /**
      * Overrides the default recovery configuration.

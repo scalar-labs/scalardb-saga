@@ -29,6 +29,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Properties;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -846,7 +847,7 @@ class SagaIntegrationTest {
         // Assert
         assertThat(callbackResult.get()).isNotNull();
         SagaStateSnapshot result =
-            java.util.Objects.requireNonNull(callbackResult.get(), "callback not invoked");
+            Objects.requireNonNull(callbackResult.get(), "callback not invoked");
         assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPLETED);
         assertThat(result.getSagaId()).isEqualTo(sagaId);
       }

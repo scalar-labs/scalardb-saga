@@ -7,8 +7,10 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.scalar.db.saga.api.RetryPolicy;
 import com.scalar.db.saga.api.SagaDefinition;
+import com.scalar.db.saga.api.SagaDefinition.ClassStep;
 import com.scalar.db.saga.api.SagaDefinition.RecoveryStrategy;
 import com.scalar.db.saga.api.SagaDefinition.SagaMode;
+import com.scalar.db.saga.api.SagaDefinition.ServiceStep;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 
 /**
@@ -30,6 +32,8 @@ final class SagaDefinitionSerializer {
 
   // Step-level JSON keys
   private static final String STEP_CLASS = "stepClass";
+  private static final String SERVICE = "service";
+  private static final String OPERATION = "operation";
   private static final String PIVOT = "pivot";
   private static final String RETRY_POLICY = "retryPolicy";
 
@@ -65,7 +69,13 @@ final class SagaDefinitionSerializer {
     for (SagaDefinition.StepDefinition step : def.getSteps()) {
       ObjectNode s = steps.addObject();
       s.put(NAME, step.getName());
-      s.put(STEP_CLASS, step.getStepClass());
+      switch (step) {
+        case ClassStep cs -> s.put(STEP_CLASS, cs.getStepClass());
+        case ServiceStep ss -> {
+          s.put(SERVICE, ss.getService());
+          s.put(OPERATION, ss.getOperation());
+        }
+      }
       s.put(TIMEOUT_MILLIS, step.getTimeoutMillis());
       s.put(PIVOT, step.isPivot());
       if (step.getRetryPolicy() != null) {
@@ -98,9 +108,8 @@ final class SagaDefinitionSerializer {
       }
 
       for (JsonNode stepNode : root.get(STEPS)) {
-        requireFields(stepNode, NAME, STEP_CLASS, TIMEOUT_MILLIS, PIVOT);
-        SagaDefinition.StepBuilder stepBuilder =
-            builder.step(stepNode.get(NAME).asText(), stepNode.get(STEP_CLASS).asText());
+        requireFields(stepNode, NAME, TIMEOUT_MILLIS, PIVOT);
+        SagaDefinition.StepBuilder stepBuilder = newStepBuilder(builder, stepNode);
         stepBuilder.timeoutMillis(stepNode.get(TIMEOUT_MILLIS).asLong());
         stepBuilder.pivot(stepNode.get(PIVOT).asBoolean());
         if (stepNode.has(RETRY_POLICY) && !stepNode.get(RETRY_POLICY).isNull()) {
@@ -113,6 +122,23 @@ final class SagaDefinitionSerializer {
     } catch (JsonProcessingException | RuntimeException e) {
       throw new SagaPersistenceException("Failed to deserialize definition", e);
     }
+  }
+
+  private static SagaDefinition.StepBuilder newStepBuilder(
+      SagaDefinition.Builder builder, JsonNode stepNode) {
+    String name = stepNode.get(NAME).asText();
+    if (stepNode.has(STEP_CLASS) && !stepNode.get(STEP_CLASS).isNull()) {
+      return builder.step(name, stepNode.get(STEP_CLASS).asText());
+    }
+    if (stepNode.has(SERVICE)
+        && !stepNode.get(SERVICE).isNull()
+        && stepNode.has(OPERATION)
+        && !stepNode.get(OPERATION).isNull()) {
+      return builder.serviceStep(
+          name, stepNode.get(SERVICE).asText(), stepNode.get(OPERATION).asText());
+    }
+    throw new IllegalArgumentException(
+        "Step '" + name + "' must define one of: stepClass or service/operation");
   }
 
   private ObjectNode serializeRetryPolicy(RetryPolicy policy) {

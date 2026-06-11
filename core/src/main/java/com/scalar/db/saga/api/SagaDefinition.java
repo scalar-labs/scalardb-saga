@@ -148,6 +148,10 @@ public final class SagaDefinition {
             "TCC definitions must not specify a pivot step"
                 + " — the pivot is implicit (last try step)");
       }
+      // A TCC step may be backed by a class (implementing TccStep) or a service operation
+      // (reserve/confirm/cancel). Capability — the class implementing TccStep, or the invoker
+      // supporting the TCC phases — is validated at registration (StepInstantiator), where the
+      // resolver/registry is available.
       return;
     }
 
@@ -242,19 +246,30 @@ public final class SagaDefinition {
         + '}';
   }
 
-  /** Defines a single step within a saga definition. */
+  /**
+   * Defines a single step within a saga definition.
+   *
+   * <p>Sealed: a step is exactly one of
+   *
+   * <ul>
+   *   <li>{@link ClassStep} — backed by a user {@link Step}/{@link TccStep} class (Layer 1)
+   *   <li>{@link ServiceStep} — dispatched to a registered service invoker (Layer 2)
+   * </ul>
+   *
+   * <p>Consumers that need step-kind-specific data use a Java pattern-matching {@code switch} over
+   * the permitted subtypes. The common fields ({@link #getName()}, {@link #getTimeoutMillis()},
+   * {@link #getRetryPolicy()}, {@link #isPivot()}) are available on the base type.
+   */
   @Immutable
-  public static final class StepDefinition {
+  public abstract static sealed class StepDefinition permits ClassStep, ServiceStep {
 
     private final String name;
-    private final String stepClass;
     private final long timeoutMillis;
     private final @Nullable RetryPolicy retryPolicy;
     private final boolean pivot;
 
     private StepDefinition(StepBuilder builder) {
       this.name = builder.name;
-      this.stepClass = builder.stepClass;
       this.timeoutMillis = builder.timeoutMillis;
       this.retryPolicy = builder.retryPolicy;
       this.pivot = builder.pivot;
@@ -262,10 +277,6 @@ public final class SagaDefinition {
 
     public String getName() {
       return name;
-    }
-
-    public String getStepClass() {
-      return stepClass;
     }
 
     /**
@@ -284,25 +295,97 @@ public final class SagaDefinition {
       return pivot;
     }
 
-    @Override
-    public boolean equals(@Nullable Object o) {
-      if (this == o) return true;
-      if (!(o instanceof StepDefinition that)) return false;
+    /** Compares the common base fields. Used by subtype {@code equals} implementations. */
+    boolean equalsCommon(StepDefinition that) {
       return timeoutMillis == that.timeoutMillis
           && pivot == that.pivot
           && name.equals(that.name)
-          && stepClass.equals(that.stepClass)
           && Objects.equals(retryPolicy, that.retryPolicy);
+    }
+  }
+
+  /** A step backed by a user {@link Step} or {@link TccStep} class (Layer 1). */
+  @Immutable
+  public static final class ClassStep extends StepDefinition {
+
+    private final String stepClass;
+
+    private ClassStep(StepBuilder builder) {
+      super(builder);
+      this.stepClass = Objects.requireNonNull(builder.stepClass);
+    }
+
+    /** Returns the fully-qualified class name implementing {@link Step} or {@link TccStep}. */
+    public String getStepClass() {
+      return stepClass;
+    }
+
+    @Override
+    public boolean equals(@Nullable Object o) {
+      if (this == o) return true;
+      if (!(o instanceof ClassStep that)) return false;
+      return equalsCommon(that) && stepClass.equals(that.stepClass);
     }
 
     @Override
     public int hashCode() {
-      return Objects.hash(name, stepClass, timeoutMillis, retryPolicy, pivot);
+      return Objects.hash(getName(), stepClass, getTimeoutMillis(), getRetryPolicy(), isPivot());
     }
 
     @Override
     public String toString() {
-      return "StepDefinition{name='" + name + "', pivot=" + pivot + '}';
+      return "ClassStep{name='" + getName() + "', stepClass='" + stepClass + "'}";
+    }
+  }
+
+  /**
+   * A step dispatched to a {@code ServiceInvoker} registered under {@link #getService()}, invoking
+   * its {@link #getOperation()} (Layer 2).
+   */
+  @Immutable
+  public static final class ServiceStep extends StepDefinition {
+
+    private final String service;
+    private final String operation;
+
+    private ServiceStep(StepBuilder builder) {
+      super(builder);
+      this.service = Objects.requireNonNull(builder.service);
+      this.operation = Objects.requireNonNull(builder.operation);
+    }
+
+    /** Returns the logical service name the invoker is registered under. */
+    public String getService() {
+      return service;
+    }
+
+    /** Returns the operation name to invoke on the service. */
+    public String getOperation() {
+      return operation;
+    }
+
+    @Override
+    public boolean equals(@Nullable Object o) {
+      if (this == o) return true;
+      if (!(o instanceof ServiceStep that)) return false;
+      return equalsCommon(that) && service.equals(that.service) && operation.equals(that.operation);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(
+          getName(), service, operation, getTimeoutMillis(), getRetryPolicy(), isPivot());
+    }
+
+    @Override
+    public String toString() {
+      return "ServiceStep{name='"
+          + getName()
+          + "', service='"
+          + service
+          + "', operation='"
+          + operation
+          + "'}";
     }
   }
 
@@ -373,6 +456,28 @@ public final class SagaDefinition {
       return new StepBuilder(this, name, stepClass.getName());
     }
 
+    /**
+     * Starts building a step dispatched to a {@code ServiceInvoker} registered under {@code
+     * service} (Layer 2). Valid in both {@link SagaMode#SAGA} and {@link SagaMode#TCC} mode: the
+     * required phases — execute/compensate for SAGA, reserve/confirm/cancel for TCC — are
+     * determined by the saga's mode and validated against the registered invoker at registration.
+     */
+    public StepBuilder serviceStep(String name, String service, String operation) {
+      Objects.requireNonNull(name, "name must not be null");
+      Objects.requireNonNull(service, "service must not be null");
+      Objects.requireNonNull(operation, "operation must not be null");
+      if (name.isBlank()) {
+        throw new IllegalArgumentException("step name must not be blank");
+      }
+      if (service.isBlank()) {
+        throw new IllegalArgumentException("service must not be blank");
+      }
+      if (operation.isBlank()) {
+        throw new IllegalArgumentException("operation must not be blank");
+      }
+      return new StepBuilder(this, name, service, operation);
+    }
+
     public SagaDefinition build() {
       SagaDefinition definition = new SagaDefinition(this);
       definition.validate();
@@ -380,20 +485,43 @@ public final class SagaDefinition {
     }
   }
 
-  /** Builder for {@link StepDefinition}. */
+  /**
+   * Builder for {@link StepDefinition}. The step kind is fixed by the factory method that created
+   * this builder.
+   */
   public static final class StepBuilder {
 
+    private enum Kind {
+      CLASS,
+      SERVICE
+    }
+
     private final Builder parent;
+    private final Kind kind;
     private final String name;
-    private final String stepClass;
+    private final @Nullable String stepClass;
+    private final @Nullable String service;
+    private final @Nullable String operation;
     private long timeoutMillis;
     private @Nullable RetryPolicy retryPolicy;
     private boolean pivot;
 
     private StepBuilder(Builder parent, String name, String stepClass) {
       this.parent = parent;
+      this.kind = Kind.CLASS;
       this.name = name;
       this.stepClass = stepClass;
+      this.service = null;
+      this.operation = null;
+    }
+
+    private StepBuilder(Builder parent, String name, String service, String operation) {
+      this.parent = parent;
+      this.kind = Kind.SERVICE;
+      this.name = name;
+      this.stepClass = null;
+      this.service = service;
+      this.operation = operation;
     }
 
     public StepBuilder timeoutMillis(long timeoutMillis) {
@@ -413,7 +541,12 @@ public final class SagaDefinition {
 
     /** Adds this step to the parent builder and returns it for chaining. */
     public Builder add() {
-      parent.steps.add(new StepDefinition(this));
+      StepDefinition step =
+          switch (kind) {
+            case CLASS -> new ClassStep(this);
+            case SERVICE -> new ServiceStep(this);
+          };
+      parent.steps.add(step);
       return parent;
     }
   }
