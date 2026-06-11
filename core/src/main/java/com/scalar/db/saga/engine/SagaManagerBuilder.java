@@ -178,12 +178,13 @@ public class SagaManagerBuilder implements SagaManager.Builder {
           "resource() and stepResolver() are mutually exclusive — use one or the other");
     }
 
-    SagaStore store = storeFactory.createStore();
-    // The manager owns the invokers created from the registered factories: they are closed on
-    // manager close (or here if build fails) — mirroring the store's lifecycle.
-    ServiceInvokerRegistry serviceInvokerRegistry =
-        ServiceInvokerRegistry.create(serviceInvokerFactories);
+    SagaStore store = null;
+    ServiceInvokerRegistry serviceInvokerRegistry = null;
     try {
+      store = storeFactory.createStore();
+      // The manager owns the invokers created from the registered factories: they are closed on
+      // manager close (or here if build fails) — mirroring the store's lifecycle.
+      serviceInvokerRegistry = ServiceInvokerRegistry.create(serviceInvokerFactories);
       StepResolver resolver = buildStepResolver();
 
       RecoveryConfig resolvedRecoveryConfig =
@@ -212,21 +213,27 @@ public class SagaManagerBuilder implements SagaManager.Builder {
           retentionManager,
           shutdownTimeoutMillis);
     } catch (Exception e) {
-      // Roll back only the resources that hold real external connections from the moment they are
-      // created: the store (DB sessions) and the invoker registry (HTTP clients). These are built
-      // before the try precisely so they are in scope here. The engine and the recovery/retention
-      // managers constructed inside the try only hold executors that stay inert until started —
-      // their threads spin up on start()/first task, never during build — so a failed build leaves
-      // them with no live threads to stop, and GC reclaims them. Hence no engine.shutdown() here.
-      try {
-        serviceInvokerRegistry.close();
-      } catch (Exception closeException) {
-        e.addSuppressed(closeException);
+      // Roll back the resources that hold real external connections: the store (DB sessions) and
+      // the invoker registry (HTTP clients). Either is null if its own creation threw —
+      // createStore() for the store, or ServiceInvokerRegistry.create() (which already closed its
+      // own partial invokers) for the registry — so each close is null-guarded. The engine and the
+      // recovery/retention managers constructed inside the try only hold executors that stay inert
+      // until started — their threads spin up on start()/first task, never during build — so a
+      // failed build leaves them with no live threads to stop, and GC reclaims them. Hence no
+      // engine.shutdown() here.
+      if (serviceInvokerRegistry != null) {
+        try {
+          serviceInvokerRegistry.close();
+        } catch (Exception closeException) {
+          e.addSuppressed(closeException);
+        }
       }
-      try {
-        store.close();
-      } catch (Exception closeException) {
-        e.addSuppressed(closeException);
+      if (store != null) {
+        try {
+          store.close();
+        } catch (Exception closeException) {
+          e.addSuppressed(closeException);
+        }
       }
       throw e;
     }
