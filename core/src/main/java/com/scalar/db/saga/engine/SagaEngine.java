@@ -8,6 +8,7 @@ import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.api.ShutdownMode;
 import com.scalar.db.saga.api.Step;
+import com.scalar.db.saga.api.StepResolver;
 import com.scalar.db.saga.api.StepResult;
 import com.scalar.db.saga.api.TccStep;
 import com.scalar.db.saga.exception.StepCompensationException;

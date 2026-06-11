@@ -159,13 +159,13 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (SagaStore eventStore = ScalarDbSagaStoreFactory.create(props).createStore();
-          SagaManager manager =
-              buildManager(eventStore, Map.of("step1", step1, "step2", step2, "step3", step3))) {
+      String sagaId;
+      try (SagaManager manager =
+          buildManager(Map.of("step1", step1, "step2", step2, "step3", step3))) {
         manager.register(def);
 
         // Act
-        String sagaId = manager.start("test-saga", Map.of());
+        sagaId = manager.start("test-saga", Map.of());
         SagaStateSnapshot result = manager.getStateSnapshot(sagaId);
 
         // Assert
@@ -177,8 +177,11 @@ class SagaIntegrationTest {
         assertThat(step3.getCompensationCount()).isEqualTo(0);
         assertThat(step2.getCompensationCount()).isEqualTo(1);
         assertThat(step1.getCompensationCount()).isEqualTo(1);
+      }
 
-        // Verify compensation event ordering (LIFO: step2 before step1)
+      // Verify compensation event ordering (LIFO: step2 before step1) by reading persisted events
+      // through an independent store — the manager owns and has already closed its own store.
+      try (SagaStore eventStore = ScalarDbSagaStoreFactory.create(props).createStore()) {
         List<SagaEvent> events = eventStore.getEvents(sagaId);
         List<StepEvent> compensatedEvents =
             events.stream()
