@@ -120,8 +120,13 @@ public final class HttpCallResponse {
           name = name.substring(0, end).trim();
         }
         name = name.replace("\"", ""); // strip optional quotes
-        if (!name.isEmpty() && Charset.isSupported(name)) {
-          return Charset.forName(name);
+        try {
+          if (!name.isEmpty() && Charset.isSupported(name)) {
+            return Charset.forName(name);
+          }
+        } catch (IllegalArgumentException e) {
+          // A malformed charset name (IllegalCharsetNameException) falls through to the UTF-8
+          // default below, like an unknown or empty charset.
         }
       }
     }
