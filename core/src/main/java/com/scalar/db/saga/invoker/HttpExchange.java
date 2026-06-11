@@ -89,8 +89,9 @@ final class HttpExchange {
           false);
     }
 
-    HttpRequest.Builder requestBuilder = HttpRequest.newBuilder(uri).timeout(timeout);
+    HttpRequest.Builder requestBuilder;
     try {
+      requestBuilder = HttpRequest.newBuilder(uri).timeout(timeout);
       requestBuilder.header(HttpHeaders.SAGA_ID, sagaId).header(HttpHeaders.SAGA_STEP, stepName);
       for (Map.Entry<String, String> header : headers) {
         requestBuilder.header(header.getKey(), header.getValue());
@@ -99,10 +100,11 @@ final class HttpExchange {
         requestBuilder.header(HttpHeaders.CONTENT_TYPE, contentType);
       }
     } catch (IllegalArgumentException e) {
-      // A control character in a header value (a saga correlation header or a caller-supplied one)
-      // makes the JDK reject it. Surface it as non-retryable, like a malformed URI, rather than
-      // letting a raw IllegalArgumentException escape.
-      throw new HttpCallException("Malformed HTTP header for " + uri, e, false);
+      // newBuilder rejects a non-http(s) scheme or a non-absolute URI; header() rejects a control
+      // character in a value (a saga correlation header or a caller-supplied one). Both are
+      // definition errors — surface them as non-retryable rather than letting a raw
+      // IllegalArgumentException escape.
+      throw new HttpCallException("Invalid request URI or header for " + uri, e, false);
     }
 
     if (body != null && contentType != null) {
