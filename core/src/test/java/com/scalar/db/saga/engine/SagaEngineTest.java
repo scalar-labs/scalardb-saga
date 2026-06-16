@@ -56,7 +56,7 @@ class SagaEngineTest {
   private final java.util.concurrent.ConcurrentHashMap<String, Object> stepMap =
       new java.util.concurrent.ConcurrentHashMap<>();
   private final StepResolver stepResolver =
-      (name, cls) -> {
+      (name, cls, ctx) -> {
         Object step = stepMap.get(name);
         if (step == null) {
           throw new IllegalArgumentException("No step registered: " + name);
@@ -72,7 +72,7 @@ class SagaEngineTest {
     engine =
         new SagaEngine(
             store,
-            stepResolver,
+            new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
             OWNER_ID,
             new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
             Clock.systemUTC());
@@ -602,7 +602,7 @@ class SagaEngineTest {
       SagaEngine clockEngine =
           new SagaEngine(
               store,
-              stepResolver,
+              new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
               OWNER_ID,
               new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
               mockClock);
@@ -656,7 +656,7 @@ class SagaEngineTest {
       SagaEngine clockEngine =
           new SagaEngine(
               store,
-              stepResolver,
+              new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
               OWNER_ID,
               new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
               mockClock);
@@ -728,7 +728,7 @@ class SagaEngineTest {
       engine =
           new SagaEngine(
               store,
-              stepResolver,
+              new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
               OWNER_ID,
               new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
               Clock.systemUTC());
@@ -910,7 +910,7 @@ class SagaEngineTest {
       engine =
           new SagaEngine(
               store,
-              stepResolver,
+              new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
               OWNER_ID,
               new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_ALL_SAGAS, 50),
               Clock.systemUTC()); // 50ms timeout

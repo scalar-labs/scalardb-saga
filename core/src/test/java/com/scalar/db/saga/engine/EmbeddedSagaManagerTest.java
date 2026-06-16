@@ -51,7 +51,7 @@ class EmbeddedSagaManagerTest {
 
   @Mock private SagaEngine engine;
   @Mock private SagaStore store;
-  @Mock private SagaDefinitionRegistry registry;
+  @Mock private SagaDefinitionRegistry definitionRegistry;
   @Mock private SagaRecoveryManager recoveryManager;
   @Mock private SagaRetentionManager retentionManager;
 
@@ -60,7 +60,8 @@ class EmbeddedSagaManagerTest {
   @BeforeEach
   void setUp() {
     manager =
-        new EmbeddedSagaManager(engine, store, registry, recoveryManager, retentionManager, 30_000);
+        new EmbeddedSagaManager(
+            engine, store, definitionRegistry, recoveryManager, retentionManager, 30_000);
   }
 
   @AfterEach
@@ -104,7 +105,7 @@ class EmbeddedSagaManagerTest {
 
       // Assert — build and cache plan eagerly, then persist
       verify(engine).getOrBuildPlan(def);
-      verify(registry).register(def);
+      verify(definitionRegistry).register(def);
     }
 
     @Test
@@ -118,7 +119,7 @@ class EmbeddedSagaManagerTest {
       // Act & Assert
       assertThatThrownBy(() -> manager.register(def)).isInstanceOf(SagaDefinitionException.class);
       // Registry should NOT be called if validation fails
-      verify(registry, never()).register(any(SagaDefinition.class));
+      verify(definitionRegistry, never()).register(any(SagaDefinition.class));
     }
   }
 
@@ -140,7 +141,7 @@ class EmbeddedSagaManagerTest {
       manager.register(file);
 
       // Assert
-      verify(registry).register(any(SagaDefinition.class));
+      verify(definitionRegistry).register(any(SagaDefinition.class));
     }
 
     @Test
@@ -162,7 +163,7 @@ class EmbeddedSagaManagerTest {
     void start_serverGeneratedId_delegatesToEngineExecute() {
       // Arrange
       SagaDefinition def = definition("transfer");
-      when(registry.resolve("transfer")).thenReturn(def);
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
       when(engine.execute(eq(def), isNull(), any())).thenReturn("saga-1");
 
       // Act
@@ -170,7 +171,7 @@ class EmbeddedSagaManagerTest {
 
       // Assert
       assertThat(sagaId).isEqualTo("saga-1");
-      verify(registry).resolve("transfer");
+      verify(definitionRegistry).resolve("transfer");
       verify(engine).execute(def, null, Map.of("amount", 100));
     }
 
@@ -178,26 +179,26 @@ class EmbeddedSagaManagerTest {
     void start_clientSuppliedId_delegatesToEngineExecute() {
       // Arrange
       SagaDefinition def = definition("transfer");
-      when(registry.resolve("transfer")).thenReturn(def);
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
       when(engine.execute(eq(def), eq("my-id"), any())).thenReturn("my-id");
 
       // Act
       manager.start("my-id", "transfer", Map.of());
 
       // Assert
-      verify(registry).resolve("transfer");
+      verify(definitionRegistry).resolve("transfer");
       verify(engine).execute(def, "my-id", Map.of());
     }
 
     @Test
     void start_unknownDefinition_throwsDefinitionNotFound() {
       // Arrange
-      when(registry.resolve("unknown")).thenReturn(null);
+      when(definitionRegistry.resolve("unknown")).thenReturn(null);
 
       // Act & Assert
       assertThatThrownBy(() -> manager.start("unknown", Map.of()))
           .isInstanceOf(SagaDefinitionNotFoundException.class);
-      verify(registry).resolve("unknown");
+      verify(definitionRegistry).resolve("unknown");
     }
 
     @Test
@@ -233,7 +234,7 @@ class EmbeddedSagaManagerTest {
       // Arrange
       SagaDefinition def = definition("transfer");
       SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
-      when(registry.resolve("transfer")).thenReturn(def);
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
       when(engine.createSaga(eq(def), isNull(), any())).thenReturn(saga);
 
       // Act
@@ -241,7 +242,7 @@ class EmbeddedSagaManagerTest {
 
       // Assert — ID returned immediately, execution happens async
       assertThat(sagaId).isEqualTo("saga-1");
-      verify(registry).resolve("transfer");
+      verify(definitionRegistry).resolve("transfer");
       verify(engine).createSaga(def, null, Map.of());
     }
 
@@ -250,14 +251,14 @@ class EmbeddedSagaManagerTest {
       // Arrange
       SagaDefinition def = definition("transfer");
       SagaStateSnapshot saga = snapshot("my-id", SagaStatus.RUNNING);
-      when(registry.resolve("transfer")).thenReturn(def);
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
       when(engine.createSaga(eq(def), eq("my-id"), any())).thenReturn(saga);
 
       // Act
       manager.startAsync("my-id", "transfer", Map.of());
 
       // Assert
-      verify(registry).resolve("transfer");
+      verify(definitionRegistry).resolve("transfer");
       verify(engine).createSaga(def, "my-id", Map.of());
     }
 
@@ -269,7 +270,7 @@ class EmbeddedSagaManagerTest {
       SagaStateSnapshot completedSaga = snapshot("saga-1", SagaStatus.COMPLETED);
       SagaCallback callback = mock(SagaCallback.class);
 
-      when(registry.resolve("transfer")).thenReturn(def);
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
       when(engine.createSaga(eq(def), isNull(), any())).thenReturn(runningSaga);
       when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(completedSaga));
 
@@ -277,7 +278,7 @@ class EmbeddedSagaManagerTest {
       manager.startAsync("transfer", Map.of(), callback);
 
       // Assert — callback dispatched asynchronously
-      verify(registry).resolve("transfer");
+      verify(definitionRegistry).resolve("transfer");
       verify(callback, timeout(5000)).onCompleted(completedSaga);
     }
 
@@ -289,7 +290,7 @@ class EmbeddedSagaManagerTest {
       SagaStateSnapshot compensatedSaga = snapshot("saga-1", SagaStatus.COMPENSATED);
       SagaCallback callback = mock(SagaCallback.class);
 
-      when(registry.resolve("transfer")).thenReturn(def);
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
       when(engine.createSaga(eq(def), isNull(), any())).thenReturn(runningSaga);
       when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(compensatedSaga));
 
@@ -297,7 +298,7 @@ class EmbeddedSagaManagerTest {
       manager.startAsync("transfer", Map.of(), callback);
 
       // Assert
-      verify(registry).resolve("transfer");
+      verify(definitionRegistry).resolve("transfer");
       verify(callback, timeout(5000)).onCompensated(compensatedSaga);
     }
 
@@ -309,7 +310,7 @@ class EmbeddedSagaManagerTest {
       SagaStateSnapshot escalatedSaga = snapshot("saga-1", SagaStatus.ESCALATED);
       SagaCallback callback = mock(SagaCallback.class);
 
-      when(registry.resolve("transfer")).thenReturn(def);
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
       when(engine.createSaga(eq(def), isNull(), any())).thenReturn(runningSaga);
       when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(escalatedSaga));
 
@@ -317,7 +318,7 @@ class EmbeddedSagaManagerTest {
       manager.startAsync("transfer", Map.of(), callback);
 
       // Assert
-      verify(registry).resolve("transfer");
+      verify(definitionRegistry).resolve("transfer");
       verify(callback, timeout(5000)).onEscalated(escalatedSaga);
     }
 
@@ -329,7 +330,7 @@ class EmbeddedSagaManagerTest {
       SagaStateSnapshot compensatedSaga = snapshot("saga-1", SagaStatus.COMPENSATED);
       SagaCallback callback = mock(SagaCallback.class);
 
-      when(registry.resolve("transfer")).thenReturn(def);
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
       when(engine.createSaga(eq(def), isNull(), any())).thenReturn(runningSaga);
       doThrow(new RuntimeException("engine failure"))
           .when(engine)
@@ -340,7 +341,7 @@ class EmbeddedSagaManagerTest {
       manager.startAsync("transfer", Map.of(), callback);
 
       // Assert — callback still dispatched despite engine failure
-      verify(registry).resolve("transfer");
+      verify(definitionRegistry).resolve("transfer");
       verify(callback, timeout(5000)).onCompensated(compensatedSaga);
     }
 
@@ -352,7 +353,7 @@ class EmbeddedSagaManagerTest {
       SagaStateSnapshot completedSaga = snapshot("my-id", SagaStatus.COMPLETED);
       SagaCallback callback = mock(SagaCallback.class);
 
-      when(registry.resolve("transfer")).thenReturn(def);
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
       when(engine.createSaga(eq(def), eq("my-id"), any())).thenReturn(runningSaga);
       when(store.getStateSnapshot("my-id")).thenReturn(Optional.of(completedSaga));
 
@@ -360,7 +361,7 @@ class EmbeddedSagaManagerTest {
       manager.startAsync("my-id", "transfer", Map.of(), callback);
 
       // Assert
-      verify(registry).resolve("transfer");
+      verify(definitionRegistry).resolve("transfer");
       verify(engine).createSaga(def, "my-id", Map.of());
       verify(callback, timeout(5000)).onCompleted(completedSaga);
     }
@@ -368,12 +369,12 @@ class EmbeddedSagaManagerTest {
     @Test
     void startAsync_unknownDefinition_throwsDefinitionNotFound() {
       // Arrange
-      when(registry.resolve("unknown")).thenReturn(null);
+      when(definitionRegistry.resolve("unknown")).thenReturn(null);
 
       // Act & Assert
       assertThatThrownBy(() -> manager.startAsync("unknown", Map.of()))
           .isInstanceOf(SagaDefinitionNotFoundException.class);
-      verify(registry).resolve("unknown");
+      verify(definitionRegistry).resolve("unknown");
     }
   }
 
@@ -389,7 +390,7 @@ class EmbeddedSagaManagerTest {
       // Arrange
       SagaDefinitionId id = new SagaDefinitionId("transfer", "2.0");
       SagaDefinition def = definition("transfer", "2.0");
-      when(registry.resolve("transfer", "2.0")).thenReturn(def);
+      when(definitionRegistry.resolve("transfer", "2.0")).thenReturn(def);
       when(engine.execute(eq(def), isNull(), any())).thenReturn("saga-1");
 
       // Act
@@ -397,7 +398,7 @@ class EmbeddedSagaManagerTest {
 
       // Assert
       assertThat(sagaId).isEqualTo("saga-1");
-      verify(registry).resolve("transfer", "2.0");
+      verify(definitionRegistry).resolve("transfer", "2.0");
       verify(engine).execute(def, null, Map.of("amount", 100));
     }
 
@@ -406,14 +407,14 @@ class EmbeddedSagaManagerTest {
       // Arrange
       SagaDefinitionId id = new SagaDefinitionId("transfer", "2.0");
       SagaDefinition def = definition("transfer", "2.0");
-      when(registry.resolve("transfer", "2.0")).thenReturn(def);
+      when(definitionRegistry.resolve("transfer", "2.0")).thenReturn(def);
       when(engine.execute(eq(def), eq("my-id"), any())).thenReturn("my-id");
 
       // Act
       manager.start("my-id", id, Map.of());
 
       // Assert
-      verify(registry).resolve("transfer", "2.0");
+      verify(definitionRegistry).resolve("transfer", "2.0");
       verify(engine).execute(def, "my-id", Map.of());
     }
 
@@ -421,12 +422,12 @@ class EmbeddedSagaManagerTest {
     void start_unknownDefinition_throwsDefinitionNotFound() {
       // Arrange
       SagaDefinitionId id = new SagaDefinitionId("unknown", "1.0");
-      when(registry.resolve("unknown", "1.0")).thenReturn(null);
+      when(definitionRegistry.resolve("unknown", "1.0")).thenReturn(null);
 
       // Act & Assert
       assertThatThrownBy(() -> manager.start(id, Map.of()))
           .isInstanceOf(SagaDefinitionNotFoundException.class);
-      verify(registry).resolve("unknown", "1.0");
+      verify(definitionRegistry).resolve("unknown", "1.0");
     }
   }
 
@@ -443,7 +444,7 @@ class EmbeddedSagaManagerTest {
       SagaDefinitionId id = new SagaDefinitionId("transfer", "2.0");
       SagaDefinition def = definition("transfer", "2.0");
       SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
-      when(registry.resolve("transfer", "2.0")).thenReturn(def);
+      when(definitionRegistry.resolve("transfer", "2.0")).thenReturn(def);
       when(engine.createSaga(eq(def), isNull(), any())).thenReturn(saga);
 
       // Act
@@ -451,7 +452,7 @@ class EmbeddedSagaManagerTest {
 
       // Assert
       assertThat(sagaId).isEqualTo("saga-1");
-      verify(registry).resolve("transfer", "2.0");
+      verify(definitionRegistry).resolve("transfer", "2.0");
       verify(engine).createSaga(def, null, Map.of());
     }
 
@@ -461,14 +462,14 @@ class EmbeddedSagaManagerTest {
       SagaDefinitionId id = new SagaDefinitionId("transfer", "2.0");
       SagaDefinition def = definition("transfer", "2.0");
       SagaStateSnapshot saga = snapshot("my-id", SagaStatus.RUNNING);
-      when(registry.resolve("transfer", "2.0")).thenReturn(def);
+      when(definitionRegistry.resolve("transfer", "2.0")).thenReturn(def);
       when(engine.createSaga(eq(def), eq("my-id"), any())).thenReturn(saga);
 
       // Act
       manager.startAsync("my-id", id, Map.of());
 
       // Assert
-      verify(registry).resolve("transfer", "2.0");
+      verify(definitionRegistry).resolve("transfer", "2.0");
       verify(engine).createSaga(def, "my-id", Map.of());
     }
 
@@ -481,7 +482,7 @@ class EmbeddedSagaManagerTest {
       SagaStateSnapshot completedSaga = snapshot("saga-1", SagaStatus.COMPLETED);
       SagaCallback callback = mock(SagaCallback.class);
 
-      when(registry.resolve("transfer", "2.0")).thenReturn(def);
+      when(definitionRegistry.resolve("transfer", "2.0")).thenReturn(def);
       when(engine.createSaga(eq(def), isNull(), any())).thenReturn(runningSaga);
       when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(completedSaga));
 
@@ -489,7 +490,7 @@ class EmbeddedSagaManagerTest {
       manager.startAsync(id, Map.of(), callback);
 
       // Assert
-      verify(registry).resolve("transfer", "2.0");
+      verify(definitionRegistry).resolve("transfer", "2.0");
       verify(callback, timeout(5000)).onCompleted(completedSaga);
     }
 
@@ -502,7 +503,7 @@ class EmbeddedSagaManagerTest {
       SagaStateSnapshot completedSaga = snapshot("my-id", SagaStatus.COMPLETED);
       SagaCallback callback = mock(SagaCallback.class);
 
-      when(registry.resolve("transfer", "2.0")).thenReturn(def);
+      when(definitionRegistry.resolve("transfer", "2.0")).thenReturn(def);
       when(engine.createSaga(eq(def), eq("my-id"), any())).thenReturn(runningSaga);
       when(store.getStateSnapshot("my-id")).thenReturn(Optional.of(completedSaga));
 
@@ -510,7 +511,7 @@ class EmbeddedSagaManagerTest {
       manager.startAsync("my-id", id, Map.of(), callback);
 
       // Assert
-      verify(registry).resolve("transfer", "2.0");
+      verify(definitionRegistry).resolve("transfer", "2.0");
       verify(engine).createSaga(def, "my-id", Map.of());
       verify(callback, timeout(5000)).onCompleted(completedSaga);
     }
@@ -519,12 +520,12 @@ class EmbeddedSagaManagerTest {
     void startAsync_unknownDefinition_throwsDefinitionNotFound() {
       // Arrange
       SagaDefinitionId id = new SagaDefinitionId("unknown", "1.0");
-      when(registry.resolve("unknown", "1.0")).thenReturn(null);
+      when(definitionRegistry.resolve("unknown", "1.0")).thenReturn(null);
 
       // Act & Assert
       assertThatThrownBy(() -> manager.startAsync(id, Map.of()))
           .isInstanceOf(SagaDefinitionNotFoundException.class);
-      verify(registry).resolve("unknown", "1.0");
+      verify(definitionRegistry).resolve("unknown", "1.0");
     }
 
     @Test
@@ -547,11 +548,17 @@ class EmbeddedSagaManagerTest {
       when(mockExecutor.awaitTermination(anyLong(), any())).thenReturn(true);
       EmbeddedSagaManager managerWithMockExecutor =
           new EmbeddedSagaManager(
-              engine, store, registry, recoveryManager, retentionManager, 30_000, mockExecutor);
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              mockExecutor);
 
       SagaDefinition def = definition("transfer");
       SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
-      when(registry.resolve("transfer")).thenReturn(def);
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
       when(engine.createSaga(eq(def), isNull(), any())).thenReturn(saga);
 
       // Act — should not throw; saga is already persisted, recovery will handle it
@@ -581,7 +588,7 @@ class EmbeddedSagaManagerTest {
       ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
 
       when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(saga));
-      when(registry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
       when(store.getEvents("saga-1")).thenReturn(events);
       when(engine.replayEvents(saga, events)).thenReturn(context);
       when(engine.resumeFrom(eq(def), eq(context), eq(1))).thenReturn(completed);
@@ -604,7 +611,7 @@ class EmbeddedSagaManagerTest {
       ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
 
       when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(saga));
-      when(registry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
       when(store.getEvents("saga-1")).thenReturn(events);
       when(engine.replayEvents(saga, events)).thenReturn(context);
       when(engine.resumeFrom(eq(def), eq(context), eq(0))).thenReturn(completed);
@@ -650,7 +657,7 @@ class EmbeddedSagaManagerTest {
       // Arrange
       SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
       when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(saga));
-      when(registry.resolve("test-saga", "1.0")).thenReturn(null);
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(null);
 
       // Act & Assert
       assertThatThrownBy(() -> manager.resume("saga-1"))
@@ -679,7 +686,7 @@ class EmbeddedSagaManagerTest {
       ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
 
       when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(saga));
-      when(registry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
       when(store.getEvents("saga-1")).thenReturn(events);
       when(engine.replayEvents(saga, events)).thenReturn(context);
 
@@ -705,7 +712,7 @@ class EmbeddedSagaManagerTest {
       ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
 
       when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(saga));
-      when(registry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
       when(store.getEvents("saga-1")).thenReturn(events);
       when(engine.replayEvents(saga, events)).thenReturn(context);
 
@@ -725,7 +732,7 @@ class EmbeddedSagaManagerTest {
       ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
 
       when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(saga));
-      when(registry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
       when(store.getEvents("saga-1")).thenReturn(events);
       when(engine.replayEvents(saga, events)).thenReturn(context);
 
@@ -884,7 +891,13 @@ class EmbeddedSagaManagerTest {
       when(mockExecutor.awaitTermination(anyLong(), any())).thenReturn(true);
       EmbeddedSagaManager managerWithMockExecutor =
           new EmbeddedSagaManager(
-              engine, store, registry, recoveryManager, retentionManager, 30_000, mockExecutor);
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              mockExecutor);
 
       // Act
       managerWithMockExecutor.close();

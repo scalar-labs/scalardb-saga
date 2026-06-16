@@ -2,15 +2,20 @@ package com.scalar.db.saga.engine;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
 
 import com.scalar.db.saga.api.Named;
 import com.scalar.db.saga.api.SagaContext;
+import com.scalar.db.saga.api.SagaHttpClient;
 import com.scalar.db.saga.api.Step;
+import com.scalar.db.saga.api.StepResolver.ResolutionContext;
 import com.scalar.db.saga.api.StepResult;
 import com.scalar.db.saga.api.TccStep;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.StepCompensationException;
 import com.scalar.db.saga.exception.StepExecutionException;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -18,6 +23,38 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 class ReflectiveStepResolverTest {
+
+  /** A {@link ResolutionContext} with no registered HTTP endpoints. */
+  private static final ResolutionContext NO_ENDPOINTS = contextOf(Map.of());
+
+  /**
+   * Builds a {@link ResolutionContext} over a fixed {@code name → client} map, applying the same
+   * "by name, or the sole endpoint when unqualified" rule as the real registry.
+   */
+  private static ResolutionContext contextOf(Map<String, SagaHttpClient> endpoints) {
+    return new ResolutionContext() {
+      @Override
+      public SagaHttpClient httpClient(String name) {
+        SagaHttpClient client = endpoints.get(name);
+        if (client == null) {
+          throw new SagaDefinitionException("no endpoint: " + name);
+        }
+        return client;
+      }
+
+      @Override
+      public SagaHttpClient httpClient() {
+        if (endpoints.isEmpty()) {
+          throw new SagaDefinitionException("no HTTP endpoint registered");
+        }
+        if (endpoints.size() > 1) {
+          throw new SagaDefinitionException(
+              "multiple HTTP endpoints registered: " + endpoints.keySet());
+        }
+        return endpoints.values().iterator().next();
+      }
+    };
+  }
 
   // ---------------------------------------------------------------------------
   // No-arg resolution
@@ -33,7 +70,7 @@ class ReflectiveStepResolverTest {
           new ReflectiveStepResolver(ResourceRegistry.newBuilder().build());
 
       // Act
-      Object result = resolver.resolve("step1", NoArgStep.class.getName());
+      Object result = resolver.resolve("step1", NoArgStep.class.getName(), NO_ENDPOINTS);
 
       // Assert
       assertThat(result).isInstanceOf(NoArgStep.class);
@@ -46,7 +83,7 @@ class ReflectiveStepResolverTest {
           new ReflectiveStepResolver(ResourceRegistry.newBuilder().build());
 
       // Act
-      Object result = resolver.resolve("step1", NoArgTccStep.class.getName());
+      Object result = resolver.resolve("step1", NoArgTccStep.class.getName(), NO_ENDPOINTS);
 
       // Assert
       assertThat(result).isInstanceOf(NoArgTccStep.class);
@@ -68,7 +105,7 @@ class ReflectiveStepResolverTest {
       ReflectiveStepResolver resolver = new ReflectiveStepResolver(registry);
 
       // Act
-      Object result = resolver.resolve("step1", SingleParamStep.class.getName());
+      Object result = resolver.resolve("step1", SingleParamStep.class.getName(), NO_ENDPOINTS);
 
       // Assert
       assertThat(result).isInstanceOf(SingleParamStep.class);
@@ -86,7 +123,7 @@ class ReflectiveStepResolverTest {
       ReflectiveStepResolver resolver = new ReflectiveStepResolver(registry);
 
       // Act
-      Object result = resolver.resolve("step1", MultiParamStep.class.getName());
+      Object result = resolver.resolve("step1", MultiParamStep.class.getName(), NO_ENDPOINTS);
 
       // Assert
       assertThat(result).isInstanceOf(MultiParamStep.class);
@@ -106,7 +143,7 @@ class ReflectiveStepResolverTest {
       ReflectiveStepResolver resolver = new ReflectiveStepResolver(registry);
 
       // Act
-      Object result = resolver.resolve("step1", NamedParamStep.class.getName());
+      Object result = resolver.resolve("step1", NamedParamStep.class.getName(), NO_ENDPOINTS);
 
       // Assert
       assertThat(result).isInstanceOf(NamedParamStep.class);
@@ -122,7 +159,8 @@ class ReflectiveStepResolverTest {
           new ReflectiveStepResolver(ResourceRegistry.newBuilder().build());
 
       // Act & Assert
-      assertThatThrownBy(() -> resolver.resolve("step1", MultiConstructorStep.class.getName()))
+      assertThatThrownBy(
+              () -> resolver.resolve("step1", MultiConstructorStep.class.getName(), NO_ENDPOINTS))
           .isInstanceOf(SagaDefinitionException.class);
     }
   }
@@ -141,8 +179,8 @@ class ReflectiveStepResolverTest {
           new ReflectiveStepResolver(ResourceRegistry.newBuilder().build());
 
       // Act
-      Object first = resolver.resolve("step1", NoArgStep.class.getName());
-      Object second = resolver.resolve("step1", NoArgStep.class.getName());
+      Object first = resolver.resolve("step1", NoArgStep.class.getName(), NO_ENDPOINTS);
+      Object second = resolver.resolve("step1", NoArgStep.class.getName(), NO_ENDPOINTS);
 
       // Assert
       assertThat(first).isSameAs(second);
@@ -155,8 +193,8 @@ class ReflectiveStepResolverTest {
           new ReflectiveStepResolver(ResourceRegistry.newBuilder().build());
 
       // Act
-      Object first = resolver.resolve("step-a", NoArgStep.class.getName());
-      Object second = resolver.resolve("step-b", NoArgStep.class.getName());
+      Object first = resolver.resolve("step-a", NoArgStep.class.getName(), NO_ENDPOINTS);
+      Object second = resolver.resolve("step-b", NoArgStep.class.getName(), NO_ENDPOINTS);
 
       // Assert
       assertThat(first).isSameAs(second);
@@ -177,7 +215,7 @@ class ReflectiveStepResolverTest {
           new ReflectiveStepResolver(ResourceRegistry.newBuilder().build());
 
       // Act & Assert
-      assertThatThrownBy(() -> resolver.resolve("step1", "com.nonexistent.FakeStep"))
+      assertThatThrownBy(() -> resolver.resolve("step1", "com.nonexistent.FakeStep", NO_ENDPOINTS))
           .isInstanceOf(SagaDefinitionException.class);
     }
 
@@ -188,7 +226,7 @@ class ReflectiveStepResolverTest {
           new ReflectiveStepResolver(ResourceRegistry.newBuilder().build());
 
       // Act & Assert
-      assertThatThrownBy(() -> resolver.resolve("step1", NotAStep.class.getName()))
+      assertThatThrownBy(() -> resolver.resolve("step1", NotAStep.class.getName(), NO_ENDPOINTS))
           .isInstanceOf(SagaDefinitionException.class);
     }
 
@@ -199,7 +237,8 @@ class ReflectiveStepResolverTest {
           new ReflectiveStepResolver(ResourceRegistry.newBuilder().build());
 
       // Act & Assert
-      assertThatThrownBy(() -> resolver.resolve("step1", AbstractStep.class.getName()))
+      assertThatThrownBy(
+              () -> resolver.resolve("step1", AbstractStep.class.getName(), NO_ENDPOINTS))
           .isInstanceOf(SagaDefinitionException.class);
     }
 
@@ -210,7 +249,7 @@ class ReflectiveStepResolverTest {
           new ReflectiveStepResolver(ResourceRegistry.newBuilder().build());
 
       // Act & Assert
-      assertThatThrownBy(() -> resolver.resolve("step1", Step.class.getName()))
+      assertThatThrownBy(() -> resolver.resolve("step1", Step.class.getName(), NO_ENDPOINTS))
           .isInstanceOf(SagaDefinitionException.class);
     }
 
@@ -221,7 +260,8 @@ class ReflectiveStepResolverTest {
           new ReflectiveStepResolver(ResourceRegistry.newBuilder().build());
 
       // Act & Assert
-      assertThatThrownBy(() -> resolver.resolve("step1", PrivateConstructorStep.class.getName()))
+      assertThatThrownBy(
+              () -> resolver.resolve("step1", PrivateConstructorStep.class.getName(), NO_ENDPOINTS))
           .isInstanceOf(SagaDefinitionException.class);
     }
 
@@ -232,7 +272,8 @@ class ReflectiveStepResolverTest {
       ReflectiveStepResolver resolver = new ReflectiveStepResolver(registry);
 
       // Act & Assert
-      assertThatThrownBy(() -> resolver.resolve("step1", RequiresLongStep.class.getName()))
+      assertThatThrownBy(
+              () -> resolver.resolve("step1", RequiresLongStep.class.getName(), NO_ENDPOINTS))
           .isInstanceOf(SagaDefinitionException.class);
     }
 
@@ -243,7 +284,8 @@ class ReflectiveStepResolverTest {
           new ReflectiveStepResolver(ResourceRegistry.newBuilder().build());
 
       // Act & Assert
-      assertThatThrownBy(() -> resolver.resolve("step1", RequiresStringStep.class.getName()))
+      assertThatThrownBy(
+              () -> resolver.resolve("step1", RequiresStringStep.class.getName(), NO_ENDPOINTS))
           .isInstanceOf(SagaDefinitionException.class);
     }
 
@@ -254,7 +296,9 @@ class ReflectiveStepResolverTest {
           new ReflectiveStepResolver(ResourceRegistry.newBuilder().build());
 
       // Act & Assert
-      assertThatThrownBy(() -> resolver.resolve("step1", ThrowingConstructorStep.class.getName()))
+      assertThatThrownBy(
+              () ->
+                  resolver.resolve("step1", ThrowingConstructorStep.class.getName(), NO_ENDPOINTS))
           .isInstanceOf(SagaDefinitionException.class);
     }
 
@@ -266,7 +310,8 @@ class ReflectiveStepResolverTest {
       ReflectiveStepResolver resolver = new ReflectiveStepResolver(registry);
 
       // Act & Assert
-      assertThatThrownBy(() -> resolver.resolve("step1", NamedSourceOnlyStep.class.getName()))
+      assertThatThrownBy(
+              () -> resolver.resolve("step1", NamedSourceOnlyStep.class.getName(), NO_ENDPOINTS))
           .isInstanceOf(SagaDefinitionException.class);
     }
   }
@@ -296,7 +341,8 @@ class ReflectiveStepResolverTest {
                 () -> {
                   try {
                     startLatch.await();
-                    Object result = resolver.resolve("step1", CountingStep.class.getName());
+                    Object result =
+                        resolver.resolve("step1", CountingStep.class.getName(), NO_ENDPOINTS);
                     if (!firstResult.compareAndSet(null, result)) {
                       if (firstResult.get() != result) {
                         mismatchCount.incrementAndGet();
@@ -316,6 +362,88 @@ class ReflectiveStepResolverTest {
       assertThat(mismatchCount.get()).isZero();
       // CountingStep tracks how many times it was constructed
       assertThat(CountingStep.instanceCount.get()).isEqualTo(1);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // SagaHttpClient injection
+  // ---------------------------------------------------------------------------
+
+  @Nested
+  class HttpClientInjection {
+
+    @Test
+    void resolve_namedHttpClient_injectsFromResolutionContext() {
+      // Arrange — the resolution context returns a stub client for "account-svc"
+      SagaHttpClient stub = mock(SagaHttpClient.class);
+      ResolutionContext context = contextOf(Map.of("account-svc", stub));
+      ReflectiveStepResolver resolver =
+          new ReflectiveStepResolver(ResourceRegistry.newBuilder().build());
+
+      // Act
+      Object result = resolver.resolve("debit", HttpClientStep.class.getName(), context);
+
+      // Assert — the @Named SagaHttpClient was injected from the context
+      assertThat(result).isInstanceOf(HttpClientStep.class);
+      assertThat(((HttpClientStep) result).http).isSameAs(stub);
+    }
+
+    @Test
+    void resolve_namedHttpClientNoEndpoint_throwsSagaDefinitionException() {
+      // Arrange — no endpoint registered under the requested name
+      ReflectiveStepResolver resolver =
+          new ReflectiveStepResolver(ResourceRegistry.newBuilder().build());
+
+      // Act & Assert
+      assertThatThrownBy(
+              () -> resolver.resolve("debit", HttpClientStep.class.getName(), NO_ENDPOINTS))
+          .isInstanceOf(SagaDefinitionException.class);
+    }
+
+    @Test
+    void resolve_unqualifiedHttpClientSingleEndpoint_injectsSoleClient() {
+      // Arrange — exactly one endpoint registered; an unqualified parameter selects it
+      SagaHttpClient stub = mock(SagaHttpClient.class);
+      ResolutionContext context = contextOf(Map.of("account-svc", stub));
+      ReflectiveStepResolver resolver =
+          new ReflectiveStepResolver(ResourceRegistry.newBuilder().build());
+
+      // Act
+      Object result = resolver.resolve("debit", UnqualifiedHttpClientStep.class.getName(), context);
+
+      // Assert — the sole SagaHttpClient was injected without @Named
+      assertThat(result).isInstanceOf(UnqualifiedHttpClientStep.class);
+      assertThat(((UnqualifiedHttpClientStep) result).http).isSameAs(stub);
+    }
+
+    @Test
+    void resolve_unqualifiedHttpClientMultipleEndpoints_throwsSagaDefinitionException() {
+      // Arrange — two endpoints registered; an unqualified parameter is ambiguous
+      Map<String, SagaHttpClient> endpoints = new LinkedHashMap<>();
+      endpoints.put("account-svc", mock(SagaHttpClient.class));
+      endpoints.put("payment-svc", mock(SagaHttpClient.class));
+      ResolutionContext context = contextOf(endpoints);
+      ReflectiveStepResolver resolver =
+          new ReflectiveStepResolver(ResourceRegistry.newBuilder().build());
+
+      // Act & Assert
+      assertThatThrownBy(
+              () -> resolver.resolve("debit", UnqualifiedHttpClientStep.class.getName(), context))
+          .isInstanceOf(SagaDefinitionException.class);
+    }
+
+    @Test
+    void resolve_unqualifiedHttpClientNoEndpoint_throwsSagaDefinitionException() {
+      // Arrange — no endpoint registered; an unqualified parameter cannot be resolved
+      ReflectiveStepResolver resolver =
+          new ReflectiveStepResolver(ResourceRegistry.newBuilder().build());
+
+      // Act & Assert
+      assertThatThrownBy(
+              () ->
+                  resolver.resolve(
+                      "debit", UnqualifiedHttpClientStep.class.getName(), NO_ENDPOINTS))
+          .isInstanceOf(SagaDefinitionException.class);
     }
   }
 
@@ -369,6 +497,50 @@ class ReflectiveStepResolverTest {
     @Override
     public String getName() {
       return "single-param";
+    }
+
+    @Override
+    public StepResult execute(SagaContext context) throws StepExecutionException {
+      return StepResult.empty();
+    }
+
+    @Override
+    public void compensate(SagaContext context) throws StepCompensationException {}
+  }
+
+  /** Step that takes an {@code @Named} {@link SagaHttpClient} (injected from the endpoint). */
+  public static class HttpClientStep implements Step {
+    final SagaHttpClient http;
+
+    public HttpClientStep(@Named("account-svc") SagaHttpClient http) {
+      this.http = http;
+    }
+
+    @Override
+    public String getName() {
+      return "http-client";
+    }
+
+    @Override
+    public StepResult execute(SagaContext context) throws StepExecutionException {
+      return StepResult.empty();
+    }
+
+    @Override
+    public void compensate(SagaContext context) throws StepCompensationException {}
+  }
+
+  /** Step with an unqualified {@link SagaHttpClient} parameter (selects the sole endpoint). */
+  public static class UnqualifiedHttpClientStep implements Step {
+    final SagaHttpClient http;
+
+    public UnqualifiedHttpClientStep(SagaHttpClient http) {
+      this.http = http;
+    }
+
+    @Override
+    public String getName() {
+      return "unqualified-http-client";
     }
 
     @Override

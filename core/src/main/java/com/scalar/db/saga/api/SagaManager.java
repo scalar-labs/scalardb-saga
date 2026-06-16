@@ -1,11 +1,9 @@
 package com.scalar.db.saga.api;
 
-// Intentional api->engine reference: the newBuilder() convenience factory delegates to the builder
-// impl. api and engine ship together in `core`, so this never forms a cross-module cycle; if api is
-// ever published as a separate artifact, replace this with a ServiceLoader SPI.
 import com.scalar.db.saga.engine.SagaManagerBuilder;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import java.net.http.HttpClient;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.Map;
@@ -296,6 +294,12 @@ public interface SagaManager extends AutoCloseable {
    * </ol>
    *
    * <p>{@code resource()} and {@code stepResolver()} are mutually exclusive.
+   *
+   * <p>Remote calls are wired with a single mode-free method, {@link #httpEndpoint(String,
+   * String)}. The registered endpoint both injects a {@code @Named} {@code SagaHttpClient} into
+   * code steps and backs declaratively-defined service steps whose {@code service} resolves to it;
+   * {@code httpEndpoint} is orthogonal to step resolution (allowed alongside either {@code
+   * resource()} or {@code stepResolver()}).
    */
   interface Builder {
 
@@ -347,6 +351,120 @@ public interface SagaManager extends AutoCloseable {
      * @return this builder
      */
     Builder stepResolver(StepResolver resolver);
+
+    /**
+     * Begins registering an HTTP endpoint under {@code name} pointing at {@code baseUrl}. One
+     * mode-free remote method: the registered endpoint both (a) injects an {@code @Named(name)
+     * SagaHttpClient} into code steps and (b) backs declaratively-defined service steps whose
+     * {@code service} resolves to it. The framework propagates the saga correlation headers,
+     * enforces the outbound HTTP policy (SSRF allowlist + body limits), and disables redirect
+     * following.
+     *
+     * <p>{@code httpEndpoint} is <b>orthogonal</b> to step resolution: it may be combined with
+     * either {@link #resource} or {@link #stepResolver(StepResolver)} (those two remain mutually
+     * exclusive; {@code httpEndpoint} does not trip that rule).
+     *
+     * <p>Configure the optional outbound policy / client on the returned sub-builder, then call
+     * {@link HttpEndpointBuilder#add()} to commit it and return to this builder:
+     *
+     * <pre>{@code
+     * SagaManager.newBuilder()
+     *     .storeFactory(...)
+     *     .httpEndpoint("account-svc", "https://account-svc:8443")
+     *         .allowedHosts("account-svc")
+     *         .maxBodyBytes(2_000_000)
+     *         .add()
+     *     .build();
+     * }</pre>
+     *
+     * @param name the endpoint name (the {@code @Named} qualifier for injection and the {@code
+     *     service} referenced by declarative steps)
+     * @param baseUrl the endpoint base URL (e.g. {@code http://account-svc:8080})
+     * @return a sub-builder for this endpoint's optional outbound configuration
+     */
+    HttpEndpointBuilder httpEndpoint(String name, String baseUrl);
+
+    /**
+     * Configures one HTTP endpoint. Obtained from {@link Builder#httpEndpoint(String, String)}; set
+     * the optional outbound policy and client, then call {@link #add()} to register the endpoint
+     * and return to the parent {@link Builder}. All settings are optional — calling {@code add()}
+     * immediately registers the endpoint with the defaults (allow-all hosts, 1 MB body limit, a
+     * framework-created client with redirects disabled).
+     */
+    interface HttpEndpointBuilder {
+
+      /**
+       * Restricts outbound calls for this endpoint to the given hosts (SSRF allowlist). Empty (the
+       * default) = allow all. Matching is by exact, case-insensitive host name only — it does not
+       * resolve the host or inspect the connect-time IP, so it does not defend against DNS
+       * rebinding or a hostname that points at a private/link-local/metadata address. It is
+       * defense-in-depth for trusted, operator-configured endpoints, not a sandbox.
+       *
+       * @param hosts the allowed host names
+       * @return this sub-builder
+       */
+      HttpEndpointBuilder allowedHosts(String... hosts);
+
+      /**
+       * Sets the maximum request/response body size in bytes for this endpoint. Defaults to 1 MB.
+       *
+       * @param maxBodyBytes the maximum body size; must be {@code > 0}
+       * @return this sub-builder
+       */
+      HttpEndpointBuilder maxBodyBytes(long maxBodyBytes);
+
+      /**
+       * Uses a custom {@link HttpClient} (e.g. with a proxy or custom TLS) for this endpoint. The
+       * caller owns the supplied client's lifecycle — unlike the framework-created default client,
+       * it is <em>not</em> closed on {@link SagaManager#close()}. The caller is responsible for its
+       * redirect policy; the framework-created default disables redirects to protect the SSRF
+       * allowlist.
+       *
+       * @param client the client to use for this endpoint
+       * @return this sub-builder
+       */
+      HttpEndpointBuilder httpClient(HttpClient client);
+
+      /**
+       * Adds a default header sent on <em>every</em> request to this endpoint — by both declarative
+       * steps and the injected {@link com.scalar.db.saga.api.SagaHttpClient SagaHttpClient} for
+       * code steps. This is the channel for authentication and other secrets (e.g. {@code
+       * Authorization}), since default headers are <b>not</b> persisted in the saga definition.
+       *
+       * <p>Per-name precedence: a default header here is overridden by a per-call header of the
+       * same name (only code steps set per-call headers, via {@link
+       * com.scalar.db.saga.api.SagaHttpClient.Request#header(String, String)}); the framework
+       * correlation headers ({@code X-Saga-Id}/{@code X-Saga-Step}) are always set by the
+       * framework. Repeatable; a later call for the same name replaces the earlier value.
+       *
+       * <p><b>Cluster-wide config caveat:</b> default headers (like the endpoint URL and allowlist)
+       * are non-persisted per-node configuration. A node recovering a saga must be configured with
+       * the same endpoint default headers; divergent per-node config is the operator's
+       * responsibility (uniform deployment, as with a database connection string).
+       *
+       * @param name the header name
+       * @param value the header value
+       * @return this sub-builder
+       */
+      HttpEndpointBuilder defaultHeader(String name, String value);
+
+      /**
+       * Adds all of {@code headers} as endpoint default headers (see {@link #defaultHeader(String,
+       * String)}). Merged with any previously set default headers; a key present in {@code headers}
+       * replaces an earlier value for the same name.
+       *
+       * @param headers the default headers to add
+       * @return this sub-builder
+       */
+      HttpEndpointBuilder defaultHeaders(Map<String, String> headers);
+
+      /**
+       * Registers this endpoint on the parent builder and returns it for chaining.
+       *
+       * @return the parent builder
+       */
+      Builder add();
+    }
 
     /**
      * Overrides the default recovery configuration.

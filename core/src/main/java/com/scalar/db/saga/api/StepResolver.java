@@ -17,23 +17,56 @@ package com.scalar.db.saga.api;
  *       verifies this after resolution
  * </ul>
  *
- * <h3>Built-in implementations</h3>
+ * <h3>Built-in implementation (default)</h3>
  *
- * <p>The default implementation ({@code ReflectiveStepResolver}) resolves steps via
- * reflection-based constructor injection, matching constructor parameter types against registered
- * resources.
+ * <p>{@code ReflectiveStepResolver} resolves steps via reflection-based constructor injection,
+ * matching constructor parameter types against registered resources and injecting an
+ * {@code @Named(name) SagaHttpClient} for any {@code httpEndpoint(name, baseUrl)} on the builder.
+ * With it a step just declares the client it needs — no custom resolver and no manual lookup:
+ *
+ * <pre>{@code
+ * class DebitStep implements Step {
+ *   private final SagaHttpClient http;
+ *   DebitStep(SagaHttpClient http) { this.http = http; }
+ *   // ...
+ * }
+ * // builder: .httpEndpoint("account-svc", "https://account-svc:8443").add()
+ * }</pre>
+ *
+ * <p>With more than one endpoint registered, qualify the parameter to select one, e.g.
+ * {@code @Named("account-svc") SagaHttpClient}.
  *
  * <h3>Custom implementations</h3>
  *
  * <p>Supply a custom resolver via {@link SagaManager.Builder#stepResolver(StepResolver)} for full
- * control over step instantiation (e.g., manual lookup, DI framework integration). The returned
- * instances must conform to the lifecycle contract documented in {@link Step}: steps are
- * application-level singletons shared across concurrent executions and must be thread-safe.
+ * control (e.g. DI-framework integration). A resolver must (a) dispatch on the step {@code name}
+ * (or {@code className}) and (b) return the same thread-safe singleton each time, per the {@link
+ * Step} lifecycle contract — e.g. a DI container whose beans are singletons:
  *
  * <pre>{@code
+ * .stepResolver((name, className, ctx) -> applicationContext.getBean(Class.forName(className)))
+ * }</pre>
+ *
+ * <p>To inject the framework {@link SagaHttpClient} into a manually-constructed step, obtain it
+ * from the {@link ResolutionContext} — not a self-built client, which would lose the saga
+ * correlation headers, SSRF allowlist, and retryable classification. The client exists only at
+ * resolve time and a step may be resolved more than once, so cache by step name:
+ *
+ * <pre>{@code
+ * String accountSvc = "account-svc";
+ * Map<String, Object> steps = new ConcurrentHashMap<>();
  * SagaManager.newBuilder()
  *     .storeFactory(ScalarDbSagaStoreFactory.create(props))
- *     .stepResolver((name, className) -> applicationContext.getBean(Class.forName(className)))
+ *     .httpEndpoint(accountSvc, "https://account-svc:8443").add()
+ *     .stepResolver(
+ *         (name, className, ctx) ->
+ *             steps.computeIfAbsent(
+ *                 name,
+ *                 n ->
+ *                     switch (n) {
+ *                       case "debit" -> new DebitStep(ctx.httpClient(accountSvc));
+ *                       default -> throw new SagaDefinitionException("unknown step: " + n);
+ *                     }))
  *     .build();
  * }</pre>
  */
@@ -48,8 +81,16 @@ public interface StepResolver {
    *
    * @param stepName the step name from the saga definition
    * @param stepClass the fully-qualified class name from the saga definition
+   * @param context resolution context exposing the registered {@link SagaHttpClient}s
    * @return the resolved step instance (must be a {@link Step} or {@link TccStep})
    * @throws com.scalar.db.saga.exception.SagaDefinitionException if the step cannot be resolved
    */
-  Object resolve(String stepName, String stepClass);
+  Object resolve(String stepName, String stepClass, ResolutionContext context);
+
+  /**
+   * Context handed to {@link #resolve(String, String, ResolutionContext)} at resolution time. It
+   * exposes the {@link SagaHttpClient}s registered via {@code httpEndpoint(name, baseUrl)} so a
+   * custom resolver can inject the live, policy-enforcing client into a step it constructs.
+   */
+  interface ResolutionContext extends SagaHttpClientProvider {}
 }

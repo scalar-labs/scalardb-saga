@@ -143,8 +143,8 @@ public final class SagaDefinitionParser {
 
     for (JsonNode stepNode : root.get("steps")) {
       String stepName = requireText(stepNode, "name");
-      String stepClass = requireText(stepNode, "stepClass");
-      SagaDefinition.StepBuilder stepBuilder = builder.step(stepName, stepClass);
+      SagaDefinition.AbstractStepBuilder<?> stepBuilder =
+          newStepBuilder(builder, stepNode, stepName);
 
       if (stepNode.has("timeoutMillis") && !stepNode.get("timeoutMillis").isNull()) {
         stepBuilder.timeoutMillis(stepNode.get("timeoutMillis").asLong());
@@ -161,6 +161,85 @@ public final class SagaDefinitionParser {
     checkUnknownFields(root, name);
 
     return builder.build();
+  }
+
+  private static SagaDefinition.AbstractStepBuilder<?> newStepBuilder(
+      SagaDefinition.Builder builder, JsonNode stepNode, String stepName) {
+    boolean hasStepClass = isPresent(stepNode, "stepClass");
+    boolean hasService = isPresent(stepNode, "service");
+    boolean hasSagaPhase = isPresent(stepNode, "execution") || isPresent(stepNode, "compensation");
+    boolean hasTccPhase =
+        isPresent(stepNode, "reservation")
+            || isPresent(stepNode, "confirmation")
+            || isPresent(stepNode, "cancellation");
+
+    if (hasStepClass) {
+      if (hasService || hasSagaPhase || hasTccPhase) {
+        throw new SagaDefinitionException(
+            "Step '" + stepName + "' must not mix 'stepClass' with 'service'/declarative phases");
+      }
+      return builder.step(stepName, stepNode.get("stepClass").asText());
+    }
+
+    // Declarative service step: requires a 'service'.
+    if (!hasService) {
+      throw new SagaDefinitionException(
+          "Step '"
+              + stepName
+              + "' must define either 'stepClass' or a declarative service step ('service' +"
+              + " phases)");
+    }
+    String service = stepNode.get("service").asText();
+
+    if (!hasSagaPhase && !hasTccPhase) {
+      throw new SagaDefinitionException(
+          "Declarative service step '"
+              + stepName
+              + "' must define phases (execution/compensation or"
+              + " reservation/confirmation/cancellation)");
+    }
+    if (hasSagaPhase && hasTccPhase) {
+      throw new SagaDefinitionException(
+          "Service step '"
+              + stepName
+              + "' must not mix SAGA phases (execution/compensation) with TCC phases"
+              + " (reservation/confirmation/cancellation)");
+    }
+    CallSpec.Transport transport = CallSpecCodec.parseTransport(stepNode, stepName);
+    if (hasSagaPhase) {
+      if (!isPresent(stepNode, "execution") || !isPresent(stepNode, "compensation")) {
+        throw new SagaDefinitionException(
+            "SAGA declarative service step '"
+                + stepName
+                + "' must define both 'execution' and 'compensation'");
+      }
+      return builder
+          .serviceStep(stepName, service)
+          .operation()
+          .execution(CallSpecCodec.parseCallSpec(transport, stepNode.get("execution"), stepName))
+          .compensation(
+              CallSpecCodec.parseCallSpec(transport, stepNode.get("compensation"), stepName));
+    }
+    if (!isPresent(stepNode, "reservation")
+        || !isPresent(stepNode, "confirmation")
+        || !isPresent(stepNode, "cancellation")) {
+      throw new SagaDefinitionException(
+          "TCC declarative service step '"
+              + stepName
+              + "' must define 'reservation', 'confirmation', and 'cancellation'");
+    }
+    return builder
+        .serviceStep(stepName, service)
+        .tccOperation()
+        .reservation(CallSpecCodec.parseCallSpec(transport, stepNode.get("reservation"), stepName))
+        .confirmation(
+            CallSpecCodec.parseCallSpec(transport, stepNode.get("confirmation"), stepName))
+        .cancellation(
+            CallSpecCodec.parseCallSpec(transport, stepNode.get("cancellation"), stepName));
+  }
+
+  private static boolean isPresent(JsonNode node, String field) {
+    return node.has(field) && !node.get(field).isNull();
   }
 
   private static RetryPolicy parseRetryPolicy(JsonNode node) {
@@ -219,7 +298,20 @@ public final class SagaDefinitionParser {
             "timeoutMillis",
             "defaultRetryPolicy",
             "steps");
-    Set<String> stepKnown = Set.of("name", "stepClass", "timeoutMillis", "retryPolicy", "pivot");
+    Set<String> stepKnown =
+        Set.of(
+            "name",
+            "stepClass",
+            "service",
+            "transport",
+            "execution",
+            "compensation",
+            "reservation",
+            "confirmation",
+            "cancellation",
+            "timeoutMillis",
+            "retryPolicy",
+            "pivot");
 
     root.fieldNames()
         .forEachRemaining(
@@ -257,6 +349,9 @@ public final class SagaDefinitionParser {
   }
 
   private static ObjectMapper createMapper(@Nullable JsonFactory factory) {
-    return factory != null ? new ObjectMapper(factory) : new ObjectMapper();
+    ObjectMapper mapper = factory != null ? new ObjectMapper(factory) : new ObjectMapper();
+    // Defense in depth against polymorphic-deserialization gadgets (off by default in Jackson 2.x).
+    mapper.deactivateDefaultTyping();
+    return mapper;
   }
 }
