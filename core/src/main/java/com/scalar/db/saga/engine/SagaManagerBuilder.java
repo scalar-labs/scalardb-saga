@@ -351,6 +351,9 @@ public class SagaManagerBuilder implements SagaManager.Builder {
 
     @Override
     public SagaManager.Builder add() {
+      if (httpEndpoints.containsKey(name)) {
+        throw new IllegalArgumentException("HTTP endpoint already registered: " + name);
+      }
       httpEndpoints.put(
           name,
           new HttpServiceConfig(baseUrl, allowedHosts, maxBodyBytes, httpClient, defaultHeaders));
