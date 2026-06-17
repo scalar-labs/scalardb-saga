@@ -14,6 +14,8 @@ import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -27,6 +29,14 @@ class SagaHttpClientTest {
 
   private HttpServer server;
   private String baseUrl;
+  private final AtomicReference<String> capturedMethod = new AtomicReference<>();
+  private final AtomicReference<String> capturedQuery = new AtomicReference<>();
+  private final AtomicReference<String> capturedContentType = new AtomicReference<>();
+  private final AtomicReference<String> capturedBody = new AtomicReference<>();
+  private final AtomicReference<Map<String, String>> capturedHeaders = new AtomicReference<>();
+
+  /** A typed body for {@link SagaHttpResponse#bodyJson(Class)}. */
+  public record Payload(String k) {}
 
   @BeforeEach
   void setUp() throws IOException {
@@ -62,6 +72,19 @@ class SagaHttpClientTest {
             Thread.currentThread().interrupt();
           }
           respond(ex, 200, "{}", Map.of());
+        });
+    server.createContext(
+        "/echo",
+        ex -> {
+          capturedMethod.set(ex.getRequestMethod());
+          capturedQuery.set(ex.getRequestURI().getRawQuery());
+          capturedContentType.set(ex.getRequestHeaders().getFirst("Content-Type"));
+          // Case-insensitive: HttpServer normalizes header-name case (e.g. X-Trace -> X-trace).
+          Map<String, String> hdrs = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+          ex.getRequestHeaders().forEach((k, v) -> hdrs.put(k, v.isEmpty() ? "" : v.get(0)));
+          capturedHeaders.set(hdrs);
+          capturedBody.set(new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+          respond(ex, 200, "{\"k\":\"v\"}", Map.of("X-Resp", "rv"));
         });
     server.start();
     baseUrl = "http://localhost:" + server.getAddress().getPort();
@@ -288,6 +311,111 @@ class SagaHttpClientTest {
 
     // Assert — at most one body may be set
     assertThat(t).isInstanceOf(IllegalStateException.class);
+  }
+
+  @Test
+  void patch_sendsPatchMethod() throws Exception {
+    // Arrange
+    SagaHttpClient client = client(OutboundHttpPolicy.allowAll());
+
+    // Act
+    client.patch("/echo").jsonBody(Map.of("a", 1)).send();
+
+    // Assert
+    assertThat(capturedMethod.get()).isEqualTo("PATCH");
+  }
+
+  @Test
+  void header_singleHeader_propagatesToRequest() throws Exception {
+    // Arrange
+    SagaHttpClient client = client(OutboundHttpPolicy.allowAll());
+
+    // Act
+    client.get("/echo").header("X-Trace", "abc").send();
+
+    // Assert
+    assertThat(capturedHeaders.get()).containsEntry("X-Trace", "abc");
+  }
+
+  @Test
+  void headers_mapOfHeaders_allPropagateToRequest() throws Exception {
+    // Arrange
+    SagaHttpClient client = client(OutboundHttpPolicy.allowAll());
+
+    // Act
+    client.get("/echo").headers(Map.of("X-Alpha", "1", "X-Beta", "2")).send();
+
+    // Assert
+    assertThat(capturedHeaders.get()).containsEntry("X-Alpha", "1").containsEntry("X-Beta", "2");
+  }
+
+  @Test
+  void query_singleParam_appendedToUrl() throws Exception {
+    // Arrange
+    SagaHttpClient client = client(OutboundHttpPolicy.allowAll());
+
+    // Act
+    client.get("/echo").query("a", "1").send();
+
+    // Assert
+    assertThat(capturedQuery.get()).isEqualTo("a=1");
+  }
+
+  @Test
+  void query_mapOfParams_allAppendedToUrl() throws Exception {
+    // Arrange
+    SagaHttpClient client = client(OutboundHttpPolicy.allowAll());
+
+    // Act
+    client.get("/echo").query(Map.of("a", "1", "b", "2")).send();
+
+    // Assert
+    assertThat(capturedQuery.get()).contains("a=1").contains("b=2");
+  }
+
+  @Test
+  void formBody_urlEncodesBodyAndSetsContentType() throws Exception {
+    // Arrange
+    SagaHttpClient client = client(OutboundHttpPolicy.allowAll());
+
+    // Act
+    client.post("/echo").formBody(Map.of("q", "a b&c")).send();
+
+    // Assert — urlencoded body (space -> '+', '&' -> %26) with the form content type.
+    assertThat(capturedBody.get()).isEqualTo("q=a+b%26c");
+    assertThat(capturedContentType.get()).isEqualTo("application/x-www-form-urlencoded");
+  }
+
+  @Test
+  void responseHeaders_returnsResponseHeaderMultimap() throws Exception {
+    // Arrange
+    SagaHttpClient client = client(OutboundHttpPolicy.allowAll());
+
+    // Act
+    SagaHttpResponse response = client.get("/echo").send();
+
+    // Assert — the response header set by the server is present (header names are
+    // case-insensitive).
+    Map<String, List<String>> headers = response.headers();
+    String key =
+        headers.keySet().stream()
+            .filter(k -> k.equalsIgnoreCase("X-Resp"))
+            .findFirst()
+            .orElseThrow();
+    assertThat(headers.get(key)).contains("rv");
+  }
+
+  @Test
+  void bodyJson_typed_deserializesResponseBody() throws Exception {
+    // Arrange
+    SagaHttpClient client = client(OutboundHttpPolicy.allowAll());
+
+    // Act — /echo returns {"k":"v"}, decoded into the typed Payload.
+    SagaHttpResponse response = client.get("/echo").send();
+    Payload payload = response.bodyJson(Payload.class);
+
+    // Assert
+    assertThat(payload.k()).isEqualTo("v");
   }
 
   private static void respond(
