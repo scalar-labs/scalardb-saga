@@ -68,7 +68,7 @@ public final class CallSpecCodec {
               + stepName
               + "' transport '"
               + transport
-              + "' is not yet supported (Task 2.1b)");
+              + "' is not yet supported");
     }
     return transport;
   }

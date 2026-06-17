@@ -3,7 +3,8 @@ package com.scalar.db.saga.api;
 /**
  * The HTTP verb a declarative {@link HttpCall} uses. {@link #GET} and {@link #DELETE} carry no
  * request body (parameters go in the path/query); {@link #POST}, {@link #PUT}, and {@link #PATCH}
- * carry a JSON object body built from the call's request mapping.
+ * carry a request body — either a JSON object or a raw string with an explicit content type (see
+ * {@link HttpCall}).
  */
 public enum HttpMethod {
   GET,

@@ -23,7 +23,9 @@ import net.jcip.annotations.Immutable;
  * <ul>
  *   <li>{@code ${key}} in a request/path/query value — substitutes the saga context value for
  *       {@code key}. A value with no {@code ${...}} is passed through literally.
- *   <li>{@code $.field} in an output value — extracts a field from the service response.
+ *   <li>{@code $.field} in an output value — extracts a field from the (JSON) service response.
+ *   <li>{@code $body} in an output value — captures the entire raw response body as a string (the
+ *       {@link HttpCall#BODY_OUTPUT} token), for responses not navigated as JSON.
  * </ul>
  */
 @Immutable
