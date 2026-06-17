@@ -315,6 +315,34 @@ class SagaHttpClientTest {
   }
 
   @Test
+  @SuppressWarnings("NullAway") // deliberately passing null to exercise the runtime guard
+  void stringBody_nullContentTypeGiven_throwsNullPointerException() {
+    // Arrange
+    SagaHttpClient client = client(OutboundHttpPolicy.allowAll());
+    SagaHttpClient.Request request = client.post("/ok");
+
+    // Act
+    Throwable t = catchThrowable(() -> request.stringBody("x", null));
+
+    // Assert — a null content type must fail fast, not silently drop the body
+    assertThat(t).isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  @SuppressWarnings("NullAway") // deliberately passing null to exercise the runtime guard
+  void bytesBody_nullContentTypeGiven_throwsNullPointerException() {
+    // Arrange
+    SagaHttpClient client = client(OutboundHttpPolicy.allowAll());
+    SagaHttpClient.Request request = client.post("/ok");
+
+    // Act
+    Throwable t = catchThrowable(() -> request.bytesBody(new byte[] {1}, null));
+
+    // Assert — a null content type must fail fast, not silently drop the body
+    assertThat(t).isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
   void patch_sendsPatchMethod() throws Exception {
     // Arrange
     SagaHttpClient client = client(OutboundHttpPolicy.allowAll());
