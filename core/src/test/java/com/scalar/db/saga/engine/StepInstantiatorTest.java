@@ -84,6 +84,23 @@ class StepInstantiatorTest {
   }
 
   @Test
+  void instantiate_declarativeStepNotExpectedType_throwsSagaDefinitionException() {
+    // Arrange — the declarative adapter produces a Step, but an unexpected type is requested
+    HttpEndpointRegistry endpoints =
+        HttpEndpointRegistry.create(
+            Map.of(
+                "account",
+                new HttpServiceConfig("http://account-svc:8080", List.of(), -1, null, Map.of())));
+    StepInstantiator instantiator =
+        new StepInstantiator((name, className, ctx) -> noopStep(name), endpoints);
+
+    // Act & Assert — a wrong expected type must surface as SagaDefinitionException, not CCE
+    assertThatThrownBy(
+            () -> instantiator.instantiate(declarativeSagaStep("debit", "account"), Runnable.class))
+        .isInstanceOf(SagaDefinitionException.class);
+  }
+
+  @Test
   void instantiate_declarativeStepUnregisteredService_throwsSagaDefinitionException() {
     // Arrange
     StepInstantiator instantiator =

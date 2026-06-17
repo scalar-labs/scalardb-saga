@@ -84,10 +84,22 @@ final class StepInstantiator {
               + service
               + "'");
     }
-    if (expectedType == TccStep.class) {
-      return expectedType.cast(httpEndpointRegistry.toTccStep(name, service, stepDef.getPhases()));
+    Object resolved =
+        expectedType == TccStep.class
+            ? httpEndpointRegistry.toTccStep(name, service, stepDef.getPhases())
+            : httpEndpointRegistry.toStep(name, service, stepDef.getPhases());
+    if (expectedType.isInstance(resolved)) {
+      return expectedType.cast(resolved);
     }
-    return expectedType.cast(httpEndpointRegistry.toStep(name, service, stepDef.getPhases()));
+    throw new SagaDefinitionException(
+        "Declarative service step '"
+            + name
+            + "' (service '"
+            + service
+            + "') does not produce "
+            + expectedType.getName()
+            + ". Found: "
+            + resolved.getClass().getName());
   }
 
   private <T> T resolveClassStep(ClassStep stepDef, Class<T> expectedType) {
