@@ -73,7 +73,7 @@ class HttpExchangeTest {
 
     // Act — no per-call header: the default is sent.
     withDefaults.exchange(
-        "GET", baseUrl, "/headers", NO_PARAMS, NO_PARAMS, null, null, "saga-1", "s");
+        "GET", baseUrl, "/headers", NO_PARAMS, NO_PARAMS, null, null, "saga-1", "s", null);
 
     // Assert
     assertThat(received.get()).isEqualTo("default-value");
@@ -88,7 +88,8 @@ class HttpExchangeTest {
         null,
         null,
         "saga-1",
-        "s");
+        "s",
+        null);
 
     // Assert — the caller value wins; the default is not also appended.
     assertThat(received.get()).isEqualTo("call-value");
@@ -106,7 +107,8 @@ class HttpExchangeTest {
             exchange.encodeJson(Map.of("a", "b")),
             "application/json",
             "saga-1",
-            "step");
+            "step",
+            null);
 
     assertThat(response.status()).isEqualTo(200);
     assertThat(response.bodyJsonObject()).containsEntry("k", "v");
@@ -116,7 +118,7 @@ class HttpExchangeTest {
   void exchange_emptyResponseBody_returnsEmptyMap() throws Exception {
     HttpCallResponse response =
         exchange.exchange(
-            "GET", baseUrl, "/empty", NO_PARAMS, NO_PARAMS, null, null, "saga-1", "s");
+            "GET", baseUrl, "/empty", NO_PARAMS, NO_PARAMS, null, null, "saga-1", "s", null);
 
     assertThat(response.bodyJsonObject()).isEmpty();
   }
@@ -125,7 +127,7 @@ class HttpExchangeTest {
   void bodyJsonObject_malformedJsonResponse_throwsNonRetryable() throws Exception {
     HttpCallResponse response =
         exchange.exchange(
-            "GET", baseUrl, "/malformed", NO_PARAMS, NO_PARAMS, null, null, "saga-1", "s");
+            "GET", baseUrl, "/malformed", NO_PARAMS, NO_PARAMS, null, null, "saga-1", "s", null);
 
     Throwable t = catchThrowable(response::bodyJsonObject);
 
@@ -139,7 +141,16 @@ class HttpExchangeTest {
         catchThrowable(
             () ->
                 exchange.exchange(
-                    "GET", baseUrl, "/fail503", NO_PARAMS, NO_PARAMS, null, null, "saga-1", "s"));
+                    "GET",
+                    baseUrl,
+                    "/fail503",
+                    NO_PARAMS,
+                    NO_PARAMS,
+                    null,
+                    null,
+                    "saga-1",
+                    "s",
+                    null));
 
     assertThat(t).isInstanceOf(HttpCallException.class);
     HttpCallException e = (HttpCallException) t;
@@ -154,7 +165,16 @@ class HttpExchangeTest {
         catchThrowable(
             () ->
                 exchange.exchange(
-                    "GET", baseUrl, "/fail422", NO_PARAMS, NO_PARAMS, null, null, "saga-1", "s"));
+                    "GET",
+                    baseUrl,
+                    "/fail422",
+                    NO_PARAMS,
+                    NO_PARAMS,
+                    null,
+                    null,
+                    "saga-1",
+                    "s",
+                    null));
 
     assertThat(t).isInstanceOf(HttpCallException.class);
     assertThat(((HttpCallException) t).isRetryable()).isFalse();
@@ -173,7 +193,7 @@ class HttpExchangeTest {
         catchThrowable(
             () ->
                 exchange.exchange(
-                    "GET", deadUrl, "/x", NO_PARAMS, NO_PARAMS, null, null, "i", "s"));
+                    "GET", deadUrl, "/x", NO_PARAMS, NO_PARAMS, null, null, "i", "s", null));
 
     assertThat(t).isInstanceOf(HttpCallException.class);
     assertThat(((HttpCallException) t).isRetryable()).isTrue();
@@ -197,7 +217,8 @@ class HttpExchangeTest {
                     null,
                     null,
                     "saga-1",
-                    "bad\nstep"));
+                    "bad\nstep",
+                    null));
 
     assertThat(t).isInstanceOf(HttpCallException.class);
     assertThat(((HttpCallException) t).isRetryable()).isFalse();
@@ -208,7 +229,7 @@ class HttpExchangeTest {
     // base URL ends with '/', path has no leading '/': should still resolve to {base}/ok
     HttpCallResponse response =
         exchange.exchange(
-            "GET", baseUrl + "/", "ok", NO_PARAMS, NO_PARAMS, null, null, "saga-1", "s");
+            "GET", baseUrl + "/", "ok", NO_PARAMS, NO_PARAMS, null, null, "saga-1", "s", null);
 
     assertThat(response.bodyJsonObject()).containsEntry("k", "v");
   }

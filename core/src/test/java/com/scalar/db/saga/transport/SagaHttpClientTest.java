@@ -53,6 +53,16 @@ class SagaHttpClientTest {
           ex.sendResponseHeaders(302, -1);
           ex.close();
         });
+    server.createContext(
+        "/slow",
+        ex -> {
+          try {
+            Thread.sleep(5000);
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+          respond(ex, 200, "{}", Map.of());
+        });
     server.start();
     baseUrl = "http://localhost:" + server.getAddress().getPort();
   }
@@ -65,6 +75,26 @@ class SagaHttpClientTest {
   private SagaHttpClient client(OutboundHttpPolicy policy) {
     HttpClient http = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build();
     return new SagaHttpClientImpl(new HttpExchange(http, policy), baseUrl);
+  }
+
+  @Test
+  void send_boundStepDeadlineElapsesBeforeResponse_throwsRetryable() {
+    // Arrange — the server is far slower than the bound step deadline.
+    SagaHttpClient client = client(OutboundHttpPolicy.allowAll());
+    SagaCorrelationContext.Correlation previous =
+        SagaCorrelationContext.bind("saga-1", "s", System.currentTimeMillis() + 300L);
+
+    // Act — the per-request timeout is derived from the remaining step deadline.
+    Throwable thrown;
+    try {
+      thrown = catchThrowable(() -> client.get("/slow").send());
+    } finally {
+      SagaCorrelationContext.restore(previous);
+    }
+
+    // Assert — timed out, surfaced as a retryable step failure.
+    assertThat(thrown).isInstanceOf(StepExecutionException.class);
+    assertThat(((StepExecutionException) thrown).isRetryable()).isTrue();
   }
 
   @Test

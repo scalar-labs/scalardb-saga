@@ -4,9 +4,11 @@ import com.scalar.db.saga.api.CallSpec;
 import com.scalar.db.saga.api.HttpCall;
 import com.scalar.db.saga.api.SagaContext;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import org.jspecify.annotations.Nullable;
 
 /**
  * The built-in {@link TransportAdapter} for {@link CallSpec.Transport#HTTP}. Resolves an {@link
@@ -74,6 +76,9 @@ final class HttpTransportAdapter implements TransportAdapter {
       }
     }
 
+    // Bound this call to the step's remaining deadline (bound by the engine on this thread); a null
+    // remaining (no deadline bound) falls back to the exchange's default per-request timeout.
+    @Nullable Duration remaining = SagaCorrelationContext.remaining();
     HttpCallResponse response;
     try {
       response =
@@ -86,7 +91,8 @@ final class HttpTransportAdapter implements TransportAdapter {
               body,
               contentType,
               context.getSagaId(),
-              stepName);
+              stepName,
+              remaining);
     } catch (HttpCallException e) {
       throw toTransportException(e);
     }

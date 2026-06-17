@@ -1,11 +1,13 @@
 package com.scalar.db.saga.transport;
 
+import java.time.Duration;
 import org.jspecify.annotations.Nullable;
 
 /**
- * Carries the current saga correlation ({@code sagaId} + {@code stepName}) to an injected {@link
- * com.scalar.db.saga.api.SagaHttpClient}, which is an application singleton with no per-call
- * context argument.
+ * Carries the current saga correlation ({@code sagaId} + {@code stepName}) and the running step's
+ * {@code deadlineMillis} to an injected {@link com.scalar.db.saga.api.SagaHttpClient}, which is an
+ * application singleton with no per-call context argument. The deadline lets a transport call bound
+ * its per-request timeout to the step's remaining budget (see {@link #remaining()}).
  *
  * <p>The engine binds the correlation on the thread that runs a step's {@code execute}/{@code
  * compensate} (see {@code SagaEngine}), so a {@code SagaHttpClient} call made from within the step
@@ -22,19 +24,27 @@ import org.jspecify.annotations.Nullable;
  */
 public final class SagaCorrelationContext {
 
-  /** The current saga correlation, immutable. */
-  public record Correlation(String sagaId, String stepName) {}
+  /**
+   * The current saga correlation, immutable. {@code deadlineMillis} is the step's absolute deadline
+   * in epoch milliseconds — the engine clock, which is the system clock in production, so {@link
+   * #remaining()} can measure it against {@link System#currentTimeMillis()} — or {@code 0} when the
+   * step has no deadline.
+   */
+  public record Correlation(String sagaId, String stepName, long deadlineMillis) {}
 
-  private static final Correlation NONE = new Correlation("", "");
+  private static final Correlation NONE = new Correlation("", "", 0L);
 
   private static final ThreadLocal<@Nullable Correlation> CURRENT = new ThreadLocal<>();
 
   private SagaCorrelationContext() {}
 
-  /** Binds the correlation for the current thread, returning the previous binding to restore. */
-  public static @Nullable Correlation bind(String sagaId, String stepName) {
+  /**
+   * Binds the correlation for the current thread, returning the previous binding to restore. {@code
+   * deadlineMillis} is the step's wall-clock absolute deadline ({@code 0} for none).
+   */
+  public static @Nullable Correlation bind(String sagaId, String stepName, long deadlineMillis) {
     Correlation previous = CURRENT.get();
-    CURRENT.set(new Correlation(sagaId, stepName));
+    CURRENT.set(new Correlation(sagaId, stepName, deadlineMillis));
     return previous;
   }
 
@@ -51,5 +61,19 @@ public final class SagaCorrelationContext {
   static Correlation current() {
     Correlation correlation = CURRENT.get();
     return correlation != null ? correlation : NONE;
+  }
+
+  /**
+   * The remaining time until the bound step deadline as a positive {@link Duration}, or {@code
+   * null} when no deadline is bound — in which case the caller should fall back to the transport's
+   * default per-request timeout. Floored at 1ms so a just-passed deadline yields a fast-failing
+   * call rather than a non-positive timeout (which the JDK rejects).
+   */
+  static @Nullable Duration remaining() {
+    long deadline = current().deadlineMillis();
+    if (deadline <= 0) {
+      return null;
+    }
+    return Duration.ofMillis(Math.max(1L, deadline - System.currentTimeMillis()));
   }
 }

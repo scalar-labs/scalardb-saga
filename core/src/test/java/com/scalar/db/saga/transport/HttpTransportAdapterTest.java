@@ -75,6 +75,16 @@ class HttpTransportAdapterTest {
           ex.getResponseHeaders().set(HttpHeaders.SAGA_RETRYABLE, "true");
           respond(ex, 409, "{}");
         });
+    server.createContext(
+        "/slow",
+        ex -> {
+          try {
+            Thread.sleep(5000);
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+          respond(ex, 200, "{}");
+        });
     server.start();
     String baseUrl = "http://localhost:" + server.getAddress().getPort();
     adapter =
@@ -89,6 +99,26 @@ class HttpTransportAdapterTest {
 
   private static SagaContext ctx(Map<String, Object> data) {
     return new FakeSagaContext("saga-1", data);
+  }
+
+  @Test
+  void call_boundStepDeadlineElapsesBeforeResponse_throwsRetryableTransportException() {
+    // Arrange — the server is far slower than the bound step deadline.
+    HttpCall spec = HttpCall.newBuilder("/slow").method(HttpMethod.GET).build();
+    SagaCorrelationContext.Correlation previous =
+        SagaCorrelationContext.bind("saga-1", "s", System.currentTimeMillis() + 300L);
+
+    // Act — the per-request timeout is derived from the remaining step deadline.
+    Throwable thrown;
+    try {
+      thrown = catchThrowable(() -> adapter.call(spec, ctx(Map.of()), "s"));
+    } finally {
+      SagaCorrelationContext.restore(previous);
+    }
+
+    // Assert — timed out, surfaced as a retryable transport failure.
+    assertThat(thrown).isInstanceOf(TransportException.class);
+    assertThat(((TransportException) thrown).isRetryable()).isTrue();
   }
 
   @Test

@@ -392,9 +392,10 @@ public class SagaEngine implements AutoCloseable {
               () -> {
                 // Bind the saga correlation on the step-execution thread so an injected
                 // SagaHttpClient (an app singleton with no per-call context arg) propagates the
-                // right X-Saga-Id/X-Saga-Step; restore on return.
+                // right X-Saga-Id/X-Saga-Step and bounds its per-request timeout to the step's
+                // remaining deadline; restore on return.
                 SagaCorrelationContext.Correlation previous =
-                    SagaCorrelationContext.bind(context.getSagaId(), step.getName());
+                    SagaCorrelationContext.bind(context.getSagaId(), step.getName(), stepDeadline);
                 try {
                   return step.execute(context);
                 } finally {
@@ -597,7 +598,7 @@ public class SagaEngine implements AutoCloseable {
           executor.submit(
               () -> {
                 SagaCorrelationContext.Correlation previous =
-                    SagaCorrelationContext.bind(context.getSagaId(), step.getName());
+                    SagaCorrelationContext.bind(context.getSagaId(), step.getName(), stepDeadline);
                 try {
                   step.compensate(context);
                 } finally {

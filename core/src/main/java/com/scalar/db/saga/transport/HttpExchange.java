@@ -81,40 +81,6 @@ final class HttpExchange {
   }
 
   /**
-   * Sends an HTTP request using this exchange's default per-request timeout. Equivalent to {@link
-   * #exchange(String, String, String, List, List, byte[], String, String, String, Duration)} with
-   * the instance default timeout.
-   *
-   * @return the response on a 2xx status
-   * @throws HttpCallException on a non-2xx response (carrying the {@link
-   *     HttpCallException#response() response}), an oversized body, a disallowed host, a malformed
-   *     URI/header, or a transport error
-   */
-  HttpCallResponse exchange(
-      String httpMethod,
-      String baseUrl,
-      String path,
-      List<Map.Entry<String, String>> queryParams,
-      List<Map.Entry<String, String>> headers,
-      byte @Nullable [] body,
-      @Nullable String contentType,
-      String sagaId,
-      String stepName)
-      throws HttpCallException {
-    return exchange(
-        httpMethod,
-        baseUrl,
-        path,
-        queryParams,
-        headers,
-        body,
-        contentType,
-        sagaId,
-        stepName,
-        timeout);
-  }
-
-  /**
    * Sends an HTTP request to {@code baseUrl}{@code /}{@code path} (with {@code queryParams}
    * appended), propagating the saga correlation headers plus the caller's {@code headers}, and
    * returns the response.
@@ -124,7 +90,8 @@ final class HttpExchange {
    *
    * <p>{@code requestTimeout} bounds this single call (the JDK {@link HttpRequest} timeout). It is
    * passed per call rather than stored, so the shared, immutable exchange instance can serve calls
-   * with different remaining step deadlines without any per-call mutable state.
+   * with different remaining step deadlines without any per-call mutable state. When {@code null},
+   * the exchange's default per-request timeout is used.
    *
    * @return the response on a 2xx status
    * @throws HttpCallException on a non-2xx response (carrying the {@link
@@ -141,7 +108,7 @@ final class HttpExchange {
       @Nullable String contentType,
       String sagaId,
       String stepName,
-      Duration requestTimeout)
+      @Nullable Duration requestTimeout)
       throws HttpCallException {
     URI uri = buildUri(baseUrl, path, queryParams);
     if (!policy.isAllowed(uri)) {
@@ -154,9 +121,10 @@ final class HttpExchange {
           false);
     }
 
+    Duration effectiveTimeout = requestTimeout != null ? requestTimeout : timeout;
     HttpRequest.Builder requestBuilder;
     try {
-      requestBuilder = HttpRequest.newBuilder(uri).timeout(requestTimeout);
+      requestBuilder = HttpRequest.newBuilder(uri).timeout(effectiveTimeout);
       // Merge by header name so a caller-supplied per-call header overrides an endpoint default of
       // the same name; the JDK header() appends (not replaces), so dedupe here before applying.
       // Case-insensitive per the HTTP spec. The framework correlation/content-type headers are set

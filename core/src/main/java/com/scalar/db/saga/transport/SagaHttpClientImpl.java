@@ -6,6 +6,7 @@ import com.scalar.db.saga.api.SagaHttpResponse;
 import com.scalar.db.saga.exception.StepExecutionException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -197,6 +198,10 @@ final class SagaHttpClientImpl implements SagaHttpClient {
           resolvedContentType = contentType;
         }
         SagaCorrelationContext.Correlation correlation = SagaCorrelationContext.current();
+        // Bound this call to the step's remaining deadline (bound by the engine on this thread); a
+        // null remaining (no deadline bound) falls back to the exchange's default per-request
+        // timeout.
+        @Nullable Duration remaining = SagaCorrelationContext.remaining();
         return exchange.exchange(
             httpMethod,
             baseUrl,
@@ -206,7 +211,8 @@ final class SagaHttpClientImpl implements SagaHttpClient {
             body,
             resolvedContentType,
             correlation.sagaId(),
-            correlation.stepName());
+            correlation.stepName(),
+            remaining);
       } catch (HttpCallException e) {
         throw new StepExecutionException(e, e.isRetryable());
       }

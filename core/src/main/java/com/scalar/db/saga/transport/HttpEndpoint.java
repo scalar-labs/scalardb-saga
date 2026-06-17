@@ -6,6 +6,7 @@ import com.scalar.db.saga.api.SagaHttpClient;
 import com.scalar.db.saga.api.Step;
 import com.scalar.db.saga.api.TccStep;
 import java.net.http.HttpClient;
+import java.time.Duration;
 import java.util.Map;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -34,6 +35,13 @@ public final class HttpEndpoint implements AutoCloseable {
 
   private static final Logger logger = LoggerFactory.getLogger(HttpEndpoint.class);
 
+  /**
+   * Connect-phase timeout for a framework-created client, so a black-holed host fails fast instead
+   * of waiting out the (deadline-derived) per-request timeout. The overall call is still bounded by
+   * that per-request timeout; this only shortens the connect phase.
+   */
+  private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
+
   private final HttpExchange exchange;
   private final String baseUrl;
   private final HttpClient client;
@@ -53,8 +61,9 @@ public final class HttpEndpoint implements AutoCloseable {
   }
 
   /**
-   * Builds an endpoint from {@code config}, creating a {@link HttpClient.Redirect#NEVER} client if
-   * none was supplied.
+   * Builds an endpoint from {@code config}, creating a {@link HttpClient.Redirect#NEVER} client
+   * with a bounded {@link #CONNECT_TIMEOUT connect timeout} if none was supplied. A caller-supplied
+   * client is used as-is (the caller owns its redirect/timeout configuration).
    */
   public static HttpEndpoint create(HttpServiceConfig config) {
     HttpClient client;
@@ -65,8 +74,13 @@ public final class HttpEndpoint implements AutoCloseable {
       ownsClient = false;
     } else {
       // Redirect.NEVER: an allowed host could otherwise 302 to a metadata/internal host that the
-      // JDK would follow without re-checking the allowlist (SSRF-via-redirect).
-      client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build();
+      // JDK would follow without re-checking the allowlist (SSRF-via-redirect). connectTimeout
+      // bounds the connect phase so a black-holed host fails fast.
+      client =
+          HttpClient.newBuilder()
+              .connectTimeout(CONNECT_TIMEOUT)
+              .followRedirects(HttpClient.Redirect.NEVER)
+              .build();
       ownsClient = true;
     }
     HttpExchange exchange = new HttpExchange(client, policyOf(config), config.defaultHeaders());

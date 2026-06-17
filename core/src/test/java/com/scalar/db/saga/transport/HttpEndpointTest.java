@@ -148,7 +148,7 @@ class HttpEndpointTest {
               "d");
 
       // Act — the SagaHttpClient (code-step) path, both riding the same exchange.
-      SagaCorrelationContext.Correlation previous = SagaCorrelationContext.bind("saga-1", "c");
+      SagaCorrelationContext.Correlation previous = SagaCorrelationContext.bind("saga-1", "c", 0L);
       try {
         endpoint.sagaHttpClient().get("/code").send();
       } finally {
