@@ -257,4 +257,21 @@ class DeclarativeExpressionsTest {
             () -> DeclarativeExpressions.extractOutput(Map.of("x", "debit_id"), Map.of()))
         .isInstanceOf(TransportException.class);
   }
+
+  @Test
+  void extractOutput_emptySegment_throwsNonRetryable() {
+    // Arrange — a doubled dot yields an empty middle segment (defense in depth; HttpCall.build()
+    // rejects this up front, but extractPath is reachable directly).
+    Map<String, Object> response = Map.of("profile", Map.of("name", "alice"));
+
+    // Act
+    Throwable thrown =
+        org.assertj.core.api.Assertions.catchThrowable(
+            () ->
+                DeclarativeExpressions.extractOutput(Map.of("name", "$.profile..name"), response));
+
+    // Assert
+    assertThat(thrown).isInstanceOf(TransportException.class);
+    assertThat(((TransportException) thrown).isRetryable()).isFalse();
+  }
 }

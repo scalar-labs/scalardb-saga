@@ -144,6 +144,46 @@ class HttpCallTest {
         .isInstanceOf(IllegalStateException.class);
   }
 
+  @Test
+  void build_outputBodyTokenGiven_succeeds() {
+    // Act
+    HttpCall call =
+        HttpCall.newBuilder("/debit").output(Map.of("raw", HttpCall.BODY_OUTPUT)).build();
+
+    // Assert
+    assertThat(call.getOutput()).containsExactly(Map.entry("raw", HttpCall.BODY_OUTPUT));
+  }
+
+  @Test
+  void build_outputPathWithoutDollarPrefixGiven_throwsException() {
+    // Act & Assert
+    assertThatThrownBy(() -> HttpCall.newBuilder("/debit").output(Map.of("id", "debit_id")).build())
+        .isInstanceOf(IllegalStateException.class);
+  }
+
+  @Test
+  void build_outputPathWithEmptySegmentGiven_throwsException() {
+    // Act & Assert — a doubled dot yields an empty middle segment.
+    assertThatThrownBy(
+            () -> HttpCall.newBuilder("/debit").output(Map.of("name", "$.profile..name")).build())
+        .isInstanceOf(IllegalStateException.class);
+  }
+
+  @Test
+  void build_outputPathTrailingDotGiven_throwsException() {
+    // Act & Assert
+    assertThatThrownBy(
+            () -> HttpCall.newBuilder("/debit").output(Map.of("name", "$.profile.")).build())
+        .isInstanceOf(IllegalStateException.class);
+  }
+
+  @Test
+  void build_bareDollarDotGiven_throwsException() {
+    // Act & Assert — "$." has a single empty segment.
+    assertThatThrownBy(() -> HttpCall.newBuilder("/debit").output(Map.of("x", "$.")).build())
+        .isInstanceOf(IllegalStateException.class);
+  }
+
   @SuppressWarnings("NullAway")
   @Test
   void stringBody_nullGiven_throwsException() {

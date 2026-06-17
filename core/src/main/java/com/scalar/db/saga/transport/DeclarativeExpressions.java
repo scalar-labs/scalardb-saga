@@ -153,6 +153,9 @@ final class DeclarativeExpressions {
     }
     Object current = response;
     for (String segment : path.substring(2).split("\\.", -1)) {
+      if (segment.isEmpty()) {
+        throw new TransportException("Output path '" + path + "' has an empty segment", false);
+      }
       if (!(current instanceof Map<?, ?> map)) {
         throw new TransportException(
             "Cannot navigate output path '" + path + "' into a non-object at '" + segment + "'",

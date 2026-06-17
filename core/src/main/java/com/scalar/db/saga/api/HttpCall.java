@@ -221,9 +221,10 @@ public final class HttpCall extends CallSpec {
      * Builds the {@link HttpCall}.
      *
      * @throws IllegalStateException if both a flat-map {@link #jsonBody(Map)} body and a string
-     *     {@link #stringBody(String)} are set, or if a body-less verb ({@link
-     *     HttpMethod#GET}/{@link HttpMethod#DELETE}) declares any request body (a {@link
-     *     #jsonBody(Map)} map or a {@link #stringBody(String)} string)
+     *     {@link #stringBody(String)} are set; if a body-less verb ({@link HttpMethod#GET}/{@link
+     *     HttpMethod#DELETE}) declares any request body (a {@link #jsonBody(Map)} map or a {@link
+     *     #stringBody(String)} string); or if an {@link #output(Map)} expression is neither {@link
+     *     #BODY_OUTPUT} nor a {@code $.path} expression with non-empty segments
      */
     public HttpCall build() {
       if (!jsonBody.isEmpty() && stringBody != null) {
@@ -234,7 +235,43 @@ public final class HttpCall extends CallSpec {
         throw new IllegalStateException(
             method + " must not declare a request body; put parameters in the path or query");
       }
+      validateOutputExpressions(output);
       return new HttpCall(this);
+    }
+
+    /**
+     * Validates each output expression: it must be the {@link #BODY_OUTPUT} token, or a {@code
+     * $.path} expression whose dot-separated segments are all non-empty. A malformed path (missing
+     * the {@code $.} prefix, or with a leading/trailing/doubled dot) is rejected here, at build
+     * time, rather than surfacing later as a confusing extraction error.
+     */
+    private static void validateOutputExpressions(Map<String, String> output) {
+      for (Map.Entry<String, String> entry : output.entrySet()) {
+        String expression = entry.getValue();
+        if (BODY_OUTPUT.equals(expression)) {
+          continue;
+        }
+        if (!expression.startsWith("$.")) {
+          throw new IllegalStateException(
+              "output expression for '"
+                  + entry.getKey()
+                  + "' must be '"
+                  + BODY_OUTPUT
+                  + "' or a '$.path' expression, got '"
+                  + expression
+                  + "'");
+        }
+        for (String segment : expression.substring(2).split("\\.", -1)) {
+          if (segment.isEmpty()) {
+            throw new IllegalStateException(
+                "output path '"
+                    + expression
+                    + "' for '"
+                    + entry.getKey()
+                    + "' has an empty segment");
+          }
+        }
+      }
     }
   }
 }
