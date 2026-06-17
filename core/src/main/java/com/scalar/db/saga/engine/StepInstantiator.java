@@ -1,16 +1,24 @@
 package com.scalar.db.saga.engine;
 
 import com.scalar.db.saga.api.SagaDefinition.ClassStep;
+import com.scalar.db.saga.api.SagaDefinition.ServiceStep;
 import com.scalar.db.saga.api.SagaDefinition.StepDefinition;
 import com.scalar.db.saga.api.StepResolver;
 import com.scalar.db.saga.api.StepResolver.ResolutionContext;
+import com.scalar.db.saga.api.TccStep;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Turns a {@link StepDefinition} into a {@code Step}/{@code TccStep} instance: a {@link ClassStep}
- * is resolved by class name via {@link StepResolver} (Layer 1).
+ * Turns a {@link StepDefinition} into a {@code Step}/{@code TccStep} instance, dispatching on the
+ * sealed step kind:
+ *
+ * <ul>
+ *   <li>{@link ClassStep} → resolved by class name via {@link StepResolver} (Layer 1)
+ *   <li>{@link ServiceStep} → wrapped in a declarative adapter backed by a {@code TransportAdapter}
+ *       (Layer 2b)
+ * </ul>
  *
  * <p>This concentrates all step-kind branching in one place so {@link SagaEngine}'s execution and
  * compensation loops stay a single {@code Step.execute}/{@code Step.compensate} dispatch path.
@@ -58,7 +66,28 @@ final class StepInstantiator {
   <T> T instantiate(StepDefinition stepDef, Class<T> expectedType) {
     return switch (stepDef) {
       case ClassStep classStep -> resolveClassStep(classStep, expectedType);
+      case ServiceStep serviceStep -> resolveServiceStep(serviceStep, expectedType);
     };
+  }
+
+  private <T> T resolveServiceStep(ServiceStep stepDef, Class<T> expectedType) {
+    String name = stepDef.getName();
+    String service = stepDef.getService();
+    // Fail fast at registration (the analog of resolving a class step) if the service has no
+    // registered transport endpoint. The SAGA/TCC phase set was already validated against the
+    // saga's mode at definition build time, so the adapter is selected purely by expectedType.
+    if (!httpEndpointRegistry.contains(service)) {
+      throw new SagaDefinitionException(
+          "Declarative service step '"
+              + name
+              + "' references unregistered service '"
+              + service
+              + "'");
+    }
+    if (expectedType == TccStep.class) {
+      return expectedType.cast(httpEndpointRegistry.toTccStep(name, service, stepDef.getPhases()));
+    }
+    return expectedType.cast(httpEndpointRegistry.toStep(name, service, stepDef.getPhases()));
   }
 
   private <T> T resolveClassStep(ClassStep stepDef, Class<T> expectedType) {

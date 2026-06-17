@@ -4,7 +4,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.scalar.db.saga.api.CallSpec;
+import com.scalar.db.saga.api.HttpCall;
+import com.scalar.db.saga.api.SagaContext;
+import com.scalar.db.saga.api.SagaDefinition.ServiceStep.Phase;
 import com.scalar.db.saga.api.SagaHttpClient;
+import com.scalar.db.saga.api.Step;
+import com.scalar.db.saga.api.TccStep;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -18,11 +24,21 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Tests for {@link HttpEndpoint}: the single per-endpoint owner of the shared {@link HttpExchange}
- * that produces the code-step {@link SagaHttpClient}. The key invariant is that the client rides
- * the endpoint's {@link HttpExchange} (one client, one policy), verified via the package-private
- * accessors.
+ * that produces both the code-step {@link SagaHttpClient} and the declarative {@link Step}/{@link
+ * TccStep}. The key invariant is that both front-ends ride the SAME {@link HttpExchange} (one
+ * client, one policy), verified directly via the package-private accessors.
  */
 class HttpEndpointTest {
+
+  private static final Map<Phase, CallSpec> SAGA_PHASES =
+      Map.of(
+          Phase.EXECUTION, HttpCall.newBuilder("/do").build(),
+          Phase.COMPENSATION, HttpCall.newBuilder("/undo").build());
+  private static final Map<Phase, CallSpec> TCC_PHASES =
+      Map.of(
+          Phase.RESERVATION, HttpCall.newBuilder("/reserve").build(),
+          Phase.CONFIRMATION, HttpCall.newBuilder("/confirm").build(),
+          Phase.CANCELLATION, HttpCall.newBuilder("/cancel").build());
 
   private static HttpServiceConfig config(String baseUrl) {
     return new HttpServiceConfig(baseUrl, List.of(), -1, null, Map.of());
@@ -66,14 +82,32 @@ class HttpEndpointTest {
   }
 
   @Test
-  void sagaHttpClient_ridesTheEndpointsSharedHttpExchange() {
+  void sagaHttpClientAndDeclarativeStep_sameEndpoint_shareOneHttpExchange() {
     // Arrange
     try (HttpEndpoint endpoint = HttpEndpoint.create(config("http://account-svc:8080"))) {
       // Act
       SagaHttpClient client = endpoint.sagaHttpClient();
+      endpoint.toStep("debit", SAGA_PHASES); // returns a step backed by the shared adapter
 
-      // Assert — the SagaHttpClient rides the very same HttpExchange instance the endpoint owns.
-      assertThat(((SagaHttpClientImpl) client).exchange()).isSameAs(endpoint.exchange());
+      // Assert — the SagaHttpClient, the declarative transport adapter, and the endpoint all ride
+      // the very same HttpExchange instance (and therefore the same policy).
+      HttpExchange shared = endpoint.exchange();
+      assertThat(((SagaHttpClientImpl) client).exchange()).isSameAs(shared);
+      assertThat(((HttpTransportAdapter) endpoint.transportAdapter()).exchange()).isSameAs(shared);
+    }
+  }
+
+  @Test
+  void sagaHttpClientAndDeclarativeStep_sameEndpoint_shareOnePolicy() {
+    // Arrange
+    try (HttpEndpoint endpoint = HttpEndpoint.create(config("http://account-svc:8080"))) {
+      // Act
+      HttpExchange clientExchange = ((SagaHttpClientImpl) endpoint.sagaHttpClient()).exchange();
+      HttpExchange adapterExchange =
+          ((HttpTransportAdapter) endpoint.transportAdapter()).exchange();
+
+      // Assert — both front-ends classify through the same OutboundHttpPolicy instance.
+      assertThat(clientExchange.policy()).isSameAs(adapterExchange.policy());
     }
   }
 
@@ -92,10 +126,41 @@ class HttpEndpointTest {
   }
 
   @Test
-  void defaultHeaders_applied_onSagaHttpClientPath() throws Exception {
-    // Arrange — a server that records the Authorization header it sees.
+  void toStep_withSagaPhases_returnsNamedStep() {
+    // Arrange
+    try (HttpEndpoint endpoint = HttpEndpoint.create(config("http://account-svc:8080"))) {
+      // Act
+      Step step = endpoint.toStep("debit", SAGA_PHASES);
+
+      // Assert
+      assertThat(step.getName()).isEqualTo("debit");
+    }
+  }
+
+  @Test
+  void toTccStep_withTccPhases_returnsNamedTccStep() {
+    // Arrange
+    try (HttpEndpoint endpoint = HttpEndpoint.create(config("http://booking-svc:8080"))) {
+      // Act
+      TccStep step = endpoint.toTccStep("seat", TCC_PHASES);
+
+      // Assert
+      assertThat(step.getName()).isEqualTo("seat");
+    }
+  }
+
+  @Test
+  void defaultHeaders_applied_onBothDeclarativeAndSagaHttpClientPaths() throws Exception {
+    // Arrange — a server that records the Authorization header it sees on each request.
+    AtomicReference<String> declarativeAuth = new AtomicReference<>();
     AtomicReference<String> codeAuth = new AtomicReference<>();
     HttpServer server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+    server.createContext(
+        "/declarative",
+        ex -> {
+          declarativeAuth.set(ex.getRequestHeaders().getFirst("Authorization"));
+          respondJson(ex);
+        });
     server.createContext(
         "/code",
         ex -> {
@@ -109,7 +174,18 @@ class HttpEndpointTest {
             baseUrl, List.of(), -1, null, Map.of("Authorization", "Bearer secret"));
 
     try (HttpEndpoint endpoint = HttpEndpoint.create(config)) {
-      // Act — the SagaHttpClient (code-step) path.
+      // Act — the declarative transport adapter path.
+      SagaContext context = new FakeSagaContext("saga-1", Map.of());
+      endpoint
+          .transportAdapter()
+          .call(
+              HttpCall.newBuilder("/declarative")
+                  .method(com.scalar.db.saga.api.HttpMethod.GET)
+                  .build(),
+              context,
+              "d");
+
+      // Act — the SagaHttpClient (code-step) path, both riding the same exchange.
       SagaCorrelationContext.Correlation previous = SagaCorrelationContext.bind("saga-1", "c", 0L);
       try {
         endpoint.sagaHttpClient().get("/code").send();
@@ -117,7 +193,8 @@ class HttpEndpointTest {
         SagaCorrelationContext.restore(previous);
       }
 
-      // Assert — the endpoint default header reached the server.
+      // Assert — the endpoint default header reached the server on BOTH front-ends.
+      assertThat(declarativeAuth.get()).isEqualTo("Bearer secret");
       assertThat(codeAuth.get()).isEqualTo("Bearer secret");
     } finally {
       server.stop(0);

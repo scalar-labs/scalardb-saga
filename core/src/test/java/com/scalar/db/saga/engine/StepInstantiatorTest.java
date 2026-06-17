@@ -3,6 +3,7 @@ package com.scalar.db.saga.engine;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.scalar.db.saga.api.HttpCall;
 import com.scalar.db.saga.api.SagaContext;
 import com.scalar.db.saga.api.SagaDefinition;
 import com.scalar.db.saga.api.SagaDefinition.SagaMode;
@@ -11,6 +12,8 @@ import com.scalar.db.saga.api.Step;
 import com.scalar.db.saga.api.StepResult;
 import com.scalar.db.saga.api.TccStep;
 import com.scalar.db.saga.exception.SagaDefinitionException;
+import com.scalar.db.saga.transport.HttpServiceConfig;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
@@ -42,6 +45,79 @@ class StepInstantiatorTest {
     assertThatThrownBy(
             () -> instantiator.instantiate(classStep("x", "com.example.X"), TccStep.class))
         .isInstanceOf(SagaDefinitionException.class);
+  }
+
+  @Test
+  void instantiate_declarativeSagaStep_resolvesToStep() {
+    // Arrange — an HTTP endpoint is registered for the step's service
+    HttpEndpointRegistry endpoints =
+        HttpEndpointRegistry.create(
+            Map.of(
+                "account",
+                new HttpServiceConfig("http://account-svc:8080", List.of(), -1, null, Map.of())));
+    StepInstantiator instantiator =
+        new StepInstantiator((name, className, ctx) -> noopStep(name), endpoints);
+
+    // Act
+    Step step = instantiator.instantiate(declarativeSagaStep("debit", "account"), Step.class);
+
+    // Assert
+    assertThat(step.getName()).isEqualTo("debit");
+  }
+
+  @Test
+  void instantiate_declarativeTccStep_resolvesToTccStep() {
+    // Arrange
+    HttpEndpointRegistry endpoints =
+        HttpEndpointRegistry.create(
+            Map.of(
+                "booking",
+                new HttpServiceConfig("http://booking-svc:8080", List.of(), -1, null, Map.of())));
+    StepInstantiator instantiator =
+        new StepInstantiator((name, className, ctx) -> noopStep(name), endpoints);
+
+    // Act
+    TccStep step = instantiator.instantiate(declarativeTccStep("seat", "booking"), TccStep.class);
+
+    // Assert
+    assertThat(step.getName()).isEqualTo("seat");
+  }
+
+  @Test
+  void instantiate_declarativeStepUnregisteredService_throwsSagaDefinitionException() {
+    // Arrange
+    StepInstantiator instantiator =
+        new StepInstantiator((name, className, ctx) -> noopStep(name), EMPTY_ENDPOINTS);
+
+    // Act & Assert
+    assertThatThrownBy(
+            () -> instantiator.instantiate(declarativeSagaStep("debit", "missing"), Step.class))
+        .isInstanceOf(SagaDefinitionException.class);
+  }
+
+  private static StepDefinition declarativeSagaStep(String name, String service) {
+    return SagaDefinition.newBuilder("s", SagaMode.SAGA)
+        .serviceStep(name, service)
+        .operation()
+        .execution(HttpCall.newBuilder("/do").build())
+        .compensation(HttpCall.newBuilder("/undo").build())
+        .add()
+        .build()
+        .getSteps()
+        .get(0);
+  }
+
+  private static StepDefinition declarativeTccStep(String name, String service) {
+    return SagaDefinition.newBuilder("s", SagaMode.TCC)
+        .serviceStep(name, service)
+        .tccOperation()
+        .reservation(HttpCall.newBuilder("/reserve").build())
+        .confirmation(HttpCall.newBuilder("/confirm").build())
+        .cancellation(HttpCall.newBuilder("/cancel").build())
+        .add()
+        .build()
+        .getSteps()
+        .get(0);
   }
 
   private static StepDefinition classStep(String name, String stepClass) {

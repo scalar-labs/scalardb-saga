@@ -19,18 +19,19 @@ import java.util.TreeMap;
 import org.jspecify.annotations.Nullable;
 
 /**
- * The shared HTTP machinery behind the code-step {@code SagaHttpClient}: JSON encoding,
- * correlation-header propagation, status→retryable classification (including the {@code
- * X-Saga-Retryable} override), and {@link OutboundHttpPolicy} (SSRF allowlist + body limits).
- * Keeping it in one place means all front-ends behave identically. Response decoding lives in
- * {@link HttpCallResponse}. The per-request timeout may be supplied per call so the single shared,
- * immutable instance can honor each step's remaining deadline.
+ * The shared HTTP machinery behind the declarative {@code HttpTransportAdapter} and the code-step
+ * {@code SagaHttpClient}: JSON encoding, correlation-header propagation, status→retryable
+ * classification (including the {@code X-Saga-Retryable} override), and {@link OutboundHttpPolicy}
+ * (SSRF allowlist + body limits). Keeping it in one place means all front-ends behave identically.
+ * Response decoding lives in {@link HttpCallResponse}. The per-request timeout may be supplied per
+ * call so the single shared, immutable instance can honor each step's remaining deadline.
  *
  * <p>Endpoint default headers (set on the {@code httpEndpoint(...)} sub-builder, never persisted in
  * a definition — the channel for auth/secrets) are applied to every request through this exchange,
- * so the code-step {@code SagaHttpClient} gets them for free. Precedence per header name: a
- * caller-supplied per-call header overrides a default header of the same name; the framework
- * correlation headers ({@code X-Saga-Id}/{@code X-Saga-Step}) are always set last and win.
+ * so both the declarative {@code HttpTransportAdapter} and the code-step {@code SagaHttpClient} get
+ * them for free. Precedence per header name: a caller-supplied per-call header overrides a default
+ * header of the same name; the framework correlation headers ({@code X-Saga-Id}/{@code
+ * X-Saga-Step}) are always set last and win.
  */
 final class HttpExchange {
 

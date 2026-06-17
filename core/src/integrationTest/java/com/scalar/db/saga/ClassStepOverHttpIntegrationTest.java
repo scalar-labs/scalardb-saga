@@ -2,6 +2,7 @@ package com.scalar.db.saga;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.scalar.db.saga.api.HttpCall;
 import com.scalar.db.saga.api.Named;
 import com.scalar.db.saga.api.RetryPolicy;
 import com.scalar.db.saga.api.SagaContext;
@@ -41,10 +42,13 @@ import org.junit.jupiter.api.Test;
  * End-to-end coverage of <b>code steps</b> that call a participant through the injected {@link
  * SagaHttpClient} (Layer 2a). The client is resolved by the DEFAULT reflective resolver from {@code
  * httpEndpoint(name, baseUrl)} and exercised against a real in-process participant over a
- * SQLite-backed store: the SAGA happy path with output flowing from one code step into the next and
- * correlation-header propagation, engine retry on a retryable {@code 503} surfaced through {@code
- * send()}, compensation of a completed code step when a later code step fails non-retryably ({@code
- * 422}), and crash-recovery that re-resolves the code {@link SagaHttpClient} steps.
+ * SQLite-backed store. Mirrors {@link ServiceStepOverHttpIntegrationTest} (which covers the
+ * declarative Layer 2b) for the code-step front-end: the SAGA happy path with output flowing from
+ * one code step into the next and correlation-header propagation, engine retry on a retryable
+ * {@code 503} surfaced through {@code send()}, compensation of a completed code step when a later
+ * code step fails non-retryably ({@code 422}), a mixed code + declarative saga sharing ONE endpoint
+ * (the Phase-2 shared-engine payoff), and crash-recovery that re-resolves both a code {@link
+ * SagaHttpClient} step and a declarative step.
  */
 class ClassStepOverHttpIntegrationTest {
 
@@ -58,6 +62,8 @@ class ClassStepOverHttpIntegrationTest {
   private final CopyOnWriteArrayList<String> notified = new CopyOnWriteArrayList<>();
   private final CopyOnWriteArrayList<String> cancelled = new CopyOnWriteArrayList<>();
   private final AtomicInteger flakyCalls = new AtomicInteger();
+  private final CopyOnWriteArrayList<String> declarativeNotified = new CopyOnWriteArrayList<>();
+  private final AtomicReference<String> declarativeSagaStepHeader = new AtomicReference<>();
 
   @BeforeEach
   void setUp() throws Exception {
@@ -100,6 +106,13 @@ class ClassStepOverHttpIntegrationTest {
           } else {
             respond(ex, 200, "{\"ok\":true}");
           }
+        });
+    server.createContext(
+        "/declarative-notify",
+        ex -> {
+          declarativeSagaStepHeader.set(ex.getRequestHeaders().getFirst("X-Saga-Step"));
+          declarativeNotified.add(readBody(ex));
+          respond(ex, 200, "{}");
         });
     server.start();
     baseUrl = "http://localhost:" + server.getAddress().getPort();
@@ -202,17 +215,64 @@ class ClassStepOverHttpIntegrationTest {
   }
 
   // ---------------------------------------------------------------------------
-  // 4. Crash-recovery over HTTP-backed code steps
+  // 4. Mixed code + declarative, same endpoint
+  // ---------------------------------------------------------------------------
+
+  @Test
+  void start_codeAndDeclarativeStepsShareOneEndpoint_bothExecuteAndPropagateHeaders() {
+    // Arrange — ONE httpEndpoint("svc", ...); a code step (injected SagaHttpClient) followed by a
+    // declarative serviceStep, both against the same endpoint
+    SagaDefinition def =
+        SagaDefinition.newBuilder("mixed-saga", SagaMode.SAGA)
+            .step("fetch", FetchUserStep.class.getName())
+            .add()
+            .serviceStep("declarativeNotify", "svc")
+            .operation()
+            .execution(
+                HttpCall.newBuilder("/declarative-notify")
+                    .jsonBody(Map.of("user", "${userName}"))
+                    .build())
+            .compensation(HttpCall.newBuilder("/noop").build())
+            .add()
+            .build();
+
+    try (SagaManager manager = buildManager("svc")) {
+      manager.register(def);
+
+      // Act
+      String sagaId = manager.start("mixed-saga", Map.of("userId", "u-1"));
+
+      // Assert — both kinds executed end-to-end against the shared endpoint, and BOTH propagated
+      // the
+      // correlation headers (the code step via the injected client, the declarative step via the
+      // shared transport adapter)
+      assertThat(manager.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.COMPLETED);
+      assertThat(sagaIdHeader.get()).isEqualTo(sagaId);
+      assertThat(sagaStepHeader.get()).isEqualTo("fetch");
+      assertThat(declarativeNotified).hasSize(1);
+      assertThat(declarativeNotified.get(0)).contains("alice");
+      assertThat(declarativeSagaStepHeader.get()).isEqualTo("declarativeNotify");
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 5. Crash-recovery over HTTP-backed steps
   // ---------------------------------------------------------------------------
 
   @Test
   void recover_crashAfterCodeStep_reResolvesHttpStepsAndCompletes() {
-    // Arrange — two code steps (each using the injected SagaHttpClient)
+    // Arrange — a code step (injected SagaHttpClient) followed by a declarative step
     SagaDefinition def =
         SagaDefinition.newBuilder("recover-saga", SagaMode.SAGA)
             .step("fetch", FetchUserStep.class.getName())
             .add()
-            .step("notify", NotifyStep.class.getName())
+            .serviceStep("declarativeNotify", "svc")
+            .operation()
+            .execution(
+                HttpCall.newBuilder("/declarative-notify")
+                    .jsonBody(Map.of("user", "${userName}"))
+                    .build())
+            .compensation(HttpCall.newBuilder("/noop").build())
             .add()
             .build();
 
@@ -230,9 +290,9 @@ class ClassStepOverHttpIntegrationTest {
         // Expected crash after the code step's completion event was persisted
       }
 
-      // The first code step ran; the second has not yet been reached
+      // The code step ran; the declarative step has not yet been reached
       assertThat(manager.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.RUNNING);
-      assertThat(notified).isEmpty();
+      assertThat(declarativeNotified).isEmpty();
     }
 
     // Restart — fresh manager built with the SAME httpEndpoint; recovery must re-resolve both kinds
@@ -242,13 +302,13 @@ class ClassStepOverHttpIntegrationTest {
       recoveryStore.markForRecovery(sagaId);
       recovered.recover();
 
-      // Assert — recovery re-resolved both SagaHttpClient code steps and completed the saga; the
-      // second code step ran exactly once (the first step's result was persisted before the crash,
-      // so it is not re-executed)
+      // Assert — recovery re-resolved the SagaHttpClient code step and the declarative step and
+      // completed the saga; the declarative step ran exactly once (the code step's result was
+      // persisted before the crash, so it is not re-executed)
       SagaStateSnapshot result = recovered.getStateSnapshot(sagaId);
       assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPLETED);
-      assertThat(notified).hasSize(1);
-      assertThat(notified.get(0)).contains("alice");
+      assertThat(declarativeNotified).hasSize(1);
+      assertThat(declarativeNotified.get(0)).contains("alice");
     }
   }
 
