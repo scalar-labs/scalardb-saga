@@ -118,10 +118,10 @@ public final class CallSpecCodec {
       }
     }
     if (isPresent(node, QUERY)) {
-      callBuilder.query(readStringMap(node.get(QUERY)));
+      callBuilder.query(readStringMap(node.get(QUERY), stepName, QUERY));
     }
     if (isPresent(node, JSON_BODY)) {
-      callBuilder.jsonBody(readStringMap(node.get(JSON_BODY)));
+      callBuilder.jsonBody(readStringMap(node.get(JSON_BODY), stepName, JSON_BODY));
     }
     if (isPresent(node, STRING_BODY)) {
       callBuilder.stringBody(node.get(STRING_BODY).asText());
@@ -130,7 +130,7 @@ public final class CallSpecCodec {
       callBuilder.contentType(node.get(CONTENT_TYPE).asText());
     }
     if (isPresent(node, OUTPUT)) {
-      callBuilder.output(readStringMap(node.get(OUTPUT)));
+      callBuilder.output(readStringMap(node.get(OUTPUT), stepName, OUTPUT));
     }
     try {
       return callBuilder.build();
@@ -177,7 +177,15 @@ public final class CallSpecCodec {
     return node;
   }
 
-  private static Map<String, String> readStringMap(JsonNode node) {
+  private static Map<String, String> readStringMap(JsonNode node, String stepName, String field) {
+    if (!node.isObject()) {
+      throw new SagaDefinitionException(
+          "Declarative service step '"
+              + stepName
+              + "' field '"
+              + field
+              + "' must be a JSON object");
+    }
     Map<String, String> map = new LinkedHashMap<>();
     node.fields().forEachRemaining(e -> map.put(e.getKey(), e.getValue().asText()));
     return map;

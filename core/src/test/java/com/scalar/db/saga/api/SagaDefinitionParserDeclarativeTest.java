@@ -235,6 +235,48 @@ class SagaDefinitionParserDeclarativeTest {
   }
 
   @Test
+  void parseJson_queryNotObjectGiven_throwsException() {
+    // Arrange — a non-object 'query' must not be silently dropped
+    String json =
+        "{\"name\":\"t\",\"mode\":\"SAGA\",\"steps\":["
+            + "{\"name\":\"debit\",\"service\":\"svc\","
+            + "\"execution\":{\"path\":\"/debit\",\"query\":\"amount=5\"},"
+            + "\"compensation\":{\"path\":\"/reverse\"}}]}";
+
+    // Act & Assert
+    assertThatThrownBy(() -> SagaDefinitionParser.parseJson(json))
+        .isInstanceOf(SagaDefinitionException.class);
+  }
+
+  @Test
+  void parseJson_jsonBodyNotObjectGiven_throwsException() {
+    // Arrange — a non-object 'jsonBody' (array) must not be silently dropped
+    String json =
+        "{\"name\":\"t\",\"mode\":\"SAGA\",\"steps\":["
+            + "{\"name\":\"debit\",\"service\":\"svc\","
+            + "\"execution\":{\"path\":\"/debit\",\"jsonBody\":[\"a\",\"b\"]},"
+            + "\"compensation\":{\"path\":\"/reverse\"}}]}";
+
+    // Act & Assert
+    assertThatThrownBy(() -> SagaDefinitionParser.parseJson(json))
+        .isInstanceOf(SagaDefinitionException.class);
+  }
+
+  @Test
+  void parseJson_outputNotObjectGiven_throwsException() {
+    // Arrange — a non-object 'output' must not be silently dropped
+    String json =
+        "{\"name\":\"t\",\"mode\":\"SAGA\",\"steps\":["
+            + "{\"name\":\"debit\",\"service\":\"svc\","
+            + "\"execution\":{\"path\":\"/debit\",\"output\":\"$.debit_id\"},"
+            + "\"compensation\":{\"path\":\"/reverse\"}}]}";
+
+    // Act & Assert
+    assertThatThrownBy(() -> SagaDefinitionParser.parseJson(json))
+        .isInstanceOf(SagaDefinitionException.class);
+  }
+
+  @Test
   void parseJson_unknownCallSpecFieldGiven_throwsException() {
     // Arrange — a misspelled 'method' ("methd") inside a call spec must not be silently ignored
     String json =
