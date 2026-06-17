@@ -61,6 +61,15 @@ final class OutboundHttpPolicy {
         if (normalized.isEmpty()) {
           throw new IllegalArgumentException("host must not be blank");
         }
+        // A port suffix would silently never match: URI.getHost() strips the port. IPv6 literals,
+        // however, must keep their brackets — URI.getHost() returns them bracketed (e.g. "[::1]").
+        if (normalized.startsWith("[")) {
+          if (!normalized.endsWith("]")) { // e.g. "[::1]:8080"
+            throw new IllegalArgumentException("host must not contain a port: " + host);
+          }
+        } else if (normalized.indexOf(':') >= 0) { // e.g. "localhost:8080" or bare "::1"
+          throw new IllegalArgumentException("host must not contain a port: " + host);
+        }
         allowedHosts.add(normalized);
       }
       return this;

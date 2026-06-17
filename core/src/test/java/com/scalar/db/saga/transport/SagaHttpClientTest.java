@@ -105,7 +105,8 @@ class SagaHttpClientTest {
     // Arrange — the server is far slower than the bound step deadline.
     SagaHttpClient client = client(OutboundHttpPolicy.allowAll());
     SagaCorrelationContext.Correlation previous =
-        SagaCorrelationContext.bind("saga-1", "s", System.currentTimeMillis() + 300L);
+        SagaCorrelationContext.bind(
+            "saga-1", "s", System.currentTimeMillis() + 300L, java.time.Clock.systemUTC());
 
     // Act — the per-request timeout is derived from the remaining step deadline.
     Throwable thrown;
@@ -311,6 +312,34 @@ class SagaHttpClientTest {
 
     // Assert — at most one body may be set
     assertThat(t).isInstanceOf(IllegalStateException.class);
+  }
+
+  @Test
+  @SuppressWarnings("NullAway") // deliberately passing null to exercise the runtime guard
+  void stringBody_nullContentTypeGiven_throwsNullPointerException() {
+    // Arrange
+    SagaHttpClient client = client(OutboundHttpPolicy.allowAll());
+    SagaHttpClient.Request request = client.post("/ok");
+
+    // Act
+    Throwable t = catchThrowable(() -> request.stringBody("x", null));
+
+    // Assert — a null content type must fail fast, not silently drop the body
+    assertThat(t).isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  @SuppressWarnings("NullAway") // deliberately passing null to exercise the runtime guard
+  void bytesBody_nullContentTypeGiven_throwsNullPointerException() {
+    // Arrange
+    SagaHttpClient client = client(OutboundHttpPolicy.allowAll());
+    SagaHttpClient.Request request = client.post("/ok");
+
+    // Act
+    Throwable t = catchThrowable(() -> request.bytesBody(new byte[] {1}, null));
+
+    // Assert — a null content type must fail fast, not silently drop the body
+    assertThat(t).isInstanceOf(NullPointerException.class);
   }
 
   @Test

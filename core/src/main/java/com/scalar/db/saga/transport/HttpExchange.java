@@ -147,7 +147,9 @@ final class HttpExchange {
       throw new HttpCallException("Invalid request URI or header for " + uri, e, false);
     }
 
-    if (body != null && contentType != null) {
+    // contentType independently gates the Content-Type header above; here we only care whether
+    // there is a body to send. Sending a body without a content type is valid HTTP — never drop it.
+    if (body != null) {
       requestBuilder.method(httpMethod, HttpRequest.BodyPublishers.ofByteArray(body));
     } else {
       requestBuilder.method(httpMethod, HttpRequest.BodyPublishers.noBody());

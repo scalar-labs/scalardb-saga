@@ -10,6 +10,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.StringJoiner;
 import org.jspecify.annotations.Nullable;
 
@@ -129,6 +130,8 @@ final class SagaHttpClientImpl implements SagaHttpClient {
     public Request stringBody(String body, String contentType) {
       checkNotSent();
       checkNoBody();
+      Objects.requireNonNull(body, "body must not be null");
+      Objects.requireNonNull(contentType, "contentType must not be null");
       this.rawBody = body.getBytes(StandardCharsets.UTF_8);
       this.contentType = contentType;
       this.bodySet = true;
@@ -139,6 +142,8 @@ final class SagaHttpClientImpl implements SagaHttpClient {
     public Request bytesBody(byte[] body, String contentType) {
       checkNotSent();
       checkNoBody();
+      Objects.requireNonNull(body, "body must not be null");
+      Objects.requireNonNull(contentType, "contentType must not be null");
       this.rawBody = body.clone();
       this.contentType = contentType;
       this.bodySet = true;

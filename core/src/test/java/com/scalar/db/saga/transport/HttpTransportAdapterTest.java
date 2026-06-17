@@ -106,7 +106,8 @@ class HttpTransportAdapterTest {
     // Arrange — the server is far slower than the bound step deadline.
     HttpCall spec = HttpCall.newBuilder("/slow").method(HttpMethod.GET).build();
     SagaCorrelationContext.Correlation previous =
-        SagaCorrelationContext.bind("saga-1", "s", System.currentTimeMillis() + 300L);
+        SagaCorrelationContext.bind(
+            "saga-1", "s", System.currentTimeMillis() + 300L, java.time.Clock.systemUTC());
 
     // Act — the per-request timeout is derived from the remaining step deadline.
     Throwable thrown;

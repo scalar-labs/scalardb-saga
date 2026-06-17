@@ -1,5 +1,6 @@
 package com.scalar.db.saga.transport;
 
+import java.time.Clock;
 import java.time.Duration;
 import org.jspecify.annotations.Nullable;
 
@@ -26,13 +27,13 @@ public final class SagaCorrelationContext {
 
   /**
    * The current saga correlation, immutable. {@code deadlineMillis} is the step's absolute deadline
-   * in epoch milliseconds — the engine clock, which is the system clock in production, so {@link
-   * #remaining()} can measure it against {@link System#currentTimeMillis()} — or {@code 0} when the
-   * step has no deadline.
+   * measured against {@code clock} — the engine's configured {@link Clock} (the system clock in
+   * production) — or {@code 0} when the step has no deadline. {@link #remaining()} computes the
+   * budget with that same clock so timeouts honor a test clock.
    */
-  public record Correlation(String sagaId, String stepName, long deadlineMillis) {}
+  public record Correlation(String sagaId, String stepName, long deadlineMillis, Clock clock) {}
 
-  private static final Correlation NONE = new Correlation("", "", 0L);
+  private static final Correlation NONE = new Correlation("", "", 0L, Clock.systemUTC());
 
   private static final ThreadLocal<@Nullable Correlation> CURRENT = new ThreadLocal<>();
 
@@ -40,11 +41,14 @@ public final class SagaCorrelationContext {
 
   /**
    * Binds the correlation for the current thread, returning the previous binding to restore. {@code
-   * deadlineMillis} is the step's wall-clock absolute deadline ({@code 0} for none).
+   * deadlineMillis} is the step's absolute deadline measured against {@code clock} ({@code 0} for
+   * none); {@code clock} is the engine's configured {@link Clock}, so a per-request timeout derived
+   * from it honors a test clock instead of bypassing it.
    */
-  public static @Nullable Correlation bind(String sagaId, String stepName, long deadlineMillis) {
+  public static @Nullable Correlation bind(
+      String sagaId, String stepName, long deadlineMillis, Clock clock) {
     Correlation previous = CURRENT.get();
-    CURRENT.set(new Correlation(sagaId, stepName, deadlineMillis));
+    CURRENT.set(new Correlation(sagaId, stepName, deadlineMillis, clock));
     return previous;
   }
 
@@ -70,10 +74,10 @@ public final class SagaCorrelationContext {
    * call rather than a non-positive timeout (which the JDK rejects).
    */
   static @Nullable Duration remaining() {
-    long deadline = current().deadlineMillis();
-    if (deadline <= 0) {
+    Correlation current = current();
+    if (current.deadlineMillis() <= 0) {
       return null;
     }
-    return Duration.ofMillis(Math.max(1L, deadline - System.currentTimeMillis()));
+    return Duration.ofMillis(Math.max(1L, current.deadlineMillis() - current.clock().millis()));
   }
 }

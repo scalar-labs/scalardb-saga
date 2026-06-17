@@ -42,6 +42,32 @@ class OutboundHttpPolicyTest {
   }
 
   @Test
+  void isAllowed_ipv6HostGiven_matchesBracketedLiteral() {
+    OutboundHttpPolicy policy = OutboundHttpPolicy.newBuilder().allowedHosts("[::1]").build();
+
+    assertThat(policy.isAllowed(URI.create("http://[::1]:8080/x"))).isTrue();
+    assertThat(policy.isAllowed(URI.create("http://[::2]/x"))).isFalse();
+  }
+
+  @Test
+  void allowedHosts_hostWithPortGiven_throwsIllegalArgumentException() {
+    assertThatThrownBy(() -> OutboundHttpPolicy.newBuilder().allowedHosts("localhost:8080"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void allowedHosts_ipv6HostWithPortGiven_throwsIllegalArgumentException() {
+    assertThatThrownBy(() -> OutboundHttpPolicy.newBuilder().allowedHosts("[::1]:8080"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void allowedHosts_unbracketedIpv6Given_throwsIllegalArgumentException() {
+    assertThatThrownBy(() -> OutboundHttpPolicy.newBuilder().allowedHosts("::1"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void allowedHosts_emptyHostGiven_throwsIllegalArgumentException() {
     assertThatThrownBy(() -> OutboundHttpPolicy.newBuilder().allowedHosts(""))
         .isInstanceOf(IllegalArgumentException.class);

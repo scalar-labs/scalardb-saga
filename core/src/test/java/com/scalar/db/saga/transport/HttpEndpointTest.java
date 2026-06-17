@@ -17,6 +17,7 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -186,7 +187,8 @@ class HttpEndpointTest {
               "d");
 
       // Act — the SagaHttpClient (code-step) path, both riding the same exchange.
-      SagaCorrelationContext.Correlation previous = SagaCorrelationContext.bind("saga-1", "c", 0L);
+      SagaCorrelationContext.Correlation previous =
+          SagaCorrelationContext.bind("saga-1", "c", 0L, Clock.systemUTC());
       try {
         endpoint.sagaHttpClient().get("/code").send();
       } finally {

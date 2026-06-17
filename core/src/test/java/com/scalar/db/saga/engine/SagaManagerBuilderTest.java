@@ -204,6 +204,17 @@ class SagaManagerBuilderTest {
   }
 
   @Test
+  void httpEndpoint_duplicateName_throwsIllegalArgumentException() {
+    // Arrange — register an endpoint named "svc"; a second add() with the same name must fail fast
+    // rather than silently overwrite (parity with ResourceRegistry).
+    var builder = SagaManagerBuilder.newBuilder().httpEndpoint("svc", "http://svc-a:8080").add();
+
+    // Act & Assert
+    assertThatThrownBy(() -> builder.httpEndpoint("svc", "http://svc-b:8080").add())
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void maxBodyBytes_nonPositive_throwsIllegalArgumentException() {
     // Act & Assert
     assertThatThrownBy(
