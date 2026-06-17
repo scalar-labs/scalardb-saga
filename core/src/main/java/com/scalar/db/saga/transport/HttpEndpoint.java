@@ -63,13 +63,30 @@ public final class HttpEndpoint implements AutoCloseable {
   /**
    * Builds an endpoint from {@code config}, creating a {@link HttpClient.Redirect#NEVER} client
    * with a bounded {@link #CONNECT_TIMEOUT connect timeout} if none was supplied. A caller-supplied
-   * client is used as-is (the caller owns its redirect/timeout configuration).
+   * client is used as-is (the caller owns its timeout configuration) — except that, when an {@code
+   * allowedHosts} allowlist is configured, it must use {@link HttpClient.Redirect#NEVER}: a
+   * redirect-following client could follow a 3xx from an allowed host to a disallowed one,
+   * bypassing the allowlist (which is only checked on the initial URI).
+   *
+   * @throws IllegalArgumentException if a supplied client follows redirects while an allowlist is
+   *     set
    */
   public static HttpEndpoint create(HttpServiceConfig config) {
     HttpClient client;
     boolean ownsClient;
     @Nullable HttpClient supplied = config.httpClient();
     if (supplied != null) {
+      // A redirect-following supplied client could follow a 3xx from an allowed host to a
+      // disallowed one, defeating the allowlist (HttpExchange only checks the initial URI). The JDK
+      // default is NEVER, so this only rejects a client that explicitly opted into redirects.
+      if (!config.allowedHosts().isEmpty()
+          && supplied.followRedirects() != HttpClient.Redirect.NEVER) {
+        throw new IllegalArgumentException(
+            "A supplied HttpClient used with an allowedHosts allowlist must use Redirect.NEVER"
+                + " (got "
+                + supplied.followRedirects()
+                + "): a redirect-following client can bypass the allowlist (SSRF).");
+      }
       client = supplied;
       ownsClient = false;
     } else {

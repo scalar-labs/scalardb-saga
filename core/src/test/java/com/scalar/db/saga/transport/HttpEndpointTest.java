@@ -2,6 +2,7 @@ package com.scalar.db.saga.transport;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.scalar.db.saga.api.CallSpec;
 import com.scalar.db.saga.api.HttpCall;
@@ -41,6 +42,43 @@ class HttpEndpointTest {
 
   private static HttpServiceConfig config(String baseUrl) {
     return new HttpServiceConfig(baseUrl, List.of(), -1, null, Map.of());
+  }
+
+  @Test
+  void create_suppliedRedirectFollowingClientWithAllowlist_throws() {
+    // Arrange — an allowlist plus a supplied client that follows redirects (an SSRF-bypass risk).
+    HttpClient redirecting =
+        HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NORMAL).build();
+    HttpServiceConfig cfg =
+        new HttpServiceConfig("http://svc:8080", List.of("svc"), -1, redirecting, Map.of());
+
+    // Act & Assert
+    assertThatThrownBy(() -> HttpEndpoint.create(cfg)).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void create_suppliedRedirectNeverClientWithAllowlist_ok() {
+    // Arrange — a supplied client that does not follow redirects is fine with an allowlist.
+    HttpClient nonRedirecting =
+        HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build();
+    HttpServiceConfig cfg =
+        new HttpServiceConfig("http://svc:8080", List.of("svc"), -1, nonRedirecting, Map.of());
+
+    // Act & Assert
+    assertThatCode(() -> HttpEndpoint.create(cfg).close()).doesNotThrowAnyException();
+  }
+
+  @Test
+  void create_suppliedRedirectFollowingClientNoAllowlist_ok() {
+    // Arrange — with no allowlist there is nothing to bypass, so a redirect-following client is
+    // fine.
+    HttpClient redirecting =
+        HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NORMAL).build();
+    HttpServiceConfig cfg =
+        new HttpServiceConfig("http://svc:8080", List.of(), -1, redirecting, Map.of());
+
+    // Act & Assert
+    assertThatCode(() -> HttpEndpoint.create(cfg).close()).doesNotThrowAnyException();
   }
 
   @Test
