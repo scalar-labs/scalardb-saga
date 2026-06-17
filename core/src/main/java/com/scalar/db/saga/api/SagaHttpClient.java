@@ -33,6 +33,11 @@ import java.util.Map;
  * concurrent saga executions (the same contract as a {@link Step}); it must be safe to use from
  * multiple threads. Each {@link Request} returned from a verb method is single-use and is not
  * shared.
+ *
+ * <p><b>Correlation scope:</b> the {@code X-Saga-Id}/{@code X-Saga-Step} headers are bound to the
+ * thread the engine runs the step on. Call this client directly on that thread; a call issued from
+ * a thread the step spawns itself (e.g. its own executor) falls back to empty correlation rather
+ * than failing.
  */
 public interface SagaHttpClient {
 

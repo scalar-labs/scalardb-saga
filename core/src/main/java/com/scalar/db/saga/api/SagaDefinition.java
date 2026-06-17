@@ -401,6 +401,11 @@ public final class SagaDefinition {
     private ServiceStep(
         AbstractStepBuilder<?> builder, String service, Map<Phase, CallSpec> phases) {
       super(builder);
+      if (phases.isEmpty()) {
+        // Structural guarantee: getTransport()/isTcc() read from the phase map, so an empty one is
+        // never a valid ServiceStep (the builder enforces a complete phase set before this point).
+        throw new IllegalArgumentException("a ServiceStep must define at least one phase");
+      }
       this.service = service;
       this.phases = Map.copyOf(phases);
     }
