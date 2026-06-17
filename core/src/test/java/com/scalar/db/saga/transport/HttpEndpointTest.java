@@ -110,7 +110,8 @@ class HttpEndpointTest {
 
     try (HttpEndpoint endpoint = HttpEndpoint.create(config)) {
       // Act — the SagaHttpClient (code-step) path.
-      SagaCorrelationContext.Correlation previous = SagaCorrelationContext.bind("saga-1", "c", 0L);
+      SagaCorrelationContext.Correlation previous =
+          SagaCorrelationContext.bind("saga-1", "c", 0L, java.time.Clock.systemUTC());
       try {
         endpoint.sagaHttpClient().get("/code").send();
       } finally {

@@ -105,7 +105,8 @@ class SagaHttpClientTest {
     // Arrange — the server is far slower than the bound step deadline.
     SagaHttpClient client = client(OutboundHttpPolicy.allowAll());
     SagaCorrelationContext.Correlation previous =
-        SagaCorrelationContext.bind("saga-1", "s", System.currentTimeMillis() + 300L);
+        SagaCorrelationContext.bind(
+            "saga-1", "s", System.currentTimeMillis() + 300L, java.time.Clock.systemUTC());
 
     // Act — the per-request timeout is derived from the remaining step deadline.
     Throwable thrown;
