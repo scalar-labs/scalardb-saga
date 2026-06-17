@@ -69,7 +69,7 @@ Typical user profiles:
   - [Async Step Completion (Daemon Mode Only)](#async-step-completion-daemon-mode-only)
   - [TCC (Try-Confirm-Cancel) Mode](#tcc-try-confirm-cancel-mode)
 - [Part III: Communication & Integration](#part-iii-communication--integration)
-  - [ServiceInvoker and Framework Integration](#serviceinvoker-and-framework-integration)
+  - [Declarative Service Steps and Framework Integration](#declarative-service-steps-and-framework-integration)
   - [Step Implementation Patterns](#step-implementation-patterns)
   - [Message Broker Extensibility](#message-broker-extensibility)
 - [Part IV: Developer Experience](#part-iv-developer-experience)
@@ -184,7 +184,7 @@ com.scalar.db.saga/
 | 4 | **SagaStore** (interface) | Append-only event persistence: 1 INSERT per step. Bucket-partitioned `saga_state` table with `status` as clustering key for efficient recovery scans and distributed writes. Default implementation: `ScalarDbSagaStore`. |
 | 5 | **SagaRecoveryManager** | Scans each `saga_state` bucket for `status=RUNNING` with stale `updated_at` (similar to Seata's model). Bucket partitioning distributes scans across database nodes. Replays events to reconstruct state. Conflict-based claiming via ScalarDB transaction conflict detection. |
 | 5b | **SagaRetentionManager** | Periodically purges resolved sagas (COMPLETED, COMPENSATED) older than a configurable retention period. Scans `saga_state` using CK prefix per (bucket, status), then deletes both `saga_state` and `saga_events` rows via `deleteSaga()`. ESCALATED sagas are excluded (require manual admin resolution). |
-| 6 | **ServiceInvoker** | Framework-agnostic typed lambdas for step dispatch. Declarative JSON communication (Layer 2b). |
+| 6 | **Declarative Steps & Transport** | Declarative service steps (`ServiceStep` + `CallSpec`) realized via the `TransportAdapter` SPI + `DeclarativeBindingStep`/`DeclarativeBindingTccStep`; `SagaHttpClient` for code steps. HTTP transport today (gRPC future). Automatic `${...}`/`$.path` mapping, `X-Saga-Id`/`X-Saga-Step` propagation, SSRF allowlist + body limits. |
 | 7 | **SagaTestHarness** | Integration testing: mock steps, crash simulation, assertion helpers. Uses `ScalarDbSagaStore` backed by in-memory SQLite. |
 | 8 | **SagaAdminService** | Production operations API: list, inspect, compensate, retry, force-complete. |
 | 9 | **SagaDevServer** | Zero-config dev environment: SQLite-backed database + embedded web UI. |
@@ -954,13 +954,13 @@ SagaDefinition def = SagaDefinition.newBuilder("PlaceOrder", SagaMode.SAGA)
     .build();
 ```
 
-The Java builder uses `stepClass` references — the developer writes communication logic in the `Step` implementation. For simple steps where no custom logic is needed, use the declarative `call`/`compensate` format in JSON/YAML instead (see [Declarative Communication](#solution-declarative-communication-in-the-saga-definition)).
+The Java builder supports both `step(...)` (a `stepClass` code step) and `serviceStep(...)` (a declarative service step). Use a code step when you need custom Java logic; use `serviceStep(...).operation()`/`.tccOperation()` for simple service calls where no Java code is needed (see [Layer 2: Declarative Service Steps](#layer-2-declarative-service-steps)).
 
 #### Saga Definition Formats
 
-| Format | `stepClass` (Java code) | Declarative `call` (no code) | Primary use |
+| Format | `stepClass` (code step) | Declarative service step (no code) | Primary use |
 |---|---|---|---|
-| **Java builder** | Yes | No (just write a Step class) | Embedded mode |
+| **Java builder** | Yes | Yes | Embedded mode |
 | **JSON/YAML** | Yes (embedded only) | Yes | Both modes |
 | **Protocol Buffers** | No | Yes | Daemon mode (Phase 7a) |
 
@@ -975,44 +975,59 @@ public class SagaDefinition {
     private String version;
     private SagaMode mode;                    // SAGA (default) or TCC
     private List<StepDefinition> steps;
-    private RecoveryStrategy recoveryStrategy;  // Saga mode only: BACKWARD, FORWARD, or MIXED (null for TCC)
+    private RecoveryStrategy recoveryStrategy;  // SAGA: BACKWARD/FORWARD/MIXED. TCC: PREDEFINED.
     private long timeoutMillis;                   // saga-level timeout (0 = no timeout)
     private RetryPolicy defaultRetryPolicy;
 
     public enum SagaMode { SAGA, TCC }
-    public enum RecoveryStrategy { BACKWARD, FORWARD, MIXED }
-    // BACKWARD: on step failure, compensate all completed steps (default)
-    // FORWARD:  on step failure, saga stays RUNNING for automatic recovery retry
-    // MIXED:    steps before the pivot are compensatable (backward recovery on failure),
-    //           steps after the pivot are retriable (forward recovery on failure).
-    //           The pivot step itself is the go/no-go point: if it fails, compensate
-    //           all completed steps before it (backward). Once the pivot succeeds,
-    //           all subsequent steps must succeed (retry on failure, never compensate).
-    //           Exactly one step must have pivot=true when recoveryStrategy is MIXED.
+    public enum RecoveryStrategy { BACKWARD, FORWARD, MIXED, PREDEFINED }
+    // BACKWARD:   on step failure, compensate all completed steps (default for SAGA)
+    // FORWARD:    on step failure, saga stays RUNNING for automatic recovery retry
+    // MIXED:      steps before the pivot are compensatable (backward recovery on failure),
+    //             steps after the pivot are retriable (forward recovery on failure).
+    //             The pivot step itself is the go/no-go point: if it fails, compensate
+    //             all completed steps before it (backward). Once the pivot succeeds,
+    //             all subsequent steps must succeed (retry on failure, never compensate).
+    //             Exactly one step must have pivot=true when recoveryStrategy is MIXED.
+    // PREDEFINED: recovery is fixed by the mode — reserved for TCC, whose recovery is the
+    //             Cancel phase. TCC definitions default to (and must use) PREDEFINED;
+    //             SAGA mode rejects it.
 
-    public static class StepDefinition {
-        String name;                 // unique within the saga (used as idempotency key with sagaId)
-        String stepClass;            // FQCN of Step implementation (always non-null).
-                                     // For user-written steps: user-provided FQCN (e.g., "com.example.DebitAccountStep").
-                                     // For declarative steps: auto-set to DeclarativeStepAdapter by the definition parser.
-        long timeoutMillis;              // per-step timeout (0 = use saga-level timeout only)
+    // Sealed: a step is either a code step (ClassStep) or a declarative service
+    // step (ServiceStep). The engine resolves both to a Step/TccStep before
+    // execution — see "Single Dispatch Path".
+    public abstract sealed static class StepDefinition permits ClassStep, ServiceStep {
+        String name;                 // unique within the saga (idempotency key with sagaId)
+        long timeoutMillis;          // per-step timeout (0 = use saga-level timeout only)
         RetryPolicy retryPolicy;     // per-step override (nullable)
         boolean pivot;               // true = this is the pivot step (at most one per saga)
     }
 
+    // Layer 1: a hand-written Step/TccStep implementation.
+    public static final class ClassStep extends StepDefinition {
+        String stepClass;            // FQCN of the Step/TccStep implementation
+    }
+
+    // Layer 2: a declarative service step — no Java code.
+    public static final class ServiceStep extends StepDefinition {
+        String service;                  // logical endpoint name (resolved via config)
+        Map<Phase, CallSpec> phases;     // one CallSpec per phase
+        // SAGA: EXECUTION, COMPENSATION. TCC: RESERVATION, CONFIRMATION, CANCELLATION.
+        public enum Phase {
+            EXECUTION, COMPENSATION, RESERVATION, CONFIRMATION, CANCELLATION
+        }
+    }
+
     /**
      * Returns the pivot index for the execution plan.
-     * For BACKWARD: lastIndex (all steps are compensatable).
+     * For BACKWARD or PREDEFINED (TCC): lastIndex (last step; for TCC the last try step,
+     *   whose confirm steps are added by the engine).
      * For FORWARD: -1 (all steps are retriable).
      * For MIXED: the index of the step with pivot=true.
-     * For TCC: lastIndex (last try step; confirm steps are added by expandTccPlan).
      */
     public int getPivotIndex() {
-        if (mode == SagaMode.TCC) {
-            return steps.size() - 1;
-        }
         return switch (recoveryStrategy) {
-            case BACKWARD -> steps.size() - 1;
+            case BACKWARD, PREDEFINED -> steps.size() - 1;
             case FORWARD -> -1;
             case MIXED -> {
                 for (int i = 0; i < steps.size(); i++) {
@@ -1024,13 +1039,24 @@ public class SagaDefinition {
     }
 
     // Validation (called at registration time):
-    // - TCC definitions must not specify pivot steps (pivot is implicit)
+    // - TCC definitions must use PREDEFINED and must not specify pivot steps (pivot is implicit)
+    // - PREDEFINED is reserved for TCC — SAGA mode rejects it
     // - MIXED definitions must have exactly one step with pivot=true
     // - BACKWARD/FORWARD definitions must not have pivot=true on any step
     public void validate() {
-        if (mode == SagaMode.TCC && steps.stream().anyMatch(StepDefinition::isPivot)) {
+        if (mode == SagaMode.TCC) {
+            if (recoveryStrategy != RecoveryStrategy.PREDEFINED) {
+                throw new SagaDefinitionException(
+                    "TCC mode must not specify a recovery strategy"
+                        + " — recovery is predefined via the Cancel phase");
+            }
+            if (steps.stream().anyMatch(StepDefinition::isPivot)) {
+                throw new SagaDefinitionException(
+                    "TCC definitions must not specify pivot steps — the pivot is implicit");
+            }
+        } else if (recoveryStrategy == RecoveryStrategy.PREDEFINED) {
             throw new SagaDefinitionException(
-                "TCC definitions must not specify pivot steps — the pivot is implicit (last try step)");
+                "PREDEFINED recovery strategy is reserved for TCC mode");
         }
     }
 }
@@ -1061,7 +1087,7 @@ Note that `BACKWARD` and `FORWARD` are special cases of the mixed recovery model
 
 - `pivot: true` is required on exactly one step when `recoveryStrategy` is `MIXED`, rejected otherwise.
 - The pivot step must not be the first or last step — use `FORWARD` or `BACKWARD` instead for those degenerate cases. This prevents confusion and makes the intent explicit.
-- `recoveryStrategy` is rejected on TCC definitions (TCC has fixed recovery behavior).
+- TCC definitions use the `PREDEFINED` strategy (recovery is the Cancel phase); specifying any other strategy on a TCC definition is rejected, and `PREDEFINED` is rejected in SAGA mode.
 
 ### SagaManager (Top-Level API)
 
@@ -3669,7 +3695,7 @@ Default: **10 attempts** with exponential backoff (more aggressive than the stan
 
 ### Recovery in TCC Mode
 
-Unlike Saga mode, where `recoveryStrategy` is configurable (BACKWARD, FORWARD, or MIXED), TCC mode has **fixed recovery behavior** defined by the TCC protocol. The `recoveryStrategy` field is not applicable to TCC definitions.
+Unlike Saga mode, where `recoveryStrategy` is configurable (BACKWARD, FORWARD, or MIXED), TCC mode has **fixed recovery behavior** defined by the TCC protocol — represented internally by the `PREDEFINED` strategy. You must not set `recoveryStrategy` on a TCC definition; the engine rejects any value other than the implicit `PREDEFINED`.
 
 TCC recovery follows the same **two-phase retry pattern** as Saga mode: immediate retry (in the engine) → periodic recovery retry (recovery manager) → time-based escalation. The phases differ in which retry behavior applies:
 
@@ -3729,303 +3755,176 @@ Seata's TCC uses annotations (`@TwoPhaseBusinessAction`) with a centralized Tran
 
 # Part III: Communication & Integration
 
-## ServiceInvoker and Framework Integration
+## Declarative Service Steps and Framework Integration
 
-### Architecture: Three Layers
+### Architecture: Layered Step Authoring
 
-The saga engine is designed as three layers. Each layer builds on the one below, and users choose which layer to interact with based on their needs:
+The saga engine is framework-agnostic at its core. On top of that core, users choose how much they want to write themselves, from a full `Step` class down to a few lines of declarative configuration:
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│  Layer 3: Framework Integration (Spring Boot / Quarkus)           │
+│  Layer 3: Framework Integration (Spring Boot / Quarkus) — future  │
 │                                                                   │
-│  @SagaStep, @SagaCompensation annotations                        │
+│  @SagaStep / @SagaCompensation annotations                       │
 │  Build-time (Quarkus) or startup-time (Spring) scanning          │
-│  Auto-generates ServiceInvoker registrations                     │
+│  Auto-registers Step / ServiceStep definitions                   │
 │  Users keep using framework-native clients                       │
 │  (@FeignClient, @GrpcClient, @RestClient, @Autowired, @Inject)  │
 ├──────────────────────────────────────────────────────────────────┤
-│  Layer 2: ServiceInvoker (framework-agnostic)                     │
+│  Layer 2: Declarative Service Steps (framework-agnostic)          │
 │                                                                   │
-│  ServiceInvokerRegistry                                          │
-│  Typed lambdas — no reflection                                   │
-│  Built-in invokers: GrpcInvoker, HttpInvoker, SpringBeanInvoker  │
-│  Saga context propagation (X-Saga-Id, X-Saga-Step headers)      │
+│  ServiceStep + CallSpec in the saga definition — zero Java code  │
+│  Realized by DeclarativeBindingStep / DeclarativeBindingTccStep  │
+│  over a pluggable TransportAdapter SPI (HTTP today; gRPC future) │
+│  Automatic ${...}/$.path mapping, context propagation, error     │
+│    classification, SSRF allowlist + body-size limits             │
 ├──────────────────────────────────────────────────────────────────┤
-│  Layer 1: Core Engine (framework-agnostic)                        │
+│  Layer 1: Core Engine + Code Steps (framework-agnostic)          │
 │                                                                   │
-│  Step interface, SagaEngine, SagaStore      │
+│  Step / TccStep interfaces, SagaEngine, SagaStore               │
 │  SagaRecoveryManager, RetryPolicy                                │
+│  SagaHttpClient removes HTTP boilerplate inside code steps       │
 │  Works with any transport, any database                          │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
 Users can interact at any layer:
-- **Layer 1 only**: Full control, implement `Step` interface directly. Best for complex steps or when no framework is used.
-- **Layer 2**: Register typed lambdas in `ServiceInvokerRegistry`. Java builder or JSON/YAML-driven saga definitions. No Step classes needed.
-- **Layer 3**: Annotate methods in a saga class. Framework scans and auto-registers. Minimal boilerplate.
+- **Layer 1 (code steps)**: Full control — implement the `Step` / `TccStep` interface directly. Best for complex steps (conditional logic, multi-call orchestration, non-HTTP transports). For the common case of calling one HTTP endpoint, inject a `SagaHttpClient` to remove the transport boilerplate while keeping full programmatic control.
+- **Layer 2 (declarative service steps)**: No Java code — define the request/response mapping for each phase directly in the saga definition (Java builder or JSON/YAML). The engine handles transport, marshaling, context propagation, and error classification. Best for straightforward service calls.
+- **Layer 3 (framework integration — future)**: Annotate methods on a saga class; the framework scans and auto-registers them. Minimal boilerplate for Spring/Quarkus users.
 
-### Layer 2: ServiceInvoker
+> **What changed:** earlier revisions of this design had a separate *Layer 2 `ServiceInvoker`* of typed lambdas (`ServiceInvokerRegistry`, `GrpcInvoker`, `HttpInvoker`). That layer has been **removed**. Its two motivations are now served more directly: the *no-code* case by **declarative service steps** (below), and the *typed-but-custom* case by ordinary **code steps** with an injected `SagaHttpClient`. There is no longer a lambda registry to maintain.
 
-#### Why Not Reflection (Like Seata)
+### Layer 1: Code Steps with `SagaHttpClient`
 
-Seata's `ServiceInvokerManager` uses reflection to invoke business methods:
+A code step is a class implementing `Step` (SAGA mode) or `TccStep` (TCC mode). It runs in the orchestrator process and may do anything inside its methods. When the work is "call one HTTP endpoint," `SagaHttpClient` removes the boilerplate of building a request, propagating saga headers, enforcing the outbound policy, and classifying the response — without giving up programmatic control.
 
-```java
-// Seata internally does this:
-Object bean = applicationContext.getBean(serviceName);
-Method method = bean.getClass().getMethod(methodName);
-Object result = method.invoke(bean, args);  // ← reflection, type-unsafe
-```
-
-This is fragile — type mismatches are runtime errors, parameter mapping is complex, and debugging is hard. Our design uses **typed lambdas** instead:
+`SagaHttpClient` is injected into the step's constructor. When more than one endpoint is registered, the `@Named` qualifier selects one by name; with a single endpoint the qualifier is optional.
 
 ```java
-// Our approach — type-safe, no reflection
-registry.register("account-service", GrpcInvoker.newBuilder(accountStub)
-    .action("debit", (stub, ctx) -> {
-        var resp = stub.debit(DebitRequest.newBuilder()
-            .setAccountId(ctx.get("accountId", String.class))
-            .setAmount(ctx.get("amount", Integer.class))
-            .build());
-        return StepResult.of("debitId", resp.getDebitId());
-    })
-    .compensation("debit", (stub, ctx) -> {
-        stub.reverseDebit(ReverseDebitRequest.newBuilder()
-            .setDebitId(ctx.get("debitId", String.class))
-            .build());
-    })
-    .build());
-```
+// --- a code step that calls the account service over HTTP ---
+public final class DebitStep implements Step {
+  private final SagaHttpClient http;
 
-#### ServiceInvokerRegistry
+  // @Named matches an endpoint registered on the SagaManager builder.
+  public DebitStep(@Named("account-svc") SagaHttpClient http) {
+    this.http = http;
+  }
 
-```java
-// --- invoker/ServiceInvokerRegistry.java ---
-public class ServiceInvokerRegistry {
-    private final Map<String, ServiceInvoker> invokers = new ConcurrentHashMap<>();
+  @Override
+  public String getName() {
+    return "debit";
+  }
 
-    public void register(String serviceName, ServiceInvoker invoker) {
-        invokers.put(serviceName, invoker);
-    }
+  @Override
+  public StepResult execute(SagaContext context) throws StepExecutionException {
+    Map<String, Object> body =
+        http.post("/debit")
+            .jsonBody(Map.of(
+                "accountId", context.get("fromAccountId", String.class),
+                "amount", context.get("amount", Integer.class)))
+            .send() // throws on a non-2xx status, classified retryable/non-retryable
+            .bodyJsonObject();
+    return StepResult.of("debitId", body.get("debit_id"));
+  }
 
-    /**
-     * Look up an invoker by service name, then execute the named method.
-     * Called by SagaEngine when the saga definition uses service/method
-     * instead of stepClass.
-     */
-    public StepResult execute(String serviceName, String method, SagaContext ctx)
-            throws StepExecutionException {
-        ServiceInvoker invoker = invokers.get(serviceName);
-        if (invoker == null) {
-            throw new StepExecutionException("No invoker registered for: " + serviceName);
-        }
-        return invoker.execute(method, ctx);
-    }
-
-    public void compensate(String serviceName, String method, SagaContext ctx)
-            throws StepCompensationException {
-        ServiceInvoker invoker = invokers.get(serviceName);
-        if (invoker == null) {
-            throw new StepCompensationException("No invoker registered for: " + serviceName);
-        }
-        invoker.compensate(method, ctx);
-    }
-}
-
-// --- invoker/ServiceInvoker.java ---
-public interface ServiceInvoker {
-    StepResult execute(String method, SagaContext ctx) throws StepExecutionException;
-    void compensate(String method, SagaContext ctx) throws StepCompensationException;
+  @Override
+  public void compensate(SagaContext context) throws StepCompensationException {
+    http.post("/reverse-debit")
+        .jsonBody(Map.of("debitId", context.get("debitId", String.class)))
+        .send();
+  }
 }
 ```
 
-#### Built-In Invokers
+`SagaHttpClient` is an application-level singleton (thread-safe, shared across sagas). It is a thin fluent wrapper over the same per-endpoint HTTP machinery used by declarative steps — see [Endpoint Configuration](#endpoint-configuration) below.
 
 ```java
-// --- invoker/GrpcInvoker.java ---
-public class GrpcInvoker<S> implements ServiceInvoker {
-    private final S stub;
-    private final Map<String, BiFunction<S, SagaContext, StepResult>> actions;
-    private final Map<String, BiConsumer<S, SagaContext>> compensations;
+// --- api/SagaHttpClient.java ---
+public interface SagaHttpClient {
+  Request get(String path);
+  Request post(String path);
+  Request put(String path);
+  Request patch(String path);
+  Request delete(String path);
+  Request method(HttpMethod method, String path);
 
-    @Override
-    public StepResult execute(String method, SagaContext ctx) throws StepExecutionException {
-        BiFunction<S, SagaContext, StepResult> action = actions.get(method);
-        if (action == null) {
-            throw new StepExecutionException("No action registered: " + method);
-        }
-        try {
-            return action.apply(stub, ctx);
-        } catch (Exception e) {
-            throw new StepExecutionException(e);
-        }
-    }
+  interface Request {
+    Request header(String name, String value);
+    Request headers(Map<String, String> headers);
+    Request query(String name, String value);
+    Request query(Map<String, String> params);
+    Request jsonBody(Object value);
+    Request stringBody(String body, String contentType);
+    Request bytesBody(byte[] body, String contentType);
+    Request formBody(Map<String, String> form);
 
-    @Override
-    public void compensate(String method, SagaContext ctx) throws StepCompensationException {
-        BiConsumer<S, SagaContext> compensation = compensations.get(method);
-        if (compensation == null) {
-            throw new StepCompensationException("No compensation registered: " + method);
-        }
-        try {
-            compensation.accept(stub, ctx);
-        } catch (Exception e) {
-            throw new StepCompensationException(e);
-        }
-    }
+    SagaHttpResponse send();    // throws on a non-2xx status
+    SagaHttpResponse sendRaw(); // returns any status without throwing
+  }
+}
 
-    // Builder pattern (see examples above)
-    public static <S> Builder<S> newBuilder(S stub) { return new Builder<>(stub); }
+// --- api/SagaHttpResponse.java ---
+public interface SagaHttpResponse {
+  int status();
+  Map<String, List<String>> headers();
+  Optional<String> header(String name); // case-insensitive
+  Map<String, Object> bodyJsonObject();
+  <T> T bodyJson(Class<T> type);
+  String bodyString();
+  byte[] bodyBytes();
 }
 ```
 
-`HttpInvoker` follows the same pattern but wraps an HTTP client, automatically propagates `X-Saga-Id` and `X-Saga-Step` headers, and classifies HTTP status codes as retryable/non-retryable.
+Every request automatically carries the saga correlation headers `X-Saga-Id` and `X-Saga-Step`, is checked against the endpoint's SSRF allowlist and body-size limit, and has its remaining saga deadline applied as the call timeout.
 
-#### Proto Ownership
-
-**The participant service defines the `.proto` — it is their API contract.** The orchestrator includes the participant's generated stubs as a compile-time dependency.
-
-| Layer | Who defines proto | Who generates stubs | How stubs are used |
-|-------|------------------|--------------------|--------------------|
-| **Layer 1** (Step) | Participant service | Orchestrator adds generated jar to classpath | Step author calls stub directly in `execute()` |
-| **Layer 2** (GrpcInvoker) | Participant service | Orchestrator adds generated jar to classpath | Passed to `GrpcInvoker.newBuilder(stub)` at startup |
-| **Layer 2b** (Declarative) | Participant service | Orchestrator adds generated jar to classpath | `GrpcTransportAdapter` uses generated message types and `MethodDescriptor` via reflection |
-| **Phase 7** (saga protocol) | Saga engine project | Both coordinator and participant | Coordinator API + participant protocol — published by the saga engine project |
-
-For Layers 1-2b, this is standard gRPC practice: the service owner publishes a `.proto` file (or a generated-stubs jar), and all callers depend on it. The saga engine itself is transport-agnostic — it never sees protobuf types.
-
-Phase 7 is different: the saga engine project defines the `.proto` for the coordinator↔participant protocol itself (saga lifecycle API, participant callbacks). Both sides generate stubs from it.
-
-#### Updated Saga Definition Format
-
-The JSON format now supports **both** `stepClass` (Layer 1) and `service`/`method` (Layer 2):
-
-```json
-{
-  "name": "PlaceOrder",
-  "steps": [
-    {
-      "name": "debit",
-      "service": "account-service",
-      "method": "debit"
-    },
-    {
-      "name": "ship",
-      "service": "shipping-service",
-      "method": "ship"
-    },
-    {
-      "name": "complex",
-      "stepClass": "com.example.ComplexStep"
-    }
-  ]
-}
-```
-
-**Step dispatch — single path for all step types:**
-
-`stepClass` is always non-null in `StepDefinition`. The definition parser ensures this:
-
-**Startup (registration):**
-
-For **Layer 1** (user's Step class):
-1. User writes: `DebitAccountStep implements Step`
-2. Definition: `{ "name": "debit", "stepClass": "com.example.DebitAccountStep" }`
-3. Parser reads definition → `StepDefinition(name="debit", stepClass="com.example.DebitAccountStep")`
-4. Registry: `stepRegistry.register("debit", DebitAccountStep instance)` (from DI container, reflection, or explicit registration)
-
-For **Layer 2b** (declarative):
-1. User writes no Java code
-2. Definition: `{ "name": "debit", "call": { "service": "account-service", ... }, "compensate": { ... } }`
-3. Parser reads definition:
-   a. Parses `call`/`compensate` blocks
-   b. Creates `DeclarativeStepAdapter("debit", transport, callDef, compensateDef)`
-   c. Sets `stepClass = "com.scalar.db.saga.invoker.DeclarativeStepAdapter"`
-   → `StepDefinition(name="debit", stepClass="...DeclarativeStepAdapter")`
-4. Registry: `stepRegistry.register("debit", the DeclarativeStepAdapter instance)`
-
-**Runtime (execution) — same path for both:**
-
-```
-instantiate(stepDef)
-  → stepRegistry.get(stepDef.getName())
-  → returns Step (either DebitAccountStep or DeclarativeStepAdapter)
-  → engine calls step.execute(ctx) / step.compensate(ctx)
-```
-
-The engine never branches. Both `DebitAccountStep` and `DeclarativeStepAdapter` implement `Step`, so the engine treats them identically. The registration logic differs (reflection/DI vs parser-created adapter), but that's in the parser/registry — not in the engine. At runtime, it's a single `stepRegistry.get(name)` call.
-
-Both step types can be mixed in the same saga.
-
-### Layer 2b: Declarative Step Communication
+### Layer 2: Declarative Service Steps
 
 #### The Problem
 
-Even with Layer 2 (ServiceInvoker) and Layer 3 (annotations), the user still writes the **actual RPC call logic** inside each step method:
-
-```java
-@SagaStep(saga = "MoneyTransfer", name = "debit", order = 1)
-public StepResult debit(SagaContext ctx) {
-    // User still writes all of this:
-    var resp = accountStub.debit(DebitRequest.newBuilder()
-        .setAccountId(ctx.get("accountId", String.class))
-        .setAmount(ctx.get("amount", Integer.class))
-        .build());
-    return StepResult.of("debitId", resp.getDebitId());
-}
-```
-
-For straightforward service calls (which are the majority of saga steps), this is repetitive boilerplate: extract values from context → build request → make call → extract response → put into context.
+For straightforward service calls — which are the majority of saga steps — a code step is repetitive boilerplate: read values from context → build a request → make the call → extract response fields → put them back into context. Multiply that by an execute and a compensate (or reserve/confirm/cancel) for every step.
 
 #### Solution: Declarative Communication in the Saga Definition
 
-Define the request/response mapping directly in the saga JSON. The engine handles transport, marshaling, context propagation, and error classification — no Java code needed for simple steps.
+A **declarative service step** describes that mapping as data instead of code. Each phase of the step (execution + compensation for SAGA; reservation + confirmation + cancellation for TCC) is a `CallSpec` — for the HTTP transport, an `HttpCall` giving the method, path, query, body, and output extraction. The engine resolves the request from the saga context, performs the call, extracts the outputs, propagates the saga context, and classifies errors — no Java code for the step at all.
+
+**JSON (SAGA mode):**
 
 ```json
 {
-  "name": "MoneyTransfer",
+  "name": "transferMoney",
+  "mode": "SAGA",
+  "version": "1.0",
+  "recoveryStrategy": "BACKWARD",
+  "timeoutMillis": 30000,
   "steps": [
     {
       "name": "debit",
-      "call": {
-        "service": "account-service",
-        "method": "debit",
-        "transport": "grpc",
-        "request": {
-          "account_id": "${accountId}",
-          "amount": "${amount}"
-        },
-        "output": {
-          "debitId": "$.debit_id"
-        }
+      "service": "account-svc",
+      "transport": "HTTP",
+      "execution": {
+        "method": "POST",
+        "path": "/accounts/${fromAccountId}/debit",
+        "jsonBody": { "amount": "${amount}" },
+        "output": { "debitId": "$.debit_id" }
       },
-      "compensate": {
-        "method": "reverseDebit",
-        "request": {
-          "debit_id": "${debitId}"
-        }
+      "compensation": {
+        "method": "POST",
+        "path": "/accounts/${fromAccountId}/reverse-debit",
+        "jsonBody": { "debitId": "${debitId}" }
       }
     },
     {
       "name": "credit",
-      "call": {
-        "service": "account-service",
-        "method": "credit",
-        "transport": "grpc",
-        "request": {
-          "account_id": "${toAccountId}",
-          "amount": "${amount}"
-        },
-        "output": {
-          "creditId": "$.credit_id"
-        }
+      "service": "account-svc",
+      "execution": {
+        "path": "/accounts/${toAccountId}/credit",
+        "jsonBody": { "amount": "${amount}" },
+        "output": { "creditId": "$.credit_id" }
       },
-      "compensate": {
-        "method": "reverseCredit",
-        "request": {
-          "credit_id": "${creditId}"
-        }
+      "compensation": {
+        "path": "/accounts/${toAccountId}/reverse-credit",
+        "jsonBody": { "creditId": "${creditId}" }
       }
     },
     {
@@ -4036,345 +3935,229 @@ Define the request/response mapping directly in the saga JSON. The engine handle
 }
 ```
 
+**YAML (TCC mode):**
+
+```yaml
+name: reserveBooking
+mode: TCC
+version: "1.0"
+steps:
+  - name: reserveFlight
+    service: booking-svc
+    reservation:
+      method: POST
+      path: /flights/${flightId}/reserve
+      jsonBody:
+        passengers: ${numPassengers}
+      output:
+        reservationId: $.reservation_id
+    confirmation:
+      method: POST
+      path: /flights/${flightId}/confirm
+      jsonBody:
+        reservationId: ${reservationId}
+    cancellation:
+      method: POST
+      path: /flights/${flightId}/cancel
+      jsonBody:
+        reservationId: ${reservationId}
+```
+
+**Step fields:**
+
+| Field | Meaning |
+|---|---|
+| `service` | Logical endpoint name; resolved to a base URL + policy via the `SagaManager` builder. Required for a declarative step. |
+| `transport` | `HTTP` (default). `GRPC` is reserved but not yet supported. |
+| `execution` / `compensation` | The two SAGA-mode phases (both required). |
+| `reservation` / `confirmation` / `cancellation` | The three TCC-mode phases (all required). |
+
+A step uses **either** `stepClass` (a code step) **or** `service` + declarative phases — never both, and SAGA and TCC phases must not be mixed. Code steps and declarative steps can be freely mixed within one saga.
+
+**`CallSpec` (HTTP) fields, per phase:**
+
+| Field | Meaning |
+|---|---|
+| `path` | URL path appended to the endpoint base URL (required). May contain `${...}` expressions. |
+| `method` | `GET`, `POST` (default), `PUT`, `PATCH`, `DELETE`. |
+| `query` | Map of query-parameter name → value template. |
+| `jsonBody` | Flat map serialized as a JSON object body (default `Content-Type: application/json`). |
+| `stringBody` | Raw request body template (mutually exclusive with `jsonBody`). |
+| `contentType` | Overrides the `Content-Type` header. |
+| `output` | Map of context key → extraction expression applied to the response. |
+
+`GET`/`DELETE` must not declare a body. The parser rejects unknown fields and these constraints at registration time.
+
+#### Java Builder API
+
+The same declarative steps can be built type-safely in embedded mode. `serviceStep(name, service).operation()` opens the SAGA-mode phases; `.tccOperation()` opens the TCC-mode phases:
+
+```java
+SagaDefinition def = SagaDefinition.newBuilder("transferMoney", SagaMode.SAGA)
+    .version("1.0")
+    .recoveryStrategy(RecoveryStrategy.BACKWARD)
+    .timeoutMillis(30_000)
+    .serviceStep("debit", "account-svc")
+        .operation()
+        .execution(HttpCall.newBuilder("/accounts/${fromAccountId}/debit")
+            .method(HttpMethod.POST)
+            .jsonBody(Map.of("amount", "${amount}"))
+            .output(Map.of("debitId", "$.debit_id"))
+            .build())
+        .compensation(HttpCall.newBuilder("/accounts/${fromAccountId}/reverse-debit")
+            .jsonBody(Map.of("debitId", "${debitId}"))
+            .build())
+        .add()
+    .serviceStep("credit", "account-svc")
+        .operation()
+        .execution(HttpCall.newBuilder("/accounts/${toAccountId}/credit")
+            .jsonBody(Map.of("amount", "${amount}"))
+            .output(Map.of("creditId", "$.credit_id"))
+            .build())
+        .compensation(HttpCall.newBuilder("/accounts/${toAccountId}/reverse-credit")
+            .jsonBody(Map.of("creditId", "${creditId}"))
+            .build())
+        .add()
+    .build();
+```
+
+For TCC, `.tccOperation().reservation(...).confirmation(...).cancellation(...).add()`. Each `add()` validates that all phases for the mode are present and that they share a single transport.
+
 **Expression syntax:**
-- `${key}` — reads a value from the saga context
-- `$.field` — extracts a field from the service response (JSON path)
+- `${key}` — substitutes a value from the saga context. When it is the entire value, the original type is preserved; embedded in a larger string, it is coerced to text. Path segments are percent-encoded to prevent traversal/injection. A missing key is a non-retryable error.
+- `$.field` — extracts a field from the JSON response body into the named context key.
+- `$body` — binds the entire raw response body as a string (works for non-JSON responses).
 
 #### How It Works
 
 ```
-Saga definition (JSON/YAML)
-    │
+Saga definition (builder / JSON / YAML)
+    │  parsed by SagaDefinitionParser + CallSpecCodec
+    ▼
+ServiceStep { service, Map<Phase, CallSpec> }   (sealed StepDefinition)
+    │  StepInstantiator + HttpEndpointRegistry
     ▼
 ┌──────────────────────────────────────────────┐
-│  DeclarativeStepAdapter                       │
+│  DeclarativeBindingStep   (implements Step)   │
+│  DeclarativeBindingTccStep(implements TccStep)│
 │                                               │
-│  1. Read request mapping from JSON            │
-│  2. Resolve ${...} expressions from context   │
-│  3. Build request object                      │
-│  4. Delegate to transport adapter             │
-│  5. Extract output via $.path from response   │
-│  6. Return StepResult with extracted values   │
+│  Picks the CallSpec for the current phase,    │
+│  delegates to the endpoint's TransportAdapter,│
+│  translates TransportException into the        │
+│  engine's StepExecution/CompensationException │
 └──────────┬───────────────────────────────────┘
            │
            ▼
 ┌──────────────────────────────────────────────┐
-│  Transport Adapter (pluggable)                │
-│                                               │
-│  GrpcTransportAdapter:                        │
-│  - Builds protobuf message from request map   │
-│  - Calls stub method via reflection on        │
-│    generated gRPC stub                        │
-│  - Propagates X-Saga-Id, X-Saga-Step via       │
-│    gRPC metadata                              │
-│  - Maps gRPC status codes to retryable/       │
-│    non-retryable                              │
+│  TransportAdapter (SPI, pluggable per transport)│
 │                                               │
 │  HttpTransportAdapter:                        │
-│  - Builds JSON request body from request map  │
-│  - Calls HTTP endpoint (POST/PUT)             │
-│  - Propagates X-Saga-Id, X-Saga-Step via       │
-│    HTTP headers                               │
-│  - Maps HTTP status codes:                    │
-│    - 2xx → success                            │
-│    - 408, 429, 502, 503, 504 → retryable     │
-│    - 4xx → non-retryable                      │
-│    - 5xx → retryable (default)                │
+│  - resolves ${...} in path/query/body via      │
+│    DeclarativeExpressions                     │
+│  - builds the request (jsonBody/stringBody)   │
+│  - calls HttpExchange (shared per endpoint):  │
+│      • adds X-Saga-Id / X-Saga-Step           │
+│      • enforces SSRF allowlist + body limits  │
+│      • applies the remaining saga deadline    │
+│      • forbids redirects                      │
+│  - classifies the status (2xx success;        │
+│    408/429/5xx retryable; other 4xx not),     │
+│    honoring an X-Saga-Retryable override      │
+│  - extracts $.field / $body into outputs      │
 └──────────────────────────────────────────────┘
 ```
 
-#### DeclarativeStepAdapter Implementation
+The engine itself never branches on step kind. `DeclarativeBindingStep` and a hand-written `Step` both implement `Step`; the only difference is how `StepInstantiator` builds them (see [Single Dispatch Path](#single-dispatch-path) below).
+
+#### `CallSpec` and `CallSpecCodec`
+
+`CallSpec` is a sealed type tagged by transport. Only `HttpCall` exists today; `GRPC` is a reserved transport value that the parser currently rejects as "not yet supported." The discriminator is persisted with the saga definition so the correct subtype is reconstructed on reload.
 
 ```java
-// --- invoker/DeclarativeStepAdapter.java ---
-public class DeclarativeStepAdapter implements Step {
-    private final String name;
-    private final TransportAdapter transport;
-    private final CallDefinition actionCall;
-    private final CallDefinition compensateCall;
-
-    @Override
-    public String getName() { return name; }
-
-    @Override
-    public StepResult execute(SagaContext ctx) throws StepExecutionException {
-        try {
-            // 1. Resolve request parameters from context
-            Map<String, Object> request = resolveExpressions(actionCall.getRequest(), ctx);
-
-            // 2. Call the service via transport adapter
-            Map<String, Object> response = transport.call(
-                actionCall.getService(), actionCall.getMethod(), request, ctx.getSagaId(), name);
-
-            // 3. Extract output fields from response
-            Map<String, Object> output = extractOutput(actionCall.getOutput(), response);
-
-            return StepResult.of(output);
-        } catch (TransportException e) {
-            throw new StepExecutionException(e);
-        }
-    }
-
-    @Override
-    public void compensate(SagaContext ctx) throws StepCompensationException {
-        try {
-            Map<String, Object> request = resolveExpressions(compensateCall.getRequest(), ctx);
-            transport.call(compensateCall.getService(),
-                           compensateCall.getMethod(), request, ctx.getSagaId(), name);
-        } catch (TransportException e) {
-            throw new StepCompensationException(e);
-        }
-    }
-
-    /**
-     * Resolve ${...} expressions by looking up values in the saga context.
-     * E.g., "${accountId}" → ctx.get("accountId")
-     */
-    private Map<String, Object> resolveExpressions(Map<String, String> template,
-                                                     SagaContext ctx) {
-        Map<String, Object> resolved = new LinkedHashMap<>();
-        for (var entry : template.entrySet()) {
-            String value = entry.getValue();
-            if (value.startsWith("${") && value.endsWith("}")) {
-                String key = value.substring(2, value.length() - 1);
-                resolved.put(entry.getKey(), ctx.get(key, Object.class));
-            } else {
-                resolved.put(entry.getKey(), value);  // literal value
-            }
-        }
-        return resolved;
-    }
-
-    /**
-     * Extract fields from the service response using $.path expressions.
-     * E.g., "$.debit_id" → response.get("debit_id")
-     */
-    private Map<String, Object> extractOutput(Map<String, String> outputMapping,
-                                                Map<String, Object> response) {
-        Map<String, Object> output = new LinkedHashMap<>();
-        for (var entry : outputMapping.entrySet()) {
-            String path = entry.getValue();
-            if (path.startsWith("$.")) {
-                String field = path.substring(2);
-                output.put(entry.getKey(), response.get(field));
-            }
-        }
-        return output;
-    }
+// --- api/CallSpec.java ---
+public abstract sealed class CallSpec permits HttpCall {
+  public enum Transport { HTTP, GRPC } // GRPC not yet supported
+  public abstract Transport transport();
 }
 ```
 
-#### TransportAdapter Interface
+`CallSpecCodec` is the single JSON (de)serializer for every `CallSpec` subtype, used by **both** `SagaDefinitionParser` (user-authored YAML/JSON) and the store's definition serializer (round-trip persistence). Because the two directions are inverses and live in one class, adding a transport or a field is a one-class change and the parse/persist paths cannot drift.
+
+#### `TransportAdapter` SPI
+
+The transport SPI replaces the old `ServiceInvoker`. It executes one phase of a declarative step end to end: resolve the request from context, perform the call, return the extracted outputs.
 
 ```java
-// --- invoker/TransportAdapter.java ---
+// --- transport/TransportAdapter.java ---
 public interface TransportAdapter {
-    /**
-     * Call a remote service method.
-     *
-     * @param service   Service name (resolved to endpoint via configuration)
-     * @param method    Method/operation name
-     * @param request   Request parameters (key-value pairs)
-     * @param sagaId    Saga ID for context propagation
-     * @param stepName  Step name for context propagation
-     * @return Response as key-value pairs
-     * @throws TransportException with retryable/non-retryable classification
-     */
-    Map<String, Object> call(String service, String method,
-                              Map<String, Object> request,
-                              String sagaId, String stepName)
-        throws TransportException;
-}
-
-// --- invoker/TransportException.java ---
-public class TransportException extends Exception {
-    private final boolean retryable;
-
-    public TransportException(String message, Throwable cause, boolean retryable) {
-        super(message, cause);
-        this.retryable = retryable;
-    }
-
-    public boolean isRetryable() { return retryable; }
+  /**
+   * Execute one declarative phase: resolve the spec's request from the saga
+   * context, perform the remote call, and return the extracted output fields.
+   *
+   * @throws TransportException carrying a retryable / non-retryable classification
+   */
+  Map<String, Object> call(CallSpec spec, SagaContext context, String stepName)
+      throws TransportException;
 }
 ```
 
-#### GrpcTransportAdapter
+`HttpTransportAdapter` is the only implementation today (package-private; created per endpoint). A future `GrpcTransportAdapter` would implement the same SPI against a `GrpcCall` subtype of `CallSpec` — no change to the engine, the binding steps, or the definition model.
 
-**Requires the participant's generated stubs on the orchestrator's classpath** — `buildProtobufMessage()` needs the generated message types and `lookupMethod()` needs the `MethodDescriptor`, both from the participant's `.proto` (see [Proto Ownership](#proto-ownership) above).
+#### Endpoint Configuration
+
+A declarative step's `service` name and a code step's `@Named` qualifier both resolve to an **`HttpEndpoint`**: one base URL, one shared `HttpClient`, one `HttpExchange`, and one `OutboundHttpPolicy`. Endpoints are declared on the `SagaManager` builder:
 
 ```java
-// --- invoker/GrpcTransportAdapter.java ---
-public class GrpcTransportAdapter implements TransportAdapter {
-    private final Map<String, ManagedChannel> channels;       // service → gRPC channel
-    private final Map<String, MethodDescriptor<?, ?>> methods; // service.method → descriptor
-
-    @Override
-    public Map<String, Object> call(String service, String method,
-                                      Map<String, Object> request,
-                                      String sagaId, String stepName)
-            throws TransportException {
-        try {
-            ManagedChannel channel = channels.get(service);
-            if (channel == null) {
-                throw new TransportException(
-                    "No gRPC channel for service: " + service, null, false);
-            }
-
-            // Propagate saga context via gRPC metadata
-            Metadata headers = new Metadata();
-            headers.put(Metadata.Key.of("x-saga-id", Metadata.ASCII_STRING_MARSHALLER), sagaId);
-            headers.put(Metadata.Key.of("x-saga-step", Metadata.ASCII_STRING_MARSHALLER), stepName);
-
-            // Build protobuf message from request map and invoke
-            // (uses protobuf JSON format for map → message conversion)
-            Message requestMsg = buildProtobufMessage(service, method, request);
-            Message responseMsg = ClientCalls.blockingUnaryCall(
-                channel, lookupMethod(service, method), CallOptions.DEFAULT
-                    .withDeadlineAfter(30, TimeUnit.SECONDS), requestMsg);
-
-            // Convert response protobuf to map
-            return protobufToMap(responseMsg);
-
-        } catch (StatusRuntimeException e) {
-            boolean retryable = isRetryableStatus(e.getStatus().getCode());
-            throw new TransportException(e.getMessage(), e, retryable);
-        }
-    }
-
-    private boolean isRetryableStatus(Status.Code code) {
-        return code == Status.Code.UNAVAILABLE
-            || code == Status.Code.DEADLINE_EXCEEDED
-            || code == Status.Code.RESOURCE_EXHAUSTED
-            || code == Status.Code.ABORTED;
-    }
-}
+SagaManager manager = SagaManager.newBuilder()
+    .storeFactory(ScalarDbSagaStoreFactory.create(props))
+    .httpEndpoint("account-svc", "https://account-svc:8443")
+        .allowedHosts("account-svc", "account-svc.internal") // SSRF allowlist
+        .maxBodyBytes(1_000_000)                              // request/response cap
+        .defaultHeader("Authorization", "Bearer …")          // never persisted
+        .add()
+    .httpEndpoint("booking-svc", "https://booking-svc:8443")
+        .add()
+    .build();
 ```
 
-#### HttpTransportAdapter
+Internally these become `HttpServiceConfig` records held by an `HttpEndpointRegistry`. The registry both hands `SagaHttpClient` instances to code steps (via the `StepResolver`'s resolution context) and builds `DeclarativeBindingStep` / `DeclarativeBindingTccStep` for declarative steps — so both paths ride the exact same exchange, policy, and correlation behavior. Framework-created HTTP clients are closed when the manager closes; caller-supplied clients are left open.
+
+The policy enforcement (SSRF allowlist, body-size limits, no redirects, default per-call timeout) lives in `HttpExchange` and `OutboundHttpPolicy`, applied uniformly to declarative and code-step calls.
+
+#### Single Dispatch Path
+
+`StepDefinition` is a sealed type with two cases, and `StepInstantiator` pattern-matches on it:
 
 ```java
-// --- invoker/HttpTransportAdapter.java ---
-public class HttpTransportAdapter implements TransportAdapter {
-    private final HttpClient httpClient;
-    private final Map<String, String> serviceBaseUrls;  // service → base URL
-
-    @Override
-    public Map<String, Object> call(String service, String method,
-                                      Map<String, Object> request,
-                                      String sagaId, String stepName)
-            throws TransportException {
-        String baseUrl = serviceBaseUrls.get(service);
-        if (baseUrl == null) {
-            throw new TransportException(
-                "No base URL for service: " + service, null, false);
-        }
-
-        try {
-            HttpRequest httpReq = HttpRequest.newBuilder()
-                .uri(URI.create(baseUrl + "/" + method))
-                .header("Content-Type", "application/json")
-                .header("X-Saga-Id", sagaId)
-                .header("X-Saga-Step", stepName)
-                .POST(HttpRequest.BodyPublishers.ofString(toJson(request)))
-                .timeout(Duration.ofSeconds(30))
-                .build();
-
-            HttpResponse<String> resp = httpClient.send(httpReq,
-                HttpResponse.BodyHandlers.ofString());
-
-            if (resp.statusCode() >= 200 && resp.statusCode() < 300) {
-                return fromJson(resp.body());
-            }
-
-            boolean retryable = isRetryableHttpStatus(resp.statusCode());
-            throw new TransportException(
-                "HTTP " + resp.statusCode() + ": " + resp.body(), null, retryable);
-
-        } catch (IOException | InterruptedException e) {
-            throw new TransportException(e.getMessage(), e, true);  // network errors are retryable
-        }
-    }
-
-    private boolean isRetryableHttpStatus(int status) {
-        return status == 408 || status == 429
-            || status == 502 || status == 503 || status == 504;
-    }
-}
+return switch (stepDef) {
+  case ClassStep classStep -> resolveClassStep(classStep, expectedType);     // Layer 1
+  case ServiceStep serviceStep -> resolveServiceStep(serviceStep, expectedType); // Layer 2
+};
 ```
 
-#### Service Endpoint Configuration
+- **`ClassStep`** is resolved to a `Step` / `TccStep` instance through the `StepResolver` (reflective constructor injection by default, or a DI-framework resolver). Constructor parameters typed `SagaHttpClient` are satisfied from the endpoint registry, matched by `@Named`.
+- **`ServiceStep`** is wrapped — fast-failing if its `service` is unregistered — in a `DeclarativeBindingStep` (SAGA) or `DeclarativeBindingTccStep` (TCC) over the resolved endpoint's `TransportAdapter`.
 
-Transport adapters resolve service names to endpoints via configuration:
-
-```properties
-# Service endpoint configuration (orchestrator's application.properties)
-saga.services.account-service.transport=grpc
-saga.services.account-service.endpoint=account-service:50051
-
-saga.services.shipping-service.transport=http
-saga.services.shipping-service.endpoint=http://shipping-service:8080
-```
-
-#### How It Fits the Layer Architecture
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│  Layer 3: Framework Integration (Spring Boot / Quarkus)           │
-│  @SagaStep, @SagaCompensation annotations                        │
-│  User writes method body with injected clients                   │
-├──────────────────────────────────────────────────────────────────┤
-│  Layer 2b: Declarative Communication (NEW)                        │
-│                                                                   │
-│  JSON-defined request/response mapping                           │
-│  Built-in transport adapters: GrpcTransportAdapter,              │
-│    HttpTransportAdapter                                          │
-│  Automatic context propagation (X-Saga-Id, X-Saga-Step)          │
-│  Automatic error classification (retryable vs non-retryable)     │
-│  User writes ZERO Java code for simple steps                     │
-├──────────────────────────────────────────────────────────────────┤
-│  Layer 2: ServiceInvoker (framework-agnostic)                     │
-│  Typed lambdas — no reflection                                   │
-│  Built-in invokers: GrpcInvoker, HttpInvoker, SpringBeanInvoker  │
-├──────────────────────────────────────────────────────────────────┤
-│  Layer 1: Core Engine (framework-agnostic)                        │
-│  Step interface, SagaEngine, SagaStore      │
-└──────────────────────────────────────────────────────────────────┘
-```
-
-**When to use which layer:**
-
-| Layer | When to use | User writes |
-|---|---|---|
-| **Layer 1** (Step) | Complex steps with conditional logic, multi-call orchestration, or non-standard transports | Full Java Step class |
-| **Layer 2** (ServiceInvoker) | Programmatic registration with type-safe lambdas | Lambda per action/compensation |
-| **Layer 2b** (Declarative) | Straightforward service calls where request/response is a simple field mapping | **Zero Java code** — only JSON/YAML definition |
-| **Layer 3** (Annotations) | Framework users (Spring/Quarkus) who prefer annotations and injected clients | Annotated method with call logic |
-
-Layer 2b and Layer 3 solve different problems:
-- **Layer 2b** eliminates the **communication boilerplate** — the engine handles the RPC call, request building, and response extraction.
-- **Layer 3** eliminates the **orchestration boilerplate** — no Step classes, no JSON files, no manual registration. But the user still writes the call logic inside the method body.
-
-They can be combined: a saga can mix declarative steps (Layer 2b) for simple calls with annotated methods (Layer 3) or custom Step classes (Layer 1) for complex logic.
+From the engine's perspective there is a single `Step` / `TccStep` it executes. The kind of authoring is entirely resolved before execution.
 
 #### Saga Context Propagation
 
-All transport adapters automatically propagate the saga context to participants:
+All transports propagate the saga correlation context to participants so they can log, trace, and deduplicate:
 
 | Transport | Propagation mechanism |
 |---|---|
-| gRPC | `x-saga-id`, `x-saga-step` metadata keys |
-| HTTP | `X-Saga-Id`, `X-Saga-Step` HTTP headers |
+| HTTP | `X-Saga-Id`, `X-Saga-Step` request headers (added last, after user/default headers) |
+| gRPC (future) | `x-saga-id`, `x-saga-step` metadata keys |
 
-Participants can read this header for logging, tracing, or idempotency purposes. See "Participant Idempotency Levels" below.
+Participants may also signal retryability back to the coordinator with an `X-Saga-Retryable` response header, overriding the default status-code classification.
 
 #### Participant Idempotency Levels
 
-The saga engine supports three levels of idempotency handling, reflecting different trade-offs between participant simplicity and reliability guarantees:
+The engine supports different levels of idempotency handling, trading participant simplicity against built-in guarantees:
 
-**Level 1: Basic (Industry Norm — Phase 1)**
+**Level 1: Basic (industry norm — current)**
 
-The orchestrator propagates the saga ID and step name to participants via headers (`X-Saga-Id`, `X-Saga-Step`). Participants are responsible for implementing their own idempotency logic. This is the same model used by all current competitors (Seata, MicroTx, Narayana LRA).
+The orchestrator propagates the saga ID and step name (`X-Saga-Id`, `X-Saga-Step`); participants implement their own idempotency. This matches Seata, MicroTx, and Narayana LRA.
 
 ```
 Orchestrator                         Participant
@@ -4389,50 +4172,43 @@ Orchestrator                         Participant
     │    or a dedup table it manages)    │
 ```
 
-**Level 2: Participant SDK (Future Enhancement)**
+**Level 2: Participant SDK (future enhancement)**
 
-An optional, lightweight SDK for participant services that provides:
-- `@SagaParticipant` annotation with auto-exposed status check endpoint
-- `@Idempotent` annotation with built-in dedup (the SDK manages the dedup state, so the participant doesn't need to)
-- Automatic saga context extraction from headers
+An optional, lightweight SDK for participant services providing a `@SagaParticipant` annotation with an auto-exposed status-check endpoint, an `@Idempotent` annotation with built-in dedup, and automatic saga-context extraction from headers.
 
 ```java
 // In the participant service — NOT the orchestrator
-@SagaParticipant(service = "account-service")
+@SagaParticipant(service = "account-svc")
 @RestController
 public class AccountEndpoint {
 
-    @SagaAction(name = "debit")
-    @PostMapping("/debit")
-    public DebitResponse debit(@RequestBody DebitRequest req,
-                               @SagaId String sagaId) {   // auto-extracted from header
-        // Business logic — no idempotency code needed
-        return new DebitResponse(debitId);
-    }
+  @SagaAction(name = "debit")
+  @PostMapping("/debit")
+  public DebitResponse debit(@RequestBody DebitRequest req,
+                             @SagaId String sagaId) { // auto-extracted from header
+    // Business logic — no idempotency code needed
+    return new DebitResponse(debitId);
+  }
 
-    @SagaCompensation(name = "debit")
-    @PostMapping("/debit/compensate")
-    public void reverseDebit(@RequestBody ReverseDebitRequest req,
-                              @SagaId String sagaId) {
-        // Compensation logic
-    }
+  @SagaCompensation(name = "debit")
+  @PostMapping("/reverse-debit")
+  public void reverseDebit(@RequestBody ReverseDebitRequest req,
+                           @SagaId String sagaId) {
+    // Compensation logic
+  }
 }
 ```
-
-The SDK auto-generates the status check endpoint and manages idempotency state internally. However, this requires participants to depend on the SDK and requires the SDK to store dedup state somewhere (participant's own database or an in-process cache).
-
-**Comparison:**
 
 | Level | Participant requirement | Extra infrastructure | Idempotency guarantee |
 |---|---|---|---|
 | **Basic** | Handle dedup on its own | None | Participant's responsibility |
 | **SDK** | Add SDK dependency | SDK needs dedup storage | Automatic, reliable |
 
-**Recommendation:** Ship Level 1 (Basic) in Phase 1 — this matches industry norm. Level 2 (Participant SDK) is optional and should only be built if customer demand justifies it.
+**Recommendation:** Ship Level 1 (Basic) — it matches industry norm. Level 2 (Participant SDK) is optional and should be built only if customer demand justifies it.
 
-### Layer 3: Framework Integration
+### Layer 3: Framework Integration (Future)
 
-The annotation layer is syntactic sugar — the scanner reads annotations and auto-generates `ServiceInvoker` registrations (or `Step` instances) at build/startup time.
+The annotation layer is syntactic sugar over Layers 1–2: a scanner reads annotations and **auto-registers `Step` / `ServiceStep` definitions** at build time (Quarkus) or startup time (Spring). Users keep their framework-native clients (`@Autowired`, `@Inject`, `@GrpcClient`, `@RestClient`). This layer is planned, not yet implemented; the shapes below are indicative.
 
 #### Annotations
 
@@ -4441,226 +4217,52 @@ The annotation layer is syntactic sugar — the scanner reads annotations and au
 @Retention(RetentionPolicy.RUNTIME)
 @Target(ElementType.METHOD)
 public @interface SagaStep {
-    String saga();                  // saga definition name
-    String name();                  // step name within the saga
-    int order();                    // execution order (1-based)
+  String saga();   // saga definition name
+  String name();   // step name within the saga
+  int order();     // execution order (1-based)
 }
 
 // --- api/annotation/SagaCompensation.java ---
 @Retention(RetentionPolicy.RUNTIME)
 @Target(ElementType.METHOD)
 public @interface SagaCompensation {
-    String saga();                  // must match a @SagaStep's saga
-    String name();                  // must match a @SagaStep's name
+  String saga();   // must match a @SagaStep's saga
+  String name();   // must match a @SagaStep's name
 }
 ```
 
 #### Spring Boot Integration
 
-```java
-// --- spring/SagaAutoConfiguration.java ---
-@Configuration
-@ConditionalOnClass(SagaManager.class)
-@EnableConfigurationProperties(SagaProperties.class)
-public class SagaAutoConfiguration {
-
-    @Bean
-    public SagaManager sagaManager(DistributedTransactionManager txManager,
-                                    ApplicationContext appContext,
-                                    SagaProperties props) {
-        SagaStore store = new ScalarDbSagaStore(txManager, new ObjectMapper(),
-            new SagaSchema(), props.getStoreConfig());
-        return SagaManagerBuilder.newBuilder()
-            .store(store)
-            .stepResolver((name, className) -> appContext.getBean(Class.forName(className)))
-            .ownerId(props.getOwnerId())
-            .build();
-    }
-
-    @Bean
-    public SagaAnnotationScanner sagaAnnotationScanner(
-            ApplicationContext appContext, SagaManager sagaManager) {
-        return new SagaAnnotationScanner(appContext, sagaManager);
-    }
-}
-
-// --- spring/SagaAnnotationScanner.java ---
-public class SagaAnnotationScanner implements SmartInitializingSingleton {
-
-    @Override
-    public void afterSingletonsInstantiated() {
-        // 1. Scan all beans for methods annotated with @SagaStep
-        Map<String, List<StepBinding>> sagaMap = new HashMap<>();
-
-        for (String beanName : appContext.getBeanDefinitionNames()) {
-            Object bean = appContext.getBean(beanName);
-            for (Method method : bean.getClass().getDeclaredMethods()) {
-                SagaStep stepAnn = method.getAnnotation(SagaStep.class);
-                if (stepAnn != null) {
-                    // Find matching @SagaCompensation method
-                    Method compMethod = findCompensationMethod(
-                        bean.getClass(), stepAnn.saga(), stepAnn.name());
-
-                    sagaMap.computeIfAbsent(stepAnn.saga(), k -> new ArrayList<>())
-                        .add(new StepBinding(stepAnn, method, compMethod, bean));
-                }
-            }
-        }
-
-        // 2. For each saga, sort by order and build SagaDefinition
-        for (var entry : sagaMap.entrySet()) {
-            List<StepBinding> bindings = entry.getValue();
-            bindings.sort(Comparator.comparingInt(b -> b.annotation.order()));
-
-            List<Step> steps = bindings.stream()
-                .map(this::createStep)
-                .collect(Collectors.toList());
-
-            SagaDefinition def = new SagaDefinition(entry.getKey(), steps);
-            sagaManager.register(def);
-        }
-    }
-
-    private Step createStep(StepBinding binding) {
-        return new Step() {
-            @Override
-            public String getName() { return binding.annotation.name(); }
-
-            @Override
-            public StepResult execute(SagaContext ctx) throws StepExecutionException {
-                try {
-                    return (StepResult) binding.actionMethod.invoke(binding.bean, ctx);
-                } catch (Exception e) {
-                    throw new StepExecutionException(e);
-                }
-            }
-
-            @Override
-            public void compensate(SagaContext ctx) throws StepCompensationException {
-                try {
-                    binding.compensationMethod.invoke(binding.bean, ctx);
-                } catch (Exception e) {
-                    throw new StepCompensationException(e);
-                }
-            }
-        };
-    }
-}
-```
-
-**What the user writes:**
+A Spring auto-configuration would build the `SagaManager` from properties and register a scanner that turns annotated beans into `SagaDefinition`s. The scanner pairs each `@SagaStep` with its `@SagaCompensation`, sorts by `order`, and registers a `Step` per method that invokes the bean — exactly the Layer 1 wiring, generated for the user.
 
 ```java
 @Component
 public class MoneyTransferSaga {
 
-    @Autowired                                          // ← Spring-managed
-    private AccountServiceClient accountClient;
+  @Autowired private AccountServiceClient accountClient; // ← Spring-managed
 
-    @Autowired                                          // ← Spring-managed
-    private ShippingServiceClient shippingClient;
+  @SagaStep(saga = "MoneyTransfer", name = "debit", order = 1)
+  public StepResult debit(SagaContext ctx) {
+    var resp = accountClient.debit(
+        ctx.get("accountId", String.class), ctx.get("amount", Integer.class));
+    return StepResult.of("debitId", resp.getDebitId());
+  }
 
-    @SagaStep(saga = "MoneyTransfer", name = "debit", order = 1)
-    public StepResult debit(SagaContext ctx) {
-        var resp = accountClient.debit(
-            ctx.get("accountId", String.class),
-            ctx.get("amount", Integer.class));
-        return StepResult.of("debitId", resp.getDebitId());
-    }
-
-    @SagaCompensation(saga = "MoneyTransfer", name = "debit")
-    public void compensateDebit(SagaContext ctx) {
-        accountClient.reverseDebit(ctx.get("debitId", String.class));
-    }
-
-    @SagaStep(saga = "MoneyTransfer", name = "ship", order = 2)
-    public StepResult ship(SagaContext ctx) {
-        var resp = shippingClient.ship(ctx.get("orderId", String.class));
-        return StepResult.of("shipmentId", resp.getShipmentId());
-    }
-
-    @SagaCompensation(saga = "MoneyTransfer", name = "ship")
-    public void compensateShip(SagaContext ctx) {
-        shippingClient.cancel(ctx.get("shipmentId", String.class));
-    }
+  @SagaCompensation(saga = "MoneyTransfer", name = "debit")
+  public void compensateDebit(SagaContext ctx) {
+    accountClient.reverseDebit(ctx.get("debitId", String.class));
+  }
 }
 
 // Starting a saga — one line:
-sagaManager.start("MoneyTransfer", Map.of(
-    "accountId", "A001", "amount", 5000, "orderId", "ORD-123"));
+sagaManager.start("MoneyTransfer", Map.of("accountId", "A001", "amount", 5000));
 ```
 
-No Step classes. No JSON/YAML definition files. No ServiceInvoker registration. Just annotated methods on a Spring bean with framework-injected clients.
+No `Step` classes, no JSON/YAML files, no manual registration — just annotated methods on a framework-managed bean.
 
 #### Quarkus Integration
 
-```java
-// --- quarkus/deployment/SagaBuildStep.java ---
-public class SagaBuildStep {
-
-    @BuildStep
-    void scanSagaAnnotations(CombinedIndexBuildItem index,
-                              BuildProducer<SagaDefinitionBuildItem> producer) {
-        IndexView idx = index.getIndex();
-
-        // Jandex scan for @SagaStep at build time
-        for (AnnotationInstance ann : idx.getAnnotations(DotName.createSimple(
-                "com.scalar.db.saga.api.annotation.SagaStep"))) {
-            MethodInfo method = ann.target().asMethod();
-            String saga = ann.value("saga").asString();
-            String name = ann.value("name").asString();
-            int order = ann.value("order").asInt();
-
-            // Find matching @SagaCompensation
-            MethodInfo compMethod = findCompensationMethod(
-                method.declaringClass(), saga, name, idx);
-
-            producer.produce(new SagaDefinitionBuildItem(
-                saga, name, order,
-                method.declaringClass().name().toString(),
-                method.name(), compMethod.name()));
-        }
-    }
-
-    @BuildStep
-    @Record(ExecutionTime.RUNTIME_INIT)
-    void registerSagas(SagaRecorder recorder,
-                        List<SagaDefinitionBuildItem> definitions,
-                        BeanContainerBuildItem beanContainer) {
-        recorder.registerSagaDefinitions(beanContainer.getValue(), definitions);
-    }
-}
-```
-
-**What the Quarkus user writes:**
-
-```java
-@ApplicationScoped
-public class MoneyTransferSaga {
-
-    @Inject @GrpcClient("account-service")               // ← Quarkus-managed
-    AccountServiceBlockingStub accountStub;
-
-    @Inject @RestClient                                    // ← Quarkus-managed
-    ShippingService shippingClient;
-
-    @SagaStep(saga = "MoneyTransfer", name = "debit", order = 1)
-    public StepResult debit(SagaContext ctx) {
-        var resp = accountStub.debit(DebitRequest.newBuilder()
-            .setAccountId(ctx.get("accountId", String.class))
-            .setAmount(ctx.get("amount", Integer.class))
-            .build());
-        return StepResult.of("debitId", resp.getDebitId());
-    }
-
-    @SagaCompensation(saga = "MoneyTransfer", name = "debit")
-    public void compensateDebit(SagaContext ctx) {
-        accountStub.reverseDebit(ReverseDebitRequest.newBuilder()
-            .setDebitId(ctx.get("debitId", String.class))
-            .build());
-    }
-}
-```
+Quarkus would scan `@SagaStep` at **build time** via Jandex and record the registrations for runtime init (zero reflection at runtime, native-image friendly). The user writes the same annotated bean with `@Inject`-ed clients.
 
 ### DX Comparison (Final)
 
@@ -4668,14 +4270,14 @@ public class MoneyTransferSaga {
 |---|---|---|
 | **Seata Saga** | JSON definition (service names + methods) | ~30 (JSON only) |
 | **MicroTx / Narayana** | `@LRA`/`@Compensate` on participant endpoints | ~40 (annotations on 3 services) |
-| **Ours — Layer 1 (Step)** | 3 Step classes + JSON/YAML definition | ~90-120 |
-| **Ours — Layer 2 (ServiceInvoker)** | Lambda registry + JSON/YAML definition | ~40-60 |
-| **Ours — Layer 2b (Declarative)** | JSON/YAML definition only (zero Java code) | **~30 (definition only)** |
-| **Ours — Layer 3 (Spring/Quarkus)** | 1 annotated saga class | **~30-40** |
+| **Ours — Layer 1 (code step)** | 3 `Step` classes + definition | ~90–120 |
+| **Ours — Layer 1 (code step + `SagaHttpClient`)** | 3 thin `Step` classes + definition | ~50–70 |
+| **Ours — Layer 2 (declarative)** | Definition only (zero Java code) | **~30 (definition only)** |
+| **Ours — Layer 3 (Spring/Quarkus — future)** | 1 annotated saga class | **~30–40** |
 
 ### Relationship Between Layers and LRA Compatibility
 
-The MicroProfile LRA compatibility section (earlier in this document) describes how to add full LRA protocol support by layering the LRA REST API on top of the Phase 3 coordinator daemon (Phase 6). This uses Layer 1 + Layer 2 internally, adding LRA-specific endpoints so the coordinator can interoperate with standard LRA participants.
+The MicroProfile LRA compatibility section (earlier in this document) describes how to add full LRA protocol support by layering the LRA REST API on top of the Phase 3 coordinator daemon (Phase 6). Internally it uses Layer 1 (code steps) and Layer 2 (declarative service steps), adding LRA-specific endpoints so the coordinator can interoperate with standard LRA participants.
 
 ## Step Implementation Patterns
 
@@ -4716,7 +4318,7 @@ public class DebitAccountStep implements Step {
 }
 ```
 
-The step itself runs in the orchestrator process. The business logic (debit, reserve inventory, etc.) runs in the participant service. This is also where `ServiceInvoker` (Layer 2) and annotations (Layer 3) provide higher-level alternatives to writing Step classes by hand — see [ServiceInvoker and Framework Integration](#serviceinvoker-and-framework-integration).
+The step itself runs in the orchestrator process. The business logic (debit, reserve inventory, etc.) runs in the participant service. This is also where declarative service steps (Layer 2) and framework annotations (Layer 3) provide higher-level alternatives to writing Step classes by hand — see [Declarative Service Steps and Framework Integration](#declarative-service-steps-and-framework-integration).
 
 ### Local Database Steps (Modular-Monolith)
 
@@ -6047,7 +5649,7 @@ The `quarkus-scalardb` extension already provides `DistributedTransactionManager
 | Phase | Unit (Mockito) | Integration (SagaTestHarness) | Transport (WireMock) |
 |---|---|---|---|
 | **1: Core Engine** | Engine (incl. inline compensation), RetryPolicy, RecoveryManager, etc. | SagaTestHarness (ScalarDB + SQLite + MockStep): saga lifecycle, crash recovery, TCC | N/A — no transport layer |
-| **2a: ServiceInvoker** | DeclarativeStepAdapter, expression resolution | Transport adapters | HttpTransportAdapter, GrpcTransportAdapter with WireMock |
+| **2a: Declarative steps** | DeclarativeBindingStep/TccStep, DeclarativeExpressions, CallSpecCodec | Transport adapters, declarative + code steps end-to-end | HttpTransportAdapter, SagaHttpClient with WireMock (gRPC future) |
 | **2b: Spring Boot** | Annotation scanner, auto-configuration | Spring Boot Test: @SagaStep scanning, property binding, controllers | N/A |
 | **3: Daemon Mode** | REST/gRPC handlers, RemoteSagaManager | In-process daemon + HTTP client: full REST API lifecycle | Daemon + WireMock: client → REST API → engine → participants |
 | **4a: Observability** | SagaEventListener, metrics | OpenTelemetry test SDK: verify spans/metrics | N/A |
@@ -6080,7 +5682,7 @@ A money transfer sample application grows with each phase, serving as E2E valida
 | `StepResult.java` | Simple data class | ~30 | Trivial |
 | `SagaContext.java` | Public interface (3 methods: `getSagaId`, `get`, `put`) — what Step implementations see | ~10 | Trivial |
 | `SagaStatus.java` | Enum (6 values: RUNNING, CONFIRMING, COMPLETED, COMPENSATING, COMPENSATED, ESCALATED) | ~10 | Trivial |
-| `SagaDefinition.java` | POJO + inner `StepDefinition` (with `pivot` flag) + SagaMode + RecoveryStrategy (BACKWARD/FORWARD/MIXED) + `getPivotIndex()` + validation | ~80 | Trivial |
+| `SagaDefinition.java` | POJO + inner `StepDefinition` (with `pivot` flag) + SagaMode + RecoveryStrategy (BACKWARD/FORWARD/MIXED/PREDEFINED) + `getPivotIndex()` + validation | ~80 | Trivial |
 | `SagaStateSnapshot.java` | Read-only view of saga state | ~40 | Trivial |
 | `SagaManager.java` | Interface (13 methods incl. register ×2, start ×2, startAsync ×4, resume, compensate, getStateSnapshot, completeStep, startRecovery) | ~35 | Trivial |
 | `SagaCallback.java` | Callback interface (onCompleted, onCompensated, onEscalated) | ~10 | Trivial |
@@ -6150,26 +5752,31 @@ The ~1,750 LoC of production code is not the hard part — AI generates the API 
 
 ## Phase 2: Communication & Framework Integration
 
-**Scope:** ServiceInvoker layer (Layer 2), declarative step communication (Layer 2b), Spring Boot integration, and Quarkus integration.
+**Scope:** Declarative service steps over HTTP (Layer 2) + the `SagaHttpClient` code-step client, Spring Boot integration, and Quarkus integration. The HTTP path (Phase 2a) is implemented; gRPC transport, framework integration, and the participant SDK are not yet built.
 
 ### File-by-File Breakdown
 
 | File | What to Build | Est. LoC | Complexity |
 |---|---|---|---|
-| **Phase 2a: ServiceInvoker + Declarative Communication** | | | |
-| **invoker/** | | | |
-| `ServiceInvoker.java` | Interface (execute + compensate) | ~15 | Trivial |
-| `ServiceInvokerRegistry.java` | Concurrent map lookup + dispatch | ~40 | Low |
-| `GrpcInvoker.java` | Typed lambda wrapper for gRPC stubs (builder pattern) | ~80 | Low |
-| `HttpInvoker.java` | HTTP client wrapper with status code classification | ~80 | Low |
-| `DeclarativeStepAdapter.java` | JSON expression resolution (${...}) + output extraction ($.path) | ~120 | **Medium** |
-| `TransportAdapter.java` | Interface + TransportException | ~30 | Trivial |
-| `GrpcTransportAdapter.java` | Protobuf message building from maps + gRPC metadata propagation | ~100 | Medium |
-| `HttpTransportAdapter.java` | JSON body building + X-Saga-Id/X-Saga-Step propagation + status code mapping | ~80 | Low |
-| Updated `SagaEngine` | Support `service`/`method` in addition to `stepClass` | ~30 | Low |
-| Updated `SagaDefinitionParser` | Parse `call`, `compensate` blocks | ~50 | Low |
-| Tests (all classes: invoker unit + declarative integration + transport edge cases) | | ~800 | Medium |
-| **Phase 2a Total** | | **~1,425** | |
+| **Phase 2a: Declarative Service Steps + HTTP Transport** (✅ implemented) | | | |
+| **api/** (declarative model + code-step client) | | | |
+| `CallSpec.java` / `HttpCall.java` / `HttpMethod.java` | Sealed transport-tagged call spec + HTTP variant/builder | ~220 | Low |
+| `CallSpecCodec.java` | Single JSON (de)serializer for every `CallSpec` (parser + store share it) | ~120 | Medium |
+| `SagaHttpClient.java` / `SagaHttpResponse.java` / `SagaHttpClientProvider.java` / `Named.java` | Fluent HTTP client for code steps + `@Named` injection | ~180 | Low |
+| Updated `SagaDefinition` / `SagaDefinitionParser` | Sealed `ClassStep`/`ServiceStep` + per-phase `CallSpec`; parse `service`/`execution`/`compensation`/`reservation`/`confirmation`/`cancellation` | ~250 | Medium |
+| **transport/** | | | |
+| `TransportAdapter.java` + `TransportException.java` | SPI: `call(CallSpec, SagaContext, stepName)` + retryable classification | ~40 | Trivial |
+| `HttpTransportAdapter.java` | Resolve templates, build request, call, extract output | ~120 | Medium |
+| `DeclarativeBindingStep.java` / `DeclarativeBindingTccStep.java` | Bridge a `ServiceStep`'s `CallSpec`s to `Step`/`TccStep` | ~120 | Low |
+| `DeclarativeExpressions.java` | `${...}` resolution + `$.path`/`$body` extraction (percent-encoded path segments) | ~150 | Medium |
+| `HttpEndpoint` / `HttpExchange` / `HttpServiceConfig` / `OutboundHttpPolicy` / `HttpStatusClassifier` | Per-endpoint HTTP machinery: one client/exchange/policy; SSRF allowlist + body limits + no-redirect + correlation headers + status classification | ~450 | Medium |
+| **engine/** | | | |
+| `HttpEndpointRegistry` / `ResourceRegistry` / updated `StepInstantiator` | Resolve endpoints by name; dispatch sealed `StepDefinition` (`ClassStep` → resolver, `ServiceStep` → binding step) | ~200 | Medium |
+| Tests (declarative unit + transport edge cases + WireMock integration) | | ~900 | Medium |
+| **Phase 2a Total** | | **~3,000** | |
+| | | | |
+| **Phase 2a (gRPC transport)** — future | | | |
+| `GrpcCall.java` (new `CallSpec` subtype) + `GrpcTransportAdapter.java` | Protobuf message building from maps + gRPC metadata propagation; plugs into the same SPI, no engine change | ~250 | Medium |
 | | | | |
 | **Phase 2b: Spring Boot Integration (`scalardb-saga-spring`)** | | | |
 | `SagaAutoConfiguration.java` | `@Bean SagaManager` from `SagaProperties` via builder | ~80 | Low |
@@ -6206,7 +5813,7 @@ The ~1,750 LoC of production code is not the hard part — AI generates the API 
 
 | Work | Time |
 |---|---|
-| Phase 2a: ServiceInvoker + declarative communication + tests | 2-3 days |
+| Phase 2a: Declarative service steps + HTTP transport + code-step client + tests | 2-3 days |
 | Phase 2b: Spring Boot auto-config + annotation scanner + tests | 2-3 days |
 | Phase 2c: Quarkus extension (build step + recorder) + tests | 2-3 days |
 | Phase 2d: Participant protocol spec + Java participant SDK + tests | 1-1.5 days |
@@ -6214,13 +5821,13 @@ The ~1,750 LoC of production code is not the hard part — AI generates the API 
 
 ### Where the Time Actually Goes
 
-1. **Declarative step communication** (~25% of Phase 2a effort) — The expression resolution (`${...}` context lookup, `$.path` response extraction) and protobuf map-to-message conversion in `GrpcTransportAdapter` are the tricky parts.
+1. **Declarative step communication** (~25% of Phase 2a effort) — The expression resolution (`${...}` context lookup, `$.path`/`$body` response extraction in `DeclarativeExpressions`) and the per-endpoint HTTP machinery (SSRF allowlist, body limits, status classification, correlation headers) are the tricky parts. The future gRPC adapter adds protobuf map-to-message conversion.
 2. **Annotation scanning** (~30% of Phase 2b/2c effort) — Correctly matching `@SagaStep` to `@SagaCompensation` methods, handling inheritance, and generating `Step` instances from annotated methods requires careful reflection/Jandex work.
 3. **Comprehensive testing** (~35% of Phase 2 effort) — Unit tests for all classes in each sub-phase. Framework-specific test setup (`@SpringBootTest`, `@QuarkusTest`) has its own overhead. Transport edge cases (malformed protobuf, HTTP error codes, connection failures) need thorough coverage.
 
 ## Phase 3: Daemon Mode
 
-**Scope:** Package the saga engine as a standalone coordinator process with a REST API for external clients to start, monitor, and manage sagas, plus a Java client SDK (`RemoteSagaManager`) that implements the same `SagaManager` interface. The daemon hosts the same `SagaEngine`, `SagaStore`, and `SagaRecoveryManager` from Phase 1 — it simply adds a process boundary and a client-facing API. How steps are invoked (direct call, HTTP, gRPC) is configured via `ServiceInvoker` (Phase 2) and is independent of the deployment mode.
+**Scope:** Package the saga engine as a standalone coordinator process with a REST API for external clients to start, monitor, and manage sagas, plus a Java client SDK (`RemoteSagaManager`) that implements the same `SagaManager` interface. The daemon hosts the same `SagaEngine`, `SagaStore`, and `SagaRecoveryManager` from Phase 1 — it simply adds a process boundary and a client-facing API. How steps are invoked (in-process code step, or declarative service step over HTTP/gRPC) is configured per step and per HTTP endpoint (Phase 2) and is independent of the deployment mode.
 
 ### What Daemon Mode Adds
 
@@ -6252,7 +5859,7 @@ Embedded mode:                           Daemon mode:
 
 Step invocation is orthogonal — both modes use the same step resolution and invocation mechanisms:
 - A step configured with `stepClass` → direct method call (same JVM)
-- A step configured with `service`/`method` → `ServiceInvoker` call (HTTP/gRPC to remote service)
+- A step configured with `service` + declarative phases → a declarative service-step call over the configured transport (HTTP today; gRPC future) to the remote service
 
 Either configuration works in either deployment mode.
 
@@ -6376,7 +5983,7 @@ The `409 Conflict` body carries the existing saga snapshot so the caller can ins
 
 ### Where the Time Actually Goes
 
-1. **Comprehensive testing** (~45% of effort) — Unit tests for all classes (REST resources, error mapper, config, RemoteSagaManager) plus integration tests verifying the full lifecycle via REST: start saga → engine executes steps → check status → recovery after coordinator restart. Must test both in-process steps and remote steps (via ServiceInvoker).
+1. **Comprehensive testing** (~45% of effort) — Unit tests for all classes (REST resources, error mapper, config, RemoteSagaManager) plus integration tests verifying the full lifecycle via REST: start saga → engine executes steps → check status → recovery after coordinator restart. Must test both in-process code steps and remote steps (via declarative service steps / `SagaHttpClient`).
 2. **Graceful shutdown** (~20% of effort) — The coordinator must drain in-flight sagas before stopping, mark them for recovery, and respond to health checks correctly during shutdown. This reuses the Phase 1 graceful shutdown logic but must integrate with the HTTP server lifecycle.
 
 ## Phase 4: Developer Experience & Observability
@@ -6488,16 +6095,41 @@ message StepDefinition {
   string name = 1;
   uint64 timeout_ms = 2;
   RetryPolicy retry_policy = 3;
-  CallDefinition call = 4;             // forward action
-  CallDefinition compensate = 5;       // compensation
+  bool pivot = 4;
+  oneof kind {
+    string step_class = 5;         // Layer 1 code step (embedded mode only)
+    ServiceStep service_step = 6;  // Layer 2 declarative service step
+  }
 }
 
-message CallDefinition {
-  string service = 1;                  // logical service name (resolved via config)
-  string method = 2;                   // method/operation name
-  string transport = 3;                // "grpc" or "http"
-  google.protobuf.Struct request = 4;  // parameter mapping (${...} expressions)
-  map<string, string> output = 5;      // response extraction ($.path expressions)
+// A declarative service step: a logical endpoint plus one CallSpec per phase.
+message ServiceStep {
+  string service = 1;              // logical endpoint name (resolved via config)
+  Transport transport = 2;         // HTTP (default) or GRPC
+  // SAGA phases:
+  CallSpec execution = 3;
+  CallSpec compensation = 4;
+  // TCC phases:
+  CallSpec reservation = 5;
+  CallSpec confirmation = 6;
+  CallSpec cancellation = 7;
+}
+
+enum Transport {
+  TRANSPORT_UNSPECIFIED = 0;
+  HTTP = 1;
+  GRPC = 2;                        // reserved; not yet supported
+}
+
+// HTTP transport call spec (a gRPC transport would add its own fields).
+message CallSpec {
+  string method = 1;                  // GET/POST(default)/PUT/PATCH/DELETE
+  string path = 2;                    // URL path; supports ${...} expressions
+  map<string, string> query = 3;
+  map<string, string> json_body = 4;  // flat map serialized as a JSON body
+  string string_body = 5;             // raw body (mutually exclusive with json_body)
+  string content_type = 6;
+  map<string, string> output = 7;     // $.field / $body extraction
 }
 
 message RetryPolicy {
@@ -6518,6 +6150,7 @@ enum RecoveryStrategy {
   BACKWARD = 1;
   FORWARD = 2;
   MIXED = 3;
+  PREDEFINED = 4;  // reserved for TCC mode (recovery is the Cancel phase)
 }
 
 // --- Runtime API ---
@@ -6553,7 +6186,7 @@ service SagaService {
 }
 ```
 
-In daemon mode, `StepDefinition` uses declarative `call`/`compensate` blocks — the same format as JSON/YAML declarative communication (see [Declarative Communication](#solution-declarative-communication-in-the-saga-definition)). The definition parser auto-sets `stepClass` to `DeclarativeStepAdapter`, keeping the single dispatch path consistent across embedded and daemon modes.
+In daemon mode, a `StepDefinition` carries either a `step_class` (a code step, embedded mode only) or a declarative `ServiceStep` with per-phase `CallSpec`s — the same model as the Java builder and JSON/YAML (see [Declarative Communication](#solution-declarative-communication-in-the-saga-definition)). The coordinator realizes a `ServiceStep` via `DeclarativeBindingStep`/`DeclarativeBindingTccStep` over the matching `TransportAdapter`, keeping a single dispatch path consistent across embedded and daemon modes.
 
 #### Client Usage Examples
 
@@ -6571,61 +6204,38 @@ stub.registerSaga(SagaDefinition.newBuilder()
     .setTimeoutMillis(300000)
     .addSteps(StepDefinition.newBuilder()
         .setName("debit")
-        .setCall(CallDefinition.newBuilder()
-            .setService("account-service")
-            .setMethod("debit")
-            .setTransport("grpc")
-            .setRequest(Struct.newBuilder()
-                .putFields("account_id", Value.newBuilder()
-                    .setStringValue("${accountId}").build())
-                .putFields("amount", Value.newBuilder()
-                    .setStringValue("${amount}").build())
-                .build())
-            .putOutput("debitId", "$.debit_id")
-            .build())
-        .setCompensate(CallDefinition.newBuilder()
-            .setService("account-service")
-            .setMethod("reverseDebit")
-            .setTransport("grpc")
-            .setRequest(Struct.newBuilder()
-                .putFields("debit_id", Value.newBuilder()
-                    .setStringValue("${debitId}").build())
-                .build())
-            .build())
         .setTimeoutMillis(60000)
-        .build())
+        .setServiceStep(ServiceStep.newBuilder()
+            .setService("account-svc")
+            .setTransport(Transport.HTTP)
+            .setExecution(CallSpec.newBuilder()
+                .setMethod("POST")
+                .setPath("/accounts/${fromAccountId}/debit")
+                .putJsonBody("amount", "${amount}")
+                .putOutput("debitId", "$.debit_id"))
+            .setCompensation(CallSpec.newBuilder()
+                .setMethod("POST")
+                .setPath("/accounts/${fromAccountId}/reverse-debit")
+                .putJsonBody("debitId", "${debitId}"))))
     .addSteps(StepDefinition.newBuilder()
         .setName("credit")
-        .setCall(CallDefinition.newBuilder()
-            .setService("account-service")
-            .setMethod("credit")
-            .setTransport("grpc")
-            .setRequest(Struct.newBuilder()
-                .putFields("account_id", Value.newBuilder()
-                    .setStringValue("${toAccountId}").build())
-                .putFields("amount", Value.newBuilder()
-                    .setStringValue("${amount}").build())
-                .build())
-            .putOutput("creditId", "$.credit_id")
-            .build())
-        .setCompensate(CallDefinition.newBuilder()
-            .setService("account-service")
-            .setMethod("reverseCredit")
-            .setTransport("grpc")
-            .setRequest(Struct.newBuilder()
-                .putFields("credit_id", Value.newBuilder()
-                    .setStringValue("${creditId}").build())
-                .build())
-            .build())
         .setTimeoutMillis(30000)
-        .build())
+        .setServiceStep(ServiceStep.newBuilder()
+            .setService("account-svc")
+            .setExecution(CallSpec.newBuilder()
+                .setPath("/accounts/${toAccountId}/credit")
+                .putJsonBody("amount", "${amount}")
+                .putOutput("creditId", "$.credit_id"))
+            .setCompensation(CallSpec.newBuilder()
+                .setPath("/accounts/${toAccountId}/reverse-credit")
+                .putJsonBody("creditId", "${creditId}"))))
     .build());
 
 StartSagaResponse response = stub.startSaga(
     StartSagaRequest.newBuilder()
         .setSagaName("MoneyTransfer")
         .setInput(Struct.newBuilder()
-            .putFields("accountId", Value.newBuilder()
+            .putFields("fromAccountId", Value.newBuilder()
                 .setStringValue("A001").build())
             .putFields("toAccountId", Value.newBuilder()
                 .setStringValue("B002").build())
@@ -6642,16 +6252,6 @@ from google.protobuf.struct_pb2 import Struct
 
 stub = saga_pb2_grpc.SagaServiceStub(channel)
 
-debit_req = Struct()
-debit_req.update({"account_id": "${accountId}", "amount": "${amount}"})
-debit_comp_req = Struct()
-debit_comp_req.update({"debit_id": "${debitId}"})
-
-credit_req = Struct()
-credit_req.update({"account_id": "${toAccountId}", "amount": "${amount}"})
-credit_comp_req = Struct()
-credit_comp_req.update({"credit_id": "${creditId}"})
-
 stub.RegisterSaga(saga_pb2.SagaDefinition(
     name="MoneyTransfer",
     version="1.0",
@@ -6661,26 +6261,33 @@ stub.RegisterSaga(saga_pb2.SagaDefinition(
     steps=[
         saga_pb2.StepDefinition(
             name="debit",
-            call=saga_pb2.CallDefinition(
-                service="account-service", method="debit", transport="grpc",
-                request=debit_req, output={"debitId": "$.debit_id"}),
-            compensate=saga_pb2.CallDefinition(
-                service="account-service", method="reverseDebit",
-                transport="grpc", request=debit_comp_req),
-            timeout_ms=60000),
+            timeout_ms=60000,
+            service_step=saga_pb2.ServiceStep(
+                service="account-svc",
+                transport=saga_pb2.HTTP,
+                execution=saga_pb2.CallSpec(
+                    method="POST", path="/accounts/${fromAccountId}/debit",
+                    json_body={"amount": "${amount}"},
+                    output={"debitId": "$.debit_id"}),
+                compensation=saga_pb2.CallSpec(
+                    method="POST", path="/accounts/${fromAccountId}/reverse-debit",
+                    json_body={"debitId": "${debitId}"}))),
         saga_pb2.StepDefinition(
             name="credit",
-            call=saga_pb2.CallDefinition(
-                service="account-service", method="credit", transport="grpc",
-                request=credit_req, output={"creditId": "$.credit_id"}),
-            compensate=saga_pb2.CallDefinition(
-                service="account-service", method="reverseCredit",
-                transport="grpc", request=credit_comp_req),
-            timeout_ms=30000),
+            timeout_ms=30000,
+            service_step=saga_pb2.ServiceStep(
+                service="account-svc",
+                execution=saga_pb2.CallSpec(
+                    path="/accounts/${toAccountId}/credit",
+                    json_body={"amount": "${amount}"},
+                    output={"creditId": "$.credit_id"}),
+                compensation=saga_pb2.CallSpec(
+                    path="/accounts/${toAccountId}/reverse-credit",
+                    json_body={"creditId": "${creditId}"}))),
     ]))
 
 input_data = Struct()
-input_data.update({"accountId": "A001", "toAccountId": "B002", "amount": 100})
+input_data.update({"fromAccountId": "A001", "toAccountId": "B002", "amount": 100})
 response = stub.StartSaga(saga_pb2.StartSagaRequest(
     saga_name="MoneyTransfer", input=input_data))
 ```
@@ -6843,7 +6450,7 @@ The following features are not included in the initial phases but planned for fu
    - **Pivot interaction:** A step with `pivot: true` cannot be inside a parallel group — it must be a single step, because the pivot is a single go/no-go point. The engine validates this at registration time.
 
 3. **Event publishing**: Use CDC/Debezium to tail `saga_events` and publish to Kafka/RabbitMQ, or implement a polling publisher that reads events by sequence range
-4. **Participant SDK**: Optional participant-side SDK with `@SagaParticipant`, `@SagaAction`, `@SagaCompensation` annotations, built-in idempotency, and anomaly protection (empty rollback, suspension). The anomaly protection uses an INSERT-based barrier mechanism inspired by Seata's TCC Fence and DTM's Sub-Transaction Barrier. Since we don't control participant databases, this is an opt-in library. See "Participant Idempotency Levels" in ServiceInvoker and Framework Integration, and [scalardb-saga-barrier-sdk-research.md](scalardb-saga-barrier-sdk-research.md) for detailed research.
+4. **Participant SDK**: Optional participant-side SDK with `@SagaParticipant`, `@SagaAction`, `@SagaCompensation` annotations, built-in idempotency, and anomaly protection (empty rollback, suspension). The anomaly protection uses an INSERT-based barrier mechanism inspired by Seata's TCC Fence and DTM's Sub-Transaction Barrier. Since we don't control participant databases, this is an opt-in library. See "Participant Idempotency Levels" in Declarative Service Steps and Framework Integration, and [scalardb-saga-barrier-sdk-research.md](scalardb-saga-barrier-sdk-research.md) for detailed research.
 5. **SubStateMachine (nesting)**: Compose sagas from sub-sagas for complex workflows
 6. **Loop execution**: Repeat steps based on collection inputs
 7. **ScriptTask**: Lightweight expression evaluation without full Step implementation

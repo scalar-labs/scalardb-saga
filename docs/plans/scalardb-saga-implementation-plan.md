@@ -46,7 +46,7 @@ Teams building microservices need eventual consistency across services (e.g., or
 A 7-phase incremental build:
 
 1. **Phase 1 — Core Engine**: API interfaces, SagaEngine (unified pivot-based execution), CompensationManager, ScalarDbSagaStore (append-only events + bucket-partitioned saga_state), SagaRecoveryManager, SagaRetentionManager (periodic cleanup of resolved sagas), TCC mode, testing harness
-2. **Phase 2 — Communication & Frameworks**: ServiceInvoker (Layer 2), declarative step communication (Layer 2b), Spring Boot integration, Quarkus integration, participant SDK
+2. **Phase 2 — Communication & Frameworks**: declarative service steps over HTTP (Layer 2: `CallSpec` + `TransportAdapter` + `DeclarativeBindingStep`) and the `SagaHttpClient` code-step client, Spring Boot integration, Quarkus integration, participant SDK
 3. **Phase 3 — Daemon Mode**: Standalone coordinator process with REST API, RemoteSagaManager client SDK
 4. **Phase 4 — DX & Observability**: OpenTelemetry listener, SagaDevServer (local dev with SQLite + web UI)
 5. **Phase 5 — Admin API**: SagaAdminService for production operations (list, inspect, retry, force-complete)
@@ -135,7 +135,7 @@ Modules are added to `settings.gradle.kts` as each phase begins.
 - [x] `api/StepResult.java` — Data class with `of()`, `empty()`, `pending()` factory methods (~30 LoC)
 - [x] `api/SagaStatus.java` — Enum: RUNNING, CONFIRMING, COMPLETED, COMPENSATING, COMPENSATED, ESCALATED (~10 LoC)
 - [x] `api/RetryPolicy.java` — Config POJO with builder, `defaultPolicy()`, `compensationDefault()`, `confirmDefault()` factories (~40 LoC). Execution logic (`sleepWithBackoff()`) deferred to Task 1.4.
-- [x] `api/SagaDefinition.java` — POJO with `StepDefinition` inner class, `SagaMode` (SAGA/TCC), `RecoveryStrategy` (BACKWARD/FORWARD/MIXED), `getPivotIndex()`, validation, builder API (~80 LoC). `getPivotPolicy()` deferred to Task 1.4 (depends on `SagaEvent` from Task 1.5).
+- [x] `api/SagaDefinition.java` — POJO with `StepDefinition` inner class, `SagaMode` (SAGA/TCC), `RecoveryStrategy` (BACKWARD/FORWARD/MIXED/PREDEFINED), `getPivotIndex()`, validation, builder API (~80 LoC). `getPivotPolicy()` deferred to Task 1.4 (depends on `SagaEvent` from Task 1.5).
 - [x] `api/SagaStateSnapshot.java` — Immutable read-only view with `withTransition()` (~40 LoC)
 - [x] `api/SagaManager.java` — Interface: register ×2, start ×2, startAsync ×4, resume, compensate, getStateSnapshot, completeStep, startRecovery (~35 LoC)
 - [x] `api/SagaCallback.java` — Callback interface: onCompleted, onCompensated, onEscalated (~10 LoC)
@@ -383,30 +383,42 @@ Total: ~80 LoC
 
 #### Phase 2: Communication & Framework Integration
 
-**Scope:** ServiceInvoker layer, declarative step communication, Spring Boot integration, Quarkus integration, participant SDK.
+**Scope:** declarative service steps over HTTP + the `SagaHttpClient` code-step client, Spring Boot integration, Quarkus integration, participant SDK.
 
 **Estimated: ~3,370 LoC, ~7-10 working days**
 
-##### Task 2.1: ServiceInvoker + Declarative Communication (Phase 2a)
+##### Task 2.1: Declarative Service Steps + HTTP Transport (Phase 2a) — ✅ implemented
 
-- [ ] `invoker/ServiceInvoker.java` — Interface (~15 LoC)
-- [ ] `invoker/ServiceInvokerRegistry.java` — Concurrent map lookup + dispatch (~40 LoC)
-- [ ] `invoker/GrpcInvoker.java` — Typed lambda wrapper for gRPC stubs (~80 LoC)
-- [ ] `invoker/HttpInvoker.java` — HTTP client wrapper with status code classification (~80 LoC)
-- [ ] `invoker/DeclarativeStepAdapter.java` — JSON expression resolution (`${...}`) + output extraction (`$.path`) (~120 LoC)
-- [ ] `invoker/TransportAdapter.java` — Interface + TransportException (~30 LoC)
-- [ ] `invoker/GrpcTransportAdapter.java` — Protobuf message building from maps + gRPC metadata propagation (~100 LoC)
-- [ ] `invoker/HttpTransportAdapter.java` — JSON body building + X-Saga-Id/X-Saga-Step propagation + status code mapping (~80 LoC)
-- [ ] Update `SagaEngine` — Support `service`/`method` in addition to `stepClass` (~30 LoC)
-- [ ] Update `SagaDefinitionParser` — Parse `call`, `compensate` blocks (~50 LoC)
-- [ ] Tests (invoker unit + declarative integration + transport edge cases) (~800 LoC)
+API (`api/`) — declarative model + code-step client:
 
-> **Research Insight (Security):**
-> - **SSRF via callback URLs**: `HttpInvoker` must validate callback/participant URLs against an allowlist of permitted hosts/CIDRs. Without this, a malicious saga definition could use the coordinator to probe internal services (SSRF). Enforce allowlist at `ServiceInvokerRegistry` level: `config.allowedHosts("payment-svc.internal", "inventory-svc.internal")`.
-> - **HTTP body size limit**: Both `HttpInvoker` (outbound) and callback receiver (inbound) should enforce body size limits. Default: 1MB. Configure via `maxRequestBodyBytes`.
-> - **Jackson ObjectMapper safety**: All `ObjectMapper` instances used for request/response deserialization must have `mapper.deactivateDefaultTyping()` to prevent deserialization gadget attacks. Never enable `@class` or `DefaultTyping.EVERYTHING`.
+- [x] `api/CallSpec.java` + `api/HttpCall.java` + `api/HttpMethod.java` — Sealed transport-tagged call spec + HTTP variant/builder (~220 LoC)
+- [x] `api/CallSpecCodec.java` — Single JSON (de)serializer for every `CallSpec` (shared by parser + store) (~120 LoC)
+- [x] `api/SagaHttpClient.java` + `SagaHttpResponse.java` + `SagaHttpClientProvider.java` + `Named.java` — Fluent HTTP client for code steps + `@Named` injection (~180 LoC)
+- [x] Update `api/SagaDefinition.java` + `api/SagaDefinitionParser.java` — Sealed `ClassStep`/`ServiceStep` + per-phase `CallSpec`; parse `service`/`execution`/`compensation`/`reservation`/`confirmation`/`cancellation` (~250 LoC)
 
-**Phase 2a Total: ~1,425 LoC**
+Transport (`transport/`):
+
+- [x] `transport/TransportAdapter.java` + `TransportException.java` — SPI: `call(CallSpec, SagaContext, stepName)` + retryable classification (~40 LoC)
+- [x] `transport/HttpTransportAdapter.java` — Resolve templates, build request, call, extract output (~120 LoC)
+- [x] `transport/DeclarativeBindingStep.java` + `DeclarativeBindingTccStep.java` — Bridge a `ServiceStep`'s `CallSpec`s to `Step`/`TccStep` (~120 LoC)
+- [x] `transport/DeclarativeExpressions.java` — `${...}` resolution + `$.path`/`$body` extraction (percent-encoded path segments) (~150 LoC)
+- [x] `transport/HttpEndpoint.java` + `HttpExchange.java` + `HttpServiceConfig.java` + `OutboundHttpPolicy.java` + `HttpStatusClassifier.java` — Per-endpoint HTTP machinery: one client/exchange/policy; SSRF allowlist + body limits + no-redirect + correlation headers + status classification (~450 LoC)
+
+Engine (`engine/`):
+
+- [x] `engine/HttpEndpointRegistry.java` + `ResourceRegistry.java` + update `StepInstantiator.java` — Resolve endpoints by name; dispatch sealed `StepDefinition` (`ClassStep` → resolver, `ServiceStep` → binding step) (~200 LoC)
+- [x] Tests (declarative unit + transport edge cases + WireMock integration) (~900 LoC)
+
+Future (Task 2.1b — gRPC transport):
+
+- [ ] `GrpcCall` (new `CallSpec` subtype) + `GrpcTransportAdapter` — Protobuf message building from maps + gRPC metadata propagation; plugs into the same SPI, no engine change (~250 LoC)
+
+> **Research Insight (Security) — implemented:**
+> - **SSRF via participant URLs**: `HttpExchange` validates each request URI against the endpoint's `OutboundHttpPolicy` allowlist (per-endpoint `allowedHosts`) and forbids redirects, so a malicious saga definition cannot use the coordinator to probe internal services. Configured via the builder: `.httpEndpoint(name, baseUrl).allowedHosts("payment-svc.internal", "inventory-svc.internal").add()`.
+> - **HTTP body size limit**: `HttpExchange` enforces request/response body-size caps via `OutboundHttpPolicy.maxBodyBytes` (configured per endpoint with `.maxBodyBytes(...)`).
+> - **Jackson ObjectMapper safety**: all `ObjectMapper` instances used for request/response (de)serialization call `mapper.deactivateDefaultTyping()` to prevent deserialization gadget attacks. Never enable `@class` or `DefaultTyping.EVERYTHING`.
+
+**Phase 2a Total: ~3,000 LoC (HTTP path implemented)**
 
 ##### Task 2.2: Spring Boot Integration (Phase 2b)
 
@@ -684,7 +696,7 @@ Total: ~80 LoC
 | Complex recovery state machine (RUNNING/CONFIRMING/COMPENSATING × Saga/TCC) | Medium | Unified pivot-based model simplifies to single loop; thorough integration tests |
 | LRA TCK compliance (Phase 6) may surface unexpected spec requirements | Medium | Start with spec analysis before coding; incremental compliance testing |
 | ScalarDB secondary index eventual consistency (Cassandra/DynamoDB) | Medium | Pass `SagaStateSnapshot` to `markForRecovery()`; handle multi-row results in `getStateSnapshot()` |
-| SSRF via participant callback URLs in declarative steps | High | Allowlist permitted hosts/CIDRs in `ServiceInvokerRegistry` |
+| SSRF via participant URLs in declarative steps | High | Per-endpoint `OutboundHttpPolicy` allowlist + no-redirect, enforced in `HttpExchange` (✅ implemented) |
 | Terminal state cleanup breaking idempotent-create contract | High | Tombstone records; SagaRetentionManager handles periodic purge with configurable retention period |
 
 ## Cumulative Timeline
