@@ -1,6 +1,7 @@
 package com.scalar.db.saga.engine;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 
@@ -160,6 +161,46 @@ class SagaManagerBuilderTest {
     // Act & Assert
     assertThatThrownBy(() -> SagaManagerBuilder.newBuilder().httpEndpoint("svc", " "))
         .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void httpEndpoint_baseUrlWithUserInfo_throwsIllegalArgumentException() {
+    // Act & Assert — a user@host authority silently retargets the host (resolves to evil.com).
+    assertThatThrownBy(
+            () -> SagaManagerBuilder.newBuilder().httpEndpoint("svc", "http://svc@evil.com:8080"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void httpEndpoint_baseUrlNonHttpScheme_throwsIllegalArgumentException() {
+    // Act & Assert
+    assertThatThrownBy(() -> SagaManagerBuilder.newBuilder().httpEndpoint("svc", "ftp://svc:8080"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void httpEndpoint_baseUrlWithoutHost_throwsIllegalArgumentException() {
+    // Act & Assert — no authority, so getHost() is null.
+    assertThatThrownBy(() -> SagaManagerBuilder.newBuilder().httpEndpoint("svc", "svc:8080/x"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void httpEndpoint_baseUrlMalformed_throwsIllegalArgumentException() {
+    // Act & Assert
+    assertThatThrownBy(() -> SagaManagerBuilder.newBuilder().httpEndpoint("svc", "not a url"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void httpEndpoint_validHttpAndHttpsBaseUrls_accepted() {
+    // Act & Assert — valid absolute http/https URLs (with and without a path) build without error.
+    assertThatCode(
+            () -> {
+              SagaManagerBuilder.newBuilder().httpEndpoint("a", "http://account-svc:8080");
+              SagaManagerBuilder.newBuilder().httpEndpoint("b", "https://account-svc:8443/api/");
+            })
+        .doesNotThrowAnyException();
   }
 
   @Test

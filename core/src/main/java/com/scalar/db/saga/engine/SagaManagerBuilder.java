@@ -10,6 +10,7 @@ import com.scalar.db.saga.recovery.SagaRecoveryManager;
 import com.scalar.db.saga.retention.SagaRetentionManager;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.transport.HttpServiceConfig;
+import java.net.URI;
 import java.net.http.HttpClient;
 import java.time.Clock;
 import java.util.ArrayList;
@@ -156,7 +157,35 @@ public class SagaManagerBuilder implements SagaManager.Builder {
     if (baseUrl.isBlank()) {
       throw new IllegalArgumentException("baseUrl must not be blank");
     }
+    validateBaseUrl(baseUrl);
     return new HttpEndpointBuilderImpl(name, baseUrl);
+  }
+
+  /**
+   * Fails fast on a malformed or misleading {@code baseUrl} at build time rather than at the first
+   * saga run: it must be a valid absolute {@code http}/{@code https} URL with a host and no
+   * user-info component (a {@code user@host} authority silently retargets the host — e.g. {@code
+   * http://svc@evil.com} resolves to {@code evil.com}).
+   */
+  private static void validateBaseUrl(String baseUrl) {
+    URI uri;
+    try {
+      uri = URI.create(baseUrl);
+    } catch (IllegalArgumentException e) {
+      throw new IllegalArgumentException("baseUrl is not a valid URI: " + baseUrl, e);
+    }
+    String scheme = uri.getScheme();
+    if (scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) {
+      throw new IllegalArgumentException("baseUrl must use the http or https scheme: " + baseUrl);
+    }
+    if (uri.getHost() == null) {
+      throw new IllegalArgumentException("baseUrl must have a host: " + baseUrl);
+    }
+    if (uri.getUserInfo() != null) {
+      throw new IllegalArgumentException(
+          "baseUrl must not contain a user-info component (it silently retargets the host): "
+              + baseUrl);
+    }
   }
 
   @Override
