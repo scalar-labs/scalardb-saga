@@ -13,7 +13,10 @@ import org.jspecify.annotations.Nullable;
 final class EventPayloadSerializer {
 
   private static final ObjectMapper MAPPER =
-      new ObjectMapper().enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
+      new ObjectMapper()
+          .enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
+          // Defense in depth against polymorphic-deserialization gadgets (off by default in 2.x).
+          .deactivateDefaultTyping();
   private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
 
   private EventPayloadSerializer() {}

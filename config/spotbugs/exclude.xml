@@ -19,6 +19,11 @@
     <Class name="~.*Test\$.*"/>
     <Bug pattern="CT_CONSTRUCTOR_THROW"/>
   </Match>
+  <!-- Test fixture step/DI classes hold injected objects (e.g. SagaHttpClient) in fields by design -->
+  <Match>
+    <Class name="~.*Test(\$.*)?"/>
+    <Bug pattern="EI_EXPOSE_REP2"/>
+  </Match>
   <!-- ThreadLocalRandom in RetryPolicy.sleepWithBackoff is for retry jitter, not security -->
   <Match>
     <Class name="com.scalar.db.saga.api.RetryPolicy"/>

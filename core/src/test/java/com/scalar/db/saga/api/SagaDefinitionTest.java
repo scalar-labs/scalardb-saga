@@ -81,7 +81,8 @@ class SagaDefinitionTest {
               .build();
 
       // Assert
-      assertThat(definition.getSteps().get(0).getStepClass()).isEqualTo("com.example.MyStep");
+      assertThat(((SagaDefinition.ClassStep) definition.getSteps().get(0)).getStepClass())
+          .isEqualTo("com.example.MyStep");
     }
 
     @Test
@@ -94,7 +95,8 @@ class SagaDefinitionTest {
               .build();
 
       // Assert
-      assertThat(definition.getSteps().get(0).getStepClass()).isEqualTo(DummyStep.class.getName());
+      assertThat(((SagaDefinition.ClassStep) definition.getSteps().get(0)).getStepClass())
+          .isEqualTo(DummyStep.class.getName());
     }
 
     @Test

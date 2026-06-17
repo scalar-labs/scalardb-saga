@@ -8,10 +8,8 @@ import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.api.ShutdownMode;
 import com.scalar.db.saga.api.Step;
-import com.scalar.db.saga.api.StepResolver;
 import com.scalar.db.saga.api.StepResult;
 import com.scalar.db.saga.api.TccStep;
-import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.StepCompensationException;
 import com.scalar.db.saga.exception.StepExecutionException;
 import com.scalar.db.saga.exception.StepTimeoutException;
@@ -19,6 +17,7 @@ import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.StatusEvent;
 import com.scalar.db.saga.store.StepEvent;
+import com.scalar.db.saga.transport.SagaCorrelationContext;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
@@ -67,7 +66,7 @@ public class SagaEngine implements AutoCloseable {
   }
 
   private final SagaStore store;
-  private final StepResolver stepResolver;
+  private final StepInstantiator stepInstantiator;
   private final String ownerId;
   private final ShutdownConfig shutdownConfig;
   private final Clock clock;
@@ -80,15 +79,15 @@ public class SagaEngine implements AutoCloseable {
 
   SagaEngine(
       SagaStore store,
-      StepResolver stepResolver,
+      StepInstantiator stepInstantiator,
       String ownerId,
       ShutdownConfig shutdownConfig,
       Clock clock) {
-    this.store = Objects.requireNonNull(store, "store must not be null");
-    this.stepResolver = Objects.requireNonNull(stepResolver, "stepResolver must not be null");
-    this.ownerId = Objects.requireNonNull(ownerId, "ownerId must not be null");
-    this.shutdownConfig = Objects.requireNonNull(shutdownConfig, "shutdownConfig must not be null");
-    this.clock = Objects.requireNonNull(clock, "clock must not be null");
+    this.store = store;
+    this.stepInstantiator = stepInstantiator;
+    this.ownerId = ownerId;
+    this.shutdownConfig = shutdownConfig;
+    this.clock = clock;
   }
 
   // ---------------------------------------------------------------------------
@@ -246,6 +245,10 @@ public class SagaEngine implements AutoCloseable {
     }
 
     executor.shutdownNow();
+
+    // In-flight sagas have drained (or been marked for recovery), so no step is still calling out:
+    // release the registries' HTTP clients. The step instantiator owns them.
+    stepInstantiator.close();
   }
 
   @Override
@@ -384,7 +387,21 @@ public class SagaEngine implements AutoCloseable {
     long interval = retryPolicy.getInitialIntervalMillis();
 
     for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-      Future<StepResult> future = executor.submit(() -> step.execute(context));
+      Future<StepResult> future =
+          executor.submit(
+              () -> {
+                // Bind the saga correlation on the step-execution thread so an injected
+                // SagaHttpClient (an app singleton with no per-call context arg) propagates the
+                // right X-Saga-Id/X-Saga-Step and bounds its per-request timeout to the step's
+                // remaining deadline; restore on return.
+                SagaCorrelationContext.Correlation previous =
+                    SagaCorrelationContext.bind(context.getSagaId(), step.getName(), stepDeadline);
+                try {
+                  return step.execute(context);
+                } finally {
+                  SagaCorrelationContext.restore(previous);
+                }
+              });
 
       try {
         if (stepDeadline <= 0) {
@@ -484,19 +501,7 @@ public class SagaEngine implements AutoCloseable {
   }
 
   private <T> T resolveStep(StepDefinition stepDef, Class<T> expectedType) {
-    Object resolved = stepResolver.resolve(stepDef.getName(), stepDef.getStepClass());
-    if (expectedType.isInstance(resolved)) {
-      return expectedType.cast(resolved);
-    }
-    throw new SagaDefinitionException(
-        "Step '"
-            + stepDef.getName()
-            + "' (class "
-            + stepDef.getStepClass()
-            + ") does not implement "
-            + expectedType.getName()
-            + ". Found: "
-            + resolved.getClass().getName());
+    return stepInstantiator.instantiate(stepDef, expectedType);
   }
 
   /**
@@ -592,7 +597,13 @@ public class SagaEngine implements AutoCloseable {
       Future<?> future =
           executor.submit(
               () -> {
-                step.compensate(context);
+                SagaCorrelationContext.Correlation previous =
+                    SagaCorrelationContext.bind(context.getSagaId(), step.getName(), stepDeadline);
+                try {
+                  step.compensate(context);
+                } finally {
+                  SagaCorrelationContext.restore(previous);
+                }
                 return null;
               });
 
