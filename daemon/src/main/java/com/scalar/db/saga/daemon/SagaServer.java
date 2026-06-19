@@ -122,8 +122,15 @@ public final class SagaServer implements AutoCloseable {
    * @return this server
    */
   public SagaServer start() {
-    sagaManager.startBackgroundTasks();
-    app.start(config.port());
+    try {
+      sagaManager.startBackgroundTasks();
+      app.start(config.port());
+    } catch (RuntimeException e) {
+      // Stop the (partially started) app and drain/close the manager so a failed start — e.g. a
+      // port bind failure after background tasks are running — does not leak threads/connections.
+      close();
+      throw e;
+    }
     logger.info("SagaServer started on port {}", port());
     return this;
   }

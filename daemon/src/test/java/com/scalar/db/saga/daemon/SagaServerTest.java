@@ -10,6 +10,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 import com.scalar.db.saga.api.SagaManager;
+import io.javalin.Javalin;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Properties;
@@ -80,5 +81,24 @@ class SagaServerTest {
     assertThatThrownBy(() -> new SagaServer(configWithDefinitionsPath(dir), manager))
         .isInstanceOf(IllegalStateException.class);
     verify(manager).close();
+  }
+
+  @Test
+  void start_portUnavailable_closesManagerAndPropagates() {
+    // Hold an ephemeral port with another server so SagaServer's app.start(...) fails to bind.
+    Javalin portHolder = Javalin.create().start(0);
+    try {
+      Properties props = new Properties();
+      props.setProperty(SagaServerConfig.PORT_KEY, Integer.toString(portHolder.port()));
+      SagaManager manager = mock(SagaManager.class);
+      SagaServer server = new SagaServer(SagaServerConfig.load(props), manager);
+
+      assertThatThrownBy(server::start).isInstanceOf(RuntimeException.class);
+
+      verify(manager).startBackgroundTasks();
+      verify(manager).close();
+    } finally {
+      portHolder.stop();
+    }
   }
 }
