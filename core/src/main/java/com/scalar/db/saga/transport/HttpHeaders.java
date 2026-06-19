@@ -57,7 +57,7 @@ final class HttpHeaders {
           if (eq >= 0 && segment.substring(0, eq).trim().equalsIgnoreCase(name)) {
             String value = segment.substring(eq + 1).trim();
             if (value.length() >= 2 && value.startsWith("\"") && value.endsWith("\"")) {
-              value = value.substring(1, value.length() - 1);
+              value = value.substring(1, value.length() - 1).trim();
             }
             return value;
           }
