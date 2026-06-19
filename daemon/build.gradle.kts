@@ -1,5 +1,10 @@
 plugins {
     id("scalardb-saga.java-conventions")
+    application
+}
+
+application {
+    mainClass = "com.scalar.db.saga.daemon.SagaServer"
 }
 
 dependencies {
