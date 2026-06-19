@@ -33,10 +33,13 @@ public final class ErrorMapper {
   public static void register(Javalin app) {
     app.exception(
         SagaNotFoundException.class,
-        (e, ctx) -> ctx.status(404).json(error("SAGA_NOT_FOUND", e.getMessage())));
+        (e, ctx) ->
+            ctx.status(404)
+                .json(error("SAGA_NOT_FOUND", "No saga found with id '" + e.getSagaId() + "'")));
     app.exception(
         SagaDefinitionNotFoundException.class,
-        (e, ctx) -> ctx.status(404).json(error("SAGA_DEFINITION_NOT_FOUND", e.getMessage())));
+        (e, ctx) ->
+            ctx.status(404).json(error("SAGA_DEFINITION_NOT_FOUND", definitionNotFoundMessage(e))));
     app.exception(
         InvalidRequestException.class,
         (e, ctx) -> ctx.status(400).json(error("BAD_REQUEST", e.getMessage())));
@@ -62,6 +65,12 @@ public final class ErrorMapper {
           logger.error("Unhandled error on {} {}", ctx.method(), ctx.path(), e);
           ctx.status(500).json(error("INTERNAL", "Internal server error"));
         });
+  }
+
+  private static String definitionNotFoundMessage(SagaDefinitionNotFoundException e) {
+    String message = "No saga definition registered with name '" + e.getSagaName() + "'";
+    String version = e.getVersion();
+    return version == null ? message : message + " (version '" + version + "')";
   }
 
   private static Map<String, Object> error(String code, @Nullable String message) {
