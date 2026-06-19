@@ -132,7 +132,7 @@ final class SagaHttpClientImpl implements SagaHttpClient {
       checkNoBody();
       Objects.requireNonNull(body, "body must not be null");
       Objects.requireNonNull(contentType, "contentType must not be null");
-      this.rawBody = body.getBytes(StandardCharsets.UTF_8);
+      this.rawBody = body.getBytes(HttpHeaders.charsetOf(contentType));
       this.contentType = contentType;
       this.bodySet = true;
       return this;
