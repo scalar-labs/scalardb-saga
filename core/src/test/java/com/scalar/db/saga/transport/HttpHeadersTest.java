@@ -45,4 +45,28 @@ class HttpHeadersTest {
   void charsetOf_blankCharsetGiven_returnsUtf8() {
     assertThat(HttpHeaders.charsetOf("text/plain; charset=")).isEqualTo(StandardCharsets.UTF_8);
   }
+
+  @Test
+  void charsetOf_whitespaceAroundEqualsGiven_returnsThatCharset() {
+    assertThat(HttpHeaders.charsetOf("text/plain; charset = ISO-8859-1"))
+        .isEqualTo(StandardCharsets.ISO_8859_1);
+  }
+
+  @Test
+  void charsetOf_charsetInsideUnquotedBoundaryGiven_isIgnored() {
+    assertThat(HttpHeaders.charsetOf("multipart/form-data; boundary=--charset=ISO-8859-1--"))
+        .isEqualTo(StandardCharsets.UTF_8);
+  }
+
+  @Test
+  void charsetOf_charsetInsideQuotedParameterValueGiven_isIgnored() {
+    assertThat(HttpHeaders.charsetOf("multipart/form-data; boundary=\"x; charset=ISO-8859-1\""))
+        .isEqualTo(StandardCharsets.UTF_8);
+  }
+
+  @Test
+  void charsetOf_charsetAfterQuotedParameterGiven_returnsThatCharset() {
+    assertThat(HttpHeaders.charsetOf("multipart/form-data; boundary=\"x;y\"; charset=ISO-8859-1"))
+        .isEqualTo(StandardCharsets.ISO_8859_1);
+  }
 }
