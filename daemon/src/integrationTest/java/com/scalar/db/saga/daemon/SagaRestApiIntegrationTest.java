@@ -164,6 +164,13 @@ class SagaRestApiIntegrationTest {
   }
 
   @Test
+  void postWithNullBody_returns400() throws Exception {
+    HttpResponse<String> post = post("/sagas", "null");
+    assertThat(post.statusCode()).isEqualTo(400);
+    assertThat(MAPPER.readTree(post.body()).get("error").asText()).isEqualTo("BAD_REQUEST");
+  }
+
+  @Test
   void postWithUnrecognizedAsyncValue_returns400() throws Exception {
     HttpResponse<String> post =
         post("/sagas?async=1", "{\"sagaName\":\"" + SAGA_NAME + "\",\"input\":{}}");

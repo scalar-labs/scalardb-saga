@@ -91,16 +91,23 @@ public final class SagaResource {
   }
 
   /**
-   * Parses the JSON request body, mapping any deserialization failure to a {@code 400}. Catches
-   * {@link Exception} because the JSON mapper surfaces parse failures as undeclared checked
-   * exceptions.
+   * Parses the JSON request body, mapping any deserialization failure — or a {@code null} body — to
+   * a {@code 400}. Catches {@link Exception} because the JSON mapper surfaces parse failures as
+   * undeclared checked exceptions.
    */
   private static StartSagaRequest parseRequest(Context ctx) {
+    StartSagaRequest request;
     try {
-      return ctx.bodyAsClass(StartSagaRequest.class);
+      request = ctx.bodyAsClass(StartSagaRequest.class);
     } catch (Exception e) {
       throw new InvalidRequestException("malformed request body");
     }
+    // A body of the JSON null literal deserializes to null without throwing; reject it cleanly here
+    // rather than NPE-ing downstream. The check is outside the try so its message survives.
+    if (request == null) {
+      throw new InvalidRequestException("request body must not be null");
+    }
+    return request;
   }
 
   /**
