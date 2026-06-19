@@ -63,7 +63,10 @@ public final class SagaServerConfig {
    * operator overrides it by setting the key explicitly.
    */
   private static Properties applyStoreDefaults(Properties properties) {
-    if (properties.getProperty(STORE_MAX_EVENT_PAYLOAD_BYTES_KEY) == null) {
+    String maxPayload = properties.getProperty(STORE_MAX_EVENT_PAYLOAD_BYTES_KEY);
+    // Treat blank as unset (like port/definitions_path); otherwise a blank value would propagate to
+    // the store factory and fail to parse as an integer, crashing startup.
+    if (maxPayload == null || maxPayload.isBlank()) {
       properties.setProperty(
           STORE_MAX_EVENT_PAYLOAD_BYTES_KEY, Integer.toString(DEFAULT_MAX_EVENT_PAYLOAD_BYTES));
     }

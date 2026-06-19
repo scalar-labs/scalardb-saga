@@ -29,6 +29,17 @@ class SagaServerConfigTest {
   }
 
   @Test
+  void load_blankPayloadLimit_appliesDaemonDefault() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY, "   ");
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.properties().getProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY))
+        .isEqualTo(Integer.toString(SagaServerConfig.DEFAULT_MAX_EVENT_PAYLOAD_BYTES));
+  }
+
+  @Test
   void load_unsetPort_usesDefault() {
     assertThat(SagaServerConfig.load(new Properties()).port())
         .isEqualTo(SagaServerConfig.DEFAULT_PORT);
