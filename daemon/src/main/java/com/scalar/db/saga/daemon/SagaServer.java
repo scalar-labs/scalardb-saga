@@ -99,7 +99,12 @@ public final class SagaServer implements AutoCloseable {
     try {
       if (Files.isDirectory(path)) {
         try (Stream<Path> files = Files.list(path)) {
-          List<Path> definitions = files.filter(SagaServer::isDefinitionFile).sorted().toList();
+          List<Path> definitions =
+              files
+                  .filter(Files::isRegularFile)
+                  .filter(SagaServer::isDefinitionFile)
+                  .sorted()
+                  .toList();
           definitions.forEach(this::registerDefinition);
           return definitions.size();
         }

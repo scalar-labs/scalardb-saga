@@ -91,6 +91,19 @@ class SagaServerTest {
   }
 
   @Test
+  void constructor_directoryWithDefinitionExtension_isIgnored(@TempDir Path dir) throws Exception {
+    Files.writeString(dir.resolve("real.json"), declarativeJson("real"));
+    Files.createDirectory(dir.resolve("nested.json")); // a directory that matches the extension
+    SagaManager manager = mock(SagaManager.class);
+
+    new SagaServer(configWithDefinitionsPath(dir), manager);
+
+    ArgumentCaptor<SagaDefinition> captor = ArgumentCaptor.forClass(SagaDefinition.class);
+    verify(manager, times(1)).register(captor.capture());
+    assertThat(captor.getValue().getName()).isEqualTo("real");
+  }
+
+  @Test
   void constructor_noDefinitionsPath_throwsAndClosesManager() {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.PORT_KEY, "0");
