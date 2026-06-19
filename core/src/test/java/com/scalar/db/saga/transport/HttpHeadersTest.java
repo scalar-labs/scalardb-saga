@@ -69,4 +69,11 @@ class HttpHeadersTest {
     assertThat(HttpHeaders.charsetOf("multipart/form-data; boundary=\"x;y\"; charset=ISO-8859-1"))
         .isEqualTo(StandardCharsets.ISO_8859_1);
   }
+
+  @Test
+  void charsetOf_escapedQuoteInParameterValueGiven_stillFindsCharset() {
+    assertThat(
+            HttpHeaders.charsetOf("multipart/form-data; boundary=\"a\\\"b\"; charset=ISO-8859-1"))
+        .isEqualTo(StandardCharsets.ISO_8859_1);
+  }
 }

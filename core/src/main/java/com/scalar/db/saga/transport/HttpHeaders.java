@@ -37,16 +37,18 @@ final class HttpHeaders {
 
   /**
    * Returns the value of media-type parameter {@code name} (case-insensitive, unquoted), or null.
-   * Parameters are split on {@code ';'} outside quoted strings and matched by name, so a stray
-   * {@code charset=} inside another parameter's value (e.g. a {@code boundary}) is ignored, and
-   * optional whitespace around {@code '='} is tolerated.
+   * Parameters are split on {@code ';'} outside quoted strings (honoring backslash-escaped quotes)
+   * and matched by name, so a stray {@code charset=} inside another parameter's value (e.g. a
+   * {@code boundary}) is ignored, and optional whitespace around {@code '='} is tolerated.
    */
   private static @Nullable String parameter(String contentType, String name) {
     boolean inQuotes = false;
     int paramStart = -1; // -1 until the first ';' — skips the media type itself
     for (int i = 0; i <= contentType.length(); i++) {
       char c = i < contentType.length() ? contentType.charAt(i) : ';'; // synthetic ';' flushes last
-      if (c == '"') {
+      if (c == '\\' && inQuotes && i + 1 < contentType.length()) {
+        i++; // skip the backslash-escaped char (quoted-pair) so it can't toggle inQuotes
+      } else if (c == '"') {
         inQuotes = !inQuotes;
       } else if (c == ';' && !inQuotes) {
         if (paramStart >= 0) {
