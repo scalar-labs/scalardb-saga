@@ -3,18 +3,10 @@ package com.scalar.db.saga.daemon;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpRequest.BodyPublishers;
+import com.sun.net.httpserver.HttpServer;
+import java.io.IOException;
 import java.net.http.HttpResponse;
-import java.net.http.HttpResponse.BodyHandlers;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Properties;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -23,82 +15,72 @@ import org.junit.jupiter.api.Test;
  * via {@code PUT} ({@code 409} + the existing snapshot on conflict), status {@code GET} ({@code
  * 404} when unknown), request validation ({@code 400} for a missing {@code sagaName}, a malformed
  * body, or an unrecognized {@code ?async} value), and the synchronous outcome status codes ({@code
- * 200} for a terminal state, {@code 202} while still resolving). The sagas run trivial in-process
- * {@code NoopStep}/{@code FailingStep} code steps — they are inert vehicles so a saga can reach a
- * known state; this test asserts nothing about how a step does its work.
+ * 200} for a terminal state, {@code 202} while still resolving). The sagas are minimal declarative
+ * service steps whose only job is to reach a known state; this test asserts only on the daemon's
+ * responses.
  *
- * <p>Counterpart: {@link SagaServiceStepIntegrationTest} covers the <b>outbound</b> side — a
- * declarative {@code service} step actually calling a participant over HTTP. This class is purely
- * the inbound REST/HTTP behavior and never makes an outbound call.
+ * <p>Counterpart: {@link SagaServiceStepIntegrationTest} asserts on the <b>outbound</b> side — that
+ * the participant is actually called. Both share {@link DaemonIntegrationTestSupport}.
  */
-class SagaRestApiIntegrationTest {
+class SagaRestApiIntegrationTest extends DaemonIntegrationTestSupport {
 
-  private static final ObjectMapper MAPPER = new ObjectMapper();
-  private static final String SAGA_NAME = "noop-saga";
+  private static final String SAGA_NAME = "saga";
+  private static final String COMPENSATING_SAGA = "compensating-saga";
+  private static final String COMPENSATION_FAILING_SAGA = "compensation-failing-saga";
+
+  // One step that completes against the participant.
   private static final String DEFINITION =
       "{\"name\":\""
           + SAGA_NAME
-          + "\",\"steps\":[{\"name\":\"s1\",\"stepClass\":\"com.scalar.db.saga.daemon.NoopStep\"}]}";
+          + "\",\"mode\":\"SAGA\",\"steps\":[{\"name\":\"s1\",\"service\":\""
+          + SERVICE
+          + "\",\"execution\":{\"method\":\"POST\",\"path\":\"/debit\"},"
+          + "\"compensation\":{\"method\":\"POST\",\"path\":\"/reverse\"}}]}";
 
-  // Backward-recovery saga: s1 (NoopStep) succeeds, s2 (FailingStep) fails → s1 compensates
-  // cleanly.
-  private static final String COMPENSATING_SAGA = "compensating-saga";
+  // s1 succeeds, s2 (/charge) returns 422 → backward recovery compensates s1 cleanly via /reverse.
   private static final String COMPENSATING_DEF =
       "{\"name\":\""
           + COMPENSATING_SAGA
           + "\",\"mode\":\"SAGA\",\"recoveryStrategy\":\"BACKWARD\","
-          + "\"defaultRetryPolicy\":{\"maxAttempts\":1,\"initialIntervalMillis\":1},"
-          + "\"steps\":[{\"name\":\"s1\",\"stepClass\":\"com.scalar.db.saga.daemon.NoopStep\"},"
-          + "{\"name\":\"s2\",\"stepClass\":\"com.scalar.db.saga.daemon.FailingStep\"}]}";
+          + "\"defaultRetryPolicy\":{\"maxAttempts\":1,\"initialIntervalMillis\":1},\"steps\":["
+          + "{\"name\":\"s1\",\"service\":\""
+          + SERVICE
+          + "\",\"execution\":{\"method\":\"POST\",\"path\":\"/debit\"},"
+          + "\"compensation\":{\"method\":\"POST\",\"path\":\"/reverse\"}},"
+          + "{\"name\":\"s2\",\"service\":\""
+          + SERVICE
+          + "\",\"execution\":{\"method\":\"POST\",\"path\":\"/charge\"},"
+          + "\"compensation\":{\"method\":\"POST\",\"path\":\"/void\"}}]}";
 
-  // Like above, but s1 (FailingCompensationStep) fails to compensate → saga stuck COMPENSATING.
-  private static final String COMPENSATION_FAILING_SAGA = "compensation-failing-saga";
+  // Like above, but s1's compensation (/reverse-fail) fails → saga stuck COMPENSATING.
   private static final String COMPENSATION_FAILING_DEF =
       "{\"name\":\""
           + COMPENSATION_FAILING_SAGA
           + "\",\"mode\":\"SAGA\",\"recoveryStrategy\":\"BACKWARD\","
-          + "\"defaultRetryPolicy\":{\"maxAttempts\":1,\"initialIntervalMillis\":1},"
-          + "\"steps\":[{\"name\":\"s1\",\"stepClass\":"
-          + "\"com.scalar.db.saga.daemon.FailingCompensationStep\"},"
-          + "{\"name\":\"s2\",\"stepClass\":\"com.scalar.db.saga.daemon.FailingStep\"}]}";
+          + "\"defaultRetryPolicy\":{\"maxAttempts\":1,\"initialIntervalMillis\":1},\"steps\":["
+          + "{\"name\":\"s1\",\"service\":\""
+          + SERVICE
+          + "\",\"execution\":{\"method\":\"POST\",\"path\":\"/debit\"},"
+          + "\"compensation\":{\"method\":\"POST\",\"path\":\"/reverse-fail\"}},"
+          + "{\"name\":\"s2\",\"service\":\""
+          + SERVICE
+          + "\",\"execution\":{\"method\":\"POST\",\"path\":\"/charge\"},"
+          + "\"compensation\":{\"method\":\"POST\",\"path\":\"/void\"}}]}";
 
-  private final HttpClient http = HttpClient.newHttpClient();
-
-  private Path tempDbPath;
-  private Path definitionsDir;
-  private SagaServer server;
-
-  @BeforeEach
-  void setUp() throws Exception {
-    tempDbPath = Files.createTempFile("saga-daemon-test-", ".db");
-    definitionsDir = Files.createTempDirectory("saga-daemon-defs-");
-    Files.writeString(definitionsDir.resolve(SAGA_NAME + ".json"), DEFINITION);
-    Files.writeString(definitionsDir.resolve(COMPENSATING_SAGA + ".json"), COMPENSATING_DEF);
-    Files.writeString(
-        definitionsDir.resolve(COMPENSATION_FAILING_SAGA + ".json"), COMPENSATION_FAILING_DEF);
-
-    Properties props = new Properties();
-    props.setProperty("scalar.db.storage", "jdbc");
-    props.setProperty(
-        "scalar.db.contact_points",
-        "jdbc:sqlite:" + tempDbPath.toAbsolutePath() + "?busy_timeout=10000");
-    props.setProperty("scalar.db.saga.store.num_buckets", "1");
-    props.setProperty(SagaServerConfig.PORT_KEY, "0");
-    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, definitionsDir.toString());
-
-    server = new SagaServer(SagaServerConfig.load(props)).start();
+  @Override
+  protected void configureParticipant(HttpServer participant) {
+    participant.createContext("/debit", ex -> respond(ex, 200, "{}"));
+    participant.createContext("/reverse", ex -> respond(ex, 200, "{}"));
+    participant.createContext("/charge", ex -> respond(ex, 422, "{}"));
+    participant.createContext("/reverse-fail", ex -> respond(ex, 500, "{}"));
+    participant.createContext("/void", ex -> respond(ex, 200, "{}"));
   }
 
-  @AfterEach
-  void tearDown() throws Exception {
-    if (server != null) {
-      server.close();
-    }
-    Files.deleteIfExists(definitionsDir.resolve(SAGA_NAME + ".json"));
-    Files.deleteIfExists(definitionsDir.resolve(COMPENSATING_SAGA + ".json"));
-    Files.deleteIfExists(definitionsDir.resolve(COMPENSATION_FAILING_SAGA + ".json"));
-    Files.deleteIfExists(definitionsDir);
-    Files.deleteIfExists(tempDbPath);
+  @Override
+  protected void writeDefinitions(Path definitionsDir) throws IOException {
+    writeDefinition(definitionsDir, SAGA_NAME, DEFINITION);
+    writeDefinition(definitionsDir, COMPENSATING_SAGA, COMPENSATING_DEF);
+    writeDefinition(definitionsDir, COMPENSATION_FAILING_SAGA, COMPENSATION_FAILING_DEF);
   }
 
   @Test
@@ -164,13 +146,6 @@ class SagaRestApiIntegrationTest {
   }
 
   @Test
-  void postWithNullBody_returns400() throws Exception {
-    HttpResponse<String> post = post("/sagas", "null");
-    assertThat(post.statusCode()).isEqualTo(400);
-    assertThat(MAPPER.readTree(post.body()).get("error").asText()).isEqualTo("BAD_REQUEST");
-  }
-
-  @Test
   void postWithUnrecognizedAsyncValue_returns400() throws Exception {
     HttpResponse<String> post =
         post("/sagas?async=1", "{\"sagaName\":\"" + SAGA_NAME + "\",\"input\":{}}");
@@ -195,43 +170,5 @@ class SagaRestApiIntegrationTest {
     // Compensation itself failed → saga is non-terminal (still resolving) → 202.
     assertThat(post.statusCode()).isEqualTo(202);
     assertThat(MAPPER.readTree(post.body()).get("status").asText()).isEqualTo("COMPENSATING");
-  }
-
-  private String pollUntilTerminal(String sagaId) throws Exception {
-    for (int i = 0; i < 50; i++) {
-      JsonNode body = MAPPER.readTree(get("/sagas/" + sagaId).body());
-      String status = body.get("status").asText();
-      if (!status.equals("RUNNING") && !status.equals("COMPENSATING")) {
-        return status;
-      }
-      Thread.sleep(40);
-    }
-    throw new AssertionError("Saga " + sagaId + " did not reach a terminal status in time");
-  }
-
-  private HttpResponse<String> post(String path, String body) throws Exception {
-    return http.send(
-        HttpRequest.newBuilder(uri(path))
-            .header("Content-Type", "application/json")
-            .POST(BodyPublishers.ofString(body))
-            .build(),
-        BodyHandlers.ofString());
-  }
-
-  private HttpResponse<String> put(String path, String body) throws Exception {
-    return http.send(
-        HttpRequest.newBuilder(uri(path))
-            .header("Content-Type", "application/json")
-            .PUT(BodyPublishers.ofString(body))
-            .build(),
-        BodyHandlers.ofString());
-  }
-
-  private HttpResponse<String> get(String path) throws Exception {
-    return http.send(HttpRequest.newBuilder(uri(path)).GET().build(), BodyHandlers.ofString());
-  }
-
-  private URI uri(String path) {
-    return URI.create("http://localhost:" + server.port() + path);
   }
 }

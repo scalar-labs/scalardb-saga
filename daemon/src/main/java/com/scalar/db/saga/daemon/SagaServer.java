@@ -1,9 +1,12 @@
 package com.scalar.db.saga.daemon;
 
+import com.scalar.db.saga.api.SagaDefinition;
+import com.scalar.db.saga.api.SagaDefinitionParser;
 import com.scalar.db.saga.api.SagaManager;
 import com.scalar.db.saga.daemon.api.ErrorMapper;
 import com.scalar.db.saga.daemon.api.HealthResource;
 import com.scalar.db.saga.daemon.api.SagaResource;
+import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.store.ScalarDbSagaStoreFactory;
 import io.javalin.Javalin;
 import java.io.IOException;
@@ -28,6 +31,10 @@ import org.slf4j.LoggerFactory;
  * at the configured definitions path. {@link #start()} starts background recovery/retention tasks
  * and binds the HTTP port. {@link #close()} stops accepting requests and then drains in-flight
  * sagas via {@link SagaManager#close()}.
+ *
+ * <p>Daemon mode is <b>declarative-only</b>: the server ships as a container, so operators cannot
+ * supply code-step classes. A definition that declares a code step ({@code stepClass}) is rejected
+ * at startup — use a declarative service step, or run the engine in embedded mode for code steps.
  */
 public final class SagaServer implements AutoCloseable {
 
@@ -74,35 +81,54 @@ public final class SagaServer implements AutoCloseable {
   }
 
   private void loadDefinitions() {
-    config
-        .definitionsPath()
-        .ifPresentOrElse(
-            this::registerDefinitions,
-            () ->
-                logger.warn("No saga definitions path configured; no sagas registered at startup"));
+    int count = config.definitionsPath().map(this::registerDefinitions).orElse(0);
+    // A daemon with no registered definitions cannot run any saga, and definitions are currently
+    // loaded only here at startup — so fail fast rather than serve a healthy but useless process.
+    // If dynamic definition registration (e.g. an admin endpoint) is added later, relax this to
+    // allow an empty startup when that mechanism is enabled.
+    if (count == 0) {
+      throw new IllegalStateException(
+          "No saga definitions registered. Set '"
+              + SagaServerConfig.DEFINITIONS_PATH_KEY
+              + "' to a file or directory containing at least one saga definition.");
+    }
+    logger.info("Registered {} saga definition(s)", count);
   }
 
-  private void registerDefinitions(Path path) {
+  private int registerDefinitions(Path path) {
     try {
-      int count;
       if (Files.isDirectory(path)) {
         try (Stream<Path> files = Files.list(path)) {
           List<Path> definitions = files.filter(SagaServer::isDefinitionFile).sorted().toList();
-          definitions.forEach(sagaManager::register);
-          count = definitions.size();
+          definitions.forEach(this::registerDefinition);
+          return definitions.size();
         }
-      } else {
-        sagaManager.register(path);
-        count = 1;
       }
-      if (count == 0) {
-        logger.warn("No saga definition files (.json/.yaml/.yml) found in {}", path);
-      } else {
-        logger.info("Registered {} saga definition(s) from {}", count, path);
-      }
+      registerDefinition(path);
+      return 1;
     } catch (IOException e) {
       throw new UncheckedIOException("Failed to load saga definitions from " + path, e);
     }
+  }
+
+  /**
+   * Parses one definition file and registers it, rejecting code steps — daemon mode is
+   * declarative-only (see the class comment).
+   */
+  private void registerDefinition(Path path) {
+    SagaDefinition definition = SagaDefinitionParser.parseFile(path);
+    for (SagaDefinition.StepDefinition step : definition.getSteps()) {
+      if (step instanceof SagaDefinition.ClassStep) {
+        throw new SagaDefinitionException(
+            "Saga '"
+                + definition.getName()
+                + "' step '"
+                + step.getName()
+                + "' is a code step (stepClass), which daemon mode does not support. Use a"
+                + " declarative service step, or run the engine in embedded mode for code steps.");
+      }
+    }
+    sagaManager.register(definition);
   }
 
   private static boolean isDefinitionFile(Path path) {
