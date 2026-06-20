@@ -104,6 +104,32 @@ class SagaDefinitionTest {
     }
 
     @Test
+    void step_tccStepClassInSagaMode_throwsIllegalArgumentException() {
+      // Arrange & Act & Assert — a SAGA class step must implement Step, not TccStep
+      assertThatThrownBy(
+              () -> SagaDefinition.newBuilder("test").saga().step("s1", DummyTccStep.class))
+          .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void step_sagaStepClassInTccMode_throwsIllegalArgumentException() {
+      // Arrange & Act & Assert — a TCC class step must implement TccStep, not Step
+      assertThatThrownBy(() -> SagaDefinition.newBuilder("test").tcc().step("s1", DummyStep.class))
+          .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void step_tccStepClassInTccMode_succeeds() {
+      // Arrange & Act
+      SagaDefinition definition =
+          SagaDefinition.newBuilder("test").tcc().step("s1", DummyTccStep.class).add().build();
+
+      // Assert
+      assertThat(((SagaDefinition.ClassStep) definition.getSteps().get(0)).getStepClass())
+          .isEqualTo(DummyTccStep.class.getName());
+    }
+
+    @Test
     void step_withRetryPolicy_setsPolicy() {
       // Arrange
       RetryPolicy policy =
@@ -703,4 +729,6 @@ class SagaDefinitionTest {
   }
 
   abstract static class DummyStep implements Step {}
+
+  abstract static class DummyTccStep implements TccStep {}
 }

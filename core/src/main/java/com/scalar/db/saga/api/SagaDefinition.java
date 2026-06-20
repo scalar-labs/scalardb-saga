@@ -527,12 +527,15 @@ public final class SagaDefinition {
       }
     }
 
-    static String classStepName(String name, Class<?> stepClass) {
+    static String classStepName(String name, Class<?> stepClass, Class<?> expectedInterface) {
       checkStepName(name);
       Objects.requireNonNull(stepClass, "stepClass must not be null");
-      if (!Step.class.isAssignableFrom(stepClass) && !TccStep.class.isAssignableFrom(stepClass)) {
+      if (!expectedInterface.isAssignableFrom(stepClass)) {
         throw new IllegalArgumentException(
-            "stepClass must implement Step or TccStep: " + stepClass.getName());
+            "stepClass must implement "
+                + expectedInterface.getSimpleName()
+                + ": "
+                + stepClass.getName());
       }
       return stepClass.getName();
     }
@@ -568,7 +571,7 @@ public final class SagaDefinition {
 
     /** Starts a class step by class. */
     public SagaClassStepBuilder step(String name, Class<?> stepClass) {
-      return new SagaClassStepBuilder(this, name, classStepName(name, stepClass));
+      return new SagaClassStepBuilder(this, name, classStepName(name, stepClass, Step.class));
     }
 
     /**
@@ -597,7 +600,7 @@ public final class SagaDefinition {
 
     /** Starts a class step by class. */
     public TccClassStepBuilder step(String name, Class<?> stepClass) {
-      return new TccClassStepBuilder(this, name, classStepName(name, stepClass));
+      return new TccClassStepBuilder(this, name, classStepName(name, stepClass, TccStep.class));
     }
 
     /**
