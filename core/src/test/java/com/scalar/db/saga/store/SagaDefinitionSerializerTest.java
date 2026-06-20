@@ -7,7 +7,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.scalar.db.saga.api.RetryPolicy;
 import com.scalar.db.saga.api.SagaDefinition;
 import com.scalar.db.saga.api.SagaDefinition.RecoveryStrategy;
-import com.scalar.db.saga.api.SagaDefinition.SagaMode;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -25,7 +24,8 @@ class SagaDefinitionSerializerTest {
   void serializeAndDeserialize_withAllFields_roundTripsCorrectly() {
     // Arrange
     SagaDefinition original =
-        SagaDefinition.newBuilder("test-saga", SagaMode.SAGA)
+        SagaDefinition.newBuilder("test-saga")
+            .saga()
             .version("2.0")
             .recoveryStrategy(RecoveryStrategy.BACKWARD)
             .timeoutMillis(30000)
@@ -63,7 +63,8 @@ class SagaDefinitionSerializerTest {
   void serializeAndDeserialize_withNoRetryPolicies_roundTripsCorrectly() {
     // Arrange
     SagaDefinition original =
-        SagaDefinition.newBuilder("simple-saga", SagaMode.SAGA)
+        SagaDefinition.newBuilder("simple-saga")
+            .saga()
             .step("step1", "com.example.Step1")
             .add()
             .build();
@@ -80,9 +81,9 @@ class SagaDefinitionSerializerTest {
   void serializeAndDeserialize_withServiceStep_roundTripsCorrectly() {
     // Arrange
     SagaDefinition original =
-        SagaDefinition.newBuilder("svc-saga", SagaMode.SAGA)
+        SagaDefinition.newBuilder("svc-saga")
+            .saga()
             .serviceStep("debit", "account-service")
-            .operation()
             .execution(com.scalar.db.saga.api.HttpCall.newBuilder("/debit").build())
             .compensation(com.scalar.db.saga.api.HttpCall.newBuilder("/reverse").build())
             .timeoutMillis(5000)
@@ -101,9 +102,9 @@ class SagaDefinitionSerializerTest {
   void serializeAndDeserialize_withStringBodyAndContentTypeAndBodyOutput_roundTripsCorrectly() {
     // Arrange — exercise the v1 fields: raw string body, content-type override, $body output.
     SagaDefinition original =
-        SagaDefinition.newBuilder("v1-saga", SagaMode.SAGA)
+        SagaDefinition.newBuilder("v1-saga")
+            .saga()
             .serviceStep("notify", "notify-service")
-            .operation()
             .execution(
                 com.scalar.db.saga.api.HttpCall.newBuilder("/notify")
                     .stringBody("<msg>${text}</msg>")
@@ -129,11 +130,11 @@ class SagaDefinitionSerializerTest {
   void serializeAndDeserialize_withMixedStepKinds_roundTripsCorrectly() {
     // Arrange
     SagaDefinition original =
-        SagaDefinition.newBuilder("mixed-saga", SagaMode.SAGA)
+        SagaDefinition.newBuilder("mixed-saga")
+            .saga()
             .step("classy", "com.example.ComplexStep")
             .add()
             .serviceStep("svc", "shipping-service")
-            .operation()
             .execution(com.scalar.db.saga.api.HttpCall.newBuilder("/ship").build())
             .compensation(com.scalar.db.saga.api.HttpCall.newBuilder("/unship").build())
             .add()

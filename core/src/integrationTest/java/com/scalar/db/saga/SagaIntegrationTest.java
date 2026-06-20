@@ -7,7 +7,6 @@ import com.scalar.db.saga.api.RetryPolicy;
 import com.scalar.db.saga.api.SagaCallback;
 import com.scalar.db.saga.api.SagaDefinition;
 import com.scalar.db.saga.api.SagaDefinition.RecoveryStrategy;
-import com.scalar.db.saga.api.SagaDefinition.SagaMode;
 import com.scalar.db.saga.api.SagaDefinitionId;
 import com.scalar.db.saga.api.SagaManager;
 import com.scalar.db.saga.api.SagaStateSnapshot;
@@ -111,7 +110,8 @@ class SagaIntegrationTest {
       FakeStep step3 = FakeStep.newBuilder("step3").build();
 
       SagaDefinition def =
-          SagaDefinition.newBuilder("test-saga", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
               .step("step1", STEP_CLASS)
               .add()
               .step("step2", STEP_CLASS)
@@ -150,7 +150,8 @@ class SagaIntegrationTest {
               .build();
 
       SagaDefinition def =
-          SagaDefinition.newBuilder("test-saga", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
               .step("step1", STEP_CLASS)
               .add()
               .step("step2", STEP_CLASS)
@@ -201,7 +202,8 @@ class SagaIntegrationTest {
       FakeStep step2 = FakeStep.newBuilder("step2").build();
 
       SagaDefinition def =
-          SagaDefinition.newBuilder("test-saga", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
               .recoveryStrategy(RecoveryStrategy.FORWARD)
               .step("step1", STEP_CLASS)
               .add()
@@ -231,7 +233,8 @@ class SagaIntegrationTest {
               .build();
 
       SagaDefinition def =
-          SagaDefinition.newBuilder("test-saga", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
               .recoveryStrategy(RecoveryStrategy.FORWARD)
               .defaultRetryPolicy(
                   RetryPolicy.newBuilder()
@@ -269,7 +272,8 @@ class SagaIntegrationTest {
       FakeStep step3 = FakeStep.newBuilder("step3").build();
 
       SagaDefinition def =
-          SagaDefinition.newBuilder("test-saga", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
               .recoveryStrategy(RecoveryStrategy.MIXED)
               .step("step1", STEP_CLASS)
               .add()
@@ -305,7 +309,8 @@ class SagaIntegrationTest {
               .build();
 
       SagaDefinition def =
-          SagaDefinition.newBuilder("test-saga", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
               .recoveryStrategy(RecoveryStrategy.MIXED)
               .defaultRetryPolicy(
                   RetryPolicy.newBuilder()
@@ -353,7 +358,8 @@ class SagaIntegrationTest {
       FakeTccStep step2 = FakeTccStep.newBuilder("step2").build();
 
       SagaDefinition def =
-          SagaDefinition.newBuilder("tcc-saga", SagaMode.TCC)
+          SagaDefinition.newBuilder("tcc-saga")
+              .tcc()
               .step("step1", TCC_STEP_CLASS)
               .add()
               .step("step2", TCC_STEP_CLASS)
@@ -388,7 +394,8 @@ class SagaIntegrationTest {
               .build();
 
       SagaDefinition def =
-          SagaDefinition.newBuilder("tcc-saga", SagaMode.TCC)
+          SagaDefinition.newBuilder("tcc-saga")
+              .tcc()
               .step("step1", TCC_STEP_CLASS)
               .add()
               .step("step2", TCC_STEP_CLASS)
@@ -423,7 +430,8 @@ class SagaIntegrationTest {
               .build();
 
       SagaDefinition def =
-          SagaDefinition.newBuilder("tcc-saga", SagaMode.TCC)
+          SagaDefinition.newBuilder("tcc-saga")
+              .tcc()
               .step("step1", TCC_STEP_CLASS)
               .add()
               .step("step2", TCC_STEP_CLASS)
@@ -466,7 +474,8 @@ class SagaIntegrationTest {
               .build();
 
       SagaDefinition def =
-          SagaDefinition.newBuilder("tcc-saga", SagaMode.TCC)
+          SagaDefinition.newBuilder("tcc-saga")
+              .tcc()
               .step("step1", TCC_STEP_CLASS)
               .add()
               .step("step2", TCC_STEP_CLASS)
@@ -501,7 +510,8 @@ class SagaIntegrationTest {
       Map<String, Object> steps = Map.of("step1", step1, "step2", step2);
 
       SagaDefinition def =
-          SagaDefinition.newBuilder("test-saga", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
               .step("step1", STEP_CLASS)
               .add()
               .step("step2", STEP_CLASS)
@@ -568,7 +578,8 @@ class SagaIntegrationTest {
               .build();
 
       SagaDefinition def =
-          SagaDefinition.newBuilder("test-saga", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
               .step("step1", STEP_CLASS)
               .add()
               .step("step2", STEP_CLASS)
@@ -600,10 +611,7 @@ class SagaIntegrationTest {
               .build();
 
       SagaDefinition def =
-          SagaDefinition.newBuilder("test-saga", SagaMode.SAGA)
-              .step("step1", STEP_CLASS)
-              .add()
-              .build();
+          SagaDefinition.newBuilder("test-saga").saga().step("step1", STEP_CLASS).add().build();
 
       try (SagaManager manager = buildManager(Map.of("step1", step1))) {
         manager.register(def);
@@ -631,10 +639,7 @@ class SagaIntegrationTest {
       FakeStep step1 = FakeStep.newBuilder("step1").build();
 
       SagaDefinition def =
-          SagaDefinition.newBuilder("test-saga", SagaMode.SAGA)
-              .step("step1", STEP_CLASS)
-              .add()
-              .build();
+          SagaDefinition.newBuilder("test-saga").saga().step("step1", STEP_CLASS).add().build();
 
       try (SagaManager manager = buildManager(Map.of("step1", step1))) {
         manager.register(def);
@@ -655,7 +660,8 @@ class SagaIntegrationTest {
       FakeStep step2 = FakeStep.newBuilder("step2").build();
 
       SagaDefinition def =
-          SagaDefinition.newBuilder("test-saga", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
               .step("step1", STEP_CLASS)
               .add()
               .step("step2", STEP_CLASS)
@@ -727,7 +733,8 @@ class SagaIntegrationTest {
               .build();
 
       SagaDefinition def =
-          SagaDefinition.newBuilder("test-saga", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
               .step("step1", STEP_CLASS)
               .add()
               .step("step2", STEP_CLASS)
@@ -776,7 +783,8 @@ class SagaIntegrationTest {
       FakeStep step2 = FakeStep.newBuilder("step2").build();
 
       SagaDefinition def =
-          SagaDefinition.newBuilder("test-saga", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
               .step("step1", STEP_CLASS)
               .add()
               .step("step2", STEP_CLASS)
@@ -806,10 +814,7 @@ class SagaIntegrationTest {
       FakeStep step1 = FakeStep.newBuilder("step1").build();
 
       SagaDefinition def =
-          SagaDefinition.newBuilder("test-saga", SagaMode.SAGA)
-              .step("step1", STEP_CLASS)
-              .add()
-              .build();
+          SagaDefinition.newBuilder("test-saga").saga().step("step1", STEP_CLASS).add().build();
 
       try (SagaManager manager = buildManager(Map.of("step1", step1))) {
         manager.register(def);
@@ -882,14 +887,16 @@ class SagaIntegrationTest {
       FakeStep step1 = FakeStep.newBuilder("step1").build();
 
       SagaDefinition v1 =
-          SagaDefinition.newBuilder("versioned-saga", SagaMode.SAGA)
+          SagaDefinition.newBuilder("versioned-saga")
+              .saga()
               .version("1.0")
               .step("step1", STEP_CLASS)
               .add()
               .build();
 
       SagaDefinition v2 =
-          SagaDefinition.newBuilder("versioned-saga", SagaMode.SAGA)
+          SagaDefinition.newBuilder("versioned-saga")
+              .saga()
               .version("2.0")
               .step("step1", STEP_CLASS)
               .add()
@@ -916,14 +923,16 @@ class SagaIntegrationTest {
       FakeStep step1 = FakeStep.newBuilder("step1").build();
 
       SagaDefinition v1 =
-          SagaDefinition.newBuilder("versioned-saga", SagaMode.SAGA)
+          SagaDefinition.newBuilder("versioned-saga")
+              .saga()
               .version("1.0")
               .step("step1", STEP_CLASS)
               .add()
               .build();
 
       SagaDefinition v2 =
-          SagaDefinition.newBuilder("versioned-saga", SagaMode.SAGA)
+          SagaDefinition.newBuilder("versioned-saga")
+              .saga()
               .version("2.0")
               .step("step1", STEP_CLASS)
               .add()
@@ -950,14 +959,16 @@ class SagaIntegrationTest {
       FakeStep step1 = FakeStep.newBuilder("step1").build();
 
       SagaDefinition v1 =
-          SagaDefinition.newBuilder("versioned-saga", SagaMode.SAGA)
+          SagaDefinition.newBuilder("versioned-saga")
+              .saga()
               .version("1.0")
               .step("step1", STEP_CLASS)
               .add()
               .build();
 
       SagaDefinition v2 =
-          SagaDefinition.newBuilder("versioned-saga", SagaMode.SAGA)
+          SagaDefinition.newBuilder("versioned-saga")
+              .saga()
               .version("2.0")
               .step("step1", STEP_CLASS)
               .add()

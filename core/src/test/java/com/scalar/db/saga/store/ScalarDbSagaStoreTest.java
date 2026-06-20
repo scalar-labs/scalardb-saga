@@ -178,7 +178,8 @@ class ScalarDbSagaStoreTest {
   void registerDefinition_firstRegistration_insertsDefinition() throws Exception {
     // Arrange
     SagaDefinition def =
-        SagaDefinition.newBuilder("order-saga", SagaMode.SAGA)
+        SagaDefinition.newBuilder("order-saga")
+            .saga()
             .version("v1")
             .step("debit", "com.example.DebitStep")
             .add()
@@ -198,7 +199,8 @@ class ScalarDbSagaStoreTest {
   void registerDefinition_sameContentAlreadyExists_skipsWrite() throws Exception {
     // Arrange
     SagaDefinition def =
-        SagaDefinition.newBuilder("order-saga", SagaMode.SAGA)
+        SagaDefinition.newBuilder("order-saga")
+            .saga()
             .version("v1")
             .step("debit", "com.example.DebitStep")
             .add()
@@ -222,13 +224,15 @@ class ScalarDbSagaStoreTest {
       throws Exception {
     // Arrange
     SagaDefinition def =
-        SagaDefinition.newBuilder("order-saga", SagaMode.SAGA)
+        SagaDefinition.newBuilder("order-saga")
+            .saga()
             .version("v1")
             .step("debit", "com.example.DebitStep")
             .add()
             .build();
     SagaDefinition differentDef =
-        SagaDefinition.newBuilder("order-saga", SagaMode.SAGA)
+        SagaDefinition.newBuilder("order-saga")
+            .saga()
             .version("v1")
             .step("credit", "com.example.CreditStep")
             .add()
@@ -250,7 +254,8 @@ class ScalarDbSagaStoreTest {
       throws Exception {
     // Arrange — commit throws UTSE, verifier finds the same definition
     SagaDefinition def =
-        SagaDefinition.newBuilder("order-saga", SagaMode.SAGA)
+        SagaDefinition.newBuilder("order-saga")
+            .saga()
             .version("v1")
             .step("debit", "com.example.DebitStep")
             .add()
@@ -279,7 +284,8 @@ class ScalarDbSagaStoreTest {
     // Verifier returns empty (our insert didn't commit), retry's primary action
     // detects the conflict and throws SagaDefinitionException.
     SagaDefinition def =
-        SagaDefinition.newBuilder("order-saga", SagaMode.SAGA)
+        SagaDefinition.newBuilder("order-saga")
+            .saga()
             .version("v1")
             .step("debit", "com.example.DebitStep")
             .add()
@@ -291,7 +297,8 @@ class ScalarDbSagaStoreTest {
     DistributedTransaction tx3 = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(tx2).thenReturn(tx3);
     SagaDefinition differentDef =
-        SagaDefinition.newBuilder("order-saga", SagaMode.SAGA)
+        SagaDefinition.newBuilder("order-saga")
+            .saga()
             .version("v1")
             .step("credit", "com.example.CreditStep")
             .add()
@@ -311,7 +318,8 @@ class ScalarDbSagaStoreTest {
   void getDefinition_existingDefinition_returnsDefinition() throws Exception {
     // Arrange
     SagaDefinition def =
-        SagaDefinition.newBuilder("order-saga", SagaMode.SAGA)
+        SagaDefinition.newBuilder("order-saga")
+            .saga()
             .version("v1")
             .step("debit", "com.example.DebitStep")
             .add()
@@ -348,7 +356,8 @@ class ScalarDbSagaStoreTest {
   void getDefinition_multipleVersionsExist_returnsLatestByRegisteredAt() throws Exception {
     // Arrange — two versions, v1 registered earlier, v2 registered later
     SagaDefinition defV2 =
-        SagaDefinition.newBuilder("order-saga", SagaMode.SAGA)
+        SagaDefinition.newBuilder("order-saga")
+            .saga()
             .version("v2")
             .step("debit", "com.example.DebitStep")
             .add()
@@ -883,7 +892,8 @@ class ScalarDbSagaStoreTest {
   void registerAndGetDefinition_withRetryPolicy_roundTripsCorrectly() throws Exception {
     // Arrange — use SAGA mode (TCC doesn't allow pivot=true)
     SagaDefinition def =
-        SagaDefinition.newBuilder("order-saga", SagaMode.SAGA)
+        SagaDefinition.newBuilder("order-saga")
+            .saga()
             .version("v2")
             .timeoutMillis(30_000)
             .defaultRetryPolicy(

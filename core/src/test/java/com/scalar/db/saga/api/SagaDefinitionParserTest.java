@@ -256,6 +256,46 @@ class SagaDefinitionParserTest {
     }
 
     @Test
+    void parseJson_tccWithRecoveryStrategy_throwsSagaDefinitionException() {
+      // Arrange — a TCC definition must not specify recoveryStrategy; recovery is predefined.
+      String json =
+          """
+          {
+            "name": "tccSaga",
+            "mode": "TCC",
+            "recoveryStrategy": "BACKWARD",
+            "steps": [
+              { "name": "t1", "stepClass": "com.example.TccStep1" }
+            ]
+          }
+          """;
+
+      // Act & Assert
+      assertThatThrownBy(() -> SagaDefinitionParser.parseJson(json))
+          .isInstanceOf(SagaDefinitionException.class);
+    }
+
+    @Test
+    void parseJson_tccWithPivotStep_throwsSagaDefinitionException() {
+      // Arrange — a TCC step must not specify pivot; recovery is predefined, so the pivot is fixed
+      // at the last try step.
+      String json =
+          """
+          {
+            "name": "tccSaga",
+            "mode": "TCC",
+            "steps": [
+              { "name": "t1", "stepClass": "com.example.TccStep1", "pivot": true }
+            ]
+          }
+          """;
+
+      // Act & Assert
+      assertThatThrownBy(() -> SagaDefinitionParser.parseJson(json))
+          .isInstanceOf(SagaDefinitionException.class);
+    }
+
+    @Test
     void parseJson_mixedStrategyGiven_parsesCorrectly() {
       // Arrange
       String json =

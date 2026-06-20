@@ -17,8 +17,8 @@ import org.jspecify.annotations.Nullable;
  * Defines a saga's structure: its steps, execution mode, recovery strategy, and timeout
  * configuration.
  *
- * <p>Use {@link #newBuilder(String, SagaMode)} to create definitions programmatically. Definitions
- * are validated at build time.
+ * <p>Use {@link #newBuilder(String)} to create definitions programmatically. Definitions are
+ * validated at build time.
  */
 @Immutable
 public final class SagaDefinition {
@@ -52,7 +52,7 @@ public final class SagaDefinition {
   private final @Nullable RetryPolicy defaultRetryPolicy;
   private final int pivotIndex;
 
-  private SagaDefinition(Builder builder) {
+  private SagaDefinition(AbstractSagaBuilder<?> builder) {
     this.name = builder.name;
     this.version = builder.version;
     this.mode = builder.mode;
@@ -63,13 +63,17 @@ public final class SagaDefinition {
     this.pivotIndex = computePivotIndex();
   }
 
-  public static Builder newBuilder(String name, SagaMode mode) {
+  /**
+   * Starts a programmatic definition for {@code name}; pick the mode with {@link
+   * ModeSelector#saga()} or {@link ModeSelector#tcc()}, which return a {@link SagaBuilder} / {@link
+   * TccBuilder} exposing only the methods valid for that mode.
+   */
+  public static ModeSelector newBuilder(String name) {
     Objects.requireNonNull(name, "name must not be null");
-    Objects.requireNonNull(mode, "mode must not be null");
     if (name.isBlank()) {
       throw new IllegalArgumentException("name must not be blank");
     }
-    return new Builder(name, mode);
+    return new ModeSelector(name);
   }
 
   /**
@@ -139,26 +143,15 @@ public final class SagaDefinition {
       if (step.isPivot()) {
         pivotCount++;
       }
-      // Every service step is declarative and inlines its phases, so its SAGA/TCC nature must match
-      // the saga's mode. (Class steps resolve their mode capability at registration, where the
-      // resolver is available.) This runs before any getTransport() so an empty-phase map can't
-      // NPE.
-      if (step instanceof ServiceStep service) {
-        validateDeclarativePhases(service);
-      }
+      // A service step's SAGA/TCC phase set is guaranteed to match the saga's mode by construction
+      // (the SagaBuilder/TccBuilder only expose their mode's phase setters) and is enforced at
+      // parse
+      // time for JSON/YAML — so no phase/mode check is needed here.
     }
 
     if (mode == SagaMode.TCC) {
-      if (recoveryStrategy != RecoveryStrategy.PREDEFINED) {
-        throw new SagaDefinitionException(
-            "TCC mode must not specify a recovery strategy"
-                + " — recovery is predefined via the Cancel phase");
-      }
-      if (pivotCount != 0) {
-        throw new SagaDefinitionException(
-            "TCC definitions must not specify a pivot step"
-                + " — the pivot is implicit (last try step)");
-      }
+      // TCC recovery is PREDEFINED and pivots are unrepresentable (the TccBuilder exposes neither),
+      // so there is nothing further to validate.
       return;
     }
 
@@ -184,22 +177,6 @@ public final class SagaDefinition {
       case PREDEFINED ->
           throw new SagaDefinitionException(
               "PREDEFINED recovery strategy is reserved for TCC mode");
-    }
-  }
-
-  private void validateDeclarativePhases(ServiceStep service) {
-    Set<ServiceStep.Phase> expected =
-        mode == SagaMode.TCC ? ServiceStep.TCC_PHASES : ServiceStep.SAGA_PHASES;
-    if (!service.getPhases().keySet().equals(expected)) {
-      throw new SagaDefinitionException(
-          "Declarative service step '"
-              + service.getName()
-              + "' in "
-              + mode
-              + " mode must define exactly the phases "
-              + expected
-              + ", but has "
-              + service.getPhases().keySet());
     }
   }
 
@@ -292,7 +269,7 @@ public final class SagaDefinition {
     private final @Nullable RetryPolicy retryPolicy;
     private final boolean pivot;
 
-    private StepDefinition(AbstractStepBuilder<?> builder) {
+    private StepDefinition(AbstractStepBuilder<?, ?> builder) {
       this.name = builder.name;
       this.timeoutMillis = builder.timeoutMillis;
       this.retryPolicy = builder.retryPolicy;
@@ -334,9 +311,9 @@ public final class SagaDefinition {
 
     private final String stepClass;
 
-    private ClassStep(StepBuilder builder) {
+    private ClassStep(AbstractStepBuilder<?, ?> builder, String stepClass) {
       super(builder);
-      this.stepClass = Objects.requireNonNull(builder.stepClass);
+      this.stepClass = Objects.requireNonNull(stepClass);
     }
 
     /** Returns the fully-qualified class name implementing {@link Step} or {@link TccStep}. */
@@ -399,7 +376,7 @@ public final class SagaDefinition {
     private final Map<Phase, CallSpec> phases;
 
     private ServiceStep(
-        AbstractStepBuilder<?> builder, String service, Map<Phase, CallSpec> phases) {
+        AbstractStepBuilder<?, ?> builder, String service, Map<Phase, CallSpec> phases) {
       super(builder);
       if (phases.isEmpty()) {
         // Structural guarantee: getTransport()/isTcc() read from the phase map, so an empty one is
@@ -462,94 +439,71 @@ public final class SagaDefinition {
     }
   }
 
-  /** Builder for {@link SagaDefinition}. */
-  public static final class Builder {
+  /**
+   * Picks the saga's mode, returned by {@link SagaDefinition#newBuilder(String)}. Choose {@link
+   * #saga()} for a SAGA definition or {@link #tcc()} for a TCC one; the returned builder exposes
+   * only the methods valid for that mode.
+   */
+  public static final class ModeSelector {
 
     private final String name;
-    private final SagaMode mode;
-    private String version = "1.0";
-    private final List<StepDefinition> steps = new ArrayList<>();
-    private RecoveryStrategy recoveryStrategy;
-    private long timeoutMillis;
-    private @Nullable RetryPolicy defaultRetryPolicy;
 
-    private Builder(String name, SagaMode mode) {
+    private ModeSelector(String name) {
+      this.name = name;
+    }
+
+    /** Builds a SAGA-mode definition (compensation-based recovery). */
+    public SagaBuilder saga() {
+      return new SagaBuilder(name);
+    }
+
+    /** Builds a TCC-mode definition (reserve/confirm/cancel). */
+    public TccBuilder tcc() {
+      return new TccBuilder(name);
+    }
+  }
+
+  /**
+   * Common base for the mode-typed saga builders. Holds the mode-agnostic settings; {@link
+   * SagaBuilder} and {@link TccBuilder} add the step and recovery methods valid for their mode. The
+   * {@code SELF} type parameter lets the shared setters return the concrete builder for chaining.
+   */
+  public abstract static sealed class AbstractSagaBuilder<SELF extends AbstractSagaBuilder<SELF>>
+      permits SagaBuilder, TccBuilder {
+
+    final String name;
+    final SagaMode mode;
+    RecoveryStrategy recoveryStrategy;
+    String version = "1.0";
+    final List<StepDefinition> steps = new ArrayList<>();
+    long timeoutMillis;
+    @Nullable RetryPolicy defaultRetryPolicy;
+
+    private AbstractSagaBuilder(String name, SagaMode mode, RecoveryStrategy recoveryStrategy) {
       this.name = name;
       this.mode = mode;
-      this.recoveryStrategy =
-          mode == SagaMode.TCC ? RecoveryStrategy.PREDEFINED : RecoveryStrategy.BACKWARD;
+      this.recoveryStrategy = recoveryStrategy;
     }
 
-    public Builder version(String version) {
+    @SuppressWarnings("unchecked")
+    final SELF self() {
+      return (SELF) this;
+    }
+
+    public SELF version(String version) {
       this.version = Objects.requireNonNull(version, "version must not be null");
-      return this;
+      return self();
     }
 
-    public Builder recoveryStrategy(RecoveryStrategy recoveryStrategy) {
-      this.recoveryStrategy =
-          Objects.requireNonNull(recoveryStrategy, "recoveryStrategy must not be null");
-      return this;
-    }
-
-    public Builder timeoutMillis(long timeoutMillis) {
+    public SELF timeoutMillis(long timeoutMillis) {
       this.timeoutMillis = timeoutMillis;
-      return this;
+      return self();
     }
 
-    public Builder defaultRetryPolicy(RetryPolicy defaultRetryPolicy) {
+    public SELF defaultRetryPolicy(RetryPolicy defaultRetryPolicy) {
       this.defaultRetryPolicy =
           Objects.requireNonNull(defaultRetryPolicy, "defaultRetryPolicy must not be null");
-      return this;
-    }
-
-    /** Starts building a new step with the given name and step class. */
-    public StepBuilder step(String name, String stepClass) {
-      Objects.requireNonNull(name, "name must not be null");
-      Objects.requireNonNull(stepClass, "stepClass must not be null");
-      if (name.isBlank()) {
-        throw new IllegalArgumentException("step name must not be blank");
-      }
-      if (stepClass.isBlank()) {
-        throw new IllegalArgumentException("stepClass must not be blank");
-      }
-      return new StepBuilder(this, name, stepClass);
-    }
-
-    /** Starts building a new step with the given name and step class. */
-    public StepBuilder step(String name, Class<?> stepClass) {
-      Objects.requireNonNull(name, "name must not be null");
-      Objects.requireNonNull(stepClass, "stepClass must not be null");
-      if (name.isBlank()) {
-        throw new IllegalArgumentException("step name must not be blank");
-      }
-      if (!Step.class.isAssignableFrom(stepClass) && !TccStep.class.isAssignableFrom(stepClass)) {
-        throw new IllegalArgumentException(
-            "stepClass must implement Step or TccStep: " + stepClass.getName());
-      }
-      return new StepBuilder(this, name, stepClass.getName());
-    }
-
-    /**
-     * Starts building a declaratively-defined step against a registered {@code service} (Layer 2b).
-     * On the returned selector choose SAGA ({@link ServiceStepBuilder#operation()}) or TCC ({@link
-     * ServiceStepBuilder#tccOperation()}), then set the call spec per phase. Valid in both {@link
-     * SagaMode#SAGA} and {@link SagaMode#TCC} mode; the step's phases must match the saga's mode
-     * (checked at build).
-     */
-    public ServiceStepBuilder serviceStep(String name, String service) {
-      checkStepNameAndService(name, service);
-      return new ServiceStepBuilder(this, name, service);
-    }
-
-    private static void checkStepNameAndService(String name, String service) {
-      Objects.requireNonNull(name, "name must not be null");
-      Objects.requireNonNull(service, "service must not be null");
-      if (name.isBlank()) {
-        throw new IllegalArgumentException("step name must not be blank");
-      }
-      if (service.isBlank()) {
-        throw new IllegalArgumentException("service must not be blank");
-      }
+      return self();
     }
 
     public SagaDefinition build() {
@@ -557,22 +511,122 @@ public final class SagaDefinition {
       definition.validate();
       return definition;
     }
+
+    static void checkStepName(String name) {
+      Objects.requireNonNull(name, "name must not be null");
+      if (name.isBlank()) {
+        throw new IllegalArgumentException("step name must not be blank");
+      }
+    }
+
+    static void checkClassStep(String name, String stepClass) {
+      checkStepName(name);
+      Objects.requireNonNull(stepClass, "stepClass must not be null");
+      if (stepClass.isBlank()) {
+        throw new IllegalArgumentException("stepClass must not be blank");
+      }
+    }
+
+    static String classStepName(String name, Class<?> stepClass) {
+      checkStepName(name);
+      Objects.requireNonNull(stepClass, "stepClass must not be null");
+      if (!Step.class.isAssignableFrom(stepClass) && !TccStep.class.isAssignableFrom(stepClass)) {
+        throw new IllegalArgumentException(
+            "stepClass must implement Step or TccStep: " + stepClass.getName());
+      }
+      return stepClass.getName();
+    }
+
+    static void checkServiceStep(String name, String service) {
+      checkStepName(name);
+      Objects.requireNonNull(service, "service must not be null");
+      if (service.isBlank()) {
+        throw new IllegalArgumentException("service must not be blank");
+      }
+    }
+  }
+
+  /** Builder for a SAGA-mode definition: compensation-based recovery, optional pivot. */
+  public static final class SagaBuilder extends AbstractSagaBuilder<SagaBuilder> {
+
+    private SagaBuilder(String name) {
+      super(name, SagaMode.SAGA, RecoveryStrategy.BACKWARD);
+    }
+
+    /** Sets the recovery strategy (defaults to {@link RecoveryStrategy#BACKWARD}). SAGA-only. */
+    public SagaBuilder recoveryStrategy(RecoveryStrategy recoveryStrategy) {
+      this.recoveryStrategy =
+          Objects.requireNonNull(recoveryStrategy, "recoveryStrategy must not be null");
+      return this;
+    }
+
+    /** Starts a class step (a {@link Step}/{@link TccStep} implementation) by class name. */
+    public SagaClassStepBuilder step(String name, String stepClass) {
+      checkClassStep(name, stepClass);
+      return new SagaClassStepBuilder(this, name, stepClass);
+    }
+
+    /** Starts a class step by class. */
+    public SagaClassStepBuilder step(String name, Class<?> stepClass) {
+      return new SagaClassStepBuilder(this, name, classStepName(name, stepClass));
+    }
+
+    /**
+     * Starts a declaratively-defined SAGA step against a registered {@code service} (Layer 2b); set
+     * its {@link DeclarativeStepBuilder#execution} and {@link DeclarativeStepBuilder#compensation}
+     * call specs, then {@link DeclarativeStepBuilder#add()}.
+     */
+    public DeclarativeStepBuilder serviceStep(String name, String service) {
+      checkServiceStep(name, service);
+      return new DeclarativeStepBuilder(this, name, service);
+    }
+  }
+
+  /** Builder for a TCC-mode definition: predefined (cancel-based) recovery, no pivot. */
+  public static final class TccBuilder extends AbstractSagaBuilder<TccBuilder> {
+
+    private TccBuilder(String name) {
+      super(name, SagaMode.TCC, RecoveryStrategy.PREDEFINED);
+    }
+
+    /** Starts a class step (a {@link TccStep} implementation) by class name. */
+    public TccClassStepBuilder step(String name, String stepClass) {
+      checkClassStep(name, stepClass);
+      return new TccClassStepBuilder(this, name, stepClass);
+    }
+
+    /** Starts a class step by class. */
+    public TccClassStepBuilder step(String name, Class<?> stepClass) {
+      return new TccClassStepBuilder(this, name, classStepName(name, stepClass));
+    }
+
+    /**
+     * Starts a declaratively-defined TCC step against a registered {@code service} (Layer 2b); set
+     * its {@link TccDeclarativeStepBuilder#reservation}, {@link
+     * TccDeclarativeStepBuilder#confirmation}, and {@link TccDeclarativeStepBuilder#cancellation}
+     * call specs, then {@link TccDeclarativeStepBuilder#add()}.
+     */
+    public TccDeclarativeStepBuilder serviceStep(String name, String service) {
+      checkServiceStep(name, service);
+      return new TccDeclarativeStepBuilder(this, name, service);
+    }
   }
 
   /**
    * Common base for the step builders. Holds the fields shared by every step kind and the optional
-   * setters ({@link #timeoutMillis}, {@link #retryPolicy}, {@link #pivot}). The {@code SELF} type
-   * parameter lets those setters return the concrete builder type for fluent chaining.
+   * {@link #timeoutMillis}/{@link #retryPolicy} setters. {@code SELF} returns the concrete step
+   * builder for chaining; {@code P} is the parent saga builder {@link #add()} returns to.
    */
-  public abstract static class AbstractStepBuilder<SELF extends AbstractStepBuilder<SELF>> {
+  public abstract static class AbstractStepBuilder<
+      SELF extends AbstractStepBuilder<SELF, P>, P extends AbstractSagaBuilder<P>> {
 
-    final Builder parent;
+    final P parent;
     final String name;
     long timeoutMillis;
     @Nullable RetryPolicy retryPolicy;
     boolean pivot;
 
-    private AbstractStepBuilder(Builder parent, String name) {
+    private AbstractStepBuilder(P parent, String name) {
       this.parent = parent;
       this.name = name;
     }
@@ -592,69 +646,49 @@ public final class SagaDefinition {
       return self();
     }
 
-    public SELF pivot(boolean pivot) {
-      this.pivot = pivot;
-      return self();
-    }
-
     /** Adds this step to the parent builder and returns it for chaining. */
-    public abstract Builder add();
+    public abstract P add();
   }
 
-  /**
-   * Builder for a class step ({@link ClassStep}). Created by {@link Builder#step}; carries the
-   * fully-qualified step class name.
-   */
-  public static final class StepBuilder extends AbstractStepBuilder<StepBuilder> {
+  /** Builder for a SAGA class step. Adds {@link #pivot} (the MIXED-recovery pivot marker). */
+  public static final class SagaClassStepBuilder
+      extends AbstractStepBuilder<SagaClassStepBuilder, SagaBuilder> {
 
     private final String stepClass;
 
-    private StepBuilder(Builder parent, String name, String stepClass) {
+    private SagaClassStepBuilder(SagaBuilder parent, String name, String stepClass) {
+      super(parent, name);
+      this.stepClass = stepClass;
+    }
+
+    /** Marks this step as the MIXED-recovery pivot. SAGA-only. */
+    public SagaClassStepBuilder pivot(boolean pivot) {
+      this.pivot = pivot;
+      return this;
+    }
+
+    @Override
+    public SagaBuilder add() {
+      parent.steps.add(new ClassStep(this, stepClass));
+      return parent;
+    }
+  }
+
+  /** Builder for a TCC class step. No pivot — the TCC pivot is implicit (last try step). */
+  public static final class TccClassStepBuilder
+      extends AbstractStepBuilder<TccClassStepBuilder, TccBuilder> {
+
+    private final String stepClass;
+
+    private TccClassStepBuilder(TccBuilder parent, String name, String stepClass) {
       super(parent, name);
       this.stepClass = stepClass;
     }
 
     @Override
-    public Builder add() {
-      parent.steps.add(new ClassStep(this));
+    public TccBuilder add() {
+      parent.steps.add(new ClassStep(this, stepClass));
       return parent;
-    }
-  }
-
-  /**
-   * Selector for a {@link ServiceStep}. Created by {@link Builder#serviceStep}. Choose SAGA via
-   * {@link #operation()} or TCC via {@link #tccOperation()}; the SAGA and TCC phase setters live on
-   * distinct returned builders, so they cannot be mixed.
-   */
-  public static final class ServiceStepBuilder {
-
-    private final Builder parent;
-    private final String name;
-    private final String service;
-
-    private ServiceStepBuilder(Builder parent, String name, String service) {
-      this.parent = parent;
-      this.name = name;
-      this.service = service;
-    }
-
-    /**
-     * Builds a SAGA service step (Layer 2b). Set its {@link DeclarativeStepBuilder#execution} and
-     * {@link DeclarativeStepBuilder#compensation} call specs, then {@link
-     * DeclarativeStepBuilder#add()}.
-     */
-    public DeclarativeStepBuilder operation() {
-      return new DeclarativeStepBuilder(parent, name, service);
-    }
-
-    /**
-     * Builds a TCC service step (Layer 2b). Set its {@link TccDeclarativeStepBuilder#reservation},
-     * {@link TccDeclarativeStepBuilder#confirmation}, and {@link
-     * TccDeclarativeStepBuilder#cancellation} call specs, then {@link
-     * TccDeclarativeStepBuilder#add()}.
-     */
-    public TccDeclarativeStepBuilder tccOperation() {
-      return new TccDeclarativeStepBuilder(parent, name, service);
     }
   }
 
@@ -664,13 +698,14 @@ public final class SagaDefinition {
    * Subclasses expose only the phase setters valid for their mode.
    */
   abstract static sealed class AbstractDeclarativeStepBuilder<
-          SELF extends AbstractDeclarativeStepBuilder<SELF>>
-      extends AbstractStepBuilder<SELF> permits DeclarativeStepBuilder, TccDeclarativeStepBuilder {
+          SELF extends AbstractDeclarativeStepBuilder<SELF, P>, P extends AbstractSagaBuilder<P>>
+      extends AbstractStepBuilder<SELF, P>
+      permits DeclarativeStepBuilder, TccDeclarativeStepBuilder {
 
     final String service;
     final Map<ServiceStep.Phase, CallSpec> phases = new EnumMap<>(ServiceStep.Phase.class);
 
-    private AbstractDeclarativeStepBuilder(Builder parent, String name, String service) {
+    private AbstractDeclarativeStepBuilder(P parent, String name, String service) {
       super(parent, name);
       this.service = service;
     }
@@ -690,7 +725,7 @@ public final class SagaDefinition {
     abstract Set<ServiceStep.Phase> requiredPhases();
 
     @Override
-    public Builder add() {
+    public P add() {
       Set<ServiceStep.Phase> required = requiredPhases();
       if (!phases.keySet().equals(required)) {
         Set<ServiceStep.Phase> missing = EnumSet.copyOf(required);
@@ -721,11 +756,13 @@ public final class SagaDefinition {
     }
   }
 
-  /** Builder for a declarative SAGA service step. Exposes only the SAGA phase setters. */
+  /**
+   * Builder for a declarative SAGA service step. Exposes the SAGA phase setters and {@link #pivot}.
+   */
   public static final class DeclarativeStepBuilder
-      extends AbstractDeclarativeStepBuilder<DeclarativeStepBuilder> {
+      extends AbstractDeclarativeStepBuilder<DeclarativeStepBuilder, SagaBuilder> {
 
-    private DeclarativeStepBuilder(Builder parent, String name, String service) {
+    private DeclarativeStepBuilder(SagaBuilder parent, String name, String service) {
       super(parent, name, service);
     }
 
@@ -739,17 +776,23 @@ public final class SagaDefinition {
       return putPhase(ServiceStep.Phase.COMPENSATION, call);
     }
 
+    /** Marks this step as the MIXED-recovery pivot. SAGA-only. */
+    public DeclarativeStepBuilder pivot(boolean pivot) {
+      this.pivot = pivot;
+      return this;
+    }
+
     @Override
     Set<ServiceStep.Phase> requiredPhases() {
       return ServiceStep.SAGA_PHASES;
     }
   }
 
-  /** Builder for a declarative TCC service step. Exposes only the TCC phase setters. */
+  /** Builder for a declarative TCC service step. Exposes only the TCC phase setters (no pivot). */
   public static final class TccDeclarativeStepBuilder
-      extends AbstractDeclarativeStepBuilder<TccDeclarativeStepBuilder> {
+      extends AbstractDeclarativeStepBuilder<TccDeclarativeStepBuilder, TccBuilder> {
 
-    private TccDeclarativeStepBuilder(Builder parent, String name, String service) {
+    private TccDeclarativeStepBuilder(TccBuilder parent, String name, String service) {
       super(parent, name, service);
     }
 

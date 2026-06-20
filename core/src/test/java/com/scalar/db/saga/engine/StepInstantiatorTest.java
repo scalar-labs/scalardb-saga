@@ -6,7 +6,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.scalar.db.saga.api.HttpCall;
 import com.scalar.db.saga.api.SagaContext;
 import com.scalar.db.saga.api.SagaDefinition;
-import com.scalar.db.saga.api.SagaDefinition.SagaMode;
 import com.scalar.db.saga.api.SagaDefinition.StepDefinition;
 import com.scalar.db.saga.api.Step;
 import com.scalar.db.saga.api.StepResult;
@@ -113,9 +112,9 @@ class StepInstantiatorTest {
   }
 
   private static StepDefinition declarativeSagaStep(String name, String service) {
-    return SagaDefinition.newBuilder("s", SagaMode.SAGA)
+    return SagaDefinition.newBuilder("s")
+        .saga()
         .serviceStep(name, service)
-        .operation()
         .execution(HttpCall.newBuilder("/do").build())
         .compensation(HttpCall.newBuilder("/undo").build())
         .add()
@@ -125,9 +124,9 @@ class StepInstantiatorTest {
   }
 
   private static StepDefinition declarativeTccStep(String name, String service) {
-    return SagaDefinition.newBuilder("s", SagaMode.TCC)
+    return SagaDefinition.newBuilder("s")
+        .tcc()
         .serviceStep(name, service)
-        .tccOperation()
         .reservation(HttpCall.newBuilder("/reserve").build())
         .confirmation(HttpCall.newBuilder("/confirm").build())
         .cancellation(HttpCall.newBuilder("/cancel").build())
@@ -138,7 +137,8 @@ class StepInstantiatorTest {
   }
 
   private static StepDefinition classStep(String name, String stepClass) {
-    return SagaDefinition.newBuilder("s", SagaMode.SAGA)
+    return SagaDefinition.newBuilder("s")
+        .saga()
         .step(name, stepClass)
         .add()
         .build()

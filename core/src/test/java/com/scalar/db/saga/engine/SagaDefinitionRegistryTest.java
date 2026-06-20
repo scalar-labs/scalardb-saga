@@ -9,7 +9,6 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.scalar.db.saga.api.SagaDefinition;
-import com.scalar.db.saga.api.SagaDefinition.SagaMode;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.store.SagaStore;
 import java.util.Optional;
@@ -31,7 +30,8 @@ class SagaDefinitionRegistryTest {
   }
 
   private static SagaDefinition definition(String name, String version) {
-    return SagaDefinition.newBuilder(name, SagaMode.SAGA)
+    return SagaDefinition.newBuilder(name)
+        .saga()
         .version(version)
         .step("s1", "com.example.Step1")
         .add()

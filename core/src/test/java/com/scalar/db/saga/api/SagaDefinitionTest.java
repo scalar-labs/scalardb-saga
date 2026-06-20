@@ -18,7 +18,8 @@ class SagaDefinitionTest {
     void build_withSagaMode_usesDefaultValues() {
       // Arrange & Act
       SagaDefinition definition =
-          SagaDefinition.newBuilder("test-saga", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
               .step("step1", "com.example.Step1")
               .add()
               .build();
@@ -36,7 +37,8 @@ class SagaDefinitionTest {
     void build_withTccMode_usesPredefinedRecoveryStrategy() {
       // Arrange & Act
       SagaDefinition definition =
-          SagaDefinition.newBuilder("test-saga", SagaMode.TCC)
+          SagaDefinition.newBuilder("test-saga")
+              .tcc()
               .step("step1", "com.example.Step1")
               .add()
               .build();
@@ -53,7 +55,8 @@ class SagaDefinitionTest {
 
       // Act
       SagaDefinition definition =
-          SagaDefinition.newBuilder("order-saga", SagaMode.TCC)
+          SagaDefinition.newBuilder("order-saga")
+              .tcc()
               .version("2.0")
               .timeoutMillis(30_000)
               .defaultRetryPolicy(policy)
@@ -75,10 +78,7 @@ class SagaDefinitionTest {
     void step_stringStepClassGiven_setsClassName() {
       // Arrange & Act
       SagaDefinition definition =
-          SagaDefinition.newBuilder("test", SagaMode.SAGA)
-              .step("s1", "com.example.MyStep")
-              .add()
-              .build();
+          SagaDefinition.newBuilder("test").saga().step("s1", "com.example.MyStep").add().build();
 
       // Assert
       assertThat(((SagaDefinition.ClassStep) definition.getSteps().get(0)).getStepClass())
@@ -89,10 +89,7 @@ class SagaDefinitionTest {
     void step_classObjectGiven_setsFullyQualifiedName() {
       // Arrange & Act
       SagaDefinition definition =
-          SagaDefinition.newBuilder("test", SagaMode.SAGA)
-              .step("s1", DummyStep.class)
-              .add()
-              .build();
+          SagaDefinition.newBuilder("test").saga().step("s1", DummyStep.class).add().build();
 
       // Assert
       assertThat(((SagaDefinition.ClassStep) definition.getSteps().get(0)).getStepClass())
@@ -102,8 +99,7 @@ class SagaDefinitionTest {
     @Test
     void step_classNotImplementingStepOrTccStep_throwsIllegalArgumentException() {
       // Arrange & Act & Assert
-      assertThatThrownBy(
-              () -> SagaDefinition.newBuilder("test", SagaMode.SAGA).step("s1", String.class))
+      assertThatThrownBy(() -> SagaDefinition.newBuilder("test").saga().step("s1", String.class))
           .isInstanceOf(IllegalArgumentException.class);
     }
 
@@ -115,7 +111,8 @@ class SagaDefinitionTest {
 
       // Act
       SagaDefinition definition =
-          SagaDefinition.newBuilder("test", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test")
+              .saga()
               .step("s1", "com.example.S1")
               .retryPolicy(policy)
               .add()
@@ -129,7 +126,8 @@ class SagaDefinitionTest {
     void build_withMultipleSteps_preservesOrder() {
       // Arrange & Act
       SagaDefinition definition =
-          SagaDefinition.newBuilder("test", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test")
+              .saga()
               .step("first", "com.example.First")
               .add()
               .step("second", "com.example.Second")
@@ -149,10 +147,7 @@ class SagaDefinitionTest {
     void getSteps_afterBuild_returnsUnmodifiableList() {
       // Arrange
       SagaDefinition definition =
-          SagaDefinition.newBuilder("test", SagaMode.SAGA)
-              .step("s1", "com.example.S1")
-              .add()
-              .build();
+          SagaDefinition.newBuilder("test").saga().step("s1", "com.example.S1").add().build();
 
       // Act & Assert
       assertThatThrownBy(() -> definition.getSteps().add(null))
@@ -163,9 +158,9 @@ class SagaDefinitionTest {
     void serviceStep_serviceAndPhasesGiven_createsServiceStep() {
       // Act
       SagaDefinition definition =
-          SagaDefinition.newBuilder("test", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test")
+              .saga()
               .serviceStep("debit", "account-service")
-              .operation()
               .execution(HttpCall.newBuilder("/debit").build())
               .compensation(HttpCall.newBuilder("/reverse").build())
               .timeoutMillis(5000)
@@ -188,8 +183,7 @@ class SagaDefinitionTest {
     @Test
     void serviceStep_blankService_throwsIllegalArgumentException() {
       // Act & Assert
-      assertThatThrownBy(
-              () -> SagaDefinition.newBuilder("test", SagaMode.SAGA).serviceStep("debit", "  "))
+      assertThatThrownBy(() -> SagaDefinition.newBuilder("test").saga().serviceStep("debit", "  "))
           .isInstanceOf(IllegalArgumentException.class);
     }
   }
@@ -199,23 +193,22 @@ class SagaDefinitionTest {
 
     @Test
     void newBuilder_blankSagaNameGiven_throwsIllegalArgumentException() {
-      // Arrange & Act & Assert
-      assertThatThrownBy(() -> SagaDefinition.newBuilder("  ", SagaMode.SAGA))
+      // Arrange & Act & Assert — the name is validated eagerly, before mode selection.
+      assertThatThrownBy(() -> SagaDefinition.newBuilder("  "))
           .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void step_blankStepNameGiven_throwsIllegalArgumentException() {
       // Arrange & Act & Assert
-      assertThatThrownBy(
-              () -> SagaDefinition.newBuilder("test", SagaMode.SAGA).step("", "com.example.S1"))
+      assertThatThrownBy(() -> SagaDefinition.newBuilder("test").saga().step("", "com.example.S1"))
           .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void step_blankStepClassGiven_throwsIllegalArgumentException() {
       // Arrange & Act & Assert
-      assertThatThrownBy(() -> SagaDefinition.newBuilder("test", SagaMode.SAGA).step("s1", "  "))
+      assertThatThrownBy(() -> SagaDefinition.newBuilder("test").saga().step("s1", "  "))
           .isInstanceOf(IllegalArgumentException.class);
     }
 
@@ -224,7 +217,8 @@ class SagaDefinitionTest {
       // Arrange & Act & Assert
       assertThatThrownBy(
               () ->
-                  SagaDefinition.newBuilder("my:saga", SagaMode.SAGA)
+                  SagaDefinition.newBuilder("my:saga")
+                      .saga()
                       .step("s1", "com.example.Step1")
                       .add()
                       .build())
@@ -236,7 +230,8 @@ class SagaDefinitionTest {
       // Arrange & Act & Assert
       assertThatThrownBy(
               () ->
-                  SagaDefinition.newBuilder("test", SagaMode.SAGA)
+                  SagaDefinition.newBuilder("test")
+                      .saga()
                       .version("1:0")
                       .step("s1", "com.example.Step1")
                       .add()
@@ -247,7 +242,7 @@ class SagaDefinitionTest {
     @Test
     void validate_noSteps_throwsSagaDefinitionException() {
       // Arrange & Act & Assert
-      assertThatThrownBy(() -> SagaDefinition.newBuilder("empty", SagaMode.SAGA).build())
+      assertThatThrownBy(() -> SagaDefinition.newBuilder("empty").saga().build())
           .isInstanceOf(SagaDefinitionException.class);
     }
 
@@ -256,7 +251,8 @@ class SagaDefinitionTest {
       // Arrange & Act & Assert
       assertThatThrownBy(
               () ->
-                  SagaDefinition.newBuilder("test", SagaMode.SAGA)
+                  SagaDefinition.newBuilder("test")
+                      .saga()
                       .timeoutMillis(-1)
                       .step("s1", "com.example.S1")
                       .add()
@@ -269,7 +265,8 @@ class SagaDefinitionTest {
       // Arrange & Act & Assert
       assertThatThrownBy(
               () ->
-                  SagaDefinition.newBuilder("test", SagaMode.SAGA)
+                  SagaDefinition.newBuilder("test")
+                      .saga()
                       .step("s1", "com.example.S1")
                       .timeoutMillis(-100)
                       .add()
@@ -281,7 +278,8 @@ class SagaDefinitionTest {
     void validate_withZeroTimeout_succeeds() {
       // Arrange & Act — 0 means no timeout, should be valid
       SagaDefinition definition =
-          SagaDefinition.newBuilder("test", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test")
+              .saga()
               .timeoutMillis(0)
               .step("s1", "com.example.S1")
               .timeoutMillis(0)
@@ -298,7 +296,8 @@ class SagaDefinitionTest {
       // Arrange & Act & Assert
       assertThatThrownBy(
               () ->
-                  SagaDefinition.newBuilder("dup", SagaMode.SAGA)
+                  SagaDefinition.newBuilder("dup")
+                      .saga()
                       .step("step1", "com.example.Step1")
                       .add()
                       .step("step1", "com.example.Step1")
@@ -312,7 +311,8 @@ class SagaDefinitionTest {
       // Arrange & Act & Assert
       assertThatThrownBy(
               () ->
-                  SagaDefinition.newBuilder("test", SagaMode.SAGA)
+                  SagaDefinition.newBuilder("test")
+                      .saga()
                       .recoveryStrategy(RecoveryStrategy.BACKWARD)
                       .step("s1", "com.example.S1")
                       .pivot(true)
@@ -326,7 +326,8 @@ class SagaDefinitionTest {
       // Arrange & Act & Assert
       assertThatThrownBy(
               () ->
-                  SagaDefinition.newBuilder("test", SagaMode.SAGA)
+                  SagaDefinition.newBuilder("test")
+                      .saga()
                       .recoveryStrategy(RecoveryStrategy.FORWARD)
                       .step("s1", "com.example.S1")
                       .pivot(true)
@@ -340,7 +341,8 @@ class SagaDefinitionTest {
       // Arrange & Act & Assert
       assertThatThrownBy(
               () ->
-                  SagaDefinition.newBuilder("test", SagaMode.SAGA)
+                  SagaDefinition.newBuilder("test")
+                      .saga()
                       .recoveryStrategy(RecoveryStrategy.MIXED)
                       .step("s1", "com.example.S1")
                       .add()
@@ -357,7 +359,8 @@ class SagaDefinitionTest {
       // Arrange & Act & Assert
       assertThatThrownBy(
               () ->
-                  SagaDefinition.newBuilder("test", SagaMode.SAGA)
+                  SagaDefinition.newBuilder("test")
+                      .saga()
                       .recoveryStrategy(RecoveryStrategy.MIXED)
                       .step("s1", "com.example.S1")
                       .pivot(true)
@@ -376,7 +379,8 @@ class SagaDefinitionTest {
       // Arrange & Act & Assert
       assertThatThrownBy(
               () ->
-                  SagaDefinition.newBuilder("test", SagaMode.SAGA)
+                  SagaDefinition.newBuilder("test")
+                      .saga()
                       .recoveryStrategy(RecoveryStrategy.MIXED)
                       .step("s1", "com.example.S1")
                       .pivot(true)
@@ -394,7 +398,8 @@ class SagaDefinitionTest {
       // Arrange & Act & Assert
       assertThatThrownBy(
               () ->
-                  SagaDefinition.newBuilder("test", SagaMode.SAGA)
+                  SagaDefinition.newBuilder("test")
+                      .saga()
                       .recoveryStrategy(RecoveryStrategy.MIXED)
                       .step("s1", "com.example.S1")
                       .add()
@@ -411,7 +416,8 @@ class SagaDefinitionTest {
     void validate_mixedWithValidPivot_succeeds() {
       // Arrange & Act
       SagaDefinition definition =
-          SagaDefinition.newBuilder("test", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test")
+              .saga()
               .recoveryStrategy(RecoveryStrategy.MIXED)
               .step("s1", "com.example.S1")
               .add()
@@ -427,52 +433,13 @@ class SagaDefinitionTest {
     }
 
     @Test
-    void validate_tccWithExplicitRecoveryStrategy_throwsSagaDefinitionException() {
-      // Arrange & Act & Assert
-      assertThatThrownBy(
-              () ->
-                  SagaDefinition.newBuilder("test", SagaMode.TCC)
-                      .recoveryStrategy(RecoveryStrategy.FORWARD)
-                      .step("s1", "com.example.S1")
-                      .add()
-                      .build())
-          .isInstanceOf(SagaDefinitionException.class);
-    }
-
-    @Test
-    void validate_tccWithExplicitBackward_throwsSagaDefinitionException() {
-      // Arrange & Act & Assert — even BACKWARD is rejected when explicitly set
-      assertThatThrownBy(
-              () ->
-                  SagaDefinition.newBuilder("test", SagaMode.TCC)
-                      .recoveryStrategy(RecoveryStrategy.BACKWARD)
-                      .step("s1", "com.example.S1")
-                      .add()
-                      .build())
-          .isInstanceOf(SagaDefinitionException.class);
-    }
-
-    @Test
-    void validate_tccWithPivotStep_throwsSagaDefinitionException() {
-      // Arrange & Act & Assert
-      assertThatThrownBy(
-              () ->
-                  SagaDefinition.newBuilder("test", SagaMode.TCC)
-                      .step("s1", "com.example.S1")
-                      .pivot(true)
-                      .add()
-                      .build())
-          .isInstanceOf(SagaDefinitionException.class);
-    }
-
-    @Test
     void validate_tccWithServiceStep_succeeds() {
-      // A declarative service step may participate in a TCC saga — its phases are validated against
-      // the saga's mode at build, and the endpoint is validated at registration, not here.
+      // A declarative service step may participate in a TCC saga — its phases are guaranteed TCC by
+      // the builder type, and the endpoint is validated at registration, not here.
       SagaDefinition definition =
-          SagaDefinition.newBuilder("test", SagaMode.TCC)
+          SagaDefinition.newBuilder("test")
+              .tcc()
               .serviceStep("s1", "account-service")
-              .tccOperation()
               .reservation(HttpCall.newBuilder("/reserve").build())
               .confirmation(HttpCall.newBuilder("/confirm").build())
               .cancellation(HttpCall.newBuilder("/cancel").build())
@@ -487,7 +454,8 @@ class SagaDefinitionTest {
     void validate_tccWithValidDefinition_succeeds() {
       // Arrange & Act
       SagaDefinition definition =
-          SagaDefinition.newBuilder("test", SagaMode.TCC)
+          SagaDefinition.newBuilder("test")
+              .tcc()
               .step("reserve-inventory", "com.example.ReserveInventory")
               .add()
               .step("reserve-payment", "com.example.ReservePayment")
@@ -504,7 +472,8 @@ class SagaDefinitionTest {
       // Arrange & Act & Assert
       assertThatThrownBy(
               () ->
-                  SagaDefinition.newBuilder("test", SagaMode.SAGA)
+                  SagaDefinition.newBuilder("test")
+                      .saga()
                       .recoveryStrategy(RecoveryStrategy.PREDEFINED)
                       .step("s1", "com.example.S1")
                       .add()
@@ -520,15 +489,9 @@ class SagaDefinitionTest {
     void equals_sameDefinitions_returnsTrue() {
       // Arrange
       SagaDefinition a =
-          SagaDefinition.newBuilder("test", SagaMode.SAGA)
-              .step("s1", "com.example.S1")
-              .add()
-              .build();
+          SagaDefinition.newBuilder("test").saga().step("s1", "com.example.S1").add().build();
       SagaDefinition b =
-          SagaDefinition.newBuilder("test", SagaMode.SAGA)
-              .step("s1", "com.example.S1")
-              .add()
-              .build();
+          SagaDefinition.newBuilder("test").saga().step("s1", "com.example.S1").add().build();
 
       // Act & Assert
       assertThat(a).isEqualTo(b);
@@ -538,15 +501,9 @@ class SagaDefinitionTest {
     void equals_differentName_returnsFalse() {
       // Arrange
       SagaDefinition a =
-          SagaDefinition.newBuilder("saga-a", SagaMode.SAGA)
-              .step("s1", "com.example.S1")
-              .add()
-              .build();
+          SagaDefinition.newBuilder("saga-a").saga().step("s1", "com.example.S1").add().build();
       SagaDefinition b =
-          SagaDefinition.newBuilder("saga-b", SagaMode.SAGA)
-              .step("s1", "com.example.S1")
-              .add()
-              .build();
+          SagaDefinition.newBuilder("saga-b").saga().step("s1", "com.example.S1").add().build();
 
       // Act & Assert
       assertThat(a).isNotEqualTo(b);
@@ -556,15 +513,9 @@ class SagaDefinitionTest {
     void equals_differentMode_returnsFalse() {
       // Arrange
       SagaDefinition saga =
-          SagaDefinition.newBuilder("test", SagaMode.SAGA)
-              .step("s1", "com.example.S1")
-              .add()
-              .build();
+          SagaDefinition.newBuilder("test").saga().step("s1", "com.example.S1").add().build();
       SagaDefinition tcc =
-          SagaDefinition.newBuilder("test", SagaMode.TCC)
-              .step("s1", "com.example.S1")
-              .add()
-              .build();
+          SagaDefinition.newBuilder("test").tcc().step("s1", "com.example.S1").add().build();
 
       // Act & Assert
       assertThat(saga).isNotEqualTo(tcc);
@@ -574,10 +525,7 @@ class SagaDefinitionTest {
     void equals_nullGiven_returnsFalse() {
       // Arrange
       SagaDefinition definition =
-          SagaDefinition.newBuilder("test", SagaMode.SAGA)
-              .step("s1", "com.example.S1")
-              .add()
-              .build();
+          SagaDefinition.newBuilder("test").saga().step("s1", "com.example.S1").add().build();
 
       // Act & Assert
       assertThat(definition).isNotEqualTo(null);
@@ -587,15 +535,9 @@ class SagaDefinitionTest {
     void hashCode_equalObjects_sameHashCode() {
       // Arrange
       SagaDefinition a =
-          SagaDefinition.newBuilder("test", SagaMode.SAGA)
-              .step("s1", "com.example.S1")
-              .add()
-              .build();
+          SagaDefinition.newBuilder("test").saga().step("s1", "com.example.S1").add().build();
       SagaDefinition b =
-          SagaDefinition.newBuilder("test", SagaMode.SAGA)
-              .step("s1", "com.example.S1")
-              .add()
-              .build();
+          SagaDefinition.newBuilder("test").saga().step("s1", "com.example.S1").add().build();
 
       // Act & Assert
       assertThat(a.hashCode()).isEqualTo(b.hashCode());
@@ -605,10 +547,7 @@ class SagaDefinitionTest {
     void toString_called_containsNameAndMode() {
       // Arrange
       SagaDefinition definition =
-          SagaDefinition.newBuilder("order-saga", SagaMode.SAGA)
-              .step("s1", "com.example.S1")
-              .add()
-              .build();
+          SagaDefinition.newBuilder("order-saga").saga().step("s1", "com.example.S1").add().build();
 
       // Act
       String result = definition.toString();
@@ -622,7 +561,8 @@ class SagaDefinitionTest {
     void stepDefinitionEquals_sameStep_returnsTrue() {
       // Arrange
       SagaDefinition defA =
-          SagaDefinition.newBuilder("test", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test")
+              .saga()
               .recoveryStrategy(RecoveryStrategy.MIXED)
               .step("s1", "com.example.S1")
               .add()
@@ -633,7 +573,8 @@ class SagaDefinitionTest {
               .add()
               .build();
       SagaDefinition defB =
-          SagaDefinition.newBuilder("test", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test")
+              .saga()
               .recoveryStrategy(RecoveryStrategy.MIXED)
               .step("s1", "com.example.S1")
               .add()
@@ -652,15 +593,9 @@ class SagaDefinitionTest {
     void stepDefinitionEquals_differentStepClass_returnsFalse() {
       // Arrange
       SagaDefinition defA =
-          SagaDefinition.newBuilder("test", SagaMode.SAGA)
-              .step("s1", "com.example.S1")
-              .add()
-              .build();
+          SagaDefinition.newBuilder("test").saga().step("s1", "com.example.S1").add().build();
       SagaDefinition defB =
-          SagaDefinition.newBuilder("test", SagaMode.SAGA)
-              .step("s1", "com.example.S2")
-              .add()
-              .build();
+          SagaDefinition.newBuilder("test").saga().step("s1", "com.example.S2").add().build();
 
       // Act & Assert
       assertThat(defA.getSteps().get(0)).isNotEqualTo(defB.getSteps().get(0));
@@ -670,7 +605,8 @@ class SagaDefinitionTest {
     void stepDefinitionToString_called_containsName() {
       // Arrange
       SagaDefinition definition =
-          SagaDefinition.newBuilder("test", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test")
+              .saga()
               .step("reserve-inventory", "com.example.S1")
               .add()
               .build();
@@ -687,7 +623,8 @@ class SagaDefinitionTest {
     void getPivotIndex_withBackwardStrategy_returnsLastIndex() {
       // Arrange
       SagaDefinition definition =
-          SagaDefinition.newBuilder("test", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test")
+              .saga()
               .recoveryStrategy(RecoveryStrategy.BACKWARD)
               .step("s1", "com.example.S1")
               .add()
@@ -705,7 +642,8 @@ class SagaDefinitionTest {
     void getPivotIndex_withForwardStrategy_returnsMinusOne() {
       // Arrange
       SagaDefinition definition =
-          SagaDefinition.newBuilder("test", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test")
+              .saga()
               .recoveryStrategy(RecoveryStrategy.FORWARD)
               .step("s1", "com.example.S1")
               .add()
@@ -721,7 +659,8 @@ class SagaDefinitionTest {
     void getPivotIndex_withMixedStrategy_returnsPivotStepIndex() {
       // Arrange
       SagaDefinition definition =
-          SagaDefinition.newBuilder("test", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test")
+              .saga()
               .recoveryStrategy(RecoveryStrategy.MIXED)
               .step("s1", "com.example.S1")
               .add()
@@ -740,7 +679,8 @@ class SagaDefinitionTest {
     void getPivotIndex_withTccMode_returnsLastIndex() {
       // Arrange
       SagaDefinition definition =
-          SagaDefinition.newBuilder("test", SagaMode.TCC)
+          SagaDefinition.newBuilder("test")
+              .tcc()
               .step("s1", "com.example.S1")
               .add()
               .step("s2", "com.example.S2")
@@ -755,10 +695,7 @@ class SagaDefinitionTest {
     void getPivotIndex_withBackwardAndSingleStep_returnsZero() {
       // Arrange
       SagaDefinition definition =
-          SagaDefinition.newBuilder("test", SagaMode.SAGA)
-              .step("only", "com.example.Only")
-              .add()
-              .build();
+          SagaDefinition.newBuilder("test").saga().step("only", "com.example.Only").add().build();
 
       // Act & Assert
       assertThat(definition.getPivotIndex()).isEqualTo(0);
