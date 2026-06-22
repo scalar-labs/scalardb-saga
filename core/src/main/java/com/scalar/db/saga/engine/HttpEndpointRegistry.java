@@ -81,11 +81,11 @@ final class HttpEndpointRegistry implements ResolutionContext, AutoCloseable {
    */
   @Override
   public void close() {
-    for (HttpEndpoint endpoint : endpoints.values()) {
+    for (Map.Entry<String, HttpEndpoint> entry : endpoints.entrySet()) {
       try {
-        endpoint.close();
+        entry.getValue().close();
       } catch (RuntimeException e) {
-        logger.warn("Failed to close HTTP endpoint", e);
+        logger.warn("Failed to close HTTP endpoint '{}'", entry.getKey(), e);
       }
     }
   }
