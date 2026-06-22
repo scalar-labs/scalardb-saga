@@ -21,7 +21,10 @@ import java.util.Optional;
 import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Flow;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -165,19 +168,27 @@ final class HttpExchange {
     HttpRequest httpRequest = requestBuilder.build();
 
     long maxBodyBytes = policy.maxBodyBytes();
-    // Buffer the body inside send() (rather than streaming it lazily afterward) so the request
-    // timeout covers the entire body, not just the headers: a mid-body stall surfaces as an
-    // HttpTimeoutException (an IOException) here instead of hanging. The handler still caps memory
-    // at maxBodyBytes, cancelling the download past the limit (see limitedBytes).
+    // The JDK request timeout (set above) only bounds time-to-headers — it is disarmed once the
+    // response status arrives, so it does NOT cover the body. To bound the whole exchange (a
+    // mid-body stall included), read the body via sendAsync and impose effectiveTimeout as a hard
+    // deadline on the future, cancelling the in-flight request if it elapses. The limitedBytes
+    // subscriber still caps the buffered body at maxBodyBytes.
+    CompletableFuture<HttpResponse<byte[]>> future =
+        client.sendAsync(httpRequest, limitedBytes(maxBodyBytes));
     HttpResponse<byte[]> response;
     try {
-      response = client.send(httpRequest, limitedBytes(maxBodyBytes));
-    } catch (IOException e) {
-      if (hasCause(e, BodyTooLargeException.class)) {
+      response = future.get(effectiveTimeout.toMillis(), TimeUnit.MILLISECONDS);
+    } catch (TimeoutException e) {
+      future.cancel(true);
+      throw new HttpCallException("HTTP call timed out: " + uri, e, true);
+    } catch (ExecutionException e) {
+      Throwable cause = e.getCause();
+      if (cause != null && hasCause(cause, BodyTooLargeException.class)) {
         throw new HttpCallException("Response body exceeds limit (> " + maxBodyBytes + ")", false);
       }
-      throw new HttpCallException("HTTP call failed: " + uri, e, true);
+      throw new HttpCallException("HTTP call failed: " + uri, cause != null ? cause : e, true);
     } catch (InterruptedException e) {
+      future.cancel(true);
       Thread.currentThread().interrupt();
       throw new HttpCallException("HTTP call interrupted: " + uri, e, true);
     }

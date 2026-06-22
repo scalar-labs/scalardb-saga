@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -276,9 +277,13 @@ class HttpExchangeTest {
                     Duration.ofMillis(500)));
     release.countDown(); // let the server thread unwind
 
-    // Assert — a mid-body stall surfaces as a retryable transport failure, not a hang.
+    // Assert — a mid-body stall surfaces as a retryable transport failure, not a hang. The cause
+    // must be the deadline TimeoutException: this proves the per-call deadline bounded the body
+    // phase, distinguishing it from the server-side 5s fallback closing the stream (a different
+    // IOException that would also be retryable, masking a regression).
     assertThat(t).isInstanceOf(HttpCallException.class);
     assertThat(((HttpCallException) t).isRetryable()).isTrue();
+    assertThat(t.getCause()).isInstanceOf(TimeoutException.class);
   }
 
   @Test
