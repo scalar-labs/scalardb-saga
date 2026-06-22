@@ -239,10 +239,9 @@ final class HttpExchange {
   }
 
   /**
-   * Accumulates the response body, rejecting it once it exceeds {@code maxBodyBytes}. Buffers are
-   * retained and concatenated at {@link #onComplete} (mirroring the JDK's {@code ofByteArray}); on
-   * exceeding the limit the subscription is cancelled and the body stage fails with {@link
-   * BodyTooLargeException}.
+   * Accumulates the response body, rejecting it once it exceeds {@code maxBodyBytes}. Each chunk is
+   * copied into a right-sized array and concatenated at {@link #onComplete}; on exceeding the limit
+   * the subscription is cancelled and the body stage fails with {@link BodyTooLargeException}.
    */
   private static final class LimitedBodySubscriber implements BodySubscriber<byte[]> {
 
@@ -253,7 +252,7 @@ final class HttpExchange {
     private final long maxBodyBytes;
     private final boolean declaredTooLarge;
     private final CompletableFuture<byte[]> body = new CompletableFuture<>();
-    private final List<ByteBuffer> buffers = new ArrayList<>();
+    private final List<byte[]> buffers = new ArrayList<>();
     private Flow.@Nullable Subscription subscription;
     private long received;
 
@@ -281,26 +280,29 @@ final class HttpExchange {
     @Override
     public void onNext(List<ByteBuffer> items) {
       for (ByteBuffer buffer : items) {
-        received += buffer.remaining();
-      }
-      if (received > maxBodyBytes) {
-        Flow.Subscription current = subscription;
-        if (current != null) {
-          current.cancel();
+        int remaining = buffer.remaining();
+        received += remaining;
+        if (received > maxBodyBytes) {
+          Flow.Subscription current = subscription;
+          if (current != null) {
+            current.cancel();
+          }
+          buffers.clear();
+          body.completeExceptionally(new BodyTooLargeException());
+          return;
         }
-        buffers.clear();
-        body.completeExceptionally(new BodyTooLargeException());
-        return;
+        // Copy each chunk into a right-sized array rather than retaining the delivered ByteBuffers:
+        // the JDK may hand us a buffer whose backing array is larger than the bytes read (e.g. a
+        // 16KB read buffer holding a few bytes of a trickled response), and retaining those would
+        // pin far more than maxBodyBytes. Copying keeps the retained heap bounded by maxBodyBytes —
+        // the cap's purpose. (Deliberate divergence from the JDK's ofByteArray, which retains the
+        // buffers because it is uncapped.)
+        if (remaining > 0) {
+          byte[] bytes = new byte[remaining];
+          buffer.get(bytes);
+          buffers.add(bytes);
+        }
       }
-      // Retain the buffers and concatenate at onComplete instead of copying eagerly, mirroring the
-      // JDK's BodySubscribers.ofByteArray(). Safe because the JDK HttpClient allocates these
-      // buffers
-      // internally and does not reuse them after onNext returns (ofByteArray relies on the same
-      // guarantee); they are read-only and owned by us once delivered. This would NOT hold for
-      // buffer-pooling transports such as Netty, which would require a copy here. Only under-limit
-      // batches are retained (the crossing batch hits the early return above), so the retained heap
-      // stays <= maxBodyBytes; the only transient is the single delivery that triggers rejection.
-      buffers.addAll(items);
     }
 
     @Override
@@ -312,15 +314,14 @@ final class HttpExchange {
     @Override
     public void onComplete() {
       int total = 0;
-      for (ByteBuffer buffer : buffers) {
-        total += buffer.remaining();
+      for (byte[] buffer : buffers) {
+        total += buffer.length;
       }
       byte[] result = new byte[total];
       int offset = 0;
-      for (ByteBuffer buffer : buffers) {
-        int length = buffer.remaining();
-        buffer.get(result, offset, length);
-        offset += length;
+      for (byte[] buffer : buffers) {
+        System.arraycopy(buffer, 0, result, offset, buffer.length);
+        offset += buffer.length;
       }
       buffers.clear();
       body.complete(result);
