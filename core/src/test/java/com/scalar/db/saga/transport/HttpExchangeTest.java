@@ -394,6 +394,34 @@ class HttpExchangeTest {
     assertThat(((HttpCallException) t).isRetryable()).isFalse();
   }
 
+  @Test
+  void exchange_largeMultiChunkResponseBody_returnsBytesIntact() throws Exception {
+    // Arrange — a body far larger than one socket read (256 KB), with a position-varying pattern so
+    // any corruption is detectable. This spans many socket reads / onNext deliveries, so it would
+    // fail if the subscriber's retained ByteBuffers were reused/overwritten before onComplete.
+    byte[] expected = new byte[256 * 1024];
+    for (int i = 0; i < expected.length; i++) {
+      expected[i] = (byte) (i % 256);
+    }
+    server.createContext(
+        "/large",
+        ex -> {
+          ex.sendResponseHeaders(200, expected.length);
+          try (OutputStream os = ex.getResponseBody()) {
+            os.write(expected);
+          }
+        });
+
+    // Act — the default 1 MB cap comfortably admits 256 KB.
+    HttpCallResponse response =
+        exchange.exchange(
+            "GET", baseUrl, "/large", NO_PARAMS, NO_PARAMS, null, null, "saga-1", "s", null);
+
+    // Assert — every byte survives the retain-then-concatenate-at-onComplete path.
+    assertThat(response.status()).isEqualTo(200);
+    assertThat(response.bodyBytes()).isEqualTo(expected);
+  }
+
   private static void respond(HttpExchange ex, int status, String body) throws IOException {
     byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
     ex.sendResponseHeaders(status, bytes.length);

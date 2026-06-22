@@ -281,10 +281,14 @@ final class HttpExchange {
         body.completeExceptionally(new BodyTooLargeException());
         return;
       }
-      // Retain the buffers (read-only, owned by us now) and concatenate at onComplete; do not copy
-      // eagerly, mirroring the JDK's ofByteArray subscriber. Only under-limit batches are retained
-      // (the crossing batch hits the early return above), so the retained heap stays <=
-      // maxBodyBytes; the only transient is the single delivery that triggers rejection.
+      // Retain the buffers and concatenate at onComplete instead of copying eagerly, mirroring the
+      // JDK's BodySubscribers.ofByteArray(). Safe because the JDK HttpClient allocates these
+      // buffers
+      // internally and does not reuse them after onNext returns (ofByteArray relies on the same
+      // guarantee); they are read-only and owned by us once delivered. This would NOT hold for
+      // buffer-pooling transports such as Netty, which would require a copy here. Only under-limit
+      // batches are retained (the crossing batch hits the early return above), so the retained heap
+      // stays <= maxBodyBytes; the only transient is the single delivery that triggers rejection.
       buffers.addAll(items);
     }
 
