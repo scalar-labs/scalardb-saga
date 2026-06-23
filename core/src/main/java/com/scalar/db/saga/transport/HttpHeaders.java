@@ -4,7 +4,7 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import org.jspecify.annotations.Nullable;
 
-/** HTTP header names and constants used by the participant protocol. */
+/** HTTP header-name constants and Content-Type utilities used by the participant protocol. */
 final class HttpHeaders {
 
   static final String SAGA_ID = "X-Saga-Id";
