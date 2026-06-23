@@ -45,10 +45,11 @@ final class DeclarativeExpressions {
 
   /** Resolves a value to a string, substituting every {@code ${key}} occurrence. */
   static String resolveString(String template, SagaContext context) throws TransportException {
+    rejectUnclosedPlaceholder(template);
     Matcher matcher = PLACEHOLDER.matcher(template);
     StringBuilder result = new StringBuilder();
     while (matcher.find()) {
-      Object value = require(matcher.group(1), context);
+      Object value = requireScalar(matcher.group(1), context);
       matcher.appendReplacement(result, Matcher.quoteReplacement(String.valueOf(value)));
     }
     matcher.appendTail(result);
@@ -63,10 +64,11 @@ final class DeclarativeExpressions {
    * value stays one segment and cannot traverse the path (e.g. {@code ../../admin}).
    */
   static String resolvePath(String template, SagaContext context) throws TransportException {
+    rejectUnclosedPlaceholder(template);
     Matcher matcher = PLACEHOLDER.matcher(template);
     StringBuilder result = new StringBuilder();
     while (matcher.find()) {
-      String encoded = encodePathSegment(String.valueOf(require(matcher.group(1), context)));
+      String encoded = encodePathSegment(String.valueOf(requireScalar(matcher.group(1), context)));
       matcher.appendReplacement(result, Matcher.quoteReplacement(encoded));
     }
     matcher.appendTail(result);
@@ -144,6 +146,42 @@ final class DeclarativeExpressions {
         .get(key, Object.class)
         .orElseThrow(
             () -> new TransportException("No saga context value for '${" + key + "}'", false));
+  }
+
+  /**
+   * Like {@link #require}, but rejects a non-scalar value (a {@code Map}/{@code List}, e.g. from a
+   * prior step's {@code $.path} capture of a nested object). Interpolating one into a path/query/
+   * string body would emit Java's {@code toString()} rather than JSON, silently corrupting the
+   * request, so this is a non-retryable definition/data error.
+   */
+  private static Object requireScalar(String key, SagaContext context) throws TransportException {
+    Object value = require(key, context);
+    if (value instanceof Map || value instanceof Iterable) {
+      throw new TransportException(
+          "Context value for '${"
+              + key
+              + "}' is a "
+              + value.getClass().getSimpleName()
+              + ", not a scalar; only scalar values can be interpolated into a path/query/string"
+              + " body",
+          false);
+    }
+    return value;
+  }
+
+  /**
+   * Rejects a template whose {@code ${...}} placeholder is missing its closing brace (e.g. {@code
+   * amount=} followed by an unclosed placeholder): {@link #PLACEHOLDER} only matches a closed
+   * placeholder, so an unclosed one would otherwise be emitted verbatim and silently sent to the
+   * participant. Checked against the template (not the resolved result) so a resolved value that
+   * legitimately contains a placeholder-like sequence is not a false positive. A typo here is a
+   * non-retryable definition error.
+   */
+  private static void rejectUnclosedPlaceholder(String template) throws TransportException {
+    if (PLACEHOLDER.matcher(template).replaceAll("").contains("${")) {
+      throw new TransportException(
+          "Unclosed '${' in template '" + template + "' (missing '}')", false);
+    }
   }
 
   private static Object extractPath(String path, Map<String, Object> response)

@@ -75,6 +75,33 @@ class DeclarativeExpressionsTest {
         .isInstanceOf(TransportException.class);
   }
 
+  @Test
+  void resolveString_unclosedPlaceholder_throwsNonRetryable() {
+    // Act — a missing closing brace must fail loudly, not be emitted verbatim.
+    Throwable thrown =
+        org.assertj.core.api.Assertions.catchThrowable(
+            () ->
+                DeclarativeExpressions.resolveString("amount=${amount", ctx(Map.of("amount", 5))));
+
+    // Assert
+    assertThat(thrown).isInstanceOf(TransportException.class);
+    assertThat(((TransportException) thrown).isRetryable()).isFalse();
+  }
+
+  @Test
+  void resolveString_nonScalarValue_throwsNonRetryable() {
+    // Act — a Map value interpolated into a string would emit Java toString(), not JSON.
+    Throwable thrown =
+        org.assertj.core.api.Assertions.catchThrowable(
+            () ->
+                DeclarativeExpressions.resolveString(
+                    "u-${obj}", ctx(Map.of("obj", Map.of("name", "Ann")))));
+
+    // Assert
+    assertThat(thrown).isInstanceOf(TransportException.class);
+    assertThat(((TransportException) thrown).isRetryable()).isFalse();
+  }
+
   // --- resolvePath ---------------------------------------------------------
 
   @Test
@@ -112,6 +139,32 @@ class DeclarativeExpressionsTest {
     Throwable thrown =
         org.assertj.core.api.Assertions.catchThrowable(
             () -> DeclarativeExpressions.resolvePath("/u/${missing}", ctx(Map.of())));
+
+    // Assert
+    assertThat(thrown).isInstanceOf(TransportException.class);
+    assertThat(((TransportException) thrown).isRetryable()).isFalse();
+  }
+
+  @Test
+  void resolvePath_unclosedPlaceholder_throwsNonRetryable() {
+    // Act
+    Throwable thrown =
+        org.assertj.core.api.Assertions.catchThrowable(
+            () -> DeclarativeExpressions.resolvePath("/u/${id", ctx(Map.of("id", 7))));
+
+    // Assert
+    assertThat(thrown).isInstanceOf(TransportException.class);
+    assertThat(((TransportException) thrown).isRetryable()).isFalse();
+  }
+
+  @Test
+  void resolvePath_nonScalarValue_throwsNonRetryable() {
+    // Act — a List value cannot be interpolated as a single path segment.
+    Throwable thrown =
+        org.assertj.core.api.Assertions.catchThrowable(
+            () ->
+                DeclarativeExpressions.resolvePath(
+                    "/u/${ids}", ctx(Map.of("ids", java.util.List.of(1, 2)))));
 
     // Assert
     assertThat(thrown).isInstanceOf(TransportException.class);
