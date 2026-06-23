@@ -52,19 +52,48 @@ final class HttpHeaders {
         inQuotes = !inQuotes;
       } else if (c == ';' && !inQuotes) {
         if (paramStart >= 0) {
-          String segment = contentType.substring(paramStart, i);
-          int eq = segment.indexOf('=');
-          if (eq >= 0 && segment.substring(0, eq).trim().equalsIgnoreCase(name)) {
-            String value = segment.substring(eq + 1).trim();
-            if (value.length() >= 2 && value.startsWith("\"") && value.endsWith("\"")) {
-              value = value.substring(1, value.length() - 1).trim();
-            }
-            return value;
+          String match = matchParameter(contentType.substring(paramStart, i), name);
+          if (match != null) {
+            return match;
           }
         }
         paramStart = i + 1;
       }
     }
+    // Unterminated quoted string: the synthetic ';' was swallowed by the still-open quote, so the
+    // tail was never flushed. The quote is known malformed, so re-split the tail on ';' literally
+    // to recover a valid parameter (e.g. charset) that follows an unterminated earlier parameter.
+    if (inQuotes && paramStart >= 0) {
+      for (int segStart = paramStart, i = paramStart; i <= contentType.length(); i++) {
+        if (i == contentType.length() || contentType.charAt(i) == ';') {
+          String match = matchParameter(contentType.substring(segStart, i), name);
+          if (match != null) {
+            return match;
+          }
+          segStart = i + 1;
+        }
+      }
+    }
     return null;
+  }
+
+  /**
+   * Returns the unquoted value of {@code segment} (a single {@code name=value} parameter) when its
+   * name matches {@code name} case-insensitively, or null. A surrounding pair of double quotes is
+   * stripped; a lone leading quote (from an unterminated quoted string) is also stripped so a
+   * malformed value can still be parsed.
+   */
+  private static @Nullable String matchParameter(String segment, String name) {
+    int eq = segment.indexOf('=');
+    if (eq < 0 || !segment.substring(0, eq).trim().equalsIgnoreCase(name)) {
+      return null;
+    }
+    String value = segment.substring(eq + 1).trim();
+    if (value.length() >= 2 && value.startsWith("\"") && value.endsWith("\"")) {
+      value = value.substring(1, value.length() - 1).trim();
+    } else if (value.startsWith("\"")) {
+      value = value.substring(1).trim(); // strip an unterminated opening quote
+    }
+    return value;
   }
 }

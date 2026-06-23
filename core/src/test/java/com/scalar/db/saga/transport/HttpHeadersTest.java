@@ -127,4 +127,23 @@ class HttpHeadersTest {
     // Assert
     assertThat(charset).isEqualTo(StandardCharsets.ISO_8859_1);
   }
+
+  @Test
+  void charsetOf_unterminatedQuotedCharsetGiven_returnsThatCharset() {
+    // Act
+    Charset charset = HttpHeaders.charsetOf("text/plain; charset=\"ISO-8859-1");
+
+    // Assert
+    assertThat(charset).isEqualTo(StandardCharsets.ISO_8859_1);
+  }
+
+  @Test
+  void charsetOf_charsetAfterUnterminatedQuotedParameterGiven_returnsThatCharset() {
+    // Act
+    Charset charset =
+        HttpHeaders.charsetOf("multipart/form-data; boundary=\"x; charset=ISO-8859-1");
+
+    // Assert
+    assertThat(charset).isEqualTo(StandardCharsets.ISO_8859_1);
+  }
 }
