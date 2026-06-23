@@ -266,4 +266,86 @@ class SagaDefinitionSerializerTest {
     assertThatThrownBy(() -> serializer.deserialize(json))
         .isInstanceOf(SagaPersistenceException.class);
   }
+
+  @Test
+  void deserialize_tccWithRecoveryStrategy_throwsSagaPersistenceException() {
+    // Arrange — TCC recovery is predefined (the cancel phase); an explicit recoveryStrategy is
+    // illegal and must be rejected, mirroring the parser.
+    String json =
+        "{\"name\":\"test\",\"mode\":\"TCC\",\"version\":\"1.0\","
+            + "\"recoveryStrategy\":\"BACKWARD\",\"timeoutMillis\":0,"
+            + "\"steps\":[]}";
+
+    // Act & Assert
+    assertThatThrownBy(() -> serializer.deserialize(json))
+        .isInstanceOf(SagaPersistenceException.class);
+  }
+
+  @Test
+  void deserialize_tccStepWithPivot_throwsSagaPersistenceException() {
+    // Arrange — TCC pivots are fixed at the last try step, so an explicit step pivot is illegal.
+    String json =
+        "{\"name\":\"test\",\"mode\":\"TCC\",\"version\":\"1.0\",\"timeoutMillis\":0,"
+            + "\"steps\":[{\"name\":\"s1\",\"stepClass\":\"com.example.S1\","
+            + "\"timeoutMillis\":1000,\"pivot\":false}]}";
+
+    // Act & Assert
+    assertThatThrownBy(() -> serializer.deserialize(json))
+        .isInstanceOf(SagaPersistenceException.class);
+  }
+
+  @Test
+  void deserialize_sagaServiceStepWithTccPhases_throwsSagaPersistenceException() {
+    // Arrange — a SAGA service step must use SAGA phases (execution/compensation), not TCC phases.
+    String json =
+        "{\"name\":\"test\",\"mode\":\"SAGA\",\"version\":\"1.0\","
+            + "\"recoveryStrategy\":\"BACKWARD\",\"timeoutMillis\":0,"
+            + "\"steps\":[{\"name\":\"s1\",\"service\":\"svc\","
+            + "\"reservation\":{},\"timeoutMillis\":1000,\"pivot\":false}]}";
+
+    // Act & Assert
+    assertThatThrownBy(() -> serializer.deserialize(json))
+        .isInstanceOf(SagaPersistenceException.class);
+  }
+
+  @Test
+  void deserialize_tccServiceStepWithSagaPhases_throwsSagaPersistenceException() {
+    // Arrange — a TCC service step must use TCC phases, not SAGA phases (execution/compensation).
+    String json =
+        "{\"name\":\"test\",\"mode\":\"TCC\",\"version\":\"1.0\",\"timeoutMillis\":0,"
+            + "\"steps\":[{\"name\":\"s1\",\"service\":\"svc\","
+            + "\"execution\":{},\"timeoutMillis\":1000}]}";
+
+    // Act & Assert
+    assertThatThrownBy(() -> serializer.deserialize(json))
+        .isInstanceOf(SagaPersistenceException.class);
+  }
+
+  @Test
+  void deserialize_stepWithStepClassAndPhase_throwsSagaPersistenceException() {
+    // Arrange — mixing a stepClass with a declarative phase (not just 'service') is illegal;
+    // exactly one step kind is allowed.
+    String json =
+        "{\"name\":\"test\",\"mode\":\"SAGA\",\"version\":\"1.0\","
+            + "\"recoveryStrategy\":\"BACKWARD\",\"timeoutMillis\":0,"
+            + "\"steps\":[{\"name\":\"s1\",\"stepClass\":\"com.example.S1\","
+            + "\"execution\":{},\"timeoutMillis\":1000,\"pivot\":false}]}";
+
+    // Act & Assert
+    assertThatThrownBy(() -> serializer.deserialize(json))
+        .isInstanceOf(SagaPersistenceException.class);
+  }
+
+  @Test
+  void deserialize_tccServiceStepMissingCancellation_throwsSagaPersistenceException() {
+    // Arrange — a TCC service step must define all three phases; a missing cancellation is invalid.
+    String json =
+        "{\"name\":\"test\",\"mode\":\"TCC\",\"version\":\"1.0\",\"timeoutMillis\":0,"
+            + "\"steps\":[{\"name\":\"s1\",\"service\":\"svc\","
+            + "\"reservation\":{},\"confirmation\":{},\"timeoutMillis\":1000}]}";
+
+    // Act & Assert
+    assertThatThrownBy(() -> serializer.deserialize(json))
+        .isInstanceOf(SagaPersistenceException.class);
+  }
 }
