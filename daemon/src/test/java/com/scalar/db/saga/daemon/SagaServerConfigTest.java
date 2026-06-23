@@ -46,6 +46,38 @@ class SagaServerConfigTest {
   }
 
   @Test
+  void load_unsetSyncTimeout_disabledByDefault() {
+    assertThat(SagaServerConfig.load(new Properties()).syncTimeoutMillis())
+        .isEqualTo(SagaServerConfig.DEFAULT_SYNC_TIMEOUT_MILLIS);
+  }
+
+  @Test
+  void load_syncTimeoutGiven_parsesValue() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SYNC_TIMEOUT_MILLIS_KEY, "5000");
+
+    assertThat(SagaServerConfig.load(props).syncTimeoutMillis()).isEqualTo(5000L);
+  }
+
+  @Test
+  void load_negativeSyncTimeout_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SYNC_TIMEOUT_MILLIS_KEY, "-1");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void load_nonNumericSyncTimeout_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SYNC_TIMEOUT_MILLIS_KEY, "soon");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void load_noServiceKeys_returnsEmptyServiceBaseUrls() {
     assertThat(SagaServerConfig.load(new Properties()).serviceBaseUrls()).isEmpty();
   }

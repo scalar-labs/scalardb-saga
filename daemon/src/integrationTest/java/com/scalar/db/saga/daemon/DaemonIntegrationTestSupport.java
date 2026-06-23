@@ -72,6 +72,7 @@ abstract class DaemonIntegrationTestSupport {
     props.setProperty(
         SagaServerConfig.SERVICE_KEY_PREFIX + SERVICE + SagaServerConfig.SERVICE_BASE_URL_SUFFIX,
         baseUrl);
+    configureProperties(props);
 
     server = new SagaServer(SagaServerConfig.load(props)).start();
   }
@@ -95,6 +96,12 @@ abstract class DaemonIntegrationTestSupport {
 
   /** Writes the saga definition files this test needs into {@code definitionsDir}. */
   protected abstract void writeDefinitions(Path definitionsDir) throws IOException;
+
+  /**
+   * Hook for a subclass to add or override server properties before the server starts (no-op by
+   * default).
+   */
+  protected void configureProperties(Properties props) {}
 
   protected final void writeDefinition(Path definitionsDir, String name, String json)
       throws IOException {

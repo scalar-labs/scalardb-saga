@@ -23,6 +23,9 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code scalar.db.saga.server.service.<name>.base_url} — base URL of the HTTP service a
  *       declarative step's {@code "service":"<name>"} resolves to; repeat the key per service
  *       (optional)
+ *   <li>{@code scalar.db.saga.server.sync_timeout_millis} — bound (ms) on how long a synchronous
+ *       start blocks before returning {@code 202} while the saga continues; {@code 0} (default)
+ *       disables it (sync blocks to terminal)
  * </ul>
  *
  * <p>All other properties configure the saga engine's persistence (e.g. ScalarDB connection
@@ -38,20 +41,25 @@ public final class SagaServerConfig {
   static final String SERVICE_BASE_URL_SUFFIX = ".base_url";
   static final String STORE_MAX_EVENT_PAYLOAD_BYTES_KEY =
       "scalar.db.saga.store.max_event_payload_bytes";
+  static final String SYNC_TIMEOUT_MILLIS_KEY = "scalar.db.saga.server.sync_timeout_millis";
   static final int DEFAULT_PORT = 8080;
   static final int DEFAULT_MAX_EVENT_PAYLOAD_BYTES = 1_048_576; // 1 MiB
+  static final long DEFAULT_SYNC_TIMEOUT_MILLIS = 0L; // 0 = disabled (sync blocks to terminal)
 
   private final int port;
+  private final long syncTimeoutMillis;
   private final Properties properties;
   private final @Nullable Path definitionsPath;
   private final Map<String, String> serviceBaseUrls;
 
   private SagaServerConfig(
       int port,
+      long syncTimeoutMillis,
       Properties properties,
       @Nullable Path definitionsPath,
       Map<String, String> serviceBaseUrls) {
     this.port = port;
+    this.syncTimeoutMillis = syncTimeoutMillis;
     this.properties = applyStoreDefaults(copyOf(properties));
     this.definitionsPath = definitionsPath;
     this.serviceBaseUrls = Map.copyOf(serviceBaseUrls);
@@ -84,11 +92,13 @@ public final class SagaServerConfig {
   public static SagaServerConfig load(Properties properties) {
     Objects.requireNonNull(properties, "properties must not be null");
     int port = parsePort(properties.getProperty(PORT_KEY));
+    long syncTimeoutMillis =
+        parseSyncTimeoutMillis(properties.getProperty(SYNC_TIMEOUT_MILLIS_KEY));
     String definitions = properties.getProperty(DEFINITIONS_PATH_KEY);
     Path definitionsPath =
         (definitions == null || definitions.isBlank()) ? null : Path.of(definitions.trim());
     return new SagaServerConfig(
-        port, properties, definitionsPath, parseServiceBaseUrls(properties));
+        port, syncTimeoutMillis, properties, definitionsPath, parseServiceBaseUrls(properties));
   }
 
   /**
@@ -120,6 +130,17 @@ public final class SagaServerConfig {
   /** Returns the configured HTTP port ({@code 0} binds an ephemeral port). */
   public int port() {
     return port;
+  }
+
+  /**
+   * Returns the synchronous-start timeout in milliseconds, or {@code 0} when disabled (the
+   * default). When positive, a synchronous {@code POST}/{@code PUT} that has not reached a terminal
+   * state within this bound returns {@code 202} and the saga keeps running on the engine's executor
+   * (the client polls {@code GET /sagas/{id}}) — so a slow saga cannot pin a request thread
+   * indefinitely.
+   */
+  public long syncTimeoutMillis() {
+    return syncTimeoutMillis;
   }
 
   /**
@@ -159,6 +180,24 @@ public final class SagaServerConfig {
           "'" + PORT_KEY + "' must be between 0 and 65535, got " + port);
     }
     return port;
+  }
+
+  private static long parseSyncTimeoutMillis(@Nullable String value) {
+    if (value == null || value.isBlank()) {
+      return DEFAULT_SYNC_TIMEOUT_MILLIS;
+    }
+    long millis;
+    try {
+      millis = Long.parseLong(value.trim());
+    } catch (NumberFormatException e) {
+      throw new IllegalArgumentException(
+          "Invalid value for '" + SYNC_TIMEOUT_MILLIS_KEY + "': " + value, e);
+    }
+    if (millis < 0) {
+      throw new IllegalArgumentException(
+          "'" + SYNC_TIMEOUT_MILLIS_KEY + "' must not be negative, got " + millis);
+    }
+    return millis;
   }
 
   private static Properties copyOf(Properties source) {

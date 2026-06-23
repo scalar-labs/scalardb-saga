@@ -1,10 +1,15 @@
 package com.scalar.db.saga.daemon.api;
 
+import com.scalar.db.saga.api.SagaCallback;
 import com.scalar.db.saga.api.SagaManager;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import io.javalin.Javalin;
 import io.javalin.http.Context;
 import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -27,6 +32,19 @@ import org.jspecify.annotations.Nullable;
  * AWS Step Functions {@code StartSyncExecution} and Netflix Conductor, which return {@code 200} for
  * a failed execution and carry the outcome in the body.
  *
+ * <p><b>Bounded synchronous start (opt-in).</b> A synchronous start runs the saga on the engine's
+ * (virtual-thread) executor and blocks the request thread only until the saga is terminal — which,
+ * with retries/compensation over slow participants, can be long. When {@code
+ * scalar.db.saga.server.sync_timeout_millis} is set (default {@code 0} = disabled, i.e. block to
+ * terminal), the request instead returns {@code 202} once that bound elapses, while the saga keeps
+ * running (poll {@code GET /sagas/{id}}). This caps how long a single request can hold a thread, so
+ * a burst of slow synchronous sagas cannot exhaust the request pool. Returning {@code 202} (rather
+ * than an error) is the honest outcome — the saga is not cancelled, it is still being processed —
+ * and reuses the {@code 202} this endpoint already returns for a non-terminal outcome. The pattern
+ * mirrors RFC 7240's {@code Prefer: respond-async, wait=N}, Azure Durable Functions' {@code
+ * WaitForCompletionOrCreateCheckStatusResponse}, and Conductor's {@code executeWorkflow} wait
+ * timeout.
+ *
  * <p>Not yet wired: {@code PUT /sagas/{id}/cancel} (needs the engine's {@code cancel} method) and
  * {@code GET /sagas} listing (needs the admin query layer).
  */
@@ -39,8 +57,10 @@ public final class SagaResource {
    *
    * @param app the Javalin app
    * @param sagaManager the saga manager the endpoints delegate to
+   * @param syncTimeoutMillis the synchronous-start timeout ({@code 0} disables it; see the class
+   *     doc's bounded-synchronous-start note)
    */
-  public static void register(Javalin app, SagaManager sagaManager) {
+  public static void register(Javalin app, SagaManager sagaManager, long syncTimeoutMillis) {
     app.post(
         "/sagas",
         ctx -> {
@@ -49,6 +69,13 @@ public final class SagaResource {
           if (isAsync(ctx.queryParam("async"))) {
             String sagaId = sagaManager.startAsync(request.requireSagaName(), input);
             respond(ctx, 202, sagaManager.getStateSnapshot(sagaId));
+          } else if (syncTimeoutMillis > 0) {
+            AtomicReference<SagaStateSnapshot> terminal = new AtomicReference<>();
+            CountDownLatch done = new CountDownLatch(1);
+            String sagaId =
+                sagaManager.startAsync(
+                    request.requireSagaName(), input, terminalSignal(done, terminal));
+            respondBoundedSync(ctx, sagaManager, sagaId, done, terminal, syncTimeoutMillis);
           } else {
             String sagaId = sagaManager.start(request.requireSagaName(), input);
             respondSync(ctx, sagaManager, sagaId);
@@ -64,6 +91,12 @@ public final class SagaResource {
           if (isAsync(ctx.queryParam("async"))) {
             sagaManager.startAsync(sagaId, request.requireSagaName(), input);
             respond(ctx, 202, sagaManager.getStateSnapshot(sagaId));
+          } else if (syncTimeoutMillis > 0) {
+            AtomicReference<SagaStateSnapshot> terminal = new AtomicReference<>();
+            CountDownLatch done = new CountDownLatch(1);
+            sagaManager.startAsync(
+                sagaId, request.requireSagaName(), input, terminalSignal(done, terminal));
+            respondBoundedSync(ctx, sagaManager, sagaId, done, terminal, syncTimeoutMillis);
           } else {
             sagaManager.start(sagaId, request.requireSagaName(), input);
             respondSync(ctx, sagaManager, sagaId);
@@ -83,6 +116,66 @@ public final class SagaResource {
   private static void respondSync(Context ctx, SagaManager sagaManager, String sagaId) {
     SagaStateSnapshot snapshot = sagaManager.getStateSnapshot(sagaId);
     respond(ctx, snapshot.getStatus().isTerminal() ? 200 : 202, snapshot);
+  }
+
+  /**
+   * A {@link SagaCallback} that captures the terminal snapshot and releases {@code done} when the
+   * saga finishes (in any terminal outcome), so a bounded synchronous start can wake as soon as the
+   * saga is done rather than always waiting the full timeout.
+   */
+  private static SagaCallback terminalSignal(
+      CountDownLatch done, AtomicReference<SagaStateSnapshot> terminal) {
+    return new SagaCallback() {
+      @Override
+      public void onCompleted(SagaStateSnapshot saga) {
+        terminal.set(saga);
+        done.countDown();
+      }
+
+      @Override
+      public void onCompensated(SagaStateSnapshot saga) {
+        terminal.set(saga);
+        done.countDown();
+      }
+
+      @Override
+      public void onEscalated(SagaStateSnapshot saga) {
+        terminal.set(saga);
+        done.countDown();
+      }
+    };
+  }
+
+  /**
+   * Renders a <em>bounded</em> synchronous start: waits up to {@code timeoutMillis} for the saga to
+   * reach a terminal state. If it does, responds like {@link #respondSync} ({@code 200}/{@code
+   * 202}); if the bound elapses first, responds {@code 202} with the in-flight snapshot while the
+   * saga keeps running on the engine's executor (the client polls {@code GET /sagas/{id}}). The
+   * request thread is therefore held for at most {@code timeoutMillis}, never the saga's full run.
+   */
+  private static void respondBoundedSync(
+      Context ctx,
+      SagaManager sagaManager,
+      String sagaId,
+      CountDownLatch done,
+      AtomicReference<SagaStateSnapshot> terminal,
+      long timeoutMillis) {
+    boolean reached;
+    try {
+      reached = done.await(timeoutMillis, TimeUnit.MILLISECONDS);
+    } catch (InterruptedException e) {
+      // The request thread was interrupted (e.g. shutdown); stop waiting. The saga continues, so
+      // 202 is the honest answer.
+      Thread.currentThread().interrupt();
+      reached = false;
+    }
+    if (reached) {
+      // 'reached' means a terminal callback ran, which sets 'terminal' before counting down.
+      SagaStateSnapshot snapshot = Objects.requireNonNull(terminal.get());
+      respond(ctx, snapshot.getStatus().isTerminal() ? 200 : 202, snapshot);
+    } else {
+      respond(ctx, 202, sagaManager.getStateSnapshot(sagaId));
+    }
   }
 
   /** Renders a saga snapshot as the JSON response body with the given HTTP status. */

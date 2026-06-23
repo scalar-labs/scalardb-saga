@@ -146,7 +146,7 @@ public final class SagaServer implements AutoCloseable {
   private void registerRoutes() {
     HealthResource.register(app);
     ErrorMapper.register(app);
-    SagaResource.register(app, sagaManager);
+    SagaResource.register(app, sagaManager, config.syncTimeoutMillis());
   }
 
   /**
