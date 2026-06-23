@@ -16,7 +16,6 @@ import com.scalar.db.saga.api.SagaDefinition.ServiceStep;
 import com.scalar.db.saga.api.SagaDefinition.ServiceStep.Phase;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import java.util.Locale;
-import org.jspecify.annotations.Nullable;
 
 /**
  * Serializes and deserializes {@link SagaDefinition} to/from JSON.
@@ -167,7 +166,7 @@ final class SagaDefinitionSerializer {
   private void addSagaStep(SagaDefinition.SagaBuilder builder, JsonNode stepNode) {
     requireFields(stepNode, NAME, TIMEOUT_MILLIS, PIVOT);
     String name = stepNode.get(NAME).asText();
-    String stepClass = classStepOrNull(stepNode, name);
+    String stepClass = CallSpecCodec.classStepOrNull(stepNode, name, IllegalArgumentException::new);
     if (stepClass != null) {
       SagaDefinition.SagaClassStepBuilder sb = builder.step(name, stepClass);
       applyStepCommon(sb, stepNode);
@@ -176,7 +175,7 @@ final class SagaDefinitionSerializer {
       return;
     }
     String service = stepNode.get(SERVICE).asText();
-    requireSagaPhases(stepNode, name);
+    CallSpecCodec.requireSagaPhases(stepNode, name, IllegalArgumentException::new);
     Transport transport = CallSpecCodec.parseTransport(stepNode, name);
     SagaDefinition.DeclarativeStepBuilder sb =
         builder
@@ -200,7 +199,7 @@ final class SagaDefinitionSerializer {
               + "' — TCC recovery is predefined (cancel-based), so the pivot is fixed at the last"
               + " try step");
     }
-    String stepClass = classStepOrNull(stepNode, name);
+    String stepClass = CallSpecCodec.classStepOrNull(stepNode, name, IllegalArgumentException::new);
     if (stepClass != null) {
       SagaDefinition.TccClassStepBuilder sb = builder.step(name, stepClass);
       applyStepCommon(sb, stepNode);
@@ -208,7 +207,7 @@ final class SagaDefinitionSerializer {
       return;
     }
     String service = stepNode.get(SERVICE).asText();
-    requireTccPhases(stepNode, name);
+    CallSpecCodec.requireTccPhases(stepNode, name, IllegalArgumentException::new);
     Transport transport = CallSpecCodec.parseTransport(stepNode, name);
     SagaDefinition.TccDeclarativeStepBuilder sb =
         builder
@@ -226,68 +225,6 @@ final class SagaDefinitionSerializer {
     if (stepNode.has(RETRY_POLICY) && !stepNode.get(RETRY_POLICY).isNull()) {
       stepBuilder.retryPolicy(deserializeRetryPolicy(stepNode.get(RETRY_POLICY)));
     }
-  }
-
-  private static @Nullable String classStepOrNull(JsonNode stepNode, String name) {
-    if (has(stepNode, STEP_CLASS)) {
-      if (has(stepNode, SERVICE) || hasSagaPhase(stepNode) || hasTccPhase(stepNode)) {
-        throw new IllegalArgumentException(
-            "Step '"
-                + name
-                + "' mixes stepClass with service/phases; exactly one step kind is allowed");
-      }
-      return stepNode.get(STEP_CLASS).asText();
-    }
-    if (!has(stepNode, SERVICE)) {
-      throw new IllegalArgumentException(
-          "Step '"
-              + name
-              + "' must define either 'stepClass' or a declarative service step ('service' +"
-              + " phases)");
-    }
-    return null;
-  }
-
-  private static void requireSagaPhases(JsonNode stepNode, String name) {
-    if (hasTccPhase(stepNode)) {
-      throw new IllegalArgumentException(
-          "SAGA definition's service step '"
-              + name
-              + "' must use SAGA phases (execution/compensation), not TCC phases"
-              + " (reservation/confirmation/cancellation)");
-    }
-    if (!has(stepNode, EXECUTION) || !has(stepNode, COMPENSATION)) {
-      throw new IllegalArgumentException(
-          "SAGA declarative service step '"
-              + name
-              + "' must define both 'execution' and 'compensation'");
-    }
-  }
-
-  private static void requireTccPhases(JsonNode stepNode, String name) {
-    if (hasSagaPhase(stepNode)) {
-      throw new IllegalArgumentException(
-          "TCC definition's service step '"
-              + name
-              + "' must use TCC phases (reservation/confirmation/cancellation), not SAGA phases"
-              + " (execution/compensation)");
-    }
-    if (!has(stepNode, RESERVATION)
-        || !has(stepNode, CONFIRMATION)
-        || !has(stepNode, CANCELLATION)) {
-      throw new IllegalArgumentException(
-          "TCC declarative service step '"
-              + name
-              + "' must define 'reservation', 'confirmation', and 'cancellation'");
-    }
-  }
-
-  private static boolean hasSagaPhase(JsonNode stepNode) {
-    return has(stepNode, EXECUTION) || has(stepNode, COMPENSATION);
-  }
-
-  private static boolean hasTccPhase(JsonNode stepNode) {
-    return has(stepNode, RESERVATION) || has(stepNode, CONFIRMATION) || has(stepNode, CANCELLATION);
   }
 
   private static String phaseKey(Phase phase) {

@@ -169,7 +169,8 @@ public final class SagaDefinitionParser {
 
   private static void addSagaStep(SagaDefinition.SagaBuilder builder, JsonNode stepNode) {
     String stepName = requireText(stepNode, "name");
-    String stepClass = classStepOrNull(stepNode, stepName);
+    String stepClass =
+        CallSpecCodec.classStepOrNull(stepNode, stepName, SagaDefinitionException::new);
     if (stepClass != null) {
       SagaDefinition.SagaClassStepBuilder sb = builder.step(stepName, stepClass);
       applyStepCommon(sb, stepNode);
@@ -180,7 +181,7 @@ public final class SagaDefinitionParser {
       return;
     }
     String service = stepNode.get("service").asText();
-    requireSagaPhases(stepNode, stepName);
+    CallSpecCodec.requireSagaPhases(stepNode, stepName, SagaDefinitionException::new);
     CallSpec.Transport transport = CallSpecCodec.parseTransport(stepNode, stepName);
     SagaDefinition.DeclarativeStepBuilder sb =
         builder
@@ -204,7 +205,8 @@ public final class SagaDefinitionParser {
               + "' must not specify 'pivot' — TCC recovery is predefined (cancel-based), so the"
               + " pivot is fixed at the last try step");
     }
-    String stepClass = classStepOrNull(stepNode, stepName);
+    String stepClass =
+        CallSpecCodec.classStepOrNull(stepNode, stepName, SagaDefinitionException::new);
     if (stepClass != null) {
       SagaDefinition.TccClassStepBuilder sb = builder.step(stepName, stepClass);
       applyStepCommon(sb, stepNode);
@@ -212,7 +214,7 @@ public final class SagaDefinitionParser {
       return;
     }
     String service = stepNode.get("service").asText();
-    requireTccPhases(stepNode, stepName);
+    CallSpecCodec.requireTccPhases(stepNode, stepName, SagaDefinitionException::new);
     CallSpec.Transport transport = CallSpecCodec.parseTransport(stepNode, stepName);
     SagaDefinition.TccDeclarativeStepBuilder sb =
         builder
@@ -225,72 +227,6 @@ public final class SagaDefinitionParser {
                 CallSpecCodec.parseCallSpec(transport, stepNode.get("cancellation"), stepName));
     applyStepCommon(sb, stepNode);
     sb.add();
-  }
-
-  /**
-   * Returns the {@code stepClass} for a class step, or {@code null} for a (validated) service step.
-   */
-  private static @Nullable String classStepOrNull(JsonNode stepNode, String stepName) {
-    boolean hasStepClass = isPresent(stepNode, "stepClass");
-    if (hasStepClass) {
-      if (isPresent(stepNode, "service") || hasSagaPhase(stepNode) || hasTccPhase(stepNode)) {
-        throw new SagaDefinitionException(
-            "Step '" + stepName + "' must not mix 'stepClass' with 'service'/declarative phases");
-      }
-      return stepNode.get("stepClass").asText();
-    }
-    if (!isPresent(stepNode, "service")) {
-      throw new SagaDefinitionException(
-          "Step '"
-              + stepName
-              + "' must define either 'stepClass' or a declarative service step ('service' +"
-              + " phases)");
-    }
-    return null;
-  }
-
-  private static void requireSagaPhases(JsonNode stepNode, String stepName) {
-    if (hasTccPhase(stepNode)) {
-      throw new SagaDefinitionException(
-          "SAGA definition's service step '"
-              + stepName
-              + "' must use SAGA phases (execution/compensation), not TCC phases"
-              + " (reservation/confirmation/cancellation)");
-    }
-    if (!isPresent(stepNode, "execution") || !isPresent(stepNode, "compensation")) {
-      throw new SagaDefinitionException(
-          "SAGA declarative service step '"
-              + stepName
-              + "' must define both 'execution' and 'compensation'");
-    }
-  }
-
-  private static void requireTccPhases(JsonNode stepNode, String stepName) {
-    if (hasSagaPhase(stepNode)) {
-      throw new SagaDefinitionException(
-          "TCC definition's service step '"
-              + stepName
-              + "' must use TCC phases (reservation/confirmation/cancellation), not SAGA phases"
-              + " (execution/compensation)");
-    }
-    if (!isPresent(stepNode, "reservation")
-        || !isPresent(stepNode, "confirmation")
-        || !isPresent(stepNode, "cancellation")) {
-      throw new SagaDefinitionException(
-          "TCC declarative service step '"
-              + stepName
-              + "' must define 'reservation', 'confirmation', and 'cancellation'");
-    }
-  }
-
-  private static boolean hasSagaPhase(JsonNode stepNode) {
-    return isPresent(stepNode, "execution") || isPresent(stepNode, "compensation");
-  }
-
-  private static boolean hasTccPhase(JsonNode stepNode) {
-    return isPresent(stepNode, "reservation")
-        || isPresent(stepNode, "confirmation")
-        || isPresent(stepNode, "cancellation");
   }
 
   private static void applyStepCommon(
