@@ -210,6 +210,21 @@ class DeclarativeExpressionsTest {
     assertThat(output).containsEntry("id", "X-1").containsEntry("raw", "{\"id\":\"X-1\"}");
   }
 
+  @Test
+  void extractOutput_dollarPathWithNonJsonResponseBody_throwsNonRetryable() {
+    // Arrange — a plain-text body that is not a JSON object.
+    HttpCallResponse response = textResponse("plain text body");
+
+    // Act — a $.path expression forces a JSON decode, which fails on the non-JSON body.
+    Throwable thrown =
+        org.assertj.core.api.Assertions.catchThrowable(
+            () -> DeclarativeExpressions.extractOutput(Map.of("id", "$.id"), response));
+
+    // Assert — a contract/definition error (non-JSON where JSON was promised), not a transient one.
+    assertThat(thrown).isInstanceOf(TransportException.class);
+    assertThat(((TransportException) thrown).isRetryable()).isFalse();
+  }
+
   private static HttpCallResponse jsonResponse(String body) {
     return new HttpCallResponse(
         200,
