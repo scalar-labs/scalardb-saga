@@ -171,4 +171,16 @@ class SagaServerTest {
       portHolder.stop();
     }
   }
+
+  @Test
+  void close_calledTwice_drainsManagerOnce(@TempDir Path dir) throws Exception {
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    SagaManager manager = mock(SagaManager.class);
+    SagaServer server = new SagaServer(configWithDefinitionsPath(dir), manager);
+
+    server.close();
+    server.close();
+
+    verify(manager, times(1)).close();
+  }
 }

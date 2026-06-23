@@ -19,6 +19,7 @@ import java.util.Locale;
 import java.util.Objects;
 import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,6 +44,7 @@ public final class SagaServer implements AutoCloseable {
   private final SagaServerConfig config;
   private final SagaManager sagaManager;
   private final Javalin app;
+  private final AtomicBoolean closed = new AtomicBoolean();
 
   /**
    * Builds the server, its underlying saga engine (connecting to ScalarDB), and registers
@@ -178,6 +180,11 @@ public final class SagaServer implements AutoCloseable {
 
   @Override
   public void close() {
+    // Idempotent: start() calls close() on a bind failure, and try-with-resources will call it
+    // again, so guard against draining the manager (and closing the store) twice.
+    if (!closed.compareAndSet(false, true)) {
+      return;
+    }
     // Stop accepting new requests first, then drain in-flight sagas.
     app.stop();
     sagaManager.close();
