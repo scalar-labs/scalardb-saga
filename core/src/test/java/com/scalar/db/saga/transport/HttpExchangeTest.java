@@ -2,6 +2,9 @@ package com.scalar.db.saga.transport;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.mock;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -13,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -211,6 +215,37 @@ class HttpExchangeTest {
     // Assert — a policy violation is non-retryable.
     assertThat(t).isInstanceOf(HttpCallException.class);
     assertThat(((HttpCallException) t).isRetryable()).isFalse();
+  }
+
+  @Test
+  void exchange_interruptedDuringBodyRead_throwsRetryableAndRestoresInterrupt() {
+    // Arrange — a client whose async send never completes.
+    HttpClient client = mock(HttpClient.class);
+    doReturn(new CompletableFuture<>()).when(client).sendAsync(any(), any());
+    com.scalar.db.saga.transport.HttpExchange exchange =
+        new com.scalar.db.saga.transport.HttpExchange(client, OutboundHttpPolicy.allowAll());
+
+    // Act — interrupt the caller so the (never-completing) future.get is interrupted.
+    Thread.currentThread().interrupt();
+    Throwable thrown;
+    boolean interruptedAfter;
+    try {
+      thrown =
+          catchThrowable(
+              () ->
+                  exchange.exchange(
+                      "GET", baseUrl, "/ok", NO_PARAMS, NO_PARAMS, null, null, "saga-1", "s",
+                      null));
+      interruptedAfter = Thread.currentThread().isInterrupted();
+    } finally {
+      Thread.interrupted(); // clear the flag so it can't leak to other tests
+    }
+
+    // Assert — retryable transport failure, InterruptedException cause, interrupt flag restored.
+    assertThat(thrown).isInstanceOf(HttpCallException.class);
+    assertThat(((HttpCallException) thrown).isRetryable()).isTrue();
+    assertThat(thrown.getCause()).isInstanceOf(InterruptedException.class);
+    assertThat(interruptedAfter).isTrue();
   }
 
   @Test
