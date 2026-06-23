@@ -3,7 +3,6 @@ package com.scalar.db.saga.transport;
 import com.scalar.db.saga.api.CallSpec;
 import com.scalar.db.saga.api.HttpCall;
 import com.scalar.db.saga.api.SagaContext;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -55,12 +54,12 @@ final class HttpTransportAdapter implements TransportAdapter {
       String overrideContentType = http.getContentType();
       if (http.getStringBody() != null) {
         // Raw/templated string body: sent verbatim with the override content type (or JSON
-        // default).
-        body =
-            DeclarativeExpressions.resolveString(http.getStringBody(), context)
-                .getBytes(StandardCharsets.UTF_8);
+        // default), encoded with that content type's charset.
         contentType =
             overrideContentType != null ? overrideContentType : HttpHeaders.APPLICATION_JSON;
+        body =
+            DeclarativeExpressions.resolveString(http.getStringBody(), context)
+                .getBytes(HttpHeaders.charsetOf(contentType));
       } else {
         // Flat-map body serialized as JSON; the content type defaults to application/json but a
         // declared override (e.g. a JSON variant content type) takes precedence.

@@ -33,6 +33,7 @@ class SagaHttpClientTest {
   private final AtomicReference<String> capturedQuery = new AtomicReference<>();
   private final AtomicReference<String> capturedContentType = new AtomicReference<>();
   private final AtomicReference<String> capturedBody = new AtomicReference<>();
+  private final AtomicReference<byte[]> capturedBodyBytes = new AtomicReference<>();
   private final AtomicReference<Map<String, String>> capturedHeaders = new AtomicReference<>();
 
   /** A typed body for {@link SagaHttpResponse#bodyJson(Class)}. */
@@ -84,7 +85,9 @@ class SagaHttpClientTest {
           Map<String, String> hdrs = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
           ex.getRequestHeaders().forEach((k, v) -> hdrs.put(k, v.isEmpty() ? "" : v.get(0)));
           capturedHeaders.set(hdrs);
-          capturedBody.set(new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+          byte[] raw = ex.getRequestBody().readAllBytes();
+          capturedBodyBytes.set(raw);
+          capturedBody.set(new String(raw, StandardCharsets.UTF_8));
           respond(ex, 200, "{\"k\":\"v\"}", Map.of("X-Resp", "rv"));
         });
     server.start();
@@ -438,6 +441,19 @@ class SagaHttpClientTest {
     // Assert — urlencoded body (space -> '+', '&' -> %26) with the form content type.
     assertThat(capturedBody.get()).isEqualTo("q=a+b%26c");
     assertThat(capturedContentType.get()).isEqualTo("application/x-www-form-urlencoded");
+  }
+
+  @Test
+  void stringBody_charsetInContentTypeGiven_encodesWithThatCharset() throws Exception {
+    // Arrange
+    SagaHttpClient client = client(OutboundHttpPolicy.allowAll());
+
+    // Act — "é" is one byte in ISO-8859-1 (0xE9) but two in UTF-8 (0xC3 0xA9).
+    client.post("/echo").stringBody("é", "text/plain; charset=ISO-8859-1").send();
+
+    // Assert — encoded with the declared charset, not UTF-8.
+    assertThat(capturedBodyBytes.get()).isEqualTo("é".getBytes(StandardCharsets.ISO_8859_1));
+    assertThat(capturedContentType.get()).isEqualTo("text/plain; charset=ISO-8859-1");
   }
 
   @Test

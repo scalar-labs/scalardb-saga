@@ -4,9 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.nio.charset.Charset;
-import java.nio.charset.StandardCharsets;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.TreeMap;
@@ -128,27 +126,6 @@ public final class HttpCallResponse {
   }
 
   private Charset charset() {
-    Optional<String> contentType = header(HttpHeaders.CONTENT_TYPE);
-    if (contentType.isPresent()) {
-      String value = contentType.get().toLowerCase(Locale.ROOT);
-      int start = value.indexOf("charset=");
-      if (start >= 0) {
-        String name = value.substring(start + "charset=".length()).trim();
-        int end = name.indexOf(';'); // strip any trailing parameters
-        if (end >= 0) {
-          name = name.substring(0, end).trim();
-        }
-        name = name.replace("\"", ""); // strip optional quotes
-        try {
-          if (!name.isEmpty()) {
-            return Charset.forName(name);
-          }
-        } catch (IllegalArgumentException e) {
-          // forName throws IllegalCharsetNameException (malformed) or UnsupportedCharsetException
-          // (unknown) — both IllegalArgumentException; fall through to the UTF-8 default below.
-        }
-      }
-    }
-    return StandardCharsets.UTF_8;
+    return HttpHeaders.charsetOf(header(HttpHeaders.CONTENT_TYPE).orElse(null));
   }
 }
