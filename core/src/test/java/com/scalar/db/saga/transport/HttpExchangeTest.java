@@ -180,6 +180,35 @@ class HttpExchangeTest {
   }
 
   @Test
+  void exchange_requestBodyExceedsLimit_throwsNonRetryable() {
+    // Arrange — a request body larger than the policy limit is rejected before any network I/O.
+    com.scalar.db.saga.transport.HttpExchange limited =
+        new com.scalar.db.saga.transport.HttpExchange(
+            HttpClient.newHttpClient(), OutboundHttpPolicy.newBuilder().maxBodyBytes(4).build());
+    byte[] body = "x".repeat(50).getBytes(StandardCharsets.UTF_8);
+
+    // Act
+    Throwable t =
+        catchThrowable(
+            () ->
+                limited.exchange(
+                    "POST",
+                    baseUrl,
+                    "/ok",
+                    NO_PARAMS,
+                    NO_PARAMS,
+                    body,
+                    "text/plain",
+                    "saga-1",
+                    "s",
+                    null));
+
+    // Assert — a policy violation is non-retryable.
+    assertThat(t).isInstanceOf(HttpCallException.class);
+    assertThat(((HttpCallException) t).isRetryable()).isFalse();
+  }
+
+  @Test
   void exchange_transportFailure_throwsRetryableWithoutResponse() throws IOException {
     // Bind then immediately release a port so nothing is listening on it.
     HttpServer probe = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
