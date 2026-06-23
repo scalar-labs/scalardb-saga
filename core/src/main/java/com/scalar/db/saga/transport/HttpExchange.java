@@ -97,11 +97,12 @@ final class HttpExchange {
    * <p>When {@code body} is non-null it is sent with the given {@code contentType}; when null no
    * body is sent.
    *
-   * <p>{@code requestTimeout} bounds this single call (the JDK {@link HttpRequest} timeout),
-   * covering the response body as well as the headers because the body is buffered inside {@code
-   * send()}. It is passed per call rather than stored, so the shared, immutable exchange instance
-   * can serve calls with different remaining step deadlines without any per-call mutable state.
-   * When {@code null}, the exchange's default per-request timeout is used.
+   * <p>{@code requestTimeout} bounds this single call — both the wait for headers (the JDK {@link
+   * HttpRequest} timeout) and the response-body read (a hard deadline on the async send's future,
+   * since the JDK timeout alone covers only the headers). It is passed per call rather than stored,
+   * so the shared, immutable exchange instance can serve calls with different remaining step
+   * deadlines without any per-call mutable state. When {@code null}, the exchange's default
+   * per-request timeout is used.
    *
    * @return the response on a 2xx status
    * @throws HttpCallException on a non-2xx response (carrying the {@link
@@ -221,9 +222,7 @@ final class HttpExchange {
   /**
    * A {@link BodyHandler} that buffers the response into a {@code byte[]} but cancels the download
    * once more than {@code maxBodyBytes} have arrived, failing with {@link BodyTooLargeException}.
-   * Unlike {@code BodyHandlers.ofByteArray()} (unbounded) it preserves the memory cap; unlike
-   * {@code ofInputStream()} the body is consumed inside {@code send()}, so the request timeout
-   * covers it.
+   * Unlike {@code BodyHandlers.ofByteArray()} (unbounded), it preserves the memory cap.
    */
   private static BodyHandler<byte[]> limitedBytes(long maxBodyBytes) {
     // A byte[] response can hold at most Integer.MAX_VALUE bytes, so clamp the cap there; this
