@@ -30,50 +30,52 @@ class SagaRestApiIntegrationTest extends DaemonIntegrationTestSupport {
 
   // One step that completes against the participant.
   private static final String DEFINITION =
-      "{\"name\":\""
-          + SAGA_NAME
-          + "\",\"mode\":\"SAGA\",\"steps\":[{\"name\":\"s1\",\"service\":\""
-          + SERVICE
-          + "\",\"execution\":{\"method\":\"POST\",\"path\":\"/debit\"},"
-          + "\"compensation\":{\"method\":\"POST\",\"path\":\"/reverse\"}}]}";
+      withService(
+          """
+          { "name": "$name", "mode": "SAGA", "steps": [
+            { "name": "s1", "service": "$svc",
+              "execution":    { "method": "POST", "path": "/debit" },
+              "compensation": { "method": "POST", "path": "/reverse" } } ] }
+          """
+              .replace("$name", SAGA_NAME));
 
   // s1 succeeds, s2 (/charge) returns 422 → backward recovery compensates s1 cleanly via /reverse.
   private static final String COMPENSATING_DEF =
-      "{\"name\":\""
-          + COMPENSATING_SAGA
-          + "\",\"mode\":\"SAGA\",\"recoveryStrategy\":\"BACKWARD\","
-          + "\"defaultRetryPolicy\":{\"maxAttempts\":1,\"initialIntervalMillis\":1},\"steps\":["
-          + "{\"name\":\"s1\",\"service\":\""
-          + SERVICE
-          + "\",\"execution\":{\"method\":\"POST\",\"path\":\"/debit\"},"
-          + "\"compensation\":{\"method\":\"POST\",\"path\":\"/reverse\"}},"
-          + "{\"name\":\"s2\",\"service\":\""
-          + SERVICE
-          + "\",\"execution\":{\"method\":\"POST\",\"path\":\"/charge\"},"
-          + "\"compensation\":{\"method\":\"POST\",\"path\":\"/void\"}}]}";
+      withService(
+          """
+          { "name": "$name", "mode": "SAGA", "recoveryStrategy": "BACKWARD",
+            "defaultRetryPolicy": { "maxAttempts": 1, "initialIntervalMillis": 1 }, "steps": [
+            { "name": "s1", "service": "$svc",
+              "execution":    { "method": "POST", "path": "/debit" },
+              "compensation": { "method": "POST", "path": "/reverse" } },
+            { "name": "s2", "service": "$svc",
+              "execution":    { "method": "POST", "path": "/charge" },
+              "compensation": { "method": "POST", "path": "/void" } } ] }
+          """
+              .replace("$name", COMPENSATING_SAGA));
 
   // Like above, but s1's compensation (/reverse-fail) fails → saga stuck COMPENSATING.
   private static final String COMPENSATION_FAILING_DEF =
-      "{\"name\":\""
-          + COMPENSATION_FAILING_SAGA
-          + "\",\"mode\":\"SAGA\",\"recoveryStrategy\":\"BACKWARD\","
-          + "\"defaultRetryPolicy\":{\"maxAttempts\":1,\"initialIntervalMillis\":1},\"steps\":["
-          + "{\"name\":\"s1\",\"service\":\""
-          + SERVICE
-          + "\",\"execution\":{\"method\":\"POST\",\"path\":\"/debit\"},"
-          + "\"compensation\":{\"method\":\"POST\",\"path\":\"/reverse-fail\"}},"
-          + "{\"name\":\"s2\",\"service\":\""
-          + SERVICE
-          + "\",\"execution\":{\"method\":\"POST\",\"path\":\"/charge\"},"
-          + "\"compensation\":{\"method\":\"POST\",\"path\":\"/void\"}}]}";
+      withService(
+          """
+          { "name": "$name", "mode": "SAGA", "recoveryStrategy": "BACKWARD",
+            "defaultRetryPolicy": { "maxAttempts": 1, "initialIntervalMillis": 1 }, "steps": [
+            { "name": "s1", "service": "$svc",
+              "execution":    { "method": "POST", "path": "/debit" },
+              "compensation": { "method": "POST", "path": "/reverse-fail" } },
+            { "name": "s2", "service": "$svc",
+              "execution":    { "method": "POST", "path": "/charge" },
+              "compensation": { "method": "POST", "path": "/void" } } ] }
+          """
+              .replace("$name", COMPENSATION_FAILING_SAGA));
 
   @Override
   protected void configureParticipant(HttpServer participant) {
-    participant.createContext("/debit", ex -> respond(ex, 200, "{}"));
-    participant.createContext("/reverse", ex -> respond(ex, 200, "{}"));
-    participant.createContext("/charge", ex -> respond(ex, 422, "{}"));
-    participant.createContext("/reverse-fail", ex -> respond(ex, 500, "{}"));
-    participant.createContext("/void", ex -> respond(ex, 200, "{}"));
+    route(participant, "/debit", 200);
+    route(participant, "/reverse", 200);
+    route(participant, "/charge", 422);
+    route(participant, "/reverse-fail", 500);
+    route(participant, "/void", 200);
   }
 
   @Override
@@ -95,7 +97,7 @@ class SagaRestApiIntegrationTest extends DaemonIntegrationTestSupport {
 
     HttpResponse<String> get = get("/sagas/" + sagaId);
     assertThat(get.statusCode()).isEqualTo(200);
-    assertThat(MAPPER.readTree(get.body()).get("status").asText()).isEqualTo("COMPLETED");
+    assertThat(status(get)).isEqualTo("COMPLETED");
   }
 
   @Test
@@ -159,7 +161,7 @@ class SagaRestApiIntegrationTest extends DaemonIntegrationTestSupport {
 
     // The saga ran to a terminal state (cleanly rolled back) → 200, with the outcome in the body.
     assertThat(post.statusCode()).isEqualTo(200);
-    assertThat(MAPPER.readTree(post.body()).get("status").asText()).isEqualTo("COMPENSATED");
+    assertThat(status(post)).isEqualTo("COMPENSATED");
   }
 
   @Test
@@ -169,6 +171,6 @@ class SagaRestApiIntegrationTest extends DaemonIntegrationTestSupport {
 
     // Compensation itself failed → saga is non-terminal (still resolving) → 202.
     assertThat(post.statusCode()).isEqualTo(202);
-    assertThat(MAPPER.readTree(post.body()).get("status").asText()).isEqualTo("COMPENSATING");
+    assertThat(status(post)).isEqualTo("COMPENSATING");
   }
 }

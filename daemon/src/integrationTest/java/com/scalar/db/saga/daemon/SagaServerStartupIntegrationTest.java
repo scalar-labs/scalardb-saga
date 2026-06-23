@@ -24,9 +24,12 @@ class SagaServerStartupIntegrationTest {
 
   // References service "account", but the test configures no service.account.base_url.
   private static final String DEFINITION =
-      "{\"name\":\"saga\",\"mode\":\"SAGA\",\"steps\":[{\"name\":\"s\",\"service\":\"account\","
-          + "\"execution\":{\"method\":\"POST\",\"path\":\"/x\"},"
-          + "\"compensation\":{\"method\":\"POST\",\"path\":\"/x\"}}]}";
+      """
+      { "name": "saga", "mode": "SAGA", "steps": [
+        { "name": "s", "service": "account",
+          "execution":    { "method": "POST", "path": "/x" },
+          "compensation": { "method": "POST", "path": "/x" } } ] }
+      """;
 
   private Path tempDbPath;
   private Path definitionsDir;

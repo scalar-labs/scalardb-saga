@@ -17,7 +17,7 @@ class SagaServerHealthIntegrationTest extends DaemonIntegrationTestSupport {
 
   @Override
   protected void configureParticipant(HttpServer participant) {
-    participant.createContext("/x", ex -> respond(ex, 200, "{}"));
+    route(participant, "/x", 200);
   }
 
   @Override
@@ -25,10 +25,13 @@ class SagaServerHealthIntegrationTest extends DaemonIntegrationTestSupport {
     writeDefinition(
         definitionsDir,
         "saga",
-        "{\"name\":\"saga\",\"mode\":\"SAGA\",\"steps\":[{\"name\":\"s\",\"service\":\""
-            + SERVICE
-            + "\",\"execution\":{\"method\":\"POST\",\"path\":\"/x\"},"
-            + "\"compensation\":{\"method\":\"POST\",\"path\":\"/x\"}}]}");
+        withService(
+            """
+            { "name": "saga", "mode": "SAGA", "steps": [
+              { "name": "s", "service": "$svc",
+                "execution":    { "method": "POST", "path": "/x" },
+                "compensation": { "method": "POST", "path": "/x" } } ] }
+            """));
   }
 
   @Test

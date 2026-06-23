@@ -17,7 +17,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
+import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -40,6 +43,7 @@ abstract class DaemonIntegrationTestSupport {
   protected static final String SERVICE = "account";
 
   private final HttpClient http = HttpClient.newHttpClient();
+  private final Map<String, AtomicInteger> hits = new ConcurrentHashMap<>();
 
   private HttpServer participant;
   private Path tempDbPath;
@@ -95,6 +99,72 @@ abstract class DaemonIntegrationTestSupport {
   protected final void writeDefinition(Path definitionsDir, String name, String json)
       throws IOException {
     Files.writeString(definitionsDir.resolve(name + ".json"), json);
+  }
+
+  /**
+   * Substitutes {@code $svc} with {@link #SERVICE} so definitions can be written as readable JSON
+   * text blocks (e.g. {@code "service": "$svc"}) instead of string concatenation.
+   */
+  protected static String withService(String json) {
+    return json.replace("$svc", SERVICE);
+  }
+
+  /**
+   * Registers a participant endpoint that counts calls and answers {@code status} with {@code {}}.
+   */
+  protected final void route(HttpServer participant, String path, int status) {
+    route(participant, path, status, "{}");
+  }
+
+  /**
+   * Registers a participant endpoint that counts calls and answers {@code status} with {@code
+   * body}.
+   */
+  protected final void route(HttpServer participant, String path, int status, String body) {
+    hits.put(path, new AtomicInteger());
+    participant.createContext(
+        path,
+        ex -> {
+          hits.get(path).incrementAndGet();
+          respond(ex, status, body);
+        });
+  }
+
+  /**
+   * Registers a participant endpoint that counts calls and answers {@code failStatus} for its first
+   * {@code failTimes} calls, then {@code okStatus} (a transient failure a retry policy rides out).
+   */
+  protected final void routeFlaky(
+      HttpServer participant, String path, int failTimes, int failStatus, int okStatus) {
+    AtomicInteger counter = new AtomicInteger();
+    hits.put(path, counter);
+    participant.createContext(
+        path,
+        ex -> respond(ex, counter.incrementAndGet() <= failTimes ? failStatus : okStatus, "{}"));
+  }
+
+  /** The number of times the participant endpoint {@code path} has been called. */
+  protected final int hits(String path) {
+    AtomicInteger counter = hits.get(path);
+    return counter == null ? 0 : counter.get();
+  }
+
+  /**
+   * Waits (up to ~2s) until the participant endpoint {@code path} has been called at least once.
+   */
+  protected final void awaitHit(String path) throws InterruptedException {
+    for (int i = 0; i < 50; i++) {
+      if (hits(path) >= 1) {
+        return;
+      }
+      Thread.sleep(40);
+    }
+    throw new AssertionError("expected the participant to be called on " + path);
+  }
+
+  /** The {@code status} field of a saga REST response body. */
+  protected final String status(HttpResponse<String> response) throws IOException {
+    return MAPPER.readTree(response.body()).get("status").asText();
   }
 
   protected final HttpResponse<String> post(String path, String body) throws Exception {
