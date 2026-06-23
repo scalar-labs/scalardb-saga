@@ -563,7 +563,7 @@ public final class SagaDefinition {
       return this;
     }
 
-    /** Starts a class step (a {@link Step}/{@link TccStep} implementation) by class name. */
+    /** Starts a class step (a {@link Step} implementation) by class name. */
     public SagaClassStepBuilder step(String name, String stepClass) {
       checkClassStep(name, stepClass);
       return new SagaClassStepBuilder(this, name, stepClass);

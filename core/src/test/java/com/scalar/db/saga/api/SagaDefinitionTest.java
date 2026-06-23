@@ -97,7 +97,7 @@ class SagaDefinitionTest {
     }
 
     @Test
-    void step_classNotImplementingStepOrTccStep_throwsIllegalArgumentException() {
+    void step_classNotImplementingStep_throwsIllegalArgumentException() {
       // Arrange & Act & Assert
       assertThatThrownBy(() -> SagaDefinition.newBuilder("test").saga().step("s1", String.class))
           .isInstanceOf(IllegalArgumentException.class);
