@@ -11,9 +11,9 @@ import java.util.Optional;
  *
  * <p>Obtained from {@link SagaHttpClient.Request#send()} (only ever 2xx — non-2xx throws) or {@link
  * SagaHttpClient.Request#sendRaw()} (any status). The body is read once (subject to the endpoint's
- * configured size limit) and can be viewed as a JSON object ({@link #bodyJsonObject()}), a typed
- * value ({@link #bodyJson(Class)}), charset-decoded text ({@link #bodyString()}), or raw bytes
- * ({@link #bodyBytes()}).
+ * configured size limit) and can be viewed as a JSON object ({@link #bodyJsonObject()}), a JSON
+ * array ({@link #bodyJsonArray()}), a typed value ({@link #bodyJson(Class)}), charset-decoded text
+ * ({@link #bodyString()}), or raw bytes ({@link #bodyBytes()}).
  *
  * <p>Implementations are immutable and safe to read from multiple threads.
  */
@@ -37,6 +37,13 @@ public interface SagaHttpResponse {
    * @throws StepExecutionException (non-retryable) if the body is not a JSON object
    */
   Map<String, Object> bodyJsonObject() throws StepExecutionException;
+
+  /**
+   * Decodes the body as a JSON array. An empty body yields an empty list.
+   *
+   * @throws StepExecutionException (non-retryable) if the body is not a JSON array
+   */
+  List<Object> bodyJsonArray() throws StepExecutionException;
 
   /**
    * Decodes the body as a value of the given type using the framework's hardened JSON mapper.
