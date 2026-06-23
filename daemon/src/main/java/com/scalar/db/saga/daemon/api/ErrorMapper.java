@@ -54,6 +54,7 @@ public final class ErrorMapper {
         (e, ctx) -> {
           Map<String, Object> body = new LinkedHashMap<>();
           body.put("error", "SAGA_ALREADY_EXISTS");
+          body.put("message", "A saga already exists with id '" + e.getSagaId() + "'");
           body.put("sagaId", e.getSagaId());
           body.put("existing", SagaSnapshotResponse.from(e.getExisting()));
           ctx.status(409).json(body);

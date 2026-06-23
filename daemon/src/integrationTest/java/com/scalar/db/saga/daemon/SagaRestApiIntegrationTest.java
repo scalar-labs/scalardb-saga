@@ -122,6 +122,7 @@ class SagaRestApiIntegrationTest extends DaemonIntegrationTestSupport {
     assertThat(second.statusCode()).isEqualTo(409);
     JsonNode conflict = MAPPER.readTree(second.body());
     assertThat(conflict.get("error").asText()).isEqualTo("SAGA_ALREADY_EXISTS");
+    assertThat(conflict.get("message").asText()).isNotBlank();
     assertThat(conflict.get("sagaId").asText()).isEqualTo("order-1");
     assertThat(conflict.get("existing").get("sagaId").asText()).isEqualTo("order-1");
   }
