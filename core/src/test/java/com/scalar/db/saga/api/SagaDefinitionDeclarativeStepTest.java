@@ -18,7 +18,7 @@ class SagaDefinitionDeclarativeStepTest {
   }
 
   @Test
-  void declarativeStep_sagaPhasesGiven_buildsSagaDeclarativeStep() {
+  void build_sagaPhasesGiven_buildsServiceStep() {
     // Arrange
     HttpCall execution =
         HttpCall.newBuilder("/debit")
@@ -53,7 +53,7 @@ class SagaDefinitionDeclarativeStepTest {
   }
 
   @Test
-  void declarativeStep_tccPhasesGiven_buildsTccDeclarativeStep() {
+  void build_tccPhasesGiven_buildsTccServiceStep() {
     // Act
     SagaDefinition definition =
         SagaDefinition.newBuilder("reserveSeats", SagaMode.TCC)
@@ -73,7 +73,7 @@ class SagaDefinitionDeclarativeStepTest {
   }
 
   @Test
-  void declarativeStep_sagaPhasesInTccMode_throwsException() {
+  void build_sagaPhasesInTccMode_throwsException() {
     // Arrange
     SagaDefinition.Builder builder =
         SagaDefinition.newBuilder("tcc-saga", SagaMode.TCC)
@@ -88,7 +88,7 @@ class SagaDefinitionDeclarativeStepTest {
   }
 
   @Test
-  void declarativeStep_tccPhasesInSagaMode_throwsException() {
+  void build_tccPhasesInSagaMode_throwsException() {
     // Arrange
     SagaDefinition.Builder builder =
         SagaDefinition.newBuilder("saga", SagaMode.SAGA)
@@ -181,14 +181,14 @@ class SagaDefinitionDeclarativeStepTest {
   }
 
   @Test
-  void declarativeStep_blankNameGiven_throwsException() {
+  void serviceStep_blankNameGiven_throwsException() {
     // Act & Assert
     assertThatThrownBy(() -> SagaDefinition.newBuilder("s", SagaMode.SAGA).serviceStep(" ", "svc"))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
-  void declarativeStep_blankServiceGiven_throwsException() {
+  void serviceStep_blankServiceGiven_throwsException() {
     // Act & Assert
     assertThatThrownBy(() -> SagaDefinition.newBuilder("s", SagaMode.SAGA).serviceStep("step", " "))
         .isInstanceOf(IllegalArgumentException.class);
@@ -208,7 +208,7 @@ class SagaDefinitionDeclarativeStepTest {
   }
 
   @Test
-  void declarativeStep_equalSteps_areEqual() {
+  void equals_equalServiceSteps_areEqual() {
     // Arrange
     ServiceStep a = buildSagaStep();
     ServiceStep b = buildSagaStep();
