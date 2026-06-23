@@ -10,7 +10,10 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -489,6 +492,54 @@ class HttpExchangeTest {
     // Assert — every byte survives the retain-then-concatenate-at-onComplete path.
     assertThat(response.status()).isEqualTo(200);
     assertThat(response.bodyBytes()).isEqualTo(expected);
+  }
+
+  @Test
+  void exchange_malformedContentLengthHeader_throwsNonRetryable() throws Exception {
+    // Arrange — a server returning a non-numeric Content-Length ("abc"). The high-level HttpServer
+    // computes Content-Length itself, so a raw socket is needed to put a malformed value on the
+    // wire. The JDK client rejects such a response while framing the body (firstValueAsLong throws
+    // NumberFormatException in the body handler); this is a deterministic protocol violation that
+    // no retry will fix, so the exchange must surface it as non-retryable rather than retryable.
+    String rawResponse =
+        String.join(
+            "\r\n",
+            "HTTP/1.1 200 OK",
+            "Content-Type: application/json",
+            "Content-Length: abc",
+            "Connection: close",
+            "",
+            "{\"k\":\"v\"}");
+    try (ServerSocket rawServer = new ServerSocket(0, 0, InetAddress.getByName("localhost"))) {
+      Thread serverThread =
+          new Thread(
+              () -> {
+                try (Socket socket = rawServer.accept()) {
+                  if (socket.getInputStream().read(new byte[8192]) < 0) {
+                    return; // client closed before sending the request
+                  }
+                  OutputStream os = socket.getOutputStream();
+                  os.write(rawResponse.getBytes(StandardCharsets.UTF_8));
+                  os.flush();
+                } catch (IOException ignored) {
+                  // client closed / test teardown
+                }
+              });
+      serverThread.setDaemon(true);
+      serverThread.start();
+      String rawUrl = "http://localhost:" + rawServer.getLocalPort();
+
+      // Act
+      Throwable t =
+          catchThrowable(
+              () ->
+                  exchange.exchange(
+                      "GET", rawUrl, "/x", NO_PARAMS, NO_PARAMS, null, null, "saga-1", "s", null));
+
+      // Assert — a malformed Content-Length is a non-retryable protocol violation.
+      assertThat(t).isInstanceOf(HttpCallException.class);
+      assertThat(((HttpCallException) t).isRetryable()).isFalse();
+    }
   }
 
   private static void respond(HttpExchange ex, int status, String body) throws IOException {

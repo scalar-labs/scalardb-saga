@@ -187,6 +187,13 @@ final class HttpExchange {
       if (cause != null && hasCause(cause, BodyTooLargeException.class)) {
         throw new HttpCallException("Response body exceeds limit (> " + maxBodyBytes + ")", false);
       }
+      if (cause != null && hasCause(cause, NumberFormatException.class)) {
+        // A malformed Content-Length (e.g. "abc") makes the JDK reject the response while framing
+        // the body — firstValueAsLong throws NumberFormatException in the body handler. This is a
+        // deterministic server protocol violation that no retry will fix, so classify it as
+        // non-retryable rather than hammering a broken server up to the policy's max attempts.
+        throw new HttpCallException("Malformed Content-Length from " + uri, cause, false);
+      }
       throw new HttpCallException("HTTP call failed: " + uri, cause != null ? cause : e, true);
     } catch (InterruptedException e) {
       future.cancel(true);
