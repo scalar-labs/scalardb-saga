@@ -137,6 +137,39 @@ class SagaDefinitionParserTest {
     }
 
     @Test
+    void parseJson_stringBodyWithContentTypeGiven_parsesCallSpec() {
+      // Arrange
+      String json =
+          """
+          {
+            "name": "svcSaga",
+            "steps": [
+              {
+                "name": "notify",
+                "service": "account-service",
+                "execution": {
+                  "path": "/notify",
+                  "stringBody": "user=${userName}",
+                  "contentType": "text/plain"
+                },
+                "compensation": { "path": "/noop" }
+              }
+            ]
+          }
+          """;
+
+      // Act
+      SagaDefinition def = SagaDefinitionParser.parseJson(json);
+
+      // Assert
+      SagaDefinition.ServiceStep step = (SagaDefinition.ServiceStep) def.getSteps().get(0);
+      HttpCall exec =
+          (HttpCall) step.getPhase(SagaDefinition.ServiceStep.Phase.EXECUTION).orElseThrow();
+      assertThat(exec.getStringBody()).isEqualTo("user=${userName}");
+      assertThat(exec.getContentType()).isEqualTo("text/plain");
+    }
+
+    @Test
     void parseJson_stepWithoutAnyKind_throwsSagaDefinitionException() {
       // Arrange
       String json =
@@ -341,6 +374,34 @@ class SagaDefinitionParserTest {
       assertThat(step1.getName()).isEqualTo("credit");
       assertThat(((SagaDefinition.ClassStep) step1).getStepClass())
           .isEqualTo("com.example.CreditStep");
+    }
+
+    @Test
+    void parseYaml_stringBodyWithContentTypeGiven_parsesCallSpec() {
+      // Arrange
+      String yaml =
+          """
+          name: svcSaga
+          steps:
+            - name: notify
+              service: account-service
+              execution:
+                path: /notify
+                stringBody: "user=${userName}"
+                contentType: text/plain
+              compensation:
+                path: /noop
+          """;
+
+      // Act
+      SagaDefinition def = SagaDefinitionParser.parseYaml(yaml);
+
+      // Assert
+      SagaDefinition.ServiceStep step = (SagaDefinition.ServiceStep) def.getSteps().get(0);
+      HttpCall exec =
+          (HttpCall) step.getPhase(SagaDefinition.ServiceStep.Phase.EXECUTION).orElseThrow();
+      assertThat(exec.getStringBody()).isEqualTo("user=${userName}");
+      assertThat(exec.getContentType()).isEqualTo("text/plain");
     }
 
     @Test

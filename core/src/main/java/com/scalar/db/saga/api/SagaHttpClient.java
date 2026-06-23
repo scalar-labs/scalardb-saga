@@ -87,7 +87,11 @@ public interface SagaHttpClient {
     /** Sets the request body to any JSON value (sent as {@code application/json}). */
     Request jsonBody(Object value);
 
-    /** Sets a string request body with an explicit {@code Content-Type} (encoded as UTF-8). */
+    /**
+     * Sets a string request body with an explicit {@code Content-Type}. The body is encoded using
+     * the charset named in {@code contentType} (defaulting to UTF-8 when none is declared, or when
+     * the named charset is unknown/unsupported).
+     */
     Request stringBody(String body, String contentType);
 
     /** Sets a raw byte request body with an explicit {@code Content-Type}. */

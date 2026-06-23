@@ -30,6 +30,7 @@ class HttpTransportAdapterTest {
   private final AtomicReference<String> rawQuery = new AtomicReference<>();
   private final AtomicReference<String> requestContentType = new AtomicReference<>();
   private final AtomicReference<String> requestBody = new AtomicReference<>();
+  private final AtomicReference<byte[]> requestBodyBytes = new AtomicReference<>();
   private final AtomicInteger hitCount = new AtomicInteger();
 
   @BeforeEach
@@ -64,7 +65,9 @@ class HttpTransportAdapterTest {
         "/notify",
         ex -> {
           requestContentType.set(ex.getRequestHeaders().getFirst(HttpHeaders.CONTENT_TYPE));
-          requestBody.set(new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+          byte[] raw = ex.getRequestBody().readAllBytes();
+          requestBodyBytes.set(raw);
+          requestBody.set(new String(raw, StandardCharsets.UTF_8));
           respondText(ex, 200, "plain-text-result");
         });
     server.createContext("/fail503", ex -> respond(ex, 503, "{}"));
@@ -193,6 +196,25 @@ class HttpTransportAdapterTest {
     assertThat(requestContentType.get()).isEqualTo("application/xml");
     assertThat(requestBody.get()).isEqualTo("<msg>hi</msg>");
     assertThat(output).containsEntry("raw", "plain-text-result");
+  }
+
+  @Test
+  void call_stringBodyWithCharsetInContentType_encodesWithThatCharset() throws Exception {
+    // Arrange — a content-type override declaring a non-UTF-8 charset.
+    HttpCall spec =
+        HttpCall.newBuilder("/notify")
+            .method(HttpMethod.POST)
+            .stringBody("<msg>${text}</msg>")
+            .contentType("application/xml; charset=ISO-8859-1")
+            .build();
+
+    // Act — "é" is one byte in ISO-8859-1 (0xE9) but two in UTF-8 (0xC3 0xA9).
+    adapter.call(spec, ctx(Map.of("text", "é")), "notify");
+
+    // Assert — the templated body is encoded with the declared charset, not UTF-8.
+    assertThat(requestBodyBytes.get())
+        .isEqualTo("<msg>é</msg>".getBytes(StandardCharsets.ISO_8859_1));
+    assertThat(requestContentType.get()).isEqualTo("application/xml; charset=ISO-8859-1");
   }
 
   @Test

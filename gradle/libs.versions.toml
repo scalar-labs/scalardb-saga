@@ -18,6 +18,7 @@ findsecbugs = "1.14.0"
 jspecify = "1.0.0"
 caffeine = "2.9.3"
 jcip = "1.0-1"
+javalin = "6.7.0"
 
 [libraries]
 scalardb = { module = "com.scalar-labs:scalardb", version.ref = "scalardb" }
@@ -37,3 +38,4 @@ findsecbugs-plugin = { module = "com.h3xstream.findsecbugs:findsecbugs-plugin", 
 jspecify = { module = "org.jspecify:jspecify", version.ref = "jspecify" }
 caffeine = { module = "com.github.ben-manes.caffeine:caffeine", version.ref = "caffeine" }
 jcip-annotations = { module = "com.github.stephenc.jcip:jcip-annotations", version.ref = "jcip" }
+javalin = { module = "io.javalin:javalin", version.ref = "javalin" }
