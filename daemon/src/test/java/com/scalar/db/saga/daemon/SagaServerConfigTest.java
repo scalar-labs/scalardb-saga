@@ -46,6 +46,20 @@ class SagaServerConfigTest {
   }
 
   @Test
+  void load_unsetHost_usesDefault() {
+    assertThat(SagaServerConfig.load(new Properties()).host())
+        .isEqualTo(SagaServerConfig.DEFAULT_HOST);
+  }
+
+  @Test
+  void load_hostGiven_isUsed() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
+
+    assertThat(SagaServerConfig.load(props).host()).isEqualTo("127.0.0.1");
+  }
+
+  @Test
   void load_unsetSyncTimeout_disabledByDefault() {
     assertThat(SagaServerConfig.load(new Properties()).syncTimeoutMillis())
         .isEqualTo(SagaServerConfig.DEFAULT_SYNC_TIMEOUT_MILLIS);

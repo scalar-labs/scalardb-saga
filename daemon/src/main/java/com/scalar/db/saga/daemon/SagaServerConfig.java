@@ -16,6 +16,9 @@ import org.jspecify.annotations.Nullable;
  * {@code scalar.db.saga.server.*} keys). Server-specific keys:
  *
  * <ul>
+ *   <li>{@code scalar.db.saga.server.host} — interface to bind (default {@code 0.0.0.0}, all
+ *       interfaces); set to {@code 127.0.0.1} or a specific interface to restrict reach, as the
+ *       endpoints are unauthenticated
  *   <li>{@code scalar.db.saga.server.port} — HTTP listen port (default {@code 8080}; {@code 0}
  *       binds an ephemeral port, useful in tests)
  *   <li>{@code scalar.db.saga.server.definitions_path} — path to a JSON/YAML saga definition file
@@ -35,6 +38,7 @@ import org.jspecify.annotations.Nullable;
  */
 public final class SagaServerConfig {
 
+  static final String HOST_KEY = "scalar.db.saga.server.host";
   static final String PORT_KEY = "scalar.db.saga.server.port";
   static final String DEFINITIONS_PATH_KEY = "scalar.db.saga.server.definitions_path";
   static final String SERVICE_KEY_PREFIX = "scalar.db.saga.server.service.";
@@ -42,10 +46,12 @@ public final class SagaServerConfig {
   static final String STORE_MAX_EVENT_PAYLOAD_BYTES_KEY =
       "scalar.db.saga.store.max_event_payload_bytes";
   static final String SYNC_TIMEOUT_MILLIS_KEY = "scalar.db.saga.server.sync_timeout_millis";
+  static final String DEFAULT_HOST = "0.0.0.0";
   static final int DEFAULT_PORT = 8080;
   static final int DEFAULT_MAX_EVENT_PAYLOAD_BYTES = 1_048_576; // 1 MiB
   static final long DEFAULT_SYNC_TIMEOUT_MILLIS = 0L; // 0 = disabled (sync blocks to terminal)
 
+  private final String host;
   private final int port;
   private final long syncTimeoutMillis;
   private final Properties properties;
@@ -53,11 +59,13 @@ public final class SagaServerConfig {
   private final Map<String, String> serviceBaseUrls;
 
   private SagaServerConfig(
+      String host,
       int port,
       long syncTimeoutMillis,
       Properties properties,
       @Nullable Path definitionsPath,
       Map<String, String> serviceBaseUrls) {
+    this.host = host;
     this.port = port;
     this.syncTimeoutMillis = syncTimeoutMillis;
     this.properties = applyStoreDefaults(copyOf(properties));
@@ -91,6 +99,7 @@ public final class SagaServerConfig {
    */
   public static SagaServerConfig load(Properties properties) {
     Objects.requireNonNull(properties, "properties must not be null");
+    String host = parseHost(properties.getProperty(HOST_KEY));
     int port = parsePort(properties.getProperty(PORT_KEY));
     long syncTimeoutMillis =
         parseSyncTimeoutMillis(properties.getProperty(SYNC_TIMEOUT_MILLIS_KEY));
@@ -98,7 +107,12 @@ public final class SagaServerConfig {
     Path definitionsPath =
         (definitions == null || definitions.isBlank()) ? null : Path.of(definitions.trim());
     return new SagaServerConfig(
-        port, syncTimeoutMillis, properties, definitionsPath, parseServiceBaseUrls(properties));
+        host,
+        port,
+        syncTimeoutMillis,
+        properties,
+        definitionsPath,
+        parseServiceBaseUrls(properties));
   }
 
   /**
@@ -125,6 +139,16 @@ public final class SagaServerConfig {
       serviceBaseUrls.put(name, baseUrl);
     }
     return serviceBaseUrls;
+  }
+
+  /**
+   * Returns the host/interface the HTTP server binds to (default {@value #DEFAULT_HOST} — all
+   * interfaces, the norm for a container behind network controls). The endpoints are
+   * unauthenticated, so set this to a specific interface (e.g. {@code 127.0.0.1}) when the daemon
+   * is not on a trusted/isolated network.
+   */
+  public String host() {
+    return host;
   }
 
   /** Returns the configured HTTP port ({@code 0} binds an ephemeral port). */
@@ -163,6 +187,10 @@ public final class SagaServerConfig {
    */
   public Map<String, String> serviceBaseUrls() {
     return serviceBaseUrls;
+  }
+
+  private static String parseHost(@Nullable String value) {
+    return (value == null || value.isBlank()) ? DEFAULT_HOST : value.trim();
   }
 
   private static int parsePort(@Nullable String value) {
