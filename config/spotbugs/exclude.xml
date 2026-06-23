@@ -24,6 +24,12 @@
     <Class name="~.*Test(\$.*)?"/>
     <Bug pattern="EI_EXPOSE_REP2"/>
   </Match>
+  <!-- Raw localhost ServerSocket in a test fixture injects a malformed Content-Length on the wire
+       (the high-level HttpServer computes Content-Length itself); plaintext is fine for a test. -->
+  <Match>
+    <Class name="~.*Test(\$.*)?"/>
+    <Bug pattern="UNENCRYPTED_SERVER_SOCKET"/>
+  </Match>
   <!-- ThreadLocalRandom in RetryPolicy.sleepWithBackoff is for retry jitter, not security -->
   <Match>
     <Class name="com.scalar.db.saga.api.RetryPolicy"/>

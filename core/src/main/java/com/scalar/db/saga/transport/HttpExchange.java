@@ -3,19 +3,28 @@ package com.scalar.db.saga.transport;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
-import java.io.InputStream;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpResponse.BodyHandler;
+import java.net.http.HttpResponse.BodySubscriber;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.TreeMap;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Flow;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -88,10 +97,12 @@ final class HttpExchange {
    * <p>When {@code body} is non-null it is sent with the given {@code contentType}; when null no
    * body is sent.
    *
-   * <p>{@code requestTimeout} bounds this single call (the JDK {@link HttpRequest} timeout). It is
-   * passed per call rather than stored, so the shared, immutable exchange instance can serve calls
-   * with different remaining step deadlines without any per-call mutable state. When {@code null},
-   * the exchange's default per-request timeout is used.
+   * <p>{@code requestTimeout} bounds this single call — both the wait for headers (the JDK {@link
+   * HttpRequest} timeout) and the response-body read (a hard deadline on the async send's future,
+   * since the JDK timeout alone covers only the headers). It is passed per call rather than stored,
+   * so the shared, immutable exchange instance can serve calls with different remaining step
+   * deadlines without any per-call mutable state. When {@code null}, the exchange's default
+   * per-request timeout is used.
    *
    * @return the response on a 2xx status
    * @throws HttpCallException on a non-2xx response (carrying the {@link
@@ -157,35 +168,39 @@ final class HttpExchange {
 
     HttpRequest httpRequest = requestBuilder.build();
 
-    HttpResponse<InputStream> response;
+    long maxBodyBytes = policy.maxBodyBytes();
+    // The JDK request timeout (set above) only bounds time-to-headers — it is disarmed once the
+    // response status arrives, so it does NOT cover the body. To bound the whole exchange (a
+    // mid-body stall included), read the body via sendAsync and impose effectiveTimeout as a hard
+    // deadline on the future, cancelling the in-flight request if it elapses. The limitedBytes
+    // subscriber still caps the buffered body at maxBodyBytes.
+    CompletableFuture<HttpResponse<byte[]>> future =
+        client.sendAsync(httpRequest, limitedBytes(maxBodyBytes));
+    HttpResponse<byte[]> response;
     try {
-      response = client.send(httpRequest, HttpResponse.BodyHandlers.ofInputStream());
-    } catch (IOException e) {
-      throw new HttpCallException("HTTP call failed: " + uri, e, true);
+      response = future.get(effectiveTimeout.toMillis(), TimeUnit.MILLISECONDS);
+    } catch (TimeoutException e) {
+      future.cancel(true);
+      throw new HttpCallException("HTTP call timed out: " + uri, e, true);
+    } catch (ExecutionException e) {
+      Throwable cause = e.getCause();
+      if (cause != null && hasCause(cause, BodyTooLargeException.class)) {
+        throw new HttpCallException("Response body exceeds limit (> " + maxBodyBytes + ")", false);
+      }
+      if (cause != null && hasCause(cause, NumberFormatException.class)) {
+        // A malformed Content-Length (e.g. "abc") makes the JDK reject the response while framing
+        // the body — firstValueAsLong throws NumberFormatException in the body handler. This is a
+        // deterministic server protocol violation that no retry will fix, so classify it as
+        // non-retryable rather than hammering a broken server up to the policy's max attempts.
+        throw new HttpCallException("Malformed Content-Length from " + uri, cause, false);
+      }
+      throw new HttpCallException("HTTP call failed: " + uri, cause != null ? cause : e, true);
     } catch (InterruptedException e) {
+      future.cancel(true);
       Thread.currentThread().interrupt();
       throw new HttpCallException("HTTP call interrupted: " + uri, e, true);
     }
-
-    long maxBodyBytes = policy.maxBodyBytes();
-    // Read at most maxBodyBytes + 1 bytes: enough to detect an oversized (or chunked/undeclared)
-    // body and reject it WITHOUT ever buffering the whole stream. Closing the stream early
-    // (try-with-resources) cancels the remaining download.
-    int readCap = (int) Math.min(maxBodyBytes + 1, Integer.MAX_VALUE);
-    byte[] responseBody;
-    try (InputStream bodyStream = response.body()) {
-      // Fail fast when an honest server declares an oversized body up front.
-      if (response.headers().firstValueAsLong(HttpHeaders.CONTENT_LENGTH).orElse(-1L)
-          > maxBodyBytes) {
-        throw new HttpCallException("Response body exceeds limit (> " + maxBodyBytes + ")", false);
-      }
-      responseBody = bodyStream.readNBytes(readCap);
-    } catch (IOException e) {
-      throw new HttpCallException("Failed to read response body: " + uri, e, true);
-    }
-    if (responseBody.length > maxBodyBytes) {
-      throw new HttpCallException("Response body exceeds limit (> " + maxBodyBytes + ")", false);
-    }
+    byte[] responseBody = response.body();
 
     int status = response.statusCode();
     HttpCallResponse callResponse =
@@ -209,6 +224,130 @@ final class HttpExchange {
       }
     }
     return HttpStatusClassifier.isRetryable(response.statusCode());
+  }
+
+  /**
+   * A {@link BodyHandler} that buffers the response into a {@code byte[]} but cancels the download
+   * once more than {@code maxBodyBytes} have arrived, failing with {@link BodyTooLargeException}.
+   * Unlike {@code BodyHandlers.ofByteArray()} (unbounded), it preserves the memory cap.
+   */
+  private static BodyHandler<byte[]> limitedBytes(long maxBodyBytes) {
+    // A byte[] response can hold at most Integer.MAX_VALUE bytes, so clamp the cap there; this
+    // keeps
+    // the onComplete length sum within int range even if a caller configures a larger maxBodyBytes.
+    long cap = Math.min(maxBodyBytes, Integer.MAX_VALUE);
+    return responseInfo -> {
+      // Fail fast when an honest server declares an oversized body up front.
+      boolean declaredTooLarge =
+          responseInfo.headers().firstValueAsLong(HttpHeaders.CONTENT_LENGTH).orElse(-1L) > cap;
+      return new LimitedBodySubscriber(cap, declaredTooLarge);
+    };
+  }
+
+  /**
+   * Accumulates the response body, rejecting it once it exceeds {@code maxBodyBytes}. Each chunk is
+   * copied into a right-sized array and concatenated at {@link #onComplete}; on exceeding the limit
+   * the subscription is cancelled and the body stage fails with {@link BodyTooLargeException}.
+   */
+  private static final class LimitedBodySubscriber implements BodySubscriber<byte[]> {
+
+    // These fields need no synchronization: Flow guarantees the subscriber's signals
+    // (onSubscribe/onNext*/onComplete|onError) are delivered serially with a happens-before between
+    // consecutive signals, so writes in one signal are visible to the next even across carrier
+    // threads. Do not add volatile/locks or reuse a subscriber instance across subscriptions.
+    private final long maxBodyBytes;
+    private final boolean declaredTooLarge;
+    private final CompletableFuture<byte[]> body = new CompletableFuture<>();
+    private final List<byte[]> buffers = new ArrayList<>();
+    private Flow.@Nullable Subscription subscription;
+    private long received;
+
+    LimitedBodySubscriber(long maxBodyBytes, boolean declaredTooLarge) {
+      this.maxBodyBytes = maxBodyBytes;
+      this.declaredTooLarge = declaredTooLarge;
+    }
+
+    @Override
+    public CompletionStage<byte[]> getBody() {
+      return body;
+    }
+
+    @Override
+    public void onSubscribe(Flow.Subscription subscription) {
+      this.subscription = subscription;
+      if (declaredTooLarge) {
+        subscription.cancel();
+        body.completeExceptionally(new BodyTooLargeException());
+        return;
+      }
+      subscription.request(Long.MAX_VALUE);
+    }
+
+    @Override
+    public void onNext(List<ByteBuffer> items) {
+      for (ByteBuffer buffer : items) {
+        int remaining = buffer.remaining();
+        received += remaining;
+        if (received > maxBodyBytes) {
+          Flow.Subscription current = subscription;
+          if (current != null) {
+            current.cancel();
+          }
+          buffers.clear();
+          body.completeExceptionally(new BodyTooLargeException());
+          return;
+        }
+        // Copy each chunk into a right-sized array rather than retaining the delivered ByteBuffers:
+        // the JDK may hand us a buffer whose backing array is larger than the bytes read (e.g. a
+        // 16KB read buffer holding a few bytes of a trickled response), and retaining those would
+        // pin far more than maxBodyBytes. Copying keeps the retained heap bounded by maxBodyBytes —
+        // the cap's purpose. (Deliberate divergence from the JDK's ofByteArray, which retains the
+        // buffers because it is uncapped.)
+        if (remaining > 0) {
+          byte[] bytes = new byte[remaining];
+          buffer.get(bytes);
+          buffers.add(bytes);
+        }
+      }
+    }
+
+    @Override
+    public void onError(Throwable throwable) {
+      buffers.clear();
+      body.completeExceptionally(throwable);
+    }
+
+    @Override
+    public void onComplete() {
+      int total = 0;
+      for (byte[] buffer : buffers) {
+        total += buffer.length;
+      }
+      byte[] result = new byte[total];
+      int offset = 0;
+      for (byte[] buffer : buffers) {
+        System.arraycopy(buffer, 0, result, offset, buffer.length);
+        offset += buffer.length;
+      }
+      buffers.clear();
+      body.complete(result);
+    }
+  }
+
+  /** Internal marker raised by {@link LimitedBodySubscriber} when the body exceeds the limit. */
+  private static final class BodyTooLargeException extends IOException {}
+
+  /** Returns whether {@code type} appears anywhere in {@code throwable}'s cause chain. */
+  private static boolean hasCause(Throwable throwable, Class<? extends Throwable> type) {
+    for (Throwable cause = throwable; cause != null; cause = cause.getCause()) {
+      if (type.isInstance(cause)) {
+        return true;
+      }
+      if (cause.getCause() == cause) {
+        break;
+      }
+    }
+    return false;
   }
 
   private static URI buildUri(

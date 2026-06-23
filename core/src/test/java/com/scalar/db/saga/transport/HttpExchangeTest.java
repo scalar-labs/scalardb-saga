@@ -2,16 +2,27 @@ package com.scalar.db.saga.transport;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.mock;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -210,6 +221,37 @@ class HttpExchangeTest {
   }
 
   @Test
+  void exchange_interruptedDuringBodyRead_throwsRetryableAndRestoresInterrupt() {
+    // Arrange — a client whose async send never completes.
+    HttpClient client = mock(HttpClient.class);
+    doReturn(new CompletableFuture<>()).when(client).sendAsync(any(), any());
+    com.scalar.db.saga.transport.HttpExchange exchange =
+        new com.scalar.db.saga.transport.HttpExchange(client, OutboundHttpPolicy.allowAll());
+
+    // Act — interrupt the caller so the (never-completing) future.get is interrupted.
+    Thread.currentThread().interrupt();
+    Throwable thrown;
+    boolean interruptedAfter;
+    try {
+      thrown =
+          catchThrowable(
+              () ->
+                  exchange.exchange(
+                      "GET", baseUrl, "/ok", NO_PARAMS, NO_PARAMS, null, null, "saga-1", "s",
+                      null));
+      interruptedAfter = Thread.currentThread().isInterrupted();
+    } finally {
+      Thread.interrupted(); // clear the flag so it can't leak to other tests
+    }
+
+    // Assert — retryable transport failure, InterruptedException cause, interrupt flag restored.
+    assertThat(thrown).isInstanceOf(HttpCallException.class);
+    assertThat(((HttpCallException) thrown).isRetryable()).isTrue();
+    assertThat(thrown.getCause()).isInstanceOf(InterruptedException.class);
+    assertThat(interruptedAfter).isTrue();
+  }
+
+  @Test
   void exchange_transportFailure_throwsRetryableWithoutResponse() throws IOException {
     // Bind then immediately release a port so nothing is listening on it.
     HttpServer probe = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
@@ -261,6 +303,243 @@ class HttpExchangeTest {
             "GET", baseUrl + "/", "ok", NO_PARAMS, NO_PARAMS, null, null, "saga-1", "s", null);
 
     assertThat(response.bodyJsonObject()).containsEntry("k", "v");
+  }
+
+  @Test
+  void exchange_serverStallsMidResponseBody_throwsRetryableWithinTimeout() throws Exception {
+    // Arrange — a server that sends the headers (declaring a 100-byte body) and a few body bytes,
+    // then stalls without sending the rest. The request timeout must cover the body and fire.
+    CountDownLatch release = new CountDownLatch(1);
+    server.createContext(
+        "/stall",
+        ex -> {
+          ex.sendResponseHeaders(200, 100); // promise 100 bytes...
+          try (OutputStream os = ex.getResponseBody()) {
+            os.write("{\"k\":".getBytes(StandardCharsets.UTF_8)); // ...send only a few, then stall
+            os.flush();
+            if (!release.await(5, TimeUnit.SECONDS)) {
+              // The test always releases the latch once it has observed the timeout; tripping this
+              // means it did not, so stop holding the body open rather than blocking indefinitely.
+              Thread.currentThread().interrupt();
+            }
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+        });
+
+    // Act — a short per-call timeout; the body never completes.
+    Throwable t =
+        catchThrowable(
+            () ->
+                exchange.exchange(
+                    "GET",
+                    baseUrl,
+                    "/stall",
+                    NO_PARAMS,
+                    NO_PARAMS,
+                    null,
+                    null,
+                    "saga-1",
+                    "s",
+                    Duration.ofMillis(500)));
+    release.countDown(); // let the server thread unwind
+
+    // Assert — a mid-body stall surfaces as a retryable transport failure, not a hang. The cause
+    // must be the deadline TimeoutException: this proves the per-call deadline bounded the body
+    // phase, distinguishing it from the server-side 5s fallback closing the stream (a different
+    // IOException that would also be retryable, masking a regression).
+    assertThat(t).isInstanceOf(HttpCallException.class);
+    assertThat(((HttpCallException) t).isRetryable()).isTrue();
+    assertThat(t.getCause()).isInstanceOf(TimeoutException.class);
+  }
+
+  @Test
+  void exchange_responseBodyExceedsLimitWithContentLength_throwsNonRetryable() throws Exception {
+    // Arrange — an honest server declares a body larger than the policy limit (fast-fail path).
+    server.createContext("/big", ex -> respond(ex, 200, "x".repeat(50)));
+    com.scalar.db.saga.transport.HttpExchange limited =
+        new com.scalar.db.saga.transport.HttpExchange(
+            HttpClient.newHttpClient(), OutboundHttpPolicy.newBuilder().maxBodyBytes(10).build());
+
+    // Act
+    Throwable t =
+        catchThrowable(
+            () ->
+                limited.exchange(
+                    "GET", baseUrl, "/big", NO_PARAMS, NO_PARAMS, null, null, "saga-1", "s", null));
+
+    // Assert
+    assertThat(t).isInstanceOf(HttpCallException.class);
+    assertThat(((HttpCallException) t).isRetryable()).isFalse();
+  }
+
+  @Test
+  void exchange_responseBodyExceedsLimitChunked_throwsNonRetryable() throws Exception {
+    // Arrange — a chunked response (no Content-Length) that overruns the limit; the cap must be
+    // enforced by counting bytes as they arrive, not just from the declared length.
+    server.createContext(
+        "/chunked",
+        ex -> {
+          ex.sendResponseHeaders(200, 0); // 0 => chunked, undeclared length
+          try (OutputStream os = ex.getResponseBody()) {
+            os.write("x".repeat(50).getBytes(StandardCharsets.UTF_8));
+          }
+        });
+    com.scalar.db.saga.transport.HttpExchange limited =
+        new com.scalar.db.saga.transport.HttpExchange(
+            HttpClient.newHttpClient(), OutboundHttpPolicy.newBuilder().maxBodyBytes(10).build());
+
+    // Act
+    Throwable t =
+        catchThrowable(
+            () ->
+                limited.exchange(
+                    "GET",
+                    baseUrl,
+                    "/chunked",
+                    NO_PARAMS,
+                    NO_PARAMS,
+                    null,
+                    null,
+                    "saga-1",
+                    "s",
+                    null));
+
+    // Assert
+    assertThat(t).isInstanceOf(HttpCallException.class);
+    assertThat(((HttpCallException) t).isRetryable()).isFalse();
+  }
+
+  @Test
+  void exchange_responseBodyExactlyAtLimit_succeeds() throws Exception {
+    // Arrange — a body of exactly maxBodyBytes must be accepted: the cap is a strict '>', so
+    // '== limit' is allowed. The body below is exactly 16 bytes.
+    server.createContext("/exact", ex -> respond(ex, 200, "{\"k\":\"01234567\"}"));
+    com.scalar.db.saga.transport.HttpExchange limited =
+        new com.scalar.db.saga.transport.HttpExchange(
+            HttpClient.newHttpClient(), OutboundHttpPolicy.newBuilder().maxBodyBytes(16).build());
+
+    // Act
+    HttpCallResponse response =
+        limited.exchange(
+            "GET", baseUrl, "/exact", NO_PARAMS, NO_PARAMS, null, null, "saga-1", "s", null);
+
+    // Assert — accepted and returned intact, not rejected as oversized.
+    assertThat(response.status()).isEqualTo(200);
+    assertThat(response.bodyJsonObject()).containsEntry("k", "01234567");
+  }
+
+  @Test
+  void exchange_responseBodyOneByteOverLimitChunked_throwsNonRetryable() throws Exception {
+    // Arrange — one byte past the limit, sent chunked so the overrun is caught by byte counting
+    // (not the Content-Length fast-fail). Pins the '>' boundary at exactly maxBodyBytes + 1.
+    server.createContext(
+        "/over-by-one",
+        ex -> {
+          ex.sendResponseHeaders(200, 0); // 0 => chunked, undeclared length
+          try (OutputStream os = ex.getResponseBody()) {
+            os.write("x".repeat(17).getBytes(StandardCharsets.UTF_8));
+          }
+        });
+    com.scalar.db.saga.transport.HttpExchange limited =
+        new com.scalar.db.saga.transport.HttpExchange(
+            HttpClient.newHttpClient(), OutboundHttpPolicy.newBuilder().maxBodyBytes(16).build());
+
+    // Act
+    Throwable t =
+        catchThrowable(
+            () ->
+                limited.exchange(
+                    "GET",
+                    baseUrl,
+                    "/over-by-one",
+                    NO_PARAMS,
+                    NO_PARAMS,
+                    null,
+                    null,
+                    "saga-1",
+                    "s",
+                    null));
+
+    // Assert
+    assertThat(t).isInstanceOf(HttpCallException.class);
+    assertThat(((HttpCallException) t).isRetryable()).isFalse();
+  }
+
+  @Test
+  void exchange_largeMultiChunkResponseBody_returnsBytesIntact() throws Exception {
+    // Arrange — a body far larger than one socket read (256 KB), with a position-varying pattern so
+    // any corruption is detectable. This spans many socket reads / onNext deliveries, so it would
+    // fail if the subscriber's retained ByteBuffers were reused/overwritten before onComplete.
+    byte[] expected = new byte[256 * 1024];
+    for (int i = 0; i < expected.length; i++) {
+      expected[i] = (byte) (i % 256);
+    }
+    server.createContext(
+        "/large",
+        ex -> {
+          ex.sendResponseHeaders(200, expected.length);
+          try (OutputStream os = ex.getResponseBody()) {
+            os.write(expected);
+          }
+        });
+
+    // Act — the default 1 MB cap comfortably admits 256 KB.
+    HttpCallResponse response =
+        exchange.exchange(
+            "GET", baseUrl, "/large", NO_PARAMS, NO_PARAMS, null, null, "saga-1", "s", null);
+
+    // Assert — every byte survives the retain-then-concatenate-at-onComplete path.
+    assertThat(response.status()).isEqualTo(200);
+    assertThat(response.bodyBytes()).isEqualTo(expected);
+  }
+
+  @Test
+  void exchange_malformedContentLengthHeader_throwsNonRetryable() throws Exception {
+    // Arrange — a server returning a non-numeric Content-Length ("abc"). The high-level HttpServer
+    // computes Content-Length itself, so a raw socket is needed to put a malformed value on the
+    // wire. The JDK client rejects such a response while framing the body (firstValueAsLong throws
+    // NumberFormatException in the body handler); this is a deterministic protocol violation that
+    // no retry will fix, so the exchange must surface it as non-retryable rather than retryable.
+    String rawResponse =
+        String.join(
+            "\r\n",
+            "HTTP/1.1 200 OK",
+            "Content-Type: application/json",
+            "Content-Length: abc",
+            "Connection: close",
+            "",
+            "{\"k\":\"v\"}");
+    try (ServerSocket rawServer = new ServerSocket(0, 0, InetAddress.getByName("localhost"))) {
+      Thread serverThread =
+          new Thread(
+              () -> {
+                try (Socket socket = rawServer.accept()) {
+                  if (socket.getInputStream().read(new byte[8192]) < 0) {
+                    return; // client closed before sending the request
+                  }
+                  OutputStream os = socket.getOutputStream();
+                  os.write(rawResponse.getBytes(StandardCharsets.UTF_8));
+                  os.flush();
+                } catch (IOException ignored) {
+                  // client closed / test teardown
+                }
+              });
+      serverThread.setDaemon(true);
+      serverThread.start();
+      String rawUrl = "http://localhost:" + rawServer.getLocalPort();
+
+      // Act
+      Throwable t =
+          catchThrowable(
+              () ->
+                  exchange.exchange(
+                      "GET", rawUrl, "/x", NO_PARAMS, NO_PARAMS, null, null, "saga-1", "s", null));
+
+      // Assert — a malformed Content-Length is a non-retryable protocol violation.
+      assertThat(t).isInstanceOf(HttpCallException.class);
+      assertThat(((HttpCallException) t).isRetryable()).isFalse();
+    }
   }
 
   private static void respond(HttpExchange ex, int status, String body) throws IOException {
