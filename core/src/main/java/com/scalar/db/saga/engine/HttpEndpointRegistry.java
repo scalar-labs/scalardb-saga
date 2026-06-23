@@ -1,8 +1,12 @@
 package com.scalar.db.saga.engine;
 
+import com.scalar.db.saga.api.CallSpec;
+import com.scalar.db.saga.api.SagaDefinition.ServiceStep.Phase;
 import com.scalar.db.saga.api.SagaHttpClient;
 import com.scalar.db.saga.api.SagaHttpClientProvider;
+import com.scalar.db.saga.api.Step;
 import com.scalar.db.saga.api.StepResolver.ResolutionContext;
+import com.scalar.db.saga.api.TccStep;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.transport.HttpEndpoint;
 import com.scalar.db.saga.transport.HttpServiceConfig;
@@ -14,12 +18,14 @@ import org.slf4j.LoggerFactory;
 /**
  * Lookup of {@link HttpEndpoint}s by the name they were registered under via {@code
  * httpEndpoint(name, baseUrl)}. Each endpoint owns ONE {@code HttpExchange} + policy + {@code
- * HttpClient}, and produces the per-endpoint {@link SagaHttpClient}.
+ * HttpClient}, and produces the per-endpoint {@link SagaHttpClient} (and, from Phase 2, the
+ * declarative transport adapter rides the same engine).
  *
  * <p>It exposes a narrow {@link SagaHttpClientProvider} view (the {@code ResolutionContext} handed
- * to a custom {@code StepResolver}) for code steps. A fail-fast {@link #httpClient(String)} names a
- * missing endpoint. {@link AutoCloseable}: framework-created clients are closed here;
- * caller-supplied ones are left open.
+ * to a custom {@code StepResolver}) for code steps, and {@link #toStep}/{@link #toTccStep} for the
+ * declarative steps — both kinds against the same endpoint share its one {@code HttpExchange}. A
+ * fail-fast {@link #httpClient(String)}/{@link #endpoint(String)} names a missing endpoint. {@link
+ * AutoCloseable}: framework-created clients are closed here; caller-supplied ones are left open.
  */
 final class HttpEndpointRegistry implements ResolutionContext, AutoCloseable {
 
@@ -38,6 +44,39 @@ final class HttpEndpointRegistry implements ResolutionContext, AutoCloseable {
       endpoints.put(entry.getKey(), HttpEndpoint.create(entry.getValue()));
     }
     return new HttpEndpointRegistry(endpoints);
+  }
+
+  /** Whether an endpoint is registered under {@code name}. */
+  boolean contains(String name) {
+    return endpoints.containsKey(name);
+  }
+
+  /**
+   * Wraps a declaratively-defined service step's phases as a {@link Step} (SAGA) named {@code
+   * stepName}, riding the endpoint {@code service}'s shared {@code HttpExchange}.
+   *
+   * @throws SagaDefinitionException if no endpoint was registered under {@code service}
+   */
+  Step toStep(String stepName, String service, Map<Phase, CallSpec> phases) {
+    return endpoint(service).toStep(stepName, phases);
+  }
+
+  /**
+   * Wraps a declaratively-defined service step's phases as a {@link TccStep} (TCC) named {@code
+   * stepName}, riding the endpoint {@code service}'s shared {@code HttpExchange}.
+   *
+   * @throws SagaDefinitionException if no endpoint was registered under {@code service}
+   */
+  TccStep toTccStep(String stepName, String service, Map<Phase, CallSpec> phases) {
+    return endpoint(service).toTccStep(stepName, phases);
+  }
+
+  private HttpEndpoint endpoint(String service) {
+    HttpEndpoint endpoint = endpoints.get(service);
+    if (endpoint == null) {
+      throw new SagaDefinitionException("No HTTP endpoint registered under name '" + service + "'");
+    }
+    return endpoint;
   }
 
   /**

@@ -165,10 +165,77 @@ public final class SagaDefinitionParser {
 
   private static SagaDefinition.AbstractStepBuilder<?> newStepBuilder(
       SagaDefinition.Builder builder, JsonNode stepNode, String stepName) {
-    if (!isPresent(stepNode, "stepClass")) {
-      throw new SagaDefinitionException("Step '" + stepName + "' must define 'stepClass'");
+    boolean hasStepClass = isPresent(stepNode, "stepClass");
+    boolean hasService = isPresent(stepNode, "service");
+    boolean hasSagaPhase = isPresent(stepNode, "execution") || isPresent(stepNode, "compensation");
+    boolean hasTccPhase =
+        isPresent(stepNode, "reservation")
+            || isPresent(stepNode, "confirmation")
+            || isPresent(stepNode, "cancellation");
+
+    if (hasStepClass) {
+      if (hasService || hasSagaPhase || hasTccPhase) {
+        throw new SagaDefinitionException(
+            "Step '" + stepName + "' must not mix 'stepClass' with 'service'/declarative phases");
+      }
+      return builder.step(stepName, stepNode.get("stepClass").asText());
     }
-    return builder.step(stepName, stepNode.get("stepClass").asText());
+
+    // Declarative service step: requires a 'service'.
+    if (!hasService) {
+      throw new SagaDefinitionException(
+          "Step '"
+              + stepName
+              + "' must define either 'stepClass' or a declarative service step ('service' +"
+              + " phases)");
+    }
+    String service = stepNode.get("service").asText();
+
+    if (!hasSagaPhase && !hasTccPhase) {
+      throw new SagaDefinitionException(
+          "Declarative service step '"
+              + stepName
+              + "' must define phases (execution/compensation or"
+              + " reservation/confirmation/cancellation)");
+    }
+    if (hasSagaPhase && hasTccPhase) {
+      throw new SagaDefinitionException(
+          "Service step '"
+              + stepName
+              + "' must not mix SAGA phases (execution/compensation) with TCC phases"
+              + " (reservation/confirmation/cancellation)");
+    }
+    CallSpec.Transport transport = CallSpecCodec.parseTransport(stepNode, stepName);
+    if (hasSagaPhase) {
+      if (!isPresent(stepNode, "execution") || !isPresent(stepNode, "compensation")) {
+        throw new SagaDefinitionException(
+            "SAGA declarative service step '"
+                + stepName
+                + "' must define both 'execution' and 'compensation'");
+      }
+      return builder
+          .serviceStep(stepName, service)
+          .operation()
+          .execution(CallSpecCodec.parseCallSpec(transport, stepNode.get("execution"), stepName))
+          .compensation(
+              CallSpecCodec.parseCallSpec(transport, stepNode.get("compensation"), stepName));
+    }
+    if (!isPresent(stepNode, "reservation")
+        || !isPresent(stepNode, "confirmation")
+        || !isPresent(stepNode, "cancellation")) {
+      throw new SagaDefinitionException(
+          "TCC declarative service step '"
+              + stepName
+              + "' must define 'reservation', 'confirmation', and 'cancellation'");
+    }
+    return builder
+        .serviceStep(stepName, service)
+        .tccOperation()
+        .reservation(CallSpecCodec.parseCallSpec(transport, stepNode.get("reservation"), stepName))
+        .confirmation(
+            CallSpecCodec.parseCallSpec(transport, stepNode.get("confirmation"), stepName))
+        .cancellation(
+            CallSpecCodec.parseCallSpec(transport, stepNode.get("cancellation"), stepName));
   }
 
   private static boolean isPresent(JsonNode node, String field) {

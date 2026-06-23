@@ -1,9 +1,10 @@
 package com.scalar.db.saga.api;
 
 /**
- * An HTTP verb for a {@link SagaHttpClient} request. {@link #GET} and {@link #DELETE} carry no
+ * The HTTP verb a declarative {@link HttpCall} uses. {@link #GET} and {@link #DELETE} carry no
  * request body (parameters go in the path/query); {@link #POST}, {@link #PUT}, and {@link #PATCH}
- * carry a request body.
+ * carry a request body — either a JSON object or a raw string with an explicit content type (see
+ * {@link HttpCall}).
  */
 public enum HttpMethod {
   GET,

@@ -158,6 +158,40 @@ class SagaDefinitionTest {
       assertThatThrownBy(() -> definition.getSteps().add(null))
           .isInstanceOf(UnsupportedOperationException.class);
     }
+
+    @Test
+    void serviceStep_serviceAndPhasesGiven_createsServiceStep() {
+      // Act
+      SagaDefinition definition =
+          SagaDefinition.newBuilder("test", SagaMode.SAGA)
+              .serviceStep("debit", "account-service")
+              .operation()
+              .execution(HttpCall.newBuilder("/debit").build())
+              .compensation(HttpCall.newBuilder("/reverse").build())
+              .timeoutMillis(5000)
+              .add()
+              .build();
+
+      // Assert
+      SagaDefinition.StepDefinition step = definition.getSteps().get(0);
+      assertThat(step).isInstanceOf(SagaDefinition.ServiceStep.class);
+      SagaDefinition.ServiceStep serviceStep = (SagaDefinition.ServiceStep) step;
+      assertThat(serviceStep.getName()).isEqualTo("debit");
+      assertThat(serviceStep.getService()).isEqualTo("account-service");
+      assertThat(serviceStep.getPhases().keySet())
+          .containsExactlyInAnyOrder(
+              SagaDefinition.ServiceStep.Phase.EXECUTION,
+              SagaDefinition.ServiceStep.Phase.COMPENSATION);
+      assertThat(serviceStep.getTimeoutMillis()).isEqualTo(5000);
+    }
+
+    @Test
+    void serviceStep_blankService_throwsIllegalArgumentException() {
+      // Act & Assert
+      assertThatThrownBy(
+              () -> SagaDefinition.newBuilder("test", SagaMode.SAGA).serviceStep("debit", "  "))
+          .isInstanceOf(IllegalArgumentException.class);
+    }
   }
 
   @Nested
@@ -429,6 +463,24 @@ class SagaDefinitionTest {
                       .add()
                       .build())
           .isInstanceOf(SagaDefinitionException.class);
+    }
+
+    @Test
+    void validate_tccWithServiceStep_succeeds() {
+      // A declarative service step may participate in a TCC saga — its phases are validated against
+      // the saga's mode at build, and the endpoint is validated at registration, not here.
+      SagaDefinition definition =
+          SagaDefinition.newBuilder("test", SagaMode.TCC)
+              .serviceStep("s1", "account-service")
+              .tccOperation()
+              .reservation(HttpCall.newBuilder("/reserve").build())
+              .confirmation(HttpCall.newBuilder("/confirm").build())
+              .cancellation(HttpCall.newBuilder("/cancel").build())
+              .add()
+              .build();
+
+      assertThat(definition.getMode()).isEqualTo(SagaMode.TCC);
+      assertThat(definition.getSteps()).hasSize(1);
     }
 
     @Test

@@ -107,6 +107,69 @@ class SagaDefinitionParserTest {
     }
 
     @Test
+    void parseJson_serviceStepGiven_createsServiceStep() {
+      // Arrange
+      String json =
+          """
+          {
+            "name": "svcSaga",
+            "steps": [
+              {
+                "name": "debit",
+                "service": "account-service",
+                "execution": { "path": "/debit" },
+                "compensation": { "path": "/reverse" }
+              }
+            ]
+          }
+          """;
+
+      // Act
+      SagaDefinition def = SagaDefinitionParser.parseJson(json);
+
+      // Assert
+      SagaDefinition.ServiceStep step = (SagaDefinition.ServiceStep) def.getSteps().get(0);
+      assertThat(step.getService()).isEqualTo("account-service");
+      assertThat(step.getPhases().keySet())
+          .containsExactlyInAnyOrder(
+              SagaDefinition.ServiceStep.Phase.EXECUTION,
+              SagaDefinition.ServiceStep.Phase.COMPENSATION);
+    }
+
+    @Test
+    void parseJson_stringBodyWithContentTypeGiven_parsesCallSpec() {
+      // Arrange
+      String json =
+          """
+          {
+            "name": "svcSaga",
+            "steps": [
+              {
+                "name": "notify",
+                "service": "account-service",
+                "execution": {
+                  "path": "/notify",
+                  "stringBody": "user=${userName}",
+                  "contentType": "text/plain"
+                },
+                "compensation": { "path": "/noop" }
+              }
+            ]
+          }
+          """;
+
+      // Act
+      SagaDefinition def = SagaDefinitionParser.parseJson(json);
+
+      // Assert
+      SagaDefinition.ServiceStep step = (SagaDefinition.ServiceStep) def.getSteps().get(0);
+      HttpCall exec =
+          (HttpCall) step.getPhase(SagaDefinition.ServiceStep.Phase.EXECUTION).orElseThrow();
+      assertThat(exec.getStringBody()).isEqualTo("user=${userName}");
+      assertThat(exec.getContentType()).isEqualTo("text/plain");
+    }
+
+    @Test
     void parseJson_stepWithoutAnyKind_throwsSagaDefinitionException() {
       // Arrange
       String json =
@@ -123,6 +186,22 @@ class SagaDefinitionParserTest {
     }
 
     @Test
+    void parseJson_serviceWithoutPhases_throwsSagaDefinitionException() {
+      // Arrange — a service step with no phases is invalid
+      String json =
+          """
+          {
+            "name": "bad",
+            "steps": [ { "name": "s1", "service": "account-service" } ]
+          }
+          """;
+
+      // Act & Assert
+      assertThatThrownBy(() -> SagaDefinitionParser.parseJson(json))
+          .isInstanceOf(SagaDefinitionException.class);
+    }
+
+    @Test
     void parseJson_unknownStepField_throwsException() {
       // Arrange — an unrecognized field on a step is rejected
       String json =
@@ -130,6 +209,30 @@ class SagaDefinitionParserTest {
           {
             "name": "bad",
             "steps": [ { "name": "s1", "stepClass": "com.example.Step1", "bogus": "x" } ]
+          }
+          """;
+
+      // Act & Assert
+      assertThatThrownBy(() -> SagaDefinitionParser.parseJson(json))
+          .isInstanceOf(SagaDefinitionException.class);
+    }
+
+    @Test
+    void parseJson_stepClassAndService_throwsSagaDefinitionException() {
+      // Arrange — a step defining both a class and a service step is a conflict
+      String json =
+          """
+          {
+            "name": "bad",
+            "steps": [
+              {
+                "name": "s1",
+                "stepClass": "com.example.DebitStep",
+                "service": "account-service",
+                "execution": { "path": "/debit" },
+                "compensation": { "path": "/reverse" }
+              }
+            ]
           }
           """;
 
@@ -271,6 +374,34 @@ class SagaDefinitionParserTest {
       assertThat(step1.getName()).isEqualTo("credit");
       assertThat(((SagaDefinition.ClassStep) step1).getStepClass())
           .isEqualTo("com.example.CreditStep");
+    }
+
+    @Test
+    void parseYaml_stringBodyWithContentTypeGiven_parsesCallSpec() {
+      // Arrange
+      String yaml =
+          """
+          name: svcSaga
+          steps:
+            - name: notify
+              service: account-service
+              execution:
+                path: /notify
+                stringBody: "user=${userName}"
+                contentType: text/plain
+              compensation:
+                path: /noop
+          """;
+
+      // Act
+      SagaDefinition def = SagaDefinitionParser.parseYaml(yaml);
+
+      // Assert
+      SagaDefinition.ServiceStep step = (SagaDefinition.ServiceStep) def.getSteps().get(0);
+      HttpCall exec =
+          (HttpCall) step.getPhase(SagaDefinition.ServiceStep.Phase.EXECUTION).orElseThrow();
+      assertThat(exec.getStringBody()).isEqualTo("user=${userName}");
+      assertThat(exec.getContentType()).isEqualTo("text/plain");
     }
 
     @Test

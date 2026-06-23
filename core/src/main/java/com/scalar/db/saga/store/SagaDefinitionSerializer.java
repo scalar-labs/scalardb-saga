@@ -5,12 +5,17 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.scalar.db.saga.api.CallSpec.Transport;
+import com.scalar.db.saga.api.CallSpecCodec;
 import com.scalar.db.saga.api.RetryPolicy;
 import com.scalar.db.saga.api.SagaDefinition;
 import com.scalar.db.saga.api.SagaDefinition.ClassStep;
 import com.scalar.db.saga.api.SagaDefinition.RecoveryStrategy;
 import com.scalar.db.saga.api.SagaDefinition.SagaMode;
+import com.scalar.db.saga.api.SagaDefinition.ServiceStep;
+import com.scalar.db.saga.api.SagaDefinition.ServiceStep.Phase;
 import com.scalar.db.saga.exception.SagaPersistenceException;
+import java.util.Locale;
 
 /**
  * Serializes and deserializes {@link SagaDefinition} to/from JSON.
@@ -31,6 +36,13 @@ final class SagaDefinitionSerializer {
 
   // Step-level JSON keys
   private static final String STEP_CLASS = "stepClass";
+  private static final String SERVICE = "service";
+  private static final String TRANSPORT = "transport";
+  private static final String EXECUTION = "execution";
+  private static final String COMPENSATION = "compensation";
+  private static final String RESERVATION = "reservation";
+  private static final String CONFIRMATION = "confirmation";
+  private static final String CANCELLATION = "cancellation";
   private static final String PIVOT = "pivot";
   private static final String RETRY_POLICY = "retryPolicy";
 
@@ -68,6 +80,14 @@ final class SagaDefinitionSerializer {
       s.put(NAME, step.getName());
       switch (step) {
         case ClassStep cs -> s.put(STEP_CLASS, cs.getStepClass());
+        case ServiceStep ss -> {
+          s.put(SERVICE, ss.getService());
+          s.put(TRANSPORT, ss.getTransport().name());
+          ss.getPhases()
+              .forEach(
+                  (phase, spec) ->
+                      s.set(phaseKey(phase), CallSpecCodec.serializeCallSpec(objectMapper, spec)));
+        }
       }
       s.put(TIMEOUT_MILLIS, step.getTimeoutMillis());
       s.put(PIVOT, step.isPivot());
@@ -120,10 +140,75 @@ final class SagaDefinitionSerializer {
   private static SagaDefinition.AbstractStepBuilder<?> newStepBuilder(
       SagaDefinition.Builder builder, JsonNode stepNode) {
     String name = stepNode.get(NAME).asText();
-    if (!has(stepNode, STEP_CLASS)) {
-      throw new IllegalArgumentException("Step '" + name + "' must define 'stepClass'");
+    boolean hasStepClass = has(stepNode, STEP_CLASS);
+    boolean hasService = has(stepNode, SERVICE);
+    boolean hasSagaPhase = has(stepNode, EXECUTION) || has(stepNode, COMPENSATION);
+    boolean hasTccPhase =
+        has(stepNode, RESERVATION) || has(stepNode, CONFIRMATION) || has(stepNode, CANCELLATION);
+
+    if (hasStepClass) {
+      if (hasService || hasSagaPhase || hasTccPhase) {
+        throw new IllegalArgumentException(
+            "Step '"
+                + name
+                + "' mixes stepClass with service/phases; exactly one step kind is allowed");
+      }
+      return builder.step(name, stepNode.get(STEP_CLASS).asText());
     }
-    return builder.step(name, stepNode.get(STEP_CLASS).asText());
+
+    // Declarative service step: requires a service.
+    if (!hasService) {
+      throw new IllegalArgumentException(
+          "Step '"
+              + name
+              + "' must define either 'stepClass' or a declarative service step ('service' +"
+              + " phases)");
+    }
+    String service = stepNode.get(SERVICE).asText();
+
+    if (!hasSagaPhase && !hasTccPhase) {
+      throw new IllegalArgumentException(
+          "Declarative service step '" + name + "' must define phases");
+    }
+    if (hasSagaPhase && hasTccPhase) {
+      throw new IllegalArgumentException(
+          "Service step '"
+              + name
+              + "' must not mix SAGA phases (execution/compensation) with TCC phases"
+              + " (reservation/confirmation/cancellation)");
+    }
+    Transport transport = CallSpecCodec.parseTransport(stepNode, name);
+    if (hasSagaPhase) {
+      if (!has(stepNode, EXECUTION) || !has(stepNode, COMPENSATION)) {
+        throw new IllegalArgumentException(
+            "SAGA declarative service step '"
+                + name
+                + "' must define both 'execution' and 'compensation'");
+      }
+      return builder
+          .serviceStep(name, service)
+          .operation()
+          .execution(CallSpecCodec.parseCallSpec(transport, stepNode.get(EXECUTION), name))
+          .compensation(CallSpecCodec.parseCallSpec(transport, stepNode.get(COMPENSATION), name));
+    }
+    if (!has(stepNode, RESERVATION)
+        || !has(stepNode, CONFIRMATION)
+        || !has(stepNode, CANCELLATION)) {
+      throw new IllegalArgumentException(
+          "TCC declarative service step '"
+              + name
+              + "' must define 'reservation', 'confirmation', and 'cancellation'");
+    }
+    return builder
+        .serviceStep(name, service)
+        .tccOperation()
+        .reservation(CallSpecCodec.parseCallSpec(transport, stepNode.get(RESERVATION), name))
+        .confirmation(CallSpecCodec.parseCallSpec(transport, stepNode.get(CONFIRMATION), name))
+        .cancellation(CallSpecCodec.parseCallSpec(transport, stepNode.get(CANCELLATION), name));
+  }
+
+  private static String phaseKey(Phase phase) {
+    return phase.name().toLowerCase(Locale.ROOT);
   }
 
   private static boolean has(JsonNode node, String field) {

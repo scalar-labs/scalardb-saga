@@ -7,8 +7,8 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * Outbound HTTP safety policy: an optional SSRF host allowlist and a maximum body size. Enforced by
- * the shared {@code HttpExchange} behind the code-step {@code SagaHttpClient}.
+ * Outbound HTTP safety policy: an optional SSRF host allowlist and a maximum body size. Shared by
+ * the declarative {@code HttpTransportAdapter} and the code-step {@code SagaHttpClient}.
  *
  * <p>When the allowlist is empty, all hosts are permitted (service endpoints are already
  * pre-configured by name — the allowlist is defense in depth). Body limits are always enforced.

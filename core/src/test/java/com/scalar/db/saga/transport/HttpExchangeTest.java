@@ -18,7 +18,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Direct tests for the shared {@link com.scalar.db.saga.transport.HttpExchange} contract —
- * especially the failure paths. The code-step {@code SagaHttpClient} depends on this behavior.
+ * especially the failure paths. Both {@code HttpTransportAdapter} and the code-step {@code
+ * SagaHttpClient} depend on this behavior.
  */
 class HttpExchangeTest {
 
