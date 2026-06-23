@@ -45,6 +45,15 @@ final class SagaHttpResponseImpl implements SagaHttpResponse {
   }
 
   @Override
+  public List<Object> bodyJsonArray() throws StepExecutionException {
+    try {
+      return delegate.bodyJsonArray();
+    } catch (HttpCallException e) {
+      throw new StepExecutionException(e, e.isRetryable());
+    }
+  }
+
+  @Override
   public <T> T bodyJson(Class<T> type) throws StepExecutionException {
     try {
       return delegate.bodyJson(type);

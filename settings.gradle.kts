@@ -5,3 +5,4 @@ pluginManagement {
 rootProject.name = "scalardb-saga"
 
 include("core")
+include("daemon")

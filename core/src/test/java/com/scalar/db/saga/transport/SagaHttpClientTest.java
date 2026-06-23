@@ -43,6 +43,7 @@ class SagaHttpClientTest {
   void setUp() throws IOException {
     server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
     server.createContext("/ok", ex -> respond(ex, 200, "{\"k\":\"v\"}", Map.of()));
+    server.createContext("/array", ex -> respond(ex, 200, "[1,2,3]", Map.of()));
     server.createContext("/fail422", ex -> respond(ex, 422, "{\"error\":\"bad\"}", Map.of()));
     server.createContext("/fail503", ex -> respond(ex, 503, "{}", Map.of()));
     server.createContext(
@@ -135,6 +136,30 @@ class SagaHttpClientTest {
     // Assert
     assertThat(response.status()).isEqualTo(200);
     assertThat(response.bodyJsonObject()).containsEntry("k", "v");
+  }
+
+  @Test
+  void bodyJsonArray_arrayBodyGiven_returnsList() throws Exception {
+    // Arrange
+    SagaHttpClient client = client(OutboundHttpPolicy.allowAll());
+
+    // Act
+    SagaHttpResponse response = client.get("/array").send();
+
+    // Assert
+    assertThat(response.bodyJsonArray()).containsExactly(1, 2, 3);
+  }
+
+  @Test
+  void bodyJsonArray_nonArrayBody_throwsNonRetryable() throws Exception {
+    // Arrange — /ok returns a JSON object, not an array.
+    SagaHttpClient client = client(OutboundHttpPolicy.allowAll());
+    SagaHttpResponse response = client.get("/ok").send();
+
+    // Act & Assert
+    Throwable t = catchThrowable(response::bodyJsonArray);
+    assertThat(t).isInstanceOf(StepExecutionException.class);
+    assertThat(((StepExecutionException) t).isRetryable()).isFalse();
   }
 
   @Test
