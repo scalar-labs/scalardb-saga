@@ -43,6 +43,12 @@ public final class ErrorMapper {
     app.exception(
         InvalidRequestException.class,
         (e, ctx) -> ctx.status(400).json(error("BAD_REQUEST", e.getMessage())));
+    // A client-supplied value the engine rejects (e.g. an invalid saga id or an unsupported input
+    // value type) surfaces as IllegalArgumentException — a client error. Map it to 400 with a
+    // generic, daemon-owned message rather than echoing the engine's wording.
+    app.exception(
+        IllegalArgumentException.class,
+        (e, ctx) -> ctx.status(400).json(error("BAD_REQUEST", "Invalid request parameter")));
     app.exception(
         SagaAlreadyExistsException.class,
         (e, ctx) -> {

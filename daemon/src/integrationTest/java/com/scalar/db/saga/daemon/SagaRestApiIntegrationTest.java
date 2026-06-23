@@ -134,6 +134,16 @@ class SagaRestApiIntegrationTest extends DaemonIntegrationTestSupport {
   }
 
   @Test
+  void putWithInvalidSagaId_returns400() throws Exception {
+    // A client-supplied id outside [a-zA-Z0-9._-]{1,128} is a client error (400), not a 500.
+    HttpResponse<String> put =
+        put("/sagas/" + "a".repeat(129), "{\"sagaName\":\"" + SAGA_NAME + "\"}");
+
+    assertThat(put.statusCode()).isEqualTo(400);
+    assertThat(MAPPER.readTree(put.body()).get("error").asText()).isEqualTo("BAD_REQUEST");
+  }
+
+  @Test
   void postWithoutSagaName_returns400() throws Exception {
     HttpResponse<String> post = post("/sagas", "{}");
     assertThat(post.statusCode()).isEqualTo(400);
