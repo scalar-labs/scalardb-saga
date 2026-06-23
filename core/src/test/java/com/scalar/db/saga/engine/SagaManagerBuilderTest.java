@@ -1,6 +1,7 @@
 package com.scalar.db.saga.engine;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 
@@ -54,6 +55,177 @@ class SagaManagerBuilderTest {
   }
 
   @Test
+  void build_withHttpEndpointDefaults_returnsSagaManager() {
+    // Arrange
+    SagaStore store = mock(SagaStore.class);
+
+    // Act
+    SagaManager manager =
+        SagaManagerBuilder.newBuilder()
+            .storeFactory(() -> store)
+            .httpEndpoint("account-svc", "http://account-svc:8080")
+            .add()
+            .build();
+
+    // Assert
+    assertThat(manager).isNotNull();
+    manager.close();
+  }
+
+  @Test
+  void build_withHttpEndpointFullConfig_returnsSagaManager() {
+    // Arrange
+    SagaStore store = mock(SagaStore.class);
+
+    // Act
+    SagaManager manager =
+        SagaManagerBuilder.newBuilder()
+            .storeFactory(() -> store)
+            .httpEndpoint("account-svc", "https://account-svc:8443")
+            .allowedHosts("account-svc")
+            .maxBodyBytes(2_000_000)
+            .httpClient(java.net.http.HttpClient.newHttpClient())
+            .defaultHeader("Authorization", "Bearer secret")
+            .defaultHeaders(java.util.Map.of("Accept", "application/json"))
+            .add()
+            .build();
+
+    // Assert
+    assertThat(manager).isNotNull();
+    manager.close();
+  }
+
+  @SuppressWarnings("NullAway")
+  @Test
+  void defaultHeader_nullValue_throwsNullPointerException() {
+    // Act & Assert
+    assertThatThrownBy(
+            () ->
+                SagaManagerBuilder.newBuilder()
+                    .httpEndpoint("account-svc", "http://account-svc:8080")
+                    .defaultHeader("Authorization", null))
+        .isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void build_withHttpEndpointAndResource_returnsSagaManager() {
+    // Arrange — httpEndpoint is orthogonal to resource() (D1)
+    SagaStore store = mock(SagaStore.class);
+
+    // Act
+    SagaManager manager =
+        SagaManagerBuilder.newBuilder()
+            .storeFactory(() -> store)
+            .httpEndpoint("account-svc", "http://account-svc:8080")
+            .add()
+            .resource(String.class, "value")
+            .build();
+
+    // Assert
+    assertThat(manager).isNotNull();
+    manager.close();
+  }
+
+  @Test
+  void build_withHttpEndpointAndStepResolver_returnsSagaManager() {
+    // Arrange — httpEndpoint is orthogonal to stepResolver() (D1)
+    SagaStore store = mock(SagaStore.class);
+    StepResolver resolver =
+        (name, cls, ctx) -> {
+          throw new UnsupportedOperationException("not used");
+        };
+
+    // Act
+    SagaManager manager =
+        SagaManagerBuilder.newBuilder()
+            .storeFactory(() -> store)
+            .httpEndpoint("account-svc", "http://account-svc:8080")
+            .add()
+            .stepResolver(resolver)
+            .build();
+
+    // Assert
+    assertThat(manager).isNotNull();
+    manager.close();
+  }
+
+  @Test
+  void httpEndpoint_blankName_throwsIllegalArgumentException() {
+    // Act & Assert
+    assertThatThrownBy(() -> SagaManagerBuilder.newBuilder().httpEndpoint(" ", "http://svc:8080"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void httpEndpoint_blankBaseUrl_throwsIllegalArgumentException() {
+    // Act & Assert
+    assertThatThrownBy(() -> SagaManagerBuilder.newBuilder().httpEndpoint("svc", " "))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void httpEndpoint_baseUrlWithUserInfo_throwsIllegalArgumentException() {
+    // Act & Assert — a user@host authority silently retargets the host (resolves to evil.com).
+    assertThatThrownBy(
+            () -> SagaManagerBuilder.newBuilder().httpEndpoint("svc", "http://svc@evil.com:8080"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void httpEndpoint_baseUrlNonHttpScheme_throwsIllegalArgumentException() {
+    // Act & Assert
+    assertThatThrownBy(() -> SagaManagerBuilder.newBuilder().httpEndpoint("svc", "ftp://svc:8080"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void httpEndpoint_baseUrlWithoutHost_throwsIllegalArgumentException() {
+    // Act & Assert — no authority, so getHost() is null.
+    assertThatThrownBy(() -> SagaManagerBuilder.newBuilder().httpEndpoint("svc", "svc:8080/x"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void httpEndpoint_baseUrlMalformed_throwsIllegalArgumentException() {
+    // Act & Assert
+    assertThatThrownBy(() -> SagaManagerBuilder.newBuilder().httpEndpoint("svc", "not a url"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void httpEndpoint_validHttpAndHttpsBaseUrls_accepted() {
+    // Act & Assert — valid absolute http/https URLs (with and without a path) build without error.
+    assertThatCode(
+            () -> {
+              SagaManagerBuilder.newBuilder().httpEndpoint("a", "http://account-svc:8080");
+              SagaManagerBuilder.newBuilder().httpEndpoint("b", "https://account-svc:8443/api/");
+            })
+        .doesNotThrowAnyException();
+  }
+
+  @Test
+  void httpEndpoint_duplicateName_throwsIllegalArgumentException() {
+    // Arrange — register an endpoint named "svc"; a second add() with the same name must fail fast
+    // rather than silently overwrite (parity with ResourceRegistry).
+    var builder = SagaManagerBuilder.newBuilder().httpEndpoint("svc", "http://svc-a:8080").add();
+
+    // Act & Assert
+    assertThatThrownBy(() -> builder.httpEndpoint("svc", "http://svc-b:8080").add())
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void maxBodyBytes_nonPositive_throwsIllegalArgumentException() {
+    // Act & Assert
+    assertThatThrownBy(
+            () ->
+                SagaManagerBuilder.newBuilder()
+                    .httpEndpoint("account-svc", "http://account-svc:8080")
+                    .maxBodyBytes(0))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void build_missingStoreFactory_throwsIllegalStateException() {
     // Act & Assert
     assertThatThrownBy(() -> SagaManagerBuilder.newBuilder().build())
@@ -83,7 +255,7 @@ class SagaManagerBuilderTest {
     // Arrange
     SagaStore store = mock(SagaStore.class);
     StepResolver resolver =
-        (name, cls) -> {
+        (name, cls, ctx) -> {
           throw new UnsupportedOperationException("not used");
         };
 
@@ -101,7 +273,7 @@ class SagaManagerBuilderTest {
     // Arrange
     SagaStore store = mock(SagaStore.class);
     StepResolver resolver =
-        (name, cls) -> {
+        (name, cls, ctx) -> {
           throw new UnsupportedOperationException("not used");
         };
 

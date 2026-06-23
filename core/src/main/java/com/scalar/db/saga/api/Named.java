@@ -22,7 +22,9 @@ import java.lang.annotation.Target;
  * }
  * }</pre>
  *
- * <p>When only one resource of a given type is registered, {@code @Named} is not required.
+ * <p>When only one resource of a given type is registered, {@code @Named} is not required. This
+ * same rule applies to a {@link SagaHttpClient} injected from {@code httpEndpoint(name, baseUrl)}:
+ * the endpoint name is required only to disambiguate when two or more endpoints are registered.
  *
  * @see StepResolver
  */

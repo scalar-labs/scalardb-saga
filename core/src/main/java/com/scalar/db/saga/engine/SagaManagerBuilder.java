@@ -9,7 +9,15 @@ import com.scalar.db.saga.api.StepResolver;
 import com.scalar.db.saga.recovery.SagaRecoveryManager;
 import com.scalar.db.saga.retention.SagaRetentionManager;
 import com.scalar.db.saga.store.SagaStore;
+import com.scalar.db.saga.transport.HttpServiceConfig;
+import java.net.URI;
+import java.net.http.HttpClient;
 import java.time.Clock;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import org.jspecify.annotations.Nullable;
 
@@ -74,6 +82,7 @@ public class SagaManagerBuilder implements SagaManager.Builder {
   private Clock clock = Clock.systemUTC();
   private ResourceRegistry.@Nullable Builder resourceRegistryBuilder;
   private @Nullable StepResolver customStepResolver;
+  private final Map<String, HttpServiceConfig> httpEndpoints = new HashMap<>();
   private @Nullable RecoveryConfig recoveryConfig;
   private @Nullable RetentionConfig retentionConfig;
 
@@ -139,6 +148,47 @@ public class SagaManagerBuilder implements SagaManager.Builder {
   }
 
   @Override
+  public SagaManager.Builder.HttpEndpointBuilder httpEndpoint(String name, String baseUrl) {
+    Objects.requireNonNull(name, "name must not be null");
+    Objects.requireNonNull(baseUrl, "baseUrl must not be null");
+    if (name.isBlank()) {
+      throw new IllegalArgumentException("name must not be blank");
+    }
+    if (baseUrl.isBlank()) {
+      throw new IllegalArgumentException("baseUrl must not be blank");
+    }
+    validateBaseUrl(baseUrl);
+    return new HttpEndpointBuilderImpl(name, baseUrl);
+  }
+
+  /**
+   * Fails fast on a malformed or misleading {@code baseUrl} at build time rather than at the first
+   * saga run: it must be a valid absolute {@code http}/{@code https} URL with a host and no
+   * user-info component (a {@code user@host} authority silently retargets the host — e.g. {@code
+   * http://svc@evil.com} resolves to {@code evil.com}).
+   */
+  private static void validateBaseUrl(String baseUrl) {
+    URI uri;
+    try {
+      uri = URI.create(baseUrl);
+    } catch (IllegalArgumentException e) {
+      throw new IllegalArgumentException("baseUrl is not a valid URI: " + baseUrl, e);
+    }
+    String scheme = uri.getScheme();
+    if (scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) {
+      throw new IllegalArgumentException("baseUrl must use the http or https scheme: " + baseUrl);
+    }
+    if (uri.getHost() == null) {
+      throw new IllegalArgumentException("baseUrl must have a host: " + baseUrl);
+    }
+    if (uri.getUserInfo() != null) {
+      throw new IllegalArgumentException(
+          "baseUrl must not contain a user-info component (it silently retargets the host): "
+              + baseUrl);
+    }
+  }
+
+  @Override
   public SagaManagerBuilder recoveryConfig(RecoveryConfig recoveryConfig) {
     this.recoveryConfig = Objects.requireNonNull(recoveryConfig, "recoveryConfig must not be null");
     return this;
@@ -162,8 +212,15 @@ public class SagaManagerBuilder implements SagaManager.Builder {
           "resource() and stepResolver() are mutually exclusive — use one or the other");
     }
 
-    SagaStore store = storeFactory.createStore();
+    SagaStore store = null;
+    HttpEndpointRegistry httpEndpointRegistry = null;
     try {
+      store = storeFactory.createStore();
+      // The manager owns the HTTP endpoints created from httpEndpoint(...): they are closed on
+      // manager close (or here if build fails) — mirroring the store's lifecycle. A code step's
+      // SagaHttpClient and a declarative step against the same endpoint share one HttpExchange (one
+      // client, one policy).
+      httpEndpointRegistry = HttpEndpointRegistry.create(httpEndpoints);
       StepResolver resolver = buildStepResolver();
 
       RecoveryConfig resolvedRecoveryConfig =
@@ -173,21 +230,43 @@ public class SagaManagerBuilder implements SagaManager.Builder {
 
       SagaEngine.ShutdownConfig shutdownConfig =
           new SagaEngine.ShutdownConfig(shutdownMode, shutdownTimeoutMillis);
-      SagaEngine engine = new SagaEngine(store, resolver, ownerId, shutdownConfig, clock);
-      SagaDefinitionRegistry registry = new SagaDefinitionRegistry(store);
+      StepInstantiator stepInstantiator = new StepInstantiator(resolver, httpEndpointRegistry);
+      SagaEngine engine = new SagaEngine(store, stepInstantiator, ownerId, shutdownConfig, clock);
+      SagaDefinitionRegistry definitionRegistry = new SagaDefinitionRegistry(store);
 
       SagaRecoveryManager recoveryManager =
-          new SagaRecoveryManager(store, engine, registry, ownerId, resolvedRecoveryConfig);
+          new SagaRecoveryManager(
+              store, engine, definitionRegistry, ownerId, resolvedRecoveryConfig);
       SagaRetentionManager retentionManager =
           new SagaRetentionManager(store, resolvedRetentionConfig);
 
       return new EmbeddedSagaManager(
-          engine, store, registry, recoveryManager, retentionManager, shutdownTimeoutMillis);
+          engine,
+          store,
+          definitionRegistry,
+          recoveryManager,
+          retentionManager,
+          shutdownTimeoutMillis);
     } catch (Exception e) {
-      try {
-        store.close();
-      } catch (RuntimeException closeException) {
-        e.addSuppressed(closeException);
+      // Roll back the resources that hold real external connections: the store (DB sessions) and
+      // the HTTP endpoint registry (holds HTTP clients). Each is null if its own creation threw, so
+      // each close is null-guarded. The engine and the recovery/retention managers constructed
+      // inside the try only hold executors that stay inert until started — their threads spin up on
+      // start()/first task, never during build — so a failed build leaves them with no live threads
+      // to stop, and GC reclaims them. Hence no engine.shutdown() here.
+      if (httpEndpointRegistry != null) {
+        try {
+          httpEndpointRegistry.close();
+        } catch (Exception closeException) {
+          e.addSuppressed(closeException);
+        }
+      }
+      if (store != null) {
+        try {
+          store.close();
+        } catch (Exception closeException) {
+          e.addSuppressed(closeException);
+        }
       }
       throw e;
     }
@@ -209,5 +288,76 @@ public class SagaManagerBuilder implements SagaManager.Builder {
       resourceRegistryBuilder = ResourceRegistry.newBuilder();
     }
     return resourceRegistryBuilder;
+  }
+
+  /** Accumulates one HTTP endpoint's optional outbound config until {@link #add()}. */
+  private final class HttpEndpointBuilderImpl implements SagaManager.Builder.HttpEndpointBuilder {
+
+    private final String name;
+    private final String baseUrl;
+    private final List<String> allowedHosts = new ArrayList<>();
+    private final Map<String, String> defaultHeaders = new LinkedHashMap<>();
+    private long maxBodyBytes = -1; // -1 = use the default
+    private @Nullable HttpClient httpClient;
+
+    private HttpEndpointBuilderImpl(String name, String baseUrl) {
+      this.name = name;
+      this.baseUrl = baseUrl;
+    }
+
+    @Override
+    public SagaManager.Builder.HttpEndpointBuilder allowedHosts(String... hosts) {
+      Objects.requireNonNull(hosts, "hosts must not be null");
+      for (String host : hosts) {
+        allowedHosts.add(Objects.requireNonNull(host, "host must not be null"));
+      }
+      return this;
+    }
+
+    @Override
+    public SagaManager.Builder.HttpEndpointBuilder maxBodyBytes(long maxBodyBytes) {
+      if (maxBodyBytes <= 0) {
+        throw new IllegalArgumentException("maxBodyBytes must be > 0, got " + maxBodyBytes);
+      }
+      this.maxBodyBytes = maxBodyBytes;
+      return this;
+    }
+
+    @Override
+    public SagaManager.Builder.HttpEndpointBuilder httpClient(HttpClient client) {
+      this.httpClient = Objects.requireNonNull(client, "client must not be null");
+      return this;
+    }
+
+    @Override
+    public SagaManager.Builder.HttpEndpointBuilder defaultHeader(String name, String value) {
+      Objects.requireNonNull(name, "name must not be null");
+      Objects.requireNonNull(value, "value must not be null");
+      defaultHeaders.put(name, value);
+      return this;
+    }
+
+    @Override
+    public SagaManager.Builder.HttpEndpointBuilder defaultHeaders(Map<String, String> headers) {
+      Objects.requireNonNull(headers, "headers must not be null");
+      headers.forEach(
+          (name, value) -> {
+            Objects.requireNonNull(name, "header name must not be null");
+            Objects.requireNonNull(value, "header value must not be null");
+            defaultHeaders.put(name, value);
+          });
+      return this;
+    }
+
+    @Override
+    public SagaManager.Builder add() {
+      if (httpEndpoints.containsKey(name)) {
+        throw new IllegalArgumentException("HTTP endpoint already registered: " + name);
+      }
+      httpEndpoints.put(
+          name,
+          new HttpServiceConfig(baseUrl, allowedHosts, maxBodyBytes, httpClient, defaultHeaders));
+      return SagaManagerBuilder.this;
+    }
   }
 }

@@ -242,19 +242,23 @@ public final class SagaDefinition {
         + '}';
   }
 
-  /** Defines a single step within a saga definition. */
+  /**
+   * Defines a single step within a saga definition.
+   *
+   * <p>Sealed: currently a step is a {@link ClassStep} — backed by a user {@link Step}/{@link
+   * TccStep} class (Layer 1). The common fields ({@link #getName()}, {@link #getTimeoutMillis()},
+   * {@link #getRetryPolicy()}, {@link #isPivot()}) are available on the base type.
+   */
   @Immutable
-  public static final class StepDefinition {
+  public abstract static sealed class StepDefinition permits ClassStep {
 
     private final String name;
-    private final String stepClass;
     private final long timeoutMillis;
     private final @Nullable RetryPolicy retryPolicy;
     private final boolean pivot;
 
-    private StepDefinition(StepBuilder builder) {
+    private StepDefinition(AbstractStepBuilder<?> builder) {
       this.name = builder.name;
-      this.stepClass = builder.stepClass;
       this.timeoutMillis = builder.timeoutMillis;
       this.retryPolicy = builder.retryPolicy;
       this.pivot = builder.pivot;
@@ -262,10 +266,6 @@ public final class SagaDefinition {
 
     public String getName() {
       return name;
-    }
-
-    public String getStepClass() {
-      return stepClass;
     }
 
     /**
@@ -284,25 +284,46 @@ public final class SagaDefinition {
       return pivot;
     }
 
-    @Override
-    public boolean equals(@Nullable Object o) {
-      if (this == o) return true;
-      if (!(o instanceof StepDefinition that)) return false;
+    /** Compares the common base fields. Used by subtype {@code equals} implementations. */
+    boolean equalsCommon(StepDefinition that) {
       return timeoutMillis == that.timeoutMillis
           && pivot == that.pivot
           && name.equals(that.name)
-          && stepClass.equals(that.stepClass)
           && Objects.equals(retryPolicy, that.retryPolicy);
+    }
+  }
+
+  /** A step backed by a user {@link Step} or {@link TccStep} class (Layer 1). */
+  @Immutable
+  public static final class ClassStep extends StepDefinition {
+
+    private final String stepClass;
+
+    private ClassStep(StepBuilder builder) {
+      super(builder);
+      this.stepClass = Objects.requireNonNull(builder.stepClass);
+    }
+
+    /** Returns the fully-qualified class name implementing {@link Step} or {@link TccStep}. */
+    public String getStepClass() {
+      return stepClass;
+    }
+
+    @Override
+    public boolean equals(@Nullable Object o) {
+      if (this == o) return true;
+      if (!(o instanceof ClassStep that)) return false;
+      return equalsCommon(that) && stepClass.equals(that.stepClass);
     }
 
     @Override
     public int hashCode() {
-      return Objects.hash(name, stepClass, timeoutMillis, retryPolicy, pivot);
+      return Objects.hash(getName(), stepClass, getTimeoutMillis(), getRetryPolicy(), isPivot());
     }
 
     @Override
     public String toString() {
-      return "StepDefinition{name='" + name + "', pivot=" + pivot + '}';
+      return "ClassStep{name='" + getName() + "', stepClass='" + stepClass + "'}";
     }
   }
 
@@ -380,40 +401,64 @@ public final class SagaDefinition {
     }
   }
 
-  /** Builder for {@link StepDefinition}. */
-  public static final class StepBuilder {
+  /**
+   * Common base for the step builders. Holds the fields shared by every step kind and the optional
+   * setters ({@link #timeoutMillis}, {@link #retryPolicy}, {@link #pivot}). The {@code SELF} type
+   * parameter lets those setters return the concrete builder type for fluent chaining.
+   */
+  public abstract static class AbstractStepBuilder<SELF extends AbstractStepBuilder<SELF>> {
 
-    private final Builder parent;
-    private final String name;
-    private final String stepClass;
-    private long timeoutMillis;
-    private @Nullable RetryPolicy retryPolicy;
-    private boolean pivot;
+    final Builder parent;
+    final String name;
+    long timeoutMillis;
+    @Nullable RetryPolicy retryPolicy;
+    boolean pivot;
 
-    private StepBuilder(Builder parent, String name, String stepClass) {
+    private AbstractStepBuilder(Builder parent, String name) {
       this.parent = parent;
       this.name = name;
-      this.stepClass = stepClass;
     }
 
-    public StepBuilder timeoutMillis(long timeoutMillis) {
+    @SuppressWarnings("unchecked")
+    final SELF self() {
+      return (SELF) this;
+    }
+
+    public SELF timeoutMillis(long timeoutMillis) {
       this.timeoutMillis = timeoutMillis;
-      return this;
+      return self();
     }
 
-    public StepBuilder retryPolicy(RetryPolicy retryPolicy) {
+    public SELF retryPolicy(RetryPolicy retryPolicy) {
       this.retryPolicy = Objects.requireNonNull(retryPolicy, "retryPolicy must not be null");
-      return this;
+      return self();
     }
 
-    public StepBuilder pivot(boolean pivot) {
+    public SELF pivot(boolean pivot) {
       this.pivot = pivot;
-      return this;
+      return self();
     }
 
     /** Adds this step to the parent builder and returns it for chaining. */
+    public abstract Builder add();
+  }
+
+  /**
+   * Builder for a class step ({@link ClassStep}). Created by {@link Builder#step}; carries the
+   * fully-qualified step class name.
+   */
+  public static final class StepBuilder extends AbstractStepBuilder<StepBuilder> {
+
+    private final String stepClass;
+
+    private StepBuilder(Builder parent, String name, String stepClass) {
+      super(parent, name);
+      this.stepClass = stepClass;
+    }
+
+    @Override
     public Builder add() {
-      parent.steps.add(new StepDefinition(this));
+      parent.steps.add(new ClassStep(this));
       return parent;
     }
   }

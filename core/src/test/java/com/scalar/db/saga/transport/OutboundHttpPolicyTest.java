@@ -1,0 +1,94 @@
+package com.scalar.db.saga.transport;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import java.net.URI;
+import org.junit.jupiter.api.Test;
+
+class OutboundHttpPolicyTest {
+
+  @Test
+  void allowAll_anyHost_isAllowed() {
+    OutboundHttpPolicy policy = OutboundHttpPolicy.allowAll();
+
+    assertThat(policy.isAllowed(URI.create("http://anything.internal/x"))).isTrue();
+    assertThat(policy.maxBodyBytes()).isEqualTo(OutboundHttpPolicy.DEFAULT_MAX_BODY_BYTES);
+  }
+
+  @Test
+  void isAllowed_withAllowlist_permitsOnlyListedHosts() {
+    OutboundHttpPolicy policy =
+        OutboundHttpPolicy.newBuilder().allowedHosts("payment.internal", "ledger.internal").build();
+
+    assertThat(policy.isAllowed(URI.create("http://payment.internal:8080/debit"))).isTrue();
+    assertThat(policy.isAllowed(URI.create("http://evil.example.com/probe"))).isFalse();
+  }
+
+  @Test
+  void isAllowed_hostMatchIsCaseInsensitive() {
+    OutboundHttpPolicy policy =
+        OutboundHttpPolicy.newBuilder().allowedHosts("Payment.Internal").build();
+
+    assertThat(policy.isAllowed(URI.create("http://payment.internal/x"))).isTrue();
+  }
+
+  @Test
+  void isAllowed_paddedHostGiven_matchesAfterTrim() {
+    OutboundHttpPolicy policy =
+        OutboundHttpPolicy.newBuilder().allowedHosts("  payment.internal  ").build();
+
+    assertThat(policy.isAllowed(URI.create("http://payment.internal/x"))).isTrue();
+  }
+
+  @Test
+  void isAllowed_ipv6HostGiven_matchesBracketedLiteral() {
+    OutboundHttpPolicy policy = OutboundHttpPolicy.newBuilder().allowedHosts("[::1]").build();
+
+    assertThat(policy.isAllowed(URI.create("http://[::1]:8080/x"))).isTrue();
+    assertThat(policy.isAllowed(URI.create("http://[::2]/x"))).isFalse();
+  }
+
+  @Test
+  void allowedHosts_hostWithPortGiven_throwsIllegalArgumentException() {
+    assertThatThrownBy(() -> OutboundHttpPolicy.newBuilder().allowedHosts("localhost:8080"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void allowedHosts_ipv6HostWithPortGiven_throwsIllegalArgumentException() {
+    assertThatThrownBy(() -> OutboundHttpPolicy.newBuilder().allowedHosts("[::1]:8080"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void allowedHosts_unbracketedIpv6Given_throwsIllegalArgumentException() {
+    assertThatThrownBy(() -> OutboundHttpPolicy.newBuilder().allowedHosts("::1"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void allowedHosts_emptyHostGiven_throwsIllegalArgumentException() {
+    assertThatThrownBy(() -> OutboundHttpPolicy.newBuilder().allowedHosts(""))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void allowedHosts_whitespaceHostGiven_throwsIllegalArgumentException() {
+    assertThatThrownBy(() -> OutboundHttpPolicy.newBuilder().allowedHosts("   "))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void maxBodyBytes_customGiven_overridesDefault() {
+    OutboundHttpPolicy policy = OutboundHttpPolicy.newBuilder().maxBodyBytes(2048).build();
+
+    assertThat(policy.maxBodyBytes()).isEqualTo(2048);
+  }
+
+  @Test
+  void maxBodyBytes_nonPositiveGiven_throwsIllegalArgumentException() {
+    assertThatThrownBy(() -> OutboundHttpPolicy.newBuilder().maxBodyBytes(0))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+}

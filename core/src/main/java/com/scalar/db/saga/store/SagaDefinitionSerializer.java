@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.scalar.db.saga.api.RetryPolicy;
 import com.scalar.db.saga.api.SagaDefinition;
+import com.scalar.db.saga.api.SagaDefinition.ClassStep;
 import com.scalar.db.saga.api.SagaDefinition.RecoveryStrategy;
 import com.scalar.db.saga.api.SagaDefinition.SagaMode;
 import com.scalar.db.saga.exception.SagaPersistenceException;
@@ -65,7 +66,9 @@ final class SagaDefinitionSerializer {
     for (SagaDefinition.StepDefinition step : def.getSteps()) {
       ObjectNode s = steps.addObject();
       s.put(NAME, step.getName());
-      s.put(STEP_CLASS, step.getStepClass());
+      switch (step) {
+        case ClassStep cs -> s.put(STEP_CLASS, cs.getStepClass());
+      }
       s.put(TIMEOUT_MILLIS, step.getTimeoutMillis());
       s.put(PIVOT, step.isPivot());
       if (step.getRetryPolicy() != null) {
@@ -98,9 +101,8 @@ final class SagaDefinitionSerializer {
       }
 
       for (JsonNode stepNode : root.get(STEPS)) {
-        requireFields(stepNode, NAME, STEP_CLASS, TIMEOUT_MILLIS, PIVOT);
-        SagaDefinition.StepBuilder stepBuilder =
-            builder.step(stepNode.get(NAME).asText(), stepNode.get(STEP_CLASS).asText());
+        requireFields(stepNode, NAME, TIMEOUT_MILLIS, PIVOT);
+        SagaDefinition.AbstractStepBuilder<?> stepBuilder = newStepBuilder(builder, stepNode);
         stepBuilder.timeoutMillis(stepNode.get(TIMEOUT_MILLIS).asLong());
         stepBuilder.pivot(stepNode.get(PIVOT).asBoolean());
         if (stepNode.has(RETRY_POLICY) && !stepNode.get(RETRY_POLICY).isNull()) {
@@ -113,6 +115,19 @@ final class SagaDefinitionSerializer {
     } catch (JsonProcessingException | RuntimeException e) {
       throw new SagaPersistenceException("Failed to deserialize definition", e);
     }
+  }
+
+  private static SagaDefinition.AbstractStepBuilder<?> newStepBuilder(
+      SagaDefinition.Builder builder, JsonNode stepNode) {
+    String name = stepNode.get(NAME).asText();
+    if (!has(stepNode, STEP_CLASS)) {
+      throw new IllegalArgumentException("Step '" + name + "' must define 'stepClass'");
+    }
+    return builder.step(name, stepNode.get(STEP_CLASS).asText());
+  }
+
+  private static boolean has(JsonNode node, String field) {
+    return node.has(field) && !node.get(field).isNull();
   }
 
   private ObjectNode serializeRetryPolicy(RetryPolicy policy) {

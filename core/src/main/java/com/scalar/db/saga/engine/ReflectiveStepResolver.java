@@ -1,8 +1,10 @@
 package com.scalar.db.saga.engine;
 
 import com.scalar.db.saga.api.Named;
+import com.scalar.db.saga.api.SagaHttpClient;
 import com.scalar.db.saga.api.Step;
 import com.scalar.db.saga.api.StepResolver;
+import com.scalar.db.saga.api.StepResolver.ResolutionContext;
 import com.scalar.db.saga.api.TccStep;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import java.lang.reflect.Constructor;
@@ -11,6 +13,7 @@ import java.lang.reflect.Modifier;
 import java.lang.reflect.Parameter;
 import java.util.concurrent.ConcurrentHashMap;
 import net.jcip.annotations.ThreadSafe;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Resolves step instances via reflection-based constructor injection against a {@link
@@ -22,7 +25,10 @@ import net.jcip.annotations.ThreadSafe;
  *   <li>Load the class via {@link Class#forName(String)}
  *   <li>Verify the class is concrete and implements {@link Step} or {@link TccStep}
  *   <li>Verify the class has exactly one public constructor (error if multiple)
- *   <li>For each parameter: match by exact type, then narrow by {@link Named} qualifier if present
+ *   <li>For each parameter: a {@link SagaHttpClient} is injected from the {@link
+ *       ResolutionContext}'s HTTP endpoints — by its {@link Named} value, or, when unqualified, the
+ *       sole registered endpoint; every other parameter is matched against the {@link
+ *       ResourceRegistry} by exact type, narrowed by {@link Named} if present
  *   <li>Instantiate via reflection and cache the singleton instance
  * </ol>
  *
@@ -40,15 +46,15 @@ class ReflectiveStepResolver implements StepResolver {
   }
 
   @Override
-  public Object resolve(String stepName, String stepClass) {
-    return cache.computeIfAbsent(stepClass, this::createInstance);
+  public Object resolve(String stepName, String stepClass, ResolutionContext context) {
+    return cache.computeIfAbsent(stepClass, key -> createInstance(stepName, key, context));
   }
 
-  private Object createInstance(String stepClass) {
+  private Object createInstance(String stepName, String stepClass, ResolutionContext context) {
     Class<?> clazz = loadClass(stepClass);
     validateStepClass(clazz, stepClass);
     Constructor<?> constructor = selectConstructor(clazz, stepClass);
-    Object[] args = resolveArguments(constructor, stepClass);
+    Object[] args = resolveArguments(constructor, stepName, stepClass, context);
     return instantiate(constructor, args, stepClass);
   }
 
@@ -99,12 +105,17 @@ class ReflectiveStepResolver implements StepResolver {
     return publicConstructors[0];
   }
 
-  private Object[] resolveArguments(Constructor<?> ctor, String stepClass) {
+  private Object[] resolveArguments(
+      Constructor<?> ctor, String stepName, String stepClass, ResolutionContext context) {
     Parameter[] params = ctor.getParameters();
     Object[] args = new Object[params.length];
     for (int i = 0; i < params.length; i++) {
       Named named = params[i].getAnnotation(Named.class);
       String qualifier = named != null ? named.value() : null;
+      if (params[i].getType() == SagaHttpClient.class) {
+        args[i] = resolveHttpClient(qualifier, stepName, stepClass, i, context);
+        continue;
+      }
       try {
         args[i] = resourceRegistry.get(params[i].getType(), qualifier);
       } catch (IllegalArgumentException | IllegalStateException e) {
@@ -120,6 +131,37 @@ class ReflectiveStepResolver implements StepResolver {
       }
     }
     return args;
+  }
+
+  /**
+   * Injects a {@link SagaHttpClient} parameter from the {@link ResolutionContext}. When the
+   * parameter is qualified with {@link Named}, the endpoint registered under that value is used;
+   * when unqualified, the sole registered endpoint is used (and an ambiguity or absence is
+   * reported). Any {@link SagaDefinitionException} from the lookup is wrapped with step and
+   * parameter context.
+   */
+  private static SagaHttpClient resolveHttpClient(
+      @Nullable String qualifier,
+      String stepName,
+      String stepClass,
+      int index,
+      ResolutionContext context) {
+    try {
+      return qualifier == null ? context.httpClient() : context.httpClient(qualifier);
+    } catch (SagaDefinitionException e) {
+      throw new SagaDefinitionException(
+          "Cannot resolve "
+              + SagaHttpClient.class.getSimpleName()
+              + " parameter "
+              + index
+              + " of step '"
+              + stepName
+              + "' (class "
+              + stepClass
+              + "): "
+              + e.getMessage(),
+          e);
+    }
   }
 
   private static Object instantiate(Constructor<?> ctor, Object[] args, String stepClass) {

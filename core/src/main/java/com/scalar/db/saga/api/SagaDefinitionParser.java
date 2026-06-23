@@ -143,8 +143,8 @@ public final class SagaDefinitionParser {
 
     for (JsonNode stepNode : root.get("steps")) {
       String stepName = requireText(stepNode, "name");
-      String stepClass = requireText(stepNode, "stepClass");
-      SagaDefinition.StepBuilder stepBuilder = builder.step(stepName, stepClass);
+      SagaDefinition.AbstractStepBuilder<?> stepBuilder =
+          newStepBuilder(builder, stepNode, stepName);
 
       if (stepNode.has("timeoutMillis") && !stepNode.get("timeoutMillis").isNull()) {
         stepBuilder.timeoutMillis(stepNode.get("timeoutMillis").asLong());
@@ -161,6 +161,18 @@ public final class SagaDefinitionParser {
     checkUnknownFields(root, name);
 
     return builder.build();
+  }
+
+  private static SagaDefinition.AbstractStepBuilder<?> newStepBuilder(
+      SagaDefinition.Builder builder, JsonNode stepNode, String stepName) {
+    if (!isPresent(stepNode, "stepClass")) {
+      throw new SagaDefinitionException("Step '" + stepName + "' must define 'stepClass'");
+    }
+    return builder.step(stepName, stepNode.get("stepClass").asText());
+  }
+
+  private static boolean isPresent(JsonNode node, String field) {
+    return node.has(field) && !node.get(field).isNull();
   }
 
   private static RetryPolicy parseRetryPolicy(JsonNode node) {
@@ -219,7 +231,20 @@ public final class SagaDefinitionParser {
             "timeoutMillis",
             "defaultRetryPolicy",
             "steps");
-    Set<String> stepKnown = Set.of("name", "stepClass", "timeoutMillis", "retryPolicy", "pivot");
+    Set<String> stepKnown =
+        Set.of(
+            "name",
+            "stepClass",
+            "service",
+            "transport",
+            "execution",
+            "compensation",
+            "reservation",
+            "confirmation",
+            "cancellation",
+            "timeoutMillis",
+            "retryPolicy",
+            "pivot");
 
     root.fieldNames()
         .forEachRemaining(
@@ -257,6 +282,9 @@ public final class SagaDefinitionParser {
   }
 
   private static ObjectMapper createMapper(@Nullable JsonFactory factory) {
-    return factory != null ? new ObjectMapper(factory) : new ObjectMapper();
+    ObjectMapper mapper = factory != null ? new ObjectMapper(factory) : new ObjectMapper();
+    // Defense in depth against polymorphic-deserialization gadgets (off by default in Jackson 2.x).
+    mapper.deactivateDefaultTyping();
+    return mapper;
   }
 }
