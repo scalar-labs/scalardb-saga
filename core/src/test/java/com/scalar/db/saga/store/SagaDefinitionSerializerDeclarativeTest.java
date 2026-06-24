@@ -8,7 +8,6 @@ import com.scalar.db.saga.api.CallSpec.Transport;
 import com.scalar.db.saga.api.HttpCall;
 import com.scalar.db.saga.api.HttpMethod;
 import com.scalar.db.saga.api.SagaDefinition;
-import com.scalar.db.saga.api.SagaDefinition.SagaMode;
 import com.scalar.db.saga.api.SagaDefinition.ServiceStep;
 import com.scalar.db.saga.api.SagaDefinition.ServiceStep.Phase;
 import com.scalar.db.saga.api.SagaDefinitionParser;
@@ -46,9 +45,9 @@ class SagaDefinitionSerializerDeclarativeTest {
     HttpCall compensation =
         HttpCall.newBuilder("/debit/reverse").jsonBody(Map.of("amount", "${amount}")).build();
     SagaDefinition original =
-        SagaDefinition.newBuilder("transfer", SagaMode.SAGA)
+        SagaDefinition.newBuilder("transfer")
+            .saga()
             .serviceStep("debit", "account-service")
-            .operation()
             .execution(execution)
             .compensation(compensation)
             .add()
@@ -105,9 +104,9 @@ class SagaDefinitionSerializerDeclarativeTest {
   void serializeAndDeserialize_tccDeclarativeStep_roundTripsCorrectly() {
     // Arrange
     SagaDefinition original =
-        SagaDefinition.newBuilder("reserveSeats", SagaMode.TCC)
+        SagaDefinition.newBuilder("reserveSeats")
+            .tcc()
             .serviceStep("seat", "booking-service")
-            .tccOperation()
             .reservation(call("/reserve"))
             .confirmation(call("/confirm"))
             .cancellation(call("/cancel"))
@@ -126,6 +125,29 @@ class SagaDefinitionSerializerDeclarativeTest {
   }
 
   @Test
+  void serialize_tccDefinition_omitsRecoveryStrategyAndPivot() {
+    // Arrange — a TCC definition has neither an explicit recoveryStrategy nor a pivot step; the
+    // serializer must omit both so the round-trip survives (deserialize rejects them for TCC).
+    SagaDefinition original =
+        SagaDefinition.newBuilder("reserveSeats")
+            .tcc()
+            .serviceStep("seat", "booking-service")
+            .reservation(call("/reserve"))
+            .confirmation(call("/confirm"))
+            .cancellation(call("/cancel"))
+            .add()
+            .build();
+
+    // Act
+    String json = serializer.serialize(original);
+    SagaDefinition restored = serializer.deserialize(json);
+
+    // Assert — serialized form drops recoveryStrategy/pivot, and the round-trip is faithful.
+    assertThat(json).doesNotContain("recoveryStrategy").doesNotContain("pivot");
+    assertThat(restored).isEqualTo(original);
+  }
+
+  @Test
   void serializeAndDeserialize_getDeclarativeStepWithQuery_roundTripsCorrectly() {
     // Arrange
     HttpCall execution =
@@ -135,9 +157,9 @@ class SagaDefinitionSerializerDeclarativeTest {
             .output(Map.of("name", "$.profile.name"))
             .build();
     SagaDefinition original =
-        SagaDefinition.newBuilder("lookup", SagaMode.SAGA)
+        SagaDefinition.newBuilder("lookup")
+            .saga()
             .serviceStep("fetchUser", "user-service")
-            .operation()
             .execution(execution)
             .compensation(call("/noop"))
             .add()
@@ -158,9 +180,9 @@ class SagaDefinitionSerializerDeclarativeTest {
   void serialize_declarativeStep_emitsTransportAndPhaseKeys() {
     // Arrange
     SagaDefinition definition =
-        SagaDefinition.newBuilder("transfer", SagaMode.SAGA)
+        SagaDefinition.newBuilder("transfer")
+            .saga()
             .serviceStep("debit", "account-service")
-            .operation()
             .execution(call("/debit"))
             .compensation(call("/reverse"))
             .add()
@@ -221,6 +243,38 @@ class SagaDefinitionSerializerDeclarativeTest {
             + "{\"name\":\"debit\",\"service\":\"svc\","
             + "\"timeoutMillis\":0,\"pivot\":false,"
             + "\"execution\":{\"path\":\"/debit\"},\"reservation\":{\"path\":\"/reserve\"}}]}";
+
+    // Act & Assert
+    assertThatThrownBy(() -> serializer.deserialize(json))
+        .isInstanceOf(SagaPersistenceException.class);
+  }
+
+  @Test
+  void deserialize_tccWithRecoveryStrategy_throwsException() {
+    // Arrange — a stored TCC record must not carry 'recoveryStrategy'; the deserializer rejects it,
+    // mirroring the parser (recovery is predefined for TCC).
+    String json =
+        "{\"name\":\"t\",\"mode\":\"TCC\",\"version\":\"1.0\","
+            + "\"recoveryStrategy\":\"BACKWARD\",\"timeoutMillis\":0,\"steps\":["
+            + "{\"name\":\"seat\",\"service\":\"svc\",\"timeoutMillis\":0,"
+            + "\"reservation\":{\"path\":\"/reserve\"},\"confirmation\":{\"path\":\"/confirm\"},"
+            + "\"cancellation\":{\"path\":\"/cancel\"}}]}";
+
+    // Act & Assert
+    assertThatThrownBy(() -> serializer.deserialize(json))
+        .isInstanceOf(SagaPersistenceException.class);
+  }
+
+  @Test
+  void deserialize_tccStepWithPivot_throwsException() {
+    // Arrange — a stored TCC step must not carry 'pivot'; the deserializer rejects it, mirroring
+    // the
+    // parser (recovery is predefined, so the pivot is fixed at the last try step).
+    String json =
+        "{\"name\":\"t\",\"mode\":\"TCC\",\"version\":\"1.0\",\"timeoutMillis\":0,\"steps\":["
+            + "{\"name\":\"seat\",\"service\":\"svc\",\"timeoutMillis\":0,\"pivot\":true,"
+            + "\"reservation\":{\"path\":\"/reserve\"},\"confirmation\":{\"path\":\"/confirm\"},"
+            + "\"cancellation\":{\"path\":\"/cancel\"}}]}";
 
     // Act & Assert
     assertThatThrownBy(() -> serializer.deserialize(json))

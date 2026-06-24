@@ -8,6 +8,8 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
+import org.jspecify.annotations.Nullable;
 
 /**
  * The single JSON (de)serializer for a declaratively-defined service step's {@link CallSpec} (Layer
@@ -33,6 +35,13 @@ public final class CallSpecCodec {
   private static final String STRING_BODY = "stringBody";
   private static final String CONTENT_TYPE = "contentType";
   private static final String OUTPUT = "output";
+  private static final String STEP_CLASS = "stepClass";
+  private static final String SERVICE = "service";
+  private static final String EXECUTION = "execution";
+  private static final String COMPENSATION = "compensation";
+  private static final String RESERVATION = "reservation";
+  private static final String CONFIRMATION = "confirmation";
+  private static final String CANCELLATION = "cancellation";
 
   // The HTTP call spec's own keys. The values of QUERY/JSON_BODY/OUTPUT are free-form user maps and
   // are not validated here.
@@ -193,5 +202,80 @@ public final class CallSpecCodec {
 
   private static boolean isPresent(JsonNode node, String field) {
     return node.has(field) && !node.get(field).isNull();
+  }
+
+  /**
+   * Returns the {@code stepClass} for a class step, or {@code null} for a (validated) service step,
+   * rejecting a step that mixes a {@code stepClass} with {@code service}/phases or defines neither.
+   * Shared by {@link SagaDefinitionParser} and the store serializer; each passes {@code error} so
+   * the failure type matches its layer (a public definition error vs an internal one).
+   */
+  public static @Nullable String classStepOrNull(
+      JsonNode stepNode, String name, Function<String, RuntimeException> error) {
+    if (isPresent(stepNode, STEP_CLASS)) {
+      if (isPresent(stepNode, SERVICE) || hasSagaPhase(stepNode) || hasTccPhase(stepNode)) {
+        throw error.apply(
+            "Step '" + name + "' must not mix 'stepClass' with 'service'/declarative phases");
+      }
+      return stepNode.get(STEP_CLASS).asText();
+    }
+    if (!isPresent(stepNode, SERVICE)) {
+      throw error.apply(
+          "Step '"
+              + name
+              + "' must define either 'stepClass' or a declarative service step ('service' +"
+              + " phases)");
+    }
+    return null;
+  }
+
+  /** Rejects a SAGA-mode service step that carries TCC phases or omits a SAGA phase. */
+  public static void requireSagaPhases(
+      JsonNode stepNode, String name, Function<String, RuntimeException> error) {
+    if (hasTccPhase(stepNode)) {
+      throw error.apply(
+          "SAGA definition's service step '"
+              + name
+              + "' must use SAGA phases (execution/compensation), not TCC phases"
+              + " (reservation/confirmation/cancellation)");
+    }
+    if (!isPresent(stepNode, EXECUTION) || !isPresent(stepNode, COMPENSATION)) {
+      throw error.apply(
+          "SAGA declarative service step '"
+              + name
+              + "' must define both 'execution' and 'compensation'");
+    }
+  }
+
+  /** Rejects a TCC-mode service step that carries SAGA phases or omits a TCC phase. */
+  public static void requireTccPhases(
+      JsonNode stepNode, String name, Function<String, RuntimeException> error) {
+    if (hasSagaPhase(stepNode)) {
+      throw error.apply(
+          "TCC definition's service step '"
+              + name
+              + "' must use TCC phases (reservation/confirmation/cancellation), not SAGA phases"
+              + " (execution/compensation)");
+    }
+    if (!isPresent(stepNode, RESERVATION)
+        || !isPresent(stepNode, CONFIRMATION)
+        || !isPresent(stepNode, CANCELLATION)) {
+      throw error.apply(
+          "TCC declarative service step '"
+              + name
+              + "' must define 'reservation', 'confirmation', and 'cancellation'");
+    }
+  }
+
+  /** Whether the step node declares any SAGA phase (execution/compensation). */
+  public static boolean hasSagaPhase(JsonNode stepNode) {
+    return isPresent(stepNode, EXECUTION) || isPresent(stepNode, COMPENSATION);
+  }
+
+  /** Whether the step node declares any TCC phase (reservation/confirmation/cancellation). */
+  public static boolean hasTccPhase(JsonNode stepNode) {
+    return isPresent(stepNode, RESERVATION)
+        || isPresent(stepNode, CONFIRMATION)
+        || isPresent(stepNode, CANCELLATION);
   }
 }

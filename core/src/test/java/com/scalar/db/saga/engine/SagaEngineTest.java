@@ -19,7 +19,6 @@ import static org.mockito.Mockito.when;
 import com.scalar.db.saga.api.RetryPolicy;
 import com.scalar.db.saga.api.SagaContext;
 import com.scalar.db.saga.api.SagaDefinition;
-import com.scalar.db.saga.api.SagaDefinition.SagaMode;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.api.ShutdownMode;
@@ -146,7 +145,7 @@ class SagaEngineTest {
   }
 
   private SagaDefinition sagaDefinition(String... stepNames) {
-    SagaDefinition.Builder builder = SagaDefinition.newBuilder("test-saga", SagaMode.SAGA);
+    var builder = SagaDefinition.newBuilder("test-saga").saga();
     for (String name : stepNames) {
       builder.step(name, "com.example." + name).add();
     }
@@ -154,8 +153,8 @@ class SagaEngineTest {
   }
 
   private SagaDefinition sagaDefinitionWithRetry(String... stepNames) {
-    SagaDefinition.Builder builder =
-        SagaDefinition.newBuilder("test-saga", SagaMode.SAGA).defaultRetryPolicy(fastRetryPolicy());
+    var builder =
+        SagaDefinition.newBuilder("test-saga").saga().defaultRetryPolicy(fastRetryPolicy());
     for (String name : stepNames) {
       builder.step(name, "com.example." + name).add();
     }
@@ -412,7 +411,8 @@ class SagaEngineTest {
       registerStep("s1", step1);
       registerStep("s2", step2);
       SagaDefinition def =
-          SagaDefinition.newBuilder("test-saga", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
               .recoveryStrategy(SagaDefinition.RecoveryStrategy.MIXED)
               .defaultRetryPolicy(fastRetryPolicy())
               .step("s0", "com.example.s0")
@@ -467,7 +467,8 @@ class SagaEngineTest {
       registerStep("t1", tcc1);
       registerStep("t2", tcc2);
       SagaDefinition def =
-          SagaDefinition.newBuilder("tcc-saga", SagaMode.TCC)
+          SagaDefinition.newBuilder("tcc-saga")
+              .tcc()
               .defaultRetryPolicy(fastRetryPolicy())
               .step("t1", "com.example.t1")
               .add()
@@ -494,7 +495,8 @@ class SagaEngineTest {
       TccStep tcc1 = createTccStep("t1");
       registerStep("t1", tcc1);
       SagaDefinition def =
-          SagaDefinition.newBuilder("tcc-saga", SagaMode.TCC)
+          SagaDefinition.newBuilder("tcc-saga")
+              .tcc()
               .defaultRetryPolicy(fastRetryPolicy())
               .step("t1", "com.example.t1")
               .add()
@@ -522,7 +524,8 @@ class SagaEngineTest {
       registerStep("t1", tcc1);
       registerStep("t2", tcc2);
       SagaDefinition def =
-          SagaDefinition.newBuilder("tcc-saga", SagaMode.TCC)
+          SagaDefinition.newBuilder("tcc-saga")
+              .tcc()
               .defaultRetryPolicy(fastRetryPolicy())
               .step("t1", "com.example.t1")
               .add()
@@ -561,7 +564,8 @@ class SagaEngineTest {
       registerStep("t1", tcc1);
       registerStep("t2", tcc2);
       SagaDefinition def =
-          SagaDefinition.newBuilder("tcc-saga", SagaMode.TCC)
+          SagaDefinition.newBuilder("tcc-saga")
+              .tcc()
               .defaultRetryPolicy(fastRetryPolicy())
               .step("t1", "com.example.t1")
               .add()
@@ -600,7 +604,8 @@ class SagaEngineTest {
               });
       registerStep("s1", step1);
       SagaDefinition def =
-          SagaDefinition.newBuilder("test-saga", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
               .defaultRetryPolicy(
                   RetryPolicy.newBuilder()
                       .maxAttempts(1)
@@ -652,7 +657,8 @@ class SagaEngineTest {
 
       // pivot index = 1 (last step), so step 0 is before pivot
       SagaDefinition def =
-          SagaDefinition.newBuilder("test-saga", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
               .timeoutMillis(1000) // saga timeout = 1000ms, clock will return 2000ms
               .step("s0", "com.example.s0")
               .add()
@@ -708,7 +714,8 @@ class SagaEngineTest {
 
       // MIXED strategy: s1 is the pivot. s0 is before pivot, s2 is after pivot.
       SagaDefinition def =
-          SagaDefinition.newBuilder("test-saga", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
               .recoveryStrategy(SagaDefinition.RecoveryStrategy.MIXED)
               .timeoutMillis(1000)
               .step("s0", "com.example.s0")
@@ -1381,7 +1388,8 @@ class SagaEngineTest {
           .thenThrow(new StepExecutionException("fail", true));
       registerStep("s1", step1);
       SagaDefinition def =
-          SagaDefinition.newBuilder("test-saga", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
               .defaultRetryPolicy(fastRetryPolicy()) // default is 3 attempts
               .step("s1", "com.example.s1")
               .retryPolicy(oneAttempt) // step override: 1 attempt
@@ -1582,7 +1590,8 @@ class SagaEngineTest {
       registerStep("s1", step1);
       registerStep("s2", step2);
       SagaDefinition def =
-          SagaDefinition.newBuilder("test-saga", SagaMode.SAGA)
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
               .recoveryStrategy(SagaDefinition.RecoveryStrategy.MIXED)
               .defaultRetryPolicy(fastRetryPolicy())
               .step("s0", "com.example.s0")

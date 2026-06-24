@@ -127,6 +127,33 @@ class SagaDefinitionParserDeclarativeTest {
   }
 
   @Test
+  void parseJson_sagaPhasesInTccMode_throwsException() {
+    // Arrange — a TCC definition whose service step declares only SAGA phases.
+    String json =
+        "{\"name\":\"t\",\"mode\":\"TCC\",\"steps\":["
+            + "{\"name\":\"debit\",\"service\":\"svc\","
+            + "\"execution\":{\"path\":\"/debit\"},\"compensation\":{\"path\":\"/reverse\"}}]}";
+
+    // Act & Assert
+    assertThatThrownBy(() -> SagaDefinitionParser.parseJson(json))
+        .isInstanceOf(SagaDefinitionException.class);
+  }
+
+  @Test
+  void parseJson_tccPhasesInSagaMode_throwsException() {
+    // Arrange — a SAGA definition whose service step declares only TCC phases.
+    String json =
+        "{\"name\":\"t\",\"mode\":\"SAGA\",\"steps\":["
+            + "{\"name\":\"seat\",\"service\":\"svc\","
+            + "\"reservation\":{\"path\":\"/reserve\"},\"confirmation\":{\"path\":\"/confirm\"},"
+            + "\"cancellation\":{\"path\":\"/cancel\"}}]}";
+
+    // Act & Assert
+    assertThatThrownBy(() -> SagaDefinitionParser.parseJson(json))
+        .isInstanceOf(SagaDefinitionException.class);
+  }
+
+  @Test
   void parseJson_missingCompensationGiven_throwsException() {
     // Arrange
     String json =
@@ -177,7 +204,7 @@ class SagaDefinitionParserDeclarativeTest {
     // Act & Assert
     assertThatThrownBy(() -> SagaDefinitionParser.parseJson(json))
         .isInstanceOf(SagaDefinitionException.class)
-        .hasMessageContaining("Declarative service step 'debit' must define phases");
+        .hasMessageContaining("must define both 'execution' and 'compensation'");
   }
 
   @Test

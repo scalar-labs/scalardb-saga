@@ -69,7 +69,12 @@ final class SagaDefinitionSerializer {
     root.put(NAME, def.getName());
     root.put(VERSION, def.getVersion());
     root.put(MODE, def.getMode().name());
-    root.put(RECOVERY_STRATEGY, def.getRecoveryStrategy().name());
+    // TCC recovery (PREDEFINED) and step pivots are implicit and must not be re-specified, so they
+    // are omitted for TCC; the deserializer rejects them if present, mirroring the parser.
+    boolean tcc = def.getMode() == SagaMode.TCC;
+    if (!tcc) {
+      root.put(RECOVERY_STRATEGY, def.getRecoveryStrategy().name());
+    }
     root.put(TIMEOUT_MILLIS, def.getTimeoutMillis());
     if (def.getDefaultRetryPolicy() != null) {
       root.set(DEFAULT_RETRY_POLICY, serializeRetryPolicy(def.getDefaultRetryPolicy()));
@@ -90,7 +95,9 @@ final class SagaDefinitionSerializer {
         }
       }
       s.put(TIMEOUT_MILLIS, step.getTimeoutMillis());
-      s.put(PIVOT, step.isPivot());
+      if (!tcc) {
+        s.put(PIVOT, step.isPivot());
+      }
       if (step.getRetryPolicy() != null) {
         s.set(RETRY_POLICY, serializeRetryPolicy(step.getRetryPolicy()));
       }
@@ -108,103 +115,116 @@ final class SagaDefinitionSerializer {
   SagaDefinition deserialize(String json) {
     try {
       JsonNode root = objectMapper.readTree(json);
-      requireFields(root, NAME, MODE, VERSION, RECOVERY_STRATEGY, TIMEOUT_MILLIS, STEPS);
-
-      SagaDefinition.Builder builder =
-          SagaDefinition.newBuilder(root.get(NAME).asText(), parseEnum(root, MODE, SagaMode.class))
-              .version(root.get(VERSION).asText())
-              .recoveryStrategy(parseEnum(root, RECOVERY_STRATEGY, RecoveryStrategy.class))
-              .timeoutMillis(root.get(TIMEOUT_MILLIS).asLong());
-
-      if (root.has(DEFAULT_RETRY_POLICY) && !root.get(DEFAULT_RETRY_POLICY).isNull()) {
-        builder.defaultRetryPolicy(deserializeRetryPolicy(root.get(DEFAULT_RETRY_POLICY)));
-      }
-
-      for (JsonNode stepNode : root.get(STEPS)) {
-        requireFields(stepNode, NAME, TIMEOUT_MILLIS, PIVOT);
-        SagaDefinition.AbstractStepBuilder<?> stepBuilder = newStepBuilder(builder, stepNode);
-        stepBuilder.timeoutMillis(stepNode.get(TIMEOUT_MILLIS).asLong());
-        stepBuilder.pivot(stepNode.get(PIVOT).asBoolean());
-        if (stepNode.has(RETRY_POLICY) && !stepNode.get(RETRY_POLICY).isNull()) {
-          stepBuilder.retryPolicy(deserializeRetryPolicy(stepNode.get(RETRY_POLICY)));
-        }
-        stepBuilder.add();
-      }
-
-      return builder.build();
+      requireFields(root, NAME, MODE, VERSION, TIMEOUT_MILLIS, STEPS);
+      SagaMode mode = parseEnum(root, MODE, SagaMode.class);
+      return mode == SagaMode.TCC ? deserializeTcc(root) : deserializeSaga(root);
     } catch (JsonProcessingException | RuntimeException e) {
       throw new SagaPersistenceException("Failed to deserialize definition", e);
     }
   }
 
-  private static SagaDefinition.AbstractStepBuilder<?> newStepBuilder(
-      SagaDefinition.Builder builder, JsonNode stepNode) {
-    String name = stepNode.get(NAME).asText();
-    boolean hasStepClass = has(stepNode, STEP_CLASS);
-    boolean hasService = has(stepNode, SERVICE);
-    boolean hasSagaPhase = has(stepNode, EXECUTION) || has(stepNode, COMPENSATION);
-    boolean hasTccPhase =
-        has(stepNode, RESERVATION) || has(stepNode, CONFIRMATION) || has(stepNode, CANCELLATION);
-
-    if (hasStepClass) {
-      if (hasService || hasSagaPhase || hasTccPhase) {
-        throw new IllegalArgumentException(
-            "Step '"
-                + name
-                + "' mixes stepClass with service/phases; exactly one step kind is allowed");
-      }
-      return builder.step(name, stepNode.get(STEP_CLASS).asText());
+  private SagaDefinition deserializeSaga(JsonNode root) {
+    requireFields(root, RECOVERY_STRATEGY);
+    SagaDefinition.SagaBuilder builder =
+        SagaDefinition.newBuilder(root.get(NAME).asText())
+            .saga()
+            .version(root.get(VERSION).asText())
+            .recoveryStrategy(parseEnum(root, RECOVERY_STRATEGY, RecoveryStrategy.class))
+            .timeoutMillis(root.get(TIMEOUT_MILLIS).asLong());
+    applyDefaultRetry(builder, root);
+    for (JsonNode stepNode : root.get(STEPS)) {
+      addSagaStep(builder, stepNode);
     }
+    return builder.build();
+  }
 
-    // Declarative service step: requires a service.
-    if (!hasService) {
+  private SagaDefinition deserializeTcc(JsonNode root) {
+    if (has(root, RECOVERY_STRATEGY)) {
       throw new IllegalArgumentException(
-          "Step '"
-              + name
-              + "' must define either 'stepClass' or a declarative service step ('service' +"
-              + " phases)");
+          "TCC definition must not specify '"
+              + RECOVERY_STRATEGY
+              + "' — recovery is predefined (the cancel phase)");
+    }
+    SagaDefinition.TccBuilder builder =
+        SagaDefinition.newBuilder(root.get(NAME).asText())
+            .tcc()
+            .version(root.get(VERSION).asText())
+            .timeoutMillis(root.get(TIMEOUT_MILLIS).asLong());
+    applyDefaultRetry(builder, root);
+    for (JsonNode stepNode : root.get(STEPS)) {
+      addTccStep(builder, stepNode);
+    }
+    return builder.build();
+  }
+
+  private void applyDefaultRetry(SagaDefinition.AbstractSagaBuilder<?> builder, JsonNode root) {
+    if (root.has(DEFAULT_RETRY_POLICY) && !root.get(DEFAULT_RETRY_POLICY).isNull()) {
+      builder.defaultRetryPolicy(deserializeRetryPolicy(root.get(DEFAULT_RETRY_POLICY)));
+    }
+  }
+
+  private void addSagaStep(SagaDefinition.SagaBuilder builder, JsonNode stepNode) {
+    requireFields(stepNode, NAME, TIMEOUT_MILLIS, PIVOT);
+    String name = stepNode.get(NAME).asText();
+    String stepClass = CallSpecCodec.classStepOrNull(stepNode, name, IllegalArgumentException::new);
+    if (stepClass != null) {
+      SagaDefinition.SagaClassStepBuilder sb = builder.step(name, stepClass);
+      applyStepCommon(sb, stepNode);
+      sb.pivot(stepNode.get(PIVOT).asBoolean());
+      sb.add();
+      return;
     }
     String service = stepNode.get(SERVICE).asText();
-
-    if (!hasSagaPhase && !hasTccPhase) {
-      throw new IllegalArgumentException(
-          "Declarative service step '" + name + "' must define phases");
-    }
-    if (hasSagaPhase && hasTccPhase) {
-      throw new IllegalArgumentException(
-          "Service step '"
-              + name
-              + "' must not mix SAGA phases (execution/compensation) with TCC phases"
-              + " (reservation/confirmation/cancellation)");
-    }
+    CallSpecCodec.requireSagaPhases(stepNode, name, IllegalArgumentException::new);
     Transport transport = CallSpecCodec.parseTransport(stepNode, name);
-    if (hasSagaPhase) {
-      if (!has(stepNode, EXECUTION) || !has(stepNode, COMPENSATION)) {
-        throw new IllegalArgumentException(
-            "SAGA declarative service step '"
-                + name
-                + "' must define both 'execution' and 'compensation'");
-      }
-      return builder
-          .serviceStep(name, service)
-          .operation()
-          .execution(CallSpecCodec.parseCallSpec(transport, stepNode.get(EXECUTION), name))
-          .compensation(CallSpecCodec.parseCallSpec(transport, stepNode.get(COMPENSATION), name));
-    }
-    if (!has(stepNode, RESERVATION)
-        || !has(stepNode, CONFIRMATION)
-        || !has(stepNode, CANCELLATION)) {
+    SagaDefinition.DeclarativeStepBuilder sb =
+        builder
+            .serviceStep(name, service)
+            .execution(CallSpecCodec.parseCallSpec(transport, stepNode.get(EXECUTION), name))
+            .compensation(CallSpecCodec.parseCallSpec(transport, stepNode.get(COMPENSATION), name));
+    applyStepCommon(sb, stepNode);
+    sb.pivot(stepNode.get(PIVOT).asBoolean());
+    sb.add();
+  }
+
+  private void addTccStep(SagaDefinition.TccBuilder builder, JsonNode stepNode) {
+    requireFields(stepNode, NAME, TIMEOUT_MILLIS);
+    String name = stepNode.get(NAME).asText();
+    if (has(stepNode, PIVOT)) {
       throw new IllegalArgumentException(
-          "TCC declarative service step '"
+          "TCC step '"
               + name
-              + "' must define 'reservation', 'confirmation', and 'cancellation'");
+              + "' must not specify '"
+              + PIVOT
+              + "' — TCC recovery is predefined (cancel-based), so the pivot is fixed at the last"
+              + " try step");
     }
-    return builder
-        .serviceStep(name, service)
-        .tccOperation()
-        .reservation(CallSpecCodec.parseCallSpec(transport, stepNode.get(RESERVATION), name))
-        .confirmation(CallSpecCodec.parseCallSpec(transport, stepNode.get(CONFIRMATION), name))
-        .cancellation(CallSpecCodec.parseCallSpec(transport, stepNode.get(CANCELLATION), name));
+    String stepClass = CallSpecCodec.classStepOrNull(stepNode, name, IllegalArgumentException::new);
+    if (stepClass != null) {
+      SagaDefinition.TccClassStepBuilder sb = builder.step(name, stepClass);
+      applyStepCommon(sb, stepNode);
+      sb.add();
+      return;
+    }
+    String service = stepNode.get(SERVICE).asText();
+    CallSpecCodec.requireTccPhases(stepNode, name, IllegalArgumentException::new);
+    Transport transport = CallSpecCodec.parseTransport(stepNode, name);
+    SagaDefinition.TccDeclarativeStepBuilder sb =
+        builder
+            .serviceStep(name, service)
+            .reservation(CallSpecCodec.parseCallSpec(transport, stepNode.get(RESERVATION), name))
+            .confirmation(CallSpecCodec.parseCallSpec(transport, stepNode.get(CONFIRMATION), name))
+            .cancellation(CallSpecCodec.parseCallSpec(transport, stepNode.get(CANCELLATION), name));
+    applyStepCommon(sb, stepNode);
+    sb.add();
+  }
+
+  private void applyStepCommon(
+      SagaDefinition.AbstractStepBuilder<?, ?> stepBuilder, JsonNode stepNode) {
+    stepBuilder.timeoutMillis(stepNode.get(TIMEOUT_MILLIS).asLong());
+    if (stepNode.has(RETRY_POLICY) && !stepNode.get(RETRY_POLICY).isNull()) {
+      stepBuilder.retryPolicy(deserializeRetryPolicy(stepNode.get(RETRY_POLICY)));
+    }
   }
 
   private static String phaseKey(Phase phase) {

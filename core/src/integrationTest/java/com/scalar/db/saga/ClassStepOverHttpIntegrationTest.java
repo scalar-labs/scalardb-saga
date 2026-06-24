@@ -7,7 +7,6 @@ import com.scalar.db.saga.api.Named;
 import com.scalar.db.saga.api.RetryPolicy;
 import com.scalar.db.saga.api.SagaContext;
 import com.scalar.db.saga.api.SagaDefinition;
-import com.scalar.db.saga.api.SagaDefinition.SagaMode;
 import com.scalar.db.saga.api.SagaHttpClient;
 import com.scalar.db.saga.api.SagaManager;
 import com.scalar.db.saga.api.SagaStateSnapshot;
@@ -139,7 +138,8 @@ class ClassStepOverHttpIntegrationTest {
   void start_codeStepsCallSagaHttpClient_outputFlowsAndHeadersPropagate() {
     // Arrange — a GET code step extracts a value into StepResult, a second code step POSTs with it
     SagaDefinition def =
-        SagaDefinition.newBuilder("user-notification-saga", SagaMode.SAGA)
+        SagaDefinition.newBuilder("user-notification-saga")
+            .saga()
             .step("fetch", FetchUserStep.class.getName())
             .add()
             .step("notify", NotifyStep.class.getName())
@@ -170,7 +170,8 @@ class ClassStepOverHttpIntegrationTest {
   void start_sagaHttpClientReturnsRetryableStatus_retriedThenCompletes() {
     // Arrange — the participant fails once (503) then succeeds; send() throws → engine retries
     SagaDefinition def =
-        SagaDefinition.newBuilder("flaky-saga", SagaMode.SAGA)
+        SagaDefinition.newBuilder("flaky-saga")
+            .saga()
             .step("flaky", FlakyStep.class.getName())
             .retryPolicy(
                 RetryPolicy.newBuilder()
@@ -203,7 +204,8 @@ class ClassStepOverHttpIntegrationTest {
     // Arrange — reserve (code step) succeeds; charge (code step) fails on a 422 (in-doubt: the
     // server processed the request, so the charge may have committed).
     SagaDefinition def =
-        SagaDefinition.newBuilder("payment-saga", SagaMode.SAGA)
+        SagaDefinition.newBuilder("payment-saga")
+            .saga()
             .step("reserve", ReserveStep.class.getName())
             .add()
             .step("charge", ChargeStep.class.getName())
@@ -234,11 +236,11 @@ class ClassStepOverHttpIntegrationTest {
     // Arrange — ONE httpEndpoint("svc", ...); a code step (injected SagaHttpClient) followed by a
     // declarative serviceStep, both against the same endpoint
     SagaDefinition def =
-        SagaDefinition.newBuilder("mixed-saga", SagaMode.SAGA)
+        SagaDefinition.newBuilder("mixed-saga")
+            .saga()
             .step("fetch", FetchUserStep.class.getName())
             .add()
             .serviceStep("declarativeNotify", "svc")
-            .operation()
             .execution(
                 HttpCall.newBuilder("/declarative-notify")
                     .jsonBody(Map.of("user", "${userName}"))
@@ -274,11 +276,11 @@ class ClassStepOverHttpIntegrationTest {
   void recover_crashAfterCodeStep_reResolvesHttpStepsAndCompletes() {
     // Arrange — a code step (injected SagaHttpClient) followed by a declarative step
     SagaDefinition def =
-        SagaDefinition.newBuilder("recover-saga", SagaMode.SAGA)
+        SagaDefinition.newBuilder("recover-saga")
+            .saga()
             .step("fetch", FetchUserStep.class.getName())
             .add()
             .serviceStep("declarativeNotify", "svc")
-            .operation()
             .execution(
                 HttpCall.newBuilder("/declarative-notify")
                     .jsonBody(Map.of("user", "${userName}"))

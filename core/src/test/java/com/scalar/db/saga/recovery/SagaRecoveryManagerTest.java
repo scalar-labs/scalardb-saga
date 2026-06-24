@@ -13,7 +13,6 @@ import static org.mockito.Mockito.when;
 
 import com.scalar.db.saga.api.RecoveryConfig;
 import com.scalar.db.saga.api.SagaDefinition;
-import com.scalar.db.saga.api.SagaDefinition.SagaMode;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.engine.ExecutionContext;
@@ -72,7 +71,8 @@ class SagaRecoveryManagerTest {
   }
 
   private static SagaDefinition definition() {
-    return SagaDefinition.newBuilder(SAGA_NAME, SagaMode.SAGA)
+    return SagaDefinition.newBuilder(SAGA_NAME)
+        .saga()
         .step("debit", "com.example.DebitStep")
         .add()
         .step("credit", "com.example.CreditStep")

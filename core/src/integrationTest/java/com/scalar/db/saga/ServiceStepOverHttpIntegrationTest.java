@@ -6,7 +6,6 @@ import com.scalar.db.saga.api.HttpCall;
 import com.scalar.db.saga.api.HttpMethod;
 import com.scalar.db.saga.api.RetryPolicy;
 import com.scalar.db.saga.api.SagaDefinition;
-import com.scalar.db.saga.api.SagaDefinition.SagaMode;
 import com.scalar.db.saga.api.SagaManager;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.store.ScalarDbSagaStoreFactory;
@@ -139,9 +138,9 @@ class ServiceStepOverHttpIntegrationTest {
   void start_declarativeStepsSucceed_outputFlowsAndHeadersPropagate() {
     // Arrange — a GET read step (path templated, output extracted), then a POST using that output
     SagaDefinition def =
-        SagaDefinition.newBuilder("user-notification-saga", SagaMode.SAGA)
+        SagaDefinition.newBuilder("user-notification-saga")
+            .saga()
             .serviceStep("fetch", "user-service")
-            .operation()
             .execution(
                 HttpCall.newBuilder("/users/${userId}")
                     .method(HttpMethod.GET)
@@ -150,7 +149,6 @@ class ServiceStepOverHttpIntegrationTest {
             .compensation(HttpCall.newBuilder("/noop").build())
             .add()
             .serviceStep("notify", "user-service")
-            .operation()
             .execution(
                 HttpCall.newBuilder("/notify").jsonBody(Map.of("user", "${userName}")).build())
             .compensation(HttpCall.newBuilder("/noop").build())
@@ -176,9 +174,9 @@ class ServiceStepOverHttpIntegrationTest {
   void start_declarativeStepReturnsRetryableStatus_retriedThenCompletes() {
     // Arrange — the participant fails once (503) then succeeds
     SagaDefinition def =
-        SagaDefinition.newBuilder("flaky-saga", SagaMode.SAGA)
+        SagaDefinition.newBuilder("flaky-saga")
+            .saga()
             .serviceStep("flaky", "svc")
-            .operation()
             .execution(HttpCall.newBuilder("/flaky").output(Map.of("ok", "$.ok")).build())
             .compensation(HttpCall.newBuilder("/noop").build())
             .retryPolicy(
@@ -206,14 +204,13 @@ class ServiceStepOverHttpIntegrationTest {
   void start_laterDeclarativeStepFailsNonRetryable_priorStepCompensated() {
     // Arrange — reserve succeeds, charge fails non-retryably (422); reserve must be compensated
     SagaDefinition def =
-        SagaDefinition.newBuilder("payment-saga", SagaMode.SAGA)
+        SagaDefinition.newBuilder("payment-saga")
+            .saga()
             .serviceStep("reserve", "svc")
-            .operation()
             .execution(HttpCall.newBuilder("/reserve").build())
             .compensation(HttpCall.newBuilder("/reserve/cancel").build())
             .add()
             .serviceStep("charge", "svc")
-            .operation()
             .execution(HttpCall.newBuilder("/charge").build())
             .compensation(HttpCall.newBuilder("/noop").build())
             .add()
@@ -235,15 +232,14 @@ class ServiceStepOverHttpIntegrationTest {
   void start_tccDeclarativeStepsAllReserve_confirmsAndCompletes() {
     // Arrange — two TCC declarative steps; both reserve, then both confirm
     SagaDefinition def =
-        SagaDefinition.newBuilder("tcc-order-saga", SagaMode.TCC)
+        SagaDefinition.newBuilder("tcc-order-saga")
+            .tcc()
             .serviceStep("reserveStock", "order-service")
-            .tccOperation()
             .reservation(tcc("/tcc/reserve", "reserveStock"))
             .confirmation(tcc("/tcc/confirm", "reserveStock"))
             .cancellation(tcc("/tcc/cancel", "reserveStock"))
             .add()
             .serviceStep("reserveCredit", "order-service")
-            .tccOperation()
             .reservation(tcc("/tcc/reserve", "reserveCredit"))
             .confirmation(tcc("/tcc/confirm", "reserveCredit"))
             .cancellation(tcc("/tcc/cancel", "reserveCredit"))
@@ -268,15 +264,14 @@ class ServiceStepOverHttpIntegrationTest {
   void start_tccDeclarativeLaterReserveFails_bothReservesCancelled() {
     // Arrange — first step reserves; second step's reserve fails non-retryably (422)
     SagaDefinition def =
-        SagaDefinition.newBuilder("tcc-order-saga", SagaMode.TCC)
+        SagaDefinition.newBuilder("tcc-order-saga")
+            .tcc()
             .serviceStep("reserveStock", "order-service")
-            .tccOperation()
             .reservation(tcc("/tcc/reserve", "reserveStock"))
             .confirmation(tcc("/tcc/confirm", "reserveStock"))
             .cancellation(tcc("/tcc/cancel", "reserveStock"))
             .add()
             .serviceStep("reserveCredit", "order-service")
-            .tccOperation()
             .reservation(tcc("/tcc/reserve-fail", "reserveCredit"))
             .confirmation(tcc("/tcc/confirm", "reserveCredit"))
             .cancellation(tcc("/tcc/cancel", "reserveCredit"))
@@ -305,9 +300,9 @@ class ServiceStepOverHttpIntegrationTest {
     // and an endpoint default header (auth) flowing through. The captured raw body feeds a second
     // step's JSON request.
     SagaDefinition def =
-        SagaDefinition.newBuilder("xml-saga", SagaMode.SAGA)
+        SagaDefinition.newBuilder("xml-saga")
+            .saga()
             .serviceStep("send", "xml-service")
-            .operation()
             .execution(
                 HttpCall.newBuilder("/xml-notify")
                     .method(HttpMethod.POST)
@@ -318,7 +313,6 @@ class ServiceStepOverHttpIntegrationTest {
             .compensation(HttpCall.newBuilder("/noop").build())
             .add()
             .serviceStep("record", "xml-service")
-            .operation()
             .execution(HttpCall.newBuilder("/notify").jsonBody(Map.of("ack", "${ack}")).build())
             .compensation(HttpCall.newBuilder("/noop").build())
             .add()
