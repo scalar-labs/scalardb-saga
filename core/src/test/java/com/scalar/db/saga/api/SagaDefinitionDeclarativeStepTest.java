@@ -3,11 +3,9 @@ package com.scalar.db.saga.api;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.scalar.db.saga.api.SagaDefinition.SagaMode;
 import com.scalar.db.saga.api.SagaDefinition.ServiceStep;
 import com.scalar.db.saga.api.SagaDefinition.ServiceStep.Phase;
 import com.scalar.db.saga.api.SagaDefinition.StepDefinition;
-import com.scalar.db.saga.exception.SagaDefinitionException;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
@@ -18,7 +16,7 @@ class SagaDefinitionDeclarativeStepTest {
   }
 
   @Test
-  void build_sagaPhasesGiven_buildsServiceStep() {
+  void declarativeStep_sagaPhasesGiven_buildsSagaDeclarativeStep() {
     // Arrange
     HttpCall execution =
         HttpCall.newBuilder("/debit")
@@ -30,9 +28,9 @@ class SagaDefinitionDeclarativeStepTest {
 
     // Act
     SagaDefinition definition =
-        SagaDefinition.newBuilder("transfer", SagaMode.SAGA)
+        SagaDefinition.newBuilder("transfer")
+            .saga()
             .serviceStep("debit", "account-service")
-            .operation()
             .execution(execution)
             .compensation(compensation)
             .add()
@@ -53,12 +51,12 @@ class SagaDefinitionDeclarativeStepTest {
   }
 
   @Test
-  void build_tccPhasesGiven_buildsTccServiceStep() {
+  void declarativeStep_tccPhasesGiven_buildsTccDeclarativeStep() {
     // Act
     SagaDefinition definition =
-        SagaDefinition.newBuilder("reserveSeats", SagaMode.TCC)
+        SagaDefinition.newBuilder("reserveSeats")
+            .tcc()
             .serviceStep("seat", "booking-service")
-            .tccOperation()
             .reservation(call("/reserve"))
             .confirmation(call("/confirm"))
             .cancellation(call("/cancel"))
@@ -73,43 +71,12 @@ class SagaDefinitionDeclarativeStepTest {
   }
 
   @Test
-  void build_sagaPhasesInTccMode_throwsException() {
-    // Arrange
-    SagaDefinition.Builder builder =
-        SagaDefinition.newBuilder("tcc-saga", SagaMode.TCC)
-            .serviceStep("debit", "account-service")
-            .operation()
-            .execution(call("/debit"))
-            .compensation(call("/reverse"))
-            .add();
-
-    // Act & Assert
-    assertThatThrownBy(builder::build).isInstanceOf(SagaDefinitionException.class);
-  }
-
-  @Test
-  void build_tccPhasesInSagaMode_throwsException() {
-    // Arrange
-    SagaDefinition.Builder builder =
-        SagaDefinition.newBuilder("saga", SagaMode.SAGA)
-            .serviceStep("seat", "booking-service")
-            .tccOperation()
-            .reservation(call("/reserve"))
-            .confirmation(call("/confirm"))
-            .cancellation(call("/cancel"))
-            .add();
-
-    // Act & Assert
-    assertThatThrownBy(builder::build).isInstanceOf(SagaDefinitionException.class);
-  }
-
-  @Test
   void add_incompleteSagaPhases_throwsException() {
     // Arrange — execution without compensation.
     SagaDefinition.DeclarativeStepBuilder stepBuilder =
-        SagaDefinition.newBuilder("saga", SagaMode.SAGA)
+        SagaDefinition.newBuilder("saga")
+            .saga()
             .serviceStep("debit", "account-service")
-            .operation()
             .execution(call("/debit"));
 
     // Act & Assert — add() rejects the incomplete step.
@@ -120,9 +87,9 @@ class SagaDefinitionDeclarativeStepTest {
   void add_incompleteTccPhases_throwsException() {
     // Arrange — reservation and confirmation without cancellation.
     SagaDefinition.TccDeclarativeStepBuilder stepBuilder =
-        SagaDefinition.newBuilder("tcc", SagaMode.TCC)
+        SagaDefinition.newBuilder("tcc")
+            .tcc()
             .serviceStep("seat", "booking-service")
-            .tccOperation()
             .reservation(call("/reserve"))
             .confirmation(call("/confirm"));
 
@@ -134,9 +101,9 @@ class SagaDefinitionDeclarativeStepTest {
   void execution_calledTwice_throwsException() {
     // Arrange
     SagaDefinition.DeclarativeStepBuilder stepBuilder =
-        SagaDefinition.newBuilder("saga", SagaMode.SAGA)
+        SagaDefinition.newBuilder("saga")
+            .saga()
             .serviceStep("debit", "account-service")
-            .operation()
             .execution(call("/debit"));
 
     // Act & Assert — setting the same phase twice is rejected.
@@ -148,9 +115,9 @@ class SagaDefinitionDeclarativeStepTest {
   void reservation_calledTwice_throwsException() {
     // Arrange
     SagaDefinition.TccDeclarativeStepBuilder stepBuilder =
-        SagaDefinition.newBuilder("tcc", SagaMode.TCC)
+        SagaDefinition.newBuilder("tcc")
+            .tcc()
             .serviceStep("seat", "booking-service")
-            .tccOperation()
             .reservation(call("/reserve"));
 
     // Act & Assert — setting the same phase twice is rejected.
@@ -162,11 +129,11 @@ class SagaDefinitionDeclarativeStepTest {
   void build_mixedStepKindsGiven_succeeds() {
     // Act
     SagaDefinition definition =
-        SagaDefinition.newBuilder("mixed", SagaMode.SAGA)
+        SagaDefinition.newBuilder("mixed")
+            .saga()
             .step("classStep", "com.example.ClassStep")
             .add()
             .serviceStep("declStep", "account-service")
-            .operation()
             .execution(call("/debit"))
             .compensation(call("/reverse"))
             .add()
@@ -181,16 +148,16 @@ class SagaDefinitionDeclarativeStepTest {
   }
 
   @Test
-  void serviceStep_blankNameGiven_throwsException() {
+  void declarativeStep_blankNameGiven_throwsException() {
     // Act & Assert
-    assertThatThrownBy(() -> SagaDefinition.newBuilder("s", SagaMode.SAGA).serviceStep(" ", "svc"))
+    assertThatThrownBy(() -> SagaDefinition.newBuilder("s").saga().serviceStep(" ", "svc"))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
-  void serviceStep_blankServiceGiven_throwsException() {
+  void declarativeStep_blankServiceGiven_throwsException() {
     // Act & Assert
-    assertThatThrownBy(() -> SagaDefinition.newBuilder("s", SagaMode.SAGA).serviceStep("step", " "))
+    assertThatThrownBy(() -> SagaDefinition.newBuilder("s").saga().serviceStep("step", " "))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
@@ -199,16 +166,12 @@ class SagaDefinitionDeclarativeStepTest {
   void execution_nullCallGiven_throwsException() {
     // Act & Assert
     assertThatThrownBy(
-            () ->
-                SagaDefinition.newBuilder("s", SagaMode.SAGA)
-                    .serviceStep("step", "svc")
-                    .operation()
-                    .execution(null))
+            () -> SagaDefinition.newBuilder("s").saga().serviceStep("step", "svc").execution(null))
         .isInstanceOf(NullPointerException.class);
   }
 
   @Test
-  void equals_equalServiceSteps_areEqual() {
+  void declarativeStep_equalSteps_areEqual() {
     // Arrange
     ServiceStep a = buildSagaStep();
     ServiceStep b = buildSagaStep();
@@ -219,9 +182,9 @@ class SagaDefinitionDeclarativeStepTest {
 
   private static ServiceStep buildSagaStep() {
     return (ServiceStep)
-        SagaDefinition.newBuilder("s", SagaMode.SAGA)
+        SagaDefinition.newBuilder("s")
+            .saga()
             .serviceStep("step", "svc")
-            .operation()
             .execution(call("/a"))
             .compensation(call("/b"))
             .add()

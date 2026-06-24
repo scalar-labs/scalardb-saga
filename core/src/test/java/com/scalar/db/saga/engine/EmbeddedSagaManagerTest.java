@@ -15,7 +15,6 @@ import static org.mockito.Mockito.when;
 
 import com.scalar.db.saga.api.SagaCallback;
 import com.scalar.db.saga.api.SagaDefinition;
-import com.scalar.db.saga.api.SagaDefinition.SagaMode;
 import com.scalar.db.saga.api.SagaDefinitionId;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
@@ -70,14 +69,12 @@ class EmbeddedSagaManagerTest {
   }
 
   private static SagaDefinition definition(String name) {
-    return SagaDefinition.newBuilder(name, SagaMode.SAGA)
-        .step("s1", "com.example.Step1")
-        .add()
-        .build();
+    return SagaDefinition.newBuilder(name).saga().step("s1", "com.example.Step1").add().build();
   }
 
   private static SagaDefinition definition(String name, String version) {
-    return SagaDefinition.newBuilder(name, SagaMode.SAGA)
+    return SagaDefinition.newBuilder(name)
+        .saga()
         .version(version)
         .step("s1", "com.example.Step1")
         .add()
