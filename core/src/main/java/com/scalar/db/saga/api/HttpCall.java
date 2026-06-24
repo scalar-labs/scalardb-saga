@@ -140,13 +140,14 @@ public final class HttpCall extends CallSpec {
     collectKeys(path, keys);
     query.values().forEach(value -> collectKeys(value, keys));
     jsonBody.values().forEach(value -> collectKeys(value, keys));
-    if (stringBody != null) {
-      collectKeys(stringBody, keys);
-    }
+    collectKeys(stringBody, keys);
     return keys;
   }
 
-  private static void collectKeys(String template, Set<String> into) {
+  private static void collectKeys(@Nullable String template, Set<String> into) {
+    if (template == null) {
+      return;
+    }
     Matcher matcher = PLACEHOLDER.matcher(template);
     while (matcher.find()) {
       String key = matcher.group(1);
