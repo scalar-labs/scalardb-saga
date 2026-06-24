@@ -110,6 +110,8 @@ class EventPayloadSerializerTest {
     assertThat(EventPayloadSerializer.isKnownNotCommitted("{\"type\":\"x\",\"message\":\"y\"}"))
         .isFalse(); // legacy payload without the flag
     assertThat(EventPayloadSerializer.isKnownNotCommitted("not json")).isFalse();
+    // A JSON null literal deserializes to a null map — must not NPE.
+    assertThat(EventPayloadSerializer.isKnownNotCommitted("null")).isFalse();
   }
 
   @Test

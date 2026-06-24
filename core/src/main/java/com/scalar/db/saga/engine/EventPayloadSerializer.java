@@ -79,7 +79,12 @@ public final class EventPayloadSerializer {
       return false;
     }
     try {
-      Object value = MAPPER.readValue(payload, MAP_TYPE).get(KNOWN_NOT_COMMITTED);
+      Map<String, Object> map = MAPPER.readValue(payload, MAP_TYPE);
+      if (map == null) {
+        // A JSON null literal ("null") deserializes to a null map; treat it as the safe default.
+        return false;
+      }
+      Object value = map.get(KNOWN_NOT_COMMITTED);
       return value instanceof Boolean b && b;
     } catch (JsonProcessingException e) {
       return false;
