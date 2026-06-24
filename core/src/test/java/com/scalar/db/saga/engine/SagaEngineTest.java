@@ -1524,8 +1524,7 @@ class SagaEngineTest {
         throws Exception {
       // The core fix: a forward failure whose non-delivery is NOT proven (the default — e.g. any
       // non-HTTP class step throwing a bare StepExecutionException) may have committed step 1's
-      // side
-      // effect, so compensation must INCLUDE step 1 (compensate from i, not i-1).
+      // side effect, so compensation must INCLUDE step 1 (compensate from i, not i-1).
 
       // Arrange
       Step step0 = successStep("s0");
