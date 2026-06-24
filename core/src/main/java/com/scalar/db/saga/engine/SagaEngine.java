@@ -298,7 +298,8 @@ public class SagaEngine implements AutoCloseable {
 
       // Execute and record are in SEPARATE try blocks because they have different
       // compensation scopes:
-      //   - executeWithRetry fails  → step i did NOT run  → compensate from i - 1
+      //   - executeWithRetry fails  → step i may have committed → compensate from i,
+      //       unless the failure proved non-delivery (knownNotCommitted) → from i - 1
       //   - recordStepCompleted fails → step i DID run    → compensate from i
       // A single try block with catch(StepExecutionException) would let the
       // RuntimeException from recordStepCompleted escape entirely, orphaning
@@ -316,7 +317,11 @@ public class SagaEngine implements AutoCloseable {
       } catch (StepExecutionException e) {
         recordStepFailed(context, i, stepWithPolicy.step().getName(), e);
         if (i <= pivotIndex) {
-          compensate(plan, context, i - 1);
+          // A forward failure may have committed step i's side effect (a 2xx with a mismatched
+          // body, an in-doubt timeout, any non-HTTP class step). The honest default is to include
+          // step i; skip it (compensate from i - 1) only when the failure proved non-delivery.
+          int from = e.knownNotCommitted() ? i - 1 : i;
+          compensate(plan, context, from);
         }
         return;
       }
@@ -364,7 +369,7 @@ public class SagaEngine implements AutoCloseable {
   private void recordStepFailed(
       ExecutionContext context, int stepIndex, String stepName, StepExecutionException e) {
     if (!context.hasFailureEvent(stepIndex)) {
-      String errorPayload = EventPayloadSerializer.serializeError(e);
+      String errorPayload = EventPayloadSerializer.serializeError(e, e.knownNotCommitted());
       store.recordStepEvent(
           context.getSagaId(),
           context.nextSequence(),
@@ -385,6 +390,11 @@ public class SagaEngine implements AutoCloseable {
 
     int maxAttempts = retryPolicy.getMaxAttempts();
     long interval = retryPolicy.getInitialIntervalMillis();
+
+    // Sticky AND of knownNotCommitted across retries: the step is "known not committed" only if
+    // EVERY attempt proved non-delivery. Once any attempt is in-doubt (may have committed), the
+    // step stays possibly-committed even if a later attempt is a proven non-delivery.
+    boolean possiblyCommitted = false;
 
     for (int attempt = 1; attempt <= maxAttempts; attempt++) {
       Future<StepResult> future =
@@ -427,6 +437,9 @@ public class SagaEngine implements AutoCloseable {
       } catch (ExecutionException e) {
         Throwable cause = e.getCause();
         if (cause instanceof StepExecutionException see) {
+          if (!see.knownNotCommitted()) {
+            possiblyCommitted = true;
+          }
           if (see.isRetryable() && attempt < maxAttempts) {
             logger.warn(
                 "Retryable failure on step '{}', attempt {}/{}",
@@ -442,6 +455,13 @@ public class SagaEngine implements AutoCloseable {
                   "Step '" + step.getName() + "' interrupted during backoff", ie, false);
             }
             continue;
+          }
+          // If an earlier attempt was in-doubt, the step may have committed even though this final
+          // attempt proved non-delivery — strip knownNotCommitted so the engine compensates it.
+          if (possiblyCommitted && see.knownNotCommitted()) {
+            Throwable seeCause = see.getCause();
+            throw new StepExecutionException(
+                seeCause != null ? seeCause : see, see.isRetryable(), false);
           }
           throw see;
         }

@@ -219,7 +219,7 @@ final class SagaHttpClientImpl implements SagaHttpClient {
             correlation.stepName(),
             remaining);
       } catch (HttpCallException e) {
-        throw new StepExecutionException(e, e.isRetryable());
+        throw new StepExecutionException(e, e.isRetryable(), e.knownNotCommitted());
       }
     }
 

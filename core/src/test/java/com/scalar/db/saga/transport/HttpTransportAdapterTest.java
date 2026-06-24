@@ -255,9 +255,31 @@ class HttpTransportAdapterTest {
     // Act
     Throwable thrown = catchThrowable(() -> adapter.call(spec, ctx(Map.of()), "s"));
 
-    // Assert
+    // Assert — the server returned a status, so the side effect may have committed.
     assertThat(thrown).isInstanceOf(TransportException.class);
     assertThat(((TransportException) thrown).isRetryable()).isFalse();
+    assertThat(((TransportException) thrown).knownNotCommitted()).isFalse();
+  }
+
+  @Test
+  void call_connectionRefused_knownNotCommitted() throws IOException {
+    // Arrange — an adapter pointing at a dead port: the request never reaches a participant.
+    HttpServer probe = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+    int deadPort = probe.getAddress().getPort();
+    probe.start();
+    probe.stop(0);
+    HttpTransportAdapter dead =
+        new HttpTransportAdapter(
+            "http://localhost:" + deadPort,
+            new HttpExchange(HttpClient.newHttpClient(), OutboundHttpPolicy.allowAll()));
+    HttpCall spec = HttpCall.newBuilder("/debit").build();
+
+    // Act
+    Throwable thrown = catchThrowable(() -> dead.call(spec, ctx(Map.of()), "debit"));
+
+    // Assert — proven non-delivery propagates from HttpExchange through the adapter.
+    assertThat(thrown).isInstanceOf(TransportException.class);
+    assertThat(((TransportException) thrown).knownNotCommitted()).isTrue();
   }
 
   @Test
@@ -300,9 +322,10 @@ class HttpTransportAdapterTest {
     // Act
     Throwable thrown = catchThrowable(() -> adapter.call(spec, ctx(Map.of()), "debit"));
 
-    // Assert
+    // Assert — a 2xx whose body lacks the mapped output: the side effect committed → not skipped.
     assertThat(thrown).isInstanceOf(TransportException.class);
     assertThat(((TransportException) thrown).isRetryable()).isFalse();
+    assertThat(((TransportException) thrown).knownNotCommitted()).isFalse();
   }
 
   private static void respond(com.sun.net.httpserver.HttpExchange ex, int status, String body)

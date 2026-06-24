@@ -1,7 +1,11 @@
 package com.scalar.db.saga.api;
 
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import net.jcip.annotations.Immutable;
 import org.jspecify.annotations.Nullable;
 
@@ -36,6 +40,9 @@ public final class HttpCall extends CallSpec {
 
   /** The output token capturing the entire raw response body as a {@code String}. */
   public static final String BODY_OUTPUT = "$body";
+
+  /** Placeholder syntax for context-value interpolation; shared with the transport resolver. */
+  public static final Pattern PLACEHOLDER = Pattern.compile("\\$\\{([^}]*)\\}");
 
   private final HttpMethod method;
   private final String path;
@@ -120,6 +127,39 @@ public final class HttpCall extends CallSpec {
    */
   public Map<String, String> getOutput() {
     return output;
+  }
+
+  /**
+   * The {@code ${key}} keys referenced across the path, query values, JSON-body values, and string
+   * body. Keys are matched exactly as the runtime resolver reads them (no trimming); empty {@code
+   * ${}} placeholders are ignored.
+   */
+  @Override
+  public Set<String> referencedContextKeys() {
+    Set<String> keys = new HashSet<>();
+    collectKeys(path, keys);
+    query.values().forEach(value -> collectKeys(value, keys));
+    jsonBody.values().forEach(value -> collectKeys(value, keys));
+    if (stringBody != null) {
+      collectKeys(stringBody, keys);
+    }
+    return keys;
+  }
+
+  private static void collectKeys(String template, Set<String> into) {
+    Matcher matcher = PLACEHOLDER.matcher(template);
+    while (matcher.find()) {
+      String key = matcher.group(1);
+      if (!key.isEmpty()) {
+        into.add(key);
+      }
+    }
+  }
+
+  /** The context keys bound from the response, i.e. the {@link #getOutput()} keys. */
+  @Override
+  public Set<String> producedContextKeys() {
+    return output.keySet();
   }
 
   @Override

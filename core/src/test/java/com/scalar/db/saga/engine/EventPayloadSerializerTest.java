@@ -79,12 +79,37 @@ class EventPayloadSerializerTest {
     RuntimeException e = new RuntimeException("something went wrong");
 
     // Act
-    String json = EventPayloadSerializer.serializeError(e);
+    String json = EventPayloadSerializer.serializeError(e, false);
 
     // Assert
     Map<String, Object> result = EventPayloadSerializer.deserializeMap(json);
     assertThat(result).containsEntry("type", "java.lang.RuntimeException");
     assertThat(result).containsEntry("message", "something went wrong");
+    assertThat(EventPayloadSerializer.isKnownNotCommitted(json)).isFalse();
+  }
+
+  @Test
+  void serializeError_knownNotCommittedTrue_roundTripsThroughIsKnownNotCommitted() {
+    // Arrange
+    RuntimeException e = new RuntimeException("refused");
+
+    // Act
+    String json = EventPayloadSerializer.serializeError(e, true);
+
+    // Assert — the flag survives persistence so recovery can skip the failed step.
+    assertThat(EventPayloadSerializer.isKnownNotCommitted(json)).isTrue();
+    assertThat(EventPayloadSerializer.deserializeMap(json))
+        .containsEntry("knownNotCommitted", true);
+  }
+
+  @Test
+  void isKnownNotCommitted_nullOrLegacyOrMalformedPayload_isFalse() {
+    // A null, legacy (pre-flag), or unparseable payload defaults to false — the safe value.
+    assertThat(EventPayloadSerializer.isKnownNotCommitted(null)).isFalse();
+    assertThat(EventPayloadSerializer.isKnownNotCommitted("")).isFalse();
+    assertThat(EventPayloadSerializer.isKnownNotCommitted("{\"type\":\"x\",\"message\":\"y\"}"))
+        .isFalse(); // legacy payload without the flag
+    assertThat(EventPayloadSerializer.isKnownNotCommitted("not json")).isFalse();
   }
 
   @Test

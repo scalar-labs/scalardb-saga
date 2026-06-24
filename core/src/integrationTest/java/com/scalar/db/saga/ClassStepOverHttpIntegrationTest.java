@@ -61,6 +61,7 @@ class ClassStepOverHttpIntegrationTest {
   private final AtomicReference<String> sagaStepHeader = new AtomicReference<>();
   private final CopyOnWriteArrayList<String> notified = new CopyOnWriteArrayList<>();
   private final CopyOnWriteArrayList<String> cancelled = new CopyOnWriteArrayList<>();
+  private final CopyOnWriteArrayList<String> chargeCancelled = new CopyOnWriteArrayList<>();
   private final AtomicInteger flakyCalls = new AtomicInteger();
   private final CopyOnWriteArrayList<String> declarativeNotified = new CopyOnWriteArrayList<>();
   private final AtomicReference<String> declarativeSagaStepHeader = new AtomicReference<>();
@@ -98,6 +99,12 @@ class ClassStepOverHttpIntegrationTest {
           respond(ex, 200, "{}");
         });
     server.createContext("/charge", ex -> respond(ex, 422, "{}")); // non-retryable
+    server.createContext(
+        "/charge/cancel",
+        ex -> {
+          chargeCancelled.add(readBody(ex));
+          respond(ex, 200, "{}");
+        });
     server.createContext(
         "/flaky",
         ex -> {
@@ -192,8 +199,9 @@ class ClassStepOverHttpIntegrationTest {
   // ---------------------------------------------------------------------------
 
   @Test
-  void start_laterCodeStepFailsNonRetryable_priorCodeStepCompensated() {
-    // Arrange — reserve (code step) succeeds, charge (code step) fails non-retryably (422)
+  void start_laterCodeStepFailsInDoubt_failedAndPriorCodeStepsCompensated() {
+    // Arrange — reserve (code step) succeeds; charge (code step) fails on a 422 (in-doubt: the
+    // server processed the request, so the charge may have committed).
     SagaDefinition def =
         SagaDefinition.newBuilder("payment-saga", SagaMode.SAGA)
             .step("reserve", ReserveStep.class.getName())
@@ -208,8 +216,11 @@ class ClassStepOverHttpIntegrationTest {
       // Act
       String sagaId = manager.start("payment-saga", Map.of());
 
-      // Assert — saga compensated; the prior code step's compensate() HTTP call ran
+      // Assert — saga compensated, and BOTH the failed code step (charge) and the prior one
+      // (reserve) ran their compensate() HTTP call: a class step that fails in-doubt is compensated
+      // by default, with no framework visibility into the side effect.
       assertThat(manager.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.COMPENSATED);
+      assertThat(chargeCancelled).hasSize(1);
       assertThat(cancelled).hasSize(1);
     }
   }
@@ -450,7 +461,11 @@ class ClassStepOverHttpIntegrationTest {
     }
   }
 
-  /** Calls {@code /charge}, which returns a non-retryable 422 → {@code send()} throws. */
+  /**
+   * Calls {@code /charge}, which returns a non-retryable 422 → {@code send()} throws. The 422 is an
+   * in-doubt failure (the server processed the request, so the charge may have committed), so its
+   * {@code compensate()} POSTs {@code /charge/cancel}.
+   */
   public static class ChargeStep implements Step {
     private final SagaHttpClient http;
 
@@ -470,6 +485,12 @@ class ClassStepOverHttpIntegrationTest {
     }
 
     @Override
-    public void compensate(SagaContext context) throws StepCompensationException {}
+    public void compensate(SagaContext context) throws StepCompensationException {
+      try {
+        http.post("/charge/cancel").jsonBody(Map.of("op", "cancel")).send();
+      } catch (StepExecutionException e) {
+        throw new StepCompensationException(e);
+      }
+    }
   }
 }

@@ -3,9 +3,12 @@ package com.scalar.db.saga.transport;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
+import java.net.ConnectException;
 import java.net.URI;
 import java.net.URLEncoder;
+import java.net.UnknownHostException;
 import java.net.http.HttpClient;
+import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandler;
@@ -25,6 +28,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import javax.net.ssl.SSLHandshakeException;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -85,7 +89,8 @@ final class HttpExchange {
     try {
       return mapper.writeValueAsBytes(value);
     } catch (JsonProcessingException e) {
-      throw new HttpCallException("Failed to encode request body", e, false);
+      // Pre-send failure → the request was never sent, so nothing committed.
+      throw new HttpCallException("Failed to encode request body", e, false, true);
     }
   }
 
@@ -123,13 +128,16 @@ final class HttpExchange {
       throws HttpCallException {
     URI uri = buildUri(baseUrl, path, queryParams);
     if (!policy.isAllowed(uri)) {
-      throw new HttpCallException("Host not allowed by policy: " + uri.getHost(), false);
+      throw new HttpCallException(
+          "Host not allowed by policy: " + uri.getHost(), null, false, true);
     }
 
     if (body != null && body.length > policy.maxBodyBytes()) {
       throw new HttpCallException(
           "Request body exceeds limit (" + body.length + " > " + policy.maxBodyBytes() + ")",
-          false);
+          null,
+          false,
+          true);
     }
 
     Duration effectiveTimeout = requestTimeout != null ? requestTimeout : timeout;
@@ -155,7 +163,7 @@ final class HttpExchange {
       // character in a value (a saga correlation header or a caller-supplied one). Both are
       // definition errors — surface them as non-retryable rather than letting a raw
       // IllegalArgumentException escape.
-      throw new HttpCallException("Invalid request URI or header for " + uri, e, false);
+      throw new HttpCallException("Invalid request URI or header for " + uri, e, false, true);
     }
 
     // contentType independently gates the Content-Type header above; here we only care whether
@@ -194,7 +202,12 @@ final class HttpExchange {
         // non-retryable rather than hammering a broken server up to the policy's max attempts.
         throw new HttpCallException("Malformed Content-Length from " + uri, cause, false);
       }
-      throw new HttpCallException("HTTP call failed: " + uri, cause != null ? cause : e, true);
+      // A failure proven never to have reached the participant (connection refused, DNS, TLS
+      // handshake, connect-timeout) cannot have committed a side effect, so mark it. A mid-flight
+      // reset, read failure, or any ambiguous I/O may have committed, so it stays false (in-doubt).
+      boolean knownNotCommitted = cause != null && isProvenNonDelivery(cause);
+      throw new HttpCallException(
+          "HTTP call failed: " + uri, cause != null ? cause : e, true, knownNotCommitted);
     } catch (InterruptedException e) {
       future.cancel(true);
       Thread.currentThread().interrupt();
@@ -350,6 +363,30 @@ final class HttpExchange {
     return false;
   }
 
+  /**
+   * Whether {@code cause} proves the request never reached the participant — connection refused
+   * ({@link ConnectException}), DNS failure ({@link UnknownHostException}), TLS handshake failure
+   * ({@link SSLHandshakeException}), or a <em>connect</em> (not read) timeout ({@link
+   * HttpConnectTimeoutException}). Such a failure cannot have committed a side effect, so the
+   * engine may skip the failed step's compensation. Everything else — a mid-flight reset, a read
+   * timeout, a body-read failure, or any ambiguous {@link IOException} — may have committed and is
+   * not proven.
+   *
+   * <p>An {@link SSLHandshakeException} is safe to treat as non-delivery because the TLS handshake
+   * completes before any request bytes are sent, so a handshake failure (bad cert, hostname
+   * mismatch, no common protocol) is always pre-send. The only way a handshake error could surface
+   * <em>after</em> the request reached the server is TLS renegotiation, which TLS 1.3 removed and
+   * HTTP/2 forbids — so it cannot occur on this client's runtime. (A TLS error during the response
+   * is an {@code SSLException} / {@code SSLProtocolException}, not a handshake exception, and
+   * correctly stays in-doubt.)
+   */
+  private static boolean isProvenNonDelivery(Throwable cause) {
+    return hasCause(cause, ConnectException.class)
+        || hasCause(cause, UnknownHostException.class)
+        || hasCause(cause, SSLHandshakeException.class)
+        || hasCause(cause, HttpConnectTimeoutException.class);
+  }
+
   private static URI buildUri(
       String baseUrl, String path, List<Map.Entry<String, String>> queryParams)
       throws HttpCallException {
@@ -372,7 +409,7 @@ final class HttpExchange {
       // A malformed base URL or path (illegal URI characters) is a definition error, not a
       // transient failure — surface it as a non-retryable HttpCallException rather than letting
       // the raw IllegalArgumentException escape as a generic "Unexpected error" in the engine.
-      throw new HttpCallException("Malformed request URI: " + url, e, false);
+      throw new HttpCallException("Malformed request URI: " + url, e, false, true);
     }
   }
 

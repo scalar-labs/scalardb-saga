@@ -28,14 +28,14 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * End-to-end conformance of declarative steps (Layer 2b) against the participant HTTP protocol (see
- * {@code docs/specs/participant-http-protocol.md}): sagas whose steps are declarative {@code
- * ServiceStep}s, registered via {@code httpEndpoint(...)}, driven by the engine over a
- * SQLite-backed store against a real in-process participant. Covers the SAGA happy path (a {@code
- * GET} read step with path/query templating, output extraction, and output flowing into a later
- * step's request), correlation-header propagation, engine retry on a retryable {@code 503},
- * compensation of a completed step when a later step fails non-retryably ({@code 422}), and the TCC
- * lifecycle (reserve→confirm; reserve→cancel when a later reserve fails).
+ * End-to-end conformance of declarative steps (Layer 2b) against the participant HTTP protocol:
+ * sagas whose steps are declarative {@code ServiceStep}s, registered via {@code httpEndpoint(...)},
+ * driven by the engine over a SQLite-backed store against a real in-process participant. Covers the
+ * SAGA happy path (a {@code GET} read step with path/query templating, output extraction, and
+ * output flowing into a later step's request), correlation-header propagation, engine retry on a
+ * retryable {@code 503}, compensation of a completed step when a later step fails non-retryably
+ * ({@code 422}), and the TCC lifecycle (reserve→confirm; reserve→cancel when a later reserve
+ * fails).
  */
 class ServiceStepOverHttpIntegrationTest {
 
@@ -265,7 +265,7 @@ class ServiceStepOverHttpIntegrationTest {
   }
 
   @Test
-  void start_tccDeclarativeLaterReserveFails_priorReserveCancelled() {
+  void start_tccDeclarativeLaterReserveFails_bothReservesCancelled() {
     // Arrange — first step reserves; second step's reserve fails non-retryably (422)
     SagaDefinition def =
         SagaDefinition.newBuilder("tcc-order-saga", SagaMode.TCC)
@@ -289,11 +289,12 @@ class ServiceStepOverHttpIntegrationTest {
       // Act
       String sagaId = manager.start("tcc-order-saga", Map.of());
 
-      // Assert — the second reserve failed, so the first reserve was cancelled and nothing
-      // confirmed
+      // Assert — the second reserve returned 422 (it may have committed the reservation), so BOTH
+      // reservations are cancelled (cancel from the failed step, not just the prior one)
+      // and nothing is confirmed.
       assertThat(manager.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.COMPENSATED);
       assertThat(reserved).hasSize(1);
-      assertThat(tccCancelled).hasSize(1);
+      assertThat(tccCancelled).hasSize(2);
       assertThat(confirmed).isEmpty();
     }
   }

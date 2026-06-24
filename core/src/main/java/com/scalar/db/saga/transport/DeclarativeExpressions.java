@@ -27,7 +27,7 @@ final class DeclarativeExpressions {
   /** The output token capturing the entire raw response body as a {@code String}. */
   static final String BODY_OUTPUT = HttpCall.BODY_OUTPUT;
 
-  private static final Pattern PLACEHOLDER = Pattern.compile("\\$\\{([^}]*)\\}");
+  private static final Pattern PLACEHOLDER = HttpCall.PLACEHOLDER;
   private static final Pattern SINGLE_PLACEHOLDER = Pattern.compile("^\\$\\{([^}]+)\\}$");
 
   private DeclarativeExpressions() {}
@@ -145,7 +145,10 @@ final class DeclarativeExpressions {
     return context
         .get(key, Object.class)
         .orElseThrow(
-            () -> new TransportException("No saga context value for '${" + key + "}'", false));
+            // Pre-send template resolution → the request was never built/sent, so nothing
+            // committed.
+            () ->
+                new TransportException("No saga context value for '${" + key + "}'", false, true));
   }
 
   /**
@@ -157,6 +160,7 @@ final class DeclarativeExpressions {
   private static Object requireScalar(String key, SagaContext context) throws TransportException {
     Object value = require(key, context);
     if (value instanceof Map || value instanceof Iterable) {
+      // Pre-send template resolution → the request was never built/sent, so nothing committed.
       throw new TransportException(
           "Context value for '${"
               + key
@@ -164,7 +168,8 @@ final class DeclarativeExpressions {
               + value.getClass().getSimpleName()
               + ", not a scalar; only scalar values can be interpolated into a path/query/string"
               + " body",
-          false);
+          false,
+          true);
     }
     return value;
   }
@@ -179,8 +184,9 @@ final class DeclarativeExpressions {
    */
   private static void rejectUnclosedPlaceholder(String template) throws TransportException {
     if (PLACEHOLDER.matcher(template).replaceAll("").contains("${")) {
+      // Pre-send template resolution → the request was never built/sent, so nothing committed.
       throw new TransportException(
-          "Unclosed '${' in template '" + template + "' (missing '}')", false);
+          "Unclosed '${' in template '" + template + "' (missing '}')", false, true);
     }
   }
 

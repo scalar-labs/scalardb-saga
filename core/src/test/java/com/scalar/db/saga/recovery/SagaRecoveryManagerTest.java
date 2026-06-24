@@ -478,8 +478,9 @@ class SagaRecoveryManagerTest {
     }
 
     @Test
-    void recover_compensatingSagaNoCompensationStarted_compensatesFromLastCompleted() {
-      // Arrange
+    void recover_failureNotKnownNotCommittedNoCompensationYet_compensatesIncludingFailedStep() {
+      // Arrange — step 2's forward failure does not prove non-delivery (null/legacy payload →
+      // knownNotCommitted=false), so it may have committed and must be compensated too.
       SagaStateSnapshot saga = snapshot(SagaStatus.COMPENSATING);
       SagaDefinition def = definition();
       ExecutionContext ctx = mock(ExecutionContext.class);
@@ -498,7 +499,34 @@ class SagaRecoveryManagerTest {
       // Act
       manager.recover();
 
-      // Assert — no compensation events, last completed is index 1
+      // Assert — compensation includes the failed step 2, not just the completed steps.
+      verify(engine).compensateFrom(def, ctx, 2);
+    }
+
+    @Test
+    void recover_failureKnownNotCommittedNoCompensationYet_compensatesFromHighestCompleted() {
+      // Arrange — step 2's failure is proven non-delivery (knownNotCommitted=true persisted on the
+      // STEP_FAILED payload), so it is skipped; compensation starts from the highest completed (1).
+      SagaStateSnapshot saga = snapshot(SagaStatus.COMPENSATING);
+      SagaDefinition def = definition();
+      ExecutionContext ctx = mock(ExecutionContext.class);
+      List<SagaEvent> events =
+          List.of(
+              StepEvent.completed(0, "debit", null).withTimestamp(NOW.minusSeconds(120)),
+              StepEvent.completed(1, "credit", null).withTimestamp(NOW.minusSeconds(90)),
+              StepEvent.failed(2, "notify", "{\"knownNotCommitted\":true}")
+                  .withTimestamp(NOW.minusSeconds(60)));
+
+      setupSinglePageRecovery(saga);
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(engine.replayEvents(saga, events)).thenReturn(ctx);
+      when(ctx.getCurrentState()).thenReturn(saga);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(def);
+
+      // Act
+      manager.recover();
+
+      // Assert — the proven-non-delivery failed step is skipped; start from the highest completed.
       verify(engine).compensateFrom(def, ctx, 1);
     }
 

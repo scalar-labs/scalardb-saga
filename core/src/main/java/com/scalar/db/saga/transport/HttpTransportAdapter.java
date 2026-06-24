@@ -100,6 +100,7 @@ final class HttpTransportAdapter implements TransportAdapter {
   }
 
   private static TransportException toTransportException(HttpCallException e) {
-    return new TransportException("HTTP transport error: " + e.getMessage(), e, e.isRetryable());
+    return new TransportException(
+        "HTTP transport error: " + e.getMessage(), e, e.isRetryable(), e.knownNotCommitted());
   }
 }

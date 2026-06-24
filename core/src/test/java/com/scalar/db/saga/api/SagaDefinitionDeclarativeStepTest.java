@@ -26,7 +26,7 @@ class SagaDefinitionDeclarativeStepTest {
             .output(Map.of("debitId", "$.debit_id"))
             .build();
     HttpCall compensation =
-        HttpCall.newBuilder("/debit/reverse").jsonBody(Map.of("id", "${debitId}")).build();
+        HttpCall.newBuilder("/debit/reverse").jsonBody(Map.of("amount", "${amount}")).build();
 
     // Act
     SagaDefinition definition =
@@ -228,5 +228,94 @@ class SagaDefinitionDeclarativeStepTest {
             .build()
             .getSteps()
             .get(0);
+  }
+
+  // --- undo must not reference its own forward output (compensation-failure-model) -------------
+
+  @Test
+  void build_compensationReferencesOwnExecutionOutput_throwsException() {
+    // Arrange — the compensation references ${debitId}, which the execution itself produces. A
+    // failed execution never binds that output, so the undo could not resolve it.
+    HttpCall execution = HttpCall.newBuilder("/debit").output(Map.of("debitId", "$.id")).build();
+    HttpCall compensation =
+        HttpCall.newBuilder("/reverse").jsonBody(Map.of("id", "${debitId}")).build();
+    SagaDefinition.Builder builder =
+        SagaDefinition.newBuilder("transfer", SagaMode.SAGA)
+            .serviceStep("debit", "account-service")
+            .operation()
+            .execution(execution)
+            .compensation(compensation)
+            .add();
+
+    // Act & Assert
+    assertThatThrownBy(builder::build).isInstanceOf(SagaDefinitionException.class);
+  }
+
+  @Test
+  void build_cancellationReferencesOwnReservationOutput_throwsException() {
+    // Arrange — the cancellation references ${reserveId}, which the reservation itself produces.
+    HttpCall reservation =
+        HttpCall.newBuilder("/reserve").output(Map.of("reserveId", "$.id")).build();
+    HttpCall cancellation =
+        HttpCall.newBuilder("/cancel").jsonBody(Map.of("id", "${reserveId}")).build();
+    SagaDefinition.Builder builder =
+        SagaDefinition.newBuilder("reserveSeats", SagaMode.TCC)
+            .serviceStep("seat", "booking-service")
+            .tccOperation()
+            .reservation(reservation)
+            .confirmation(call("/confirm"))
+            .cancellation(cancellation)
+            .add();
+
+    // Act & Assert
+    assertThatThrownBy(builder::build).isInstanceOf(SagaDefinitionException.class);
+  }
+
+  @Test
+  void build_compensationReferencesInputNotOwnOutput_succeeds() {
+    // Arrange — the compensation references ${accountId} (a saga input), not its own output.
+    HttpCall execution = HttpCall.newBuilder("/debit").output(Map.of("debitId", "$.id")).build();
+    HttpCall compensation =
+        HttpCall.newBuilder("/reverse").jsonBody(Map.of("account", "${accountId}")).build();
+
+    // Act
+    SagaDefinition definition =
+        SagaDefinition.newBuilder("transfer", SagaMode.SAGA)
+            .serviceStep("debit", "account-service")
+            .operation()
+            .execution(execution)
+            .compensation(compensation)
+            .add()
+            .build();
+
+    // Assert
+    assertThat(definition.getSteps()).hasSize(1);
+  }
+
+  @Test
+  void build_compensationReferencesPriorStepOutput_succeeds() {
+    // Arrange — step "credit"'s compensation references ${debitId}, produced by the PRIOR "debit"
+    // step (durably available), not by "credit" itself. That is allowed.
+    HttpCall debitExec = HttpCall.newBuilder("/debit").output(Map.of("debitId", "$.id")).build();
+    HttpCall creditComp =
+        HttpCall.newBuilder("/credit/reverse").jsonBody(Map.of("ref", "${debitId}")).build();
+
+    // Act
+    SagaDefinition definition =
+        SagaDefinition.newBuilder("transfer", SagaMode.SAGA)
+            .serviceStep("debit", "account-service")
+            .operation()
+            .execution(debitExec)
+            .compensation(call("/debit/reverse"))
+            .add()
+            .serviceStep("credit", "account-service")
+            .operation()
+            .execution(call("/credit"))
+            .compensation(creditComp)
+            .add()
+            .build();
+
+    // Assert
+    assertThat(definition.getSteps()).hasSize(2);
   }
 }

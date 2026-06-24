@@ -1,5 +1,6 @@
 package com.scalar.db.saga.api;
 
+import java.util.Set;
 import net.jcip.annotations.Immutable;
 
 /**
@@ -48,4 +49,20 @@ public abstract sealed class CallSpec permits HttpCall {
 
   /** The wire transport this call uses — the discriminator persisted with the definition. */
   public abstract Transport transport();
+
+  /**
+   * The saga-context keys this call references via {@code ${key}} substitutions in its request
+   * templates. May be empty.
+   *
+   * <p>Used at build time to enforce that a compensating call does not depend on its own forward
+   * step's output (which may not exist when the forward action failed) — see {@link
+   * Step#compensate} / {@link TccStep#cancel}.
+   */
+  public abstract Set<String> referencedContextKeys();
+
+  /**
+   * The saga-context keys this call binds into the context from its response (its output mapping).
+   * May be empty.
+   */
+  public abstract Set<String> producedContextKeys();
 }

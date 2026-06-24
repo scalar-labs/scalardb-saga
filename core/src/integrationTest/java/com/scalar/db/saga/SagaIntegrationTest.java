@@ -173,14 +173,16 @@ class SagaIntegrationTest {
         assertThat(step1.getExecutionCount()).isEqualTo(1);
         assertThat(step2.getExecutionCount()).isEqualTo(1);
         assertThat(step3.getExecutionCount()).isEqualTo(1);
-        // step3 failed, so its side effect never committed — not compensated
-        assertThat(step3.getCompensationCount()).isEqualTo(0);
+        // step3's execute failed, but its non-delivery is not proven, so it may have committed →
+        // it is compensated too (compensate from i, not i-1).
+        assertThat(step3.getCompensationCount()).isEqualTo(1);
         assertThat(step2.getCompensationCount()).isEqualTo(1);
         assertThat(step1.getCompensationCount()).isEqualTo(1);
       }
 
-      // Verify compensation event ordering (LIFO: step2 before step1) by reading persisted events
-      // through an independent store — the manager owns and has already closed its own store.
+      // Verify compensation event ordering (LIFO: step3 → step2 → step1) by reading persisted
+      // events through an independent store — the manager owns and has already closed its own
+      // store.
       try (SagaStore eventStore = ScalarDbSagaStoreFactory.create(props).createStore()) {
         List<SagaEvent> events = eventStore.getEvents(sagaId);
         List<StepEvent> compensatedEvents =
@@ -188,9 +190,10 @@ class SagaIntegrationTest {
                 .filter(e -> e.getEventType() == EventType.STEP_COMPENSATED)
                 .map(e -> (StepEvent) e)
                 .toList();
-        assertThat(compensatedEvents).hasSize(2);
-        assertThat(compensatedEvents.get(0).getStepName()).isEqualTo("step2");
-        assertThat(compensatedEvents.get(1).getStepName()).isEqualTo("step1");
+        assertThat(compensatedEvents).hasSize(3);
+        assertThat(compensatedEvents.get(0).getStepName()).isEqualTo("step3");
+        assertThat(compensatedEvents.get(1).getStepName()).isEqualTo("step2");
+        assertThat(compensatedEvents.get(2).getStepName()).isEqualTo("step1");
       }
     }
 
@@ -379,8 +382,9 @@ class SagaIntegrationTest {
     }
 
     @Test
-    void start_secondReserveFails_cancelsFirstReserve() {
-      // Arrange
+    void start_secondReserveFails_cancelsBothReserves() {
+      // Arrange — step2's reserve fails without proving non-delivery (the default), so its
+      // reservation may have committed and must be cancelled too (cancel from i).
       FakeTccStep step1 = FakeTccStep.newBuilder("step1").build();
       FakeTccStep step2 =
           FakeTccStep.newBuilder("step2")
@@ -407,7 +411,7 @@ class SagaIntegrationTest {
         assertThat(step1.getReservations()).hasSize(1);
         assertThat(step2.getReservations()).hasSize(1);
         assertThat(step1.getCancellations()).hasSize(1);
-        assertThat(step2.getCancellations()).isEmpty();
+        assertThat(step2.getCancellations()).hasSize(1);
         assertThat(step1.getConfirmations()).isEmpty();
         assertThat(step2.getConfirmations()).isEmpty();
       }

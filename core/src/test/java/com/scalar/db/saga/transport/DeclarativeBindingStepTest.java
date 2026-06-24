@@ -77,6 +77,36 @@ class DeclarativeBindingStepTest {
   }
 
   @Test
+  void execute_transportKnownNotCommitted_propagatesFlag() throws Exception {
+    // Arrange — a proven non-delivery rides the TransportException into the step exception.
+    TransportAdapter transport = mock(TransportAdapter.class);
+    when(transport.call(any(), any(), any()))
+        .thenThrow(new TransportException("refused", new RuntimeException(), true, true));
+
+    // Act
+    Throwable thrown = catchThrowable(() -> adapter(transport).execute(CTX));
+
+    // Assert — the engine may skip the failed step from compensation; retryable is independent.
+    assertThat(thrown).isInstanceOf(StepExecutionException.class);
+    assertThat(((StepExecutionException) thrown).knownNotCommitted()).isTrue();
+    assertThat(((StepExecutionException) thrown).isRetryable()).isTrue();
+  }
+
+  @Test
+  void execute_transportCommitted_flagIsFalse() throws Exception {
+    // Arrange — an unproven failure (the default) → the failed step must be compensated.
+    TransportAdapter transport = mock(TransportAdapter.class);
+    when(transport.call(any(), any(), any())).thenThrow(new TransportException("in-doubt", false));
+
+    // Act
+    Throwable thrown = catchThrowable(() -> adapter(transport).execute(CTX));
+
+    // Assert
+    assertThat(thrown).isInstanceOf(StepExecutionException.class);
+    assertThat(((StepExecutionException) thrown).knownNotCommitted()).isFalse();
+  }
+
+  @Test
   void compensate_callsCompensationSpec() throws Exception {
     // Arrange
     TransportAdapter transport = mock(TransportAdapter.class);
