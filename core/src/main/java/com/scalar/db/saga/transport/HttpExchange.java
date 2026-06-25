@@ -374,13 +374,17 @@ final class HttpExchange {
    * timeout, a body-read failure, or any ambiguous {@link IOException} — may have committed and is
    * not proven.
    *
-   * <p>An {@link SSLHandshakeException} is safe to treat as non-delivery because the TLS handshake
-   * completes before any request bytes are sent, so a handshake failure (bad cert, hostname
-   * mismatch, no common protocol) is always pre-send. The only way a handshake error could surface
-   * <em>after</em> the request reached the server is TLS renegotiation, which TLS 1.3 removed and
-   * HTTP/2 forbids — so it cannot occur on this client's runtime. (A TLS error during the response
-   * is an {@code SSLException} / {@code SSLProtocolException}, not a handshake exception, and
-   * correctly stays in-doubt.)
+   * <p>{@link SSLHandshakeException} is safe to treat as non-delivery because JSSE raises it only
+   * for {@code handshakeOnly} alerts (bad cert, hostname mismatch, no common protocol, {@code
+   * handshake_failure}), which arise only during the <em>initial</em> handshake — and that
+   * completes before any request bytes are sent, so it is always pre-send. This client does not
+   * force TLS 1.3 / HTTP-2, so a TLS 1.2 connection can still receive a server-initiated
+   * renegotiation ({@code hello_request}) after the request was sent; but the JDK {@code
+   * HttpClient} does not perform renegotiation — it rejects {@code hello_request} as an unexpected
+   * message, which surfaces as {@code SSLProtocolException} (JDK-8208642), a sibling of {@code
+   * SSLHandshakeException} that this method does not match, so it correctly stays in-doubt.
+   * (Caveat: a non-default JSSE provider that actively renegotiates could throw {@code
+   * SSLHandshakeException} post-delivery; not covered.)
    */
   private static boolean isProvenNonDelivery(Throwable cause) {
     return hasCause(cause, ConnectException.class)
