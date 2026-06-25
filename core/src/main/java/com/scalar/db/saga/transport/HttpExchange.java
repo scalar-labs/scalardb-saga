@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.net.ConnectException;
+import java.net.NoRouteToHostException;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.UnknownHostException;
@@ -365,7 +366,8 @@ final class HttpExchange {
 
   /**
    * Whether {@code cause} proves the request never reached the participant — connection refused
-   * ({@link ConnectException}), DNS failure ({@link UnknownHostException}), TLS handshake failure
+   * ({@link ConnectException}), host unreachable via firewall/routing ({@link
+   * NoRouteToHostException}), DNS failure ({@link UnknownHostException}), TLS handshake failure
    * ({@link SSLHandshakeException}), or a <em>connect</em> (not read) timeout ({@link
    * HttpConnectTimeoutException}). Such a failure cannot have committed a side effect, so the
    * engine may skip the failed step's compensation. Everything else — a mid-flight reset, a read
@@ -382,6 +384,7 @@ final class HttpExchange {
    */
   private static boolean isProvenNonDelivery(Throwable cause) {
     return hasCause(cause, ConnectException.class)
+        || hasCause(cause, NoRouteToHostException.class)
         || hasCause(cause, UnknownHostException.class)
         || hasCause(cause, SSLHandshakeException.class)
         || hasCause(cause, HttpConnectTimeoutException.class);

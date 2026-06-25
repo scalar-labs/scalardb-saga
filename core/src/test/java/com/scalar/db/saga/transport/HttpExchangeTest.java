@@ -13,6 +13,7 @@ import java.io.OutputStream;
 import java.net.ConnectException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.NoRouteToHostException;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.UnknownHostException;
@@ -279,6 +280,11 @@ class HttpExchangeTest {
     assertThat(
             knownNotCommittedAfterSendFails(new HttpConnectTimeoutException("connect timed out")))
         .isTrue();
+  }
+
+  @Test
+  void exchange_noRouteToHost_knownNotCommitted() {
+    assertThat(knownNotCommittedAfterSendFails(new NoRouteToHostException("unreachable"))).isTrue();
   }
 
   @Test
