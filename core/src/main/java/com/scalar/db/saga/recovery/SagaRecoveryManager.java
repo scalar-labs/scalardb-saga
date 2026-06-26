@@ -4,6 +4,7 @@ import com.scalar.db.saga.api.RecoveryConfig;
 import com.scalar.db.saga.api.SagaDefinition;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.engine.EventPayloadSerializer;
 import com.scalar.db.saga.engine.ExecutionContext;
 import com.scalar.db.saga.engine.SagaDefinitionRegistry;
 import com.scalar.db.saga.engine.SagaEngine;
@@ -255,6 +256,29 @@ public class SagaRecoveryManager {
       return;
     }
 
+    // A durable STEP_FAILED at or before the pivot means the engine had already exhausted retries
+    // and decided to compensate: the forward path records STEP_FAILED, then transitions to
+    // COMPENSATING. A crash between those two writes leaves the saga RUNNING with the failure
+    // recorded but compensation never started. Resuming forward here would re-run a step whose side
+    // effect may have committed (an in-doubt failure) and, if the re-run then proved non-delivery,
+    // skip it — orphaning the original side effect. Drive compensation instead, mirroring
+    // recoverCompensating's fromStep computation: an in-doubt/possibly-committed failure (in
+    // failedIndicesToCompensate) is included; a knownNotCommitted=true failure is skipped (start
+    // from the highest completed). A POST-pivot failure is intentionally left to resume forward —
+    // FORWARD/MIXED recovery re-attempts the failed step rather than compensating past the pivot.
+    int pivotIndex = def.getPivotIndex();
+    if (hasUnresolvedPrePivotFailure(events, pivotIndex)) {
+      int fromStep =
+          Math.max(
+              stepIndices(events, EventType.STEP_COMPLETED).max().orElse(-1),
+              failedIndicesToCompensate(events)
+                  .filter(index -> index <= pivotIndex)
+                  .max()
+                  .orElse(-1));
+      engine.compensateFrom(def, context, fromStep);
+      return;
+    }
+
     int lastCompleted = stepIndices(events, EventType.STEP_COMPLETED).max().orElse(-1);
 
     engine.resumeFrom(def, context, lastCompleted + 1);
@@ -276,11 +300,55 @@ public class SagaRecoveryManager {
     if (lastCompensated < Integer.MAX_VALUE) {
       fromStep = lastCompensated - 1;
     } else {
-      // No compensation started yet — find the last completed step
-      fromStep = stepIndices(events, EventType.STEP_COMPLETED).max().orElse(-1);
+      // No compensation started yet (crash after the COMPENSATING transition, before any step was
+      // compensated). Start from the highest completed step OR the highest forward failure whose
+      // non-delivery was NOT proven — that failed step may have committed and must be compensated
+      // too. A knownNotCommitted failure is safely skipped.
+      fromStep =
+          Math.max(
+              stepIndices(events, EventType.STEP_COMPLETED).max().orElse(-1),
+              failedIndicesToCompensate(events).max().orElse(-1));
     }
 
+    // Pivot-scope invariant (documented, not enforced): unlike the forward path's
+    // `if (i <= pivotIndex)` guard, this does not clamp fromStep to the pivot — it does not need
+    // to. A saga reaches COMPENSATING only via a PRE-pivot forward failure, which stops execution
+    // at that step, so every completed/failed index here is necessarily <= pivotIndex and fromStep
+    // cannot point past the pivot. If a future path ever drives a past-the-pivot saga into
+    // COMPENSATING (most likely a manual cancel/abort API), this breaks: such a saga cannot be
+    // cleanly auto-rolled-back, so it must fail loud (escalate), NOT silently clamp here — that
+    // would leave a torn saga (pre-pivot undone, post-pivot still committed). Handle the pivot
+    // scope when that path is introduced.
     engine.compensateFrom(def, context, fromStep);
+  }
+
+  /**
+   * STEP_FAILED indices whose persisted payload does not prove non-delivery — those failed steps
+   * may have committed, so compensation must include them. A {@code knownNotCommitted} failure
+   * (proven non-delivery) is excluded.
+   */
+  private static IntStream failedIndicesToCompensate(List<SagaEvent> events) {
+    return events.stream()
+        .filter(e -> e instanceof StepEvent)
+        .map(e -> (StepEvent) e)
+        .filter(e -> e.getEventType() == EventType.STEP_FAILED)
+        .filter(e -> !EventPayloadSerializer.isKnownNotCommitted(e.getPayload()))
+        .mapToInt(StepEvent::getStepIndex);
+  }
+
+  /**
+   * Returns whether a RUNNING saga has a forward failure at or before the pivot that no later
+   * {@code STEP_COMPLETED} at the same index resolved. Such a failure means the engine had decided
+   * to compensate (retries exhausted) but crashed before the {@code COMPENSATING} transition, so
+   * recovery must compensate rather than resume forward. Post-pivot failures are excluded — those
+   * are resumed forward (FORWARD/MIXED recovery).
+   */
+  private static boolean hasUnresolvedPrePivotFailure(List<SagaEvent> events, int pivotIndex) {
+    Set<Integer> resolvedIndices =
+        stepIndices(events, EventType.STEP_COMPLETED).boxed().collect(Collectors.toSet());
+    return stepIndices(events, EventType.STEP_FAILED)
+        .filter(index -> index <= pivotIndex)
+        .anyMatch(index -> !resolvedIndices.contains(index));
   }
 
   /**

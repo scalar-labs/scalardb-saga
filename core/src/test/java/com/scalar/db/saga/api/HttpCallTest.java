@@ -253,4 +253,55 @@ class HttpCallTest {
     // Act & Assert
     assertThat(post).isNotEqualTo(put);
   }
+
+  @Test
+  void referencedContextKeys_acrossPathQueryAndBody_collectsAllKeys() {
+    // Arrange
+    HttpCall call =
+        HttpCall.newBuilder("/accounts/${accountId}/debit")
+            .query(Map.of("trace", "${traceId}"))
+            .jsonBody(Map.of("amount", "${amount}", "note", "literal-${memo}-suffix"))
+            .build();
+
+    // Act & Assert
+    assertThat(call.referencedContextKeys())
+        .containsExactlyInAnyOrder("accountId", "traceId", "amount", "memo");
+  }
+
+  @Test
+  void referencedContextKeys_fromStringBody_collectsKeys() {
+    // Arrange
+    HttpCall call =
+        HttpCall.newBuilder("/notify").stringBody("<msg>${text} for ${userId}</msg>").build();
+
+    // Act & Assert
+    assertThat(call.referencedContextKeys()).containsExactlyInAnyOrder("text", "userId");
+  }
+
+  @Test
+  void referencedContextKeys_noPlaceholdersOrEmptyPlaceholder_isEmpty() {
+    // Arrange — a literal path, a literal body, and an empty ${} placeholder (ignored).
+    HttpCall call =
+        HttpCall.newBuilder("/static").jsonBody(Map.of("k", "v", "blank", "${}")).build();
+
+    // Act & Assert
+    assertThat(call.referencedContextKeys()).isEmpty();
+  }
+
+  @Test
+  void producedContextKeys_returnsOutputKeys() {
+    // Arrange
+    HttpCall call =
+        HttpCall.newBuilder("/debit")
+            .output(Map.of("debitId", "$.debit_id", "raw", HttpCall.BODY_OUTPUT))
+            .build();
+
+    // Act & Assert
+    assertThat(call.producedContextKeys()).containsExactlyInAnyOrder("debitId", "raw");
+  }
+
+  @Test
+  void producedContextKeys_noOutput_isEmpty() {
+    assertThat(HttpCall.newBuilder("/debit").build().producedContextKeys()).isEmpty();
+  }
 }

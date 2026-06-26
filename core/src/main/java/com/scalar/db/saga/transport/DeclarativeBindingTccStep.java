@@ -49,7 +49,7 @@ final class DeclarativeBindingTccStep implements TccStep {
     try {
       return StepResult.of(transport.call(reserve, context, name));
     } catch (TransportException e) {
-      throw new StepExecutionException(e, e.isRetryable());
+      throw new StepExecutionException(e, e.isRetryable(), e.knownNotCommitted());
     }
   }
 

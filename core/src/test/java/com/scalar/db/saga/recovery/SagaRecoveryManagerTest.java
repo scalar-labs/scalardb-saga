@@ -335,17 +335,21 @@ class SagaRecoveryManagerTest {
     }
 
     @Test
-    void recover_runningSagaWithRecentFailure_resumesInsteadOfEscalating() {
-      // Arrange
+    void recover_runningSagaWithInDoubtPrePivotFailure_compensatesIncludingFailedStep() {
+      // Arrange — step 1's forward failure is in-doubt (null/legacy payload → knownNotCommitted=
+      // false): the engine recorded STEP_FAILED(1) and was about to compensate, but crashed before
+      // the COMPENSATING transition, so the saga is still RUNNING. Recovery must compensate the
+      // possibly-committed step 1, NOT resume forward (resuming would re-run it and, if the re-run
+      // then proved non-delivery, skip it — orphaning the original committed side effect).
       SagaStateSnapshot saga = snapshot(SagaStatus.RUNNING);
-      SagaDefinition def = definition();
+      SagaDefinition def = definition(); // 2-step BACKWARD saga: pivot = last step (index 1)
       ExecutionContext ctx = mock(ExecutionContext.class);
 
-      // Failure event within grace period (NOW - 30 minutes < 1 hour grace)
+      // Failure within grace period so escalation does not pre-empt compensation.
       List<SagaEvent> events =
           List.of(
-              StepEvent.completed(0, "debit", null).withTimestamp(NOW.minusSeconds(1800)),
-              StepEvent.failed(1, "credit", null).withTimestamp(NOW.minusSeconds(1800)));
+              StepEvent.completed(0, "debit", null).withTimestamp(NOW.minusSeconds(60)),
+              StepEvent.failed(1, "credit", null).withTimestamp(NOW.minusSeconds(30)));
 
       setupSinglePageRecovery(saga);
       when(store.getEvents(SAGA_ID)).thenReturn(events);
@@ -356,8 +360,79 @@ class SagaRecoveryManagerTest {
       // Act
       manager.recover();
 
-      // Assert — last completed is step 0, so resume from step 1
+      // Assert — compensate including the failed step 1; do not resume forward.
+      verify(engine).compensateFrom(def, ctx, 1);
+      verify(engine, never()).resumeFrom(any(), any(), anyInt());
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any());
+    }
+
+    @Test
+    void recover_runningSagaWithKnownNotCommittedPrePivotFailure_compensatesSkippingFailedStep() {
+      // Arrange — step 1's forward failure proved non-delivery (knownNotCommitted=true persisted on
+      // the STEP_FAILED payload). The engine recorded STEP_FAILED(1) and was about to compensate
+      // from step 0 (skipping the un-delivered step 1), but crashed before the COMPENSATING
+      // transition. Recovery must compensate from the highest completed step (0), skipping step 1 —
+      // not resume forward.
+      SagaStateSnapshot saga = snapshot(SagaStatus.RUNNING);
+      SagaDefinition def = definition();
+      ExecutionContext ctx = mock(ExecutionContext.class);
+
+      List<SagaEvent> events =
+          List.of(
+              StepEvent.completed(0, "debit", null).withTimestamp(NOW.minusSeconds(60)),
+              StepEvent.failed(1, "credit", "{\"knownNotCommitted\":true}")
+                  .withTimestamp(NOW.minusSeconds(30)));
+
+      setupSinglePageRecovery(saga);
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(engine.replayEvents(saga, events)).thenReturn(ctx);
+      when(ctx.getCurrentState()).thenReturn(saga);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(def);
+
+      // Act
+      manager.recover();
+
+      // Assert — proven-non-delivery step 1 is skipped; compensate from the highest completed (0).
+      verify(engine).compensateFrom(def, ctx, 0);
+      verify(engine, never()).resumeFrom(any(), any(), anyInt());
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any());
+    }
+
+    @Test
+    void recover_runningSagaWithPostPivotFailure_resumesForward() {
+      // Arrange — a FORWARD-recovery saga has pivot = -1, so every step is post-pivot. A forward
+      // failure there is retried by recovery (roll forward), not compensated: there is no
+      // crash-before-compensating ambiguity because the engine never compensates past the pivot.
+      SagaStateSnapshot saga = snapshot(SagaStatus.RUNNING);
+      SagaDefinition def =
+          SagaDefinition.newBuilder(SAGA_NAME)
+              .saga()
+              .recoveryStrategy(SagaDefinition.RecoveryStrategy.FORWARD)
+              .step("debit", "com.example.DebitStep")
+              .add()
+              .step("credit", "com.example.CreditStep")
+              .add()
+              .build();
+      ExecutionContext ctx = mock(ExecutionContext.class);
+
+      // Recent failure (within grace) so it is not escalated.
+      List<SagaEvent> events =
+          List.of(
+              StepEvent.completed(0, "debit", null).withTimestamp(NOW.minusSeconds(60)),
+              StepEvent.failed(1, "credit", null).withTimestamp(NOW.minusSeconds(30)));
+
+      setupSinglePageRecovery(saga);
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(engine.replayEvents(saga, events)).thenReturn(ctx);
+      when(ctx.getCurrentState()).thenReturn(saga);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(def);
+
+      // Act
+      manager.recover();
+
+      // Assert — resume forward at the failed post-pivot step; never compensate.
       verify(engine).resumeFrom(def, ctx, 1);
+      verify(engine, never()).compensateFrom(any(), any(), anyInt());
       verify(store, never()).recordStatusEvent(any(), anyInt(), any());
     }
 
@@ -478,8 +553,9 @@ class SagaRecoveryManagerTest {
     }
 
     @Test
-    void recover_compensatingSagaNoCompensationStarted_compensatesFromLastCompleted() {
-      // Arrange
+    void recover_failureNotKnownNotCommittedNoCompensationYet_compensatesIncludingFailedStep() {
+      // Arrange — step 2's forward failure does not prove non-delivery (null/legacy payload →
+      // knownNotCommitted=false), so it may have committed and must be compensated too.
       SagaStateSnapshot saga = snapshot(SagaStatus.COMPENSATING);
       SagaDefinition def = definition();
       ExecutionContext ctx = mock(ExecutionContext.class);
@@ -498,7 +574,34 @@ class SagaRecoveryManagerTest {
       // Act
       manager.recover();
 
-      // Assert — no compensation events, last completed is index 1
+      // Assert — compensation includes the failed step 2, not just the completed steps.
+      verify(engine).compensateFrom(def, ctx, 2);
+    }
+
+    @Test
+    void recover_failureKnownNotCommittedNoCompensationYet_compensatesFromHighestCompleted() {
+      // Arrange — step 2's failure is proven non-delivery (knownNotCommitted=true persisted on the
+      // STEP_FAILED payload), so it is skipped; compensation starts from the highest completed (1).
+      SagaStateSnapshot saga = snapshot(SagaStatus.COMPENSATING);
+      SagaDefinition def = definition();
+      ExecutionContext ctx = mock(ExecutionContext.class);
+      List<SagaEvent> events =
+          List.of(
+              StepEvent.completed(0, "debit", null).withTimestamp(NOW.minusSeconds(120)),
+              StepEvent.completed(1, "credit", null).withTimestamp(NOW.minusSeconds(90)),
+              StepEvent.failed(2, "notify", "{\"knownNotCommitted\":true}")
+                  .withTimestamp(NOW.minusSeconds(60)));
+
+      setupSinglePageRecovery(saga);
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(engine.replayEvents(saga, events)).thenReturn(ctx);
+      when(ctx.getCurrentState()).thenReturn(saga);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(def);
+
+      // Act
+      manager.recover();
+
+      // Assert — the proven-non-delivery failed step is skipped; start from the highest completed.
       verify(engine).compensateFrom(def, ctx, 1);
     }
 

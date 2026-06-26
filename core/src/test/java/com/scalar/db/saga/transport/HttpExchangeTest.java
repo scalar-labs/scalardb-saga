@@ -10,11 +10,15 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.net.ConnectException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.NoRouteToHostException;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.UnknownHostException;
 import java.net.http.HttpClient;
+import java.net.http.HttpConnectTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
@@ -23,6 +27,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import javax.net.ssl.SSLHandshakeException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -249,6 +254,139 @@ class HttpExchangeTest {
     assertThat(((HttpCallException) thrown).isRetryable()).isTrue();
     assertThat(thrown.getCause()).isInstanceOf(InterruptedException.class);
     assertThat(interruptedAfter).isTrue();
+  }
+
+  // --- knownNotCommitted classification (the orphaned-side-effect fix) -------
+  // Proven non-delivery → true (the failed step may be skipped from compensation); everything that
+  // reached, or may have reached, the participant → false (compensate the failed step).
+
+  @Test
+  void exchange_connectionRefused_knownNotCommitted() {
+    assertThat(knownNotCommittedAfterSendFails(new ConnectException("refused"))).isTrue();
+  }
+
+  @Test
+  void exchange_unknownHost_knownNotCommitted() {
+    assertThat(knownNotCommittedAfterSendFails(new UnknownHostException("no-such-host"))).isTrue();
+  }
+
+  @Test
+  void exchange_tlsHandshakeFailure_knownNotCommitted() {
+    assertThat(knownNotCommittedAfterSendFails(new SSLHandshakeException("bad cert"))).isTrue();
+  }
+
+  @Test
+  void exchange_connectTimeout_knownNotCommitted() {
+    assertThat(
+            knownNotCommittedAfterSendFails(new HttpConnectTimeoutException("connect timed out")))
+        .isTrue();
+  }
+
+  @Test
+  void exchange_noRouteToHost_knownNotCommitted() {
+    assertThat(knownNotCommittedAfterSendFails(new NoRouteToHostException("unreachable"))).isTrue();
+  }
+
+  @Test
+  void exchange_ambiguousIoException_notKnownNotCommitted() {
+    // A mid-flight reset / unrecognized I/O failure may have committed → not proven.
+    assertThat(knownNotCommittedAfterSendFails(new IOException("connection reset"))).isFalse();
+  }
+
+  @Test
+  void exchange_hostBlockedByPolicy_knownNotCommitted() {
+    // Pre-send rejection — the request never went out.
+    com.scalar.db.saga.transport.HttpExchange limited =
+        new com.scalar.db.saga.transport.HttpExchange(
+            HttpClient.newHttpClient(),
+            OutboundHttpPolicy.newBuilder().allowedHosts("other-host").build());
+
+    Throwable t =
+        catchThrowable(
+            () ->
+                limited.exchange(
+                    "GET", baseUrl, "/ok", NO_PARAMS, NO_PARAMS, null, null, "saga-1", "s", null));
+
+    assertThat(t).isInstanceOf(HttpCallException.class);
+    assertThat(((HttpCallException) t).knownNotCommitted()).isTrue();
+  }
+
+  @Test
+  void exchange_requestEncodeFailure_knownNotCommitted() {
+    // A value the mapper cannot serialize fails before the request is built/sent.
+    Throwable t = catchThrowable(() -> exchange.encodeJson(new Unencodable()));
+
+    assertThat(t).isInstanceOf(HttpCallException.class);
+    assertThat(((HttpCallException) t).knownNotCommitted()).isTrue();
+  }
+
+  @Test
+  void exchange_4xxStatus_notKnownNotCommitted() {
+    // The server processed the request (it returned a status) → the side effect may have committed.
+    Throwable t =
+        catchThrowable(
+            () ->
+                exchange.exchange(
+                    "GET",
+                    baseUrl,
+                    "/fail422",
+                    NO_PARAMS,
+                    NO_PARAMS,
+                    null,
+                    null,
+                    "saga-1",
+                    "s",
+                    null));
+
+    assertThat(t).isInstanceOf(HttpCallException.class);
+    assertThat(((HttpCallException) t).knownNotCommitted()).isFalse();
+  }
+
+  @Test
+  void exchange_5xxStatus_notKnownNotCommitted() {
+    Throwable t =
+        catchThrowable(
+            () ->
+                exchange.exchange(
+                    "GET",
+                    baseUrl,
+                    "/fail503",
+                    NO_PARAMS,
+                    NO_PARAMS,
+                    null,
+                    null,
+                    "saga-1",
+                    "s",
+                    null));
+
+    assertThat(t).isInstanceOf(HttpCallException.class);
+    assertThat(((HttpCallException) t).knownNotCommitted()).isFalse();
+  }
+
+  /** Runs an exchange whose async send fails with {@code cause}; returns the resulting flag. */
+  private boolean knownNotCommittedAfterSendFails(Throwable cause) {
+    HttpClient client = mock(HttpClient.class);
+    doReturn(CompletableFuture.failedFuture(cause)).when(client).sendAsync(any(), any());
+    com.scalar.db.saga.transport.HttpExchange ex =
+        new com.scalar.db.saga.transport.HttpExchange(client, OutboundHttpPolicy.allowAll());
+
+    Throwable t =
+        catchThrowable(
+            () ->
+                ex.exchange(
+                    "GET", baseUrl, "/ok", NO_PARAMS, NO_PARAMS, null, null, "saga-1", "s", null));
+
+    assertThat(t).isInstanceOf(HttpCallException.class);
+    return ((HttpCallException) t).knownNotCommitted();
+  }
+
+  /** A value the JSON mapper cannot serialize — its getter throws during serialization. */
+  static final class Unencodable {
+    // Invoked reflectively by Jackson, not directly — @DoNotCall does not apply.
+    @SuppressWarnings("DoNotCallSuggester")
+    public String getValue() {
+      throw new IllegalStateException("cannot serialize");
+    }
   }
 
   @Test

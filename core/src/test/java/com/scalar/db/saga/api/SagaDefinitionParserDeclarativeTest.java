@@ -18,7 +18,7 @@ class SagaDefinitionParserDeclarativeTest {
             + "{\"name\":\"debit\",\"service\":\"account-service\","
             + "\"execution\":{\"method\":\"POST\",\"path\":\"/debit\","
             + "\"jsonBody\":{\"amount\":\"${amount}\"},\"output\":{\"debitId\":\"$.debit_id\"}},"
-            + "\"compensation\":{\"path\":\"/reverse\",\"jsonBody\":{\"id\":\"${debitId}\"}}}]}";
+            + "\"compensation\":{\"path\":\"/reverse\",\"jsonBody\":{\"amount\":\"${amount}\"}}}]}";
 
     // Act
     SagaDefinition definition = SagaDefinitionParser.parseJson(json);

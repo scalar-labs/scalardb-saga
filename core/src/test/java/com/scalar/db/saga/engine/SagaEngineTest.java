@@ -127,11 +127,17 @@ class SagaEngineTest {
   }
 
   private Step failingStep(String name, boolean retryable) {
+    return failingStep(name, retryable, false);
+  }
+
+  private Step failingStep(String name, boolean retryable, boolean knownNotCommitted) {
     Step step = mock(Step.class);
     when(step.getName()).thenReturn(name);
     try {
       when(step.execute(any(SagaContext.class)))
-          .thenThrow(new StepExecutionException("step failed", retryable));
+          .thenThrow(
+              new StepExecutionException(
+                  new RuntimeException("step failed"), retryable, knownNotCommitted));
     } catch (StepExecutionException e) {
       throw new RuntimeException(e);
     }
@@ -365,7 +371,8 @@ class SagaEngineTest {
   class PivotBoundary {
 
     @Test
-    void executeSaga_failureBeforePivot_compensatesBackward() throws Exception {
+    void executeSaga_failureBeforePivot_compensatesFailedAndCompletedStepsAndReachesCompensated()
+        throws Exception {
       // Arrange — 3 steps: s1 succeeds, s2 fails (all are compensatable: BACKWARD strategy)
       Step step1 = successStep("s1");
       Step step2 = failingStep("s2", false);
@@ -383,7 +390,9 @@ class SagaEngineTest {
 
       // Assert — step3 never executed
       verify(step3, never()).execute(any(SagaContext.class));
-      // Compensation was triggered: step1 compensated
+      // The failed step s2 (knownNotCommitted=false) may have committed, so it is compensated too
+      // (from = i), along with the completed step s1.
+      verify(step2).compensate(any(SagaContext.class));
       verify(step1).compensate(any(SagaContext.class));
       // Two transitions in order: SAGA_COMPENSATING → SAGA_COMPENSATED
       ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
@@ -542,6 +551,38 @@ class SagaEngineTest {
           .isEqualTo(EventType.SAGA_COMPENSATING);
       assertThat(transitionCaptor.getAllValues().get(1).getEventType())
           .isEqualTo(EventType.SAGA_COMPENSATED);
+    }
+
+    @Test
+    void executeSaga_tccReserveFailureNotKnownNotCommitted_cancelsIncludingFailedReservation()
+        throws Exception {
+      // A reserve failure whose non-delivery is NOT proven (the default) may have committed the
+      // reservation, so cancellation must INCLUDE the failed step (cancel from i, not i-1).
+      TccStep tcc1 = createTccStep("t1");
+      TccStep tcc2 = mock(TccStep.class);
+      when(tcc2.getName()).thenReturn("t2");
+      when(tcc2.reserve(any(SagaContext.class)))
+          .thenThrow(new StepExecutionException("reserve failed", false)); // default false
+      registerStep("t1", tcc1);
+      registerStep("t2", tcc2);
+      SagaDefinition def =
+          SagaDefinition.newBuilder("tcc-saga")
+              .tcc()
+              .defaultRetryPolicy(fastRetryPolicy())
+              .step("t1", "com.example.t1")
+              .add()
+              .step("t2", "com.example.t2")
+              .add()
+              .build();
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+
+      // Act
+      engine.executeSaga(def, saga, Map.of());
+
+      // Assert — both the prior reservation AND the failed one are cancelled.
+      verify(tcc2).cancel(any(SagaContext.class));
+      verify(tcc1).cancel(any(SagaContext.class));
     }
   }
 
@@ -1458,14 +1499,14 @@ class SagaEngineTest {
     }
 
     @Test
-    void executeSagaSteps_executionFailure_doesNotCompensateCurrentStep() throws Exception {
-      // Regression: execution failure at step 1 compensates from i-1 (only step 0),
-      // NOT from i. This contrasts with the recordStepCompleted failure test above
-      // where step 1 IS compensated because its execute() already succeeded.
+    void executeSagaSteps_executionFailureKnownNotCommitted_doesNotCompensateCurrentStep()
+        throws Exception {
+      // A forward failure the framework PROVED did not commit (knownNotCommitted) compensates from
+      // i-1 (only step 0), skipping step 1 — it provably has no side effect to undo.
 
       // Arrange
       Step step0 = successStep("s0");
-      Step step1 = failingStep("s1", false);
+      Step step1 = failingStep("s1", false, /* knownNotCommitted= */ true);
       registerStep("s0", step0);
       registerStep("s1", step1);
       SagaDefinition def = sagaDefinitionWithRetry("s0", "s1");
@@ -1475,9 +1516,68 @@ class SagaEngineTest {
       // Act
       engine.executeSaga(def, saga, Map.of());
 
-      // Assert — step 1 NOT compensated (it failed to execute, no side effect)
+      // Assert — step 1 NOT compensated (proven non-delivery); step 0 IS compensated.
       verify(step1, never()).compensate(any(SagaContext.class));
-      // step 0 IS compensated
+      verify(step0).compensate(any(SagaContext.class));
+    }
+
+    @Test
+    void executeSagaSteps_executionFailureNotKnownNotCommitted_compensatesIncludingCurrentStep()
+        throws Exception {
+      // The core fix: a forward failure whose non-delivery is NOT proven (the default — e.g. any
+      // non-HTTP class step throwing a bare StepExecutionException) may have committed step 1's
+      // side effect, so compensation must INCLUDE step 1 (compensate from i, not i-1).
+
+      // Arrange
+      Step step0 = successStep("s0");
+      Step step1 = failingStep("s1", false); // default knownNotCommitted = false
+      registerStep("s0", step0);
+      registerStep("s1", step1);
+      SagaDefinition def = sagaDefinitionWithRetry("s0", "s1");
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+
+      // Act
+      engine.executeSaga(def, saga, Map.of());
+
+      // Assert — step 1 IS compensated (its side effect may exist); step 0 too.
+      verify(step1).compensate(any(SagaContext.class));
+      verify(step0).compensate(any(SagaContext.class));
+    }
+
+    @Test
+    void executeWithRetry_inDoubtThenNonDeliveryOnLastAttempt_staysNotKnownNotCommitted()
+        throws Exception {
+      // Sticky AND across retries: an early in-doubt attempt (may have committed) pins the step
+      // possibly-committed even though the LAST attempt proved non-delivery (knownNotCommitted).
+      // The failed step must still be compensated (from i, not i-1). Without the sticky rule the
+      // engine would see the final attempt's knownNotCommitted=true and skip step 1's compensation.
+
+      // Arrange — step1 fails every attempt: attempt 1 is in-doubt (knownNotCommitted=false), the
+      // remaining attempts prove non-delivery (knownNotCommitted=true). Both are retryable so all
+      // three attempts (fastRetryPolicy maxAttempts=3) run.
+      Step step0 = successStep("s0");
+      Step step1 = mock(Step.class);
+      when(step1.getName()).thenReturn("s1");
+      StepExecutionException inDoubt =
+          new StepExecutionException(
+              new RuntimeException("read timeout"), true, /* knownNotCommitted= */ false);
+      StepExecutionException nonDelivery =
+          new StepExecutionException(
+              new RuntimeException("connection refused"), true, /* knownNotCommitted= */ true);
+      when(step1.execute(any(SagaContext.class))).thenThrow(inDoubt, nonDelivery);
+      registerStep("s0", step0);
+      registerStep("s1", step1);
+      SagaDefinition def = sagaDefinitionWithRetry("s0", "s1");
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+
+      // Act
+      engine.executeSaga(def, saga, Map.of());
+
+      // Assert — step 1 IS compensated despite the final attempt being a proven non-delivery,
+      // because an earlier attempt may have committed.
+      verify(step1).compensate(any(SagaContext.class));
       verify(step0).compensate(any(SagaContext.class));
     }
 

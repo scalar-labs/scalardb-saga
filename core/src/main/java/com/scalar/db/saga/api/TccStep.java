@@ -42,6 +42,17 @@ public interface TccStep {
   /**
    * Cancel phase: releases the reservation. Called when any step's {@code reserve} fails.
    *
+   * <p><b>Must be idempotent and no-op-safe.</b> Cancellation runs whenever a reserve failure's
+   * non-delivery is not proven — including for a reservation that may not have committed, or never
+   * ran. So it must release the reservation if it was made and otherwise do nothing. Recovery also
+   * retries cancellation, so repeated calls must be safe.
+   *
+   * <p><b>Must not depend on this step's own {@code reserve} output.</b> Because cancellation may
+   * run for a step whose {@code reserve} failed, that output may not exist. Cancellation must be
+   * executable from pre-execution / correlation data — the saga id, the step inputs, or a prior
+   * completed step's output — e.g. "release whatever was reserved under this saga id" rather than
+   * "release the reservation id this step returned."
+   *
    * @param context the saga execution context
    * @throws StepCompensationException if cancellation fails
    */

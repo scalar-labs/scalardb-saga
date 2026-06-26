@@ -64,6 +64,35 @@ class DeclarativeBindingTccStepTest {
   }
 
   @Test
+  void reserve_transportKnownNotCommitted_propagatesFlag() throws Exception {
+    // Arrange — a proven non-delivery on reserve rides into the step exception.
+    TransportAdapter transport = mock(TransportAdapter.class);
+    when(transport.call(any(), any(), any()))
+        .thenThrow(new TransportException("refused", new RuntimeException(), true, true));
+
+    // Act
+    Throwable thrown = catchThrowable(() -> adapter(transport).reserve(CTX));
+
+    // Assert — the engine may skip the failed reservation from cancellation.
+    assertThat(thrown).isInstanceOf(StepExecutionException.class);
+    assertThat(((StepExecutionException) thrown).knownNotCommitted()).isTrue();
+  }
+
+  @Test
+  void reserve_transportCommitted_flagIsFalse() throws Exception {
+    // Arrange — an unproven reserve failure (the default) → cancel the failed reservation too.
+    TransportAdapter transport = mock(TransportAdapter.class);
+    when(transport.call(any(), any(), any())).thenThrow(new TransportException("in-doubt", false));
+
+    // Act
+    Throwable thrown = catchThrowable(() -> adapter(transport).reserve(CTX));
+
+    // Assert
+    assertThat(thrown).isInstanceOf(StepExecutionException.class);
+    assertThat(((StepExecutionException) thrown).knownNotCommitted()).isFalse();
+  }
+
+  @Test
   void confirm_callsConfirmationSpec() throws Exception {
     // Arrange
     TransportAdapter transport = mock(TransportAdapter.class);

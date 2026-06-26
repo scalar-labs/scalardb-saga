@@ -10,6 +10,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeSet;
 import net.jcip.annotations.Immutable;
 import org.jspecify.annotations.Nullable;
 
@@ -147,6 +148,9 @@ public final class SagaDefinition {
       // (the SagaBuilder/TccBuilder only expose their mode's phase setters) and is enforced at
       // parse
       // time for JSON/YAML — so no phase/mode check is needed here.
+      if (step instanceof ServiceStep service) {
+        validateUndoDoesNotReferenceOwnOutput(service);
+      }
     }
 
     if (mode == SagaMode.TCC) {
@@ -177,6 +181,53 @@ public final class SagaDefinition {
       case PREDEFINED ->
           throw new SagaDefinitionException(
               "PREDEFINED recovery strategy is reserved for TCC mode");
+    }
+  }
+
+  /**
+   * A declarative step's undo phase (SAGA {@link ServiceStep.Phase#COMPENSATION}, TCC {@link
+   * ServiceStep.Phase#CANCELLATION}) must not reference its own forward phase's output: the undo
+   * runs even when the forward action failed (so that the failed step's possibly-committed side
+   * effect is undone), and a failed step never bound its output into the context. So the undo must
+   * be keyed on pre-execution data (saga id / inputs / a prior step's output), not on the resource
+   * id this step itself returned. See {@link Step#compensate} / {@link TccStep#cancel}.
+   */
+  private void validateUndoDoesNotReferenceOwnOutput(ServiceStep service) {
+    ServiceStep.Phase forwardPhase;
+    ServiceStep.Phase undoPhase;
+    if (mode == SagaMode.TCC) {
+      forwardPhase = ServiceStep.Phase.RESERVATION;
+      undoPhase = ServiceStep.Phase.CANCELLATION;
+    } else {
+      forwardPhase = ServiceStep.Phase.EXECUTION;
+      undoPhase = ServiceStep.Phase.COMPENSATION;
+    }
+    CallSpec forward = service.getPhases().get(forwardPhase);
+    CallSpec undo = service.getPhases().get(undoPhase);
+    // The builder (at add()) and the JSON/YAML parser guarantee both phases are present before
+    // build()-time validation; guard defensively for NullAway.
+    if (forward == null || undo == null) {
+      return;
+    }
+    Set<String> produced = forward.producedContextKeys();
+    if (produced.isEmpty()) {
+      return;
+    }
+    Set<String> offending = new TreeSet<>(undo.referencedContextKeys());
+    offending.retainAll(produced);
+    if (!offending.isEmpty()) {
+      throw new SagaDefinitionException(
+          "Declarative service step '"
+              + service.getName()
+              + "' "
+              + undoPhase
+              + " must not reference its own "
+              + forwardPhase
+              + " output "
+              + offending
+              + " — the undo runs even when the forward action failed, so that output may not"
+              + " exist. Key the undo on pre-execution data (saga id, inputs, or a prior step's"
+              + " output) instead.");
     }
   }
 

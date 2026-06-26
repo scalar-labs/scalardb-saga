@@ -43,7 +43,7 @@ class SagaDefinitionSerializerDeclarativeTest {
             .output(Map.of("debitId", "$.debit_id"))
             .build();
     HttpCall compensation =
-        HttpCall.newBuilder("/debit/reverse").jsonBody(Map.of("id", "${debitId}")).build();
+        HttpCall.newBuilder("/debit/reverse").jsonBody(Map.of("amount", "${amount}")).build();
     SagaDefinition original =
         SagaDefinition.newBuilder("transfer")
             .saga()
@@ -85,7 +85,7 @@ class SagaDefinitionSerializerDeclarativeTest {
               "compensation": {
                 "method": "POST",
                 "path": "/accounts/${id}/credit",
-                "jsonBody": {"id": "${debitId}"}
+                "jsonBody": {"id": "${id}"}
               }
             }
           ]

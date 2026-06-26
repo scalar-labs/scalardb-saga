@@ -139,6 +139,39 @@ class SagaHttpClientTest {
   }
 
   @Test
+  void send_5xx_notKnownNotCommitted() {
+    // Arrange — a status response means the server processed the request → may have committed.
+    SagaHttpClient client = client(OutboundHttpPolicy.allowAll());
+
+    // Act
+    Throwable thrown = catchThrowable(() -> client.get("/fail503").send());
+
+    // Assert
+    assertThat(thrown).isInstanceOf(StepExecutionException.class);
+    assertThat(((StepExecutionException) thrown).knownNotCommitted()).isFalse();
+  }
+
+  @Test
+  void send_connectionRefused_knownNotCommitted() throws IOException {
+    // Arrange — a client pointing at a dead port: the request never reaches a participant.
+    HttpServer probe = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+    int deadPort = probe.getAddress().getPort();
+    probe.start();
+    probe.stop(0);
+    SagaHttpClient client =
+        new SagaHttpClientImpl(
+            new HttpExchange(HttpClient.newHttpClient(), OutboundHttpPolicy.allowAll()),
+            "http://localhost:" + deadPort);
+
+    // Act
+    Throwable thrown = catchThrowable(() -> client.get("/ok").send());
+
+    // Assert — proven non-delivery propagates from HttpExchange to the step exception.
+    assertThat(thrown).isInstanceOf(StepExecutionException.class);
+    assertThat(((StepExecutionException) thrown).knownNotCommitted()).isTrue();
+  }
+
+  @Test
   void bodyJsonArray_arrayBodyGiven_returnsList() throws Exception {
     // Arrange
     SagaHttpClient client = client(OutboundHttpPolicy.allowAll());

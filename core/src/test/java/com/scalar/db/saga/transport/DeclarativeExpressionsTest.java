@@ -50,9 +50,10 @@ class DeclarativeExpressionsTest {
         org.assertj.core.api.Assertions.catchThrowable(
             () -> DeclarativeExpressions.resolveObject("${missing}", ctx(Map.of())));
 
-    // Assert
+    // Assert — a pre-send template failure provably sent nothing, so the step may be skipped.
     assertThat(thrown).isInstanceOf(TransportException.class);
     assertThat(((TransportException) thrown).isRetryable()).isFalse();
+    assertThat(((TransportException) thrown).knownNotCommitted()).isTrue();
   }
 
   // --- resolveString -------------------------------------------------------
@@ -83,9 +84,10 @@ class DeclarativeExpressionsTest {
             () ->
                 DeclarativeExpressions.resolveString("amount=${amount", ctx(Map.of("amount", 5))));
 
-    // Assert
+    // Assert — a pre-send template failure provably sent nothing, so the step may be skipped.
     assertThat(thrown).isInstanceOf(TransportException.class);
     assertThat(((TransportException) thrown).isRetryable()).isFalse();
+    assertThat(((TransportException) thrown).knownNotCommitted()).isTrue();
   }
 
   @Test
@@ -97,9 +99,10 @@ class DeclarativeExpressionsTest {
                 DeclarativeExpressions.resolveString(
                     "u-${obj}", ctx(Map.of("obj", Map.of("name", "Ann")))));
 
-    // Assert
+    // Assert — a pre-send template failure provably sent nothing, so the step may be skipped.
     assertThat(thrown).isInstanceOf(TransportException.class);
     assertThat(((TransportException) thrown).isRetryable()).isFalse();
+    assertThat(((TransportException) thrown).knownNotCommitted()).isTrue();
   }
 
   // --- resolvePath ---------------------------------------------------------
@@ -303,9 +306,11 @@ class DeclarativeExpressionsTest {
                 DeclarativeExpressions.extractOutput(
                     Map.of("x", "$.missing"), Map.of("present", 1)));
 
-    // Assert
+    // Assert — output extraction runs *after* a response arrived: the side effect may have
+    // committed, so this is NOT knownNotCommitted (contrast the pre-send template failures above).
     assertThat(thrown).isInstanceOf(TransportException.class);
     assertThat(((TransportException) thrown).isRetryable()).isFalse();
+    assertThat(((TransportException) thrown).knownNotCommitted()).isFalse();
   }
 
   @Test

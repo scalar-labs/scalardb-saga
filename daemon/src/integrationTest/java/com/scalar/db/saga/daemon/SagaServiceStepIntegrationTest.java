@@ -11,11 +11,11 @@ import org.junit.jupiter.api.Test;
 /**
  * End-to-end coverage of the daemon's <b>outbound service-step transport</b> — a declarative {@code
  * service} step's call actually reaches the participant over HTTP. Asserts that the participant is
- * hit on execution and, on a downstream failure, hit again on compensation (with the captured
- * output threaded into the compensation body) — i.e. that the daemon→participant wiring works.
- * Covers default completion, BACKWARD compensation, and MIXED recovery with a {@code pivot} step (a
- * pre-pivot failure compensates → {@code COMPENSATED}; a post-pivot failure rolls forward → stays
- * {@code RUNNING}).
+ * hit on execution and, on a downstream failure, hit again on compensation (a saga-id-keyed undo —
+ * the correlation header identifies the work, not the failed step's own output) — i.e. that the
+ * daemon→participant wiring works. Covers default completion, BACKWARD compensation, and MIXED
+ * recovery with a {@code pivot} step (a pre-pivot failure compensates → {@code COMPENSATED}; a
+ * post-pivot failure rolls forward → stays {@code RUNNING}).
  *
  * <p>Counterpart: {@link SagaRestApiIntegrationTest} asserts on the <b>inbound</b> REST contract.
  * Both share {@link DaemonIntegrationTestSupport}; this one adds participant-hit assertions.
@@ -26,6 +26,7 @@ class SagaServiceStepIntegrationTest extends DaemonIntegrationTestSupport {
   private static final String COMPENSATING_SAGA = "declarative-compensating-saga";
   private static final String MIXED_BEFORE_PIVOT = "mixed-before-pivot";
   private static final String MIXED_AFTER_PIVOT = "mixed-after-pivot";
+  private static final String MISMATCHED_BODY_SAGA = "declarative-mismatched-body";
 
   // Single step that captures output and completes.
   private static final String COMPLETING_DEF =
@@ -34,7 +35,7 @@ class SagaServiceStepIntegrationTest extends DaemonIntegrationTestSupport {
           { "name": "$name", "mode": "SAGA", "steps": [
             { "name": "debit", "service": "$svc",
               "execution":    { "method": "POST", "path": "/debit", "output": { "debitId": "$.debit_id" } },
-              "compensation": { "method": "POST", "path": "/reverse", "jsonBody": { "id": "${debitId}" } } } ] }
+              "compensation": { "method": "POST", "path": "/reverse" } } ] }
           """
               .replace("$name", COMPLETING_SAGA));
 
@@ -46,7 +47,7 @@ class SagaServiceStepIntegrationTest extends DaemonIntegrationTestSupport {
             "defaultRetryPolicy": { "maxAttempts": 1, "initialIntervalMillis": 1 }, "steps": [
             { "name": "debit", "service": "$svc",
               "execution":    { "method": "POST", "path": "/debit", "output": { "debitId": "$.debit_id" } },
-              "compensation": { "method": "POST", "path": "/reverse", "jsonBody": { "id": "${debitId}" } } },
+              "compensation": { "method": "POST", "path": "/reverse" } },
             { "name": "charge", "service": "$svc",
               "execution":    { "method": "POST", "path": "/charge" },
               "compensation": { "method": "POST", "path": "/void" } } ] }
@@ -91,11 +92,30 @@ class SagaServiceStepIntegrationTest extends DaemonIntegrationTestSupport {
           """
               .replace("$name", MIXED_AFTER_PIVOT));
 
+  // debit succeeds; charge returns 200 but its body lacks the mapped output field, so output
+  // extraction fails AFTER the participant committed → the committed charge is compensated via
+  // /void (the bug's "known committed" case: a 2xx whose body does not match the output mapping).
+  private static final String MISMATCHED_BODY_DEF =
+      withService(
+          """
+          { "name": "$name", "mode": "SAGA", "recoveryStrategy": "BACKWARD",
+            "defaultRetryPolicy": { "maxAttempts": 1, "initialIntervalMillis": 1 }, "steps": [
+            { "name": "debit", "service": "$svc",
+              "execution":    { "method": "POST", "path": "/debit", "output": { "debitId": "$.debit_id" } },
+              "compensation": { "method": "POST", "path": "/reverse" } },
+            { "name": "charge", "service": "$svc",
+              "execution":    { "method": "POST", "path": "/charge-badbody", "output": { "chargeId": "$.charge_id" } },
+              "compensation": { "method": "POST", "path": "/void" } } ] }
+          """
+              .replace("$name", MISMATCHED_BODY_SAGA));
+
   @Override
   protected void configureParticipant(HttpServer participant) {
     route(participant, "/debit", 200, "{\"debit_id\":\"DBT-1\"}");
     route(participant, "/reverse", 200);
     route(participant, "/charge", 422);
+    route(participant, "/void", 200); // charge's compensation: a 422 may have committed
+    route(participant, "/charge-badbody", 200, "{}"); // 2xx but missing the mapped output field
 
     // MIXED-recovery (pivot) endpoints.
     route(participant, "/m/s1", 200);
@@ -114,6 +134,7 @@ class SagaServiceStepIntegrationTest extends DaemonIntegrationTestSupport {
     writeDefinition(definitionsDir, COMPENSATING_SAGA, COMPENSATING_DEF);
     writeDefinition(definitionsDir, MIXED_BEFORE_PIVOT, MIXED_BEFORE_PIVOT_DEF);
     writeDefinition(definitionsDir, MIXED_AFTER_PIVOT, MIXED_AFTER_PIVOT_DEF);
+    writeDefinition(definitionsDir, MISMATCHED_BODY_SAGA, MISMATCHED_BODY_DEF);
   }
 
   @Test
@@ -129,10 +150,27 @@ class SagaServiceStepIntegrationTest extends DaemonIntegrationTestSupport {
   void startSync_declarativeBusinessFailure_compensatesViaParticipant() throws Exception {
     HttpResponse<String> post = post("/sagas", "{\"sagaName\":\"" + COMPENSATING_SAGA + "\"}");
 
-    // charge returned 422 → debit compensated via /reverse → cleanly rolled back.
+    // charge returned 422 (the side effect may have committed), so charge is compensated via /void
+    // AND debit via /reverse (compensate from the failed step, not just the prior ones).
     assertThat(post.statusCode()).isEqualTo(200);
     assertThat(status(post)).isEqualTo("COMPENSATED");
     assertThat(hits("/debit")).isEqualTo(1);
+    assertThat(hits("/void")).isEqualTo(1);
+    assertThat(hits("/reverse")).isEqualTo(1);
+  }
+
+  @Test
+  void startSync_declarative2xxMismatchedOutput_compensatesCommittedStep() throws Exception {
+    HttpResponse<String> post = post("/sagas", "{\"sagaName\":\"" + MISMATCHED_BODY_SAGA + "\"}");
+
+    // charge returned 200 (committed) but its body lacked the mapped output field, so output
+    // extraction failed. The committed charge is still compensated via /void — it is NOT orphaned —
+    // and debit via /reverse.
+    assertThat(post.statusCode()).isEqualTo(200);
+    assertThat(status(post)).isEqualTo("COMPENSATED");
+    assertThat(hits("/debit")).isEqualTo(1);
+    assertThat(hits("/charge-badbody")).isEqualTo(1);
+    assertThat(hits("/void")).isEqualTo(1);
     assertThat(hits("/reverse")).isEqualTo(1);
   }
 
@@ -140,12 +178,12 @@ class SagaServiceStepIntegrationTest extends DaemonIntegrationTestSupport {
   void startSync_mixedRecoveryFailureBeforePivot_compensates() throws Exception {
     HttpResponse<String> post = post("/sagas", "{\"sagaName\":\"" + MIXED_BEFORE_PIVOT + "\"}");
 
-    // The pivot's execution failed (before the commit point): the completed pre-pivot step is
-    // compensated, the pivot itself never completed so it is not, and s3 never runs.
+    // The pivot's execution returned 422 (it may have committed before responding), so the pivot IS
+    // compensated via /m/pivot-undo along with the completed pre-pivot step; s3 never runs.
     assertThat(post.statusCode()).isEqualTo(200);
     assertThat(status(post)).isEqualTo("COMPENSATED");
     assertThat(hits("/m/s1-undo")).isEqualTo(1);
-    assertThat(hits("/m/pivot-undo")).isZero();
+    assertThat(hits("/m/pivot-undo")).isEqualTo(1);
   }
 
   @Test
