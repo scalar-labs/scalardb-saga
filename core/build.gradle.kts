@@ -3,6 +3,8 @@ plugins {
 }
 
 dependencies {
+    api(project(":api"))
+
     implementation(platform(libs.jackson.bom))
     implementation(libs.scalardb)
     implementation(libs.jackson.databind)
