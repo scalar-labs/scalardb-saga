@@ -48,6 +48,16 @@ class StepTimeoutExceptionTest {
   }
 
   @Test
+  void knownNotCommitted_always_isFalse() {
+    // Assert — a timeout is in-doubt (the request may have committed), so a timed-out step is
+    // ALWAYS treated as possibly committed and compensated (from = i). Pin this invariant.
+    assertThat(new StepTimeoutException("step timed out").knownNotCommitted()).isFalse();
+    assertThat(
+            new StepTimeoutException("step timed out", new RuntimeException()).knownNotCommitted())
+        .isFalse();
+  }
+
+  @Test
   void classHierarchy_always_extendsStepExecutionException() {
     // Assert
     assertThat(StepExecutionException.class).isAssignableFrom(StepTimeoutException.class);

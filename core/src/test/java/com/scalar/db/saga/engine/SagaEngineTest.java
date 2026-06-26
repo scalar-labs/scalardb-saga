@@ -371,7 +371,7 @@ class SagaEngineTest {
   class PivotBoundary {
 
     @Test
-    void executeSaga_failureBeforePivot_compensatesCompletedStepsAndReachesCompensated()
+    void executeSaga_failureBeforePivot_compensatesFailedAndCompletedStepsAndReachesCompensated()
         throws Exception {
       // Arrange — 3 steps: s1 succeeds, s2 fails (all are compensatable: BACKWARD strategy)
       Step step1 = successStep("s1");
@@ -390,7 +390,9 @@ class SagaEngineTest {
 
       // Assert — step3 never executed
       verify(step3, never()).execute(any(SagaContext.class));
-      // Compensation was triggered: step1 compensated
+      // The failed step s2 (knownNotCommitted=false) may have committed, so it is compensated too
+      // (from = i), along with the completed step s1.
+      verify(step2).compensate(any(SagaContext.class));
       verify(step1).compensate(any(SagaContext.class));
       // Two transitions in order: SAGA_COMPENSATING → SAGA_COMPENSATED
       ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
