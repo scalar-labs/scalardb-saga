@@ -3,11 +3,11 @@ package com.scalar.db.saga;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.scalar.db.saga.api.HttpMethod;
-import com.scalar.db.saga.api.SagaManager;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.definition.HttpCall;
 import com.scalar.db.saga.definition.RetryPolicy;
 import com.scalar.db.saga.definition.SagaDefinition;
+import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.store.ScalarDbSagaStoreFactory;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -155,7 +155,7 @@ class ServiceStepOverHttpIntegrationTest {
             .add()
             .build();
 
-    try (SagaManager manager = buildManager("user-service")) {
+    try (DefaultSagaOrchestrator manager = buildManager("user-service")) {
       manager.register(def);
 
       // Act
@@ -188,7 +188,7 @@ class ServiceStepOverHttpIntegrationTest {
             .add()
             .build();
 
-    try (SagaManager manager = buildManager("svc")) {
+    try (DefaultSagaOrchestrator manager = buildManager("svc")) {
       manager.register(def);
 
       // Act
@@ -216,7 +216,7 @@ class ServiceStepOverHttpIntegrationTest {
             .add()
             .build();
 
-    try (SagaManager manager = buildManager("svc")) {
+    try (DefaultSagaOrchestrator manager = buildManager("svc")) {
       manager.register(def);
 
       // Act
@@ -246,7 +246,7 @@ class ServiceStepOverHttpIntegrationTest {
             .add()
             .build();
 
-    try (SagaManager manager = buildManager("order-service")) {
+    try (DefaultSagaOrchestrator manager = buildManager("order-service")) {
       manager.register(def);
 
       // Act
@@ -278,7 +278,7 @@ class ServiceStepOverHttpIntegrationTest {
             .add()
             .build();
 
-    try (SagaManager manager = buildManager("order-service")) {
+    try (DefaultSagaOrchestrator manager = buildManager("order-service")) {
       manager.register(def);
 
       // Act
@@ -318,8 +318,8 @@ class ServiceStepOverHttpIntegrationTest {
             .add()
             .build();
 
-    try (SagaManager manager =
-        SagaManager.newBuilder()
+    try (DefaultSagaOrchestrator manager =
+        DefaultSagaOrchestrator.newBuilder()
             .storeFactory(ScalarDbSagaStoreFactory.create(props))
             .httpEndpoint("xml-service", baseUrl)
             .defaultHeader("Authorization", "Bearer secret")
@@ -345,8 +345,8 @@ class ServiceStepOverHttpIntegrationTest {
     return HttpCall.newBuilder(path).jsonBody(Map.of("op", op)).build();
   }
 
-  private SagaManager buildManager(String serviceName) {
-    return SagaManager.newBuilder()
+  private DefaultSagaOrchestrator buildManager(String serviceName) {
+    return DefaultSagaOrchestrator.newBuilder()
         .storeFactory(ScalarDbSagaStoreFactory.create(props))
         .httpEndpoint(serviceName, baseUrl)
         .add()

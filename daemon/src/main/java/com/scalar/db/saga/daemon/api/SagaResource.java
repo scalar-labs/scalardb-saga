@@ -1,8 +1,8 @@
 package com.scalar.db.saga.daemon.api;
 
 import com.scalar.db.saga.api.SagaCallback;
-import com.scalar.db.saga.api.SagaManager;
 import com.scalar.db.saga.api.SagaStateSnapshot;
+import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import io.javalin.Javalin;
 import io.javalin.http.Context;
 import java.util.Map;
@@ -60,7 +60,8 @@ public final class SagaResource {
    * @param syncTimeoutMillis the synchronous-start timeout ({@code 0} disables it; see the class
    *     doc's bounded-synchronous-start note)
    */
-  public static void register(Javalin app, SagaManager sagaManager, long syncTimeoutMillis) {
+  public static void register(
+      Javalin app, DefaultSagaOrchestrator sagaManager, long syncTimeoutMillis) {
     app.post(
         "/sagas",
         ctx -> {
@@ -113,7 +114,7 @@ public final class SagaResource {
    * COMPENSATED}/{@code ESCALATED}), or {@code 202} while it is still resolving ({@code
    * COMPENSATING} / parked {@code RUNNING}) — poll {@code GET /sagas/{id}}.
    */
-  private static void respondSync(Context ctx, SagaManager sagaManager, String sagaId) {
+  private static void respondSync(Context ctx, DefaultSagaOrchestrator sagaManager, String sagaId) {
     SagaStateSnapshot snapshot = sagaManager.getStateSnapshot(sagaId);
     respond(ctx, snapshot.getStatus().isTerminal() ? 200 : 202, snapshot);
   }
@@ -155,7 +156,7 @@ public final class SagaResource {
    */
   private static void respondBoundedSync(
       Context ctx,
-      SagaManager sagaManager,
+      DefaultSagaOrchestrator sagaManager,
       String sagaId,
       CountDownLatch done,
       AtomicReference<SagaStateSnapshot> terminal,

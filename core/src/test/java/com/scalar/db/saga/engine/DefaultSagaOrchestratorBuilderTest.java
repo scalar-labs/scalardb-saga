@@ -5,37 +5,37 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 
-import com.scalar.db.saga.api.SagaManager;
 import com.scalar.db.saga.store.SagaStore;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import org.junit.jupiter.api.Test;
 
-class SagaManagerBuilderTest {
+class DefaultSagaOrchestratorBuilderTest {
 
   @Test
-  void build_withRequiredFields_returnsSagaManager() {
+  void build_withRequiredFields_returnsDefaultSagaOrchestrator() {
     // Arrange
     SagaStore store = mock(SagaStore.class);
 
     // Act
-    SagaManager manager = SagaManagerBuilder.newBuilder().storeFactory(() -> store).build();
+    DefaultSagaOrchestrator manager =
+        DefaultSagaOrchestrator.newBuilder().storeFactory(() -> store).build();
 
     // Assert
     assertThat(manager).isNotNull();
-    assertThat(manager).isInstanceOf(EmbeddedSagaManager.class);
+    assertThat(manager).isInstanceOf(DefaultSagaOrchestrator.class);
     manager.close();
   }
 
   @Test
-  void build_withAllOptions_returnsSagaManager() {
+  void build_withAllOptions_returnsDefaultSagaOrchestrator() {
     // Arrange
     SagaStore store = mock(SagaStore.class);
 
     // Act
-    SagaManager manager =
-        SagaManagerBuilder.newBuilder()
+    DefaultSagaOrchestrator manager =
+        DefaultSagaOrchestrator.newBuilder()
             .storeFactory(() -> store)
             .ownerId("pod-1")
             .shutdownMode(ShutdownMode.WAIT_ALL_SAGAS)
@@ -51,13 +51,13 @@ class SagaManagerBuilderTest {
   }
 
   @Test
-  void build_withHttpEndpointDefaults_returnsSagaManager() {
+  void build_withHttpEndpointDefaults_returnsDefaultSagaOrchestrator() {
     // Arrange
     SagaStore store = mock(SagaStore.class);
 
     // Act
-    SagaManager manager =
-        SagaManagerBuilder.newBuilder()
+    DefaultSagaOrchestrator manager =
+        DefaultSagaOrchestrator.newBuilder()
             .storeFactory(() -> store)
             .httpEndpoint("account-svc", "http://account-svc:8080")
             .add()
@@ -69,13 +69,13 @@ class SagaManagerBuilderTest {
   }
 
   @Test
-  void build_withHttpEndpointFullConfig_returnsSagaManager() {
+  void build_withHttpEndpointFullConfig_returnsDefaultSagaOrchestrator() {
     // Arrange
     SagaStore store = mock(SagaStore.class);
 
     // Act
-    SagaManager manager =
-        SagaManagerBuilder.newBuilder()
+    DefaultSagaOrchestrator manager =
+        DefaultSagaOrchestrator.newBuilder()
             .storeFactory(() -> store)
             .httpEndpoint("account-svc", "https://account-svc:8443")
             .allowedHosts("account-svc")
@@ -97,20 +97,20 @@ class SagaManagerBuilderTest {
     // Act & Assert
     assertThatThrownBy(
             () ->
-                SagaManagerBuilder.newBuilder()
+                DefaultSagaOrchestrator.newBuilder()
                     .httpEndpoint("account-svc", "http://account-svc:8080")
                     .defaultHeader("Authorization", null))
         .isInstanceOf(NullPointerException.class);
   }
 
   @Test
-  void build_withHttpEndpointAndResource_returnsSagaManager() {
+  void build_withHttpEndpointAndResource_returnsDefaultSagaOrchestrator() {
     // Arrange — httpEndpoint is orthogonal to resource() (D1)
     SagaStore store = mock(SagaStore.class);
 
     // Act
-    SagaManager manager =
-        SagaManagerBuilder.newBuilder()
+    DefaultSagaOrchestrator manager =
+        DefaultSagaOrchestrator.newBuilder()
             .storeFactory(() -> store)
             .httpEndpoint("account-svc", "http://account-svc:8080")
             .add()
@@ -123,7 +123,7 @@ class SagaManagerBuilderTest {
   }
 
   @Test
-  void build_withHttpEndpointAndStepResolver_returnsSagaManager() {
+  void build_withHttpEndpointAndStepResolver_returnsDefaultSagaOrchestrator() {
     // Arrange — httpEndpoint is orthogonal to stepResolver() (D1)
     SagaStore store = mock(SagaStore.class);
     StepResolver resolver =
@@ -132,8 +132,8 @@ class SagaManagerBuilderTest {
         };
 
     // Act
-    SagaManager manager =
-        SagaManagerBuilder.newBuilder()
+    DefaultSagaOrchestrator manager =
+        DefaultSagaOrchestrator.newBuilder()
             .storeFactory(() -> store)
             .httpEndpoint("account-svc", "http://account-svc:8080")
             .add()
@@ -148,14 +148,15 @@ class SagaManagerBuilderTest {
   @Test
   void httpEndpoint_blankName_throwsIllegalArgumentException() {
     // Act & Assert
-    assertThatThrownBy(() -> SagaManagerBuilder.newBuilder().httpEndpoint(" ", "http://svc:8080"))
+    assertThatThrownBy(
+            () -> DefaultSagaOrchestrator.newBuilder().httpEndpoint(" ", "http://svc:8080"))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
   void httpEndpoint_blankBaseUrl_throwsIllegalArgumentException() {
     // Act & Assert
-    assertThatThrownBy(() -> SagaManagerBuilder.newBuilder().httpEndpoint("svc", " "))
+    assertThatThrownBy(() -> DefaultSagaOrchestrator.newBuilder().httpEndpoint("svc", " "))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
@@ -163,28 +164,31 @@ class SagaManagerBuilderTest {
   void httpEndpoint_baseUrlWithUserInfo_throwsIllegalArgumentException() {
     // Act & Assert — a user@host authority silently retargets the host (resolves to evil.com).
     assertThatThrownBy(
-            () -> SagaManagerBuilder.newBuilder().httpEndpoint("svc", "http://svc@evil.com:8080"))
+            () ->
+                DefaultSagaOrchestrator.newBuilder()
+                    .httpEndpoint("svc", "http://svc@evil.com:8080"))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
   void httpEndpoint_baseUrlNonHttpScheme_throwsIllegalArgumentException() {
     // Act & Assert
-    assertThatThrownBy(() -> SagaManagerBuilder.newBuilder().httpEndpoint("svc", "ftp://svc:8080"))
+    assertThatThrownBy(
+            () -> DefaultSagaOrchestrator.newBuilder().httpEndpoint("svc", "ftp://svc:8080"))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
   void httpEndpoint_baseUrlWithoutHost_throwsIllegalArgumentException() {
     // Act & Assert — no authority, so getHost() is null.
-    assertThatThrownBy(() -> SagaManagerBuilder.newBuilder().httpEndpoint("svc", "svc:8080/x"))
+    assertThatThrownBy(() -> DefaultSagaOrchestrator.newBuilder().httpEndpoint("svc", "svc:8080/x"))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
   void httpEndpoint_baseUrlMalformed_throwsIllegalArgumentException() {
     // Act & Assert
-    assertThatThrownBy(() -> SagaManagerBuilder.newBuilder().httpEndpoint("svc", "not a url"))
+    assertThatThrownBy(() -> DefaultSagaOrchestrator.newBuilder().httpEndpoint("svc", "not a url"))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
@@ -193,8 +197,9 @@ class SagaManagerBuilderTest {
     // Act & Assert — valid absolute http/https URLs (with and without a path) build without error.
     assertThatCode(
             () -> {
-              SagaManagerBuilder.newBuilder().httpEndpoint("a", "http://account-svc:8080");
-              SagaManagerBuilder.newBuilder().httpEndpoint("b", "https://account-svc:8443/api/");
+              DefaultSagaOrchestrator.newBuilder().httpEndpoint("a", "http://account-svc:8080");
+              DefaultSagaOrchestrator.newBuilder()
+                  .httpEndpoint("b", "https://account-svc:8443/api/");
             })
         .doesNotThrowAnyException();
   }
@@ -203,7 +208,8 @@ class SagaManagerBuilderTest {
   void httpEndpoint_duplicateName_throwsIllegalArgumentException() {
     // Arrange — register an endpoint named "svc"; a second add() with the same name must fail fast
     // rather than silently overwrite (parity with ResourceRegistry).
-    var builder = SagaManagerBuilder.newBuilder().httpEndpoint("svc", "http://svc-a:8080").add();
+    var builder =
+        DefaultSagaOrchestrator.newBuilder().httpEndpoint("svc", "http://svc-a:8080").add();
 
     // Act & Assert
     assertThatThrownBy(() -> builder.httpEndpoint("svc", "http://svc-b:8080").add())
@@ -215,7 +221,7 @@ class SagaManagerBuilderTest {
     // Act & Assert
     assertThatThrownBy(
             () ->
-                SagaManagerBuilder.newBuilder()
+                DefaultSagaOrchestrator.newBuilder()
                     .httpEndpoint("account-svc", "http://account-svc:8080")
                     .maxBodyBytes(0))
         .isInstanceOf(IllegalArgumentException.class);
@@ -224,18 +230,18 @@ class SagaManagerBuilderTest {
   @Test
   void build_missingStoreFactory_throwsIllegalStateException() {
     // Act & Assert
-    assertThatThrownBy(() -> SagaManagerBuilder.newBuilder().build())
+    assertThatThrownBy(() -> DefaultSagaOrchestrator.newBuilder().build())
         .isInstanceOf(IllegalStateException.class);
   }
 
   @Test
-  void build_withResources_returnsSagaManager() {
+  void build_withResources_returnsDefaultSagaOrchestrator() {
     // Arrange
     SagaStore store = mock(SagaStore.class);
 
     // Act
-    SagaManager manager =
-        SagaManagerBuilder.newBuilder()
+    DefaultSagaOrchestrator manager =
+        DefaultSagaOrchestrator.newBuilder()
             .storeFactory(() -> store)
             .resource(String.class, "source-channel", "source")
             .resource(String.class, "target-channel", "target")
@@ -247,7 +253,7 @@ class SagaManagerBuilderTest {
   }
 
   @Test
-  void build_withStepResolver_returnsSagaManager() {
+  void build_withStepResolver_returnsDefaultSagaOrchestrator() {
     // Arrange
     SagaStore store = mock(SagaStore.class);
     StepResolver resolver =
@@ -256,8 +262,11 @@ class SagaManagerBuilderTest {
         };
 
     // Act
-    SagaManager manager =
-        SagaManagerBuilder.newBuilder().storeFactory(() -> store).stepResolver(resolver).build();
+    DefaultSagaOrchestrator manager =
+        DefaultSagaOrchestrator.newBuilder()
+            .storeFactory(() -> store)
+            .stepResolver(resolver)
+            .build();
 
     // Assert
     assertThat(manager).isNotNull();
@@ -276,7 +285,7 @@ class SagaManagerBuilderTest {
     // Act & Assert
     assertThatThrownBy(
             () ->
-                SagaManagerBuilder.newBuilder()
+                DefaultSagaOrchestrator.newBuilder()
                     .storeFactory(() -> store)
                     .resource(String.class, "value")
                     .stepResolver(resolver)
@@ -290,7 +299,8 @@ class SagaManagerBuilderTest {
     SagaStore store = mock(SagaStore.class);
 
     // Act
-    SagaManager manager = SagaManagerBuilder.newBuilder().storeFactory(() -> store).build();
+    DefaultSagaOrchestrator manager =
+        DefaultSagaOrchestrator.newBuilder().storeFactory(() -> store).build();
 
     // Assert — default mode uses ReflectiveStepResolver with empty registry (no-arg only)
     assertThat(manager).isNotNull();
@@ -305,7 +315,7 @@ class SagaManagerBuilderTest {
     // Act & Assert
     assertThatThrownBy(
             () ->
-                SagaManagerBuilder.newBuilder()
+                DefaultSagaOrchestrator.newBuilder()
                     .storeFactory(() -> store)
                     .resource(String.class, "first")
                     .resource(String.class, "second")
@@ -320,8 +330,8 @@ class SagaManagerBuilderTest {
     Clock fixedClock = Clock.fixed(Instant.parse("2025-06-01T00:00:00Z"), ZoneOffset.UTC);
 
     // Act — build with custom clock but no explicit recovery/retention configs
-    SagaManager manager =
-        SagaManagerBuilder.newBuilder().storeFactory(() -> store).clock(fixedClock).build();
+    DefaultSagaOrchestrator manager =
+        DefaultSagaOrchestrator.newBuilder().storeFactory(() -> store).clock(fixedClock).build();
 
     // Assert — verify defaults(Clock) propagates the clock correctly
     assertThat(manager).isNotNull();
@@ -340,8 +350,8 @@ class SagaManagerBuilderTest {
     RetentionConfig explicitRetention = RetentionConfig.defaults(configClock);
 
     // Act — explicit configs should take precedence over builder clock
-    SagaManager manager =
-        SagaManagerBuilder.newBuilder()
+    DefaultSagaOrchestrator manager =
+        DefaultSagaOrchestrator.newBuilder()
             .storeFactory(() -> store)
             .clock(builderClock)
             .recoveryConfig(explicitRecovery)

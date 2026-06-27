@@ -1,11 +1,11 @@
 package com.scalar.db.saga.daemon;
 
-import com.scalar.db.saga.api.SagaManager;
 import com.scalar.db.saga.daemon.api.ErrorMapper;
 import com.scalar.db.saga.daemon.api.HealthResource;
 import com.scalar.db.saga.daemon.api.SagaResource;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.definition.SagaDefinitionParser;
+import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.store.ScalarDbSagaStoreFactory;
 import io.javalin.Javalin;
@@ -27,11 +27,11 @@ import org.slf4j.LoggerFactory;
 /**
  * Standalone HTTP server that hosts a saga engine and exposes it over a REST API (daemon mode).
  *
- * <p>Construction builds the embedded {@link SagaManager} — creating the saga schema if needed —
- * from the configured properties, then loads and registers any declarative saga definitions found
- * at the configured definitions path. {@link #start()} starts background recovery/retention tasks
- * and binds the HTTP port. {@link #close()} stops accepting requests and then drains in-flight
- * sagas via {@link SagaManager#close()}.
+ * <p>Construction builds the embedded {@link DefaultSagaOrchestrator} — creating the saga schema if
+ * needed — from the configured properties, then loads and registers any declarative saga
+ * definitions found at the configured definitions path. {@link #start()} starts background
+ * recovery/retention tasks and binds the HTTP port. {@link #close()} stops accepting requests and
+ * then drains in-flight sagas via {@link DefaultSagaOrchestrator#close()}.
  *
  * <p>Daemon mode is <b>declarative-only</b>: the server ships as a container, so operators cannot
  * supply code-step classes. A definition that declares a code step ({@code stepClass}) is rejected
@@ -42,7 +42,7 @@ public final class SagaServer implements AutoCloseable {
   private static final Logger logger = LoggerFactory.getLogger(SagaServer.class);
 
   private final SagaServerConfig config;
-  private final SagaManager sagaManager;
+  private final DefaultSagaOrchestrator sagaManager;
   private final Javalin app;
   private final AtomicBoolean closed = new AtomicBoolean();
 
@@ -53,14 +53,15 @@ public final class SagaServer implements AutoCloseable {
    * @param config the server configuration
    */
   public SagaServer(SagaServerConfig config) {
-    this(config, buildSagaManager(config));
+    this(config, buildDefaultSagaOrchestrator(config));
   }
 
   /**
-   * Visible for testing: builds the server around an already-constructed {@link SagaManager}, so a
-   * test can inject a mock to exercise definition loading and route wiring without a database.
+   * Visible for testing: builds the server around an already-constructed {@link
+   * DefaultSagaOrchestrator}, so a test can inject a mock to exercise definition loading and route
+   * wiring without a database.
    */
-  SagaServer(SagaServerConfig config, SagaManager sagaManager) {
+  SagaServer(SagaServerConfig config, DefaultSagaOrchestrator sagaManager) {
     this.config = Objects.requireNonNull(config, "config must not be null");
     this.sagaManager = Objects.requireNonNull(sagaManager, "sagaManager must not be null");
     this.app = Javalin.create();
@@ -74,10 +75,11 @@ public final class SagaServer implements AutoCloseable {
     }
   }
 
-  private static SagaManager buildSagaManager(SagaServerConfig config) {
+  private static DefaultSagaOrchestrator buildDefaultSagaOrchestrator(SagaServerConfig config) {
     Objects.requireNonNull(config, "config must not be null");
-    SagaManager.Builder builder =
-        SagaManager.newBuilder().storeFactory(ScalarDbSagaStoreFactory.create(config.properties()));
+    DefaultSagaOrchestrator.Builder builder =
+        DefaultSagaOrchestrator.newBuilder()
+            .storeFactory(ScalarDbSagaStoreFactory.create(config.properties()));
     config.serviceBaseUrls().forEach((name, baseUrl) -> builder.httpEndpoint(name, baseUrl).add());
     return builder.build();
   }

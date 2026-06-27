@@ -5,7 +5,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.scalar.db.saga.api.Named;
 import com.scalar.db.saga.api.SagaContext;
 import com.scalar.db.saga.api.SagaHttpClient;
-import com.scalar.db.saga.api.SagaManager;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.api.Step;
@@ -13,6 +12,7 @@ import com.scalar.db.saga.api.StepResult;
 import com.scalar.db.saga.definition.HttpCall;
 import com.scalar.db.saga.definition.RetryPolicy;
 import com.scalar.db.saga.definition.SagaDefinition;
+import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.StepCompensationException;
 import com.scalar.db.saga.exception.StepExecutionException;
 import com.scalar.db.saga.store.SagaStore;
@@ -146,7 +146,7 @@ class ClassStepOverHttpIntegrationTest {
             .add()
             .build();
 
-    try (SagaManager manager = buildManager("svc")) {
+    try (DefaultSagaOrchestrator manager = buildManager("svc")) {
       manager.register(def);
 
       // Act
@@ -182,7 +182,7 @@ class ClassStepOverHttpIntegrationTest {
             .add()
             .build();
 
-    try (SagaManager manager = buildManager("svc")) {
+    try (DefaultSagaOrchestrator manager = buildManager("svc")) {
       manager.register(def);
 
       // Act
@@ -212,7 +212,7 @@ class ClassStepOverHttpIntegrationTest {
             .add()
             .build();
 
-    try (SagaManager manager = buildManager("svc")) {
+    try (DefaultSagaOrchestrator manager = buildManager("svc")) {
       manager.register(def);
 
       // Act
@@ -249,7 +249,7 @@ class ClassStepOverHttpIntegrationTest {
             .add()
             .build();
 
-    try (SagaManager manager = buildManager("svc")) {
+    try (DefaultSagaOrchestrator manager = buildManager("svc")) {
       manager.register(def);
 
       // Act
@@ -294,7 +294,7 @@ class ClassStepOverHttpIntegrationTest {
     // First run — crash after the first (code) step completes
     try (SagaStore baseStore = ScalarDbSagaStoreFactory.create(props).createStore();
         SagaStore crashingStore = new CrashingStoreDecorator(baseStore, 0);
-        SagaManager manager = buildManager(crashingStore, "svc")) {
+        DefaultSagaOrchestrator manager = buildManager(crashingStore, "svc")) {
       manager.register(def);
 
       try {
@@ -310,7 +310,7 @@ class ClassStepOverHttpIntegrationTest {
 
     // Restart — fresh manager built with the SAME httpEndpoint; recovery must re-resolve both kinds
     try (SagaStore recoveryStore = ScalarDbSagaStoreFactory.create(props).createStore();
-        SagaManager recovered = buildManager(recoveryStore, "svc")) {
+        DefaultSagaOrchestrator recovered = buildManager(recoveryStore, "svc")) {
       recovered.register(def);
       recoveryStore.markForRecovery(sagaId);
       recovered.recover();
@@ -329,16 +329,16 @@ class ClassStepOverHttpIntegrationTest {
   // Helpers
   // ===========================================================================
 
-  private SagaManager buildManager(String serviceName) {
-    return SagaManager.newBuilder()
+  private DefaultSagaOrchestrator buildManager(String serviceName) {
+    return DefaultSagaOrchestrator.newBuilder()
         .storeFactory(ScalarDbSagaStoreFactory.create(props))
         .httpEndpoint(serviceName, baseUrl)
         .add()
         .build();
   }
 
-  private SagaManager buildManager(SagaStore sagaStore, String serviceName) {
-    return SagaManager.newBuilder()
+  private DefaultSagaOrchestrator buildManager(SagaStore sagaStore, String serviceName) {
+    return DefaultSagaOrchestrator.newBuilder()
         .storeFactory(() -> sagaStore)
         .httpEndpoint(serviceName, baseUrl)
         .add()

@@ -10,7 +10,6 @@ import com.scalar.db.saga.store.SagaStore.Recoverables;
 import com.scalar.db.saga.store.SagaStore.RecoverablesCursor;
 import com.scalar.db.saga.store.StatusEvent;
 import com.scalar.db.saga.store.StepEvent;
-import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -47,7 +46,7 @@ import org.slf4j.LoggerFactory;
  *   <li>Escalates to {@link SagaStatus#ESCALATED} if stuck longer than the grace period.
  * </ol>
  */
-public class SagaRecoveryManager {
+class SagaRecoveryManager {
 
   private static final Logger logger = LoggerFactory.getLogger(SagaRecoveryManager.class);
 
@@ -60,11 +59,7 @@ public class SagaRecoveryManager {
   private final ExecutorService recoveryExecutor;
   private final Semaphore recoverySemaphore;
 
-  @SuppressFBWarnings(
-      value = "EI_EXPOSE_REP2",
-      justification =
-          "Dependencies are interfaces/shared objects; storing references is intentional")
-  public SagaRecoveryManager(
+  SagaRecoveryManager(
       SagaStore store,
       SagaEngine engine,
       SagaDefinitionRegistry registry,

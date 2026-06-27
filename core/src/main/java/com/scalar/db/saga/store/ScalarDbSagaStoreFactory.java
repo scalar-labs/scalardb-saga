@@ -21,7 +21,7 @@ import java.util.Properties;
  * props.setProperty("scalar.db.storage", "jdbc");
  * props.setProperty("scalar.db.contact_points", "jdbc:postgresql://...");
  *
- * SagaManager manager = SagaManager.newBuilder()
+ * DefaultSagaOrchestrator manager = DefaultSagaOrchestrator.newBuilder()
  *     .storeFactory(ScalarDbSagaStoreFactory.create(props))
  *     .build();
  * }</pre>

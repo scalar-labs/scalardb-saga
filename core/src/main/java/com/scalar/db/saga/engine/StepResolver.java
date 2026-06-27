@@ -38,10 +38,11 @@ package com.scalar.db.saga.engine;
  *
  * <h3>Custom implementations</h3>
  *
- * <p>Supply a custom resolver via {@link SagaManager.Builder#stepResolver(StepResolver)} for full
- * control (e.g. DI-framework integration). A resolver must (a) dispatch on the step {@code name}
- * (or {@code className}) and (b) return the same thread-safe singleton each time, per the {@link
- * Step} lifecycle contract — e.g. a DI container whose beans are singletons:
+ * <p>Supply a custom resolver via {@link
+ * DefaultSagaOrchestrator.Builder#stepResolver(StepResolver)} for full control (e.g. DI-framework
+ * integration). A resolver must (a) dispatch on the step {@code name} (or {@code className}) and
+ * (b) return the same thread-safe singleton each time, per the {@link Step} lifecycle contract —
+ * e.g. a DI container whose beans are singletons:
  *
  * <pre>{@code
  * .stepResolver((name, className, ctx) -> applicationContext.getBean(Class.forName(className)))
@@ -55,7 +56,7 @@ package com.scalar.db.saga.engine;
  * <pre>{@code
  * String accountSvc = "account-svc";
  * Map<String, Object> steps = new ConcurrentHashMap<>();
- * SagaManager.newBuilder()
+ * DefaultSagaOrchestrator.newBuilder()
  *     .storeFactory(ScalarDbSagaStoreFactory.create(props))
  *     .httpEndpoint(accountSvc, "https://account-svc:8443").add()
  *     .stepResolver(

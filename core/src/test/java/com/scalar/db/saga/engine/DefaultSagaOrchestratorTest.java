@@ -42,7 +42,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 @ExtendWith(MockitoExtension.class)
-class EmbeddedSagaManagerTest {
+class DefaultSagaOrchestratorTest {
 
   private static final Instant NOW = Instant.parse("2025-01-01T00:00:00Z");
 
@@ -52,12 +52,12 @@ class EmbeddedSagaManagerTest {
   @Mock private SagaRecoveryManager recoveryManager;
   @Mock private SagaRetentionManager retentionManager;
 
-  private EmbeddedSagaManager manager;
+  private DefaultSagaOrchestrator manager;
 
   @BeforeEach
   void setUp() {
     manager =
-        new EmbeddedSagaManager(
+        new DefaultSagaOrchestrator(
             engine, store, definitionRegistry, recoveryManager, retentionManager, 30_000);
   }
 
@@ -541,8 +541,8 @@ class EmbeddedSagaManagerTest {
       when(mockExecutor.submit(any(Runnable.class)))
           .thenThrow(new java.util.concurrent.RejectedExecutionException("shutting down"));
       when(mockExecutor.awaitTermination(anyLong(), any())).thenReturn(true);
-      EmbeddedSagaManager managerWithMockExecutor =
-          new EmbeddedSagaManager(
+      DefaultSagaOrchestrator managerWithMockExecutor =
+          new DefaultSagaOrchestrator(
               engine,
               store,
               definitionRegistry,
@@ -884,8 +884,8 @@ class EmbeddedSagaManagerTest {
       // Arrange
       ExecutorService mockExecutor = mock(ExecutorService.class);
       when(mockExecutor.awaitTermination(anyLong(), any())).thenReturn(true);
-      EmbeddedSagaManager managerWithMockExecutor =
-          new EmbeddedSagaManager(
+      DefaultSagaOrchestrator managerWithMockExecutor =
+          new DefaultSagaOrchestrator(
               engine,
               store,
               definitionRegistry,

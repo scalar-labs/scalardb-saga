@@ -3,7 +3,6 @@ package com.scalar.db.saga.engine;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.store.SagaStore;
-import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -29,7 +28,7 @@ import org.slf4j.LoggerFactory;
  * <p>{@link SagaStatus#ESCALATED} sagas are excluded — they require manual admin resolution before
  * cleanup.
  */
-public class SagaRetentionManager {
+class SagaRetentionManager {
 
   private static final Logger logger = LoggerFactory.getLogger(SagaRetentionManager.class);
 
@@ -42,11 +41,7 @@ public class SagaRetentionManager {
   private final ExecutorService purgeExecutor;
   private final Semaphore purgeSemaphore;
 
-  @SuppressFBWarnings(
-      value = "EI_EXPOSE_REP2",
-      justification =
-          "Dependencies are interfaces/shared objects; storing references is intentional")
-  public SagaRetentionManager(SagaStore store, RetentionConfig config) {
+  SagaRetentionManager(SagaStore store, RetentionConfig config) {
     this.store = store;
     this.config = config;
     this.scheduler =

@@ -10,7 +10,7 @@ package com.scalar.db.saga.store;
  * returning a mock store can be used directly:
  *
  * <pre>{@code
- * SagaManager manager = SagaManager.newBuilder()
+ * DefaultSagaOrchestrator manager = DefaultSagaOrchestrator.newBuilder()
  *     .storeFactory(() -> mockStore)
  *     .build();
  * }</pre>

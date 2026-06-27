@@ -53,7 +53,7 @@ public final class StepResult {
 
   /**
    * Creates a pending result (daemon mode only). The engine parks the saga until an external
-   * callback completes the step via {@link SagaManager#completeStep}.
+   * callback completes the step via {@code completeStep} (daemon mode).
    */
   public static StepResult pending() {
     return PENDING;

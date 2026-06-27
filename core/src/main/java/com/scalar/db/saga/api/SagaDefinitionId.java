@@ -4,8 +4,8 @@ import java.util.Objects;
 
 /**
  * Identifies a specific version of a saga definition. Use this with the versioned {@link
- * SagaManager#start(SagaDefinitionId, java.util.Map)} overloads to skip the store round-trip that
- * name-only start requires for "latest version" resolution.
+ * SagaOrchestrator#start(SagaDefinitionId, java.util.Map)} overloads to skip the store round-trip
+ * that name-only start requires for "latest version" resolution.
  *
  * @param name the saga definition name
  * @param version the saga definition version
