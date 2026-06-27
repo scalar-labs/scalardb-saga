@@ -1,7 +1,6 @@
 package com.scalar.db.saga.store;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.scalar.db.saga.api.SagaStoreFactory;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.service.TransactionFactory;
 import java.util.Objects;

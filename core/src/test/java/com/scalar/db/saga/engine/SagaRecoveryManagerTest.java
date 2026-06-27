@@ -1,4 +1,4 @@
-package com.scalar.db.saga.recovery;
+package com.scalar.db.saga.engine;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -11,13 +11,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-import com.scalar.db.saga.api.RecoveryConfig;
-import com.scalar.db.saga.api.SagaDefinition;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
-import com.scalar.db.saga.engine.ExecutionContext;
-import com.scalar.db.saga.engine.SagaDefinitionRegistry;
-import com.scalar.db.saga.engine.SagaEngine;
+import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.SagaStore.Recoverables;

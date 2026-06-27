@@ -9,8 +9,8 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
-import com.scalar.db.saga.api.SagaDefinition;
 import com.scalar.db.saga.api.SagaManager;
+import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import io.javalin.Javalin;
 import java.nio.file.Files;

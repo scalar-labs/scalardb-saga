@@ -1,6 +1,5 @@
-package com.scalar.db.saga.retention;
+package com.scalar.db.saga.engine;
 
-import com.scalar.db.saga.api.RetentionConfig;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.store.SagaStore;

@@ -1,6 +1,4 @@
-package com.scalar.db.saga.api;
-
-import com.scalar.db.saga.store.SagaStore;
+package com.scalar.db.saga.store;
 
 /**
  * Factory for creating {@link SagaStore} instances.

@@ -1,11 +1,11 @@
-package com.scalar.db.saga.api;
+package com.scalar.db.saga.definition;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.scalar.db.saga.api.SagaDefinition.ServiceStep;
-import com.scalar.db.saga.api.SagaDefinition.ServiceStep.Phase;
-import com.scalar.db.saga.api.SagaDefinition.StepDefinition;
+import com.scalar.db.saga.definition.SagaDefinition.ServiceStep;
+import com.scalar.db.saga.definition.SagaDefinition.ServiceStep.Phase;
+import com.scalar.db.saga.definition.SagaDefinition.StepDefinition;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import java.util.Map;
 import org.junit.jupiter.api.Test;

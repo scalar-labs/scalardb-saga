@@ -1,11 +1,11 @@
 package com.scalar.db.saga.daemon;
 
-import com.scalar.db.saga.api.SagaDefinition;
-import com.scalar.db.saga.api.SagaDefinitionParser;
 import com.scalar.db.saga.api.SagaManager;
 import com.scalar.db.saga.daemon.api.ErrorMapper;
 import com.scalar.db.saga.daemon.api.HealthResource;
 import com.scalar.db.saga.daemon.api.SagaResource;
+import com.scalar.db.saga.definition.SagaDefinition;
+import com.scalar.db.saga.definition.SagaDefinitionParser;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.store.ScalarDbSagaStoreFactory;
 import io.javalin.Javalin;

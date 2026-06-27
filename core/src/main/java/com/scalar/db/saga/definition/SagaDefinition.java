@@ -1,5 +1,7 @@
-package com.scalar.db.saga.api;
+package com.scalar.db.saga.definition;
 
+import com.scalar.db.saga.api.Step;
+import com.scalar.db.saga.api.TccStep;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import java.util.ArrayList;
 import java.util.EnumMap;

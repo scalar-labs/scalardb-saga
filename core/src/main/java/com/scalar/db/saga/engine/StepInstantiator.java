@@ -1,11 +1,10 @@
 package com.scalar.db.saga.engine;
 
-import com.scalar.db.saga.api.SagaDefinition.ClassStep;
-import com.scalar.db.saga.api.SagaDefinition.ServiceStep;
-import com.scalar.db.saga.api.SagaDefinition.StepDefinition;
-import com.scalar.db.saga.api.StepResolver;
-import com.scalar.db.saga.api.StepResolver.ResolutionContext;
 import com.scalar.db.saga.api.TccStep;
+import com.scalar.db.saga.definition.SagaDefinition.ClassStep;
+import com.scalar.db.saga.definition.SagaDefinition.ServiceStep;
+import com.scalar.db.saga.definition.SagaDefinition.StepDefinition;
+import com.scalar.db.saga.engine.StepResolver.ResolutionContext;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

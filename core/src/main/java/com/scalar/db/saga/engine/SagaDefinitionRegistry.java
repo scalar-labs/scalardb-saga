@@ -1,6 +1,6 @@
 package com.scalar.db.saga.engine;
 
-import com.scalar.db.saga.api.SagaDefinition;
+import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.store.SagaStore;
 import java.util.concurrent.ConcurrentHashMap;
 import net.jcip.annotations.ThreadSafe;

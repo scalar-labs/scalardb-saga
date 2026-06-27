@@ -43,7 +43,7 @@ class ScalarDbSagaStoreConfig {
    * sagas beyond this limit are picked up on the next recovery cycle.
    *
    * <p>This per-bucket cap works together with {@link
-   * com.scalar.db.saga.api.RecoveryConfig#batchSize()} (total cap per pass) to ensure fair
+   * com.scalar.db.saga.engine.RecoveryConfig#batchSize()} (total cap per pass) to ensure fair
    * distribution across buckets. Keep this value smaller than {@code batchSize /
    * numRecoverableStatuses} so that a single hot bucket cannot consume the entire batch budget.
    *
@@ -114,7 +114,7 @@ class ScalarDbSagaStoreConfig {
      * sagas beyond this limit are picked up on the next recovery cycle.
      *
      * <p>See {@link ScalarDbSagaStoreConfig#getRecoveryScanLimit()} for how this interacts with
-     * {@link com.scalar.db.saga.api.RecoveryConfig#batchSize()}.
+     * {@link com.scalar.db.saga.engine.RecoveryConfig#batchSize()}.
      *
      * @param recoveryScanLimit the scan limit (must be &gt;= 1)
      * @return this builder

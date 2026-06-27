@@ -1,4 +1,4 @@
-package com.scalar.db.saga.api;
+package com.scalar.db.saga.definition;
 
 import java.util.Objects;
 import java.util.concurrent.ThreadLocalRandom;

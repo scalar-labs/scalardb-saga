@@ -2,17 +2,17 @@ package com.scalar.db.saga;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.scalar.db.saga.api.HttpCall;
 import com.scalar.db.saga.api.Named;
-import com.scalar.db.saga.api.RetryPolicy;
 import com.scalar.db.saga.api.SagaContext;
-import com.scalar.db.saga.api.SagaDefinition;
 import com.scalar.db.saga.api.SagaHttpClient;
 import com.scalar.db.saga.api.SagaManager;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.api.Step;
 import com.scalar.db.saga.api.StepResult;
+import com.scalar.db.saga.definition.HttpCall;
+import com.scalar.db.saga.definition.RetryPolicy;
+import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.exception.StepCompensationException;
 import com.scalar.db.saga.exception.StepExecutionException;
 import com.scalar.db.saga.store.SagaStore;

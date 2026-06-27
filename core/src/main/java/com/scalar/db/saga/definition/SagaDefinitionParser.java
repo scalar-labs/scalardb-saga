@@ -1,11 +1,11 @@
-package com.scalar.db.saga.api;
+package com.scalar.db.saga.definition;
 
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
-import com.scalar.db.saga.api.SagaDefinition.RecoveryStrategy;
-import com.scalar.db.saga.api.SagaDefinition.SagaMode;
+import com.scalar.db.saga.definition.SagaDefinition.RecoveryStrategy;
+import com.scalar.db.saga.definition.SagaDefinition.SagaMode;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import java.io.IOException;
 import java.io.InputStream;

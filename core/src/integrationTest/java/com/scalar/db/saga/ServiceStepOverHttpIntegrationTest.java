@@ -2,12 +2,12 @@ package com.scalar.db.saga;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.scalar.db.saga.api.HttpCall;
 import com.scalar.db.saga.api.HttpMethod;
-import com.scalar.db.saga.api.RetryPolicy;
-import com.scalar.db.saga.api.SagaDefinition;
 import com.scalar.db.saga.api.SagaManager;
 import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.definition.HttpCall;
+import com.scalar.db.saga.definition.RetryPolicy;
+import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.store.ScalarDbSagaStoreFactory;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;

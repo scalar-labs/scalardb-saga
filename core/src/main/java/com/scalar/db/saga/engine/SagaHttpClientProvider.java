@@ -1,5 +1,6 @@
-package com.scalar.db.saga.api;
+package com.scalar.db.saga.engine;
 
+import com.scalar.db.saga.api.SagaHttpClient;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 
 /**

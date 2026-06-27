@@ -32,7 +32,7 @@
   </Match>
   <!-- ThreadLocalRandom in RetryPolicy.sleepWithBackoff is for retry jitter, not security -->
   <Match>
-    <Class name="com.scalar.db.saga.api.RetryPolicy"/>
+    <Class name="com.scalar.db.saga.definition.RetryPolicy"/>
     <Method name="sleepWithBackoff"/>
     <Bug pattern="PREDICTABLE_RANDOM"/>
   </Match>

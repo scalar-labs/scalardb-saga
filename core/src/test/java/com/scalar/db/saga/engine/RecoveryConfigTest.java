@@ -1,4 +1,4 @@
-package com.scalar.db.saga.api;
+package com.scalar.db.saga.engine;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;

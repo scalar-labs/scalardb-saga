@@ -4,13 +4,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.scalar.db.saga.api.CallSpec;
-import com.scalar.db.saga.api.HttpCall;
+import com.scalar.db.saga.api.HttpMethod;
 import com.scalar.db.saga.api.SagaContext;
-import com.scalar.db.saga.api.SagaDefinition.ServiceStep.Phase;
 import com.scalar.db.saga.api.SagaHttpClient;
 import com.scalar.db.saga.api.Step;
 import com.scalar.db.saga.api.TccStep;
+import com.scalar.db.saga.definition.CallSpec;
+import com.scalar.db.saga.definition.HttpCall;
+import com.scalar.db.saga.definition.SagaDefinition.ServiceStep.Phase;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -179,12 +180,7 @@ class HttpEndpointTest {
       SagaContext context = new FakeSagaContext("saga-1", Map.of());
       endpoint
           .transportAdapter()
-          .call(
-              HttpCall.newBuilder("/declarative")
-                  .method(com.scalar.db.saga.api.HttpMethod.GET)
-                  .build(),
-              context,
-              "d");
+          .call(HttpCall.newBuilder("/declarative").method(HttpMethod.GET).build(), context, "d");
 
       // Act — the SagaHttpClient (code-step) path, both riding the same exchange.
       SagaCorrelationContext.Correlation previous =

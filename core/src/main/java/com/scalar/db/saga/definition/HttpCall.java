@@ -1,5 +1,6 @@
-package com.scalar.db.saga.api;
+package com.scalar.db.saga.definition;
 
+import com.scalar.db.saga.api.HttpMethod;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Objects;

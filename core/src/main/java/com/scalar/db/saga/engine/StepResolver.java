@@ -1,4 +1,4 @@
-package com.scalar.db.saga.api;
+package com.scalar.db.saga.engine;
 
 /**
  * Resolves step class names to step instances.

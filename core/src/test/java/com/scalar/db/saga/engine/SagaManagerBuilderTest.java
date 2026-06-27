@@ -5,11 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 
-import com.scalar.db.saga.api.RecoveryConfig;
-import com.scalar.db.saga.api.RetentionConfig;
 import com.scalar.db.saga.api.SagaManager;
-import com.scalar.db.saga.api.ShutdownMode;
-import com.scalar.db.saga.api.StepResolver;
 import com.scalar.db.saga.store.SagaStore;
 import java.time.Clock;
 import java.time.Instant;

@@ -1,8 +1,9 @@
-package com.scalar.db.saga.api;
+package com.scalar.db.saga.definition;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.scalar.db.saga.api.HttpMethod;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import java.util.Arrays;
 import java.util.LinkedHashMap;

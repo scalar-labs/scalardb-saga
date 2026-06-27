@@ -1,4 +1,4 @@
-package com.scalar.db.saga.api;
+package com.scalar.db.saga.engine;
 
 /** Shutdown strategy for in-flight sagas. */
 public enum ShutdownMode {
