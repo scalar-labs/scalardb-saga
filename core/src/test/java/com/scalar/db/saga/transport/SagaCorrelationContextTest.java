@@ -109,6 +109,6 @@ class SagaCorrelationContextTest {
     SagaCorrelationContext.bind("saga-1", "s", 6_000L, fixed);
 
     // Act & Assert
-    assertThat(SagaCorrelationContext.remaining()).isEqualTo(Duration.ofMillis(5_000L));
+    assertThat(SagaCorrelationContext.remaining()).isEqualTo(Duration.ofSeconds(5));
   }
 }
