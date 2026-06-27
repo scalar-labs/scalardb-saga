@@ -36,4 +36,13 @@
     <Method name="sleepWithBackoff"/>
     <Bug pattern="PREDICTABLE_RANDOM"/>
   </Match>
+  <!-- CT_CONSTRUCTOR_THROW surfaces only when compiling to Java 8 bytecode (the api module's
+       release-8 target). SpotBugs auto-suppresses this finalizer-attack finding for Java 15+
+       bytecode (class version 59+) but reports it for Java 8 bytecode. The api value types and
+       exceptions validate their constructor arguments by design; they are not finalizer-attack
+       vectors in practice. -->
+  <Match>
+    <Class name="~com\.scalar\.db\.saga\.(api|exception)\..*"/>
+    <Bug pattern="CT_CONSTRUCTOR_THROW"/>
+  </Match>
 </FindBugsFilter>

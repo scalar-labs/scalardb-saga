@@ -78,7 +78,8 @@ public final class SagaStateSnapshot {
   @Override
   public boolean equals(@Nullable Object o) {
     if (this == o) return true;
-    if (!(o instanceof SagaStateSnapshot that)) return false;
+    if (!(o instanceof SagaStateSnapshot)) return false;
+    SagaStateSnapshot that = (SagaStateSnapshot) o;
     return sagaId.equals(that.sagaId)
         && sagaName.equals(that.sagaName)
         && status == that.status

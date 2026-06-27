@@ -2,6 +2,7 @@ package com.scalar.db.saga.api;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 import net.jcip.annotations.Immutable;
@@ -43,7 +44,13 @@ public final class StepResult {
   /** Creates a result with multiple key-value pairs. The map is defensively copied. */
   public static StepResult of(Map<String, Object> output) {
     Objects.requireNonNull(output, "output must not be null");
-    return new StepResult(false, Map.copyOf(output));
+    Map<String, Object> copy = new HashMap<>();
+    for (Map.Entry<String, Object> entry : output.entrySet()) {
+      String key = Objects.requireNonNull(entry.getKey(), "output keys must not be null");
+      Object value = Objects.requireNonNull(entry.getValue(), "output values must not be null");
+      copy.put(key, value);
+    }
+    return new StepResult(false, Collections.unmodifiableMap(copy));
   }
 
   /** Creates a result with no output data. */
@@ -76,7 +83,8 @@ public final class StepResult {
   @Override
   public boolean equals(@Nullable Object o) {
     if (this == o) return true;
-    if (!(o instanceof StepResult that)) return false;
+    if (!(o instanceof StepResult)) return false;
+    StepResult that = (StepResult) o;
     return pending == that.pending && output.equals(that.output);
   }
 
