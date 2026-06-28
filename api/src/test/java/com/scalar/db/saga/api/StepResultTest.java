@@ -85,6 +85,17 @@ class StepResultTest {
   }
 
   @Test
+  void of_emptyMapGiven_returnsEmptyResult() {
+    // Arrange & Act
+    StepResult result = StepResult.of(new HashMap<>());
+
+    // Assert — an empty input short-circuits to the cached EMPTY singleton
+    assertThat(result.isPending()).isFalse();
+    assertThat(result.getOutput()).isEmpty();
+    assertThat(result).isSameAs(StepResult.empty());
+  }
+
+  @Test
   void empty_called_returnsNonPendingEmptyResult() {
     // Arrange & Act
     StepResult result = StepResult.empty();

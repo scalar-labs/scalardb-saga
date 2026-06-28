@@ -44,6 +44,9 @@ public final class StepResult {
   /** Creates a result with multiple key-value pairs. The map is defensively copied. */
   public static StepResult of(Map<String, Object> output) {
     Objects.requireNonNull(output, "output must not be null");
+    if (output.isEmpty()) {
+      return EMPTY;
+    }
     Map<String, Object> copy = new HashMap<>();
     for (Map.Entry<String, Object> entry : output.entrySet()) {
       String key = Objects.requireNonNull(entry.getKey(), "output keys must not be null");
