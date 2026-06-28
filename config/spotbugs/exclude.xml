@@ -38,11 +38,13 @@
   </Match>
   <!-- CT_CONSTRUCTOR_THROW surfaces only when compiling to Java 8 bytecode (the api module's
        release-8 target). SpotBugs auto-suppresses this finalizer-attack finding for Java 15+
-       bytecode (class version 59+) but reports it for Java 8 bytecode. The api value types and
-       exceptions validate their constructor arguments by design; they are not finalizer-attack
-       vectors in practice. -->
+       bytecode (class version 59+) but reports it for Java 8 bytecode.
+
+       The exception classes are non-final and validate their constructor arguments (requireNonNull),
+       but they carry only a message and cause — a partially constructed instance captured via a
+       finalizer attack grants nothing — so the package-wide suppression is safe here. -->
   <Match>
-    <Class name="~com\.scalar\.db\.saga\.(api|exception)\..*"/>
+    <Class name="~com\.scalar\.db\.saga\.exception\..*"/>
     <Bug pattern="CT_CONSTRUCTOR_THROW"/>
   </Match>
 </FindBugsFilter>

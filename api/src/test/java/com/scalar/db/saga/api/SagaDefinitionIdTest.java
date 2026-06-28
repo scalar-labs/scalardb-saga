@@ -48,6 +48,22 @@ class SagaDefinitionIdTest {
   }
 
   @Test
+  void constructor_emptyNameGiven_throwsIllegalArgumentException() {
+    // Act & Assert — empty string is blank by vacuous truth: allMatch over zero code points is
+    // true.
+    assertThatThrownBy(() -> new SagaDefinitionId("", "1.0"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void constructor_emptyVersionGiven_throwsIllegalArgumentException() {
+    // Act & Assert — empty string is blank by vacuous truth: allMatch over zero code points is
+    // true.
+    assertThatThrownBy(() -> new SagaDefinitionId("transfer", ""))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void constructor_unicodeWhitespaceNameGiven_throwsIllegalArgumentException() {
     // Arrange — U+3000 (ideographic space) is whitespace above U+0020, which String.trim() does not
     // strip; the blank check must still reject it (exact String.isBlank() parity under --release
@@ -109,5 +125,11 @@ class SagaDefinitionIdTest {
 
     // Act & Assert
     assertThat(id1).isNotEqualTo(id2);
+  }
+
+  @Test
+  void equals_nullGiven_returnsFalse() {
+    // Act & Assert
+    assertThat(new SagaDefinitionId("transfer", "1.0")).isNotEqualTo(null);
   }
 }
