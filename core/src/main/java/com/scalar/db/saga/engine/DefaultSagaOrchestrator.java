@@ -381,7 +381,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       Thread.currentThread().interrupt();
     } finally {
       // Sagas are drained. The engine.shutdown() above already released the HTTP clients held by
-      // the step instantiator's registries (it owns them); here the manager closes the store, the
+      // the step instantiator's registries (it owns them); here the orchestrator closes the store,
+      // the
       // one external resource it owns directly.
       try {
         store.close();

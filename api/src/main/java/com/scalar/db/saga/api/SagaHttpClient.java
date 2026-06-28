@@ -22,8 +22,13 @@ import java.util.Map;
  *
  *   @Override
  *   public StepResult execute(SagaContext context) throws StepExecutionException {
+ *     // Collections.singletonMap keeps this snippet compilable on Java 8; on Java 9+ prefer
+ *     // Map.of("amount", 2000) — and Map.of(k1, v1, k2, v2, ...) for multiple fields.
  *     Map<String, Object> body =
- *         http.post("/debit").jsonBody(Map.of("amount", 2000)).send().bodyJsonObject();
+ *         http.post("/debit")
+ *             .jsonBody(Collections.singletonMap("amount", 2000))
+ *             .send()
+ *             .bodyJsonObject();
  *     return StepResult.of("debitId", body.get("debit_id"));
  *   }
  * }

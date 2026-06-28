@@ -143,7 +143,7 @@ public interface SagaStore extends AutoCloseable {
    * by the retention manager to find purgeable COMPLETED/COMPENSATED sagas.
    *
    * <p>This method may be removed once the Admin API's {@code listStateSnapshots} query is
-   * available (phase 5).
+   * available.
    *
    * @param status the terminal status to scan for
    * @param threshold the cutoff time — only sagas updated before this are returned

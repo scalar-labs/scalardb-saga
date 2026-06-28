@@ -17,8 +17,8 @@ import org.slf4j.LoggerFactory;
 /**
  * Lookup of {@link HttpEndpoint}s by the name they were registered under via {@code
  * httpEndpoint(name, baseUrl)}. Each endpoint owns ONE {@code HttpExchange} + policy + {@code
- * HttpClient}, and produces the per-endpoint {@link SagaHttpClient} (and, from Phase 2, the
- * declarative transport adapter rides the same engine).
+ * HttpClient}, and produces the per-endpoint {@link SagaHttpClient} (and the declarative transport
+ * adapter rides the same engine).
  *
  * <p>It exposes a narrow {@link SagaHttpClientProvider} view (the {@code ResolutionContext} handed
  * to a custom {@code StepResolver}) for code steps, and {@link #toStep}/{@link #toTccStep} for the

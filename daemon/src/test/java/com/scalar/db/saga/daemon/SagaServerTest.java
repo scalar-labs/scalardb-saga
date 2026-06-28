@@ -105,7 +105,7 @@ class SagaServerTest {
   }
 
   @Test
-  void constructor_noDefinitionsPath_throwsAndClosesManager() {
+  void constructor_noDefinitionsPath_throwsAndClosesOrchestrator() {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.PORT_KEY, "0");
     DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
@@ -117,7 +117,8 @@ class SagaServerTest {
   }
 
   @Test
-  void constructor_noDefinitionFiles_throwsAndClosesManager(@TempDir Path dir) throws Exception {
+  void constructor_noDefinitionFiles_throwsAndClosesOrchestrator(@TempDir Path dir)
+      throws Exception {
     Files.writeString(dir.resolve("notes.md"), "ignored"); // no .json/.yaml/.yml definitions
     DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
 
@@ -128,7 +129,8 @@ class SagaServerTest {
   }
 
   @Test
-  void constructor_codeStepDefinition_throwsAndClosesManager(@TempDir Path dir) throws Exception {
+  void constructor_codeStepDefinition_throwsAndClosesOrchestrator(@TempDir Path dir)
+      throws Exception {
     Files.writeString(dir.resolve("code.json"), codeStepJson("code"));
     DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
 
@@ -139,7 +141,7 @@ class SagaServerTest {
   }
 
   @Test
-  void constructor_definitionRegistrationFails_closesManagerAndPropagates(@TempDir Path dir)
+  void constructor_definitionRegistrationFails_closesOrchestratorAndPropagates(@TempDir Path dir)
       throws Exception {
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
@@ -153,7 +155,7 @@ class SagaServerTest {
   }
 
   @Test
-  void start_portUnavailable_closesManagerAndPropagates(@TempDir Path dir) throws Exception {
+  void start_portUnavailable_closesOrchestratorAndPropagates(@TempDir Path dir) throws Exception {
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     // Hold an ephemeral port with another server so SagaServer's app.start(...) fails to bind.
     Javalin portHolder = Javalin.create().start(0);
@@ -174,7 +176,7 @@ class SagaServerTest {
   }
 
   @Test
-  void close_calledTwice_drainsManagerOnce(@TempDir Path dir) throws Exception {
+  void close_calledTwice_drainsOrchestratorOnce(@TempDir Path dir) throws Exception {
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
     SagaServer server = new SagaServer(configWithDefinitionsPath(dir), orchestrator);
