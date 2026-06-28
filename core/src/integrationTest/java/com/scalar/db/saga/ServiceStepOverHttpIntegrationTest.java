@@ -155,14 +155,14 @@ class ServiceStepOverHttpIntegrationTest {
             .add()
             .build();
 
-    try (DefaultSagaOrchestrator manager = buildManager("user-service")) {
-      manager.register(def);
+    try (DefaultSagaOrchestrator orchestrator = buildOrchestrator("user-service")) {
+      orchestrator.register(def);
 
       // Act
-      String sagaId = manager.start("user-notification-saga", Map.of("userId", "u-1"));
+      String sagaId = orchestrator.start("user-notification-saga", Map.of("userId", "u-1"));
 
       // Assert — saga completed; output flowed; correlation headers reached the participant
-      assertThat(manager.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.COMPLETED);
+      assertThat(orchestrator.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.COMPLETED);
       assertThat(notified).hasSize(1);
       assertThat(notified.get(0)).contains("alice");
       assertThat(sagaIdHeader.get()).isEqualTo(sagaId);
@@ -188,14 +188,14 @@ class ServiceStepOverHttpIntegrationTest {
             .add()
             .build();
 
-    try (DefaultSagaOrchestrator manager = buildManager("svc")) {
-      manager.register(def);
+    try (DefaultSagaOrchestrator orchestrator = buildOrchestrator("svc")) {
+      orchestrator.register(def);
 
       // Act
-      String sagaId = manager.start("flaky-saga", Map.of());
+      String sagaId = orchestrator.start("flaky-saga", Map.of());
 
       // Assert — engine retried the retryable 503; the second attempt succeeded
-      assertThat(manager.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.COMPLETED);
+      assertThat(orchestrator.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.COMPLETED);
       assertThat(flakyCalls.get()).isEqualTo(2);
     }
   }
@@ -216,14 +216,15 @@ class ServiceStepOverHttpIntegrationTest {
             .add()
             .build();
 
-    try (DefaultSagaOrchestrator manager = buildManager("svc")) {
-      manager.register(def);
+    try (DefaultSagaOrchestrator orchestrator = buildOrchestrator("svc")) {
+      orchestrator.register(def);
 
       // Act
-      String sagaId = manager.start("payment-saga", Map.of());
+      String sagaId = orchestrator.start("payment-saga", Map.of());
 
       // Assert — saga compensated and the prior step's compensation ran
-      assertThat(manager.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.COMPENSATED);
+      assertThat(orchestrator.getStateSnapshot(sagaId).getStatus())
+          .isEqualTo(SagaStatus.COMPENSATED);
       assertThat(cancelled).hasSize(1);
     }
   }
@@ -246,14 +247,14 @@ class ServiceStepOverHttpIntegrationTest {
             .add()
             .build();
 
-    try (DefaultSagaOrchestrator manager = buildManager("order-service")) {
-      manager.register(def);
+    try (DefaultSagaOrchestrator orchestrator = buildOrchestrator("order-service")) {
+      orchestrator.register(def);
 
       // Act
-      String sagaId = manager.start("tcc-order-saga", Map.of());
+      String sagaId = orchestrator.start("tcc-order-saga", Map.of());
 
       // Assert — all reserves succeeded, so both steps confirmed
-      assertThat(manager.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.COMPLETED);
+      assertThat(orchestrator.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.COMPLETED);
       assertThat(reserved).hasSize(2);
       assertThat(confirmed).hasSize(2);
       assertThat(tccCancelled).isEmpty();
@@ -278,16 +279,17 @@ class ServiceStepOverHttpIntegrationTest {
             .add()
             .build();
 
-    try (DefaultSagaOrchestrator manager = buildManager("order-service")) {
-      manager.register(def);
+    try (DefaultSagaOrchestrator orchestrator = buildOrchestrator("order-service")) {
+      orchestrator.register(def);
 
       // Act
-      String sagaId = manager.start("tcc-order-saga", Map.of());
+      String sagaId = orchestrator.start("tcc-order-saga", Map.of());
 
       // Assert — the second reserve returned 422 (it may have committed the reservation), so BOTH
       // reservations are cancelled (cancel from the failed step, not just the prior one)
       // and nothing is confirmed.
-      assertThat(manager.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.COMPENSATED);
+      assertThat(orchestrator.getStateSnapshot(sagaId).getStatus())
+          .isEqualTo(SagaStatus.COMPENSATED);
       assertThat(reserved).hasSize(1);
       assertThat(tccCancelled).hasSize(2);
       assertThat(confirmed).isEmpty();
@@ -318,21 +320,21 @@ class ServiceStepOverHttpIntegrationTest {
             .add()
             .build();
 
-    try (DefaultSagaOrchestrator manager =
+    try (DefaultSagaOrchestrator orchestrator =
         DefaultSagaOrchestrator.newBuilder()
             .storeFactory(ScalarDbSagaStoreFactory.create(props))
             .httpEndpoint("xml-service", baseUrl)
             .defaultHeader("Authorization", "Bearer secret")
             .add()
             .build()) {
-      manager.register(def);
+      orchestrator.register(def);
 
       // Act
-      String sagaId = manager.start("xml-saga", Map.of("text", "hello"));
+      String sagaId = orchestrator.start("xml-saga", Map.of("text", "hello"));
 
       // Assert — the override content type, templated raw body, default auth header, and raw $body
       // capture all worked end-to-end.
-      assertThat(manager.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.COMPLETED);
+      assertThat(orchestrator.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.COMPLETED);
       assertThat(xmlContentType.get()).isEqualTo("application/xml");
       assertThat(xmlBody.get()).isEqualTo("<msg>hello</msg>");
       assertThat(xmlAuthHeader.get()).isEqualTo("Bearer secret");
@@ -345,7 +347,7 @@ class ServiceStepOverHttpIntegrationTest {
     return HttpCall.newBuilder(path).jsonBody(Map.of("op", op)).build();
   }
 
-  private DefaultSagaOrchestrator buildManager(String serviceName) {
+  private DefaultSagaOrchestrator buildOrchestrator(String serviceName) {
     return DefaultSagaOrchestrator.newBuilder()
         .storeFactory(ScalarDbSagaStoreFactory.create(props))
         .httpEndpoint(serviceName, baseUrl)

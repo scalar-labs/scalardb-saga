@@ -67,7 +67,7 @@ class SagaIntegrationTest {
     Files.deleteIfExists(tempDbPath);
   }
 
-  private DefaultSagaOrchestrator buildManager(Map<String, Object> steps) {
+  private DefaultSagaOrchestrator buildOrchestrator(Map<String, Object> steps) {
     return DefaultSagaOrchestrator.newBuilder()
         .storeFactory(ScalarDbSagaStoreFactory.create(props))
         .stepResolver(
@@ -81,7 +81,8 @@ class SagaIntegrationTest {
         .build();
   }
 
-  private DefaultSagaOrchestrator buildManager(SagaStore sagaStore, Map<String, Object> steps) {
+  private DefaultSagaOrchestrator buildOrchestrator(
+      SagaStore sagaStore, Map<String, Object> steps) {
     return DefaultSagaOrchestrator.newBuilder()
         .storeFactory(() -> sagaStore)
         .stepResolver(
@@ -120,13 +121,13 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (DefaultSagaOrchestrator manager =
-          buildManager(Map.of("step1", step1, "step2", step2, "step3", step3))) {
-        manager.register(def);
+      try (DefaultSagaOrchestrator orchestrator =
+          buildOrchestrator(Map.of("step1", step1, "step2", step2, "step3", step3))) {
+        orchestrator.register(def);
 
         // Act
-        String sagaId = manager.start("test-saga", Map.of());
-        SagaStateSnapshot result = manager.getStateSnapshot(sagaId);
+        String sagaId = orchestrator.start("test-saga", Map.of());
+        SagaStateSnapshot result = orchestrator.getStateSnapshot(sagaId);
 
         // Assert
         assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPLETED);
@@ -161,13 +162,13 @@ class SagaIntegrationTest {
               .build();
 
       String sagaId;
-      try (DefaultSagaOrchestrator manager =
-          buildManager(Map.of("step1", step1, "step2", step2, "step3", step3))) {
-        manager.register(def);
+      try (DefaultSagaOrchestrator orchestrator =
+          buildOrchestrator(Map.of("step1", step1, "step2", step2, "step3", step3))) {
+        orchestrator.register(def);
 
         // Act
-        sagaId = manager.start("test-saga", Map.of());
-        SagaStateSnapshot result = manager.getStateSnapshot(sagaId);
+        sagaId = orchestrator.start("test-saga", Map.of());
+        SagaStateSnapshot result = orchestrator.getStateSnapshot(sagaId);
 
         // Assert
         assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPENSATED);
@@ -182,7 +183,7 @@ class SagaIntegrationTest {
       }
 
       // Verify compensation event ordering (LIFO: step3 → step2 → step1) by reading persisted
-      // events through an independent store — the manager owns and has already closed its own
+      // events through an independent store — the orchestrator owns and has already closed its own
       // store.
       try (SagaStore eventStore = ScalarDbSagaStoreFactory.create(props).createStore()) {
         List<SagaEvent> events = eventStore.getEvents(sagaId);
@@ -214,12 +215,13 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (DefaultSagaOrchestrator manager = buildManager(Map.of("step1", step1, "step2", step2))) {
-        manager.register(def);
+      try (DefaultSagaOrchestrator orchestrator =
+          buildOrchestrator(Map.of("step1", step1, "step2", step2))) {
+        orchestrator.register(def);
 
         // Act
-        String sagaId = manager.start("test-saga", Map.of());
-        SagaStateSnapshot result = manager.getStateSnapshot(sagaId);
+        String sagaId = orchestrator.start("test-saga", Map.of());
+        SagaStateSnapshot result = orchestrator.getStateSnapshot(sagaId);
 
         // Assert
         assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPLETED);
@@ -251,12 +253,13 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (DefaultSagaOrchestrator manager = buildManager(Map.of("step1", step1, "step2", step2))) {
-        manager.register(def);
+      try (DefaultSagaOrchestrator orchestrator =
+          buildOrchestrator(Map.of("step1", step1, "step2", step2))) {
+        orchestrator.register(def);
 
         // Act
-        String sagaId = manager.start("test-saga", Map.of());
-        SagaStateSnapshot result = manager.getStateSnapshot(sagaId);
+        String sagaId = orchestrator.start("test-saga", Map.of());
+        SagaStateSnapshot result = orchestrator.getStateSnapshot(sagaId);
 
         // Assert — FORWARD strategy: no compensation, saga stays RUNNING
         assertThat(result.getStatus()).isEqualTo(SagaStatus.RUNNING);
@@ -287,13 +290,13 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (DefaultSagaOrchestrator manager =
-          buildManager(Map.of("step1", step1, "step2", step2, "step3", step3))) {
-        manager.register(def);
+      try (DefaultSagaOrchestrator orchestrator =
+          buildOrchestrator(Map.of("step1", step1, "step2", step2, "step3", step3))) {
+        orchestrator.register(def);
 
         // Act
-        String sagaId = manager.start("test-saga", Map.of());
-        SagaStateSnapshot result = manager.getStateSnapshot(sagaId);
+        String sagaId = orchestrator.start("test-saga", Map.of());
+        SagaStateSnapshot result = orchestrator.getStateSnapshot(sagaId);
 
         // Assert — failure at pivot (step2), compensate step1
         assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPENSATED);
@@ -330,13 +333,13 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (DefaultSagaOrchestrator manager =
-          buildManager(Map.of("step1", step1, "step2", step2, "step3", step3))) {
-        manager.register(def);
+      try (DefaultSagaOrchestrator orchestrator =
+          buildOrchestrator(Map.of("step1", step1, "step2", step2, "step3", step3))) {
+        orchestrator.register(def);
 
         // Act
-        String sagaId = manager.start("test-saga", Map.of());
-        SagaStateSnapshot result = manager.getStateSnapshot(sagaId);
+        String sagaId = orchestrator.start("test-saga", Map.of());
+        SagaStateSnapshot result = orchestrator.getStateSnapshot(sagaId);
 
         // Assert — failure after pivot: no compensation, saga stays RUNNING for recovery
         assertThat(result.getStatus()).isEqualTo(SagaStatus.RUNNING);
@@ -369,12 +372,13 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (DefaultSagaOrchestrator manager = buildManager(Map.of("step1", step1, "step2", step2))) {
-        manager.register(def);
+      try (DefaultSagaOrchestrator orchestrator =
+          buildOrchestrator(Map.of("step1", step1, "step2", step2))) {
+        orchestrator.register(def);
 
         // Act
-        String sagaId = manager.start("tcc-saga", Map.of());
-        SagaStateSnapshot result = manager.getStateSnapshot(sagaId);
+        String sagaId = orchestrator.start("tcc-saga", Map.of());
+        SagaStateSnapshot result = orchestrator.getStateSnapshot(sagaId);
 
         // Assert
         assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPLETED);
@@ -406,12 +410,13 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (DefaultSagaOrchestrator manager = buildManager(Map.of("step1", step1, "step2", step2))) {
-        manager.register(def);
+      try (DefaultSagaOrchestrator orchestrator =
+          buildOrchestrator(Map.of("step1", step1, "step2", step2))) {
+        orchestrator.register(def);
 
         // Act
-        String sagaId = manager.start("tcc-saga", Map.of());
-        SagaStateSnapshot result = manager.getStateSnapshot(sagaId);
+        String sagaId = orchestrator.start("tcc-saga", Map.of());
+        SagaStateSnapshot result = orchestrator.getStateSnapshot(sagaId);
 
         // Assert
         assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPENSATED);
@@ -442,12 +447,13 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (DefaultSagaOrchestrator manager = buildManager(Map.of("step1", step1, "step2", step2))) {
-        manager.register(def);
+      try (DefaultSagaOrchestrator orchestrator =
+          buildOrchestrator(Map.of("step1", step1, "step2", step2))) {
+        orchestrator.register(def);
 
         // Act
-        String sagaId = manager.start("tcc-saga", Map.of());
-        SagaStateSnapshot result = manager.getStateSnapshot(sagaId);
+        String sagaId = orchestrator.start("tcc-saga", Map.of());
+        SagaStateSnapshot result = orchestrator.getStateSnapshot(sagaId);
 
         // Assert — confirm is past the pivot, so no compensation; saga stays RUNNING
         assertThat(result.getStatus()).isEqualTo(SagaStatus.RUNNING);
@@ -486,12 +492,13 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (DefaultSagaOrchestrator manager = buildManager(Map.of("step1", step1, "step2", step2))) {
-        manager.register(def);
+      try (DefaultSagaOrchestrator orchestrator =
+          buildOrchestrator(Map.of("step1", step1, "step2", step2))) {
+        orchestrator.register(def);
 
         // Act
-        String sagaId = manager.start("tcc-saga", Map.of());
-        SagaStateSnapshot result = manager.getStateSnapshot(sagaId);
+        String sagaId = orchestrator.start("tcc-saga", Map.of());
+        SagaStateSnapshot result = orchestrator.getStateSnapshot(sagaId);
 
         // Assert
         assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPLETED);
@@ -527,24 +534,24 @@ class SagaIntegrationTest {
       // First run — with crash decorator
       try (SagaStore baseStore = ScalarDbSagaStoreFactory.create(props).createStore();
           SagaStore crashingStore = new CrashingStoreDecorator(baseStore, 0);
-          DefaultSagaOrchestrator manager = buildManager(crashingStore, steps)) {
-        manager.register(def);
+          DefaultSagaOrchestrator orchestrator = buildOrchestrator(crashingStore, steps)) {
+        orchestrator.register(def);
 
         try {
-          manager.start(sagaId, "test-saga", Map.of());
+          orchestrator.start(sagaId, "test-saga", Map.of());
         } catch (SimulatedCrashError expected) {
           // Expected crash
         }
 
         // Verify saga is still RUNNING after crash
-        assertThat(manager.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.RUNNING);
+        assertThat(orchestrator.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.RUNNING);
         assertThat(step1.getExecutionCount()).isEqualTo(1);
         assertThat(step2.getExecutionCount()).isEqualTo(0);
       }
 
-      // Restart — new manager with fresh store, no crash decorator
+      // Restart — new orchestrator with fresh store, no crash decorator
       try (SagaStore recoveryStore = ScalarDbSagaStoreFactory.create(props).createStore();
-          DefaultSagaOrchestrator recovered = buildManager(recoveryStore, steps)) {
+          DefaultSagaOrchestrator recovered = buildOrchestrator(recoveryStore, steps)) {
         recoveryStore.markForRecovery(sagaId);
         recovered.recover();
 
@@ -590,12 +597,13 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (DefaultSagaOrchestrator manager = buildManager(Map.of("step1", step1, "step2", step2))) {
-        manager.register(def);
+      try (DefaultSagaOrchestrator orchestrator =
+          buildOrchestrator(Map.of("step1", step1, "step2", step2))) {
+        orchestrator.register(def);
 
         // Act
-        String sagaId = manager.start("test-saga", Map.of());
-        SagaStateSnapshot result = manager.getStateSnapshot(sagaId);
+        String sagaId = orchestrator.start("test-saga", Map.of());
+        SagaStateSnapshot result = orchestrator.getStateSnapshot(sagaId);
 
         // Assert
         assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPLETED);
@@ -617,12 +625,12 @@ class SagaIntegrationTest {
       SagaDefinition def =
           SagaDefinition.newBuilder("test-saga").saga().step("step1", STEP_CLASS).add().build();
 
-      try (DefaultSagaOrchestrator manager = buildManager(Map.of("step1", step1))) {
-        manager.register(def);
+      try (DefaultSagaOrchestrator orchestrator = buildOrchestrator(Map.of("step1", step1))) {
+        orchestrator.register(def);
 
         // Act
-        String sagaId = manager.start("test-saga", Map.of("name", "World"));
-        SagaStateSnapshot result = manager.getStateSnapshot(sagaId);
+        String sagaId = orchestrator.start("test-saga", Map.of("name", "World"));
+        SagaStateSnapshot result = orchestrator.getStateSnapshot(sagaId);
 
         // Assert
         assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPLETED);
@@ -645,14 +653,14 @@ class SagaIntegrationTest {
       SagaDefinition def =
           SagaDefinition.newBuilder("test-saga").saga().step("step1", STEP_CLASS).add().build();
 
-      try (DefaultSagaOrchestrator manager = buildManager(Map.of("step1", step1))) {
-        manager.register(def);
+      try (DefaultSagaOrchestrator orchestrator = buildOrchestrator(Map.of("step1", step1))) {
+        orchestrator.register(def);
 
         // Act — first execution succeeds
-        manager.start("my-saga-id", "test-saga", Map.of());
+        orchestrator.start("my-saga-id", "test-saga", Map.of());
 
         // Assert — second execution with same ID fails
-        assertThatThrownBy(() -> manager.start("my-saga-id", "test-saga", Map.of()))
+        assertThatThrownBy(() -> orchestrator.start("my-saga-id", "test-saga", Map.of()))
             .isInstanceOf(SagaAlreadyExistsException.class);
       }
     }
@@ -672,8 +680,9 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (DefaultSagaOrchestrator manager = buildManager(Map.of("step1", step1, "step2", step2))) {
-        manager.register(def);
+      try (DefaultSagaOrchestrator orchestrator =
+          buildOrchestrator(Map.of("step1", step1, "step2", step2))) {
+        orchestrator.register(def);
 
         int numSagas = 5;
         CopyOnWriteArrayList<SagaStateSnapshot> results = new CopyOnWriteArrayList<>();
@@ -690,8 +699,8 @@ class SagaIntegrationTest {
                   () -> {
                     try {
                       latch.await();
-                      manager.start(sagaId, "test-saga", Map.of("idx", sagaId));
-                      SagaStateSnapshot result = manager.getStateSnapshot(sagaId);
+                      orchestrator.start(sagaId, "test-saga", Map.of("idx", sagaId));
+                      SagaStateSnapshot result = orchestrator.getStateSnapshot(sagaId);
                       results.add(result);
                     } catch (InterruptedException e) {
                       Thread.currentThread().interrupt();
@@ -747,7 +756,7 @@ class SagaIntegrationTest {
 
       String sagaId;
       try (DefaultSagaOrchestrator manager1 =
-          buildManager(Map.of("step1", step1, "step2", step2))) {
+          buildOrchestrator(Map.of("step1", step1, "step2", step2))) {
         manager1.register(def);
 
         // Act — start saga; step2 fails, step1 compensation also fails → COMPENSATING
@@ -756,11 +765,11 @@ class SagaIntegrationTest {
             .isEqualTo(SagaStatus.COMPENSATING);
       }
 
-      // New manager with fresh store and a step1 that can compensate successfully
+      // New orchestrator with fresh store and a step1 that can compensate successfully
       FakeStep step1Fixed = FakeStep.newBuilder("step1").build();
       try (SagaStore store2 = ScalarDbSagaStoreFactory.create(props).createStore();
           DefaultSagaOrchestrator manager2 =
-              buildManager(store2, Map.of("step1", step1Fixed, "step2", step2))) {
+              buildOrchestrator(store2, Map.of("step1", step1Fixed, "step2", step2))) {
 
         // Act — recovery picks up the COMPENSATING saga and completes compensation
         store2.markForRecovery(sagaId);
@@ -796,15 +805,16 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (DefaultSagaOrchestrator manager = buildManager(Map.of("step1", step1, "step2", step2))) {
-        manager.register(def);
+      try (DefaultSagaOrchestrator orchestrator =
+          buildOrchestrator(Map.of("step1", step1, "step2", step2))) {
+        orchestrator.register(def);
 
         // Act — startAsync returns immediately
-        String sagaId = manager.startAsync("test-saga", Map.of());
+        String sagaId = orchestrator.startAsync("test-saga", Map.of());
         assertThat(sagaId).isNotNull();
 
         // Wait for async completion
-        SagaStateSnapshot result = awaitTerminal(manager, sagaId);
+        SagaStateSnapshot result = awaitTerminal(orchestrator, sagaId);
 
         // Assert
         assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPLETED);
@@ -821,8 +831,8 @@ class SagaIntegrationTest {
       SagaDefinition def =
           SagaDefinition.newBuilder("test-saga").saga().step("step1", STEP_CLASS).add().build();
 
-      try (DefaultSagaOrchestrator manager = buildManager(Map.of("step1", step1))) {
-        manager.register(def);
+      try (DefaultSagaOrchestrator orchestrator = buildOrchestrator(Map.of("step1", step1))) {
+        orchestrator.register(def);
 
         CountDownLatch callbackLatch = new CountDownLatch(1);
         AtomicReference<SagaStateSnapshot> callbackResult = new AtomicReference<>();
@@ -849,7 +859,7 @@ class SagaIntegrationTest {
             };
 
         // Act
-        String sagaId = manager.startAsync("test-saga", Map.of(), callback);
+        String sagaId = orchestrator.startAsync("test-saga", Map.of(), callback);
 
         // Wait for callback
         assertThat(callbackLatch.await(10, TimeUnit.SECONDS)).isTrue();
@@ -863,11 +873,11 @@ class SagaIntegrationTest {
       }
     }
 
-    private SagaStateSnapshot awaitTerminal(DefaultSagaOrchestrator manager, String sagaId)
+    private SagaStateSnapshot awaitTerminal(DefaultSagaOrchestrator orchestrator, String sagaId)
         throws InterruptedException {
       long deadline = System.currentTimeMillis() + 10_000;
       while (System.currentTimeMillis() < deadline) {
-        SagaStateSnapshot snapshot = manager.getStateSnapshot(sagaId);
+        SagaStateSnapshot snapshot = orchestrator.getStateSnapshot(sagaId);
         if (snapshot.getStatus() == SagaStatus.COMPLETED
             || snapshot.getStatus() == SagaStatus.COMPENSATED
             || snapshot.getStatus() == SagaStatus.ESCALATED) {
@@ -907,14 +917,14 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (DefaultSagaOrchestrator manager = buildManager(Map.of("step1", step1))) {
-        manager.register(v1);
-        manager.register(v2);
+      try (DefaultSagaOrchestrator orchestrator = buildOrchestrator(Map.of("step1", step1))) {
+        orchestrator.register(v1);
+        orchestrator.register(v2);
 
         // Act — start with explicit version 1.0
         SagaDefinitionId idV1 = new SagaDefinitionId("versioned-saga", "1.0");
-        String sagaId = manager.start(idV1, Map.of());
-        SagaStateSnapshot result = manager.getStateSnapshot(sagaId);
+        String sagaId = orchestrator.start(idV1, Map.of());
+        SagaStateSnapshot result = orchestrator.getStateSnapshot(sagaId);
 
         // Assert
         assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPLETED);
@@ -943,14 +953,14 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (DefaultSagaOrchestrator manager = buildManager(Map.of("step1", step1))) {
-        manager.register(v1);
-        manager.register(v2);
+      try (DefaultSagaOrchestrator orchestrator = buildOrchestrator(Map.of("step1", step1))) {
+        orchestrator.register(v1);
+        orchestrator.register(v2);
 
         // Act — start with explicit version 2.0
         SagaDefinitionId idV2 = new SagaDefinitionId("versioned-saga", "2.0");
-        String sagaId = manager.start(idV2, Map.of());
-        SagaStateSnapshot result = manager.getStateSnapshot(sagaId);
+        String sagaId = orchestrator.start(idV2, Map.of());
+        SagaStateSnapshot result = orchestrator.getStateSnapshot(sagaId);
 
         // Assert
         assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPLETED);
@@ -979,13 +989,13 @@ class SagaIntegrationTest {
               .add()
               .build();
 
-      try (DefaultSagaOrchestrator manager = buildManager(Map.of("step1", step1))) {
-        manager.register(v1);
-        manager.register(v2);
+      try (DefaultSagaOrchestrator orchestrator = buildOrchestrator(Map.of("step1", step1))) {
+        orchestrator.register(v1);
+        orchestrator.register(v2);
 
         // Act — start by name only (should resolve to latest = v2)
-        String sagaId = manager.start("versioned-saga", Map.of());
-        SagaStateSnapshot result = manager.getStateSnapshot(sagaId);
+        String sagaId = orchestrator.start("versioned-saga", Map.of());
+        SagaStateSnapshot result = orchestrator.getStateSnapshot(sagaId);
 
         // Assert
         assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPLETED);

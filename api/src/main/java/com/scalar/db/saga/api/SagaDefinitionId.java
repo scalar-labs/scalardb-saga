@@ -24,10 +24,12 @@ public final class SagaDefinitionId {
   public SagaDefinitionId(String name, String version) {
     Objects.requireNonNull(name, "name must not be null");
     Objects.requireNonNull(version, "version must not be null");
-    if (name.trim().isEmpty()) {
+    // Reject empty or all-whitespace (Java 8 equivalent of String.isBlank(), which is Java 11+):
+    // allMatch returns true for an empty code-point stream, so this also rejects "".
+    if (name.codePoints().allMatch(Character::isWhitespace)) {
       throw new IllegalArgumentException("name must not be blank");
     }
-    if (version.trim().isEmpty()) {
+    if (version.codePoints().allMatch(Character::isWhitespace)) {
       throw new IllegalArgumentException("version must not be blank");
     }
     if (name.contains(":")) {

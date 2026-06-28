@@ -48,6 +48,26 @@ class SagaDefinitionIdTest {
   }
 
   @Test
+  void constructor_unicodeWhitespaceNameGiven_throwsIllegalArgumentException() {
+    // Arrange — U+3000 (ideographic space) is whitespace above U+0020, which String.trim() does not
+    // strip; the blank check must still reject it (exact String.isBlank() parity under --release
+    // 8).
+    // Act & Assert
+    assertThatThrownBy(() -> new SagaDefinitionId("\u3000", "1.0"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void constructor_unicodeWhitespaceVersionGiven_throwsIllegalArgumentException() {
+    // Arrange — U+3000 (ideographic space) is whitespace above U+0020, which String.trim() does not
+    // strip; the blank check must still reject it (exact String.isBlank() parity under --release
+    // 8).
+    // Act & Assert
+    assertThatThrownBy(() -> new SagaDefinitionId("transfer", "\u3000"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void constructor_nameWithColonGiven_throwsIllegalArgumentException() {
     // Act & Assert
     assertThatThrownBy(() -> new SagaDefinitionId("ns:transfer", "1.0"))

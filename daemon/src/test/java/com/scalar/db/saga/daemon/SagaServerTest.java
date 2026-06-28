@@ -68,12 +68,12 @@ class SagaServerTest {
     Files.writeString(dir.resolve("c.yml"), declarativeYaml("c"));
     Files.writeString(dir.resolve("d.txt"), "ignored");
     Files.writeString(dir.resolve("notes.md"), "ignored");
-    DefaultSagaOrchestrator manager = mock(DefaultSagaOrchestrator.class);
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
 
-    new SagaServer(configWithDefinitionsPath(dir), manager);
+    new SagaServer(configWithDefinitionsPath(dir), orchestrator);
 
     ArgumentCaptor<SagaDefinition> captor = ArgumentCaptor.forClass(SagaDefinition.class);
-    verify(manager, times(3)).register(captor.capture());
+    verify(orchestrator, times(3)).register(captor.capture());
     assertThat(captor.getAllValues())
         .extracting(SagaDefinition::getName)
         .containsExactlyInAnyOrder("a", "b", "c");
@@ -82,12 +82,12 @@ class SagaServerTest {
   @Test
   void constructor_singleDefinitionFile_registersOnce(@TempDir Path dir) throws Exception {
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
-    DefaultSagaOrchestrator manager = mock(DefaultSagaOrchestrator.class);
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
 
-    new SagaServer(configWithDefinitionsPath(dir.resolve("saga.json")), manager);
+    new SagaServer(configWithDefinitionsPath(dir.resolve("saga.json")), orchestrator);
 
     ArgumentCaptor<SagaDefinition> captor = ArgumentCaptor.forClass(SagaDefinition.class);
-    verify(manager, times(1)).register(captor.capture());
+    verify(orchestrator, times(1)).register(captor.capture());
     assertThat(captor.getValue().getName()).isEqualTo("saga");
   }
 
@@ -95,12 +95,12 @@ class SagaServerTest {
   void constructor_directoryWithDefinitionExtension_isIgnored(@TempDir Path dir) throws Exception {
     Files.writeString(dir.resolve("real.json"), declarativeJson("real"));
     Files.createDirectory(dir.resolve("nested.json")); // a directory that matches the extension
-    DefaultSagaOrchestrator manager = mock(DefaultSagaOrchestrator.class);
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
 
-    new SagaServer(configWithDefinitionsPath(dir), manager);
+    new SagaServer(configWithDefinitionsPath(dir), orchestrator);
 
     ArgumentCaptor<SagaDefinition> captor = ArgumentCaptor.forClass(SagaDefinition.class);
-    verify(manager, times(1)).register(captor.capture());
+    verify(orchestrator, times(1)).register(captor.capture());
     assertThat(captor.getValue().getName()).isEqualTo("real");
   }
 
@@ -108,48 +108,48 @@ class SagaServerTest {
   void constructor_noDefinitionsPath_throwsAndClosesManager() {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.PORT_KEY, "0");
-    DefaultSagaOrchestrator manager = mock(DefaultSagaOrchestrator.class);
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
 
-    assertThatThrownBy(() -> new SagaServer(SagaServerConfig.load(props), manager))
+    assertThatThrownBy(() -> new SagaServer(SagaServerConfig.load(props), orchestrator))
         .isInstanceOf(IllegalStateException.class);
-    verify(manager, never()).register(any(SagaDefinition.class));
-    verify(manager).close();
+    verify(orchestrator, never()).register(any(SagaDefinition.class));
+    verify(orchestrator).close();
   }
 
   @Test
   void constructor_noDefinitionFiles_throwsAndClosesManager(@TempDir Path dir) throws Exception {
     Files.writeString(dir.resolve("notes.md"), "ignored"); // no .json/.yaml/.yml definitions
-    DefaultSagaOrchestrator manager = mock(DefaultSagaOrchestrator.class);
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
 
-    assertThatThrownBy(() -> new SagaServer(configWithDefinitionsPath(dir), manager))
+    assertThatThrownBy(() -> new SagaServer(configWithDefinitionsPath(dir), orchestrator))
         .isInstanceOf(IllegalStateException.class);
-    verify(manager, never()).register(any(SagaDefinition.class));
-    verify(manager).close();
+    verify(orchestrator, never()).register(any(SagaDefinition.class));
+    verify(orchestrator).close();
   }
 
   @Test
   void constructor_codeStepDefinition_throwsAndClosesManager(@TempDir Path dir) throws Exception {
     Files.writeString(dir.resolve("code.json"), codeStepJson("code"));
-    DefaultSagaOrchestrator manager = mock(DefaultSagaOrchestrator.class);
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
 
-    assertThatThrownBy(() -> new SagaServer(configWithDefinitionsPath(dir), manager))
+    assertThatThrownBy(() -> new SagaServer(configWithDefinitionsPath(dir), orchestrator))
         .isInstanceOf(SagaDefinitionException.class);
-    verify(manager, never()).register(any(SagaDefinition.class));
-    verify(manager).close();
+    verify(orchestrator, never()).register(any(SagaDefinition.class));
+    verify(orchestrator).close();
   }
 
   @Test
   void constructor_definitionRegistrationFails_closesManagerAndPropagates(@TempDir Path dir)
       throws Exception {
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
-    DefaultSagaOrchestrator manager = mock(DefaultSagaOrchestrator.class);
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
     doThrow(new IllegalStateException("bad definition"))
-        .when(manager)
+        .when(orchestrator)
         .register(any(SagaDefinition.class));
 
-    assertThatThrownBy(() -> new SagaServer(configWithDefinitionsPath(dir), manager))
+    assertThatThrownBy(() -> new SagaServer(configWithDefinitionsPath(dir), orchestrator))
         .isInstanceOf(IllegalStateException.class);
-    verify(manager).close();
+    verify(orchestrator).close();
   }
 
   @Test
@@ -161,13 +161,13 @@ class SagaServerTest {
       Properties props = new Properties();
       props.setProperty(SagaServerConfig.PORT_KEY, Integer.toString(portHolder.port()));
       props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
-      DefaultSagaOrchestrator manager = mock(DefaultSagaOrchestrator.class);
-      SagaServer server = new SagaServer(SagaServerConfig.load(props), manager);
+      DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
+      SagaServer server = new SagaServer(SagaServerConfig.load(props), orchestrator);
 
       assertThatThrownBy(server::start).isInstanceOf(RuntimeException.class);
 
-      verify(manager).startBackgroundTasks();
-      verify(manager).close();
+      verify(orchestrator).startBackgroundTasks();
+      verify(orchestrator).close();
     } finally {
       portHolder.stop();
     }
@@ -176,12 +176,12 @@ class SagaServerTest {
   @Test
   void close_calledTwice_drainsManagerOnce(@TempDir Path dir) throws Exception {
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
-    DefaultSagaOrchestrator manager = mock(DefaultSagaOrchestrator.class);
-    SagaServer server = new SagaServer(configWithDefinitionsPath(dir), manager);
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
+    SagaServer server = new SagaServer(configWithDefinitionsPath(dir), orchestrator);
 
     server.close();
     server.close();
 
-    verify(manager, times(1)).close();
+    verify(orchestrator, times(1)).close();
   }
 }

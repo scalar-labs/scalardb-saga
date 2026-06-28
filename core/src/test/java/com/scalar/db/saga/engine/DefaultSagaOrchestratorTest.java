@@ -52,18 +52,18 @@ class DefaultSagaOrchestratorTest {
   @Mock private SagaRecoveryManager recoveryManager;
   @Mock private SagaRetentionManager retentionManager;
 
-  private DefaultSagaOrchestrator manager;
+  private DefaultSagaOrchestrator orchestrator;
 
   @BeforeEach
   void setUp() {
-    manager =
+    orchestrator =
         new DefaultSagaOrchestrator(
             engine, store, definitionRegistry, recoveryManager, retentionManager, 30_000);
   }
 
   @AfterEach
   void tearDown() {
-    manager.close();
+    orchestrator.close();
   }
 
   private static SagaDefinition definition(String name) {
@@ -96,7 +96,7 @@ class DefaultSagaOrchestratorTest {
       SagaDefinition def = definition("transfer");
 
       // Act
-      manager.register(def);
+      orchestrator.register(def);
 
       // Assert — build and cache plan eagerly, then persist
       verify(engine).getOrBuildPlan(def);
@@ -112,7 +112,8 @@ class DefaultSagaOrchestratorTest {
           .getOrBuildPlan(def);
 
       // Act & Assert
-      assertThatThrownBy(() -> manager.register(def)).isInstanceOf(SagaDefinitionException.class);
+      assertThatThrownBy(() -> orchestrator.register(def))
+          .isInstanceOf(SagaDefinitionException.class);
       // Registry should NOT be called if validation fails
       verify(definitionRegistry, never()).register(any(SagaDefinition.class));
     }
@@ -133,7 +134,7 @@ class DefaultSagaOrchestratorTest {
       Path file = Path.of(resource.toURI());
 
       // Act
-      manager.register(file);
+      orchestrator.register(file);
 
       // Assert
       verify(definitionRegistry).register(any(SagaDefinition.class));
@@ -142,7 +143,7 @@ class DefaultSagaOrchestratorTest {
     @Test
     void register_nonexistentFileGiven_throwsException() {
       // Act & Assert
-      assertThatThrownBy(() -> manager.register(Path.of("nonexistent.json")))
+      assertThatThrownBy(() -> orchestrator.register(Path.of("nonexistent.json")))
           .isInstanceOf(SagaDefinitionException.class);
     }
   }
@@ -162,7 +163,7 @@ class DefaultSagaOrchestratorTest {
       when(engine.execute(eq(def), isNull(), any())).thenReturn("saga-1");
 
       // Act
-      String sagaId = manager.start("transfer", Map.of("amount", 100));
+      String sagaId = orchestrator.start("transfer", Map.of("amount", 100));
 
       // Assert
       assertThat(sagaId).isEqualTo("saga-1");
@@ -178,7 +179,7 @@ class DefaultSagaOrchestratorTest {
       when(engine.execute(eq(def), eq("my-id"), any())).thenReturn("my-id");
 
       // Act
-      manager.start("my-id", "transfer", Map.of());
+      orchestrator.start("my-id", "transfer", Map.of());
 
       // Assert
       verify(definitionRegistry).resolve("transfer");
@@ -191,7 +192,7 @@ class DefaultSagaOrchestratorTest {
       when(definitionRegistry.resolve("unknown")).thenReturn(null);
 
       // Act & Assert
-      assertThatThrownBy(() -> manager.start("unknown", Map.of()))
+      assertThatThrownBy(() -> orchestrator.start("unknown", Map.of()))
           .isInstanceOf(SagaDefinitionNotFoundException.class);
       verify(definitionRegistry).resolve("unknown");
     }
@@ -199,20 +200,20 @@ class DefaultSagaOrchestratorTest {
     @Test
     void start_afterClose_throwsIllegalState() {
       // Arrange
-      manager.close();
+      orchestrator.close();
 
       // Act & Assert
-      assertThatThrownBy(() -> manager.start("transfer", Map.of()))
+      assertThatThrownBy(() -> orchestrator.start("transfer", Map.of()))
           .isInstanceOf(IllegalStateException.class);
     }
 
     @Test
     void start_clientSuppliedIdAfterClose_throwsIllegalState() {
       // Arrange
-      manager.close();
+      orchestrator.close();
 
       // Act & Assert
-      assertThatThrownBy(() -> manager.start("my-id", "transfer", Map.of()))
+      assertThatThrownBy(() -> orchestrator.start("my-id", "transfer", Map.of()))
           .isInstanceOf(IllegalStateException.class);
     }
   }
@@ -233,7 +234,7 @@ class DefaultSagaOrchestratorTest {
       when(engine.createSaga(eq(def), isNull(), any())).thenReturn(saga);
 
       // Act
-      String sagaId = manager.startAsync("transfer", Map.of());
+      String sagaId = orchestrator.startAsync("transfer", Map.of());
 
       // Assert — ID returned immediately, execution happens async
       assertThat(sagaId).isEqualTo("saga-1");
@@ -250,7 +251,7 @@ class DefaultSagaOrchestratorTest {
       when(engine.createSaga(eq(def), eq("my-id"), any())).thenReturn(saga);
 
       // Act
-      manager.startAsync("my-id", "transfer", Map.of());
+      orchestrator.startAsync("my-id", "transfer", Map.of());
 
       // Assert
       verify(definitionRegistry).resolve("transfer");
@@ -270,7 +271,7 @@ class DefaultSagaOrchestratorTest {
       when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(completedSaga));
 
       // Act
-      manager.startAsync("transfer", Map.of(), callback);
+      orchestrator.startAsync("transfer", Map.of(), callback);
 
       // Assert — callback dispatched asynchronously
       verify(definitionRegistry).resolve("transfer");
@@ -290,7 +291,7 @@ class DefaultSagaOrchestratorTest {
       when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(compensatedSaga));
 
       // Act
-      manager.startAsync("transfer", Map.of(), callback);
+      orchestrator.startAsync("transfer", Map.of(), callback);
 
       // Assert
       verify(definitionRegistry).resolve("transfer");
@@ -310,7 +311,7 @@ class DefaultSagaOrchestratorTest {
       when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(escalatedSaga));
 
       // Act
-      manager.startAsync("transfer", Map.of(), callback);
+      orchestrator.startAsync("transfer", Map.of(), callback);
 
       // Assert
       verify(definitionRegistry).resolve("transfer");
@@ -333,7 +334,7 @@ class DefaultSagaOrchestratorTest {
       when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(compensatedSaga));
 
       // Act
-      manager.startAsync("transfer", Map.of(), callback);
+      orchestrator.startAsync("transfer", Map.of(), callback);
 
       // Assert — callback still dispatched despite engine failure
       verify(definitionRegistry).resolve("transfer");
@@ -353,7 +354,7 @@ class DefaultSagaOrchestratorTest {
       when(store.getStateSnapshot("my-id")).thenReturn(Optional.of(completedSaga));
 
       // Act
-      manager.startAsync("my-id", "transfer", Map.of(), callback);
+      orchestrator.startAsync("my-id", "transfer", Map.of(), callback);
 
       // Assert
       verify(definitionRegistry).resolve("transfer");
@@ -367,7 +368,7 @@ class DefaultSagaOrchestratorTest {
       when(definitionRegistry.resolve("unknown")).thenReturn(null);
 
       // Act & Assert
-      assertThatThrownBy(() -> manager.startAsync("unknown", Map.of()))
+      assertThatThrownBy(() -> orchestrator.startAsync("unknown", Map.of()))
           .isInstanceOf(SagaDefinitionNotFoundException.class);
       verify(definitionRegistry).resolve("unknown");
     }
@@ -389,7 +390,7 @@ class DefaultSagaOrchestratorTest {
       when(engine.execute(eq(def), isNull(), any())).thenReturn("saga-1");
 
       // Act
-      String sagaId = manager.start(id, Map.of("amount", 100));
+      String sagaId = orchestrator.start(id, Map.of("amount", 100));
 
       // Assert
       assertThat(sagaId).isEqualTo("saga-1");
@@ -406,7 +407,7 @@ class DefaultSagaOrchestratorTest {
       when(engine.execute(eq(def), eq("my-id"), any())).thenReturn("my-id");
 
       // Act
-      manager.start("my-id", id, Map.of());
+      orchestrator.start("my-id", id, Map.of());
 
       // Assert
       verify(definitionRegistry).resolve("transfer", "2.0");
@@ -420,7 +421,7 @@ class DefaultSagaOrchestratorTest {
       when(definitionRegistry.resolve("unknown", "1.0")).thenReturn(null);
 
       // Act & Assert
-      assertThatThrownBy(() -> manager.start(id, Map.of()))
+      assertThatThrownBy(() -> orchestrator.start(id, Map.of()))
           .isInstanceOf(SagaDefinitionNotFoundException.class);
       verify(definitionRegistry).resolve("unknown", "1.0");
     }
@@ -443,7 +444,7 @@ class DefaultSagaOrchestratorTest {
       when(engine.createSaga(eq(def), isNull(), any())).thenReturn(saga);
 
       // Act
-      String sagaId = manager.startAsync(id, Map.of());
+      String sagaId = orchestrator.startAsync(id, Map.of());
 
       // Assert
       assertThat(sagaId).isEqualTo("saga-1");
@@ -461,7 +462,7 @@ class DefaultSagaOrchestratorTest {
       when(engine.createSaga(eq(def), eq("my-id"), any())).thenReturn(saga);
 
       // Act
-      manager.startAsync("my-id", id, Map.of());
+      orchestrator.startAsync("my-id", id, Map.of());
 
       // Assert
       verify(definitionRegistry).resolve("transfer", "2.0");
@@ -482,7 +483,7 @@ class DefaultSagaOrchestratorTest {
       when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(completedSaga));
 
       // Act
-      manager.startAsync(id, Map.of(), callback);
+      orchestrator.startAsync(id, Map.of(), callback);
 
       // Assert
       verify(definitionRegistry).resolve("transfer", "2.0");
@@ -503,7 +504,7 @@ class DefaultSagaOrchestratorTest {
       when(store.getStateSnapshot("my-id")).thenReturn(Optional.of(completedSaga));
 
       // Act
-      manager.startAsync("my-id", id, Map.of(), callback);
+      orchestrator.startAsync("my-id", id, Map.of(), callback);
 
       // Assert
       verify(definitionRegistry).resolve("transfer", "2.0");
@@ -518,7 +519,7 @@ class DefaultSagaOrchestratorTest {
       when(definitionRegistry.resolve("unknown", "1.0")).thenReturn(null);
 
       // Act & Assert
-      assertThatThrownBy(() -> manager.startAsync(id, Map.of()))
+      assertThatThrownBy(() -> orchestrator.startAsync(id, Map.of()))
           .isInstanceOf(SagaDefinitionNotFoundException.class);
       verify(definitionRegistry).resolve("unknown", "1.0");
     }
@@ -527,10 +528,10 @@ class DefaultSagaOrchestratorTest {
     void startAsync_afterClose_throwsIllegalState() {
       // Arrange
       SagaDefinitionId id = new SagaDefinitionId("transfer", "2.0");
-      manager.close();
+      orchestrator.close();
 
       // Act & Assert
-      assertThatThrownBy(() -> manager.startAsync(id, Map.of()))
+      assertThatThrownBy(() -> orchestrator.startAsync(id, Map.of()))
           .isInstanceOf(IllegalStateException.class);
     }
 
@@ -541,7 +542,7 @@ class DefaultSagaOrchestratorTest {
       when(mockExecutor.submit(any(Runnable.class)))
           .thenThrow(new java.util.concurrent.RejectedExecutionException("shutting down"));
       when(mockExecutor.awaitTermination(anyLong(), any())).thenReturn(true);
-      DefaultSagaOrchestrator managerWithMockExecutor =
+      DefaultSagaOrchestrator orchestratorWithMockExecutor =
           new DefaultSagaOrchestrator(
               engine,
               store,
@@ -557,11 +558,11 @@ class DefaultSagaOrchestratorTest {
       when(engine.createSaga(eq(def), isNull(), any())).thenReturn(saga);
 
       // Act — should not throw; saga is already persisted, recovery will handle it
-      String sagaId = managerWithMockExecutor.startAsync("transfer", Map.of());
+      String sagaId = orchestratorWithMockExecutor.startAsync("transfer", Map.of());
 
       // Assert
       assertThat(sagaId).isEqualTo("saga-1");
-      managerWithMockExecutor.close();
+      orchestratorWithMockExecutor.close();
     }
   }
 
@@ -589,7 +590,7 @@ class DefaultSagaOrchestratorTest {
       when(engine.resumeFrom(eq(def), eq(context), eq(1))).thenReturn(completed);
 
       // Act
-      SagaStateSnapshot result = manager.resume("saga-1");
+      SagaStateSnapshot result = orchestrator.resume("saga-1");
 
       // Assert — resumes from step 1 (after last completed step 0)
       verify(engine).resumeFrom(def, context, 1);
@@ -612,7 +613,7 @@ class DefaultSagaOrchestratorTest {
       when(engine.resumeFrom(eq(def), eq(context), eq(0))).thenReturn(completed);
 
       // Act
-      manager.resume("saga-1");
+      orchestrator.resume("saga-1");
 
       // Assert
       verify(engine).resumeFrom(def, context, 0);
@@ -625,7 +626,8 @@ class DefaultSagaOrchestratorTest {
       when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(saga));
 
       // Act & Assert
-      assertThatThrownBy(() -> manager.resume("saga-1")).isInstanceOf(IllegalStateException.class);
+      assertThatThrownBy(() -> orchestrator.resume("saga-1"))
+          .isInstanceOf(IllegalStateException.class);
     }
 
     @Test
@@ -635,7 +637,8 @@ class DefaultSagaOrchestratorTest {
       when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(saga));
 
       // Act & Assert
-      assertThatThrownBy(() -> manager.resume("saga-1")).isInstanceOf(IllegalStateException.class);
+      assertThatThrownBy(() -> orchestrator.resume("saga-1"))
+          .isInstanceOf(IllegalStateException.class);
     }
 
     @Test
@@ -644,7 +647,8 @@ class DefaultSagaOrchestratorTest {
       when(store.getStateSnapshot("unknown")).thenReturn(Optional.empty());
 
       // Act & Assert
-      assertThatThrownBy(() -> manager.resume("unknown")).isInstanceOf(SagaNotFoundException.class);
+      assertThatThrownBy(() -> orchestrator.resume("unknown"))
+          .isInstanceOf(SagaNotFoundException.class);
     }
 
     @Test
@@ -655,7 +659,7 @@ class DefaultSagaOrchestratorTest {
       when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(null);
 
       // Act & Assert
-      assertThatThrownBy(() -> manager.resume("saga-1"))
+      assertThatThrownBy(() -> orchestrator.resume("saga-1"))
           .isInstanceOf(SagaDefinitionNotFoundException.class);
     }
   }
@@ -686,7 +690,7 @@ class DefaultSagaOrchestratorTest {
       when(engine.replayEvents(saga, events)).thenReturn(context);
 
       // Act
-      manager.compensate("saga-1");
+      orchestrator.compensate("saga-1");
 
       // Assert — compensate from step 1 (last completed)
       verify(engine).compensateFrom(def, context, 1);
@@ -712,7 +716,7 @@ class DefaultSagaOrchestratorTest {
       when(engine.replayEvents(saga, events)).thenReturn(context);
 
       // Act
-      manager.compensate("saga-1");
+      orchestrator.compensate("saga-1");
 
       // Assert — compensate from step 0 (one before the lowest compensated step 1)
       verify(engine).compensateFrom(def, context, 0);
@@ -732,7 +736,7 @@ class DefaultSagaOrchestratorTest {
       when(engine.replayEvents(saga, events)).thenReturn(context);
 
       // Act
-      manager.compensate("saga-1");
+      orchestrator.compensate("saga-1");
 
       // Assert — no steps to compensate, but still transitions to COMPENSATED
       verify(engine).compensateFrom(def, context, -1);
@@ -745,7 +749,7 @@ class DefaultSagaOrchestratorTest {
       when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(saga));
 
       // Act & Assert
-      assertThatThrownBy(() -> manager.compensate("saga-1"))
+      assertThatThrownBy(() -> orchestrator.compensate("saga-1"))
           .isInstanceOf(IllegalStateException.class);
     }
 
@@ -756,7 +760,7 @@ class DefaultSagaOrchestratorTest {
       when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(saga));
 
       // Act & Assert
-      assertThatThrownBy(() -> manager.compensate("saga-1"))
+      assertThatThrownBy(() -> orchestrator.compensate("saga-1"))
           .isInstanceOf(IllegalStateException.class);
     }
 
@@ -766,7 +770,7 @@ class DefaultSagaOrchestratorTest {
       when(store.getStateSnapshot("unknown")).thenReturn(Optional.empty());
 
       // Act & Assert
-      assertThatThrownBy(() -> manager.compensate("unknown"))
+      assertThatThrownBy(() -> orchestrator.compensate("unknown"))
           .isInstanceOf(SagaNotFoundException.class);
     }
   }
@@ -785,7 +789,7 @@ class DefaultSagaOrchestratorTest {
       when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(saga));
 
       // Act
-      SagaStateSnapshot result = manager.getStateSnapshot("saga-1");
+      SagaStateSnapshot result = orchestrator.getStateSnapshot("saga-1");
 
       // Assert
       assertThat(result).isSameAs(saga);
@@ -797,7 +801,7 @@ class DefaultSagaOrchestratorTest {
       when(store.getStateSnapshot("unknown")).thenReturn(Optional.empty());
 
       // Act & Assert
-      assertThatThrownBy(() -> manager.getStateSnapshot("unknown"))
+      assertThatThrownBy(() -> orchestrator.getStateSnapshot("unknown"))
           .isInstanceOf(SagaNotFoundException.class);
     }
   }
@@ -812,7 +816,7 @@ class DefaultSagaOrchestratorTest {
     @Test
     void completeStep_always_throwsUnsupported() {
       // Act & Assert
-      assertThatThrownBy(() -> manager.completeStep("saga-1", "s1", Map.of()))
+      assertThatThrownBy(() -> orchestrator.completeStep("saga-1", "s1", Map.of()))
           .isInstanceOf(UnsupportedOperationException.class);
     }
   }
@@ -827,7 +831,7 @@ class DefaultSagaOrchestratorTest {
     @Test
     void startBackgroundTasks_always_startsBothManagers() {
       // Act
-      manager.startBackgroundTasks();
+      orchestrator.startBackgroundTasks();
 
       // Assert
       verify(recoveryManager).start();
@@ -837,10 +841,10 @@ class DefaultSagaOrchestratorTest {
     @Test
     void startBackgroundTasks_afterClose_throwsIllegalState() {
       // Arrange
-      manager.close();
+      orchestrator.close();
 
       // Act & Assert
-      assertThatThrownBy(() -> manager.startBackgroundTasks())
+      assertThatThrownBy(() -> orchestrator.startBackgroundTasks())
           .isInstanceOf(IllegalStateException.class);
     }
   }
@@ -855,7 +859,7 @@ class DefaultSagaOrchestratorTest {
     @Test
     void recover_always_delegatesToRecoveryManager() {
       // Act
-      manager.recover();
+      orchestrator.recover();
 
       // Assert
       verify(recoveryManager).recover();
@@ -864,10 +868,10 @@ class DefaultSagaOrchestratorTest {
     @Test
     void recover_afterClose_throwsIllegalState() {
       // Arrange
-      manager.close();
+      orchestrator.close();
 
       // Act & Assert
-      assertThatThrownBy(() -> manager.recover()).isInstanceOf(IllegalStateException.class);
+      assertThatThrownBy(() -> orchestrator.recover()).isInstanceOf(IllegalStateException.class);
     }
   }
 
@@ -884,7 +888,7 @@ class DefaultSagaOrchestratorTest {
       // Arrange
       ExecutorService mockExecutor = mock(ExecutorService.class);
       when(mockExecutor.awaitTermination(anyLong(), any())).thenReturn(true);
-      DefaultSagaOrchestrator managerWithMockExecutor =
+      DefaultSagaOrchestrator orchestratorWithMockExecutor =
           new DefaultSagaOrchestrator(
               engine,
               store,
@@ -895,7 +899,7 @@ class DefaultSagaOrchestratorTest {
               mockExecutor);
 
       // Act
-      managerWithMockExecutor.close();
+      orchestratorWithMockExecutor.close();
 
       // Assert
       verify(retentionManager).stop(anyLong());

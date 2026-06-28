@@ -42,7 +42,7 @@ public final class SagaServer implements AutoCloseable {
   private static final Logger logger = LoggerFactory.getLogger(SagaServer.class);
 
   private final SagaServerConfig config;
-  private final DefaultSagaOrchestrator sagaManager;
+  private final DefaultSagaOrchestrator orchestrator;
   private final Javalin app;
   private final AtomicBoolean closed = new AtomicBoolean();
 
@@ -61,16 +61,16 @@ public final class SagaServer implements AutoCloseable {
    * DefaultSagaOrchestrator}, so a test can inject a mock to exercise definition loading and route
    * wiring without a database.
    */
-  SagaServer(SagaServerConfig config, DefaultSagaOrchestrator sagaManager) {
+  SagaServer(SagaServerConfig config, DefaultSagaOrchestrator orchestrator) {
     this.config = Objects.requireNonNull(config, "config must not be null");
-    this.sagaManager = Objects.requireNonNull(sagaManager, "sagaManager must not be null");
+    this.orchestrator = Objects.requireNonNull(orchestrator, "orchestrator must not be null");
     this.app = Javalin.create();
     try {
       loadDefinitions();
       registerRoutes();
     } catch (RuntimeException e) {
-      // Release the store/DB connections held by the manager if startup wiring fails.
-      sagaManager.close();
+      // Release the store/DB connections held by the orchestrator if startup wiring fails.
+      orchestrator.close();
       throw e;
     }
   }
@@ -137,7 +137,7 @@ public final class SagaServer implements AutoCloseable {
                 + " declarative service step, or run the engine in embedded mode for code steps.");
       }
     }
-    sagaManager.register(definition);
+    orchestrator.register(definition);
   }
 
   private static boolean isDefinitionFile(Path path) {
@@ -148,7 +148,7 @@ public final class SagaServer implements AutoCloseable {
   private void registerRoutes() {
     HealthResource.register(app);
     ErrorMapper.register(app);
-    SagaResource.register(app, sagaManager, config.syncTimeoutMillis());
+    SagaResource.register(app, orchestrator, config.syncTimeoutMillis());
   }
 
   /**
@@ -158,10 +158,11 @@ public final class SagaServer implements AutoCloseable {
    */
   public SagaServer start() {
     try {
-      sagaManager.startBackgroundTasks();
+      orchestrator.startBackgroundTasks();
       app.start(config.host(), config.port());
     } catch (RuntimeException e) {
-      // Stop the (partially started) app and drain/close the manager so a failed start — e.g. a
+      // Stop the (partially started) app and drain/close the orchestrator so a failed start — e.g.
+      // a
       // port bind failure after background tasks are running — does not leak threads/connections.
       close();
       throw e;
@@ -183,13 +184,13 @@ public final class SagaServer implements AutoCloseable {
   @Override
   public void close() {
     // Idempotent: start() calls close() on a bind failure, and try-with-resources will call it
-    // again, so guard against draining the manager (and closing the store) twice.
+    // again, so guard against draining the orchestrator (and closing the store) twice.
     if (!closed.compareAndSet(false, true)) {
       return;
     }
     // Stop accepting new requests first, then drain in-flight sagas.
     app.stop();
-    sagaManager.close();
+    orchestrator.close();
     logger.info("SagaServer stopped");
   }
 

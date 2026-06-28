@@ -1,8 +1,8 @@
 package com.scalar.db.saga.daemon.api;
 
 import com.scalar.db.saga.api.SagaCallback;
+import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
-import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import io.javalin.Javalin;
 import io.javalin.http.Context;
 import java.util.Map;
@@ -56,30 +56,29 @@ public final class SagaResource {
    * Registers the saga lifecycle routes on the given app.
    *
    * @param app the Javalin app
-   * @param sagaManager the saga manager the endpoints delegate to
+   * @param orchestrator the saga orchestrator the endpoints delegate to
    * @param syncTimeoutMillis the synchronous-start timeout ({@code 0} disables it; see the class
    *     doc's bounded-synchronous-start note)
    */
-  public static void register(
-      Javalin app, DefaultSagaOrchestrator sagaManager, long syncTimeoutMillis) {
+  public static void register(Javalin app, SagaOrchestrator orchestrator, long syncTimeoutMillis) {
     app.post(
         "/sagas",
         ctx -> {
           StartSagaRequest request = parseRequest(ctx);
           Map<String, Object> input = request.inputOrEmpty();
           if (isAsync(ctx.queryParam("async"))) {
-            String sagaId = sagaManager.startAsync(request.requireSagaName(), input);
-            respond(ctx, 202, sagaManager.getStateSnapshot(sagaId));
+            String sagaId = orchestrator.startAsync(request.requireSagaName(), input);
+            respond(ctx, 202, orchestrator.getStateSnapshot(sagaId));
           } else if (syncTimeoutMillis > 0) {
             AtomicReference<SagaStateSnapshot> terminal = new AtomicReference<>();
             CountDownLatch done = new CountDownLatch(1);
             String sagaId =
-                sagaManager.startAsync(
+                orchestrator.startAsync(
                     request.requireSagaName(), input, terminalSignal(done, terminal));
-            respondBoundedSync(ctx, sagaManager, sagaId, done, terminal, syncTimeoutMillis);
+            respondBoundedSync(ctx, orchestrator, sagaId, done, terminal, syncTimeoutMillis);
           } else {
-            String sagaId = sagaManager.start(request.requireSagaName(), input);
-            respondSync(ctx, sagaManager, sagaId);
+            String sagaId = orchestrator.start(request.requireSagaName(), input);
+            respondSync(ctx, orchestrator, sagaId);
           }
         });
 
@@ -90,22 +89,23 @@ public final class SagaResource {
           StartSagaRequest request = parseRequest(ctx);
           Map<String, Object> input = request.inputOrEmpty();
           if (isAsync(ctx.queryParam("async"))) {
-            sagaManager.startAsync(sagaId, request.requireSagaName(), input);
-            respond(ctx, 202, sagaManager.getStateSnapshot(sagaId));
+            orchestrator.startAsync(sagaId, request.requireSagaName(), input);
+            respond(ctx, 202, orchestrator.getStateSnapshot(sagaId));
           } else if (syncTimeoutMillis > 0) {
             AtomicReference<SagaStateSnapshot> terminal = new AtomicReference<>();
             CountDownLatch done = new CountDownLatch(1);
-            sagaManager.startAsync(
+            orchestrator.startAsync(
                 sagaId, request.requireSagaName(), input, terminalSignal(done, terminal));
-            respondBoundedSync(ctx, sagaManager, sagaId, done, terminal, syncTimeoutMillis);
+            respondBoundedSync(ctx, orchestrator, sagaId, done, terminal, syncTimeoutMillis);
           } else {
-            sagaManager.start(sagaId, request.requireSagaName(), input);
-            respondSync(ctx, sagaManager, sagaId);
+            orchestrator.start(sagaId, request.requireSagaName(), input);
+            respondSync(ctx, orchestrator, sagaId);
           }
         });
 
     app.get(
-        "/sagas/{id}", ctx -> respond(ctx, 200, sagaManager.getStateSnapshot(ctx.pathParam("id"))));
+        "/sagas/{id}",
+        ctx -> respond(ctx, 200, orchestrator.getStateSnapshot(ctx.pathParam("id"))));
   }
 
   /**
@@ -114,8 +114,8 @@ public final class SagaResource {
    * COMPENSATED}/{@code ESCALATED}), or {@code 202} while it is still resolving ({@code
    * COMPENSATING} / parked {@code RUNNING}) — poll {@code GET /sagas/{id}}.
    */
-  private static void respondSync(Context ctx, DefaultSagaOrchestrator sagaManager, String sagaId) {
-    SagaStateSnapshot snapshot = sagaManager.getStateSnapshot(sagaId);
+  private static void respondSync(Context ctx, SagaOrchestrator orchestrator, String sagaId) {
+    SagaStateSnapshot snapshot = orchestrator.getStateSnapshot(sagaId);
     respond(ctx, snapshot.getStatus().isTerminal() ? 200 : 202, snapshot);
   }
 
@@ -156,7 +156,7 @@ public final class SagaResource {
    */
   private static void respondBoundedSync(
       Context ctx,
-      DefaultSagaOrchestrator sagaManager,
+      SagaOrchestrator orchestrator,
       String sagaId,
       CountDownLatch done,
       AtomicReference<SagaStateSnapshot> terminal,
@@ -175,7 +175,7 @@ public final class SagaResource {
       SagaStateSnapshot snapshot = Objects.requireNonNull(terminal.get());
       respond(ctx, snapshot.getStatus().isTerminal() ? 200 : 202, snapshot);
     } else {
-      respond(ctx, 202, sagaManager.getStateSnapshot(sagaId));
+      respond(ctx, 202, orchestrator.getStateSnapshot(sagaId));
     }
   }
 

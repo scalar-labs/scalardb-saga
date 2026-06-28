@@ -19,13 +19,13 @@ class DefaultSagaOrchestratorBuilderTest {
     SagaStore store = mock(SagaStore.class);
 
     // Act
-    DefaultSagaOrchestrator manager =
+    DefaultSagaOrchestrator orchestrator =
         DefaultSagaOrchestrator.newBuilder().storeFactory(() -> store).build();
 
     // Assert
-    assertThat(manager).isNotNull();
-    assertThat(manager).isInstanceOf(DefaultSagaOrchestrator.class);
-    manager.close();
+    assertThat(orchestrator).isNotNull();
+    assertThat(orchestrator).isInstanceOf(DefaultSagaOrchestrator.class);
+    orchestrator.close();
   }
 
   @Test
@@ -34,7 +34,7 @@ class DefaultSagaOrchestratorBuilderTest {
     SagaStore store = mock(SagaStore.class);
 
     // Act
-    DefaultSagaOrchestrator manager =
+    DefaultSagaOrchestrator orchestrator =
         DefaultSagaOrchestrator.newBuilder()
             .storeFactory(() -> store)
             .ownerId("pod-1")
@@ -46,8 +46,8 @@ class DefaultSagaOrchestratorBuilderTest {
             .build();
 
     // Assert
-    assertThat(manager).isNotNull();
-    manager.close();
+    assertThat(orchestrator).isNotNull();
+    orchestrator.close();
   }
 
   @Test
@@ -56,7 +56,7 @@ class DefaultSagaOrchestratorBuilderTest {
     SagaStore store = mock(SagaStore.class);
 
     // Act
-    DefaultSagaOrchestrator manager =
+    DefaultSagaOrchestrator orchestrator =
         DefaultSagaOrchestrator.newBuilder()
             .storeFactory(() -> store)
             .httpEndpoint("account-svc", "http://account-svc:8080")
@@ -64,8 +64,8 @@ class DefaultSagaOrchestratorBuilderTest {
             .build();
 
     // Assert
-    assertThat(manager).isNotNull();
-    manager.close();
+    assertThat(orchestrator).isNotNull();
+    orchestrator.close();
   }
 
   @Test
@@ -74,7 +74,7 @@ class DefaultSagaOrchestratorBuilderTest {
     SagaStore store = mock(SagaStore.class);
 
     // Act
-    DefaultSagaOrchestrator manager =
+    DefaultSagaOrchestrator orchestrator =
         DefaultSagaOrchestrator.newBuilder()
             .storeFactory(() -> store)
             .httpEndpoint("account-svc", "https://account-svc:8443")
@@ -87,8 +87,8 @@ class DefaultSagaOrchestratorBuilderTest {
             .build();
 
     // Assert
-    assertThat(manager).isNotNull();
-    manager.close();
+    assertThat(orchestrator).isNotNull();
+    orchestrator.close();
   }
 
   @SuppressWarnings("NullAway")
@@ -109,7 +109,7 @@ class DefaultSagaOrchestratorBuilderTest {
     SagaStore store = mock(SagaStore.class);
 
     // Act
-    DefaultSagaOrchestrator manager =
+    DefaultSagaOrchestrator orchestrator =
         DefaultSagaOrchestrator.newBuilder()
             .storeFactory(() -> store)
             .httpEndpoint("account-svc", "http://account-svc:8080")
@@ -118,8 +118,8 @@ class DefaultSagaOrchestratorBuilderTest {
             .build();
 
     // Assert
-    assertThat(manager).isNotNull();
-    manager.close();
+    assertThat(orchestrator).isNotNull();
+    orchestrator.close();
   }
 
   @Test
@@ -132,7 +132,7 @@ class DefaultSagaOrchestratorBuilderTest {
         };
 
     // Act
-    DefaultSagaOrchestrator manager =
+    DefaultSagaOrchestrator orchestrator =
         DefaultSagaOrchestrator.newBuilder()
             .storeFactory(() -> store)
             .httpEndpoint("account-svc", "http://account-svc:8080")
@@ -141,8 +141,8 @@ class DefaultSagaOrchestratorBuilderTest {
             .build();
 
     // Assert
-    assertThat(manager).isNotNull();
-    manager.close();
+    assertThat(orchestrator).isNotNull();
+    orchestrator.close();
   }
 
   @Test
@@ -240,7 +240,7 @@ class DefaultSagaOrchestratorBuilderTest {
     SagaStore store = mock(SagaStore.class);
 
     // Act
-    DefaultSagaOrchestrator manager =
+    DefaultSagaOrchestrator orchestrator =
         DefaultSagaOrchestrator.newBuilder()
             .storeFactory(() -> store)
             .resource(String.class, "source-channel", "source")
@@ -248,8 +248,8 @@ class DefaultSagaOrchestratorBuilderTest {
             .build();
 
     // Assert
-    assertThat(manager).isNotNull();
-    manager.close();
+    assertThat(orchestrator).isNotNull();
+    orchestrator.close();
   }
 
   @Test
@@ -262,15 +262,15 @@ class DefaultSagaOrchestratorBuilderTest {
         };
 
     // Act
-    DefaultSagaOrchestrator manager =
+    DefaultSagaOrchestrator orchestrator =
         DefaultSagaOrchestrator.newBuilder()
             .storeFactory(() -> store)
             .stepResolver(resolver)
             .build();
 
     // Assert
-    assertThat(manager).isNotNull();
-    manager.close();
+    assertThat(orchestrator).isNotNull();
+    orchestrator.close();
   }
 
   @Test
@@ -299,12 +299,12 @@ class DefaultSagaOrchestratorBuilderTest {
     SagaStore store = mock(SagaStore.class);
 
     // Act
-    DefaultSagaOrchestrator manager =
+    DefaultSagaOrchestrator orchestrator =
         DefaultSagaOrchestrator.newBuilder().storeFactory(() -> store).build();
 
     // Assert — default mode uses ReflectiveStepResolver with empty registry (no-arg only)
-    assertThat(manager).isNotNull();
-    manager.close();
+    assertThat(orchestrator).isNotNull();
+    orchestrator.close();
   }
 
   @Test
@@ -330,14 +330,14 @@ class DefaultSagaOrchestratorBuilderTest {
     Clock fixedClock = Clock.fixed(Instant.parse("2025-06-01T00:00:00Z"), ZoneOffset.UTC);
 
     // Act — build with custom clock but no explicit recovery/retention configs
-    DefaultSagaOrchestrator manager =
+    DefaultSagaOrchestrator orchestrator =
         DefaultSagaOrchestrator.newBuilder().storeFactory(() -> store).clock(fixedClock).build();
 
     // Assert — verify defaults(Clock) propagates the clock correctly
-    assertThat(manager).isNotNull();
+    assertThat(orchestrator).isNotNull();
     assertThat(RecoveryConfig.defaults(fixedClock).clock()).isSameAs(fixedClock);
     assertThat(RetentionConfig.defaults(fixedClock).clock()).isSameAs(fixedClock);
-    manager.close();
+    orchestrator.close();
   }
 
   @Test
@@ -350,7 +350,7 @@ class DefaultSagaOrchestratorBuilderTest {
     RetentionConfig explicitRetention = RetentionConfig.defaults(configClock);
 
     // Act — explicit configs should take precedence over builder clock
-    DefaultSagaOrchestrator manager =
+    DefaultSagaOrchestrator orchestrator =
         DefaultSagaOrchestrator.newBuilder()
             .storeFactory(() -> store)
             .clock(builderClock)
@@ -359,9 +359,9 @@ class DefaultSagaOrchestratorBuilderTest {
             .build();
 
     // Assert
-    assertThat(manager).isNotNull();
+    assertThat(orchestrator).isNotNull();
     assertThat(explicitRecovery.clock()).isSameAs(configClock);
     assertThat(explicitRetention.clock()).isSameAs(configClock);
-    manager.close();
+    orchestrator.close();
   }
 }
