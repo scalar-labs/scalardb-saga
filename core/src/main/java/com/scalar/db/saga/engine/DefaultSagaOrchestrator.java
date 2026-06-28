@@ -250,13 +250,17 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       @Nullable String sagaId,
       Map<String, Object> input,
       @Nullable SagaCallback callback) {
+    // Defensive copy: the async thread reads this map after we return to the caller, so a caller
+    // that mutates its map post-return would otherwise race the read (CME or a torn copy).
+    Map<String, Object> copiedInput = new HashMap<>(input);
+
     // Persist synchronously — saga is recoverable from this point
-    SagaStateSnapshot saga = engine.createSaga(def, sagaId, input);
+    SagaStateSnapshot saga = engine.createSaga(def, sagaId, copiedInput);
 
     // Submit execution to a virtual thread. The returned Future is intentionally unused:
     // saga state is persisted, so recovery handles failures. Storing the future would require
     // managing its lifecycle (fire-and-forget pattern).
-    submitAsync(def, saga, input, callback);
+    submitAsync(def, saga, copiedInput, callback);
 
     return saga;
   }
