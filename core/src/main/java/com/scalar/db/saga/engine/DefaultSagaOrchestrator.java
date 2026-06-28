@@ -101,6 +101,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   // ---------------------------------------------------------------------------
 
   public void register(SagaDefinition definition) {
+    Objects.requireNonNull(definition, "definition must not be null");
     // Eagerly resolve all steps — fail fast on missing resources or unresolvable constructors.
     // This must happen before persisting to the store, so invalid definitions are never stored.
     engine.getOrBuildPlan(definition);
@@ -108,6 +109,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   }
 
   public void register(Path definitionFile) {
+    Objects.requireNonNull(definitionFile, "definitionFile must not be null");
     register(SagaDefinitionParser.parseFile(definitionFile));
   }
 
@@ -117,6 +119,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
 
   @Override
   public String start(String sagaName, Map<String, Object> input) {
+    Objects.requireNonNull(sagaName, "sagaName must not be null");
+    Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
     SagaDefinition def = requireLatestDefinition(sagaName);
     return engine.execute(def, null, input);
@@ -124,6 +128,9 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
 
   @Override
   public void start(String sagaId, String sagaName, Map<String, Object> input) {
+    Objects.requireNonNull(sagaId, "sagaId must not be null");
+    Objects.requireNonNull(sagaName, "sagaName must not be null");
+    Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
     SagaDefinition def = requireLatestDefinition(sagaName);
     engine.execute(def, sagaId, input);
@@ -131,6 +138,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
 
   @Override
   public String start(SagaDefinitionId id, Map<String, Object> input) {
+    Objects.requireNonNull(id, "id must not be null");
+    Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
     SagaDefinition def = requireVersionedDefinition(id);
     return engine.execute(def, null, input);
@@ -138,6 +147,9 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
 
   @Override
   public void start(String sagaId, SagaDefinitionId id, Map<String, Object> input) {
+    Objects.requireNonNull(sagaId, "sagaId must not be null");
+    Objects.requireNonNull(id, "id must not be null");
+    Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
     SagaDefinition def = requireVersionedDefinition(id);
     engine.execute(def, sagaId, input);
@@ -149,6 +161,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
 
   @Override
   public String startAsync(String sagaName, Map<String, Object> input) {
+    Objects.requireNonNull(sagaName, "sagaName must not be null");
+    Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
     SagaDefinition def = requireLatestDefinition(sagaName);
     return startAsyncInternal(def, null, input, null).getSagaId();
@@ -156,6 +170,9 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
 
   @Override
   public String startAsync(String sagaName, Map<String, Object> input, SagaCallback callback) {
+    Objects.requireNonNull(sagaName, "sagaName must not be null");
+    Objects.requireNonNull(input, "input must not be null");
+    Objects.requireNonNull(callback, "callback must not be null");
     ensureOpen();
     SagaDefinition def = requireLatestDefinition(sagaName);
     return startAsyncInternal(def, null, input, callback).getSagaId();
@@ -163,6 +180,9 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
 
   @Override
   public void startAsync(String sagaId, String sagaName, Map<String, Object> input) {
+    Objects.requireNonNull(sagaId, "sagaId must not be null");
+    Objects.requireNonNull(sagaName, "sagaName must not be null");
+    Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
     SagaDefinition def = requireLatestDefinition(sagaName);
     startAsyncInternal(def, sagaId, input, null);
@@ -171,6 +191,10 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   @Override
   public void startAsync(
       String sagaId, String sagaName, Map<String, Object> input, SagaCallback callback) {
+    Objects.requireNonNull(sagaId, "sagaId must not be null");
+    Objects.requireNonNull(sagaName, "sagaName must not be null");
+    Objects.requireNonNull(input, "input must not be null");
+    Objects.requireNonNull(callback, "callback must not be null");
     ensureOpen();
     SagaDefinition def = requireLatestDefinition(sagaName);
     startAsyncInternal(def, sagaId, input, callback);
@@ -178,6 +202,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
 
   @Override
   public String startAsync(SagaDefinitionId id, Map<String, Object> input) {
+    Objects.requireNonNull(id, "id must not be null");
+    Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
     SagaDefinition def = requireVersionedDefinition(id);
     return startAsyncInternal(def, null, input, null).getSagaId();
@@ -185,6 +211,9 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
 
   @Override
   public String startAsync(SagaDefinitionId id, Map<String, Object> input, SagaCallback callback) {
+    Objects.requireNonNull(id, "id must not be null");
+    Objects.requireNonNull(input, "input must not be null");
+    Objects.requireNonNull(callback, "callback must not be null");
     ensureOpen();
     SagaDefinition def = requireVersionedDefinition(id);
     return startAsyncInternal(def, null, input, callback).getSagaId();
@@ -192,6 +221,9 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
 
   @Override
   public void startAsync(String sagaId, SagaDefinitionId id, Map<String, Object> input) {
+    Objects.requireNonNull(sagaId, "sagaId must not be null");
+    Objects.requireNonNull(id, "id must not be null");
+    Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
     SagaDefinition def = requireVersionedDefinition(id);
     startAsyncInternal(def, sagaId, input, null);
@@ -200,6 +232,10 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   @Override
   public void startAsync(
       String sagaId, SagaDefinitionId id, Map<String, Object> input, SagaCallback callback) {
+    Objects.requireNonNull(sagaId, "sagaId must not be null");
+    Objects.requireNonNull(id, "id must not be null");
+    Objects.requireNonNull(input, "input must not be null");
+    Objects.requireNonNull(callback, "callback must not be null");
     ensureOpen();
     SagaDefinition def = requireVersionedDefinition(id);
     startAsyncInternal(def, sagaId, input, callback);
@@ -276,6 +312,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   // ---------------------------------------------------------------------------
 
   public SagaStateSnapshot resume(String sagaId) {
+    Objects.requireNonNull(sagaId, "sagaId must not be null");
     SagaStateSnapshot saga = getStateSnapshot(sagaId);
     if (saga.getStatus() != SagaStatus.RUNNING) {
       throw new IllegalStateException(
@@ -291,6 +328,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   }
 
   public SagaStateSnapshot compensate(String sagaId) {
+    Objects.requireNonNull(sagaId, "sagaId must not be null");
     SagaStateSnapshot saga = getStateSnapshot(sagaId);
     if (saga.getStatus() != SagaStatus.COMPENSATING) {
       throw new IllegalStateException(
@@ -322,6 +360,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
 
   @Override
   public SagaStateSnapshot getStateSnapshot(String sagaId) {
+    Objects.requireNonNull(sagaId, "sagaId must not be null");
     return store.getStateSnapshot(sagaId).orElseThrow(() -> new SagaNotFoundException(sagaId));
   }
 
@@ -331,6 +370,9 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
 
   public SagaStateSnapshot completeStep(
       String sagaId, String stepName, Map<String, Object> output) {
+    Objects.requireNonNull(sagaId, "sagaId must not be null");
+    Objects.requireNonNull(stepName, "stepName must not be null");
+    Objects.requireNonNull(output, "output must not be null");
     // completeStep resumes a parked (WAITING) saga when an external callback arrives.
     // It is only available in daemon mode, which uses a separate orchestrator implementation.
     throw new UnsupportedOperationException("completeStep is only available in daemon mode");
@@ -382,8 +424,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     } finally {
       // Sagas are drained. The engine.shutdown() above already released the HTTP clients held by
       // the step instantiator's registries (it owns them); here the orchestrator closes the store,
-      // the
-      // one external resource it owns directly.
+      // the one external resource it owns directly.
       try {
         store.close();
       } catch (Exception e) {
