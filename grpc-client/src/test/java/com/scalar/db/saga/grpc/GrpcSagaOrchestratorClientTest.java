@@ -249,6 +249,22 @@ class GrpcSagaOrchestratorClientTest {
   }
 
   @Test
+  void start_awaitRunningThenTerminal_pollsUntilTerminal() {
+    // Arrange — start returns RUNNING; the first AwaitSaga is a gRPC-OK but still-RUNNING window,
+    // the second reports terminal — exercises the OK-non-terminal "loop again, no backoff" branch.
+    fake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
+    fake.enqueueAwaitSnapshot(snapshot("ignored", SagaStatus.RUNNING));
+    fake.enqueueAwaitSnapshot(snapshot("ignored", SagaStatus.COMPLETED));
+
+    // Act
+    String sagaId = client.start("transfer", Map.of());
+
+    // Assert — the OK-RUNNING return looped again with no backoff; two awaits, then terminal.
+    assertThat(sagaId).isNotEmpty();
+    assertThat(fake.awaitCalls).isEqualTo(2);
+  }
+
+  @Test
   void start_awaitResetThenTerminal_resumesLoop() {
     // Arrange — the first AwaitSaga is reset (UNAVAILABLE); the loop retries and gets terminal.
     fake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
