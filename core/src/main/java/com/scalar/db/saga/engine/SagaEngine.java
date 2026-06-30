@@ -295,14 +295,15 @@ public class SagaEngine implements AutoCloseable {
           TimeoutPolicy.calculateStepDeadline(
               stepWithPolicy.stepTimeoutMillis(), sagaDeadline, clock.millis());
 
-      // Execute and record are in SEPARATE try blocks because they have different
-      // compensation scopes:
-      //   - executeWithRetry fails  → step i may have committed → compensate from i,
-      //       unless the failure proved non-delivery (knownNotCommitted) → from i - 1
-      //   - recordStepCompleted fails → step i DID run    → compensate from i
-      // A single try block with catch(StepExecutionException) would let the
-      // RuntimeException from recordStepCompleted escape entirely, orphaning
-      // step i's side effect with no compensation.
+      // Execute and record are SEPARATE try blocks for two reasons: they have different
+      // compensation scopes, and a single broad catch would mistake an unexpected
+      // RuntimeException from executeWithRetry (a bug — real step failures arrive as
+      // StepExecutionException) for a record failure. Both paths durably record STEP_FAILED(i)
+      // before compensating, so a crash leaves recovery a marker to include step i:
+      //   - executeWithRetry fails: step i may have committed, so compensate from i (or
+      //     from i - 1 if the failure proved non-delivery, knownNotCommitted).
+      //   - recordStepCompleted fails: step i DID commit, so record STEP_FAILED with
+      //     knownNotCommitted=false and compensate from i.
 
       // 1. Execute the step
       StepResult result;
@@ -335,15 +336,21 @@ public class SagaEngine implements AutoCloseable {
       try {
         recordStepCompleted(context, i, stepWithPolicy.step().getName(), result);
       } catch (RuntimeException e) {
-        // Step i's side effect is committed but recording failed. Compensation
-        // must include step i. If the event was actually persisted (e.g., network
-        // timeout after commit), the compensate() call below will fail with a
-        // write-write conflict at the same sequence number, causing the saga to
-        // stay RUNNING for recovery — which will replay the persisted completion
-        // event and correctly resume forward.
+        // Step i's side effect is committed but recording STEP_COMPLETED failed. Record
+        // STEP_FAILED(i) (knownNotCommitted=false) before compensating so the durable record
+        // matches the in-process scope: without it, a crash before the first STEP_COMPENSATED
+        // leaves recovery to start from the highest STEP_COMPLETED (i - 1) and orphan step i.
+        // If STEP_COMPLETED(i) was actually persisted (ack lost), the STEP_FAILED insert
+        // conflicts at the same sequence, so it throws, the saga stays RUNNING, and recovery
+        // replays the persisted completion forward.
         logger.error(
             "Failed to record completion for step {} of saga {}", i, context.getSagaId(), e);
         if (i <= pivotIndex) {
+          String stepName = stepWithPolicy.step().getName();
+          StepExecutionException recordFailure =
+              new StepExecutionException(
+                  "Failed to record completion for step '" + stepName + "'", e, false);
+          recordStepFailed(context, i, stepName, recordFailure);
           compensate(plan, context, i);
         }
         return;
