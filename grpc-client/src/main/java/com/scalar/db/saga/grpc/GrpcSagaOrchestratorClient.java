@@ -459,10 +459,14 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
       // only on the rare conflict) so the exception faithfully carries the existing state.
       existing = getStateSnapshot(clientSagaId);
     } catch (RuntimeException refetchFailure) {
-      // Cannot build a SagaAlreadyExistsException without the snapshot; surface the conflict +
-      // failure.
-      return new SagaRuntimeException(
-          "Saga '" + clientSagaId + "' already exists, but fetching its current state failed", e);
+      // Cannot build a SagaAlreadyExistsException without the snapshot; surface the conflict as the
+      // primary cause and attach the refetch failure as suppressed for debugging context.
+      SagaRuntimeException conflict =
+          new SagaRuntimeException(
+              "Saga '" + clientSagaId + "' already exists, but fetching its current state failed",
+              e);
+      conflict.addSuppressed(refetchFailure);
+      return conflict;
     }
     return new SagaAlreadyExistsException(clientSagaId, existing);
   }
