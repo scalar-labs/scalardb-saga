@@ -212,9 +212,12 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
     }
     ownedChannel.shutdown();
     try {
-      ownedChannel.awaitTermination(CLOSE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+      if (!ownedChannel.awaitTermination(CLOSE_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+        ownedChannel.shutdownNow();
+      }
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
+      ownedChannel.shutdownNow();
     }
   }
 
