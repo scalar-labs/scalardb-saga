@@ -48,6 +48,27 @@ class SagaServerConfigTest {
   }
 
   @Test
+  void grpcMaxInboundMessageBytes_zeroPayloadLimit_mapsToIntegerMax() {
+    // The store reads 0 as "no limit"; gRPC's maxInboundMessageSize(0) would reject every non-empty
+    // message, so 0 must map to the effective maximum.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY, "0");
+
+    assertThat(SagaServerConfig.load(props).grpcMaxInboundMessageBytes())
+        .isEqualTo(Integer.MAX_VALUE);
+  }
+
+  @Test
+  void grpcMaxInboundMessageBytes_negativePayloadLimit_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY, "-1");
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThatThrownBy(config::grpcMaxInboundMessageBytes)
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void grpcMaxInboundMessageBytes_nonNumericPayloadLimit_throwsIllegalArgumentException() {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY, "not-a-number");

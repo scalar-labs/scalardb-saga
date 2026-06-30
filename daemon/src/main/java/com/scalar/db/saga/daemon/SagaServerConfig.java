@@ -197,20 +197,27 @@ public final class SagaServerConfig {
   /**
    * Returns the gRPC server's maximum inbound message size in bytes, aligned with the store's
    * max-event-payload cap so neither transport accepts an input the store would reject (and so an
-   * unauthenticated caller cannot push an oversized message). Defaults to {@value
-   * #DEFAULT_MAX_EVENT_PAYLOAD_BYTES} bytes.
+   * unauthenticated caller cannot push an oversized message). The store's {@code 0} ("no limit") is
+   * mapped to {@link Integer#MAX_VALUE} here, since gRPC reads {@code 0} as "reject all non-empty
+   * messages". Defaults to {@value #DEFAULT_MAX_EVENT_PAYLOAD_BYTES} bytes.
    */
   public int grpcMaxInboundMessageBytes() {
     String value = properties.getProperty(STORE_MAX_EVENT_PAYLOAD_BYTES_KEY);
     if (value == null) {
       return DEFAULT_MAX_EVENT_PAYLOAD_BYTES;
     }
+    int bytes;
     try {
-      return Integer.parseInt(value.trim());
+      bytes = Integer.parseInt(value.trim());
     } catch (NumberFormatException e) {
       throw new IllegalArgumentException(
           "Invalid value for '" + STORE_MAX_EVENT_PAYLOAD_BYTES_KEY + "': " + value, e);
     }
+    if (bytes < 0) {
+      throw new IllegalArgumentException(
+          "'" + STORE_MAX_EVENT_PAYLOAD_BYTES_KEY + "' must not be negative, got " + bytes);
+    }
+    return bytes == 0 ? Integer.MAX_VALUE : bytes;
   }
 
   /**
