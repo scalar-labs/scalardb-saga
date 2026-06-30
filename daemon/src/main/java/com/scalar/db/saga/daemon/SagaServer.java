@@ -23,6 +23,7 @@ import java.util.Locale;
 import java.util.Objects;
 import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -51,6 +52,7 @@ public final class SagaServer implements AutoCloseable {
   private final SagaServerConfig config;
   private final DefaultSagaOrchestrator orchestrator;
   private final Javalin app;
+  private final ExecutorService grpcExecutor;
   private final Server grpcServer;
   private final AtomicBoolean closed = new AtomicBoolean();
   private volatile boolean grpcStarted;
@@ -74,12 +76,15 @@ public final class SagaServer implements AutoCloseable {
     this.config = Objects.requireNonNull(config, "config must not be null");
     this.orchestrator = Objects.requireNonNull(orchestrator, "orchestrator must not be null");
     this.app = Javalin.create();
+    this.grpcExecutor = Executors.newVirtualThreadPerTaskExecutor();
     try {
       loadDefinitions();
       registerRoutes();
       this.grpcServer = buildGrpcServer();
     } catch (RuntimeException e) {
-      // Release the store/DB connections held by the orchestrator if startup wiring fails.
+      // Release the executor and the store/DB connections held by the orchestrator if startup
+      // wiring fails.
+      grpcExecutor.shutdown();
       orchestrator.close();
       throw e;
     }
@@ -99,7 +104,7 @@ public final class SagaServer implements AutoCloseable {
                 orchestrator, config.syncTimeoutMillis(), config.syncMaxWaitMillis()))
         .maxInboundMessageSize(config.grpcMaxInboundMessageBytes())
         .maxInboundMetadataSize(8 * 1024)
-        .executor(Executors.newVirtualThreadPerTaskExecutor())
+        .executor(grpcExecutor)
         .permitKeepAliveTime(1, TimeUnit.MINUTES)
         .build();
   }
@@ -236,6 +241,9 @@ public final class SagaServer implements AutoCloseable {
     // Stop accepting new requests on both transports, drain in-flight gRPC calls, then drain sagas.
     app.stop();
     shutdownGrpc();
+    // gRPC does not own the executor we supplied it, so shut it down ourselves. shutdownGrpc() has
+    // already drained in-flight calls, so no tasks remain and a plain shutdown() suffices.
+    grpcExecutor.shutdown();
     orchestrator.close();
     logger.info("SagaServer stopped");
   }
