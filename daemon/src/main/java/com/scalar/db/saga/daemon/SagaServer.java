@@ -3,15 +3,19 @@ package com.scalar.db.saga.daemon;
 import com.scalar.db.saga.daemon.api.ErrorMapper;
 import com.scalar.db.saga.daemon.api.HealthResource;
 import com.scalar.db.saga.daemon.api.SagaResource;
+import com.scalar.db.saga.daemon.grpc.SagaServiceImpl;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.definition.SagaDefinitionParser;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.store.ScalarDbSagaStoreFactory;
+import io.grpc.Server;
+import io.grpc.netty.NettyServerBuilder;
 import io.javalin.Javalin;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
+import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -19,6 +23,8 @@ import java.util.Locale;
 import java.util.Objects;
 import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Stream;
 import org.slf4j.Logger;
@@ -40,11 +46,14 @@ import org.slf4j.LoggerFactory;
 public final class SagaServer implements AutoCloseable {
 
   private static final Logger logger = LoggerFactory.getLogger(SagaServer.class);
+  private static final long GRPC_SHUTDOWN_TIMEOUT_SECONDS = 30L;
 
   private final SagaServerConfig config;
   private final DefaultSagaOrchestrator orchestrator;
   private final Javalin app;
+  private final Server grpcServer;
   private final AtomicBoolean closed = new AtomicBoolean();
+  private volatile boolean grpcStarted;
 
   /**
    * Builds the server, its underlying saga engine (connecting to ScalarDB), and registers
@@ -68,11 +77,31 @@ public final class SagaServer implements AutoCloseable {
     try {
       loadDefinitions();
       registerRoutes();
+      this.grpcServer = buildGrpcServer();
     } catch (RuntimeException e) {
       // Release the store/DB connections held by the orchestrator if startup wiring fails.
       orchestrator.close();
       throw e;
     }
+  }
+
+  /**
+   * Builds (does not bind) the gRPC server: it serves {@link SagaServiceImpl} over the same {@link
+   * SagaServerConfig#host()} as HTTP on its own port, delegating to the same orchestrator the REST
+   * routes use. The wait-heavy bounded-sync calls run on a virtual-thread executor (cheap
+   * blocking); the inbound-size and metadata caps bound abuse on the unauthenticated port; server
+   * reflection is deliberately not registered (it would expose the schema to any client).
+   */
+  private Server buildGrpcServer() {
+    return NettyServerBuilder.forAddress(new InetSocketAddress(config.host(), config.grpcPort()))
+        .addService(
+            new SagaServiceImpl(
+                orchestrator, config.syncTimeoutMillis(), config.syncMaxWaitMillis()))
+        .maxInboundMessageSize(config.grpcMaxInboundMessageBytes())
+        .maxInboundMetadataSize(8 * 1024)
+        .executor(Executors.newVirtualThreadPerTaskExecutor())
+        .permitKeepAliveTime(1, TimeUnit.MINUTES)
+        .build();
   }
 
   private static DefaultSagaOrchestrator buildDefaultSagaOrchestrator(SagaServerConfig config) {
@@ -160,13 +189,20 @@ public final class SagaServer implements AutoCloseable {
     try {
       orchestrator.startBackgroundTasks();
       app.start(config.host(), config.port());
+      grpcServer.start();
+      grpcStarted = true;
     } catch (RuntimeException e) {
-      // Stop the (partially started) app and drain/close the orchestrator so a failed start — e.g.
-      // a port bind failure after background tasks are running — does not leak threads/connections.
+      // Stop the (partially started) app/gRPC server and drain/close the orchestrator so a failed
+      // start — e.g. a port bind failure after background tasks are running — does not leak
+      // threads/connections. Two ports means two bind-failure windows; close() covers both.
       close();
       throw e;
+    } catch (IOException e) {
+      // io.grpc.Server.start() throws IOException on a bind failure (e.g. the gRPC port is in use).
+      close();
+      throw new UncheckedIOException("Failed to start gRPC server on port " + config.grpcPort(), e);
     }
-    logger.info("SagaServer started on port {}", port());
+    logger.info("SagaServer started on HTTP port {} and gRPC port {}", port(), grpcPort());
     return this;
   }
 
@@ -180,6 +216,16 @@ public final class SagaServer implements AutoCloseable {
     return app.port();
   }
 
+  /**
+   * Returns the bound gRPC port (the actual ephemeral port when configured with {@code 0}). Only
+   * meaningful after {@link #start()}.
+   *
+   * @return the bound gRPC port
+   */
+  public int grpcPort() {
+    return grpcServer.getPort();
+  }
+
   @Override
   public void close() {
     // Idempotent: start() calls close() on a bind failure, and try-with-resources will call it
@@ -187,10 +233,31 @@ public final class SagaServer implements AutoCloseable {
     if (!closed.compareAndSet(false, true)) {
       return;
     }
-    // Stop accepting new requests first, then drain in-flight sagas.
+    // Stop accepting new requests on both transports, drain in-flight gRPC calls, then drain sagas.
     app.stop();
+    shutdownGrpc();
     orchestrator.close();
     logger.info("SagaServer stopped");
+  }
+
+  /**
+   * Gracefully shuts the gRPC server: stop accepting calls, drain in-flight ones up to {@value
+   * #GRPC_SHUTDOWN_TIMEOUT_SECONDS}s, then force-cancel any stragglers. A no-op if the server never
+   * started (a built-but-unbound server holds no resources).
+   */
+  private void shutdownGrpc() {
+    if (!grpcStarted) {
+      return;
+    }
+    grpcServer.shutdown();
+    try {
+      if (!grpcServer.awaitTermination(GRPC_SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+        grpcServer.shutdownNow();
+      }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      grpcServer.shutdownNow();
+    }
   }
 
   /**

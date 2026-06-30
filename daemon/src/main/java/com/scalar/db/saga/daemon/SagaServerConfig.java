@@ -21,6 +21,8 @@ import org.jspecify.annotations.Nullable;
  *       endpoints are unauthenticated
  *   <li>{@code scalar.db.saga.server.port} — HTTP listen port (default {@code 8080}; {@code 0}
  *       binds an ephemeral port, useful in tests)
+ *   <li>{@code scalar.db.saga.server.grpc_port} — gRPC listen port (default {@code 50051}; {@code
+ *       0} binds an ephemeral port). Bound to the same {@code host} as HTTP, on its own listener
  *   <li>{@code scalar.db.saga.server.definitions_path} — path to a JSON/YAML saga definition file
  *       or directory (optional)
  *   <li>{@code scalar.db.saga.server.service.<name>.base_url} — base URL of the HTTP service a
@@ -28,7 +30,10 @@ import org.jspecify.annotations.Nullable;
  *       (optional)
  *   <li>{@code scalar.db.saga.server.sync_timeout_millis} — bound (ms) on how long a synchronous
  *       start blocks before returning {@code 202} while the saga continues; {@code 0} (default)
- *       disables it (sync blocks to terminal)
+ *       disables this operator bound
+ *   <li>{@code scalar.db.saga.server.sync_max_wait_millis} — absolute ceiling (ms) on a synchronous
+ *       gRPC start's server-side wait, so it can never block indefinitely (default {@code 60000});
+ *       {@code sync_timeout_millis} and the client's deadline only tighten it
  * </ul>
  *
  * <p>All other properties configure the saga engine's persistence (e.g. ScalarDB connection
@@ -40,20 +45,27 @@ public final class SagaServerConfig {
 
   static final String HOST_KEY = "scalar.db.saga.server.host";
   static final String PORT_KEY = "scalar.db.saga.server.port";
+  static final String GRPC_PORT_KEY = "scalar.db.saga.server.grpc_port";
   static final String DEFINITIONS_PATH_KEY = "scalar.db.saga.server.definitions_path";
   static final String SERVICE_KEY_PREFIX = "scalar.db.saga.server.service.";
   static final String SERVICE_BASE_URL_SUFFIX = ".base_url";
   static final String STORE_MAX_EVENT_PAYLOAD_BYTES_KEY =
       "scalar.db.saga.store.max_event_payload_bytes";
   static final String SYNC_TIMEOUT_MILLIS_KEY = "scalar.db.saga.server.sync_timeout_millis";
+  static final String SYNC_MAX_WAIT_MILLIS_KEY = "scalar.db.saga.server.sync_max_wait_millis";
   static final String DEFAULT_HOST = "0.0.0.0";
   static final int DEFAULT_PORT = 8080;
+  static final int DEFAULT_GRPC_PORT = 50051;
   static final int DEFAULT_MAX_EVENT_PAYLOAD_BYTES = 1_048_576; // 1 MiB
   static final long DEFAULT_SYNC_TIMEOUT_MILLIS = 0L; // 0 = disabled (sync blocks to terminal)
+  static final long DEFAULT_SYNC_MAX_WAIT_MILLIS =
+      60_000L; // ceiling on a synchronous server-side wait
 
   private final String host;
   private final int port;
+  private final int grpcPort;
   private final long syncTimeoutMillis;
+  private final long syncMaxWaitMillis;
   private final Properties properties;
   private final @Nullable Path definitionsPath;
   private final Map<String, String> serviceBaseUrls;
@@ -61,13 +73,17 @@ public final class SagaServerConfig {
   private SagaServerConfig(
       String host,
       int port,
+      int grpcPort,
       long syncTimeoutMillis,
+      long syncMaxWaitMillis,
       Properties properties,
       @Nullable Path definitionsPath,
       Map<String, String> serviceBaseUrls) {
     this.host = host;
     this.port = port;
+    this.grpcPort = grpcPort;
     this.syncTimeoutMillis = syncTimeoutMillis;
+    this.syncMaxWaitMillis = syncMaxWaitMillis;
     this.properties = applyStoreDefaults(copyOf(properties));
     this.definitionsPath = definitionsPath;
     this.serviceBaseUrls = Map.copyOf(serviceBaseUrls);
@@ -100,16 +116,30 @@ public final class SagaServerConfig {
   public static SagaServerConfig load(Properties properties) {
     Objects.requireNonNull(properties, "properties must not be null");
     String host = parseHost(properties.getProperty(HOST_KEY));
-    int port = parsePort(properties.getProperty(PORT_KEY));
+    int port = parsePort(properties.getProperty(PORT_KEY), PORT_KEY, DEFAULT_PORT);
+    int grpcPort =
+        parsePort(properties.getProperty(GRPC_PORT_KEY), GRPC_PORT_KEY, DEFAULT_GRPC_PORT);
     long syncTimeoutMillis =
-        parseSyncTimeoutMillis(properties.getProperty(SYNC_TIMEOUT_MILLIS_KEY));
+        parseBoundedLong(
+            properties.getProperty(SYNC_TIMEOUT_MILLIS_KEY),
+            SYNC_TIMEOUT_MILLIS_KEY,
+            DEFAULT_SYNC_TIMEOUT_MILLIS,
+            0L);
+    long syncMaxWaitMillis =
+        parseBoundedLong(
+            properties.getProperty(SYNC_MAX_WAIT_MILLIS_KEY),
+            SYNC_MAX_WAIT_MILLIS_KEY,
+            DEFAULT_SYNC_MAX_WAIT_MILLIS,
+            1L);
     String definitions = properties.getProperty(DEFINITIONS_PATH_KEY);
     Path definitionsPath =
         (definitions == null || definitions.isBlank()) ? null : Path.of(definitions.trim());
     return new SagaServerConfig(
         host,
         port,
+        grpcPort,
         syncTimeoutMillis,
+        syncMaxWaitMillis,
         properties,
         definitionsPath,
         parseServiceBaseUrls(properties));
@@ -157,6 +187,33 @@ public final class SagaServerConfig {
   }
 
   /**
+   * Returns the configured gRPC port ({@code 0} binds an ephemeral port). The gRPC server binds the
+   * same {@link #host()} as HTTP, on its own listener.
+   */
+  public int grpcPort() {
+    return grpcPort;
+  }
+
+  /**
+   * Returns the gRPC server's maximum inbound message size in bytes, aligned with the store's
+   * max-event-payload cap so neither transport accepts an input the store would reject (and so an
+   * unauthenticated caller cannot push an oversized message). Defaults to {@value
+   * #DEFAULT_MAX_EVENT_PAYLOAD_BYTES} bytes.
+   */
+  public int grpcMaxInboundMessageBytes() {
+    String value = properties.getProperty(STORE_MAX_EVENT_PAYLOAD_BYTES_KEY);
+    if (value == null) {
+      return DEFAULT_MAX_EVENT_PAYLOAD_BYTES;
+    }
+    try {
+      return Integer.parseInt(value.trim());
+    } catch (NumberFormatException e) {
+      throw new IllegalArgumentException(
+          "Invalid value for '" + STORE_MAX_EVENT_PAYLOAD_BYTES_KEY + "': " + value, e);
+    }
+  }
+
+  /**
    * Returns the synchronous-start timeout in milliseconds, or {@code 0} when disabled (the
    * default). When positive, a synchronous {@code POST}/{@code PUT} that has not reached a terminal
    * state within this bound returns {@code 202} and the saga keeps running on the engine's executor
@@ -165,6 +222,16 @@ public final class SagaServerConfig {
    */
   public long syncTimeoutMillis() {
     return syncTimeoutMillis;
+  }
+
+  /**
+   * Returns the absolute ceiling (ms) on a synchronous gRPC {@code StartSaga}'s server-side wait.
+   * {@link #syncTimeoutMillis()} and the client's call deadline can only tighten this bound, never
+   * exceed it, so a synchronous start can never pin a server thread indefinitely. Defaults to
+   * {@value #DEFAULT_SYNC_MAX_WAIT_MILLIS} ms.
+   */
+  public long syncMaxWaitMillis() {
+    return syncMaxWaitMillis;
   }
 
   /**
@@ -193,37 +260,41 @@ public final class SagaServerConfig {
     return (value == null || value.isBlank()) ? DEFAULT_HOST : value.trim();
   }
 
-  private static int parsePort(@Nullable String value) {
+  private static int parsePort(@Nullable String value, String key, int defaultPort) {
     if (value == null || value.isBlank()) {
-      return DEFAULT_PORT;
+      return defaultPort;
     }
     int port;
     try {
       port = Integer.parseInt(value.trim());
     } catch (NumberFormatException e) {
-      throw new IllegalArgumentException("Invalid value for '" + PORT_KEY + "': " + value, e);
+      throw new IllegalArgumentException("Invalid value for '" + key + "': " + value, e);
     }
     if (port < 0 || port > 65535) {
-      throw new IllegalArgumentException(
-          "'" + PORT_KEY + "' must be between 0 and 65535, got " + port);
+      throw new IllegalArgumentException("'" + key + "' must be between 0 and 65535, got " + port);
     }
     return port;
   }
 
-  private static long parseSyncTimeoutMillis(@Nullable String value) {
+  /**
+   * Parses a long config value: applies {@code defaultValue} when unset/blank, rejects non-numeric
+   * values, and enforces {@code value >= minInclusive} (e.g. {@code 0} for an optional bound that
+   * may be disabled, {@code 1} for a strictly-positive ceiling).
+   */
+  private static long parseBoundedLong(
+      @Nullable String value, String key, long defaultValue, long minInclusive) {
     if (value == null || value.isBlank()) {
-      return DEFAULT_SYNC_TIMEOUT_MILLIS;
+      return defaultValue;
     }
     long millis;
     try {
       millis = Long.parseLong(value.trim());
     } catch (NumberFormatException e) {
-      throw new IllegalArgumentException(
-          "Invalid value for '" + SYNC_TIMEOUT_MILLIS_KEY + "': " + value, e);
+      throw new IllegalArgumentException("Invalid value for '" + key + "': " + value, e);
     }
-    if (millis < 0) {
+    if (millis < minInclusive) {
       throw new IllegalArgumentException(
-          "'" + SYNC_TIMEOUT_MILLIS_KEY + "' must not be negative, got " + millis);
+          "'" + key + "' must be >= " + minInclusive + ", got " + millis);
     }
     return millis;
   }

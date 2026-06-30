@@ -40,6 +40,24 @@ class SagaServerConfigTest {
   }
 
   @Test
+  void grpcMaxInboundMessageBytes_returnsConfiguredPayloadLimit() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY, "12345");
+
+    assertThat(SagaServerConfig.load(props).grpcMaxInboundMessageBytes()).isEqualTo(12345);
+  }
+
+  @Test
+  void grpcMaxInboundMessageBytes_nonNumericPayloadLimit_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY, "not-a-number");
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThatThrownBy(config::grpcMaxInboundMessageBytes)
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void load_unsetPort_usesDefault() {
     assertThat(SagaServerConfig.load(new Properties()).port())
         .isEqualTo(SagaServerConfig.DEFAULT_PORT);
@@ -86,6 +104,47 @@ class SagaServerConfigTest {
   void load_nonNumericSyncTimeout_throwsIllegalArgumentException() {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.SYNC_TIMEOUT_MILLIS_KEY, "soon");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void load_unsetSyncMaxWait_defaultsToCeiling() {
+    assertThat(SagaServerConfig.load(new Properties()).syncMaxWaitMillis())
+        .isEqualTo(SagaServerConfig.DEFAULT_SYNC_MAX_WAIT_MILLIS);
+  }
+
+  @Test
+  void load_syncMaxWaitGiven_parsesValue() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "30000");
+
+    assertThat(SagaServerConfig.load(props).syncMaxWaitMillis()).isEqualTo(30000L);
+  }
+
+  @Test
+  void load_zeroSyncMaxWait_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "0");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void load_negativeSyncMaxWait_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "-1");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void load_nonNumericSyncMaxWait_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "soon");
 
     assertThatThrownBy(() -> SagaServerConfig.load(props))
         .isInstanceOf(IllegalArgumentException.class);

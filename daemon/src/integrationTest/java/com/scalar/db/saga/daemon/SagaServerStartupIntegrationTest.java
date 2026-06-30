@@ -57,6 +57,7 @@ class SagaServerStartupIntegrationTest {
         "jdbc:sqlite:" + tempDbPath.toAbsolutePath() + "?busy_timeout=10000");
     props.setProperty("scalar.db.saga.store.num_buckets", "1");
     props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.GRPC_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, definitionsDir.toString());
     // Deliberately no scalar.db.saga.server.service.account.base_url.
 
