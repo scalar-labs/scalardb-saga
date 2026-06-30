@@ -1,0 +1,67 @@
+syntax = "proto3";
+
+package rpc;
+
+option java_multiple_files = true;
+option java_package = "com.scalar.db.saga.rpc";
+option java_outer_classname = "SagaProto";
+
+import "google/protobuf/timestamp.proto";
+
+// The gRPC rendering of the saga daemon's REST contract. Three unary RPCs delegating to the same
+// orchestrator as the REST routes. No streaming yet (a future WatchSaga adds push). Errors travel as
+// plain io.grpc.Status (no rich-error model); the duplicate-id conflict is ALREADY_EXISTS.
+service SagaService {
+  // Starts a saga. `async=false` blocks for one bounded window (the gRPC analogue of REST's 202),
+  // returning the terminal snapshot if it is reached within the window, else the in-flight
+  // (non-terminal) snapshot; `async=true` returns the running snapshot immediately. A duplicate
+  // client-supplied `saga_id` fails ALREADY_EXISTS.
+  rpc StartSaga (StartSagaRequest) returns (SagaSnapshot);
+
+  // Long-poll wait on an EXISTING saga: blocks until the saga is terminal, bounded by
+  // min(max_wait_millis, the server's sync ceiling, the remaining call deadline). On the bound it
+  // returns the current (possibly non-terminal) snapshot — status is the source of truth — and the
+  // client re-issues AwaitSaga. Idempotent and side-effect-free, so it is safe to retry/loop.
+  // NOT_FOUND if no saga has the given id.
+  rpc AwaitSaga (AwaitSagaRequest) returns (SagaSnapshot);
+
+  // Returns the current snapshot; NOT_FOUND if no saga has the given id.
+  rpc GetSaga (GetSagaRequest) returns (SagaSnapshot);
+}
+
+message StartSagaRequest {
+  optional string saga_id = 1;  // absent = server-generated id; present = client-supplied (idempotent retry)
+  string name = 2;              // required: the saga definition name
+  optional string version = 3;  // absent = latest version; present = pinned version
+  bytes input_json = 4;         // UTF-8 JSON of the Map<String, Object> saga input
+  bool async = 5;               // true = return immediately (running); false = block to terminal
+}
+
+message AwaitSagaRequest {
+  string saga_id = 1;                   // required: the existing saga to wait on
+  optional uint64 max_wait_millis = 2;  // client-requested long-poll window; server clamps to its ceiling
+}
+
+message GetSagaRequest {
+  string saga_id = 1;
+}
+
+message SagaSnapshot {
+  string saga_id = 1;
+  string name = 2;
+  SagaStatus status = 3;
+  string definition_version = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+}
+
+// Mapped to/from the api SagaStatus enum BY NAME (the Java enum's RUNNING=0 collides with proto3's
+// required zero-value _UNSPECIFIED, so the numeric codes deliberately differ).
+enum SagaStatus {
+  SAGA_STATUS_UNSPECIFIED = 0;
+  SAGA_STATUS_RUNNING = 1;
+  SAGA_STATUS_COMPENSATING = 2;
+  SAGA_STATUS_COMPLETED = 3;
+  SAGA_STATUS_COMPENSATED = 4;
+  SAGA_STATUS_ESCALATED = 5;
+}

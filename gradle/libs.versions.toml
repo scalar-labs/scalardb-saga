@@ -19,6 +19,9 @@ jspecify = "1.0.0"
 caffeine = "2.9.3"
 jcip = "1.0-1"
 javalin = "6.7.0"
+grpc = "1.82.1"
+protobuf-java = "4.35.1"
+protobuf-plugin = "0.10.0"
 
 [libraries]
 scalardb = { module = "com.scalar-labs:scalardb", version.ref = "scalardb" }
@@ -39,3 +42,10 @@ jspecify = { module = "org.jspecify:jspecify", version.ref = "jspecify" }
 caffeine = { module = "com.github.ben-manes.caffeine:caffeine", version.ref = "caffeine" }
 jcip-annotations = { module = "com.github.stephenc.jcip:jcip-annotations", version.ref = "jcip" }
 javalin = { module = "io.javalin:javalin", version.ref = "javalin" }
+grpc-bom = { module = "io.grpc:grpc-bom", version.ref = "grpc" }
+grpc-protobuf = { module = "io.grpc:grpc-protobuf" }
+grpc-stub = { module = "io.grpc:grpc-stub" }
+grpc-netty = { module = "io.grpc:grpc-netty" }
+grpc-netty-shaded = { module = "io.grpc:grpc-netty-shaded" }
+grpc-inprocess = { module = "io.grpc:grpc-inprocess" }
+protobuf-java = { module = "com.google.protobuf:protobuf-java", version.ref = "protobuf-java" }
