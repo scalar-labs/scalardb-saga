@@ -1,6 +1,5 @@
 package com.scalar.db.saga.grpc;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.protobuf.ByteString;
 import com.scalar.db.saga.api.SagaCallback;
@@ -24,6 +23,7 @@ import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
+import java.io.IOException;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
@@ -407,8 +407,10 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
       return ByteString.EMPTY;
     }
     try {
-      return ByteString.copyFrom(OBJECT_MAPPER.writeValueAsBytes(input));
-    } catch (JsonProcessingException e) {
+      ByteString.Output output = ByteString.newOutput();
+      OBJECT_MAPPER.writeValue(output, input);
+      return output.toByteString();
+    } catch (IOException e) {
       throw new IllegalArgumentException("Failed to serialize saga input to JSON", e);
     }
   }

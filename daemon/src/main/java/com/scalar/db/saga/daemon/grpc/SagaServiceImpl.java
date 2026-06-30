@@ -247,7 +247,7 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
     }
     Map<String, Object> input;
     try {
-      input = objectMapper.readValue(inputJson.toByteArray(), MAP_TYPE);
+      input = objectMapper.readValue(inputJson.newInput(), MAP_TYPE);
     } catch (IOException e) {
       throw new InvalidRequestException("malformed input_json");
     }
