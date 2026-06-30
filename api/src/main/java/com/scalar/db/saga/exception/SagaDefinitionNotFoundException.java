@@ -4,7 +4,7 @@ import com.scalar.db.saga.api.SagaDefinitionId;
 import org.jspecify.annotations.Nullable;
 
 /** Thrown when a saga definition cannot be found by name or by name and version. */
-public class SagaDefinitionNotFoundException extends RuntimeException {
+public class SagaDefinitionNotFoundException extends SagaRuntimeException {
 
   private final String sagaName;
   private final @Nullable String version;
