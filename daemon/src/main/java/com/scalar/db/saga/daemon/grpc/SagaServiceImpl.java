@@ -116,12 +116,14 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
    * Polls the store until {@code sagaId} is terminal or {@code boundMillis} elapses, returning the
    * latest snapshot either way. The first {@link SagaOrchestrator#getStateSnapshot} also validates
    * existence (throws {@link com.scalar.db.saga.exception.SagaNotFoundException} → {@code
-   * NOT_FOUND}). Runs on a virtual thread, so the polling sleep is cheap.
+   * NOT_FOUND}). Runs on a virtual thread, so the polling sleep is cheap. Stops early if the client
+   * cancels or its connection drops ({@link Context#isCancelled()}), so we do not keep polling the
+   * store for a caller that is gone.
    */
   private SagaStateSnapshot awaitTerminalOrBound(String sagaId, long boundMillis) {
     long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(boundMillis);
     SagaStateSnapshot snapshot = orchestrator.getStateSnapshot(sagaId);
-    while (!snapshot.getStatus().isTerminal()) {
+    while (!snapshot.getStatus().isTerminal() && !Context.current().isCancelled()) {
       long remainingMillis = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
       if (remainingMillis <= 0L) {
         break;
