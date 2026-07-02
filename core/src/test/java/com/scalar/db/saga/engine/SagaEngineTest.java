@@ -1484,19 +1484,13 @@ class SagaEngineTest {
       // Act
       engine.executeSaga(def, saga, Map.of());
 
-      // Assert — step 1 IS compensated (its side effect exists)
-      verify(step1).compensate(any(SagaContext.class));
-      verify(step0).compensate(any(SagaContext.class));
-      // SAGA_COMPENSATING → SAGA_COMPENSATED
-      ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
-      verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture());
-      assertThat(transitionCaptor.getAllValues().get(0).getEventType())
-          .isEqualTo(EventType.SAGA_COMPENSATING);
-      assertThat(transitionCaptor.getAllValues().get(1).getEventType())
-          .isEqualTo(EventType.SAGA_COMPENSATED);
-      // The durable STEP_FAILED(1) marker is what lets crash-recovery include step 1: without it,
-      // recovery starts compensation from the highest STEP_COMPLETED (step 0) and orphans step 1.
-      verify(store)
+      // Assert — the durable STEP_FAILED(1) marker is written BEFORE step 1 is compensated. That
+      // marker is what lets crash-recovery include step 1; without it recovery starts from the
+      // highest STEP_COMPLETED (step 0) and orphans step 1. Recording it *after* compensating would
+      // reintroduce the crash-orphan window, so pin the order rather than asserting mere presence.
+      InOrder inOrder = inOrder(store, step1);
+      inOrder
+          .verify(store)
           .recordStepEvent(
               anyString(),
               anyInt(),
@@ -1505,6 +1499,16 @@ class SagaEngineTest {
                       event != null
                           && event.getStepIndex() == 1
                           && event.getEventType() == EventType.STEP_FAILED));
+      inOrder.verify(step1).compensate(any(SagaContext.class));
+
+      // step 0 is also compensated (LIFO), and the saga transitions COMPENSATING → COMPENSATED.
+      verify(step0).compensate(any(SagaContext.class));
+      ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
+      verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture());
+      assertThat(transitionCaptor.getAllValues().get(0).getEventType())
+          .isEqualTo(EventType.SAGA_COMPENSATING);
+      assertThat(transitionCaptor.getAllValues().get(1).getEventType())
+          .isEqualTo(EventType.SAGA_COMPENSATED);
     }
 
     @Test
