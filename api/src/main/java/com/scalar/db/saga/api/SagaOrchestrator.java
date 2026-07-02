@@ -110,6 +110,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @param callback callback for completion/compensation/escalation
    * @return the generated saga ID
    * @throws SagaDefinitionNotFoundException if no definition matches the given name
+   * @throws UnsupportedOperationException if the implementation cannot deliver a local completion
+   *     callback (e.g. a remote client with no server-streaming callback channel)
    */
   String startAsync(String sagaName, Map<String, Object> input, SagaCallback callback);
 
@@ -139,6 +141,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @param input initial data for the saga context
    * @param callback callback for completion/compensation/escalation
    * @throws SagaDefinitionNotFoundException if no definition matches the given name
+   * @throws UnsupportedOperationException if the implementation cannot deliver a local completion
+   *     callback (e.g. a remote client with no server-streaming callback channel)
    */
   void startAsync(String sagaId, String sagaName, Map<String, Object> input, SagaCallback callback);
 
@@ -164,6 +168,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @param callback callback for completion/compensation/escalation
    * @return the generated saga ID
    * @throws SagaDefinitionNotFoundException if no definition matches the given name and version
+   * @throws UnsupportedOperationException if the implementation cannot deliver a local completion
+   *     callback (e.g. a remote client with no server-streaming callback channel)
    */
   String startAsync(SagaDefinitionId id, Map<String, Object> input, SagaCallback callback);
 
@@ -189,6 +195,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @param input initial data for the saga context
    * @param callback callback for completion/compensation/escalation
    * @throws SagaDefinitionNotFoundException if no definition matches the given name and version
+   * @throws UnsupportedOperationException if the implementation cannot deliver a local completion
+   *     callback (e.g. a remote client with no server-streaming callback channel)
    */
   void startAsync(
       String sagaId, SagaDefinitionId id, Map<String, Object> input, SagaCallback callback);
