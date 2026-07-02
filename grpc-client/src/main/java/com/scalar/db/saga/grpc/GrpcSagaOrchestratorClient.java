@@ -318,8 +318,17 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
   }
 
   private SagaSnapshot getSagaSnapshot(String sagaId, long loopDeadlineNanos) {
-    return callWithin(loopDeadlineNanos)
-        .getSaga(GetSagaRequest.newBuilder().setSagaId(sagaId).build());
+    try {
+      return callWithin(loopDeadlineNanos)
+          .getSaga(GetSagaRequest.newBuilder().setSagaId(sagaId).build());
+    } catch (StatusRuntimeException e) {
+      // Map like getStateSnapshot, so a refetch failure surfaces as a Saga* exception rather than
+      // leaking a raw gRPC StatusRuntimeException out of start().
+      if (e.getStatus().getCode() == Status.Code.NOT_FOUND) {
+        throw new SagaNotFoundException(sagaId);
+      }
+      throw mapCommon(e);
+    }
   }
 
   private static boolean isTerminal(SagaSnapshot snapshot) {

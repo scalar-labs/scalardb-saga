@@ -314,6 +314,20 @@ class GrpcSagaOrchestratorClientTest {
   }
 
   @Test
+  void start_retryAlreadyExistsThenRefetchNotFound_throwsSagaNotFound() {
+    // Retry sees ALREADY_EXISTS (our earlier attempt landed), but the follow-up GetSaga finds the
+    // saga purged. The refetch failure must surface as a Saga* type, not a raw
+    // StatusRuntimeException.
+    fake.enqueueStartError(Status.UNAVAILABLE.withDescription("reset").asRuntimeException());
+    fake.enqueueStartError(Status.ALREADY_EXISTS.withDescription("ours").asRuntimeException());
+    fake.getError = Status.NOT_FOUND.withDescription("purged").asRuntimeException();
+
+    // Act + Assert
+    assertThatThrownBy(() -> client.start("transfer", Map.of()))
+        .isInstanceOf(SagaNotFoundException.class);
+  }
+
+  @Test
   void start_awaitReturnsNotFound_throwsSagaNotFound() {
     // Arrange — enter the await loop (RUNNING), then the saga is purged/TTL'd between polls so
     // AwaitSaga reports NOT_FOUND. The client must surface the same type getStateSnapshot does.
