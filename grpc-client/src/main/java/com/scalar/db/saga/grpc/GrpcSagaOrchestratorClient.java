@@ -200,10 +200,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
       SagaSnapshot snapshot = stub().getSaga(GetSagaRequest.newBuilder().setSagaId(sagaId).build());
       return ClientProtoMappers.toApi(snapshot);
     } catch (StatusRuntimeException e) {
-      if (e.getStatus().getCode() == Status.Code.NOT_FOUND) {
-        throw new SagaNotFoundException(sagaId);
-      }
-      throw mapCommon(e);
+      throw mapSagaCall(e, sagaId);
     }
   }
 
@@ -307,11 +304,8 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
           backoff(retries++);
           continue;
         }
-        if (code == Status.Code.NOT_FOUND) {
-          // The saga was purged/TTL'd between polls — surface the same type getStateSnapshot does.
-          throw new SagaNotFoundException(sagaId);
-        }
-        throw mapCommon(e);
+        // NOT_FOUND here means the saga was purged/TTL'd between polls.
+        throw mapSagaCall(e, sagaId);
       }
     }
     return snapshot;
@@ -324,10 +318,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
     } catch (StatusRuntimeException e) {
       // Map like getStateSnapshot, so a refetch failure surfaces as a Saga* exception rather than
       // leaking a raw gRPC StatusRuntimeException out of start().
-      if (e.getStatus().getCode() == Status.Code.NOT_FOUND) {
-        throw new SagaNotFoundException(sagaId);
-      }
-      throw mapCommon(e);
+      throw mapSagaCall(e, sagaId);
     }
   }
 
@@ -502,6 +493,19 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
     return new SagaAlreadyExistsException(clientSagaId, existing);
   }
 
+  /**
+   * Maps a saga-instance RPC failure ({@code getSaga}/{@code awaitSaga}) to the api exception.
+   * {@code NOT_FOUND} means the saga id is gone — purged, TTL'd, or never existed — vs the start
+   * path, where {@code NOT_FOUND} means the <i>definition</i> is missing (see {@link
+   * #mapStartException}). Everything else routes through {@link #mapCommon}.
+   */
+  private static RuntimeException mapSagaCall(StatusRuntimeException e, String sagaId) {
+    if (e.getStatus().getCode() == Status.Code.NOT_FOUND) {
+      return new SagaNotFoundException(sagaId);
+    }
+    return mapCommon(e);
+  }
+
   private static RuntimeException mapCommon(StatusRuntimeException e) {
     Status status = e.getStatus();
     String description = status.getDescription();
@@ -515,6 +519,8 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
         return new SagaUnavailableException(
             description == null ? "Saga service temporarily unavailable" : description, e);
       default:
+        // NOT_FOUND is deliberately absent — the two context mappers (mapSagaCall,
+        // mapStartException) handle it upstream, so it never reaches this catch-all.
         return new SagaRuntimeException(
             "Saga RPC failed ("
                 + status.getCode()
