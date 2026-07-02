@@ -1,10 +1,10 @@
 package com.scalar.db.saga.transport;
 
-import com.scalar.db.saga.api.CallSpec;
-import com.scalar.db.saga.api.SagaDefinition.ServiceStep.Phase;
 import com.scalar.db.saga.api.SagaHttpClient;
 import com.scalar.db.saga.api.Step;
 import com.scalar.db.saga.api.TccStep;
+import com.scalar.db.saga.definition.CallSpec;
+import com.scalar.db.saga.definition.SagaDefinition.ServiceStep.Phase;
 import java.net.http.HttpClient;
 import java.time.Duration;
 import java.util.Map;

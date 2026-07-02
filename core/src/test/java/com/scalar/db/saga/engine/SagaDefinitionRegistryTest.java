@@ -8,7 +8,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import com.scalar.db.saga.api.SagaDefinition;
+import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.store.SagaStore;
 import java.util.Optional;

@@ -1,8 +1,8 @@
 package com.scalar.db.saga.testing;
 
-import com.scalar.db.saga.api.SagaDefinition;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaStore;

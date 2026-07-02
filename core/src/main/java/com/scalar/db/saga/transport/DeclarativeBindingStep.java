@@ -1,10 +1,10 @@
 package com.scalar.db.saga.transport;
 
-import com.scalar.db.saga.api.CallSpec;
 import com.scalar.db.saga.api.SagaContext;
-import com.scalar.db.saga.api.SagaDefinition.ServiceStep.Phase;
 import com.scalar.db.saga.api.Step;
 import com.scalar.db.saga.api.StepResult;
+import com.scalar.db.saga.definition.CallSpec;
+import com.scalar.db.saga.definition.SagaDefinition.ServiceStep.Phase;
 import com.scalar.db.saga.exception.StepCompensationException;
 import com.scalar.db.saga.exception.StepExecutionException;
 import java.util.Map;

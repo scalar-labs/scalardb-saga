@@ -4,9 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.scalar.db.saga.api.RetryPolicy;
-import com.scalar.db.saga.api.SagaDefinition;
-import com.scalar.db.saga.api.SagaDefinition.RecoveryStrategy;
+import com.scalar.db.saga.definition.HttpCall;
+import com.scalar.db.saga.definition.RetryPolicy;
+import com.scalar.db.saga.definition.SagaDefinition;
+import com.scalar.db.saga.definition.SagaDefinition.RecoveryStrategy;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -84,8 +85,8 @@ class SagaDefinitionSerializerTest {
         SagaDefinition.newBuilder("svc-saga")
             .saga()
             .serviceStep("debit", "account-service")
-            .execution(com.scalar.db.saga.api.HttpCall.newBuilder("/debit").build())
-            .compensation(com.scalar.db.saga.api.HttpCall.newBuilder("/reverse").build())
+            .execution(HttpCall.newBuilder("/debit").build())
+            .compensation(HttpCall.newBuilder("/reverse").build())
             .timeoutMillis(5000)
             .add()
             .build();
@@ -106,12 +107,12 @@ class SagaDefinitionSerializerTest {
             .saga()
             .serviceStep("notify", "notify-service")
             .execution(
-                com.scalar.db.saga.api.HttpCall.newBuilder("/notify")
+                HttpCall.newBuilder("/notify")
                     .stringBody("<msg>${text}</msg>")
                     .contentType("application/xml")
-                    .output(java.util.Map.of("raw", com.scalar.db.saga.api.HttpCall.BODY_OUTPUT))
+                    .output(java.util.Map.of("raw", HttpCall.BODY_OUTPUT))
                     .build())
-            .compensation(com.scalar.db.saga.api.HttpCall.newBuilder("/retract").build())
+            .compensation(HttpCall.newBuilder("/retract").build())
             .add()
             .build();
 
@@ -135,8 +136,8 @@ class SagaDefinitionSerializerTest {
             .step("classy", "com.example.ComplexStep")
             .add()
             .serviceStep("svc", "shipping-service")
-            .execution(com.scalar.db.saga.api.HttpCall.newBuilder("/ship").build())
-            .compensation(com.scalar.db.saga.api.HttpCall.newBuilder("/unship").build())
+            .execution(HttpCall.newBuilder("/ship").build())
+            .compensation(HttpCall.newBuilder("/unship").build())
             .add()
             .build();
 

@@ -1,7 +1,7 @@
 package com.scalar.db.saga.transport;
 
-import com.scalar.db.saga.api.HttpCall;
 import com.scalar.db.saga.api.SagaContext;
+import com.scalar.db.saga.definition.HttpCall;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;

@@ -1,7 +1,7 @@
 package com.scalar.db.saga.engine;
 
-import com.scalar.db.saga.api.RetryPolicy;
 import com.scalar.db.saga.api.Step;
+import com.scalar.db.saga.definition.RetryPolicy;
 
 /**
  * Bundles a {@link Step} with its resolved retry policies and per-step timeout.

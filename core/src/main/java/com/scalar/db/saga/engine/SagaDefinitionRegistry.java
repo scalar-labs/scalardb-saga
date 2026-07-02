@@ -1,6 +1,6 @@
 package com.scalar.db.saga.engine;
 
-import com.scalar.db.saga.api.SagaDefinition;
+import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.store.SagaStore;
 import java.util.concurrent.ConcurrentHashMap;
 import net.jcip.annotations.ThreadSafe;
@@ -9,9 +9,9 @@ import org.jspecify.annotations.Nullable;
 /**
  * Centralized definition registry with two-tier lookup: in-memory first, then store fallback.
  *
- * <p>{@link EmbeddedSagaManager} calls {@link #register}, while recovery calls {@link #resolve}.
- * Definitions are persisted to the store <b>before</b> being put in memory to ensure recoverability
- * by other replicas.
+ * <p>{@link DefaultSagaOrchestrator} calls {@link #register}, while recovery calls {@link
+ * #resolve}. Definitions are persisted to the store <b>before</b> being put in memory to ensure
+ * recoverability by other replicas.
  */
 @ThreadSafe
 public class SagaDefinitionRegistry {

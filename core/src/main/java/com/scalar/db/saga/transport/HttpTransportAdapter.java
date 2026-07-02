@@ -1,8 +1,8 @@
 package com.scalar.db.saga.transport;
 
-import com.scalar.db.saga.api.CallSpec;
-import com.scalar.db.saga.api.HttpCall;
 import com.scalar.db.saga.api.SagaContext;
+import com.scalar.db.saga.definition.CallSpec;
+import com.scalar.db.saga.definition.HttpCall;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;

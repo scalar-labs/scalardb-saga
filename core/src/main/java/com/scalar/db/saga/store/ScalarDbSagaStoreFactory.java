@@ -1,7 +1,6 @@
 package com.scalar.db.saga.store;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.scalar.db.saga.api.SagaStoreFactory;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.service.TransactionFactory;
 import java.util.Objects;
@@ -22,7 +21,7 @@ import java.util.Properties;
  * props.setProperty("scalar.db.storage", "jdbc");
  * props.setProperty("scalar.db.contact_points", "jdbc:postgresql://...");
  *
- * SagaManager manager = SagaManager.newBuilder()
+ * DefaultSagaOrchestrator manager = DefaultSagaOrchestrator.newBuilder()
  *     .storeFactory(ScalarDbSagaStoreFactory.create(props))
  *     .build();
  * }</pre>

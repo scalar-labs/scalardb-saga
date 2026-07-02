@@ -1,12 +1,11 @@
 package com.scalar.db.saga.engine;
 
-import com.scalar.db.saga.api.CallSpec;
-import com.scalar.db.saga.api.SagaDefinition.ServiceStep.Phase;
 import com.scalar.db.saga.api.SagaHttpClient;
-import com.scalar.db.saga.api.SagaHttpClientProvider;
 import com.scalar.db.saga.api.Step;
-import com.scalar.db.saga.api.StepResolver.ResolutionContext;
 import com.scalar.db.saga.api.TccStep;
+import com.scalar.db.saga.definition.CallSpec;
+import com.scalar.db.saga.definition.SagaDefinition.ServiceStep.Phase;
+import com.scalar.db.saga.engine.StepResolver.ResolutionContext;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.transport.HttpEndpoint;
 import com.scalar.db.saga.transport.HttpServiceConfig;
@@ -18,8 +17,8 @@ import org.slf4j.LoggerFactory;
 /**
  * Lookup of {@link HttpEndpoint}s by the name they were registered under via {@code
  * httpEndpoint(name, baseUrl)}. Each endpoint owns ONE {@code HttpExchange} + policy + {@code
- * HttpClient}, and produces the per-endpoint {@link SagaHttpClient} (and, from Phase 2, the
- * declarative transport adapter rides the same engine).
+ * HttpClient}, and produces the per-endpoint {@link SagaHttpClient} (and the declarative transport
+ * adapter rides the same engine).
  *
  * <p>It exposes a narrow {@link SagaHttpClientProvider} view (the {@code ResolutionContext} handed
  * to a custom {@code StepResolver}) for code steps, and {@link #toStep}/{@link #toTccStep} for the

@@ -32,8 +32,22 @@
   </Match>
   <!-- ThreadLocalRandom in RetryPolicy.sleepWithBackoff is for retry jitter, not security -->
   <Match>
-    <Class name="com.scalar.db.saga.api.RetryPolicy"/>
+    <Class name="com.scalar.db.saga.definition.RetryPolicy"/>
     <Method name="sleepWithBackoff"/>
     <Bug pattern="PREDICTABLE_RANDOM"/>
+  </Match>
+  <!-- CT_CONSTRUCTOR_THROW surfaces only when compiling to Java 8 bytecode (the api module's
+       release-8 target). SpotBugs auto-suppresses this finalizer-attack finding for Java 15+
+       bytecode (class version 59+) but reports it for Java 8 bytecode.
+
+       The exception classes are non-final and validate their constructor arguments (requireNonNull).
+       Some carry extra fields (e.g. sagaId, a state snapshot, the knownNotCommitted flag), but those
+       are all caller-supplied data, never a security-sensitive capability or resource — and an
+       exception's constructor performs no security check that a finalizer-captured partial instance
+       could bypass. A partially constructed instance therefore grants the caller nothing they did
+       not already pass in, so the package-wide suppression is safe here. -->
+  <Match>
+    <Class name="~com\.scalar\.db\.saga\.exception\..*"/>
+    <Bug pattern="CT_CONSTRUCTOR_THROW"/>
   </Match>
 </FindBugsFilter>

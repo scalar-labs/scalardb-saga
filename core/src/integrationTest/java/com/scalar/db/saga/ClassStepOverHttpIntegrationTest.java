@@ -2,17 +2,17 @@ package com.scalar.db.saga;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.scalar.db.saga.api.HttpCall;
 import com.scalar.db.saga.api.Named;
-import com.scalar.db.saga.api.RetryPolicy;
 import com.scalar.db.saga.api.SagaContext;
-import com.scalar.db.saga.api.SagaDefinition;
 import com.scalar.db.saga.api.SagaHttpClient;
-import com.scalar.db.saga.api.SagaManager;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.api.Step;
 import com.scalar.db.saga.api.StepResult;
+import com.scalar.db.saga.definition.HttpCall;
+import com.scalar.db.saga.definition.RetryPolicy;
+import com.scalar.db.saga.definition.SagaDefinition;
+import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.StepCompensationException;
 import com.scalar.db.saga.exception.StepExecutionException;
 import com.scalar.db.saga.store.SagaStore;
@@ -146,15 +146,15 @@ class ClassStepOverHttpIntegrationTest {
             .add()
             .build();
 
-    try (SagaManager manager = buildManager("svc")) {
-      manager.register(def);
+    try (DefaultSagaOrchestrator orchestrator = buildOrchestrator("svc")) {
+      orchestrator.register(def);
 
       // Act
-      String sagaId = manager.start("user-notification-saga", Map.of("userId", "u-1"));
+      String sagaId = orchestrator.start("user-notification-saga", Map.of("userId", "u-1"));
 
       // Assert — saga completed; the fetched value flowed into the second step's POST; the
       // correlation headers reached the participant from the injected client
-      assertThat(manager.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.COMPLETED);
+      assertThat(orchestrator.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.COMPLETED);
       assertThat(notified).hasSize(1);
       assertThat(notified.get(0)).contains("alice");
       assertThat(sagaIdHeader.get()).isEqualTo(sagaId);
@@ -182,15 +182,15 @@ class ClassStepOverHttpIntegrationTest {
             .add()
             .build();
 
-    try (SagaManager manager = buildManager("svc")) {
-      manager.register(def);
+    try (DefaultSagaOrchestrator orchestrator = buildOrchestrator("svc")) {
+      orchestrator.register(def);
 
       // Act
-      String sagaId = manager.start("flaky-saga", Map.of());
+      String sagaId = orchestrator.start("flaky-saga", Map.of());
 
       // Assert — send() threw a retryable StepExecutionException on the 503; the engine retried and
       // the second attempt succeeded
-      assertThat(manager.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.COMPLETED);
+      assertThat(orchestrator.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.COMPLETED);
       assertThat(flakyCalls.get()).isEqualTo(2);
     }
   }
@@ -212,16 +212,17 @@ class ClassStepOverHttpIntegrationTest {
             .add()
             .build();
 
-    try (SagaManager manager = buildManager("svc")) {
-      manager.register(def);
+    try (DefaultSagaOrchestrator orchestrator = buildOrchestrator("svc")) {
+      orchestrator.register(def);
 
       // Act
-      String sagaId = manager.start("payment-saga", Map.of());
+      String sagaId = orchestrator.start("payment-saga", Map.of());
 
       // Assert — saga compensated, and BOTH the failed code step (charge) and the prior one
       // (reserve) ran their compensate() HTTP call: a class step that fails in-doubt is compensated
       // by default, with no framework visibility into the side effect.
-      assertThat(manager.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.COMPENSATED);
+      assertThat(orchestrator.getStateSnapshot(sagaId).getStatus())
+          .isEqualTo(SagaStatus.COMPENSATED);
       assertThat(chargeCancelled).hasSize(1);
       assertThat(cancelled).hasSize(1);
     }
@@ -249,17 +250,17 @@ class ClassStepOverHttpIntegrationTest {
             .add()
             .build();
 
-    try (SagaManager manager = buildManager("svc")) {
-      manager.register(def);
+    try (DefaultSagaOrchestrator orchestrator = buildOrchestrator("svc")) {
+      orchestrator.register(def);
 
       // Act
-      String sagaId = manager.start("mixed-saga", Map.of("userId", "u-1"));
+      String sagaId = orchestrator.start("mixed-saga", Map.of("userId", "u-1"));
 
       // Assert — both kinds executed end-to-end against the shared endpoint, and BOTH propagated
       // the
       // correlation headers (the code step via the injected client, the declarative step via the
       // shared transport adapter)
-      assertThat(manager.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.COMPLETED);
+      assertThat(orchestrator.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.COMPLETED);
       assertThat(sagaIdHeader.get()).isEqualTo(sagaId);
       assertThat(sagaStepHeader.get()).isEqualTo("fetch");
       assertThat(declarativeNotified).hasSize(1);
@@ -294,23 +295,24 @@ class ClassStepOverHttpIntegrationTest {
     // First run — crash after the first (code) step completes
     try (SagaStore baseStore = ScalarDbSagaStoreFactory.create(props).createStore();
         SagaStore crashingStore = new CrashingStoreDecorator(baseStore, 0);
-        SagaManager manager = buildManager(crashingStore, "svc")) {
-      manager.register(def);
+        DefaultSagaOrchestrator orchestrator = buildOrchestrator(crashingStore, "svc")) {
+      orchestrator.register(def);
 
       try {
-        manager.start(sagaId, "recover-saga", Map.of("userId", "u-1"));
+        orchestrator.start(sagaId, "recover-saga", Map.of("userId", "u-1"));
       } catch (SimulatedCrashError expected) {
         // Expected crash after the code step's completion event was persisted
       }
 
       // The code step ran; the declarative step has not yet been reached
-      assertThat(manager.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.RUNNING);
+      assertThat(orchestrator.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.RUNNING);
       assertThat(declarativeNotified).isEmpty();
     }
 
-    // Restart — fresh manager built with the SAME httpEndpoint; recovery must re-resolve both kinds
+    // Restart — fresh orchestrator built with the SAME httpEndpoint; recovery must re-resolve both
+    // kinds
     try (SagaStore recoveryStore = ScalarDbSagaStoreFactory.create(props).createStore();
-        SagaManager recovered = buildManager(recoveryStore, "svc")) {
+        DefaultSagaOrchestrator recovered = buildOrchestrator(recoveryStore, "svc")) {
       recovered.register(def);
       recoveryStore.markForRecovery(sagaId);
       recovered.recover();
@@ -329,16 +331,16 @@ class ClassStepOverHttpIntegrationTest {
   // Helpers
   // ===========================================================================
 
-  private SagaManager buildManager(String serviceName) {
-    return SagaManager.newBuilder()
+  private DefaultSagaOrchestrator buildOrchestrator(String serviceName) {
+    return DefaultSagaOrchestrator.newBuilder()
         .storeFactory(ScalarDbSagaStoreFactory.create(props))
         .httpEndpoint(serviceName, baseUrl)
         .add()
         .build();
   }
 
-  private SagaManager buildManager(SagaStore sagaStore, String serviceName) {
-    return SagaManager.newBuilder()
+  private DefaultSagaOrchestrator buildOrchestrator(SagaStore sagaStore, String serviceName) {
+    return DefaultSagaOrchestrator.newBuilder()
         .storeFactory(() -> sagaStore)
         .httpEndpoint(serviceName, baseUrl)
         .add()

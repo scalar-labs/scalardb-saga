@@ -3,13 +3,13 @@ package com.scalar.db.saga.engine;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.scalar.db.saga.api.HttpCall;
 import com.scalar.db.saga.api.SagaContext;
-import com.scalar.db.saga.api.SagaDefinition;
-import com.scalar.db.saga.api.SagaDefinition.StepDefinition;
 import com.scalar.db.saga.api.Step;
 import com.scalar.db.saga.api.StepResult;
 import com.scalar.db.saga.api.TccStep;
+import com.scalar.db.saga.definition.HttpCall;
+import com.scalar.db.saga.definition.SagaDefinition;
+import com.scalar.db.saga.definition.SagaDefinition.StepDefinition;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.transport.HttpServiceConfig;
 import java.util.List;
