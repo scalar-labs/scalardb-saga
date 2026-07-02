@@ -296,10 +296,15 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
         snapshot = callWithin(loopDeadlineNanos).awaitSaga(request);
         retries = 0;
       } catch (StatusRuntimeException e) {
-        if (isRetryable(e.getStatus().getCode())) {
+        Status.Code code = e.getStatus().getCode();
+        if (isRetryable(code)) {
           guardDeadline(loopDeadlineNanos);
           backoff(retries++);
           continue;
+        }
+        if (code == Status.Code.NOT_FOUND) {
+          // The saga was purged/TTL'd between polls — surface the same type getStateSnapshot does.
+          throw new SagaNotFoundException(sagaId);
         }
         throw mapCommon(e);
       }

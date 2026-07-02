@@ -307,6 +307,18 @@ class GrpcSagaOrchestratorClientTest {
     assertThat(fake.awaitCalls).isZero();
   }
 
+  @Test
+  void start_awaitReturnsNotFound_throwsSagaNotFound() {
+    // Arrange — enter the await loop (RUNNING), then the saga is purged/TTL'd between polls so
+    // AwaitSaga reports NOT_FOUND. The client must surface the same type getStateSnapshot does.
+    fake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
+    fake.enqueueAwaitError(Status.NOT_FOUND.withDescription("purged").asRuntimeException());
+
+    // Act + Assert
+    assertThatThrownBy(() -> client.start("transfer", Map.of()))
+        .isInstanceOf(SagaNotFoundException.class);
+  }
+
   // ---------------------------------------------------------------------------
   // Null validation
   // ---------------------------------------------------------------------------
