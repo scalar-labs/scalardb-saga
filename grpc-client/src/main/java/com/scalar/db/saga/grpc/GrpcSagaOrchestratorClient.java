@@ -71,7 +71,10 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
     this(stub, ownedChannel, 0L);
   }
 
-  private GrpcSagaOrchestratorClient(
+  /**
+   * Visible for testing — inject a stub plus a nonzero default deadline over an in-process channel.
+   */
+  GrpcSagaOrchestratorClient(
       SagaServiceBlockingStub stub,
       @Nullable ManagedChannel ownedChannel,
       long defaultDeadlineMillis) {

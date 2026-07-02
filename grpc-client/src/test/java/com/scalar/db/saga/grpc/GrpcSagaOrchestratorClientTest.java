@@ -340,6 +340,21 @@ class GrpcSagaOrchestratorClientTest {
   }
 
   @Test
+  void start_withDeadline_awaitKeepsFailing_throwsSagaTimeout() {
+    // Arrange — a client with a small overall deadline; start returns RUNNING, then AwaitSaga keeps
+    // returning UNAVAILABLE. The loop absorbs each retryable failure with backoff until the client
+    // deadline elapses, at which point guardDeadline aborts the bounded wait.
+    GrpcSagaOrchestratorClient deadlineClient =
+        new GrpcSagaOrchestratorClient(SagaServiceGrpc.newBlockingStub(channel), null, 100L);
+    fake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
+    fake.awaitError = Status.UNAVAILABLE.withDescription("still down").asRuntimeException();
+
+    // Act + Assert
+    assertThatThrownBy(() -> deadlineClient.start("transfer", Map.of()))
+        .isInstanceOf(SagaTimeoutException.class);
+  }
+
+  @Test
   void start_clientClosedWhileAwaiting_throwsTerminallyInsteadOfRetryingForever() {
     // Arrange — the default client has no deadline, so guardDeadline never fires. Enter the await
     // loop (RUNNING); a retryable transport error then stands in for calls failing after close()
@@ -428,6 +443,9 @@ class GrpcSagaOrchestratorClientTest {
     SagaSnapshot startResponse = SagaSnapshot.getDefaultInstance();
     @Nullable StatusRuntimeException getError;
     SagaSnapshot getResponse = SagaSnapshot.getDefaultInstance();
+    // When set (and no await script is pending), awaitSaga keeps failing with this error — lets a
+    // test drive the bounded-wait loop until the client deadline elapses.
+    @Nullable StatusRuntimeException awaitError;
 
     // Scripted per-call outcomes; when a script is non-empty it takes precedence over the single
     // response/error fields, enabling multi-call loop and retry-after-reset tests.
@@ -488,6 +506,10 @@ class GrpcSagaOrchestratorClientTest {
       awaitEntered.countDown();
       if (!awaitScript.isEmpty()) {
         awaitScript.poll().accept(responseObserver);
+        return;
+      }
+      if (awaitError != null) {
+        responseObserver.onError(awaitError);
         return;
       }
       respondWith(responseObserver, getResponse);
