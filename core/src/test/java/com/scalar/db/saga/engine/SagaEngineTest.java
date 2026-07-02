@@ -1522,6 +1522,7 @@ class SagaEngineTest {
       // no compensation runs — the saga is left RUNNING (no COMPENSATING) for recovery to replay
       // the
       // persisted completion forward. The committed-residual safety net is preserved.
+      // Arrange — 2 steps, both execute successfully
       Step step0 = successStep("s0");
       Step step1 = successStep("s1");
       registerStep("s0", step0);
