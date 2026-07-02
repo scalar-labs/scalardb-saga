@@ -1484,16 +1484,86 @@ class SagaEngineTest {
       // Act
       engine.executeSaga(def, saga, Map.of());
 
-      // Assert — step 1 IS compensated (its side effect exists)
-      verify(step1).compensate(any(SagaContext.class));
+      // Assert — the durable STEP_FAILED(1) marker is written BEFORE step 1 is compensated. That
+      // marker is what lets crash-recovery include step 1; without it recovery starts from the
+      // highest STEP_COMPLETED (step 0) and orphans step 1. Recording it *after* compensating would
+      // reintroduce the crash-orphan window, so pin the order rather than asserting mere presence.
+      InOrder inOrder = inOrder(store, step1);
+      inOrder
+          .verify(store)
+          .recordStepEvent(
+              anyString(),
+              anyInt(),
+              argThat(
+                  event ->
+                      event != null
+                          && event.getStepIndex() == 1
+                          && event.getEventType() == EventType.STEP_FAILED));
+      inOrder.verify(step1).compensate(any(SagaContext.class));
+
+      // step 0 is also compensated (LIFO), and the saga transitions COMPENSATING → COMPENSATED.
       verify(step0).compensate(any(SagaContext.class));
-      // SAGA_COMPENSATING → SAGA_COMPENSATED
       ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
       verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture());
       assertThat(transitionCaptor.getAllValues().get(0).getEventType())
           .isEqualTo(EventType.SAGA_COMPENSATING);
       assertThat(transitionCaptor.getAllValues().get(1).getEventType())
           .isEqualTo(EventType.SAGA_COMPENSATED);
+    }
+
+    @Test
+    void
+        executeSagaSteps_recordStepCompletedThrowsButCompletionPersisted_propagatesWithoutCompensating()
+            throws Exception {
+      // The committed-residual case: recordStepCompleted's ack was lost (the event IS persisted),
+      // so
+      // the STEP_FAILED(1) marker insert conflicts at the same sequence. The conflict propagates
+      // and
+      // no compensation runs — the saga is left RUNNING (no COMPENSATING) for recovery to replay
+      // the
+      // persisted completion forward. The committed-residual safety net is preserved.
+      // Arrange — 2 steps, both execute successfully
+      Step step0 = successStep("s0");
+      Step step1 = successStep("s1");
+      registerStep("s0", step0);
+      registerStep("s1", step1);
+      SagaDefinition def = sagaDefinitionWithRetry("s0", "s1");
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+
+      // STEP_COMPLETED(1) ack lost (throws); the follow-up STEP_FAILED(1) marker conflicts at seq
+      // N.
+      doThrow(new RuntimeException("ack lost"))
+          .when(store)
+          .recordStepEvent(
+              anyString(),
+              anyInt(),
+              argThat(
+                  e ->
+                      e != null
+                          && e.getStepIndex() == 1
+                          && e.getEventType() == EventType.STEP_COMPLETED));
+      doThrow(new RuntimeException("write-write conflict at the same sequence"))
+          .when(store)
+          .recordStepEvent(
+              anyString(),
+              anyInt(),
+              argThat(
+                  e ->
+                      e != null
+                          && e.getStepIndex() == 1
+                          && e.getEventType() == EventType.STEP_FAILED));
+
+      // Act + Assert — the conflict propagates; no step is compensated and no COMPENSATING is
+      // written.
+      assertThatThrownBy(() -> engine.executeSaga(def, saga, Map.of()))
+          .isInstanceOf(RuntimeException.class);
+      verify(step1, never()).compensate(any(SagaContext.class));
+      verify(step0, never()).compensate(any(SagaContext.class));
+      verify(store, never())
+          .recordStatusEvent(
+              any(),
+              anyInt(),
+              argThat(s -> s != null && s.getEventType() == EventType.SAGA_COMPENSATING));
     }
 
     @Test
