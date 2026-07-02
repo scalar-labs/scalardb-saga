@@ -32,6 +32,12 @@ import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
@@ -319,6 +325,55 @@ class GrpcSagaOrchestratorClientTest {
         .isInstanceOf(SagaNotFoundException.class);
   }
 
+  @Test
+  void start_clientClosedWhileAwaiting_throwsTerminallyInsteadOfRetryingForever() {
+    // Arrange — the default client has no deadline, so guardDeadline never fires. Enter the await
+    // loop (RUNNING); a retryable transport error then stands in for calls failing after close()
+    // shuts the channel. With the client already marked closed, the loop must abort terminally
+    // rather than retry the retryable error forever (a deterministic stand-in for a concurrent
+    // close() racing an in-flight blocking start()).
+    fake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
+    fake.enqueueAwaitError(Status.UNAVAILABLE.withDescription("channel shut").asRuntimeException());
+    client.close();
+
+    // Act + Assert
+    assertThatThrownBy(() -> client.start("transfer", Map.of()))
+        .isInstanceOf(IllegalStateException.class);
+  }
+
+  @Test
+  void start_concurrentCloseWhileAwaiting_throwsTerminallyWithRealChannel() throws Exception {
+    // A client that OWNS a real in-process channel, so close() actually shuts the transport (unlike
+    // the injected-stub setup, where close() is a no-op). A background thread blocks in start()'s
+    // await loop (the fake keeps returning RUNNING); closing the client mid-flight must make that
+    // blocking call fail terminally rather than retry the resulting UNAVAILABLE forever.
+    FakeSagaService ownFake = new FakeSagaService();
+    ownFake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
+    ownFake.getResponse =
+        snapshot("ignored", SagaStatus.RUNNING); // awaitSaga keeps returning RUNNING
+    String name = InProcessServerBuilder.generateName();
+    Server ownServer = InProcessServerBuilder.forName(name).addService(ownFake).build().start();
+    ManagedChannel ownChannel = InProcessChannelBuilder.forName(name).build();
+    GrpcSagaOrchestratorClient ownedClient =
+        new GrpcSagaOrchestratorClient(SagaServiceGrpc.newBlockingStub(ownChannel), ownChannel);
+    ExecutorService caller = Executors.newSingleThreadExecutor();
+    try {
+      // Act — start on a background thread, wait until it is in the await loop, then close.
+      Future<?> start = caller.submit(() -> ownedClient.start("transfer", Map.of()));
+      assertThat(ownFake.awaitEntered.await(5, TimeUnit.SECONDS)).isTrue();
+      ownedClient.close();
+
+      // Assert — the blocking start() fails terminally instead of hanging on infinite retry.
+      assertThatThrownBy(() -> start.get(5, TimeUnit.SECONDS))
+          .isInstanceOf(ExecutionException.class)
+          .hasCauseInstanceOf(IllegalStateException.class);
+    } finally {
+      caller.shutdownNow();
+      ownChannel.shutdownNow();
+      ownServer.shutdownNow();
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Null validation
   // ---------------------------------------------------------------------------
@@ -365,6 +420,9 @@ class GrpcSagaOrchestratorClientTest {
     final Deque<Consumer<StreamObserver<SagaSnapshot>>> startScript = new ArrayDeque<>();
     final Deque<Consumer<StreamObserver<SagaSnapshot>>> awaitScript = new ArrayDeque<>();
     int awaitCalls;
+    // Counted down the first time awaitSaga is invoked, so a test can observe that the client has
+    // reached the await loop before acting (e.g. closing the client concurrently).
+    final CountDownLatch awaitEntered = new CountDownLatch(1);
 
     StartSagaRequest lastStart() {
       return Objects.requireNonNull(lastStart);
@@ -413,6 +471,7 @@ class GrpcSagaOrchestratorClientTest {
     public void awaitSaga(AwaitSagaRequest request, StreamObserver<SagaSnapshot> responseObserver) {
       lastAwait = request;
       awaitCalls++;
+      awaitEntered.countDown();
       if (!awaitScript.isEmpty()) {
         awaitScript.poll().accept(responseObserver);
         return;

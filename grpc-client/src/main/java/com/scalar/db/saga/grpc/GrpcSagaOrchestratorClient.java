@@ -28,6 +28,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import javax.net.ssl.SSLEngine;
 import net.jcip.annotations.ThreadSafe;
 import org.jspecify.annotations.Nullable;
@@ -60,6 +61,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
   private final SagaServiceBlockingStub stub;
   @Nullable private final ManagedChannel ownedChannel;
   private final long defaultDeadlineMillis;
+  private final AtomicBoolean closed = new AtomicBoolean(false);
 
   /**
    * Visible for testing — inject a stub over an in-process channel; {@code close()} is then a
@@ -207,6 +209,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
 
   @Override
   public void close() {
+    closed.set(true);
     if (ownedChannel == null) {
       return;
     }
@@ -272,6 +275,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
         }
         if (isRetryable(code)) {
           attempted = true;
+          throwIfClosed(sagaId);
           guardDeadline(loopDeadlineNanos);
           backoff(retries++);
           continue;
@@ -298,6 +302,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
       } catch (StatusRuntimeException e) {
         Status.Code code = e.getStatus().getCode();
         if (isRetryable(code)) {
+          throwIfClosed(sagaId);
           guardDeadline(loopDeadlineNanos);
           backoff(retries++);
           continue;
@@ -334,6 +339,18 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
   private void guardDeadline(long loopDeadlineNanos) {
     if (loopDeadlineNanos != 0L && System.nanoTime() >= loopDeadlineNanos) {
       throw new SagaTimeoutException("Saga did not reach a terminal state within the deadline");
+    }
+  }
+
+  /**
+   * Aborts the retry loop if {@link #close()} was called concurrently. Without this, a blocking
+   * {@code start()} with no client deadline would retry the (now retryable) channel-shutdown errors
+   * forever and never return.
+   */
+  private void throwIfClosed(String sagaId) {
+    if (closed.get()) {
+      throw new IllegalStateException(
+          "Saga client was closed before saga " + sagaId + " reached a terminal state");
     }
   }
 
