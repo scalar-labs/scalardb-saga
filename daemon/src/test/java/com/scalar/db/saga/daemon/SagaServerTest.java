@@ -186,4 +186,38 @@ class SagaServerTest {
 
     verify(orchestrator, times(1)).close();
   }
+
+  private SagaServer serverWithSyncMaxWait(Path dir, long syncMaxWaitMillis) throws Exception {
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, Long.toString(syncMaxWaitMillis));
+    return new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class));
+  }
+
+  @Test
+  void grpcDrainMillis_syncMaxWaitBelowFloor_returnsFloor(@TempDir Path dir) throws Exception {
+    // A small ceiling still drains for at least the 30s floor.
+    SagaServer server = serverWithSyncMaxWait(dir, 1_000L);
+
+    assertThat(server.grpcDrainMillis()).isEqualTo(30_000L);
+  }
+
+  @Test
+  void grpcDrainMillis_syncMaxWaitAboveFloor_returnsCeilingPlusSlack(@TempDir Path dir)
+      throws Exception {
+    // A ceiling that (with slack) exceeds the floor widens the drain window past 30s, so a
+    // legitimate bounded-sync call reaches its own wait ceiling before force-cancellation.
+    SagaServer server = serverWithSyncMaxWait(dir, 60_000L);
+
+    assertThat(server.grpcDrainMillis()).isEqualTo(65_000L);
+  }
+
+  @Test
+  void grpcDrainMillis_raisedSyncMaxWait_widensWindow(@TempDir Path dir) throws Exception {
+    SagaServer server = serverWithSyncMaxWait(dir, 120_000L);
+
+    assertThat(server.grpcDrainMillis()).isEqualTo(125_000L);
+  }
 }

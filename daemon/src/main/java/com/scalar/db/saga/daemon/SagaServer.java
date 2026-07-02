@@ -47,7 +47,8 @@ import org.slf4j.LoggerFactory;
 public final class SagaServer implements AutoCloseable {
 
   private static final Logger logger = LoggerFactory.getLogger(SagaServer.class);
-  private static final long GRPC_SHUTDOWN_TIMEOUT_SECONDS = 30L;
+  private static final long GRPC_SHUTDOWN_MIN_SECONDS = 30L;
+  private static final long GRPC_SHUTDOWN_SLACK_MILLIS = 5_000L;
 
   private final SagaServerConfig config;
   private final DefaultSagaOrchestrator orchestrator;
@@ -249,9 +250,9 @@ public final class SagaServer implements AutoCloseable {
   }
 
   /**
-   * Gracefully shuts the gRPC server: stop accepting calls, drain in-flight ones up to {@value
-   * #GRPC_SHUTDOWN_TIMEOUT_SECONDS}s, then force-cancel any stragglers. A no-op if the server never
-   * started (a built-but-unbound server holds no resources).
+   * Gracefully shuts the gRPC server: stop accepting calls, drain in-flight ones up to {@link
+   * #grpcDrainMillis()}, then force-cancel any stragglers. A no-op if the server never started (a
+   * built-but-unbound server holds no resources).
    */
   private void shutdownGrpc() {
     if (!grpcStarted) {
@@ -259,13 +260,30 @@ public final class SagaServer implements AutoCloseable {
     }
     grpcServer.shutdown();
     try {
-      if (!grpcServer.awaitTermination(GRPC_SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+      if (!grpcServer.awaitTermination(grpcDrainMillis(), TimeUnit.MILLISECONDS)) {
         grpcServer.shutdownNow();
       }
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       grpcServer.shutdownNow();
     }
+  }
+
+  /**
+   * The graceful gRPC drain window (ms). Derived from {@code sync_max_wait_millis} so an in-flight
+   * bounded-sync {@code StartSaga}/{@code AwaitSaga} call can reach its own wait ceiling before we
+   * force-cancel it: a fixed 30s drain would cut a legitimate 60s (default) wait in half, and the
+   * gap would widen further whenever an operator raises {@code sync_max_wait_millis}. Kept at a
+   * {@value #GRPC_SHUTDOWN_MIN_SECONDS}s floor for small ceilings, and padded with {@value
+   * #GRPC_SHUTDOWN_SLACK_MILLIS}ms of slack so the call unwinds before the deadline rather than at
+   * it.
+   *
+   * <p>Package-private for testing the derivation without binding a port or shutting down a server.
+   */
+  long grpcDrainMillis() {
+    return Math.max(
+        TimeUnit.SECONDS.toMillis(GRPC_SHUTDOWN_MIN_SECONDS),
+        config.syncMaxWaitMillis() + GRPC_SHUTDOWN_SLACK_MILLIS);
   }
 
   /**
