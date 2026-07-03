@@ -23,6 +23,11 @@ import org.jspecify.annotations.Nullable;
  *       binds an ephemeral port, useful in tests)
  *   <li>{@code scalar.db.saga.server.grpc_port} — gRPC listen port (default {@code 50051}; {@code
  *       0} binds an ephemeral port). Bound to the same {@code host} as HTTP, on its own listener
+ *   <li>{@code scalar.db.saga.server.http_enabled} — whether to serve the REST transport (default
+ *       {@code true}); set {@code false} to run a gRPC-only server
+ *   <li>{@code scalar.db.saga.server.grpc_enabled} — whether to serve the gRPC transport (default
+ *       {@code true}); set {@code false} to run an HTTP-only server. At least one transport must be
+ *       enabled — the server refuses to start with both disabled
  *   <li>{@code scalar.db.saga.server.definitions_path} — path to a JSON/YAML saga definition file
  *       or directory (optional)
  *   <li>{@code scalar.db.saga.server.service.<name>.base_url} — base URL of the HTTP service a
@@ -46,6 +51,8 @@ public final class SagaServerConfig {
   static final String HOST_KEY = "scalar.db.saga.server.host";
   static final String PORT_KEY = "scalar.db.saga.server.port";
   static final String GRPC_PORT_KEY = "scalar.db.saga.server.grpc_port";
+  static final String HTTP_ENABLED_KEY = "scalar.db.saga.server.http_enabled";
+  static final String GRPC_ENABLED_KEY = "scalar.db.saga.server.grpc_enabled";
   static final String DEFINITIONS_PATH_KEY = "scalar.db.saga.server.definitions_path";
   static final String SERVICE_KEY_PREFIX = "scalar.db.saga.server.service.";
   static final String SERVICE_BASE_URL_SUFFIX = ".base_url";
@@ -56,6 +63,8 @@ public final class SagaServerConfig {
   static final String DEFAULT_HOST = "0.0.0.0";
   static final int DEFAULT_PORT = 8080;
   static final int DEFAULT_GRPC_PORT = 50051;
+  static final boolean DEFAULT_HTTP_ENABLED = true;
+  static final boolean DEFAULT_GRPC_ENABLED = true;
   static final int DEFAULT_MAX_EVENT_PAYLOAD_BYTES = 1_048_576; // 1 MiB
   static final long DEFAULT_SYNC_TIMEOUT_MILLIS = 0L; // 0 = disabled (sync blocks to terminal)
   static final long DEFAULT_SYNC_MAX_WAIT_MILLIS =
@@ -64,6 +73,8 @@ public final class SagaServerConfig {
   private final String host;
   private final int port;
   private final int grpcPort;
+  private final boolean httpEnabled;
+  private final boolean grpcEnabled;
   private final long syncTimeoutMillis;
   private final long syncMaxWaitMillis;
   private final Properties properties;
@@ -74,6 +85,8 @@ public final class SagaServerConfig {
       String host,
       int port,
       int grpcPort,
+      boolean httpEnabled,
+      boolean grpcEnabled,
       long syncTimeoutMillis,
       long syncMaxWaitMillis,
       Properties properties,
@@ -82,6 +95,8 @@ public final class SagaServerConfig {
     this.host = host;
     this.port = port;
     this.grpcPort = grpcPort;
+    this.httpEnabled = httpEnabled;
+    this.grpcEnabled = grpcEnabled;
     this.syncTimeoutMillis = syncTimeoutMillis;
     this.syncMaxWaitMillis = syncMaxWaitMillis;
     this.properties = applyStoreDefaults(copyOf(properties));
@@ -119,6 +134,20 @@ public final class SagaServerConfig {
     int port = parsePort(properties.getProperty(PORT_KEY), PORT_KEY, DEFAULT_PORT);
     int grpcPort =
         parsePort(properties.getProperty(GRPC_PORT_KEY), GRPC_PORT_KEY, DEFAULT_GRPC_PORT);
+    boolean httpEnabled =
+        parseBoolean(
+            properties.getProperty(HTTP_ENABLED_KEY), HTTP_ENABLED_KEY, DEFAULT_HTTP_ENABLED);
+    boolean grpcEnabled =
+        parseBoolean(
+            properties.getProperty(GRPC_ENABLED_KEY), GRPC_ENABLED_KEY, DEFAULT_GRPC_ENABLED);
+    if (!httpEnabled && !grpcEnabled) {
+      throw new IllegalArgumentException(
+          "At least one transport must be enabled, but '"
+              + HTTP_ENABLED_KEY
+              + "' and '"
+              + GRPC_ENABLED_KEY
+              + "' are both false. A server that exposes no transport can serve no requests.");
+    }
     long syncTimeoutMillis =
         parseBoundedLong(
             properties.getProperty(SYNC_TIMEOUT_MILLIS_KEY),
@@ -138,6 +167,8 @@ public final class SagaServerConfig {
         host,
         port,
         grpcPort,
+        httpEnabled,
+        grpcEnabled,
         syncTimeoutMillis,
         syncMaxWaitMillis,
         properties,
@@ -192,6 +223,24 @@ public final class SagaServerConfig {
    */
   public int grpcPort() {
     return grpcPort;
+  }
+
+  /**
+   * Returns whether the HTTP (REST) transport is served (default {@code true}). When {@code false},
+   * the server runs gRPC-only and binds no HTTP port. At least one of {@link #httpEnabled()} /
+   * {@link #grpcEnabled()} is always {@code true}.
+   */
+  public boolean httpEnabled() {
+    return httpEnabled;
+  }
+
+  /**
+   * Returns whether the gRPC transport is served (default {@code true}). When {@code false}, the
+   * server runs HTTP-only and binds no gRPC port. At least one of {@link #httpEnabled()} / {@link
+   * #grpcEnabled()} is always {@code true}.
+   */
+  public boolean grpcEnabled() {
+    return grpcEnabled;
   }
 
   /**
@@ -281,6 +330,25 @@ public final class SagaServerConfig {
       throw new IllegalArgumentException("'" + key + "' must be between 0 and 65535, got " + port);
     }
     return port;
+  }
+
+  /**
+   * Parses a boolean config value: applies {@code defaultValue} when unset/blank, accepts only
+   * {@code true}/{@code false} (case-insensitive), and rejects anything else so a typo (e.g. {@code
+   * yes}, {@code 1}) fails fast rather than being silently read as {@code false}.
+   */
+  private static boolean parseBoolean(@Nullable String value, String key, boolean defaultValue) {
+    if (value == null || value.isBlank()) {
+      return defaultValue;
+    }
+    String trimmed = value.trim();
+    if (trimmed.equalsIgnoreCase("true")) {
+      return true;
+    }
+    if (trimmed.equalsIgnoreCase("false")) {
+      return false;
+    }
+    throw new IllegalArgumentException("'" + key + "' must be 'true' or 'false', got " + value);
   }
 
   /**

@@ -46,6 +46,7 @@ grpc-bom = { module = "io.grpc:grpc-bom", version.ref = "grpc" }
 grpc-protobuf = { module = "io.grpc:grpc-protobuf" }
 grpc-stub = { module = "io.grpc:grpc-stub" }
 grpc-netty = { module = "io.grpc:grpc-netty" }
+grpc-services = { module = "io.grpc:grpc-services" }
 grpc-netty-shaded = { module = "io.grpc:grpc-netty-shaded" }
 grpc-inprocess = { module = "io.grpc:grpc-inprocess" }
 protobuf-java = { module = "com.google.protobuf:protobuf-java", version.ref = "protobuf-java" }

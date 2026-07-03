@@ -11,6 +11,7 @@ import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.store.ScalarDbSagaStoreFactory;
 import io.grpc.Server;
 import io.grpc.netty.NettyServerBuilder;
+import io.grpc.protobuf.services.HealthStatusManager;
 import io.javalin.Javalin;
 import java.io.IOException;
 import java.io.InputStream;
@@ -28,17 +29,25 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Stream;
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Standalone HTTP server that hosts a saga engine and exposes it over a REST API (daemon mode).
+ * Standalone server that hosts a saga engine and exposes it over a REST and/or gRPC API (daemon
+ * mode).
  *
  * <p>Construction builds the embedded {@link DefaultSagaOrchestrator} — creating the saga schema if
  * needed — from the configured properties, then loads and registers any declarative saga
  * definitions found at the configured definitions path. {@link #start()} starts background
- * recovery/retention tasks and binds the HTTP port. {@link #close()} stops accepting requests and
- * then drains in-flight sagas via {@link DefaultSagaOrchestrator#close()}.
+ * recovery/retention tasks and binds the enabled transports. {@link #close()} stops accepting
+ * requests and then drains in-flight sagas via {@link DefaultSagaOrchestrator#close()}.
+ *
+ * <p>Each transport is independently toggleable ({@link SagaServerConfig#httpEnabled()} / {@link
+ * SagaServerConfig#grpcEnabled()}, both on by default); the config layer guarantees at least one is
+ * enabled. Each enabled transport carries its own health check — HTTP serves {@code GET /health}
+ * and gRPC registers the standard {@code grpc.health.v1.Health} service — so whichever transport(s)
+ * an operator runs stays probeable.
  *
  * <p>Daemon mode is <b>declarative-only</b>: the server ships as a container, so operators cannot
  * supply code-step classes. A definition that declares a code step ({@code stepClass}) is rejected
@@ -52,9 +61,11 @@ public final class SagaServer implements AutoCloseable {
 
   private final SagaServerConfig config;
   private final DefaultSagaOrchestrator orchestrator;
-  private final Javalin app;
-  private final ExecutorService grpcExecutor;
-  private final Server grpcServer;
+  // Each transport is null when disabled; SagaServerConfig guarantees at least one is enabled.
+  private final @Nullable Javalin httpServer;
+  private final @Nullable ExecutorService grpcExecutor;
+  private final @Nullable Server grpcServer;
+  private final @Nullable HealthStatusManager grpcHealth;
   private final AtomicBoolean closed = new AtomicBoolean();
   private volatile boolean grpcStarted;
 
@@ -76,16 +87,30 @@ public final class SagaServer implements AutoCloseable {
   SagaServer(SagaServerConfig config, DefaultSagaOrchestrator orchestrator) {
     this.config = Objects.requireNonNull(config, "config must not be null");
     this.orchestrator = Objects.requireNonNull(orchestrator, "orchestrator must not be null");
-    this.app = Javalin.create();
-    this.grpcExecutor = Executors.newVirtualThreadPerTaskExecutor();
+    Javalin httpServer = config.httpEnabled() ? Javalin.create() : null;
+    ExecutorService grpcExecutor =
+        config.grpcEnabled() ? Executors.newVirtualThreadPerTaskExecutor() : null;
+    this.httpServer = httpServer;
+    this.grpcExecutor = grpcExecutor;
     try {
       loadDefinitions();
-      registerRoutes();
-      this.grpcServer = buildGrpcServer();
+      if (httpServer != null) {
+        registerRoutes(httpServer);
+      }
+      if (grpcExecutor != null) {
+        HealthStatusManager health = new HealthStatusManager();
+        this.grpcHealth = health;
+        this.grpcServer = buildGrpcServer(grpcExecutor, health);
+      } else {
+        this.grpcHealth = null;
+        this.grpcServer = null;
+      }
     } catch (RuntimeException e) {
       // Release the executor and the store/DB connections held by the orchestrator if startup
       // wiring fails.
-      grpcExecutor.shutdown();
+      if (grpcExecutor != null) {
+        grpcExecutor.shutdown();
+      }
       orchestrator.close();
       throw e;
     }
@@ -94,18 +119,21 @@ public final class SagaServer implements AutoCloseable {
   /**
    * Builds (does not bind) the gRPC server: it serves {@link SagaServiceImpl} over the same {@link
    * SagaServerConfig#host()} as HTTP on its own port, delegating to the same orchestrator the REST
-   * routes use. The wait-heavy bounded-sync calls run on a virtual-thread executor (cheap
-   * blocking); the inbound-size and metadata caps bound abuse on the unauthenticated port; server
-   * reflection is deliberately not registered (it would expose the schema to any client).
+   * routes use. It also registers the standard {@code grpc.health.v1.Health} service so a gRPC-only
+   * deployment stays probeable (e.g. by K8s-native gRPC probes). The wait-heavy bounded-sync calls
+   * run on a virtual-thread executor (cheap blocking); the inbound-size and metadata caps bound
+   * abuse on the unauthenticated port; server reflection is deliberately not registered (it would
+   * expose the schema to any client).
    */
-  private Server buildGrpcServer() {
+  private Server buildGrpcServer(ExecutorService executor, HealthStatusManager health) {
     return NettyServerBuilder.forAddress(new InetSocketAddress(config.host(), config.grpcPort()))
         .addService(
             new SagaServiceImpl(
                 orchestrator, config.syncTimeoutMillis(), config.syncMaxWaitMillis()))
+        .addService(health.getHealthService())
         .maxInboundMessageSize(config.grpcMaxInboundMessageBytes())
         .maxInboundMetadataSize(8 * 1024)
-        .executor(grpcExecutor)
+        .executor(executor)
         .permitKeepAliveTime(1, TimeUnit.MINUTES)
         .build();
   }
@@ -180,10 +208,10 @@ public final class SagaServer implements AutoCloseable {
     return name.endsWith(".json") || name.endsWith(".yaml") || name.endsWith(".yml");
   }
 
-  private void registerRoutes() {
-    HealthResource.register(app);
-    ErrorMapper.register(app);
-    SagaResource.register(app, orchestrator, config.syncTimeoutMillis());
+  private void registerRoutes(Javalin httpServer) {
+    HealthResource.register(httpServer);
+    ErrorMapper.register(httpServer);
+    SagaResource.register(httpServer, orchestrator, config.syncTimeoutMillis());
   }
 
   /**
@@ -194,11 +222,15 @@ public final class SagaServer implements AutoCloseable {
   public SagaServer start() {
     try {
       orchestrator.startBackgroundTasks();
-      app.start(config.host(), config.port());
-      grpcServer.start();
-      grpcStarted = true;
+      if (httpServer != null) {
+        httpServer.start(config.host(), config.port());
+      }
+      if (grpcServer != null) {
+        grpcServer.start();
+        grpcStarted = true;
+      }
     } catch (RuntimeException e) {
-      // Stop the (partially started) app/gRPC server and drain/close the orchestrator so a failed
+      // Stop the (partially started) HTTP/gRPC server and drain/close the orchestrator so a failed
       // start — e.g. a port bind failure after background tasks are running — does not leak
       // threads/connections. Two ports means two bind-failure windows; close() covers both.
       close();
@@ -208,28 +240,32 @@ public final class SagaServer implements AutoCloseable {
       close();
       throw new UncheckedIOException("Failed to start gRPC server on port " + config.grpcPort(), e);
     }
-    logger.info("SagaServer started on HTTP port {} and gRPC port {}", port(), grpcPort());
+    logger.info(
+        "SagaServer started ({}, {})",
+        httpServer == null ? "HTTP disabled" : "HTTP port " + port(),
+        grpcServer == null ? "gRPC disabled" : "gRPC port " + grpcPort());
     return this;
   }
 
   /**
-   * Returns the bound HTTP port (the actual ephemeral port when configured with {@code 0}). Only
-   * meaningful after {@link #start()}.
+   * Returns the bound HTTP port (the actual ephemeral port when configured with {@code 0}), or
+   * {@code -1} when the HTTP transport is disabled. Only meaningful after {@link #start()}.
    *
-   * @return the bound port
+   * @return the bound port, or {@code -1} if HTTP is disabled
    */
   public int port() {
-    return app.port();
+    return httpServer == null ? -1 : httpServer.port();
   }
 
   /**
-   * Returns the bound gRPC port (the actual ephemeral port when configured with {@code 0}). Only
-   * meaningful after {@link #start()}.
+   * Returns the bound gRPC port (the actual ephemeral port when configured with {@code 0}), or
+   * {@code -1} when the gRPC transport is disabled (or the server is not started). Only meaningful
+   * after {@link #start()}.
    *
-   * @return the bound gRPC port
+   * @return the bound gRPC port, or {@code -1} if gRPC is disabled
    */
   public int grpcPort() {
-    return grpcServer.getPort();
+    return grpcServer == null ? -1 : grpcServer.getPort();
   }
 
   @Override
@@ -239,33 +275,43 @@ public final class SagaServer implements AutoCloseable {
     if (!closed.compareAndSet(false, true)) {
       return;
     }
-    // Stop accepting new requests on both transports, drain in-flight gRPC calls, then drain sagas.
-    app.stop();
+    // Stop accepting new requests on the enabled transports, drain in-flight gRPC calls, then drain
+    // sagas.
+    if (httpServer != null) {
+      httpServer.stop();
+    }
     shutdownGrpc();
     // gRPC does not own the executor we supplied it, so shut it down ourselves. shutdownGrpc() has
     // already drained in-flight calls, so no tasks remain and a plain shutdown() suffices.
-    grpcExecutor.shutdown();
+    if (grpcExecutor != null) {
+      grpcExecutor.shutdown();
+    }
     orchestrator.close();
     logger.info("SagaServer stopped");
   }
 
   /**
-   * Gracefully shuts the gRPC server: stop accepting calls, drain in-flight ones up to {@link
-   * #grpcDrainMillis()}, then force-cancel any stragglers. A no-op if the server never started (a
-   * built-but-unbound server holds no resources).
+   * Gracefully shuts the gRPC server: mark it {@code NOT_SERVING} for any in-flight health probe,
+   * stop accepting calls, drain in-flight ones up to {@link #grpcDrainMillis()}, then force-cancel
+   * any stragglers. A no-op if gRPC is disabled or the server never started (a built-but-unbound
+   * server holds no resources).
    */
   private void shutdownGrpc() {
-    if (!grpcStarted) {
+    Server server = grpcServer;
+    if (server == null || !grpcStarted) {
       return;
     }
-    grpcServer.shutdown();
+    if (grpcHealth != null) {
+      grpcHealth.enterTerminalState();
+    }
+    server.shutdown();
     try {
-      if (!grpcServer.awaitTermination(grpcDrainMillis(), TimeUnit.MILLISECONDS)) {
-        grpcServer.shutdownNow();
+      if (!server.awaitTermination(grpcDrainMillis(), TimeUnit.MILLISECONDS)) {
+        server.shutdownNow();
       }
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
-      grpcServer.shutdownNow();
+      server.shutdownNow();
     }
   }
 

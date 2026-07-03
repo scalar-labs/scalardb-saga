@@ -216,4 +216,61 @@ class SagaServerConfigTest {
     assertThatThrownBy(() -> SagaServerConfig.load(props))
         .isInstanceOf(IllegalArgumentException.class);
   }
+
+  @Test
+  void load_unsetTransportToggles_bothEnabledByDefault() {
+    SagaServerConfig config = SagaServerConfig.load(new Properties());
+
+    assertThat(config.httpEnabled()).isTrue();
+    assertThat(config.grpcEnabled()).isTrue();
+  }
+
+  @Test
+  void load_httpDisabled_leavesGrpcEnabled() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HTTP_ENABLED_KEY, "false");
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.httpEnabled()).isFalse();
+    assertThat(config.grpcEnabled()).isTrue();
+  }
+
+  @Test
+  void load_grpcDisabled_leavesHttpEnabled() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.grpcEnabled()).isFalse();
+    assertThat(config.httpEnabled()).isTrue();
+  }
+
+  @Test
+  void load_transportToggleCaseInsensitive_isParsed() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "FALSE");
+
+    assertThat(SagaServerConfig.load(props).grpcEnabled()).isFalse();
+  }
+
+  @Test
+  void load_bothTransportsDisabled_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HTTP_ENABLED_KEY, "false");
+    props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void load_nonBooleanTransportToggle_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HTTP_ENABLED_KEY, "yes");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
 }

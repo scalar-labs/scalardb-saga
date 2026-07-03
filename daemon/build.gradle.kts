@@ -13,6 +13,7 @@ dependencies {
     implementation(platform(libs.grpc.bom))
     implementation(libs.grpc.stub)
     implementation(libs.grpc.netty)
+    implementation(libs.grpc.services)
     implementation(libs.protobuf.java)
     implementation(libs.javalin)
     implementation(libs.slf4j.api)
