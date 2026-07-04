@@ -41,6 +41,11 @@ import org.jspecify.annotations.Nullable;
  *       {@code sync_timeout_millis} and the client's deadline only tighten it
  * </ul>
  *
+ * <p>Any {@code scalar.db.saga.*} value may use a secret reference — {@code ${file:UTF-8:/path}}
+ * (preferred; e.g. a Kubernetes mounted Secret) or {@code ${env:NAME}} — resolved at load time. See
+ * {@link SecretResolver}. {@code scalar.db.*} store keys are left for ScalarDB to resolve with the
+ * same syntax.
+ *
  * <p>All other properties configure the saga engine's persistence (e.g. ScalarDB connection
  * settings) and are forwarded as-is. In daemon mode, {@code
  * scalar.db.saga.store.max_event_payload_bytes} defaults to 1 MiB when unset, bounding how large an
@@ -48,18 +53,22 @@ import org.jspecify.annotations.Nullable;
  */
 public final class SagaServerConfig {
 
-  static final String HOST_KEY = "scalar.db.saga.server.host";
-  static final String PORT_KEY = "scalar.db.saga.server.port";
-  static final String GRPC_PORT_KEY = "scalar.db.saga.server.grpc_port";
-  static final String HTTP_ENABLED_KEY = "scalar.db.saga.server.http_enabled";
-  static final String GRPC_ENABLED_KEY = "scalar.db.saga.server.grpc_enabled";
-  static final String DEFINITIONS_PATH_KEY = "scalar.db.saga.server.definitions_path";
-  static final String SERVICE_KEY_PREFIX = "scalar.db.saga.server.service.";
+  // The daemon's config namespace: the base for every key below, and the boundary within which
+  // secret references are resolved (scalar.db.* store keys are left for ScalarDB — see
+  // resolveSecrets).
+  static final String PREFIX = "scalar.db.saga.";
+  static final String SERVER_PREFIX = PREFIX + "server.";
+  static final String HOST_KEY = SERVER_PREFIX + "host";
+  static final String PORT_KEY = SERVER_PREFIX + "port";
+  static final String GRPC_PORT_KEY = SERVER_PREFIX + "grpc_port";
+  static final String HTTP_ENABLED_KEY = SERVER_PREFIX + "http_enabled";
+  static final String GRPC_ENABLED_KEY = SERVER_PREFIX + "grpc_enabled";
+  static final String DEFINITIONS_PATH_KEY = SERVER_PREFIX + "definitions_path";
+  static final String SERVICE_KEY_PREFIX = SERVER_PREFIX + "service.";
   static final String SERVICE_BASE_URL_SUFFIX = ".base_url";
-  static final String STORE_MAX_EVENT_PAYLOAD_BYTES_KEY =
-      "scalar.db.saga.store.max_event_payload_bytes";
-  static final String SYNC_TIMEOUT_MILLIS_KEY = "scalar.db.saga.server.sync_timeout_millis";
-  static final String SYNC_MAX_WAIT_MILLIS_KEY = "scalar.db.saga.server.sync_max_wait_millis";
+  static final String SYNC_TIMEOUT_MILLIS_KEY = SERVER_PREFIX + "sync_timeout_millis";
+  static final String SYNC_MAX_WAIT_MILLIS_KEY = SERVER_PREFIX + "sync_max_wait_millis";
+  static final String STORE_MAX_EVENT_PAYLOAD_BYTES_KEY = PREFIX + "store.max_event_payload_bytes";
   static final String DEFAULT_HOST = "0.0.0.0";
   static final int DEFAULT_PORT = 8080;
   static final int DEFAULT_GRPC_PORT = 50051;
@@ -130,6 +139,7 @@ public final class SagaServerConfig {
    */
   public static SagaServerConfig load(Properties properties) {
     Objects.requireNonNull(properties, "properties must not be null");
+    properties = resolveSecrets(properties);
     String host = parseHost(properties.getProperty(HOST_KEY));
     int port = parsePort(properties.getProperty(PORT_KEY), PORT_KEY, DEFAULT_PORT);
     int grpcPort =
@@ -174,6 +184,26 @@ public final class SagaServerConfig {
         properties,
         definitionsPath,
         parseServiceBaseUrls(properties));
+  }
+
+  /**
+   * Returns a copy of {@code properties} with secret references resolved in the daemon's own
+   * namespace. Only {@code scalar.db.saga.*} values pass through {@link SecretResolver} (so an
+   * operator can write {@code ${env:NAME}} / {@code ${file:UTF-8:/path}} in any daemon key); {@code
+   * scalar.db.*} store keys are left untouched, since ScalarDB resolves those itself with the same
+   * syntax.
+   */
+  private static Properties resolveSecrets(Properties properties) {
+    SecretResolver resolver = new SecretResolver();
+    Properties resolved = new Properties();
+    for (String key : properties.stringPropertyNames()) {
+      String value = properties.getProperty(key);
+      if (value == null) {
+        continue; // stringPropertyNames() only lists keys with values; guard for null-safety
+      }
+      resolved.setProperty(key, key.startsWith(PREFIX) ? resolver.resolve(value) : value);
+    }
+    return resolved;
   }
 
   /**

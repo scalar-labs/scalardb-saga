@@ -4,8 +4,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.entry;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Properties;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class SagaServerConfigTest {
 
@@ -272,5 +277,32 @@ class SagaServerConfigTest {
 
     assertThatThrownBy(() -> SagaServerConfig.load(props))
         .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void load_sagaNamespaceSecretReference_isResolved(@TempDir Path dir) throws IOException {
+    // A scalar.db.saga.* value may carry a secret reference; here host is resolved from a file.
+    Path secret = dir.resolve("host");
+    Files.writeString(secret, "10.1.2.3", StandardCharsets.UTF_8);
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "${file:UTF-8:" + secret + "}");
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.host()).isEqualTo("10.1.2.3");
+  }
+
+  @Test
+  void load_scalarDbNamespaceSecretReference_isLeftForScalarDb() {
+    // A scalar.db.* store key is NOT resolved by the daemon (ScalarDB resolves it). If the daemon
+    // wrongly resolved it, the missing-file reference would throw; instead it is preserved
+    // verbatim.
+    Properties props = new Properties();
+    props.setProperty("scalar.db.contact_points", "${file:UTF-8:/does/not/exist}");
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.properties().getProperty("scalar.db.contact_points"))
+        .isEqualTo("${file:UTF-8:/does/not/exist}");
   }
 }
