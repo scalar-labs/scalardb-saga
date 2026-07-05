@@ -65,4 +65,13 @@ public abstract sealed class CallSpec permits HttpCall {
    * May be empty.
    */
   public abstract Set<String> producedContextKeys();
+
+  /**
+   * Whether this call may complete <b>asynchronously</b>: the participant may acknowledge the
+   * request and deliver the result later via an external callback (parking the saga), instead of
+   * returning it in the response. Meaningful only on a forward phase (execution / reservation /
+   * confirmation) — a {@code ServiceStep} rejects an async backward-phase (compensation /
+   * cancellation) call. Daemon-mode only; embedded mode always blocks until completion.
+   */
+  public abstract boolean isAsync();
 }

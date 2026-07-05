@@ -311,4 +311,26 @@ class SagaDefinitionSerializerDeclarativeTest {
     assertThatThrownBy(() -> serializer.deserialize(json))
         .isInstanceOf(SagaPersistenceException.class);
   }
+
+  @Test
+  void serializeAndDeserialize_asyncExecution_roundTripsCorrectly() {
+    // Arrange
+    SagaDefinition original =
+        SagaDefinition.newBuilder("transfer")
+            .saga()
+            .serviceStep("debit", "account-service")
+            .execution(HttpCall.newBuilder("/debit").async(true).build())
+            .compensation(call("/debit/reverse"))
+            .add()
+            .build();
+
+    // Act
+    SagaDefinition deserialized = serializer.deserialize(serializer.serialize(original));
+
+    // Assert
+    assertThat(deserialized).isEqualTo(original);
+    assertThat(
+            ((HttpCall) firstStep(deserialized).getPhase(Phase.EXECUTION).orElseThrow()).isAsync())
+        .isTrue();
+  }
 }

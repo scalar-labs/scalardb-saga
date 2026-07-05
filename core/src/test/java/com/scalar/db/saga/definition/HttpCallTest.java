@@ -305,4 +305,28 @@ class HttpCallTest {
   void producedContextKeys_noOutput_isEmpty() {
     assertThat(HttpCall.newBuilder("/debit").build().producedContextKeys()).isEmpty();
   }
+
+  @Test
+  void build_asyncGiven_setsAsync() {
+    // Act
+    HttpCall call = HttpCall.newBuilder("/debit").async(true).build();
+
+    // Assert
+    assertThat(call.isAsync()).isTrue();
+  }
+
+  @Test
+  void build_pathOnlyGiven_asyncDefaultsToFalse() {
+    assertThat(HttpCall.newBuilder("/debit").build().isAsync()).isFalse();
+  }
+
+  @Test
+  void equals_asyncDiffers_notEqual() {
+    // Arrange
+    HttpCall async = HttpCall.newBuilder("/debit").async(true).build();
+    HttpCall sync = HttpCall.newBuilder("/debit").build();
+
+    // Assert
+    assertThat(async).isNotEqualTo(sync);
+  }
 }

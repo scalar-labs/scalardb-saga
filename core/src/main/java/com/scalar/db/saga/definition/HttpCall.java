@@ -52,6 +52,7 @@ public final class HttpCall extends CallSpec {
   private final @Nullable String stringBody;
   private final @Nullable String contentType;
   private final Map<String, String> output;
+  private final boolean async;
 
   private HttpCall(Builder builder) {
     this.method = builder.method;
@@ -61,6 +62,7 @@ public final class HttpCall extends CallSpec {
     this.stringBody = builder.stringBody;
     this.contentType = builder.contentType;
     this.output = Map.copyOf(builder.output);
+    this.async = builder.async;
   }
 
   /** Creates a builder for a call to {@code path} (resolved against the service's base URL). */
@@ -130,6 +132,11 @@ public final class HttpCall extends CallSpec {
     return output;
   }
 
+  @Override
+  public boolean isAsync() {
+    return async;
+  }
+
   /**
    * The {@code ${key}} keys referenced across the path, query values, JSON-body values, and string
    * body. Keys are matched exactly as the runtime resolver reads them (no trimming); empty {@code
@@ -169,6 +176,7 @@ public final class HttpCall extends CallSpec {
     if (this == o) return true;
     if (!(o instanceof HttpCall that)) return false;
     return method == that.method
+        && async == that.async
         && path.equals(that.path)
         && query.equals(that.query)
         && jsonBody.equals(that.jsonBody)
@@ -179,7 +187,7 @@ public final class HttpCall extends CallSpec {
 
   @Override
   public int hashCode() {
-    return Objects.hash(method, path, query, jsonBody, stringBody, contentType, output);
+    return Objects.hash(method, path, query, jsonBody, stringBody, contentType, output, async);
   }
 
   @Override
@@ -198,6 +206,8 @@ public final class HttpCall extends CallSpec {
         + contentType
         + ", output="
         + output
+        + ", async="
+        + async
         + '}';
   }
 
@@ -211,6 +221,7 @@ public final class HttpCall extends CallSpec {
     private @Nullable String stringBody;
     private @Nullable String contentType;
     private Map<String, String> output = Map.of();
+    private boolean async = false;
 
     private Builder(String path) {
       this.path = path;
@@ -256,6 +267,17 @@ public final class HttpCall extends CallSpec {
     /** Sets the output extraction mapping. Defensively copied. */
     public Builder output(Map<String, String> output) {
       this.output = Map.copyOf(output);
+      return this;
+    }
+
+    /**
+     * Marks this call async-capable: the participant may respond {@code 202 Accepted} and complete
+     * the step later via an external callback (daemon mode), rather than returning the result in
+     * the response. Defaults to {@code false}. Valid only on a forward phase — a {@code
+     * ServiceStep} rejects an async {@code compensation}/{@code cancellation} call.
+     */
+    public Builder async(boolean async) {
+      this.async = async;
       return this;
     }
 
