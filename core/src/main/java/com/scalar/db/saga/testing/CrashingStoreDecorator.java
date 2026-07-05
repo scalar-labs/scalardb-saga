@@ -112,8 +112,7 @@ public final class CrashingStoreDecorator implements SagaStore {
   }
 
   @Override
-  public Recoverables findRecoverable(
-      long recoveryTimeoutMillis, @Nullable RecoverablesCursor cursor) {
+  public Recoverables findRecoverable(long recoveryTimeoutMillis, @Nullable ScanCursor cursor) {
     return delegate.findRecoverable(recoveryTimeoutMillis, cursor);
   }
 
@@ -125,6 +124,11 @@ public final class CrashingStoreDecorator implements SagaStore {
   @Override
   public void markForRecovery(String sagaId) {
     delegate.markForRecovery(sagaId);
+  }
+
+  @Override
+  public OverdueParked findOverdueParkedSagas(Instant threshold, @Nullable ScanCursor cursor) {
+    return delegate.findOverdueParkedSagas(threshold, cursor);
   }
 
   @Override

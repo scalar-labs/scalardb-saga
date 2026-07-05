@@ -7,7 +7,7 @@ import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.SagaStore.Recoverables;
-import com.scalar.db.saga.store.SagaStore.RecoverablesCursor;
+import com.scalar.db.saga.store.SagaStore.ScanCursor;
 import com.scalar.db.saga.store.StatusEvent;
 import com.scalar.db.saga.store.StepEvent;
 import java.time.Duration;
@@ -154,7 +154,7 @@ class SagaRecoveryManager {
    */
   public void recover() {
     List<Future<?>> futures = new ArrayList<>();
-    @Nullable RecoverablesCursor cursor = null;
+    @Nullable ScanCursor cursor = null;
     int submitted = 0;
     try {
       do {

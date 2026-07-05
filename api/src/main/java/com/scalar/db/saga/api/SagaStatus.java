@@ -68,12 +68,13 @@ public enum SagaStatus {
   }
 
   /**
-   * Returns {@code true} if sagas in this status are handled by the recovery sweeper: resuming
-   * forward execution (RUNNING) or compensation (COMPENSATING), or timing out a parked async step
-   * (WAITING).
+   * Returns {@code true} if sagas in this status are eligible for the recovery staleness scan:
+   * resuming forward execution (RUNNING) or compensation (COMPENSATING). A parked (WAITING) saga is
+   * excluded — it is timed out via the dedicated {@code saga_parked} deadline index, not by {@code
+   * updated_at} staleness.
    */
   public boolean isRecoverable() {
-    return this == RUNNING || this == COMPENSATING || this == WAITING;
+    return this == RUNNING || this == COMPENSATING;
   }
 
   /**

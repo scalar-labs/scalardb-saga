@@ -17,7 +17,7 @@ import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.SagaStore.Recoverables;
-import com.scalar.db.saga.store.SagaStore.RecoverablesCursor;
+import com.scalar.db.saga.store.SagaStore.ScanCursor;
 import com.scalar.db.saga.store.StatusEvent;
 import com.scalar.db.saga.store.StepEvent;
 import java.time.Clock;
@@ -114,7 +114,7 @@ class SagaRecoveryManagerTest {
               DEF_VERSION,
               NOW.minusSeconds(300),
               NOW);
-      RecoverablesCursor cursor = mock(RecoverablesCursor.class);
+      ScanCursor cursor = mock(ScanCursor.class);
       SagaDefinition def = definition();
       ExecutionContext ctx1 = mock(ExecutionContext.class);
       ExecutionContext ctx2 = mock(ExecutionContext.class);
@@ -183,7 +183,7 @@ class SagaRecoveryManagerTest {
               DEF_VERSION,
               NOW.minusSeconds(300),
               NOW);
-      RecoverablesCursor cursor = mock(RecoverablesCursor.class);
+      ScanCursor cursor = mock(ScanCursor.class);
       SagaDefinition def = definition();
       ExecutionContext ctx1 = mock(ExecutionContext.class);
       ExecutionContext ctx2 = mock(ExecutionContext.class);

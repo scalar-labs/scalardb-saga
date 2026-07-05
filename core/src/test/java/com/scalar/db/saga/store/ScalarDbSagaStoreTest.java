@@ -34,6 +34,7 @@ import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
+import com.scalar.db.saga.store.SagaStore.OverdueParked;
 import com.scalar.db.saga.store.SagaStore.Recoverables;
 import java.time.Instant;
 import java.util.List;
@@ -653,25 +654,22 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
-  void findRecoverable_activeStatuses_returnsResultsFromAllScans() throws Exception {
-    // Arrange — recovery scans RUNNING, COMPENSATING, and WAITING per bucket; each returns one
+  void findRecoverable_bothStatuses_returnsResultsFromAllScans() throws Exception {
+    // Arrange — recovery scans RUNNING and COMPENSATING per bucket (WAITING is timed out via the
+    // saga_parked index, not the staleness scan); each returns one result
     Result running = mockStateResult("saga-running", SagaStatus.RUNNING);
     Result compensating = mockStateResult("saga-compensating", SagaStatus.COMPENSATING);
-    Result waiting = mockStateResult("saga-waiting", SagaStatus.WAITING);
-    when(tx.scan(any(Scan.class)))
-        .thenReturn(List.of(running))
-        .thenReturn(List.of(compensating))
-        .thenReturn(List.of(waiting));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(running)).thenReturn(List.of(compensating));
 
     // Act
     Recoverables result = store.findRecoverable(60_000, null);
 
-    // Assert — all three active statuses collected, in RECOVERABLE_STATUS_CODES order
-    assertThat(result.sagas()).hasSize(3);
+    // Assert — both active statuses collected
+    assertThat(result.sagas()).hasSize(2);
     assertThat(result.sagas())
         .extracting(SagaStateSnapshot::getSagaId)
-        .containsExactly("saga-running", "saga-compensating", "saga-waiting");
-    verify(tx, times(3)).scan(any(Scan.class));
+        .containsExactly("saga-running", "saga-compensating");
+    verify(tx, times(2)).scan(any(Scan.class));
   }
 
   @Test
@@ -681,6 +679,69 @@ class ScalarDbSagaStoreTest {
 
     // Act & Assert
     assertThatThrownBy(() -> store.findRecoverable(60_000, null))
+        .isInstanceOf(SagaPersistenceException.class);
+  }
+
+  // ---------------------------------------------------------------------------
+  // findOverdueParkedSagas
+  // ---------------------------------------------------------------------------
+
+  @Test
+  void findOverdueParkedSagas_firstCall_returnsFirstBucketIdsAndCursor() throws Exception {
+    // Arrange — the first bucket has two parked sagas whose deadline has passed
+    Result p1 = mock(Result.class);
+    when(p1.getText("saga_id")).thenReturn("saga-a");
+    Result p2 = mock(Result.class);
+    when(p2.getText("saga_id")).thenReturn("saga-b");
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(p1, p2));
+
+    // Act — one bucket per call, starting from bucket 0
+    OverdueParked result = store.findOverdueParkedSagas(Instant.now(), null);
+
+    // Assert
+    assertThat(result.sagaIds()).containsExactly("saga-a", "saga-b");
+    assertThat(result.hasMore()).isTrue(); // buckets 1..3 remain
+  }
+
+  @Test
+  void findOverdueParkedSagas_noneDue_returnsEmptyBatchWithCursor() throws Exception {
+    // Arrange
+    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+
+    // Act
+    OverdueParked result = store.findOverdueParkedSagas(Instant.now(), null);
+
+    // Assert
+    assertThat(result.sagaIds()).isEmpty();
+    assertThat(result.hasMore()).isTrue();
+  }
+
+  @Test
+  void findOverdueParkedSagas_chainedCalls_exhaustAllBuckets() throws Exception {
+    // Arrange — 4 buckets, all empty
+    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    Instant now = Instant.now();
+
+    // Act — chain through all buckets via the returned cursor
+    OverdueParked r0 = store.findOverdueParkedSagas(now, null);
+    OverdueParked r1 = store.findOverdueParkedSagas(now, r0.nextCursor());
+    OverdueParked r2 = store.findOverdueParkedSagas(now, r1.nextCursor());
+    OverdueParked r3 = store.findOverdueParkedSagas(now, r2.nextCursor());
+
+    // Assert — last bucket returns a null cursor
+    assertThat(r0.hasMore()).isTrue();
+    assertThat(r3.hasMore()).isFalse();
+    assertThat(r3.nextCursor()).isNull();
+  }
+
+  @Test
+  void findOverdueParkedSagas_storageFailureGiven_throwsSagaPersistenceException()
+      throws Exception {
+    // Arrange
+    when(tx.scan(any(Scan.class))).thenThrow(mock(CrudException.class));
+
+    // Act & Assert
+    assertThatThrownBy(() -> store.findOverdueParkedSagas(Instant.now(), null))
         .isInstanceOf(SagaPersistenceException.class);
   }
 

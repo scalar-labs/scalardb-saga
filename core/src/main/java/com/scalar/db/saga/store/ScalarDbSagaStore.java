@@ -321,8 +321,7 @@ public class ScalarDbSagaStore implements SagaStore {
   // ---------------------------------------------------------------------------
 
   @Override
-  public Recoverables findRecoverable(
-      long recoveryTimeoutMillis, @Nullable RecoverablesCursor cursor) {
+  public Recoverables findRecoverable(long recoveryTimeoutMillis, @Nullable ScanCursor cursor) {
     int startBucket = 0;
     if (cursor instanceof BucketCursor(int nextBucket)) {
       startBucket = nextBucket;
@@ -358,7 +357,7 @@ public class ScalarDbSagaStore implements SagaStore {
             "find recoverable sagas");
 
     int nextBucket = startBucket + 1;
-    @Nullable RecoverablesCursor nextCursor =
+    @Nullable ScanCursor nextCursor =
         nextBucket < schema.getNumBuckets() ? new BucketCursor(nextBucket) : null;
     return new Recoverables(result, nextCursor);
   }
@@ -446,6 +445,41 @@ public class ScalarDbSagaStore implements SagaStore {
       // Best effort — conflict with executing thread is expected and harmless
       logger.warn("markForRecovery failed for saga {} (best-effort)", sagaId, e);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Parked-step timeout (async WAITING sagas)
+  // ---------------------------------------------------------------------------
+
+  @Override
+  public OverdueParked findOverdueParkedSagas(Instant threshold, @Nullable ScanCursor cursor) {
+    int startBucket = 0;
+    if (cursor instanceof BucketCursor(int nextBucket)) {
+      startBucket = nextBucket;
+    }
+    if (startBucket >= schema.getNumBuckets()) {
+      return new OverdueParked(List.of(), null);
+    }
+
+    int bucket = startBucket;
+    List<String> sagaIds =
+        runInTransaction(
+            tx -> {
+              // Cap the scan to bound memory; anything beyond is picked up next recovery cycle.
+              List<Result> rows =
+                  tx.scan(
+                      Scan.newBuilder(buildParkedRangeScan(bucket, threshold))
+                          .limit(config.getRecoveryScanLimit())
+                          .build());
+              return rows.stream().map(r -> r.getText("saga_id")).toList();
+            },
+            null,
+            "find overdue parked sagas");
+
+    int nextBucket = startBucket + 1;
+    @Nullable ScanCursor nextCursor =
+        nextBucket < schema.getNumBuckets() ? new BucketCursor(nextBucket) : null;
+    return new OverdueParked(sagaIds, nextCursor);
   }
 
   // ---------------------------------------------------------------------------
@@ -754,6 +788,17 @@ public class ScalarDbSagaStore implements SagaStore {
         .build();
   }
 
+  /** Scans one {@code saga_parked} bucket for deadlines in {@code [EPOCH, threshold]}. */
+  private Scan buildParkedRangeScan(int bucket, Instant threshold) {
+    return Scan.newBuilder()
+        .namespace(SagaSchema.NAMESPACE)
+        .table(SagaSchema.PARKED_TABLE)
+        .partitionKey(Key.ofInt("bucket", bucket))
+        .start(Key.newBuilder().addTimestampTZ("parked_deadline", Instant.EPOCH).build(), true)
+        .end(Key.newBuilder().addTimestampTZ("parked_deadline", threshold).build(), true)
+        .build();
+  }
+
   // -- saga_definitions builders --
 
   private Insert buildDefinitionInsert(String name, String version, String json) {
@@ -947,5 +992,5 @@ public class ScalarDbSagaStore implements SagaStore {
   // ---------------------------------------------------------------------------
 
   /** Internal cursor tracking which bucket to scan next. */
-  private record BucketCursor(int nextBucket) implements RecoverablesCursor {}
+  private record BucketCursor(int nextBucket) implements ScanCursor {}
 }

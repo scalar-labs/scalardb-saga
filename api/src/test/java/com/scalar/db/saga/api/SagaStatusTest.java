@@ -64,7 +64,6 @@ class SagaStatusTest {
     // Act & Assert
     assertThat(SagaStatus.RUNNING.isRecoverable()).isTrue();
     assertThat(SagaStatus.COMPENSATING.isRecoverable()).isTrue();
-    assertThat(SagaStatus.WAITING.isRecoverable()).isTrue();
   }
 
   @Test
@@ -73,6 +72,7 @@ class SagaStatusTest {
     assertThat(SagaStatus.COMPLETED.isRecoverable()).isFalse();
     assertThat(SagaStatus.COMPENSATED.isRecoverable()).isFalse();
     assertThat(SagaStatus.ESCALATED.isRecoverable()).isFalse();
+    assertThat(SagaStatus.WAITING.isRecoverable()).isFalse();
   }
 
   @Test

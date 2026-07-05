@@ -113,7 +113,7 @@ public interface SagaStore extends AutoCloseable {
    * @param cursor the cursor from a previous call, or {@code null} to start a new scan
    * @return recoverable sagas and a cursor for the next batch
    */
-  Recoverables findRecoverable(long recoveryTimeoutMillis, @Nullable RecoverablesCursor cursor);
+  Recoverables findRecoverable(long recoveryTimeoutMillis, @Nullable ScanCursor cursor);
 
   /**
    * Attempts to claim a saga for recovery by updating its owner. Returns an empty {@link Optional}
@@ -133,6 +133,26 @@ public interface SagaStore extends AutoCloseable {
    * @param sagaId the saga instance ID
    */
   void markForRecovery(String sagaId);
+
+  // ---------------------------------------------------------------------------
+  // Parked-step timeout (async WAITING sagas)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Finds parked (async {@code WAITING}) sagas whose timeout deadline is at or before {@code
+   * threshold}, from the dedicated {@code saga_parked} index. Used by recovery to time out async
+   * steps whose callback never arrived. A parked step with no timeout (wait indefinitely) has no
+   * index row and is never returned.
+   *
+   * <p>Cursor-paged one bucket per call, like {@link #findRecoverable}: pass the previous result's
+   * cursor to continue, or {@code null} to start. A {@code null} {@link OverdueParked#nextCursor()}
+   * in the result means the scan is complete.
+   *
+   * @param threshold the cutoff time — parked sagas with a deadline at or before this are returned
+   * @param cursor the cursor from a previous call, or {@code null} to start a new scan
+   * @return a batch of overdue parked saga IDs and a cursor for the next batch
+   */
+  OverdueParked findOverdueParkedSagas(Instant threshold, @Nullable ScanCursor cursor);
 
   // ---------------------------------------------------------------------------
   // Data retention
@@ -171,7 +191,7 @@ public interface SagaStore extends AutoCloseable {
    * @param sagas the recoverable saga snapshots in this batch
    * @param nextCursor cursor for the next batch, or {@code null} if the scan is complete
    */
-  record Recoverables(List<SagaStateSnapshot> sagas, @Nullable RecoverablesCursor nextCursor) {
+  record Recoverables(List<SagaStateSnapshot> sagas, @Nullable ScanCursor nextCursor) {
 
     /** Creates a new instance, defensively copying the sagas list. */
     public Recoverables {
@@ -185,8 +205,29 @@ public interface SagaStore extends AutoCloseable {
   }
 
   /**
-   * Opaque cursor for paginating through recoverable sagas returned by {@link #findRecoverable}.
-   * Implementations define the internal state (e.g., partition index, page token).
+   * Result of {@link #findOverdueParkedSagas}: a batch of overdue parked saga IDs and an optional
+   * cursor for the next batch.
+   *
+   * @param sagaIds the overdue parked saga IDs in this batch
+   * @param nextCursor cursor for the next batch, or {@code null} if the scan is complete
    */
-  interface RecoverablesCursor {}
+  record OverdueParked(List<String> sagaIds, @Nullable ScanCursor nextCursor) {
+
+    /** Creates a new instance, defensively copying the IDs list. */
+    public OverdueParked {
+      sagaIds = List.copyOf(sagaIds);
+    }
+
+    /** Returns {@code true} if there are more results to fetch. */
+    public boolean hasMore() {
+      return nextCursor != null;
+    }
+  }
+
+  /**
+   * Opaque cursor for paginating a bucket-partitioned scan ({@link #findRecoverable}, {@link
+   * #findOverdueParkedSagas}). Implementations define the internal state (e.g., the next bucket
+   * index).
+   */
+  interface ScanCursor {}
 }
