@@ -19,7 +19,10 @@ public enum SagaStatus {
   COMPENSATED(3),
 
   /** Stuck beyond grace period, needs manual intervention. */
-  ESCALATED(4);
+  ESCALATED(4),
+
+  /** Parked on an async step, awaiting an external callback (daemon mode). */
+  WAITING(5);
 
   private static final Map<Integer, SagaStatus> BY_STATUS_CODE = new HashMap<>();
 
@@ -65,11 +68,12 @@ public enum SagaStatus {
   }
 
   /**
-   * Returns {@code true} if sagas in this status are eligible for crash recovery. Recovery resumes
-   * forward execution (RUNNING) or compensation (COMPENSATING).
+   * Returns {@code true} if sagas in this status are handled by the recovery sweeper: resuming
+   * forward execution (RUNNING) or compensation (COMPENSATING), or timing out a parked async step
+   * (WAITING).
    */
   public boolean isRecoverable() {
-    return this == RUNNING || this == COMPENSATING;
+    return this == RUNNING || this == COMPENSATING || this == WAITING;
   }
 
   /**

@@ -653,21 +653,25 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
-  void findRecoverable_bothStatuses_returnsResultsFromAllScans() throws Exception {
-    // Arrange — each status scan returns one result
+  void findRecoverable_activeStatuses_returnsResultsFromAllScans() throws Exception {
+    // Arrange — recovery scans RUNNING, COMPENSATING, and WAITING per bucket; each returns one
     Result running = mockStateResult("saga-running", SagaStatus.RUNNING);
     Result compensating = mockStateResult("saga-compensating", SagaStatus.COMPENSATING);
-    when(tx.scan(any(Scan.class))).thenReturn(List.of(running)).thenReturn(List.of(compensating));
+    Result waiting = mockStateResult("saga-waiting", SagaStatus.WAITING);
+    when(tx.scan(any(Scan.class)))
+        .thenReturn(List.of(running))
+        .thenReturn(List.of(compensating))
+        .thenReturn(List.of(waiting));
 
     // Act
     Recoverables result = store.findRecoverable(60_000, null);
 
-    // Assert — both statuses collected
-    assertThat(result.sagas()).hasSize(2);
+    // Assert — all three active statuses collected, in RECOVERABLE_STATUS_CODES order
+    assertThat(result.sagas()).hasSize(3);
     assertThat(result.sagas())
         .extracting(SagaStateSnapshot::getSagaId)
-        .containsExactly("saga-running", "saga-compensating");
-    verify(tx, times(2)).scan(any(Scan.class));
+        .containsExactly("saga-running", "saga-compensating", "saga-waiting");
+    verify(tx, times(3)).scan(any(Scan.class));
   }
 
   @Test
