@@ -321,4 +321,35 @@ class SagaServerConfigTest {
 
     assertThat(config.properties().get("scalar.db.some.numeric_setting")).isEqualTo(nonStringValue);
   }
+
+  @Test
+  void load_nonSagaPropertyInDefaults_isPreserved() {
+    // A caller may pass Properties backed by defaults (new Properties(defaults)).
+    // stringPropertyNames() lists defaulted keys, but putAll/copyOf would not copy them —
+    // resolveSecrets must still carry non-saga store keys through, or ScalarDB loses its connection
+    // settings at startup.
+    Properties defaults = new Properties();
+    defaults.setProperty("scalar.db.contact_points", "cassandra-host");
+    Properties props = new Properties(defaults);
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.properties().getProperty("scalar.db.contact_points"))
+        .isEqualTo("cassandra-host");
+  }
+
+  @Test
+  void load_sagaSecretReferenceInDefaults_isResolved(@TempDir Path dir) throws IOException {
+    // A scalar.db.saga.* secret reference inherited from the defaults chain must still be resolved,
+    // not just carried through verbatim.
+    Path secret = dir.resolve("host");
+    Files.writeString(secret, "10.9.8.7", StandardCharsets.UTF_8);
+    Properties defaults = new Properties();
+    defaults.setProperty(SagaServerConfig.HOST_KEY, "${file:UTF-8:" + secret + "}");
+    Properties props = new Properties(defaults);
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.host()).isEqualTo("10.9.8.7");
+  }
 }

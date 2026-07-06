@@ -195,18 +195,28 @@ public final class SagaServerConfig {
    */
   private static Properties resolveSecrets(Properties properties) {
     SecretResolver resolver = new SecretResolver();
-    // Start from a full copy so non-string entries (a programmatically populated Properties may
-    // hold
-    // them) are preserved; then resolve only the daemon's own scalar.db.saga.* string values.
-    Properties resolved = copyOf(properties);
+    // Rebuild from stringPropertyNames() so every string property is flattened into one table,
+    // including any inherited from a Properties defaults chain (new Properties(defaults)) — putAll
+    // /
+    // copyOf would silently drop those. Resolve secret references only within the daemon's own
+    // scalar.db.saga.* namespace; scalar.db.* store keys pass through for ScalarDB to resolve.
+    Properties resolved = new Properties();
     for (String key : properties.stringPropertyNames()) {
-      if (key.startsWith(PREFIX)) {
-        String value = properties.getProperty(key);
-        if (value != null) {
-          resolved.setProperty(key, resolver.resolve(value));
-        }
+      String value = properties.getProperty(key);
+      if (value == null) {
+        continue; // stringPropertyNames() only lists string-valued keys; guard for null-safety
       }
+      resolved.setProperty(key, key.startsWith(PREFIX) ? resolver.resolve(value) : value);
     }
+    // Non-string entries aren't listed by stringPropertyNames(); carry them through. forEach covers
+    // the main table only; a non-string entry in a defaults chain is intentionally not flattened
+    // (Properties are conventionally string-only, and ScalarDB reads config via getProperty).
+    properties.forEach(
+        (key, value) -> {
+          if (!(key instanceof String) || !(value instanceof String)) {
+            resolved.put(key, value);
+          }
+        });
     return resolved;
   }
 
