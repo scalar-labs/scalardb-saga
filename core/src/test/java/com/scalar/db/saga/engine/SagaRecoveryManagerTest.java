@@ -5,6 +5,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -14,8 +15,12 @@ import static org.mockito.Mockito.when;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.definition.SagaDefinition;
+import com.scalar.db.saga.definition.SagaDefinition.RecoveryStrategy;
+import com.scalar.db.saga.exception.SagaConcurrentModificationException;
+import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaStore;
+import com.scalar.db.saga.store.SagaStore.OverdueParked;
 import com.scalar.db.saga.store.SagaStore.Recoverables;
 import com.scalar.db.saga.store.SagaStore.ScanCursor;
 import com.scalar.db.saga.store.StatusEvent;
@@ -59,6 +64,10 @@ class SagaRecoveryManagerTest {
     config =
         new RecoveryConfig(60_000, 30, GRACE_PERIOD, 1000, 10, Clock.fixed(NOW, ZoneOffset.UTC));
     manager = new SagaRecoveryManager(store, engine, registry, OWNER_ID, config, scheduler);
+    // Default: no overdue parked sagas — the recover() staleness-scan tests don't exercise pass 2.
+    lenient()
+        .when(store.findOverdueParkedSagas(any(), any()))
+        .thenReturn(new OverdueParked(List.of(), null));
   }
 
   private static SagaStateSnapshot snapshot(SagaStatus status) {
@@ -244,6 +253,138 @@ class SagaRecoveryManagerTest {
       verify(store, never()).getEvents(saga1.getSagaId());
       // Assert — saga2 was still recovered despite saga1 failure
       verify(engine).resumeFrom(eq(def), eq(ctx2), eq(0));
+    }
+  }
+
+  // =========================================================================
+  // recover() — parked-step timeout sweep
+  // =========================================================================
+
+  @Nested
+  class ParkedTimeout {
+
+    private void noStaleRecoverables() {
+      when(store.findRecoverable(anyLong(), any())).thenReturn(new Recoverables(List.of(), null));
+    }
+
+    @Test
+    void recover_overdueParkedPrePivot_timesOutToCompensatingAndCompensates() {
+      // Arrange — parked at pre-pivot step 0 (BACKWARD saga: pivot = last step)
+      SagaStateSnapshot waiting = snapshot(SagaStatus.WAITING);
+      SagaStateSnapshot compensating = snapshot(SagaStatus.COMPENSATING);
+      SagaDefinition def = definition();
+      List<SagaEvent> events = List.of(StatusEvent.started(null), StepEvent.pending(0, "debit"));
+      ExecutionContext ctx = mock(ExecutionContext.class);
+
+      noStaleRecoverables();
+      when(store.findOverdueParkedSagas(any(), any()))
+          .thenReturn(new OverdueParked(List.of(SAGA_ID), null));
+      when(store.getStateSnapshot(SAGA_ID)).thenReturn(Optional.of(waiting));
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(def);
+      when(store.timeoutParkedStep(
+              eq(waiting), anyInt(), any(StepEvent.class), eq(SagaStatus.COMPENSATING)))
+          .thenReturn(compensating);
+      when(engine.replayEvents(eq(compensating), any())).thenReturn(ctx);
+
+      // Act
+      manager.recover();
+
+      // Assert — STEP_FAILED for the parked step, WAITING -> COMPENSATING, then compensate from it
+      ArgumentCaptor<StepEvent> failed = ArgumentCaptor.forClass(StepEvent.class);
+      verify(store)
+          .timeoutParkedStep(eq(waiting), anyInt(), failed.capture(), eq(SagaStatus.COMPENSATING));
+      assertThat(failed.getValue().getEventType()).isEqualTo(EventType.STEP_FAILED);
+      assertThat(failed.getValue().getStepIndex()).isEqualTo(0);
+      verify(engine).compensateFrom(def, ctx, 0);
+    }
+
+    @Test
+    void recover_overdueParkedPostPivot_timesOutToEscalated() {
+      // Arrange — FORWARD saga: pivot = -1, so the parked step is post-pivot -> escalate
+      SagaStateSnapshot waiting = snapshot(SagaStatus.WAITING);
+      SagaDefinition forwardDef =
+          SagaDefinition.newBuilder(SAGA_NAME)
+              .saga()
+              .recoveryStrategy(RecoveryStrategy.FORWARD)
+              .step("debit", "com.example.DebitStep")
+              .add()
+              .build();
+      List<SagaEvent> events = List.of(StatusEvent.started(null), StepEvent.pending(0, "debit"));
+
+      noStaleRecoverables();
+      when(store.findOverdueParkedSagas(any(), any()))
+          .thenReturn(new OverdueParked(List.of(SAGA_ID), null));
+      when(store.getStateSnapshot(SAGA_ID)).thenReturn(Optional.of(waiting));
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(forwardDef);
+
+      // Act
+      manager.recover();
+
+      // Assert
+      verify(store)
+          .timeoutParkedStep(eq(waiting), anyInt(), any(StepEvent.class), eq(SagaStatus.ESCALATED));
+      verify(engine, never()).compensateFrom(any(), any(), anyInt());
+    }
+
+    @Test
+    void recover_overdueParkedNoLongerWaiting_skips() {
+      // Arrange — a callback already resumed it (now RUNNING); the sweep must not time it out
+      noStaleRecoverables();
+      when(store.findOverdueParkedSagas(any(), any()))
+          .thenReturn(new OverdueParked(List.of(SAGA_ID), null));
+      when(store.getStateSnapshot(SAGA_ID)).thenReturn(Optional.of(snapshot(SagaStatus.RUNNING)));
+
+      // Act
+      manager.recover();
+
+      // Assert
+      verify(store, never()).timeoutParkedStep(any(), anyInt(), any(), any());
+    }
+
+    @Test
+    void recover_missingDefinitionForParkedSaga_escalatesClearingParkedRow() {
+      // Arrange — definition gone: escalate via timeoutParkedStep(ESCALATED) so the parked row
+      // clears
+      SagaStateSnapshot waiting = snapshot(SagaStatus.WAITING);
+      List<SagaEvent> events = List.of(StatusEvent.started(null), StepEvent.pending(0, "debit"));
+
+      noStaleRecoverables();
+      when(store.findOverdueParkedSagas(any(), any()))
+          .thenReturn(new OverdueParked(List.of(SAGA_ID), null));
+      when(store.getStateSnapshot(SAGA_ID)).thenReturn(Optional.of(waiting));
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(null);
+
+      // Act
+      manager.recover();
+
+      // Assert — escalated through the parked-clearing op, not a plain recordStatusEvent
+      verify(store)
+          .timeoutParkedStep(eq(waiting), anyInt(), any(StepEvent.class), eq(SagaStatus.ESCALATED));
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any());
+    }
+
+    @Test
+    void recover_concurrentCallbackWonRace_swallowsConflict() {
+      // Arrange — timeoutParkedStep loses the WAITING-CK race (a callback resumed it first)
+      SagaStateSnapshot waiting = snapshot(SagaStatus.WAITING);
+      SagaDefinition def = definition();
+      List<SagaEvent> events = List.of(StatusEvent.started(null), StepEvent.pending(0, "debit"));
+
+      noStaleRecoverables();
+      when(store.findOverdueParkedSagas(any(), any()))
+          .thenReturn(new OverdueParked(List.of(SAGA_ID), null));
+      when(store.getStateSnapshot(SAGA_ID)).thenReturn(Optional.of(waiting));
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(def);
+      when(store.timeoutParkedStep(any(), anyInt(), any(), eq(SagaStatus.COMPENSATING)))
+          .thenThrow(mock(SagaConcurrentModificationException.class));
+
+      // Act & Assert — recover() must not propagate the conflict
+      manager.recover();
+      verify(engine, never()).compensateFrom(any(), any(), anyInt());
     }
   }
 
