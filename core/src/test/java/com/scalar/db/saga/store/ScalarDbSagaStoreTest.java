@@ -517,6 +517,25 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
+  void getEvents_stepPendingEvent_deserializesAsStepEvent() throws Exception {
+    // Arrange
+    Result r = mockEventResult("STEP_PENDING", 1, "charge", null);
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(r));
+
+    // Act
+    List<SagaEvent> events = store.getEvents("saga-1");
+
+    // Assert
+    assertThat(events).hasSize(1);
+    assertThat(events.get(0)).isInstanceOf(StepEvent.class);
+    StepEvent stepEvent = (StepEvent) events.get(0);
+    assertThat(stepEvent.getEventType()).isEqualTo(EventType.STEP_PENDING);
+    assertThat(stepEvent.getStepIndex()).isEqualTo(1);
+    assertThat(stepEvent.getStepName()).isEqualTo("charge");
+    assertThat(stepEvent.getPayload()).isNull();
+  }
+
+  @Test
   void getEvents_noEvents_returnsEmptyList() throws Exception {
     // Arrange
     when(tx.scan(any(Scan.class))).thenReturn(List.of());

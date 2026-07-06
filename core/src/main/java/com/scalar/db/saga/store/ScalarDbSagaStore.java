@@ -895,6 +895,7 @@ public class ScalarDbSagaStore implements SagaStore {
       String name = Objects.requireNonNull(stepName, "stepName must not be null for step events");
       StepEvent event =
           switch (eventType) {
+            case STEP_PENDING -> StepEvent.pending(stepIndex, name);
             case STEP_COMPLETED -> StepEvent.completed(stepIndex, name, payload);
             case STEP_FAILED -> StepEvent.failed(stepIndex, name, payload);
             case STEP_COMPENSATED -> StepEvent.compensated(stepIndex, name);

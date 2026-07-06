@@ -188,6 +188,10 @@ public class SagaEngine implements AutoCloseable {
           Map<String, Object> input = EventPayloadSerializer.deserializeMap(event.getPayload());
           input.forEach(context::put);
         }
+        case STEP_PENDING -> {
+          // Park marker (RUNNING → WAITING); superseded by STEP_COMPLETED on resume or STEP_FAILED
+          // on timeout, so there is nothing to fold into context here.
+        }
         case STEP_COMPLETED -> {
           StepEvent stepEvent = (StepEvent) event;
           Map<String, Object> output =
