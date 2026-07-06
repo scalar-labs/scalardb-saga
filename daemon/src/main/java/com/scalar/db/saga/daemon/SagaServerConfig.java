@@ -195,13 +195,17 @@ public final class SagaServerConfig {
    */
   private static Properties resolveSecrets(Properties properties) {
     SecretResolver resolver = new SecretResolver();
-    Properties resolved = new Properties();
+    // Start from a full copy so non-string entries (a programmatically populated Properties may
+    // hold
+    // them) are preserved; then resolve only the daemon's own scalar.db.saga.* string values.
+    Properties resolved = copyOf(properties);
     for (String key : properties.stringPropertyNames()) {
-      String value = properties.getProperty(key);
-      if (value == null) {
-        continue; // stringPropertyNames() only lists keys with values; guard for null-safety
+      if (key.startsWith(PREFIX)) {
+        String value = properties.getProperty(key);
+        if (value != null) {
+          resolved.setProperty(key, resolver.resolve(value));
+        }
       }
-      resolved.setProperty(key, key.startsWith(PREFIX) ? resolver.resolve(value) : value);
     }
     return resolved;
   }

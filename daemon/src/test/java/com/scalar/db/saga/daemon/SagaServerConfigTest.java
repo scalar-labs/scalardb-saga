@@ -305,4 +305,20 @@ class SagaServerConfigTest {
     assertThat(config.properties().getProperty("scalar.db.contact_points"))
         .isEqualTo("${file:UTF-8:/does/not/exist}");
   }
+
+  @Test
+  void load_nonStringPropertyEntry_isPreserved() {
+    // A programmatically populated Properties may hold non-string entries (Properties extends
+    // Hashtable). Since the same object is forwarded to ScalarDB as the store config,
+    // resolveSecrets
+    // must copy such entries through rather than silently drop them (stringPropertyNames() omits
+    // them).
+    Object nonStringValue = 12345;
+    Properties props = new Properties();
+    props.put("scalar.db.some.numeric_setting", nonStringValue);
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.properties().get("scalar.db.some.numeric_setting")).isEqualTo(nonStringValue);
+  }
 }
