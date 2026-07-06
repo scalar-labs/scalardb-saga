@@ -318,7 +318,7 @@ public class ScalarDbSagaStore implements SagaStore {
           }
           return updated;
         },
-        verifyTransitionCommitted(sagaId, sequence),
+        verifyTransitionCommitted(sagaId, sequence, pendingEvent.getEventType()),
         "park saga " + sagaId);
   }
 
@@ -353,7 +353,7 @@ public class ScalarDbSagaStore implements SagaStore {
           }
           return updated;
         },
-        verifyTransitionCommitted(sagaId, sequence),
+        verifyTransitionCommitted(sagaId, sequence, completedEvent.getEventType()),
         "resume parked step for saga " + sagaId);
   }
 
@@ -391,16 +391,28 @@ public class ScalarDbSagaStore implements SagaStore {
           }
           return updated;
         },
-        verifyTransitionCommitted(sagaId, sequence),
+        verifyTransitionCommitted(sagaId, sequence, failedEvent.getEventType()),
         "time out parked step for saga " + sagaId);
   }
 
-  /** Verifier for park/resume: if the event at {@code sequence} persisted, the tx committed. */
-  private CommitVerifier<SagaStateSnapshot> verifyTransitionCommitted(String sagaId, int sequence) {
+  /**
+   * Verifier for park/resume/timeout: the tx committed iff the event at {@code sequence} is present
+   * <em>and</em> of {@code expectedType}. The type check matters because {@code resumeParkedStep}
+   * and {@code timeoutParkedStep} are claim-less and derive the same {@code sequence} from a
+   * WAITING saga's event count, so both target the same event CK with different types. Presence
+   * alone would let the loser of a callback-vs-timeout race read the winner's event and wrongly
+   * report its own commit as successful; matching the type proves the persisted event is ours. A
+   * mismatch (the other op won) returns empty, so the caller retries, re-reads the now-non-WAITING
+   * CK, and throws {@link SagaConcurrentModificationException}.
+   */
+  private CommitVerifier<SagaStateSnapshot> verifyTransitionCommitted(
+      String sagaId, int sequence, EventType expectedType) {
     return () ->
         runInTransaction(
             tx -> {
-              if (tx.get(buildEventGet(sagaId, sequence)).isPresent()) {
+              Optional<Result> event = tx.get(buildEventGet(sagaId, sequence));
+              if (event.isPresent()
+                  && expectedType.name().equals(event.get().getText("event_type"))) {
                 return loadStateSnapshot(sagaId);
               }
               return Optional.empty();

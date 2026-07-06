@@ -606,6 +606,67 @@ class ScalarDbSagaStoreTest {
         .isInstanceOf(SagaConcurrentModificationException.class);
   }
 
+  @Test
+  void
+      resumeParkedStep_unknownStatusAndVerifierFindsCrossTypeEvent_throwsSagaConcurrentModificationException()
+          throws Exception {
+    // Arrange — the callback's commit returns an unknown status, and a concurrent timeout sweep won
+    // the WAITING CK and wrote its own STEP_FAILED at the same sequence. The verifier must NOT
+    // mistake that cross-type event for our STEP_COMPLETED: it reports "not committed", the resume
+    // retries, re-reads the now-non-WAITING CK, and throws.
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
+    DistributedTransaction retryTx = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx).thenReturn(retryTx);
+    // Attempt 1: the optimistic WAITING-CK check passes, then commit is ambiguous.
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    // Verifier: the persisted event at the sequence is the sweep's STEP_FAILED, not our own.
+    Result crossTypeEvent = mock(Result.class);
+    when(crossTypeEvent.getText("event_type")).thenReturn("STEP_FAILED");
+    when(verifyTx.get(any(Get.class))).thenReturn(Optional.of(crossTypeEvent));
+    // Retry: the sweep already moved the row off the WAITING CK.
+    when(retryTx.get(any(Get.class))).thenReturn(Optional.empty());
+
+    // Act & Assert
+    assertThatThrownBy(
+            () -> store.resumeParkedStep(current, 4, StepEvent.completed(1, "charge", null)))
+        .isInstanceOf(SagaConcurrentModificationException.class);
+  }
+
+  @Test
+  void resumeParkedStep_unknownStatusAndVerifierFindsOwnEvent_returnsRunning() throws Exception {
+    // Arrange — commit is ambiguous (unknown status) but our own STEP_COMPLETED did persist at the
+    // sequence, so the type-matching verifier confirms the commit and returns the RUNNING snapshot.
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
+    DistributedTransaction loadTx = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx).thenReturn(loadTx);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    // Verifier finds our own STEP_COMPLETED, then loadStateSnapshot re-reads the committed state.
+    Result ownEvent = mock(Result.class);
+    when(ownEvent.getText("event_type")).thenReturn("STEP_COMPLETED");
+    when(verifyTx.get(any(Get.class))).thenReturn(Optional.of(ownEvent));
+    Result runningState = mockStateResult("saga-1", SagaStatus.RUNNING);
+    when(loadTx.scan(any(Scan.class))).thenReturn(List.of(runningState));
+
+    // Act
+    SagaStateSnapshot result =
+        store.resumeParkedStep(current, 4, StepEvent.completed(1, "charge", null));
+
+    // Assert
+    assertThat(result.getStatus()).isEqualTo(SagaStatus.RUNNING);
+  }
+
   // ---------------------------------------------------------------------------
   // timeoutParkedStep
   // ---------------------------------------------------------------------------
@@ -689,6 +750,36 @@ class ScalarDbSagaStoreTest {
             () ->
                 store.timeoutParkedStep(
                     current, 1, StepEvent.failed(1, "charge", null), SagaStatus.COMPENSATING))
+        .isInstanceOf(SagaConcurrentModificationException.class);
+  }
+
+  @Test
+  void
+      timeoutParkedStep_unknownStatusAndVerifierFindsCrossTypeEvent_throwsSagaConcurrentModificationException()
+          throws Exception {
+    // Symmetric to the resume case: the sweep's commit is ambiguous and a concurrent callback won
+    // the WAITING CK, writing STEP_COMPLETED at the sequence. The verifier must not accept that as
+    // its own STEP_FAILED — it reports "not committed", retries, and throws on the moved CK.
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
+    DistributedTransaction retryTx = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx).thenReturn(retryTx);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    Result crossTypeEvent = mock(Result.class);
+    when(crossTypeEvent.getText("event_type")).thenReturn("STEP_COMPLETED");
+    when(verifyTx.get(any(Get.class))).thenReturn(Optional.of(crossTypeEvent));
+    when(retryTx.get(any(Get.class))).thenReturn(Optional.empty());
+
+    // Act & Assert
+    assertThatThrownBy(
+            () ->
+                store.timeoutParkedStep(
+                    current, 4, StepEvent.failed(1, "charge", null), SagaStatus.COMPENSATING))
         .isInstanceOf(SagaConcurrentModificationException.class);
   }
 

@@ -407,6 +407,18 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     StepEvent completedEvent = StepEvent.completed(stepIndex, stepName, payload);
     SagaStateSnapshot running = store.resumeParkedStep(saga, events.size(), completedEvent);
 
+    // Defense in depth: a successful resume must land in RUNNING. resumeParkedStep already throws
+    // SagaConcurrentModificationException if a concurrent timeout sweep won the WAITING CK, so this
+    // guards only against a store contract violation — never drive forward on a non-RUNNING
+    // snapshot.
+    if (running.getStatus() != SagaStatus.RUNNING) {
+      throw new IllegalStateException(
+          "resumeParkedStep for saga "
+              + sagaId
+              + " returned unexpected status "
+              + running.getStatus());
+    }
+
     // Replay (now folds the callback output into context) and continue from the next step. The
     // resume appended completedEvent at events.size() and nothing else; a successful resume proves,
     // via its WAITING-CK check, that the saga was untouched since we read `events` (a parked saga's
