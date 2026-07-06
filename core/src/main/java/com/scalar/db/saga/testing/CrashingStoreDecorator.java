@@ -97,6 +97,21 @@ public final class CrashingStoreDecorator implements SagaStore {
   }
 
   @Override
+  public SagaStateSnapshot park(
+      SagaStateSnapshot current,
+      int sequence,
+      StepEvent pendingEvent,
+      @Nullable Instant parkedDeadline) {
+    return delegate.park(current, sequence, pendingEvent, parkedDeadline);
+  }
+
+  @Override
+  public SagaStateSnapshot resumeParkedStep(
+      SagaStateSnapshot current, int sequence, StepEvent completedEvent) {
+    return delegate.resumeParkedStep(current, sequence, completedEvent);
+  }
+
+  @Override
   public List<SagaEvent> getEvents(String sagaId) {
     return delegate.getEvents(sagaId);
   }

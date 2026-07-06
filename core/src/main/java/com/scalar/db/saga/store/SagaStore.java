@@ -81,6 +81,38 @@ public interface SagaStore extends AutoCloseable {
    */
   SagaStateSnapshot recordStatusEvent(SagaStateSnapshot current, int sequence, StatusEvent event);
 
+  /**
+   * Parks a forward step on an async callback, in one transaction: appends {@code pendingEvent},
+   * transitions the saga {@code RUNNING → WAITING}, and — when {@code parkedDeadline} is non-null —
+   * writes a {@code saga_parked} row so the recovery sweeper can time it out. A {@code null}
+   * deadline means "wait indefinitely" and writes no {@code saga_parked} row.
+   *
+   * @param current the current ({@code RUNNING}) snapshot (used for optimistic concurrency)
+   * @param sequence the event sequence number
+   * @param pendingEvent the {@link EventType#STEP_PENDING} event marking which step parked
+   * @param parkedDeadline the absolute timeout deadline, or {@code null} for an unbounded wait
+   * @return the post-transition ({@code WAITING}) snapshot
+   */
+  SagaStateSnapshot park(
+      SagaStateSnapshot current,
+      int sequence,
+      StepEvent pendingEvent,
+      @Nullable Instant parkedDeadline);
+
+  /**
+   * Resumes a parked step when its callback arrives, in one transaction: appends {@code
+   * completedEvent}, transitions the saga {@code WAITING → RUNNING}, and deletes the {@code
+   * saga_parked} row (if any). The optimistic check on the {@code WAITING} row makes this and the
+   * deadline-timeout sweep mutually exclusive.
+   *
+   * @param current the current ({@code WAITING}) snapshot (used for optimistic concurrency)
+   * @param sequence the event sequence number
+   * @param completedEvent the {@link EventType#STEP_COMPLETED} event carrying the callback output
+   * @return the post-transition ({@code RUNNING}) snapshot
+   */
+  SagaStateSnapshot resumeParkedStep(
+      SagaStateSnapshot current, int sequence, StepEvent completedEvent);
+
   /** Returns all events for the given saga, ordered by sequence number. */
   List<SagaEvent> getEvents(String sagaId);
 

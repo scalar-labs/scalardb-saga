@@ -284,6 +284,93 @@ public class ScalarDbSagaStore implements SagaStore {
         "record transition for saga " + sagaId);
   }
 
+  // ---------------------------------------------------------------------------
+  // Async park / resume
+  // ---------------------------------------------------------------------------
+
+  @Override
+  public SagaStateSnapshot park(
+      SagaStateSnapshot current,
+      int sequence,
+      StepEvent pendingEvent,
+      @Nullable Instant parkedDeadline) {
+    String sagaId = current.getSagaId();
+    int bucket = schema.bucketOf(sagaId);
+
+    return runInTransaction(
+        tx -> {
+          Instant now = Instant.now();
+
+          // Optimistic check: the row must still be at the snapshot's (RUNNING) CK.
+          int oldStatus = current.getStatus().getStatusCode();
+          if (tx.get(buildStateGet(bucket, oldStatus, current.getUpdatedAt(), sagaId)).isEmpty()) {
+            throw new SagaConcurrentModificationException(sagaId);
+          }
+
+          tx.insert(buildEventInsert(sagaId, sequence, pendingEvent, now));
+          tx.delete(buildStateDelete(bucket, oldStatus, current.getUpdatedAt(), sagaId));
+          SagaStateSnapshot updated = current.withTransition(SagaStatus.WAITING, now);
+          tx.insert(buildStateInsert(bucket, updated));
+          // A bounded park records its deadline for the recovery sweeper; an unbounded park
+          // (null deadline) writes no row and is never timed out.
+          if (parkedDeadline != null) {
+            tx.insert(buildParkedInsert(bucket, parkedDeadline, sagaId));
+          }
+          return updated;
+        },
+        verifyTransitionCommitted(sagaId, sequence),
+        "park saga " + sagaId);
+  }
+
+  @Override
+  public SagaStateSnapshot resumeParkedStep(
+      SagaStateSnapshot current, int sequence, StepEvent completedEvent) {
+    validatePayloadSize(completedEvent.getPayload());
+    String sagaId = current.getSagaId();
+    int bucket = schema.bucketOf(sagaId);
+
+    return runInTransaction(
+        tx -> {
+          Instant now = Instant.now();
+
+          // Optimistic check: the row must still be at the snapshot's (WAITING) CK. This is what
+          // makes the callback and the deadline-timeout sweep mutually exclusive — one wins the CK,
+          // the other sees an empty get and throws.
+          int oldStatus = current.getStatus().getStatusCode();
+          if (tx.get(buildStateGet(bucket, oldStatus, current.getUpdatedAt(), sagaId)).isEmpty()) {
+            throw new SagaConcurrentModificationException(sagaId);
+          }
+
+          tx.insert(buildEventInsert(sagaId, sequence, completedEvent, now));
+          tx.delete(buildStateDelete(bucket, oldStatus, current.getUpdatedAt(), sagaId));
+          SagaStateSnapshot updated = current.withTransition(SagaStatus.RUNNING, now);
+          tx.insert(buildStateInsert(bucket, updated));
+
+          // Delete the parked-deadline row, if any (an unbounded park left none). The CK's
+          // parked_deadline is unknown here, so find the row via the saga_id secondary index.
+          for (Result parked : tx.scan(buildParkedIndexScan(sagaId))) {
+            tx.delete(buildParkedDelete(bucket, parked.getTimestampTZ("parked_deadline"), sagaId));
+          }
+          return updated;
+        },
+        verifyTransitionCommitted(sagaId, sequence),
+        "resume parked step for saga " + sagaId);
+  }
+
+  /** Verifier for park/resume: if the event at {@code sequence} persisted, the tx committed. */
+  private CommitVerifier<SagaStateSnapshot> verifyTransitionCommitted(String sagaId, int sequence) {
+    return () ->
+        runInTransaction(
+            tx -> {
+              if (tx.get(buildEventGet(sagaId, sequence)).isPresent()) {
+                return loadStateSnapshot(sagaId);
+              }
+              return Optional.empty();
+            },
+            null,
+            "verify transition " + sagaId + " seq " + sequence);
+  }
+
   @Override
   public List<SagaEvent> getEvents(String sagaId) {
     return runInTransaction(
@@ -796,6 +883,41 @@ public class ScalarDbSagaStore implements SagaStore {
         .partitionKey(Key.ofInt("bucket", bucket))
         .start(Key.newBuilder().addTimestampTZ("parked_deadline", Instant.EPOCH).build(), true)
         .end(Key.newBuilder().addTimestampTZ("parked_deadline", threshold).build(), true)
+        .build();
+  }
+
+  private Insert buildParkedInsert(int bucket, Instant parkedDeadline, String sagaId) {
+    return Insert.newBuilder()
+        .namespace(SagaSchema.NAMESPACE)
+        .table(SagaSchema.PARKED_TABLE)
+        .partitionKey(Key.ofInt("bucket", bucket))
+        .clusteringKey(parkedClusteringKey(parkedDeadline, sagaId))
+        .build();
+  }
+
+  private Delete buildParkedDelete(int bucket, Instant parkedDeadline, String sagaId) {
+    return Delete.newBuilder()
+        .namespace(SagaSchema.NAMESPACE)
+        .table(SagaSchema.PARKED_TABLE)
+        .partitionKey(Key.ofInt("bucket", bucket))
+        .clusteringKey(parkedClusteringKey(parkedDeadline, sagaId))
+        .build();
+  }
+
+  /** Looks up a single {@code saga_parked} row by {@code saga_id} via the secondary index. */
+  private Scan buildParkedIndexScan(String sagaId) {
+    return Scan.newBuilder()
+        .namespace(SagaSchema.NAMESPACE)
+        .table(SagaSchema.PARKED_TABLE)
+        .indexKey(Key.ofText("saga_id", sagaId))
+        .limit(1)
+        .build();
+  }
+
+  private static Key parkedClusteringKey(Instant parkedDeadline, String sagaId) {
+    return Key.newBuilder()
+        .addTimestampTZ("parked_deadline", parkedDeadline)
+        .addText("saga_id", sagaId)
         .build();
   }
 

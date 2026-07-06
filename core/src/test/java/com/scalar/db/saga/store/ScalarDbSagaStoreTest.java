@@ -483,6 +483,130 @@ class ScalarDbSagaStoreTest {
   }
 
   // ---------------------------------------------------------------------------
+  // park / resumeParkedStep
+  // ---------------------------------------------------------------------------
+
+  @Test
+  void park_boundedDeadlineGiven_transitionsToWaitingAndInsertsParkedRow() throws Exception {
+    // Arrange
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+
+    // Act
+    SagaStateSnapshot result =
+        store.park(current, 3, StepEvent.pending(1, "charge"), now.plusSeconds(600));
+
+    // Assert
+    assertThat(result.getStatus()).isEqualTo(SagaStatus.WAITING);
+    verify(tx).get(any(Get.class));
+    // STEP_PENDING event insert + state insert + parked-row insert
+    verify(tx, times(3)).insert(any(Insert.class));
+    verify(tx).delete(any(Delete.class));
+    verify(tx).commit();
+  }
+
+  @Test
+  void park_nullDeadline_writesNoParkedRow() throws Exception {
+    // Arrange
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+
+    // Act
+    SagaStateSnapshot result = store.park(current, 3, StepEvent.pending(1, "charge"), null);
+
+    // Assert
+    assertThat(result.getStatus()).isEqualTo(SagaStatus.WAITING);
+    // event insert + state insert only — no parked row
+    verify(tx, times(2)).insert(any(Insert.class));
+    verify(tx).commit();
+  }
+
+  @Test
+  void park_rowNotFound_throwsSagaConcurrentModificationException() throws Exception {
+    // Arrange
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.empty());
+
+    // Act & Assert
+    assertThatThrownBy(
+            () -> store.park(current, 1, StepEvent.pending(1, "charge"), now.plusSeconds(60)))
+        .isInstanceOf(SagaConcurrentModificationException.class);
+  }
+
+  @Test
+  void resumeParkedStep_parkedRowExists_transitionsToRunningAndDeletesParkedRow() throws Exception {
+    // Arrange
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+    Result parkedRow = mock(Result.class);
+    when(parkedRow.getTimestampTZ("parked_deadline")).thenReturn(now.plusSeconds(600));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(parkedRow));
+
+    // Act
+    SagaStateSnapshot result =
+        store.resumeParkedStep(
+            current, 4, StepEvent.completed(1, "charge", "{\"paymentId\":\"p1\"}"));
+
+    // Assert
+    assertThat(result.getStatus()).isEqualTo(SagaStatus.RUNNING);
+    // STEP_COMPLETED event insert + state insert
+    verify(tx, times(2)).insert(any(Insert.class));
+    // state delete + parked-row delete
+    verify(tx, times(2)).delete(any(Delete.class));
+    verify(tx).commit();
+  }
+
+  @Test
+  void resumeParkedStep_unboundedPark_transitionsToRunningWithoutDeletingRow() throws Exception {
+    // Arrange — an unbounded park (callbackTimeoutMillis=0 and no saga-level timeout) wrote no
+    // saga_parked row, so the resume finds nothing to delete
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+
+    // Act
+    SagaStateSnapshot result =
+        store.resumeParkedStep(current, 4, StepEvent.completed(1, "charge", null));
+
+    // Assert
+    assertThat(result.getStatus()).isEqualTo(SagaStatus.RUNNING);
+    verify(tx, times(2)).insert(any(Insert.class));
+    // only the state delete — no parked-row delete
+    verify(tx).delete(any(Delete.class));
+    verify(tx).commit();
+  }
+
+  @Test
+  void resumeParkedStep_rowNotFound_throwsSagaConcurrentModificationException() throws Exception {
+    // Arrange
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.empty());
+
+    // Act & Assert
+    assertThatThrownBy(
+            () -> store.resumeParkedStep(current, 1, StepEvent.completed(1, "charge", null)))
+        .isInstanceOf(SagaConcurrentModificationException.class);
+  }
+
+  // ---------------------------------------------------------------------------
   // getEvents
   // ---------------------------------------------------------------------------
 
