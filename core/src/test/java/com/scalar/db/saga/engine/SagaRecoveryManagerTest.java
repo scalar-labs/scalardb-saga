@@ -268,7 +268,7 @@ class SagaRecoveryManagerTest {
     }
 
     @Test
-    void recover_overdueParkedPrePivot_timesOutToCompensatingAndCompensates() {
+    void recover_overdueParkedBeforePivot_timesOutToCompensatingAndCompensates() {
       // Arrange — parked at pre-pivot step 0 (BACKWARD saga: pivot = last step)
       SagaStateSnapshot waiting = snapshot(SagaStatus.WAITING);
       SagaStateSnapshot compensating = snapshot(SagaStatus.COMPENSATING);
@@ -300,7 +300,7 @@ class SagaRecoveryManagerTest {
     }
 
     @Test
-    void recover_overdueParkedPostPivot_timesOutToEscalated() {
+    void recover_overdueParkedAfterPivot_timesOutToEscalated() {
       // Arrange — FORWARD saga: pivot = -1, so the parked step is post-pivot -> escalate
       SagaStateSnapshot waiting = snapshot(SagaStatus.WAITING);
       SagaDefinition forwardDef =
