@@ -357,6 +357,44 @@ public class ScalarDbSagaStore implements SagaStore {
         "resume parked step for saga " + sagaId);
   }
 
+  @Override
+  public SagaStateSnapshot timeoutParkedStep(
+      SagaStateSnapshot current, int sequence, StepEvent failedEvent, SagaStatus targetStatus) {
+    if (targetStatus != SagaStatus.COMPENSATING && targetStatus != SagaStatus.ESCALATED) {
+      throw new IllegalArgumentException(
+          "timeoutParkedStep targetStatus must be COMPENSATING or ESCALATED, got " + targetStatus);
+    }
+    validatePayloadSize(failedEvent.getPayload());
+    String sagaId = current.getSagaId();
+    int bucket = schema.bucketOf(sagaId);
+
+    return runInTransaction(
+        tx -> {
+          Instant now = Instant.now();
+
+          // Optimistic check on the WAITING CK: makes the timeout sweep and a concurrent callback
+          // (resumeParkedStep) mutually exclusive — one wins the CK, the other throws.
+          int oldStatus = current.getStatus().getStatusCode();
+          if (tx.get(buildStateGet(bucket, oldStatus, current.getUpdatedAt(), sagaId)).isEmpty()) {
+            throw new SagaConcurrentModificationException(sagaId);
+          }
+
+          tx.insert(buildEventInsert(sagaId, sequence, failedEvent, now));
+          tx.delete(buildStateDelete(bucket, oldStatus, current.getUpdatedAt(), sagaId));
+          SagaStateSnapshot updated = current.withTransition(targetStatus, now);
+          tx.insert(buildStateInsert(bucket, updated));
+
+          // Delete the parked-deadline row, if any (an unbounded park left none), via the saga_id
+          // secondary index (its parked_deadline CK is unknown here).
+          for (Result parked : tx.scan(buildParkedIndexScan(sagaId))) {
+            tx.delete(buildParkedDelete(bucket, parked.getTimestampTZ("parked_deadline"), sagaId));
+          }
+          return updated;
+        },
+        verifyTransitionCommitted(sagaId, sequence),
+        "time out parked step for saga " + sagaId);
+  }
+
   /** Verifier for park/resume: if the event at {@code sequence} persisted, the tx committed. */
   private CommitVerifier<SagaStateSnapshot> verifyTransitionCommitted(String sagaId, int sequence) {
     return () ->

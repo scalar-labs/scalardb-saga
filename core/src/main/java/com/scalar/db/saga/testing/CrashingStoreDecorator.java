@@ -112,6 +112,12 @@ public final class CrashingStoreDecorator implements SagaStore {
   }
 
   @Override
+  public SagaStateSnapshot timeoutParkedStep(
+      SagaStateSnapshot current, int sequence, StepEvent failedEvent, SagaStatus targetStatus) {
+    return delegate.timeoutParkedStep(current, sequence, failedEvent, targetStatus);
+  }
+
+  @Override
   public List<SagaEvent> getEvents(String sagaId) {
     return delegate.getEvents(sagaId);
   }

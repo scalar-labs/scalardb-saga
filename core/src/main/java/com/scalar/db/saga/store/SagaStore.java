@@ -113,6 +113,25 @@ public interface SagaStore extends AutoCloseable {
   SagaStateSnapshot resumeParkedStep(
       SagaStateSnapshot current, int sequence, StepEvent completedEvent);
 
+  /**
+   * Times out a parked step, in one transaction: appends {@code failedEvent}, transitions the saga
+   * {@code WAITING → targetStatus}, and deletes the {@code saga_parked} row (if any). Used by the
+   * recovery sweep when a parked step's deadline passes and its retry budget is spent. The
+   * optimistic check on the {@code WAITING} row makes this and a concurrent callback ({@link
+   * #resumeParkedStep}) mutually exclusive.
+   *
+   * @param current the current ({@code WAITING}) snapshot (used for optimistic concurrency)
+   * @param sequence the event sequence number
+   * @param failedEvent the {@link EventType#STEP_FAILED} event for the timed-out step
+   * @param targetStatus {@code COMPENSATING} (pre-pivot, will compensate) or {@code ESCALATED}
+   *     (post-pivot, needs manual resolution)
+   * @return the post-transition snapshot
+   * @throws IllegalArgumentException if {@code targetStatus} is not {@code COMPENSATING} or {@code
+   *     ESCALATED}
+   */
+  SagaStateSnapshot timeoutParkedStep(
+      SagaStateSnapshot current, int sequence, StepEvent failedEvent, SagaStatus targetStatus);
+
   /** Returns all events for the given saga, ordered by sequence number. */
   List<SagaEvent> getEvents(String sagaId);
 

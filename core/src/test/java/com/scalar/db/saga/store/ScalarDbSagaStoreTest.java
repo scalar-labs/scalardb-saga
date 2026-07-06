@@ -607,6 +607,92 @@ class ScalarDbSagaStoreTest {
   }
 
   // ---------------------------------------------------------------------------
+  // timeoutParkedStep
+  // ---------------------------------------------------------------------------
+
+  @Test
+  void timeoutParkedStep_toCompensating_transitionsAndDeletesParkedRow() throws Exception {
+    // Arrange — pre-pivot timeout: WAITING -> COMPENSATING, STEP_FAILED, delete the parked row
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+    Result parkedRow = mock(Result.class);
+    when(parkedRow.getTimestampTZ("parked_deadline")).thenReturn(now.plusSeconds(600));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(parkedRow));
+
+    // Act
+    SagaStateSnapshot result =
+        store.timeoutParkedStep(
+            current, 4, StepEvent.failed(1, "charge", null), SagaStatus.COMPENSATING);
+
+    // Assert
+    assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPENSATING);
+    // STEP_FAILED event insert + state insert
+    verify(tx, times(2)).insert(any(Insert.class));
+    // state delete + parked-row delete
+    verify(tx, times(2)).delete(any(Delete.class));
+    verify(tx).commit();
+  }
+
+  @Test
+  void timeoutParkedStep_toEscalatedUnboundedPark_transitionsWithoutDeletingRow() throws Exception {
+    // Arrange — post-pivot timeout of an unbounded park: WAITING -> ESCALATED, no parked row
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+
+    // Act
+    SagaStateSnapshot result =
+        store.timeoutParkedStep(
+            current, 4, StepEvent.failed(1, "charge", null), SagaStatus.ESCALATED);
+
+    // Assert
+    assertThat(result.getStatus()).isEqualTo(SagaStatus.ESCALATED);
+    verify(tx, times(2)).insert(any(Insert.class));
+    // only the state delete — no parked-row delete
+    verify(tx).delete(any(Delete.class));
+    verify(tx).commit();
+  }
+
+  @Test
+  void timeoutParkedStep_invalidTargetStatusGiven_throwsIllegalArgumentException() {
+    // Arrange
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+
+    // Act & Assert — only COMPENSATING / ESCALATED are valid targets
+    assertThatThrownBy(
+            () ->
+                store.timeoutParkedStep(
+                    current, 4, StepEvent.failed(1, "charge", null), SagaStatus.RUNNING))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void timeoutParkedStep_rowNotFound_throwsSagaConcurrentModificationException() throws Exception {
+    // Arrange — a concurrent callback won the WAITING CK
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.empty());
+
+    // Act & Assert
+    assertThatThrownBy(
+            () ->
+                store.timeoutParkedStep(
+                    current, 1, StepEvent.failed(1, "charge", null), SagaStatus.COMPENSATING))
+        .isInstanceOf(SagaConcurrentModificationException.class);
+  }
+
+  // ---------------------------------------------------------------------------
   // getEvents
   // ---------------------------------------------------------------------------
 
