@@ -372,14 +372,71 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   // Daemon mode only
   // ---------------------------------------------------------------------------
 
+  /**
+   * Resumes a parked ({@code WAITING}) saga when the async callback for its parked step arrives:
+   * atomically records {@code STEP_COMPLETED} (carrying {@code output}), transitions {@code WAITING
+   * -> RUNNING}, and deletes the {@code saga_parked} row, then continues forward execution from the
+   * next step.
+   *
+   * @param sagaId the parked saga
+   * @param stepName the step the callback completes (must be the currently parked step)
+   * @param output the step's output, merged into the saga context for downstream steps
+   * @return the resulting state snapshot after forward execution runs (or re-parks / terminates)
+   * @throws IllegalStateException if the saga is not {@code WAITING}
+   * @throws IllegalArgumentException if {@code stepName} is not the currently parked step
+   */
   public SagaStateSnapshot completeStep(
       String sagaId, String stepName, Map<String, Object> output) {
     Objects.requireNonNull(sagaId, "sagaId must not be null");
     Objects.requireNonNull(stepName, "stepName must not be null");
     Objects.requireNonNull(output, "output must not be null");
-    // completeStep resumes a parked (WAITING) saga when an external callback arrives.
-    // It is only available in daemon mode, which uses a separate orchestrator implementation.
-    throw new UnsupportedOperationException("completeStep is only available in daemon mode");
+
+    SagaStateSnapshot saga = getStateSnapshot(sagaId);
+    if (saga.getStatus() != SagaStatus.WAITING) {
+      throw new IllegalStateException(
+          "Cannot complete step for saga " + sagaId + " in status " + saga.getStatus());
+    }
+
+    List<SagaEvent> events = store.getEvents(sagaId);
+    int stepIndex = parkedStepIndex(events, sagaId, stepName);
+    SagaDefinition def = resolveDefinition(saga);
+
+    // Atomic: STEP_COMPLETED + WAITING -> RUNNING + delete the saga_parked row. The optimistic
+    // WAITING-CK check makes this and a concurrent deadline-timeout sweep mutually exclusive.
+    String payload = EventPayloadSerializer.serialize(output);
+    SagaStateSnapshot running =
+        store.resumeParkedStep(
+            saga, events.size(), StepEvent.completed(stepIndex, stepName, payload));
+
+    // Replay (now folds the callback output into context) and continue from the next step.
+    ExecutionContext context = engine.replayEvents(running, store.getEvents(sagaId));
+    return engine.resumeFrom(def, context, stepIndex + 1);
+  }
+
+  /**
+   * Returns the step index of the currently parked step — the most recent {@code STEP_PENDING} for
+   * a {@code WAITING} saga — validating that {@code stepName} matches it.
+   */
+  private static int parkedStepIndex(List<SagaEvent> events, String sagaId, String stepName) {
+    StepEvent parked = null;
+    for (SagaEvent event : events) {
+      if (event.getEventType() == EventType.STEP_PENDING) {
+        parked = (StepEvent) event;
+      }
+    }
+    if (parked == null) {
+      throw new IllegalStateException("Saga " + sagaId + " has no parked step to complete");
+    }
+    if (!parked.getStepName().equals(stepName)) {
+      throw new IllegalArgumentException(
+          "Callback step '"
+              + stepName
+              + "' does not match the parked step '"
+              + parked.getStepName()
+              + "' for saga "
+              + sagaId);
+    }
+    return parked.getStepIndex();
   }
 
   // ---------------------------------------------------------------------------

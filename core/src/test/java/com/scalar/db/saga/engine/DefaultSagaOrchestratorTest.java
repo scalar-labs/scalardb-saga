@@ -21,6 +21,7 @@ import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.StatusEvent;
@@ -38,6 +39,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -814,10 +816,76 @@ class DefaultSagaOrchestratorTest {
   class CompleteStep {
 
     @Test
-    void completeStep_always_throwsUnsupported() {
+    void completeStep_waitingSaga_resumesFromNextStep() {
+      // Arrange — saga is parked on step 1 (STEP_PENDING); the callback completes it
+      SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
+      SagaDefinition def = definition("test-saga");
+      SagaStateSnapshot running = snapshot("saga-1", SagaStatus.RUNNING);
+      SagaStateSnapshot completed = snapshot("saga-1", SagaStatus.COMPLETED);
+      List<SagaEvent> events =
+          List.of(
+              StatusEvent.started(null),
+              StepEvent.completed(0, "s0", null),
+              StepEvent.pending(1, "s1"));
+      ExecutionContext context = new ExecutionContext("saga-1", Map.of(), running);
+
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(waiting));
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(store.getEvents("saga-1")).thenReturn(events);
+      when(store.resumeParkedStep(eq(waiting), eq(events.size()), any(StepEvent.class)))
+          .thenReturn(running);
+      when(engine.replayEvents(eq(running), any())).thenReturn(context);
+      when(engine.resumeFrom(eq(def), eq(context), eq(2))).thenReturn(completed);
+
+      // Act
+      SagaStateSnapshot result =
+          orchestrator.completeStep("saga-1", "s1", Map.of("paymentId", "p1"));
+
+      // Assert — resumes step 1 via STEP_COMPLETED, then continues from step 2
+      ArgumentCaptor<StepEvent> captor = ArgumentCaptor.forClass(StepEvent.class);
+      verify(store).resumeParkedStep(eq(waiting), eq(events.size()), captor.capture());
+      assertThat(captor.getValue().getEventType()).isEqualTo(EventType.STEP_COMPLETED);
+      assertThat(captor.getValue().getStepIndex()).isEqualTo(1);
+      assertThat(captor.getValue().getStepName()).isEqualTo("s1");
+      verify(engine).resumeFrom(def, context, 2);
+      assertThat(result).isSameAs(completed);
+    }
+
+    @Test
+    void completeStep_nonWaitingSaga_throwsIllegalState() {
+      // Arrange
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(saga));
+
       // Act & Assert
       assertThatThrownBy(() -> orchestrator.completeStep("saga-1", "s1", Map.of()))
-          .isInstanceOf(UnsupportedOperationException.class);
+          .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void completeStep_stepNameMismatch_throwsIllegalArgument() {
+      // Arrange — saga is parked on "s1" but the callback names a different step
+      SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
+      List<SagaEvent> events = List.of(StatusEvent.started(null), StepEvent.pending(1, "s1"));
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(waiting));
+      when(store.getEvents("saga-1")).thenReturn(events);
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.completeStep("saga-1", "other", Map.of()))
+          .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void completeStep_noParkedStep_throwsIllegalState() {
+      // Arrange — WAITING but no STEP_PENDING marker in history (defensive)
+      SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
+      List<SagaEvent> events = List.of(StatusEvent.started(null));
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(waiting));
+      when(store.getEvents("saga-1")).thenReturn(events);
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.completeStep("saga-1", "s1", Map.of()))
+          .isInstanceOf(IllegalStateException.class);
     }
   }
 
