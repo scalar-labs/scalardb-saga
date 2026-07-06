@@ -154,17 +154,18 @@ public interface SagaStore extends AutoCloseable {
 
   /**
    * Finds sagas in {@link SagaStatus#RUNNING} or {@link SagaStatus#COMPENSATING} status whose
-   * {@code updated_at} is older than the recovery timeout threshold.
+   * {@code updated_at} is older than the given threshold. The caller computes the staleness cutoff
+   * from its clock, mirroring {@link #findOverdueParkedSagas} and {@link #findByStatusOlderThan}.
    *
    * <p>Each call returns a batch of results. Pass the cursor from the previous result to continue
    * scanning, or {@code null} to start from the beginning. A {@code null} cursor in the returned
    * {@link Recoverables} indicates that the scan is complete.
    *
-   * @param recoveryTimeoutMillis the staleness threshold in milliseconds
+   * @param threshold the staleness cutoff — only sagas updated before this are returned
    * @param cursor the cursor from a previous call, or {@code null} to start a new scan
    * @return recoverable sagas and a cursor for the next batch
    */
-  Recoverables findRecoverable(long recoveryTimeoutMillis, @Nullable ScanCursor cursor);
+  Recoverables findRecoverable(Instant threshold, @Nullable ScanCursor cursor);
 
   /**
    * Attempts to claim a saga for recovery by updating its owner. Returns an empty {@link Optional}

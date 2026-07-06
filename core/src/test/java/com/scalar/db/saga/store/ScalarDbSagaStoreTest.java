@@ -928,7 +928,7 @@ class ScalarDbSagaStoreTest {
         .thenReturn(List.of());
 
     // Act
-    Recoverables result = store.findRecoverable(60_000, null);
+    Recoverables result = store.findRecoverable(Instant.now(), null);
 
     // Assert
     assertThat(result.sagas()).hasSize(1);
@@ -944,16 +944,16 @@ class ScalarDbSagaStoreTest {
     when(tx.scan(any(Scan.class))).thenReturn(List.of());
 
     // Act — chain 4 calls (buckets 0-3), each returning cursor for next bucket
-    Recoverables r0 = store.findRecoverable(60_000, null);
+    Recoverables r0 = store.findRecoverable(Instant.now(), null);
     assertThat(r0.hasMore()).isTrue();
 
-    Recoverables r1 = store.findRecoverable(60_000, r0.nextCursor());
+    Recoverables r1 = store.findRecoverable(Instant.now(), r0.nextCursor());
     assertThat(r1.hasMore()).isTrue();
 
-    Recoverables r2 = store.findRecoverable(60_000, r1.nextCursor());
+    Recoverables r2 = store.findRecoverable(Instant.now(), r1.nextCursor());
     assertThat(r2.hasMore()).isTrue();
 
-    Recoverables r3 = store.findRecoverable(60_000, r2.nextCursor());
+    Recoverables r3 = store.findRecoverable(Instant.now(), r2.nextCursor());
 
     // Assert — last bucket returns null cursor
     assertThat(r3.hasMore()).isFalse();
@@ -966,7 +966,7 @@ class ScalarDbSagaStoreTest {
     when(tx.scan(any(Scan.class))).thenReturn(List.of());
 
     // Act
-    Recoverables result = store.findRecoverable(60_000, null);
+    Recoverables result = store.findRecoverable(Instant.now(), null);
 
     // Assert
     assertThat(result.sagas()).isEmpty();
@@ -982,7 +982,7 @@ class ScalarDbSagaStoreTest {
     when(tx.scan(any(Scan.class))).thenReturn(List.of(running)).thenReturn(List.of(compensating));
 
     // Act
-    Recoverables result = store.findRecoverable(60_000, null);
+    Recoverables result = store.findRecoverable(Instant.now(), null);
 
     // Assert — both active statuses collected
     assertThat(result.sagas()).hasSize(2);
@@ -998,7 +998,7 @@ class ScalarDbSagaStoreTest {
     when(tx.scan(any(Scan.class))).thenThrow(mock(CrudException.class));
 
     // Act & Assert
-    assertThatThrownBy(() -> store.findRecoverable(60_000, null))
+    assertThatThrownBy(() -> store.findRecoverable(Instant.now(), null))
         .isInstanceOf(SagaPersistenceException.class);
   }
 

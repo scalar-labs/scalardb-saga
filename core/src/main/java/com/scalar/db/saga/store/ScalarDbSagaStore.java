@@ -459,7 +459,7 @@ public class ScalarDbSagaStore implements SagaStore {
   // ---------------------------------------------------------------------------
 
   @Override
-  public Recoverables findRecoverable(long recoveryTimeoutMillis, @Nullable ScanCursor cursor) {
+  public Recoverables findRecoverable(Instant threshold, @Nullable ScanCursor cursor) {
     int startBucket = 0;
     if (cursor instanceof BucketCursor(int nextBucket)) {
       startBucket = nextBucket;
@@ -469,7 +469,6 @@ public class ScalarDbSagaStore implements SagaStore {
       return new Recoverables(List.of(), null);
     }
 
-    Instant threshold = Instant.now().minusMillis(recoveryTimeoutMillis);
     int bucket = startBucket;
 
     List<SagaStateSnapshot> result =

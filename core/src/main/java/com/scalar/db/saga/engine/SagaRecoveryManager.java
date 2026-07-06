@@ -158,11 +158,13 @@ class SagaRecoveryManager {
   public void recover() {
     List<Future<?>> futures = new ArrayList<>();
     try {
-      // Pass 1: stale RUNNING / COMPENSATING sagas (updated_at staleness scan).
+      // Pass 1: stale RUNNING / COMPENSATING sagas (updated_at staleness scan). Compute the cutoff
+      // once from the injected clock so every bucket in this cycle uses a consistent threshold.
+      Instant staleThreshold = config.clock().instant().minusMillis(config.recoveryTimeoutMillis());
       @Nullable ScanCursor cursor = null;
       int recoverySubmitted = 0;
       do {
-        Recoverables page = store.findRecoverable(config.recoveryTimeoutMillis(), cursor);
+        Recoverables page = store.findRecoverable(staleThreshold, cursor);
         cursor = page.nextCursor();
 
         for (SagaStateSnapshot saga : page.sagas()) {

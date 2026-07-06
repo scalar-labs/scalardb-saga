@@ -86,7 +86,7 @@ class SagaRecoveryManagerTest {
   }
 
   private void setupSinglePageRecovery(SagaStateSnapshot saga) {
-    when(store.findRecoverable(anyLong(), any())).thenReturn(new Recoverables(List.of(saga), null));
+    when(store.findRecoverable(any(), any())).thenReturn(new Recoverables(List.of(saga), null));
     when(store.claimForRecovery(saga, OWNER_ID)).thenReturn(Optional.of(saga));
   }
 
@@ -100,7 +100,7 @@ class SagaRecoveryManagerTest {
     @Test
     void recover_noRecoverableSagas_doesNothing() {
       // Arrange
-      when(store.findRecoverable(anyLong(), any())).thenReturn(new Recoverables(List.of(), null));
+      when(store.findRecoverable(any(), any())).thenReturn(new Recoverables(List.of(), null));
 
       // Act
       manager.recover();
@@ -128,7 +128,7 @@ class SagaRecoveryManagerTest {
       ExecutionContext ctx1 = mock(ExecutionContext.class);
       ExecutionContext ctx2 = mock(ExecutionContext.class);
 
-      when(store.findRecoverable(anyLong(), any()))
+      when(store.findRecoverable(any(), any()))
           .thenReturn(new Recoverables(List.of(saga1), cursor))
           .thenReturn(new Recoverables(List.of(saga2), null));
       when(store.claimForRecovery(saga1, OWNER_ID)).thenReturn(Optional.of(saga1));
@@ -153,8 +153,7 @@ class SagaRecoveryManagerTest {
     void recover_claimFails_skipsSaga() {
       // Arrange
       SagaStateSnapshot saga = snapshot(SagaStatus.RUNNING);
-      when(store.findRecoverable(anyLong(), any()))
-          .thenReturn(new Recoverables(List.of(saga), null));
+      when(store.findRecoverable(any(), any())).thenReturn(new Recoverables(List.of(saga), null));
       when(store.claimForRecovery(saga, OWNER_ID)).thenReturn(Optional.empty());
 
       // Act
@@ -198,7 +197,7 @@ class SagaRecoveryManagerTest {
       ExecutionContext ctx2 = mock(ExecutionContext.class);
 
       // Page 1 has 2 sagas (hits batch limit), page 2 has 1 more
-      when(store.findRecoverable(anyLong(), any()))
+      when(store.findRecoverable(any(), any()))
           .thenReturn(new Recoverables(List.of(saga1, saga2), cursor));
       when(store.claimForRecovery(saga1, OWNER_ID)).thenReturn(Optional.of(saga1));
       when(store.claimForRecovery(saga2, OWNER_ID)).thenReturn(Optional.of(saga2));
@@ -218,7 +217,7 @@ class SagaRecoveryManagerTest {
       verify(engine).resumeFrom(eq(def), eq(ctx2), eq(0));
       verify(store, never()).claimForRecovery(eq(saga3), any());
       // findRecoverable called only once — batch limit stopped before second page
-      verify(store).findRecoverable(anyLong(), any());
+      verify(store).findRecoverable(any(), any());
     }
 
     @Test
@@ -237,7 +236,7 @@ class SagaRecoveryManagerTest {
       SagaDefinition def = definition();
       ExecutionContext ctx2 = mock(ExecutionContext.class);
 
-      when(store.findRecoverable(anyLong(), any()))
+      when(store.findRecoverable(any(), any()))
           .thenReturn(new Recoverables(List.of(saga1, saga2), null));
       when(store.claimForRecovery(saga1, OWNER_ID)).thenThrow(new RuntimeException("store error"));
       when(store.claimForRecovery(saga2, OWNER_ID)).thenReturn(Optional.of(saga2));
@@ -264,7 +263,7 @@ class SagaRecoveryManagerTest {
   class ParkedTimeout {
 
     private void noStaleRecoverables() {
-      when(store.findRecoverable(anyLong(), any())).thenReturn(new Recoverables(List.of(), null));
+      when(store.findRecoverable(any(), any())).thenReturn(new Recoverables(List.of(), null));
     }
 
     @Test

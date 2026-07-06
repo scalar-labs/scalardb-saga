@@ -133,8 +133,8 @@ public final class CrashingStoreDecorator implements SagaStore {
   }
 
   @Override
-  public Recoverables findRecoverable(long recoveryTimeoutMillis, @Nullable ScanCursor cursor) {
-    return delegate.findRecoverable(recoveryTimeoutMillis, cursor);
+  public Recoverables findRecoverable(Instant threshold, @Nullable ScanCursor cursor) {
+    return delegate.findRecoverable(threshold, cursor);
   }
 
   @Override
