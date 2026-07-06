@@ -5,9 +5,12 @@ import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.api.Step;
 import com.scalar.db.saga.api.StepResult;
 import com.scalar.db.saga.api.TccStep;
+import com.scalar.db.saga.definition.CallSpec;
 import com.scalar.db.saga.definition.RetryPolicy;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.definition.SagaDefinition.SagaMode;
+import com.scalar.db.saga.definition.SagaDefinition.ServiceStep;
+import com.scalar.db.saga.definition.SagaDefinition.ServiceStep.Phase;
 import com.scalar.db.saga.definition.SagaDefinition.StepDefinition;
 import com.scalar.db.saga.exception.StepCompensationException;
 import com.scalar.db.saga.exception.StepExecutionException;
@@ -18,6 +21,7 @@ import com.scalar.db.saga.store.StatusEvent;
 import com.scalar.db.saga.store.StepEvent;
 import com.scalar.db.saga.transport.SagaCorrelationContext;
 import java.time.Clock;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -331,8 +335,10 @@ public class SagaEngine implements AutoCloseable {
       }
 
       if (result.isPending()) {
-        // Park the saga — release the thread without appending an event.
-        // The saga stays RUNNING; recovery or a callback will resume it.
+        // The participant accepted the step (202) and will complete it later via a callback. Park
+        // the saga (RUNNING -> WAITING) and release the thread; the callback or a deadline timeout
+        // resumes it.
+        parkStep(context, i, stepWithPolicy, sagaDeadline);
         return;
       }
 
@@ -499,7 +505,13 @@ public class SagaEngine implements AutoCloseable {
     for (StepDefinition stepDef : def.getSteps()) {
       Step step = resolveStep(stepDef, Step.class);
       RetryPolicy policy = resolveRetryPolicy(stepDef, def);
-      plan.add(new StepWithPolicy(step, policy, compensationPolicy, stepDef.getTimeoutMillis()));
+      plan.add(
+          new StepWithPolicy(
+              step,
+              policy,
+              compensationPolicy,
+              stepDef.getTimeoutMillis(),
+              callbackTimeoutMillisFor(stepDef, Phase.EXECUTION)));
     }
     return plan;
   }
@@ -518,13 +530,15 @@ public class SagaEngine implements AutoCloseable {
               new TccReserveStep(tccStep),
               reservePolicy,
               compensationPolicy,
-              stepDef.getTimeoutMillis()));
+              stepDef.getTimeoutMillis(),
+              callbackTimeoutMillisFor(stepDef, Phase.RESERVATION)));
       confirmSteps.add(
           new StepWithPolicy(
               new TccConfirmStep(tccStep),
               confirmPolicy,
               compensationPolicy,
-              stepDef.getTimeoutMillis()));
+              stepDef.getTimeoutMillis(),
+              callbackTimeoutMillisFor(stepDef, Phase.CONFIRMATION)));
     }
 
     reserveSteps.addAll(confirmSteps);
@@ -533,6 +547,17 @@ public class SagaEngine implements AutoCloseable {
 
   private <T> T resolveStep(StepDefinition stepDef, Class<T> expectedType) {
     return stepInstantiator.instantiate(stepDef, expectedType);
+  }
+
+  /**
+   * The {@code callbackTimeoutMillis} of a step's phase-call, or {@code 0} for a class step (no
+   * {@code CallSpec}) or a phase without one — such a step never parks.
+   */
+  private static long callbackTimeoutMillisFor(StepDefinition stepDef, Phase phase) {
+    if (stepDef instanceof ServiceStep serviceStep) {
+      return serviceStep.getPhase(phase).map(CallSpec::callbackTimeoutMillis).orElse(0L);
+    }
+    return 0L;
   }
 
   /**
@@ -715,6 +740,28 @@ public class SagaEngine implements AutoCloseable {
   // ---------------------------------------------------------------------------
   // Private — state transitions
   // ---------------------------------------------------------------------------
+
+  /**
+   * Parks a forward step that returned pending (a {@code 202}): transitions the saga to WAITING and
+   * records a STEP_PENDING marker (+ a deadline row) via {@link SagaStore#park}. The parked
+   * deadline is {@code min(now + callbackTimeoutMillis, sagaDeadline)}; when both are unbounded it
+   * parks with no deadline (wait indefinitely).
+   */
+  private void parkStep(
+      ExecutionContext context, int stepIndex, StepWithPolicy stepWithPolicy, long sagaDeadline) {
+    long deadlineMillis =
+        TimeoutPolicy.calculateStepDeadline(
+            stepWithPolicy.callbackTimeoutMillis(), sagaDeadline, clock.millis());
+    Instant parkedDeadline = deadlineMillis > 0 ? Instant.ofEpochMilli(deadlineMillis) : null;
+    SagaStateSnapshot updated =
+        store.park(
+            context.getCurrentState(),
+            context.nextSequence(),
+            StepEvent.pending(stepIndex, stepWithPolicy.step().getName()),
+            parkedDeadline);
+    context.setCurrentState(updated);
+    context.advanceSequence();
+  }
 
   private void transition(ExecutionContext context, StatusEvent event) {
     SagaStateSnapshot newState =
