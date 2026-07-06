@@ -1,6 +1,7 @@
 package com.scalar.db.saga.daemon;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import java.io.IOException;
@@ -91,6 +92,17 @@ class SecretResolverTest {
 
     // Assert — an undefined variable is not disruptive; the reference is left as-is.
     assertThat(resolved).isEqualTo("${env:SAGA_SECRET_RESOLVER_SURELY_MISSING_VAR}");
+  }
+
+  @Test
+  void resolve_missingFileReferenceGiven_throws(@TempDir Path dir) {
+    // Arrange — a ${file:...} secret that does not exist. Unlike an undefined ${env:...} (left
+    // verbatim), a missing secret file must fail fast rather than silently resolve to a literal.
+    Path missing = dir.resolve("no-such-secret");
+
+    // Act & Assert
+    assertThatThrownBy(() -> resolver.resolve("${file:UTF-8:" + missing + "}"))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
