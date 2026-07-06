@@ -52,6 +52,25 @@ class SecretResolverTest {
   }
 
   @Test
+  void resolve_secretContainingReferenceSyntax_isNotRecursivelyReExpanded(@TempDir Path dir)
+      throws IOException {
+    // Arrange — a resolved secret must be treated literally. The outer file's contents are
+    // themselves a ${file:...} reference; if resolution recursed into the value, it would follow
+    // that reference and leak the inner secret instead of returning the outer file verbatim.
+    Path inner = dir.resolve("inner");
+    Files.writeString(inner, "inner-secret", StandardCharsets.UTF_8);
+    Path outer = dir.resolve("outer");
+    String nestedReference = "${file:UTF-8:" + inner + "}";
+    Files.writeString(outer, nestedReference, StandardCharsets.UTF_8);
+
+    // Act
+    String resolved = resolver.resolve("${file:UTF-8:" + outer + "}");
+
+    // Assert — the outer reference resolves exactly once, to the raw file contents.
+    assertThat(resolved).isEqualTo(nestedReference);
+  }
+
+  @Test
   void resolve_envReferenceGiven_returnsEnvValue() {
     // Arrange — use whatever environment variable the JVM actually has, for determinism.
     Map<String, String> env = System.getenv();
