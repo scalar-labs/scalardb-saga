@@ -295,8 +295,9 @@ public final class CallSpecCodec {
    * Rejects an {@code async} marker on a backward phase (compensation / cancellation). Async
    * completion — the participant parking the saga and calling back — applies only to forward phases
    * (execution / reservation / confirmation); a compensation/cancellation always runs
-   * synchronously. Shared by the parser and the store serializer via {@code error} so the failure
-   * type matches the layer.
+   * synchronously. This is a parse-path precheck (called by {@code SagaDefinitionParser}); the
+   * {@code error} factory keeps the failure type layer-appropriate. The programmatic-builder and
+   * store-reload paths are guarded independently by the {@code ServiceStep} constructor.
    */
   public static void rejectAsyncOnBackwardPhase(
       JsonNode stepNode, String name, Function<String, RuntimeException> error) {

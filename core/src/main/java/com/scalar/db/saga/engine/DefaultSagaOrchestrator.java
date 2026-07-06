@@ -7,6 +7,7 @@ import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.definition.SagaDefinitionParser;
+import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.store.EventType;
@@ -384,6 +385,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * @return the resulting state snapshot after forward execution runs (or re-parks / terminates)
    * @throws IllegalStateException if the saga is not {@code WAITING}
    * @throws IllegalArgumentException if {@code stepName} is not the currently parked step
+   * @throws SagaConcurrentModificationException if a concurrent deadline-timeout sweep resolves the
+   *     parked step first (the callback lost the race)
    */
   public SagaStateSnapshot completeStep(
       String sagaId, String stepName, Map<String, Object> output) {

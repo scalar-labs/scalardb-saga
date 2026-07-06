@@ -333,9 +333,10 @@ public class ScalarDbSagaStore implements SagaStore {
         tx -> {
           Instant now = Instant.now();
 
-          // Optimistic check: the row must still be at the snapshot's (WAITING) CK. This is what
-          // makes the callback and the deadline-timeout sweep mutually exclusive — one wins the CK,
-          // the other sees an empty get and throws.
+          // Fail-fast pre-check: the row must still be at the snapshot's (WAITING) CK. The actual
+          // callback-vs-timeout mutual exclusion is enforced by the state-row delete below — two
+          // transactions deleting the same WAITING CK conflict at commit, so exactly one commits;
+          // the loser retries, re-reads an empty CK here, and throws.
           int oldStatus = current.getStatus().getStatusCode();
           if (tx.get(buildStateGet(bucket, oldStatus, current.getUpdatedAt(), sagaId)).isEmpty()) {
             throw new SagaConcurrentModificationException(sagaId);
@@ -372,8 +373,8 @@ public class ScalarDbSagaStore implements SagaStore {
         tx -> {
           Instant now = Instant.now();
 
-          // Optimistic check on the WAITING CK: makes the timeout sweep and a concurrent callback
-          // (resumeParkedStep) mutually exclusive — one wins the CK, the other throws.
+          // Fail-fast pre-check on the WAITING CK; the real timeout-vs-callback exclusion is the
+          // state-row delete below (same mechanism as resumeParkedStep above).
           int oldStatus = current.getStatus().getStatusCode();
           if (tx.get(buildStateGet(bucket, oldStatus, current.getUpdatedAt(), sagaId)).isEmpty()) {
             throw new SagaConcurrentModificationException(sagaId);
