@@ -404,12 +404,18 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     // Atomic: STEP_COMPLETED + WAITING -> RUNNING + delete the saga_parked row. The optimistic
     // WAITING-CK check makes this and a concurrent deadline-timeout sweep mutually exclusive.
     String payload = EventPayloadSerializer.serialize(output);
-    SagaStateSnapshot running =
-        store.resumeParkedStep(
-            saga, events.size(), StepEvent.completed(stepIndex, stepName, payload));
+    StepEvent completedEvent = StepEvent.completed(stepIndex, stepName, payload);
+    SagaStateSnapshot running = store.resumeParkedStep(saga, events.size(), completedEvent);
 
-    // Replay (now folds the callback output into context) and continue from the next step.
-    ExecutionContext context = engine.replayEvents(running, store.getEvents(sagaId));
+    // Replay (now folds the callback output into context) and continue from the next step. The
+    // resume appended completedEvent at events.size() and nothing else; a successful resume proves,
+    // via its WAITING-CK check, that the saga was untouched since we read `events` (a parked saga's
+    // log only grows through a CK-changing transition), so appending locally reproduces the
+    // persisted
+    // log without a second read (replayEvents ignores the event timestamp).
+    List<SagaEvent> updatedEvents = new ArrayList<>(events);
+    updatedEvents.add(completedEvent);
+    ExecutionContext context = engine.replayEvents(running, updatedEvents);
     return engine.resumeFrom(def, context, stepIndex + 1);
   }
 
