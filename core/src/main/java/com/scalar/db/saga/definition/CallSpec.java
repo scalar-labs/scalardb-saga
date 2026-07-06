@@ -74,4 +74,12 @@ public abstract sealed class CallSpec permits HttpCall {
    * cancellation) call. Daemon-mode only; embedded mode always blocks until completion.
    */
   public abstract boolean isAsync();
+
+  /**
+   * The callback-wait deadline in milliseconds: after this call parks on a {@code 202} (see {@link
+   * #isAsync()}), how long to wait for the external callback before the recovery sweeper times the
+   * step out. {@code 0} means "wait indefinitely" — bounded only by the saga-level timeout. Ignored
+   * for a non-async call.
+   */
+  public abstract long callbackTimeoutMillis();
 }

@@ -76,6 +76,24 @@ class SagaDefinitionParserDeclarativeTest {
   }
 
   @Test
+  void parseJson_callbackTimeoutMillisGiven_parsesCallbackTimeout() {
+    // Arrange
+    String json =
+        "{\"name\":\"transfer\",\"steps\":["
+            + "{\"name\":\"debit\",\"service\":\"account-service\","
+            + "\"execution\":{\"path\":\"/debit\",\"async\":true,\"callbackTimeoutMillis\":600000},"
+            + "\"compensation\":{\"path\":\"/reverse\"}}]}";
+
+    // Act
+    SagaDefinition definition = SagaDefinitionParser.parseJson(json);
+
+    // Assert
+    ServiceStep step = (ServiceStep) definition.getSteps().get(0);
+    assertThat(((HttpCall) step.getPhase(Phase.EXECUTION).orElseThrow()).callbackTimeoutMillis())
+        .isEqualTo(600000);
+  }
+
+  @Test
   void parseJson_asyncReservationGiven_parsesAsyncCall() {
     // Arrange
     String json =
@@ -101,6 +119,20 @@ class SagaDefinitionParserDeclarativeTest {
             + "{\"name\":\"debit\",\"service\":\"account-service\","
             + "\"execution\":{\"path\":\"/debit\"},"
             + "\"compensation\":{\"path\":\"/reverse\",\"async\":true}}]}";
+
+    // Act & Assert
+    assertThatThrownBy(() -> SagaDefinitionParser.parseJson(json))
+        .isInstanceOf(SagaDefinitionException.class);
+  }
+
+  @Test
+  void parseJson_callbackTimeoutWithoutAsyncGiven_throwsException() {
+    // Arrange — a callback timeout is meaningless without async.
+    String json =
+        "{\"name\":\"transfer\",\"steps\":["
+            + "{\"name\":\"debit\",\"service\":\"account-service\","
+            + "\"execution\":{\"path\":\"/debit\",\"callbackTimeoutMillis\":600000},"
+            + "\"compensation\":{\"path\":\"/reverse\"}}]}";
 
     // Act & Assert
     assertThatThrownBy(() -> SagaDefinitionParser.parseJson(json))

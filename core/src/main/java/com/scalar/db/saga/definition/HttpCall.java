@@ -53,6 +53,7 @@ public final class HttpCall extends CallSpec {
   private final @Nullable String contentType;
   private final Map<String, String> output;
   private final boolean async;
+  private final long callbackTimeoutMillis;
 
   private HttpCall(Builder builder) {
     this.method = builder.method;
@@ -63,6 +64,7 @@ public final class HttpCall extends CallSpec {
     this.contentType = builder.contentType;
     this.output = Map.copyOf(builder.output);
     this.async = builder.async;
+    this.callbackTimeoutMillis = builder.callbackTimeoutMillis;
   }
 
   /** Creates a builder for a call to {@code path} (resolved against the service's base URL). */
@@ -137,6 +139,11 @@ public final class HttpCall extends CallSpec {
     return async;
   }
 
+  @Override
+  public long callbackTimeoutMillis() {
+    return callbackTimeoutMillis;
+  }
+
   /**
    * The {@code ${key}} keys referenced across the path, query values, JSON-body values, and string
    * body. Keys are matched exactly as the runtime resolver reads them (no trimming); empty {@code
@@ -177,6 +184,7 @@ public final class HttpCall extends CallSpec {
     if (!(o instanceof HttpCall that)) return false;
     return method == that.method
         && async == that.async
+        && callbackTimeoutMillis == that.callbackTimeoutMillis
         && path.equals(that.path)
         && query.equals(that.query)
         && jsonBody.equals(that.jsonBody)
@@ -187,7 +195,16 @@ public final class HttpCall extends CallSpec {
 
   @Override
   public int hashCode() {
-    return Objects.hash(method, path, query, jsonBody, stringBody, contentType, output, async);
+    return Objects.hash(
+        method,
+        path,
+        query,
+        jsonBody,
+        stringBody,
+        contentType,
+        output,
+        async,
+        callbackTimeoutMillis);
   }
 
   @Override
@@ -208,6 +225,8 @@ public final class HttpCall extends CallSpec {
         + output
         + ", async="
         + async
+        + ", callbackTimeoutMillis="
+        + callbackTimeoutMillis
         + '}';
   }
 
@@ -222,6 +241,7 @@ public final class HttpCall extends CallSpec {
     private @Nullable String contentType;
     private Map<String, String> output = Map.of();
     private boolean async = false;
+    private long callbackTimeoutMillis = 0;
 
     private Builder(String path) {
       this.path = path;
@@ -282,13 +302,27 @@ public final class HttpCall extends CallSpec {
     }
 
     /**
+     * Sets the callback-wait deadline in milliseconds for an async call (see {@link
+     * #async(boolean)}): how long to wait for the callback after a {@code 202} before the step is
+     * timed out. {@code 0} (the default) means wait indefinitely, bounded only by the saga-level
+     * timeout. Only valid on an async call — {@link #build()} rejects a positive value without
+     * {@link #async(boolean)}.
+     */
+    public Builder callbackTimeoutMillis(long callbackTimeoutMillis) {
+      this.callbackTimeoutMillis = callbackTimeoutMillis;
+      return this;
+    }
+
+    /**
      * Builds the {@link HttpCall}.
      *
      * @throws IllegalStateException if both a flat-map {@link #jsonBody(Map)} body and a string
      *     {@link #stringBody(String)} are set; if a body-less verb ({@link HttpMethod#GET}/{@link
      *     HttpMethod#DELETE}) declares any request body (a {@link #jsonBody(Map)} map or a {@link
      *     #stringBody(String)} string); or if an {@link #output(Map)} expression is neither {@link
-     *     #BODY_OUTPUT} nor a {@code $.path} expression with non-empty segments
+     *     #BODY_OUTPUT} nor a {@code $.path} expression with non-empty segments; if {@code
+     *     callbackTimeoutMillis} is negative; or if {@code callbackTimeoutMillis} is positive on a
+     *     non-async call
      */
     public HttpCall build() {
       if (!jsonBody.isEmpty() && stringBody != null) {
@@ -298,6 +332,14 @@ public final class HttpCall extends CallSpec {
       if (!method.hasBody() && (!jsonBody.isEmpty() || stringBody != null)) {
         throw new IllegalStateException(
             method + " must not declare a request body; put parameters in the path or query");
+      }
+      if (callbackTimeoutMillis < 0) {
+        throw new IllegalStateException(
+            "callbackTimeoutMillis must be >= 0, got " + callbackTimeoutMillis);
+      }
+      if (callbackTimeoutMillis > 0 && !async) {
+        throw new IllegalStateException(
+            "callbackTimeoutMillis is only valid on an async call; set async(true) or remove it");
       }
       validateOutputExpressions(output);
       return new HttpCall(this);

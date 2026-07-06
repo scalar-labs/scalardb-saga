@@ -37,6 +37,7 @@ public final class CallSpecCodec {
   private static final String CONTENT_TYPE = "contentType";
   private static final String OUTPUT = "output";
   private static final String ASYNC = "async";
+  private static final String CALLBACK_TIMEOUT_MILLIS = "callbackTimeoutMillis";
   private static final String STEP_CLASS = "stepClass";
   private static final String SERVICE = "service";
   private static final String EXECUTION = "execution";
@@ -48,7 +49,16 @@ public final class CallSpecCodec {
   // The HTTP call spec's own keys. The values of QUERY/JSON_BODY/OUTPUT are free-form user maps and
   // are not validated here.
   private static final Set<String> KNOWN_HTTP_FIELDS =
-      Set.of(METHOD, PATH, QUERY, JSON_BODY, STRING_BODY, CONTENT_TYPE, OUTPUT, ASYNC);
+      Set.of(
+          METHOD,
+          PATH,
+          QUERY,
+          JSON_BODY,
+          STRING_BODY,
+          CONTENT_TYPE,
+          OUTPUT,
+          ASYNC,
+          CALLBACK_TIMEOUT_MILLIS);
 
   private CallSpecCodec() {}
 
@@ -146,6 +156,9 @@ public final class CallSpecCodec {
     if (isPresent(node, ASYNC)) {
       callBuilder.async(node.get(ASYNC).asBoolean());
     }
+    if (isPresent(node, CALLBACK_TIMEOUT_MILLIS)) {
+      callBuilder.callbackTimeoutMillis(node.get(CALLBACK_TIMEOUT_MILLIS).asLong());
+    }
     try {
       return callBuilder.build();
     } catch (IllegalStateException e) {
@@ -182,6 +195,9 @@ public final class CallSpecCodec {
         }
         if (http.isAsync()) {
           node.put(ASYNC, true);
+        }
+        if (http.callbackTimeoutMillis() > 0) {
+          node.put(CALLBACK_TIMEOUT_MILLIS, http.callbackTimeoutMillis());
         }
       }
     }

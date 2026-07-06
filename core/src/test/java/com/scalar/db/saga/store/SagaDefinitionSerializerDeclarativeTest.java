@@ -333,4 +333,28 @@ class SagaDefinitionSerializerDeclarativeTest {
             ((HttpCall) firstStep(deserialized).getPhase(Phase.EXECUTION).orElseThrow()).isAsync())
         .isTrue();
   }
+
+  @Test
+  void serializeAndDeserialize_callbackTimeoutMillis_roundTripsCorrectly() {
+    // Arrange
+    SagaDefinition original =
+        SagaDefinition.newBuilder("transfer")
+            .saga()
+            .serviceStep("debit", "account-service")
+            .execution(
+                HttpCall.newBuilder("/debit").async(true).callbackTimeoutMillis(600_000).build())
+            .compensation(call("/debit/reverse"))
+            .add()
+            .build();
+
+    // Act
+    SagaDefinition deserialized = serializer.deserialize(serializer.serialize(original));
+
+    // Assert
+    assertThat(deserialized).isEqualTo(original);
+    assertThat(
+            ((HttpCall) firstStep(deserialized).getPhase(Phase.EXECUTION).orElseThrow())
+                .callbackTimeoutMillis())
+        .isEqualTo(600_000);
+  }
 }
