@@ -399,7 +399,13 @@ class SagaRecoveryManager {
       // timed-out step (knownNotCommitted=false — the async step may have committed server-side).
       SagaStateSnapshot compensating =
           store.timeoutParkedStep(saga, events.size(), failedEvent, SagaStatus.COMPENSATING);
-      ExecutionContext context = engine.replayEvents(compensating, store.getEvents(sagaId));
+      // The timeout appended failedEvent at events.size() and nothing else; a successful
+      // timeoutParkedStep proves, via its WAITING-CK check, that the log was untouched since we
+      // read
+      // `events`, so append locally rather than re-reading (replayEvents ignores the timestamp).
+      List<SagaEvent> updatedEvents = new ArrayList<>(events);
+      updatedEvents.add(failedEvent);
+      ExecutionContext context = engine.replayEvents(compensating, updatedEvents);
       engine.compensateFrom(def, context, parkedIndex);
     } else {
       // Post-pivot: cannot roll back, and the give-up floor does not re-drive forward — escalate.
