@@ -68,6 +68,11 @@ public final class SagaServerConfig {
   static final String SERVICE_BASE_URL_SUFFIX = ".base_url";
   static final String SYNC_TIMEOUT_MILLIS_KEY = SERVER_PREFIX + "sync_timeout_millis";
   static final String SYNC_MAX_WAIT_MILLIS_KEY = SERVER_PREFIX + "sync_max_wait_millis";
+  // Security keys — daemon-only (embedded mode delegates auth to the host framework). The HMAC
+  // callback secret enables async-callback authentication; its value may be a ${file:}/${env:}
+  // secret reference (resolved by resolveSecrets, like every other scalar.db.saga.* key).
+  static final String SECURITY_PREFIX = SERVER_PREFIX + "security.";
+  static final String CALLBACK_SECRET_KEY = SECURITY_PREFIX + "callback_secret";
   static final String STORE_MAX_EVENT_PAYLOAD_BYTES_KEY = PREFIX + "store.max_event_payload_bytes";
   static final String DEFAULT_HOST = "0.0.0.0";
   static final int DEFAULT_PORT = 8080;
@@ -86,6 +91,7 @@ public final class SagaServerConfig {
   private final boolean grpcEnabled;
   private final long syncTimeoutMillis;
   private final long syncMaxWaitMillis;
+  private final @Nullable String callbackSecret;
   private final Properties properties;
   private final @Nullable Path definitionsPath;
   private final Map<String, String> serviceBaseUrls;
@@ -98,6 +104,7 @@ public final class SagaServerConfig {
       boolean grpcEnabled,
       long syncTimeoutMillis,
       long syncMaxWaitMillis,
+      @Nullable String callbackSecret,
       Properties properties,
       @Nullable Path definitionsPath,
       Map<String, String> serviceBaseUrls) {
@@ -108,6 +115,7 @@ public final class SagaServerConfig {
     this.grpcEnabled = grpcEnabled;
     this.syncTimeoutMillis = syncTimeoutMillis;
     this.syncMaxWaitMillis = syncMaxWaitMillis;
+    this.callbackSecret = callbackSecret;
     this.properties = applyStoreDefaults(copyOf(properties));
     this.definitionsPath = definitionsPath;
     this.serviceBaseUrls = Map.copyOf(serviceBaseUrls);
@@ -170,6 +178,11 @@ public final class SagaServerConfig {
             SYNC_MAX_WAIT_MILLIS_KEY,
             DEFAULT_SYNC_MAX_WAIT_MILLIS,
             1L);
+    // Treat blank as unset (no callback auth configured → no callback route). Do not trim: an HMAC
+    // secret is opaque and could legitimately contain leading/trailing characters.
+    String callbackSecretRaw = properties.getProperty(CALLBACK_SECRET_KEY);
+    String callbackSecret =
+        (callbackSecretRaw == null || callbackSecretRaw.isBlank()) ? null : callbackSecretRaw;
     String definitions = properties.getProperty(DEFINITIONS_PATH_KEY);
     Path definitionsPath =
         (definitions == null || definitions.isBlank()) ? null : Path.of(definitions.trim());
@@ -181,6 +194,7 @@ public final class SagaServerConfig {
         grpcEnabled,
         syncTimeoutMillis,
         syncMaxWaitMillis,
+        callbackSecret,
         properties,
         definitionsPath,
         parseServiceBaseUrls(properties));
@@ -318,6 +332,15 @@ public final class SagaServerConfig {
    */
   public long syncMaxWaitMillis() {
     return syncMaxWaitMillis;
+  }
+
+  /**
+   * Returns the HMAC secret used to authenticate async-callback requests, or empty when unset. When
+   * empty, the daemon registers no callback route (async completion is not enabled). The value may
+   * be supplied as a {@code ${file:}}/{@code ${env:}} secret reference.
+   */
+  public Optional<String> callbackSecret() {
+    return Optional.ofNullable(callbackSecret);
   }
 
   /**

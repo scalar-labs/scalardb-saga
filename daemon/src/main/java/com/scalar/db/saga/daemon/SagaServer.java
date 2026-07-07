@@ -1,5 +1,6 @@
 package com.scalar.db.saga.daemon;
 
+import com.scalar.db.saga.daemon.api.CallbackResource;
 import com.scalar.db.saga.daemon.api.ErrorMapper;
 import com.scalar.db.saga.daemon.api.HealthResource;
 import com.scalar.db.saga.daemon.api.SagaResource;
@@ -212,6 +213,11 @@ public final class SagaServer implements AutoCloseable {
     HealthResource.register(httpServer);
     ErrorMapper.register(httpServer);
     SagaResource.register(httpServer, orchestrator, config.syncTimeoutMillis());
+    // The async-callback route exists only when a callback secret is configured; without it there
+    // is nothing to authenticate callbacks against, so async completion is not enabled.
+    config
+        .callbackSecret()
+        .ifPresent(secret -> CallbackResource.register(httpServer, orchestrator, secret));
   }
 
   /**

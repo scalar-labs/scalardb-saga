@@ -305,4 +305,35 @@ class SagaServerConfigTest {
     assertThat(config.properties().getProperty("scalar.db.contact_points"))
         .isEqualTo("${file:UTF-8:/does/not/exist}");
   }
+
+  @Test
+  void load_unsetCallbackSecret_isEmpty() {
+    assertThat(SagaServerConfig.load(new Properties()).callbackSecret()).isEmpty();
+  }
+
+  @Test
+  void load_blankCallbackSecret_isEmpty() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.CALLBACK_SECRET_KEY, "   ");
+
+    assertThat(SagaServerConfig.load(props).callbackSecret()).isEmpty();
+  }
+
+  @Test
+  void load_callbackSecretGiven_isPresent() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.CALLBACK_SECRET_KEY, "s3cr3t-key");
+
+    assertThat(SagaServerConfig.load(props).callbackSecret()).contains("s3cr3t-key");
+  }
+
+  @Test
+  void load_callbackSecretFileReference_isResolved(@TempDir Path dir) throws IOException {
+    Path secretFile = dir.resolve("callback.secret");
+    Files.writeString(secretFile, "resolved-secret-value", StandardCharsets.UTF_8);
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.CALLBACK_SECRET_KEY, "${file:UTF-8:" + secretFile + "}");
+
+    assertThat(SagaServerConfig.load(props).callbackSecret()).contains("resolved-secret-value");
+  }
 }
