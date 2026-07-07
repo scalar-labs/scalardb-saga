@@ -730,6 +730,71 @@ class SagaDefinitionTest {
     }
   }
 
+  @Nested
+  class WithTimeoutMillis {
+
+    private SagaDefinition twoStepSaga(long timeoutMillis) {
+      return SagaDefinition.newBuilder("orders")
+          .saga()
+          .step("s1", "com.example.Step1")
+          .add()
+          .step("s2", "com.example.Step2")
+          .add()
+          .timeoutMillis(timeoutMillis)
+          .build();
+    }
+
+    @Test
+    void withTimeoutMillis_replacesTimeout_preservingOtherFieldsAndOriginal() {
+      // Arrange
+      SagaDefinition original = twoStepSaga(1_000);
+
+      // Act
+      SagaDefinition copy = original.withTimeoutMillis(5_000);
+
+      // Assert — new timeout, everything else identical, original untouched
+      assertThat(copy.getTimeoutMillis()).isEqualTo(5_000);
+      assertThat(copy.getName()).isEqualTo(original.getName());
+      assertThat(copy.getMode()).isEqualTo(original.getMode());
+      assertThat(copy.getRecoveryStrategy()).isEqualTo(original.getRecoveryStrategy());
+      assertThat(copy.getSteps()).hasSameSizeAs(original.getSteps());
+      assertThat(copy.getPivotIndex()).isEqualTo(original.getPivotIndex());
+      assertThat(original.getTimeoutMillis()).isEqualTo(1_000);
+    }
+
+    @Test
+    void withTimeoutMillis_fromUnbounded_setsTimeout() {
+      // Arrange — a definition with no timeout (0 = unbounded), as daemon-loaded definitions often
+      // are
+      SagaDefinition original = twoStepSaga(0);
+
+      // Act
+      SagaDefinition copy = original.withTimeoutMillis(3_000);
+
+      // Assert
+      assertThat(copy.getTimeoutMillis()).isEqualTo(3_000);
+    }
+
+    @Test
+    void withTimeoutMillis_sameValue_returnsSameInstance() {
+      // Arrange
+      SagaDefinition original = twoStepSaga(2_000);
+
+      // Act / Assert — no copy when nothing changes
+      assertThat(original.withTimeoutMillis(2_000)).isSameAs(original);
+    }
+
+    @Test
+    void withTimeoutMillis_negative_throwsException() {
+      // Arrange
+      SagaDefinition original = twoStepSaga(1_000);
+
+      // Act / Assert
+      assertThatThrownBy(() -> original.withTimeoutMillis(-1))
+          .isInstanceOf(IllegalArgumentException.class);
+    }
+  }
+
   abstract static class DummyStep implements Step {}
 
   abstract static class DummyTccStep implements TccStep {}

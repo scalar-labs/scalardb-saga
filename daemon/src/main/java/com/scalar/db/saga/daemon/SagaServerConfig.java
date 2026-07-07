@@ -43,6 +43,14 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code scalar.db.saga.server.security.provider} — the authentication provider (default
  *       {@code noop} — no authentication; suitable only for a trusted/isolated network). Set to a
  *       real provider to enforce access control
+ *   <li>{@code scalar.db.saga.server.max_threads} / {@code min_threads} — HTTP request thread-pool
+ *       bounds (defaults {@code 200} / {@code 8}); the max caps concurrent request threads so a
+ *       burst of slow requests cannot exhaust threads
+ *   <li>{@code scalar.db.saga.server.default_saga_timeout_millis} — a default saga timeout applied
+ *       to a loaded definition that set none ({@code 0} = unbounded); {@code 0} (default) disables
+ *       it. A definition's own timeout always wins
+ *   <li>{@code scalar.db.saga.server.max_start_requests_per_minute} — per-principal rate limit on
+ *       {@code POST}/{@code PUT /sagas}; {@code 0} (default) disables rate limiting
  * </ul>
  *
  * <p>Any {@code scalar.db.saga.*} value may use a secret reference — {@code ${file:UTF-8:/path}}
@@ -77,6 +85,12 @@ public final class SagaServerConfig {
   static final String SYNC_MAX_WAIT_MILLIS_KEY = SERVER_PREFIX + "sync_max_wait_millis";
   static final String SECURITY_PREFIX = SERVER_PREFIX + "security.";
   static final String SECURITY_PROVIDER_KEY = SECURITY_PREFIX + "provider";
+  static final String MAX_THREADS_KEY = SERVER_PREFIX + "max_threads";
+  static final String MIN_THREADS_KEY = SERVER_PREFIX + "min_threads";
+  static final String DEFAULT_SAGA_TIMEOUT_MILLIS_KEY =
+      SERVER_PREFIX + "default_saga_timeout_millis";
+  static final String MAX_START_REQUESTS_PER_MINUTE_KEY =
+      SERVER_PREFIX + "max_start_requests_per_minute";
   static final String STORE_MAX_EVENT_PAYLOAD_BYTES_KEY = PREFIX + "store.max_event_payload_bytes";
   static final String DEFAULT_HOST = "0.0.0.0";
   static final int DEFAULT_PORT = 8080;
@@ -89,6 +103,11 @@ public final class SagaServerConfig {
       60_000L; // ceiling on a synchronous server-side wait
   static final String DEFAULT_SECURITY_PROVIDER =
       "noop"; // no authentication (see NoopSecurityProvider)
+  static final int DEFAULT_MAX_THREADS = 200; // Jetty's own default
+  static final int DEFAULT_MIN_THREADS = 8; // Jetty's own default
+  static final long DEFAULT_SAGA_TIMEOUT_MILLIS =
+      0L; // 0 = disabled (definition's own timeout wins)
+  static final int DEFAULT_MAX_START_REQUESTS_PER_MINUTE = 0; // 0 = disabled (no rate limiting)
 
   private final String host;
   private final int port;
@@ -98,6 +117,10 @@ public final class SagaServerConfig {
   private final long syncTimeoutMillis;
   private final long syncMaxWaitMillis;
   private final String securityProvider;
+  private final int maxThreads;
+  private final int minThreads;
+  private final long defaultSagaTimeoutMillis;
+  private final int maxStartRequestsPerMinute;
   private final Properties properties;
   private final Properties rawProperties;
   private final @Nullable Path definitionsPath;
@@ -112,6 +135,10 @@ public final class SagaServerConfig {
       long syncTimeoutMillis,
       long syncMaxWaitMillis,
       String securityProvider,
+      int maxThreads,
+      int minThreads,
+      long defaultSagaTimeoutMillis,
+      int maxStartRequestsPerMinute,
       Properties properties,
       Properties rawProperties,
       @Nullable Path definitionsPath,
@@ -124,6 +151,10 @@ public final class SagaServerConfig {
     this.syncTimeoutMillis = syncTimeoutMillis;
     this.syncMaxWaitMillis = syncMaxWaitMillis;
     this.securityProvider = securityProvider;
+    this.maxThreads = maxThreads;
+    this.minThreads = minThreads;
+    this.defaultSagaTimeoutMillis = defaultSagaTimeoutMillis;
+    this.maxStartRequestsPerMinute = maxStartRequestsPerMinute;
     this.properties = applyStoreDefaults(copyOf(properties));
     this.rawProperties = copyOf(rawProperties);
     this.definitionsPath = definitionsPath;
@@ -191,6 +222,39 @@ public final class SagaServerConfig {
             DEFAULT_SYNC_MAX_WAIT_MILLIS,
             1L);
     String securityProvider = parseSecurityProvider(properties.getProperty(SECURITY_PROVIDER_KEY));
+    int maxThreads =
+        (int)
+            parseBoundedLong(
+                properties.getProperty(MAX_THREADS_KEY), MAX_THREADS_KEY, DEFAULT_MAX_THREADS, 1L);
+    int minThreads =
+        (int)
+            parseBoundedLong(
+                properties.getProperty(MIN_THREADS_KEY), MIN_THREADS_KEY, DEFAULT_MIN_THREADS, 1L);
+    if (minThreads > maxThreads) {
+      throw new IllegalArgumentException(
+          "'"
+              + MIN_THREADS_KEY
+              + "' ("
+              + minThreads
+              + ") must not exceed '"
+              + MAX_THREADS_KEY
+              + "' ("
+              + maxThreads
+              + ").");
+    }
+    long defaultSagaTimeoutMillis =
+        parseBoundedLong(
+            properties.getProperty(DEFAULT_SAGA_TIMEOUT_MILLIS_KEY),
+            DEFAULT_SAGA_TIMEOUT_MILLIS_KEY,
+            DEFAULT_SAGA_TIMEOUT_MILLIS,
+            0L);
+    int maxStartRequestsPerMinute =
+        (int)
+            parseBoundedLong(
+                properties.getProperty(MAX_START_REQUESTS_PER_MINUTE_KEY),
+                MAX_START_REQUESTS_PER_MINUTE_KEY,
+                DEFAULT_MAX_START_REQUESTS_PER_MINUTE,
+                0L);
     String definitions = properties.getProperty(DEFINITIONS_PATH_KEY);
     Path definitionsPath =
         (definitions == null || definitions.isBlank()) ? null : Path.of(definitions.trim());
@@ -203,6 +267,10 @@ public final class SagaServerConfig {
         syncTimeoutMillis,
         syncMaxWaitMillis,
         securityProvider,
+        maxThreads,
+        minThreads,
+        defaultSagaTimeoutMillis,
+        maxStartRequestsPerMinute,
         properties,
         rawProperties,
         definitionsPath,
@@ -381,6 +449,41 @@ public final class SagaServerConfig {
    */
   Properties rawProperties() {
     return copyOf(rawProperties);
+  }
+
+  /**
+   * Returns the maximum size of the HTTP (Jetty) request-handling thread pool (default {@value
+   * #DEFAULT_MAX_THREADS}). Caps concurrent request threads so a burst of slow requests cannot
+   * exhaust threads.
+   */
+  public int maxThreads() {
+    return maxThreads;
+  }
+
+  /**
+   * Returns the minimum (core) size of the HTTP thread pool (default {@value
+   * #DEFAULT_MIN_THREADS}).
+   */
+  public int minThreads() {
+    return minThreads;
+  }
+
+  /**
+   * Returns the server-wide default saga timeout (ms) applied to a loaded definition that specified
+   * none ({@code 0} = unbounded); {@code 0} (the default) disables it. A definition's own timeout
+   * always takes precedence — this only fills in for definitions that left it unset, so a
+   * daemon-hosted saga cannot run without a deadline.
+   */
+  public long defaultSagaTimeoutMillis() {
+    return defaultSagaTimeoutMillis;
+  }
+
+  /**
+   * Returns the per-principal rate limit on saga-start requests ({@code POST}/{@code PUT /sagas}),
+   * in requests per minute; {@code 0} (the default) disables rate limiting.
+   */
+  public int maxStartRequestsPerMinute() {
+    return maxStartRequestsPerMinute;
   }
 
   /** Returns the optional path to declarative saga definitions loaded at startup. */

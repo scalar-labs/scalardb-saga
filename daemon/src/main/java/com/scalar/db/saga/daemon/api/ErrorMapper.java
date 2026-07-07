@@ -68,6 +68,13 @@ public final class ErrorMapper {
               e.getRequiredRole().wireName());
           ctx.status(403).json(error("FORBIDDEN", "Insufficient permissions"));
         });
+    app.exception(
+        RateLimitExceededException.class,
+        (e, ctx) -> {
+          logger.debug(
+              "Rate limit exceeded on {} {}: {}", ctx.method(), ctx.path(), e.getMessage());
+          ctx.status(429).json(error("TOO_MANY_REQUESTS", "Rate limit exceeded"));
+        });
     // A client-supplied value the engine rejects (e.g. an invalid saga id or an unsupported input
     // value type) surfaces as IllegalArgumentException — a client error. Map it to 400 with a
     // generic, daemon-owned message rather than echoing the engine's wording.

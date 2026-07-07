@@ -65,6 +65,73 @@ class SagaServerTest {
     return SagaServerConfig.load(props);
   }
 
+  /** A declarative definition carrying its own explicit saga timeout. */
+  private static String declarativeJsonWithTimeout(String name, long timeoutMillis) {
+    return "{\"name\":\""
+        + name
+        + "\",\"mode\":\"SAGA\",\"timeoutMillis\":"
+        + timeoutMillis
+        + ",\"steps\":[{\"name\":\"s\",\"service\":\"svc\","
+        + "\"execution\":{\"method\":\"POST\",\"path\":\"/x\"},"
+        + "\"compensation\":{\"method\":\"POST\",\"path\":\"/y\"}}]}";
+  }
+
+  @Test
+  void constructor_definitionWithoutTimeout_appliesServerDefault(@TempDir Path dir)
+      throws Exception {
+    // Arrange — a definition with no timeout, and a server default of 30s
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.DEFAULT_SAGA_TIMEOUT_MILLIS_KEY, "30000");
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
+
+    // Act
+    new SagaServer(SagaServerConfig.load(props), orchestrator);
+
+    // Assert — the registered definition got the server default
+    ArgumentCaptor<SagaDefinition> captor = ArgumentCaptor.forClass(SagaDefinition.class);
+    verify(orchestrator).register(captor.capture());
+    assertThat(captor.getValue().getTimeoutMillis()).isEqualTo(30_000L);
+  }
+
+  @Test
+  void constructor_definitionWithOwnTimeout_isNotOverriddenByDefault(@TempDir Path dir)
+      throws Exception {
+    // Arrange — a definition that sets its own timeout, and a different server default
+    Files.writeString(dir.resolve("saga.json"), declarativeJsonWithTimeout("saga", 5000));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.DEFAULT_SAGA_TIMEOUT_MILLIS_KEY, "30000");
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
+
+    // Act
+    new SagaServer(SagaServerConfig.load(props), orchestrator);
+
+    // Assert — the definition's own timeout wins
+    ArgumentCaptor<SagaDefinition> captor = ArgumentCaptor.forClass(SagaDefinition.class);
+    verify(orchestrator).register(captor.capture());
+    assertThat(captor.getValue().getTimeoutMillis()).isEqualTo(5000L);
+  }
+
+  @Test
+  void constructor_noServerDefault_leavesDefinitionTimeoutUnbounded(@TempDir Path dir)
+      throws Exception {
+    // Arrange — no server default configured
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
+
+    // Act
+    new SagaServer(configWithDefinitionsPath(dir), orchestrator);
+
+    // Assert — timeout stays 0 (unbounded)
+    ArgumentCaptor<SagaDefinition> captor = ArgumentCaptor.forClass(SagaDefinition.class);
+    verify(orchestrator).register(captor.capture());
+    assertThat(captor.getValue().getTimeoutMillis()).isZero();
+  }
+
   @Test
   void constructor_definitionsDirectory_registersOnlyDefinitionFiles(@TempDir Path dir)
       throws Exception {

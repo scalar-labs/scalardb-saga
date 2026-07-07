@@ -59,6 +59,80 @@ class SagaServerConfigTest {
   }
 
   @Test
+  void threadPool_unset_appliesDefaults() {
+    SagaServerConfig config = SagaServerConfig.load(new Properties());
+
+    assertThat(config.maxThreads()).isEqualTo(SagaServerConfig.DEFAULT_MAX_THREADS);
+    assertThat(config.minThreads()).isEqualTo(SagaServerConfig.DEFAULT_MIN_THREADS);
+  }
+
+  @Test
+  void threadPool_configuredValues_areParsed() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.MAX_THREADS_KEY, "50");
+    props.setProperty(SagaServerConfig.MIN_THREADS_KEY, "4");
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.maxThreads()).isEqualTo(50);
+    assertThat(config.minThreads()).isEqualTo(4);
+  }
+
+  @Test
+  void threadPool_minExceedsMax_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.MAX_THREADS_KEY, "4");
+    props.setProperty(SagaServerConfig.MIN_THREADS_KEY, "8");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void threadPool_zeroMaxThreads_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.MAX_THREADS_KEY, "0");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void defaultSagaTimeoutMillis_unset_defaultsToDisabled() {
+    assertThat(SagaServerConfig.load(new Properties()).defaultSagaTimeoutMillis()).isZero();
+  }
+
+  @Test
+  void defaultSagaTimeoutMillis_configured_isParsed() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.DEFAULT_SAGA_TIMEOUT_MILLIS_KEY, "30000");
+
+    assertThat(SagaServerConfig.load(props).defaultSagaTimeoutMillis()).isEqualTo(30_000L);
+  }
+
+  @Test
+  void defaultSagaTimeoutMillis_negative_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.DEFAULT_SAGA_TIMEOUT_MILLIS_KEY, "-1");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void maxStartRequestsPerMinute_unset_defaultsToDisabled() {
+    assertThat(SagaServerConfig.load(new Properties()).maxStartRequestsPerMinute()).isZero();
+  }
+
+  @Test
+  void maxStartRequestsPerMinute_configured_isParsed() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY, "100");
+
+    assertThat(SagaServerConfig.load(props).maxStartRequestsPerMinute()).isEqualTo(100);
+  }
+
+  @Test
   void securityProvider_unset_defaultsToNoop() {
     SagaServerConfig config = SagaServerConfig.load(new Properties());
 

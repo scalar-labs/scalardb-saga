@@ -2,6 +2,7 @@ package com.scalar.db.saga.daemon;
 
 import com.scalar.db.saga.daemon.api.ErrorMapper;
 import com.scalar.db.saga.daemon.api.HealthResource;
+import com.scalar.db.saga.daemon.api.RateLimitHandler;
 import com.scalar.db.saga.daemon.api.SagaResource;
 import com.scalar.db.saga.daemon.grpc.SagaServiceImpl;
 import com.scalar.db.saga.daemon.security.AuthExemptions;
@@ -32,6 +33,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Stream;
+import org.eclipse.jetty.util.thread.QueuedThreadPool;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -61,6 +63,7 @@ public final class SagaServer implements AutoCloseable {
   private static final Logger logger = LoggerFactory.getLogger(SagaServer.class);
   private static final long GRPC_SHUTDOWN_MIN_SECONDS = 30L;
   private static final long GRPC_SHUTDOWN_SLACK_MILLIS = 5_000L;
+  private static final long THREAD_POOL_IDLE_TIMEOUT_MILLIS = 60_000L;
 
   private final SagaServerConfig config;
   private final DefaultSagaOrchestrator orchestrator;
@@ -91,7 +94,7 @@ public final class SagaServer implements AutoCloseable {
   SagaServer(SagaServerConfig config, DefaultSagaOrchestrator orchestrator) {
     this.config = Objects.requireNonNull(config, "config must not be null");
     this.orchestrator = Objects.requireNonNull(orchestrator, "orchestrator must not be null");
-    Javalin httpServer = config.httpEnabled() ? Javalin.create() : null;
+    Javalin httpServer = config.httpEnabled() ? createHttpServer(config) : null;
     ExecutorService grpcExecutor =
         config.grpcEnabled() ? Executors.newVirtualThreadPerTaskExecutor() : null;
     this.httpServer = httpServer;
@@ -210,7 +213,24 @@ public final class SagaServer implements AutoCloseable {
                 + " declarative service step, or run the engine in embedded mode for code steps.");
       }
     }
-    orchestrator.register(definition);
+    orchestrator.register(applyDefaultTimeout(definition));
+  }
+
+  /**
+   * Applies the server-wide default saga timeout to a definition that specified none ({@code
+   * timeoutMillis == 0}), so a daemon-hosted saga cannot run without a deadline. A definition's own
+   * timeout is left untouched, and when no default is configured this is a no-op.
+   */
+  private SagaDefinition applyDefaultTimeout(SagaDefinition definition) {
+    long defaultTimeout = config.defaultSagaTimeoutMillis();
+    if (defaultTimeout > 0 && definition.getTimeoutMillis() == 0) {
+      logger.info(
+          "Applying default timeout of {} ms to saga '{}' (no timeout set)",
+          defaultTimeout,
+          definition.getName());
+      return definition.withTimeoutMillis(defaultTimeout);
+    }
+    return definition;
   }
 
   private static boolean isDefinitionFile(Path path) {
@@ -218,11 +238,31 @@ public final class SagaServer implements AutoCloseable {
     return name.endsWith(".json") || name.endsWith(".yaml") || name.endsWith(".yml");
   }
 
+  /**
+   * Builds the Javalin app with a bounded Jetty thread pool, so a burst of slow requests cannot
+   * exhaust request-handling threads. {@code maxThreads} caps concurrency; the idle timeout lets
+   * the pool shrink back toward {@code minThreads} when quiet.
+   */
+  private static Javalin createHttpServer(SagaServerConfig config) {
+    return Javalin.create(
+        cfg ->
+            cfg.jetty.threadPool =
+                new QueuedThreadPool(
+                    config.maxThreads(),
+                    config.minThreads(),
+                    (int) THREAD_POOL_IDLE_TIMEOUT_MILLIS));
+  }
+
   private void registerRoutes(Javalin httpServer) {
     // The RBAC before-handler authenticates every request except the exempt paths. The liveness
     // probe carries no user credential; the async-callback route (PR B) authenticates with its own
     // per-step HMAC token and registers CallbackResource.PATH here when that work merges.
     SecurityHandler.register(httpServer, securityProvider, AuthExemptions.of(HealthResource.PATH));
+    // Rate limiting runs after auth (it keys off the resolved principal) and only when enabled;
+    // registered before the routes so it gates saga-start requests.
+    if (config.maxStartRequestsPerMinute() > 0) {
+      RateLimitHandler.register(httpServer, config.maxStartRequestsPerMinute());
+    }
     HealthResource.register(httpServer);
     ErrorMapper.register(httpServer);
     SagaResource.register(httpServer, orchestrator, config.syncTimeoutMillis());
