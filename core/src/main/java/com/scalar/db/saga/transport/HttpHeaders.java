@@ -10,6 +10,9 @@ final class HttpHeaders {
   static final String SAGA_ID = "X-Saga-Id";
   static final String SAGA_STEP = "X-Saga-Step";
   static final String SAGA_RETRYABLE = "X-Saga-Retryable";
+  // The callback URL a participant POSTs to when an async step completes (injected for async
+  // steps).
+  static final String SAGA_CALLBACK_URL = "X-Saga-Callback-Url";
   static final String CONTENT_TYPE = "Content-Type";
   static final String CONTENT_LENGTH = "Content-Length";
   static final String APPLICATION_JSON = "application/json";

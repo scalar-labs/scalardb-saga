@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.catchThrowable;
 
 import com.scalar.db.saga.api.HttpMethod;
 import com.scalar.db.saga.api.SagaContext;
+import com.scalar.db.saga.api.StepResult;
 import com.scalar.db.saga.definition.HttpCall;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
@@ -31,6 +32,7 @@ class HttpTransportAdapterTest {
   private final AtomicReference<String> requestContentType = new AtomicReference<>();
   private final AtomicReference<String> requestBody = new AtomicReference<>();
   private final AtomicReference<byte[]> requestBodyBytes = new AtomicReference<>();
+  private final AtomicReference<String> callbackUrlHeader = new AtomicReference<>();
   private final AtomicInteger hitCount = new AtomicInteger();
 
   @BeforeEach
@@ -70,6 +72,12 @@ class HttpTransportAdapterTest {
           requestBody.set(new String(raw, StandardCharsets.UTF_8));
           respondText(ex, 200, "plain-text-result");
         });
+    server.createContext(
+        "/async",
+        ex -> {
+          callbackUrlHeader.set(ex.getRequestHeaders().getFirst(HttpHeaders.SAGA_CALLBACK_URL));
+          respond(ex, 202, "{}"); // 202 Accepted — the participant will call back later
+        });
     server.createContext("/fail503", ex -> respond(ex, 503, "{}"));
     server.createContext("/fail422", ex -> respond(ex, 422, "{}"));
     server.createContext(
@@ -105,6 +113,61 @@ class HttpTransportAdapterTest {
   }
 
   @Test
+  void call_asyncStepReturns202_returnsPending() throws Exception {
+    HttpCall spec = HttpCall.newBuilder("/async").method(HttpMethod.POST).async(true).build();
+
+    StepResult result =
+        adapterWithProvider((sagaId, step) -> "http://cb/x").call(spec, ctx(Map.of()), "debit");
+
+    assertThat(result.isPending()).isTrue();
+  }
+
+  @Test
+  void call_asyncStep_injectsCallbackUrlHeader() throws Exception {
+    HttpCall spec = HttpCall.newBuilder("/async").method(HttpMethod.POST).async(true).build();
+
+    adapterWithProvider((sagaId, step) -> "http://cb/" + sagaId + "/" + step)
+        .call(spec, ctx(Map.of()), "debit");
+
+    assertThat(callbackUrlHeader.get()).isEqualTo("http://cb/saga-1/debit");
+  }
+
+  @Test
+  void call_nonAsyncStepReturns202_throwsNonRetryableTransportException() {
+    HttpCall spec = HttpCall.newBuilder("/async").method(HttpMethod.POST).build(); // not async
+
+    Throwable thrown = catchThrowable(() -> adapter.call(spec, ctx(Map.of()), "debit"));
+
+    assertThat(thrown).isInstanceOf(TransportException.class);
+    assertThat(((TransportException) thrown).isRetryable()).isFalse();
+  }
+
+  @Test
+  void call_asyncStepCompletedSynchronouslyWith200_returnsOutputNotPending() throws Exception {
+    // An async-capable step whose participant completes synchronously (200) does not park.
+    HttpCall spec =
+        HttpCall.newBuilder("/debit")
+            .method(HttpMethod.POST)
+            .async(true)
+            .output(Map.of("debitId", "$.debit_id"))
+            .build();
+
+    StepResult result =
+        adapterWithProvider((sagaId, step) -> "http://cb/x").call(spec, ctx(Map.of()), "debit");
+
+    assertThat(result.isPending()).isFalse();
+    assertThat(result.getOutput()).containsEntry("debitId", "DBT-1");
+  }
+
+  private HttpTransportAdapter adapterWithProvider(CallbackUrlProvider provider) {
+    String baseUrl = "http://localhost:" + server.getAddress().getPort();
+    return new HttpTransportAdapter(
+        baseUrl,
+        new HttpExchange(HttpClient.newHttpClient(), OutboundHttpPolicy.allowAll()),
+        provider);
+  }
+
+  @Test
   void call_boundStepDeadlineElapsesBeforeResponse_throwsRetryableTransportException() {
     // Arrange — the server is far slower than the bound step deadline.
     HttpCall spec = HttpCall.newBuilder("/slow").method(HttpMethod.GET).build();
@@ -137,7 +200,7 @@ class HttpTransportAdapterTest {
 
     // Act
     Map<String, Object> output =
-        adapter.call(spec, ctx(Map.of("acct", "A-1", "amount", 500)), "debit");
+        adapter.call(spec, ctx(Map.of("acct", "A-1", "amount", 500)), "debit").getOutput();
 
     // Assert
     assertThat(output).containsExactly(Map.entry("debitId", "DBT-1"));
@@ -157,7 +220,8 @@ class HttpTransportAdapterTest {
             .build();
 
     // Act
-    Map<String, Object> output = adapter.call(spec, ctx(Map.of("userId", "U1")), "fetch");
+    Map<String, Object> output =
+        adapter.call(spec, ctx(Map.of("userId", "U1")), "fetch").getOutput();
 
     // Assert
     assertThat(output).containsEntry("name", "Ann");
@@ -190,7 +254,8 @@ class HttpTransportAdapterTest {
             .build();
 
     // Act
-    Map<String, Object> output = adapter.call(spec, ctx(Map.of("text", "hi")), "notify");
+    Map<String, Object> output =
+        adapter.call(spec, ctx(Map.of("text", "hi")), "notify").getOutput();
 
     // Assert — the override content type and the templated raw body were sent; $body was captured.
     assertThat(requestContentType.get()).isEqualTo("application/xml");

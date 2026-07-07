@@ -39,7 +39,7 @@ class DeclarativeBindingTccStepTest {
     // Arrange
     TransportAdapter transport = mock(TransportAdapter.class);
     when(transport.call(eq(RESERVATION), any(), eq("seat")))
-        .thenReturn(Map.of("reservationId", "R-1"));
+        .thenReturn(StepResult.of(Map.of("reservationId", "R-1")));
 
     // Act
     StepResult result = adapter(transport).reserve(CTX);

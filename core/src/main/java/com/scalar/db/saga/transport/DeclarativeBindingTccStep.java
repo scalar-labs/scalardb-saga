@@ -47,7 +47,7 @@ final class DeclarativeBindingTccStep implements TccStep {
   @Override
   public StepResult reserve(SagaContext context) throws StepExecutionException {
     try {
-      return StepResult.of(transport.call(reserve, context, name));
+      return transport.call(reserve, context, name);
     } catch (TransportException e) {
       throw new StepExecutionException(e, e.isRetryable(), e.knownNotCommitted());
     }

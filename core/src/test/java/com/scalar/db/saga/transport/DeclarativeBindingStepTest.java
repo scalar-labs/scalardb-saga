@@ -38,7 +38,8 @@ class DeclarativeBindingStepTest {
   void execute_callsExecutionSpec_returnsStepResultFromOutput() throws Exception {
     // Arrange
     TransportAdapter transport = mock(TransportAdapter.class);
-    when(transport.call(eq(EXECUTION), any(), eq("debit"))).thenReturn(Map.of("debitId", "DBT-1"));
+    when(transport.call(eq(EXECUTION), any(), eq("debit")))
+        .thenReturn(StepResult.of(Map.of("debitId", "DBT-1")));
 
     // Act
     StepResult result = adapter(transport).execute(CTX);

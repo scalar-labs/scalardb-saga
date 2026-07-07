@@ -328,6 +328,27 @@ class SagaServerConfigTest {
   }
 
   @Test
+  void load_unsetCallbackBaseUrl_isEmpty() {
+    assertThat(SagaServerConfig.load(new Properties()).callbackBaseUrl()).isEmpty();
+  }
+
+  @Test
+  void load_callbackBaseUrlGiven_isPresent() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.CALLBACK_BASE_URL_KEY, "http://daemon:8080");
+
+    assertThat(SagaServerConfig.load(props).callbackBaseUrl()).contains("http://daemon:8080");
+  }
+
+  @Test
+  void load_callbackBaseUrlTrailingSlash_isStripped() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.CALLBACK_BASE_URL_KEY, "http://daemon:8080/");
+
+    assertThat(SagaServerConfig.load(props).callbackBaseUrl()).contains("http://daemon:8080");
+  }
+
+  @Test
   void load_callbackSecretFileReference_isResolved(@TempDir Path dir) throws IOException {
     Path secretFile = dir.resolve("callback.secret");
     Files.writeString(secretFile, "resolved-secret-value", StandardCharsets.UTF_8);

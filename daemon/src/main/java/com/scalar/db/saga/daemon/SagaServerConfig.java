@@ -73,6 +73,10 @@ public final class SagaServerConfig {
   // secret reference (resolved by resolveSecrets, like every other scalar.db.saga.* key).
   static final String SECURITY_PREFIX = SERVER_PREFIX + "security.";
   static final String CALLBACK_SECRET_KEY = SECURITY_PREFIX + "callback_secret";
+  // The daemon's externally-reachable base URL, used to build the callback URL handed to a
+  // participant for an async step. Not a secret (a plain server address), so it lives directly
+  // under server.* rather than server.security.*.
+  static final String CALLBACK_BASE_URL_KEY = SERVER_PREFIX + "callback_base_url";
   static final String STORE_MAX_EVENT_PAYLOAD_BYTES_KEY = PREFIX + "store.max_event_payload_bytes";
   static final String DEFAULT_HOST = "0.0.0.0";
   static final int DEFAULT_PORT = 8080;
@@ -92,6 +96,7 @@ public final class SagaServerConfig {
   private final long syncTimeoutMillis;
   private final long syncMaxWaitMillis;
   private final @Nullable String callbackSecret;
+  private final @Nullable String callbackBaseUrl;
   private final Properties properties;
   private final @Nullable Path definitionsPath;
   private final Map<String, String> serviceBaseUrls;
@@ -105,6 +110,7 @@ public final class SagaServerConfig {
       long syncTimeoutMillis,
       long syncMaxWaitMillis,
       @Nullable String callbackSecret,
+      @Nullable String callbackBaseUrl,
       Properties properties,
       @Nullable Path definitionsPath,
       Map<String, String> serviceBaseUrls) {
@@ -116,6 +122,7 @@ public final class SagaServerConfig {
     this.syncTimeoutMillis = syncTimeoutMillis;
     this.syncMaxWaitMillis = syncMaxWaitMillis;
     this.callbackSecret = callbackSecret;
+    this.callbackBaseUrl = callbackBaseUrl;
     this.properties = applyStoreDefaults(copyOf(properties));
     this.definitionsPath = definitionsPath;
     this.serviceBaseUrls = Map.copyOf(serviceBaseUrls);
@@ -183,6 +190,7 @@ public final class SagaServerConfig {
     String callbackSecretRaw = properties.getProperty(CALLBACK_SECRET_KEY);
     String callbackSecret =
         (callbackSecretRaw == null || callbackSecretRaw.isBlank()) ? null : callbackSecretRaw;
+    String callbackBaseUrl = parseCallbackBaseUrl(properties.getProperty(CALLBACK_BASE_URL_KEY));
     String definitions = properties.getProperty(DEFINITIONS_PATH_KEY);
     Path definitionsPath =
         (definitions == null || definitions.isBlank()) ? null : Path.of(definitions.trim());
@@ -195,6 +203,7 @@ public final class SagaServerConfig {
         syncTimeoutMillis,
         syncMaxWaitMillis,
         callbackSecret,
+        callbackBaseUrl,
         properties,
         definitionsPath,
         parseServiceBaseUrls(properties));
@@ -344,6 +353,15 @@ public final class SagaServerConfig {
   }
 
   /**
+   * Returns the daemon's externally-reachable base URL used to build async-step callback URLs, or
+   * empty when unset. Any trailing {@code /} is stripped so a callback path can be appended
+   * directly.
+   */
+  public Optional<String> callbackBaseUrl() {
+    return Optional.ofNullable(callbackBaseUrl);
+  }
+
+  /**
    * Returns a defensive copy of the underlying configuration properties forwarded to construct the
    * saga engine's persistence.
    */
@@ -367,6 +385,15 @@ public final class SagaServerConfig {
 
   private static String parseHost(@Nullable String value) {
     return (value == null || value.isBlank()) ? DEFAULT_HOST : value.trim();
+  }
+
+  /** Trims the callback base URL and strips a trailing {@code /}; blank ⇒ null (unset). */
+  private static @Nullable String parseCallbackBaseUrl(@Nullable String value) {
+    if (value == null || value.isBlank()) {
+      return null;
+    }
+    String trimmed = value.trim();
+    return trimmed.endsWith("/") ? trimmed.substring(0, trimmed.length() - 1) : trimmed;
   }
 
   private static int parsePort(@Nullable String value, String key, int defaultPort) {

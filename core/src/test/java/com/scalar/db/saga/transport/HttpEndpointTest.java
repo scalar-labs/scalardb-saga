@@ -12,6 +12,7 @@ import com.scalar.db.saga.api.TccStep;
 import com.scalar.db.saga.definition.CallSpec;
 import com.scalar.db.saga.definition.HttpCall;
 import com.scalar.db.saga.definition.SagaDefinition.ServiceStep.Phase;
+import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -44,6 +45,30 @@ class HttpEndpointTest {
 
   private static HttpServiceConfig config(String baseUrl) {
     return new HttpServiceConfig(baseUrl, List.of(), -1, null, Map.of());
+  }
+
+  private static Map<Phase, CallSpec> asyncSagaPhases() {
+    return Map.of(
+        Phase.EXECUTION, HttpCall.newBuilder("/do").async(true).build(),
+        Phase.COMPENSATION, HttpCall.newBuilder("/undo").build());
+  }
+
+  @Test
+  void toStep_asyncPhaseWithoutCallbackProvider_throwsSagaDefinitionException() {
+    // An async step with no callback URL provider configured cannot be provisioned — fail fast at
+    // plan build rather than parking a saga that could never be completed.
+    HttpEndpoint endpoint = HttpEndpoint.create(config("http://svc:8080"));
+
+    assertThatThrownBy(() -> endpoint.toStep("debit", asyncSagaPhases()))
+        .isInstanceOf(SagaDefinitionException.class);
+  }
+
+  @Test
+  void toStep_asyncPhaseWithCallbackProvider_succeeds() {
+    HttpEndpoint endpoint =
+        HttpEndpoint.create(config("http://svc:8080"), (sagaId, step) -> "http://cb/x");
+
+    assertThatCode(() -> endpoint.toStep("debit", asyncSagaPhases())).doesNotThrowAnyException();
   }
 
   @Test

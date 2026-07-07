@@ -15,6 +15,7 @@ import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.SagaStoreFactory;
 import com.scalar.db.saga.store.StepEvent;
+import com.scalar.db.saga.transport.CallbackUrlProvider;
 import com.scalar.db.saga.transport.HttpServiceConfig;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -601,6 +602,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     private final Map<String, HttpServiceConfig> httpEndpoints = new HashMap<>();
     private @Nullable RecoveryConfig recoveryConfig;
     private @Nullable RetentionConfig retentionConfig;
+    private @Nullable CallbackUrlProvider callbackUrlProvider;
 
     private Builder() {}
 
@@ -806,6 +808,20 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     }
 
     /**
+     * Sets the provider that mints the callback URL injected into an async step's outgoing request
+     * (daemon mode). When unset, async steps cannot be provisioned and registering an async
+     * definition fails fast.
+     *
+     * @param callbackUrlProvider the callback URL provider
+     * @return this builder
+     */
+    public Builder callbackUrlProvider(CallbackUrlProvider callbackUrlProvider) {
+      this.callbackUrlProvider =
+          Objects.requireNonNull(callbackUrlProvider, "callbackUrlProvider must not be null");
+      return this;
+    }
+
+    /**
      * Builds and returns a configured {@link DefaultSagaOrchestrator}.
      *
      * @return the orchestrator
@@ -830,7 +846,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
         // on close (or here if build fails) — mirroring the store's lifecycle. A code step's
         // SagaHttpClient and a declarative step against the same endpoint share one HttpExchange
         // (one client, one policy).
-        httpEndpointRegistry = HttpEndpointRegistry.create(httpEndpoints);
+        httpEndpointRegistry = HttpEndpointRegistry.create(httpEndpoints, callbackUrlProvider);
         StepResolver resolver = buildStepResolver();
 
         RecoveryConfig resolvedRecoveryConfig =
