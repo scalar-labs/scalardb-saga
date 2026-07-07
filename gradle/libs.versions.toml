@@ -1,6 +1,7 @@
 [versions]
 scalardb = "3.17.3"
 jackson = "2.18.6"
+commons-text = "1.15.0"
 slf4j = "2.0.17"
 logback = "1.5.32"
 junit-jupiter = "5.13.4"
@@ -28,6 +29,7 @@ scalardb = { module = "com.scalar-labs:scalardb", version.ref = "scalardb" }
 jackson-bom = { module = "com.fasterxml.jackson:jackson-bom", version.ref = "jackson" }
 jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind" }
 jackson-dataformat-yaml = { module = "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml" }
+commons-text = { module = "org.apache.commons:commons-text", version.ref = "commons-text" }
 slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
 logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
 mockito-core = { module = "org.mockito:mockito-core", version.ref = "mockito" }

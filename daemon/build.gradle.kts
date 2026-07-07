@@ -16,6 +16,7 @@ dependencies {
     implementation(libs.grpc.services)
     implementation(libs.protobuf.java)
     implementation(libs.javalin)
+    implementation(libs.commons.text)
     implementation(libs.slf4j.api)
     implementation(platform(libs.jackson.bom))
     implementation(libs.jackson.databind)

@@ -4,8 +4,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.entry;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Properties;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class SagaServerConfigTest {
 
@@ -272,5 +277,79 @@ class SagaServerConfigTest {
 
     assertThatThrownBy(() -> SagaServerConfig.load(props))
         .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void load_sagaNamespaceSecretReference_isResolved(@TempDir Path dir) throws IOException {
+    // A scalar.db.saga.* value may carry a secret reference; here host is resolved from a file.
+    Path secret = dir.resolve("host");
+    Files.writeString(secret, "10.1.2.3", StandardCharsets.UTF_8);
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "${file:UTF-8:" + secret + "}");
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.host()).isEqualTo("10.1.2.3");
+  }
+
+  @Test
+  void load_scalarDbNamespaceSecretReference_isLeftForScalarDb() {
+    // A scalar.db.* store key is NOT resolved by the daemon (ScalarDB resolves it). If the daemon
+    // wrongly resolved it, the missing-file reference would throw; instead it is preserved
+    // verbatim.
+    Properties props = new Properties();
+    props.setProperty("scalar.db.contact_points", "${file:UTF-8:/does/not/exist}");
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.properties().getProperty("scalar.db.contact_points"))
+        .isEqualTo("${file:UTF-8:/does/not/exist}");
+  }
+
+  @Test
+  void load_nonStringPropertyEntry_isPreserved() {
+    // A programmatically populated Properties may hold non-string entries (Properties extends
+    // Hashtable). Since the same object is forwarded to ScalarDB as the store config,
+    // resolveSecrets
+    // must copy such entries through rather than silently drop them (stringPropertyNames() omits
+    // them).
+    Object nonStringValue = 12345;
+    Properties props = new Properties();
+    props.put("scalar.db.some.numeric_setting", nonStringValue);
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.properties().get("scalar.db.some.numeric_setting")).isEqualTo(nonStringValue);
+  }
+
+  @Test
+  void load_nonSagaPropertyInDefaults_isPreserved() {
+    // A caller may pass Properties backed by defaults (new Properties(defaults)).
+    // stringPropertyNames() lists defaulted keys, but putAll/copyOf would not copy them —
+    // resolveSecrets must still carry non-saga store keys through, or ScalarDB loses its connection
+    // settings at startup.
+    Properties defaults = new Properties();
+    defaults.setProperty("scalar.db.contact_points", "cassandra-host");
+    Properties props = new Properties(defaults);
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.properties().getProperty("scalar.db.contact_points"))
+        .isEqualTo("cassandra-host");
+  }
+
+  @Test
+  void load_sagaSecretReferenceInDefaults_isResolved(@TempDir Path dir) throws IOException {
+    // A scalar.db.saga.* secret reference inherited from the defaults chain must still be resolved,
+    // not just carried through verbatim.
+    Path secret = dir.resolve("host");
+    Files.writeString(secret, "10.9.8.7", StandardCharsets.UTF_8);
+    Properties defaults = new Properties();
+    defaults.setProperty(SagaServerConfig.HOST_KEY, "${file:UTF-8:" + secret + "}");
+    Properties props = new Properties(defaults);
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.host()).isEqualTo("10.9.8.7");
   }
 }
