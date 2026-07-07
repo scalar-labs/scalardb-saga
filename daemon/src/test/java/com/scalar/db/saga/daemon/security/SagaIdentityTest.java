@@ -79,6 +79,17 @@ class SagaIdentityTest {
   }
 
   @Test
+  void hasRole_holdsMixedLowerAndHigherRoles_authorizesViaHighest() {
+    // Arrange — a set with a gap: READ and ADMIN present, WRITE absent
+    SagaIdentity identity = SagaIdentity.of("alice", Set.of(SagaRole.READ, SagaRole.ADMIN));
+
+    // Assert — ADMIN covers the missing WRITE (and READ); the lower READ never restricts
+    assertThat(identity.hasRole(SagaRole.READ)).isTrue();
+    assertThat(identity.hasRole(SagaRole.WRITE)).isTrue();
+    assertThat(identity.hasRole(SagaRole.ADMIN)).isTrue();
+  }
+
+  @Test
   void hasRole_holdsOnlyLowerRole_deniesHigherRequirement() {
     // Arrange
     SagaIdentity reader = SagaIdentity.of("bob", Set.of(SagaRole.READ));

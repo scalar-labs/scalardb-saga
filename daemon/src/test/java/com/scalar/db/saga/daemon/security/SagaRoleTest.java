@@ -37,4 +37,20 @@ class SagaRoleTest {
     assertThat(SagaRole.READ.implies(SagaRole.ADMIN)).isFalse();
     assertThat(SagaRole.WRITE.implies(SagaRole.ADMIN)).isFalse();
   }
+
+  @Test
+  void fromWireName_knownWireNameGiven_returnsRole() {
+    // Assert
+    assertThat(SagaRole.fromWireName("saga:read")).contains(SagaRole.READ);
+    assertThat(SagaRole.fromWireName("saga:write")).contains(SagaRole.WRITE);
+    assertThat(SagaRole.fromWireName("saga:admin")).contains(SagaRole.ADMIN);
+  }
+
+  @Test
+  void fromWireName_unknownOrShortNameGiven_returnsEmpty() {
+    // Assert — only the exact wire name matches (not the enum's own name)
+    assertThat(SagaRole.fromWireName("read")).isEmpty();
+    assertThat(SagaRole.fromWireName("SAGA:READ")).isEmpty();
+    assertThat(SagaRole.fromWireName("saga:superuser")).isEmpty();
+  }
 }

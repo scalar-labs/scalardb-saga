@@ -1,5 +1,6 @@
 package com.scalar.db.saga.daemon;
 
+import com.scalar.db.saga.daemon.security.JwtSecurityProvider;
 import com.scalar.db.saga.daemon.security.NoopSecurityProvider;
 import com.scalar.db.saga.daemon.security.SagaSecurityProvider;
 import java.util.Objects;
@@ -8,10 +9,10 @@ import java.util.Objects;
  * Builds the configured {@link SagaSecurityProvider} from a {@link SagaServerConfig}, selected by
  * {@link SagaServerConfig#securityProvider()}.
  *
- * <p>Currently supports only {@code noop} (the default — no authentication). The JWT provider (PR
- * C2) and the pre-shared-API-key provider (PR C3) register their own {@code case} branches here as
- * they land; an unrecognized name fails startup with a clear message rather than silently falling
- * back to no authentication.
+ * <p>Supports {@code noop} (the default — no authentication) and {@code jwt} (Bearer-JWT validation
+ * against a remote JWKS). The pre-shared-API-key provider (PR C3) registers its own {@code case}
+ * branch here when it lands; an unrecognized name fails startup with a clear message rather than
+ * silently falling back to no authentication.
  */
 final class SecurityProviderFactory {
 
@@ -29,13 +30,14 @@ final class SecurityProviderFactory {
     String name = config.securityProvider();
     return switch (name) {
       case "noop" -> new NoopSecurityProvider();
+      case "jwt" -> JwtSecurityProvider.create(config.properties());
       default ->
           throw new IllegalArgumentException(
               "Unknown security provider '"
                   + name
                   + "' for '"
                   + SagaServerConfig.SECURITY_PROVIDER_KEY
-                  + "'. Supported: noop.");
+                  + "'. Supported: noop, jwt.");
     };
   }
 }

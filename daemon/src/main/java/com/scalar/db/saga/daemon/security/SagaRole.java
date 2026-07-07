@@ -1,5 +1,7 @@
 package com.scalar.db.saga.daemon.security;
 
+import java.util.Optional;
+
 /**
  * A role granted to an authenticated caller, gating access to the daemon's endpoints (RBAC).
  *
@@ -39,6 +41,20 @@ public enum SagaRole {
    */
   public String wireName() {
     return wireName;
+  }
+
+  /**
+   * Returns the role whose {@link #wireName()} equals {@code wireName} (e.g. {@code "saga:write"} →
+   * {@link #WRITE}), or empty if none matches. Providers use this to map a credential's claim
+   * values (JWT scopes, an API key's configured roles) onto the RBAC roles.
+   */
+  public static Optional<SagaRole> fromWireName(String wireName) {
+    for (SagaRole role : values()) {
+      if (role.wireName.equals(wireName)) {
+        return Optional.of(role);
+      }
+    }
+    return Optional.empty();
   }
 
   /**
