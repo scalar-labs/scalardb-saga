@@ -41,6 +41,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -1067,7 +1068,8 @@ class SagaIntegrationTest {
     @Test
     void recover_overdueParkedStepBeforePivot_compensates() throws Exception {
       // Arrange — step2 parks (returns pending); the saga-level timeout bounds the class-step park.
-      MutableClock clock = new MutableClock(Instant.parse("2025-01-01T00:00:00Z"));
+      // The clock starts at real "now" so the grace check aligns with the store's event timestamps.
+      MutableClock clock = new MutableClock(Instant.now());
       FakeStep step1 = FakeStep.newBuilder("step1").build();
       FakeStep step2 = FakeStep.newBuilder("step2").executeReturns(StepResult.pending()).build();
       SagaDefinition def =
@@ -1089,8 +1091,9 @@ class SagaIntegrationTest {
         String sagaId = orchestrator.start("test-saga", Map.of());
         assertThat(orchestrator.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.WAITING);
 
-        // Act 2 — advance past the park deadline, then run a recovery pass
-        clock.advance(Duration.ofMinutes(2));
+        // Act 2 — advance past the park deadline AND the re-drive grace period (default 4h), so the
+        // timeout gives up (compensates) rather than re-driving, then run a recovery pass
+        clock.advance(Duration.ofHours(5));
         orchestrator.recover();
 
         // Assert — timed out (pre-pivot) -> compensated; the completed step rolled back; row
@@ -1104,8 +1107,9 @@ class SagaIntegrationTest {
 
     @Test
     void recover_overdueParkedStepAfterPivot_escalates() throws Exception {
-      // Arrange — FORWARD saga (pivot = -1), so the parked step is post-pivot -> escalate
-      MutableClock clock = new MutableClock(Instant.parse("2025-01-01T00:00:00Z"));
+      // Arrange — FORWARD saga (pivot = -1), so the parked step is post-pivot -> escalate. The
+      // clock starts at real "now" so the grace check aligns with the store's event timestamps.
+      MutableClock clock = new MutableClock(Instant.now());
       FakeStep step1 = FakeStep.newBuilder("step1").executeReturns(StepResult.pending()).build();
       SagaDefinition def =
           SagaDefinition.newBuilder("test-saga")
@@ -1123,12 +1127,60 @@ class SagaIntegrationTest {
         String sagaId = orchestrator.start("test-saga", Map.of());
         assertThat(orchestrator.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.WAITING);
 
-        clock.advance(Duration.ofMinutes(2));
+        // Advance past the park deadline AND the re-drive grace period (default 4h) so the timeout
+        // gives up (escalates) rather than re-driving.
+        clock.advance(Duration.ofHours(5));
         orchestrator.recover();
 
         // Assert — post-pivot timeout escalates (no compensation); parked row cleared
         assertThat(orchestrator.getStateSnapshot(sagaId).getStatus())
             .isEqualTo(SagaStatus.ESCALATED);
+        assertThat(step1.getCompensationCount()).isEqualTo(0);
+        assertThat(store.findOverdueParkedSagas(farFuture(), null).sagaIds()).isEmpty();
+      }
+    }
+
+    @Test
+    void recover_overdueParkedStepWithinBounds_redrivesAndCompletes() throws Exception {
+      // Arrange — step2 parks on its first execute, then completes when the re-drive re-issues it.
+      // The clock starts at real "now" so the grace check aligns with the store's event timestamps.
+      MutableClock clock = new MutableClock(Instant.now());
+      FakeStep step1 = FakeStep.newBuilder("step1").build();
+      AtomicInteger step2Calls = new AtomicInteger();
+      FakeStep step2 =
+          FakeStep.newBuilder("step2")
+              .executeAction(
+                  ctx ->
+                      step2Calls.getAndIncrement() == 0
+                          ? StepResult.pending()
+                          : StepResult.of("done", true))
+              .build();
+      SagaDefinition def =
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
+              .timeoutMillis(60_000)
+              .step("step1", STEP_CLASS)
+              .add()
+              .step("step2", STEP_CLASS)
+              .add()
+              .build();
+
+      try (SagaStore store = ScalarDbSagaStoreFactory.create(props).createStore();
+          DefaultSagaOrchestrator orchestrator =
+              buildOrchestrator(Map.of("step1", step1, "step2", step2), clock)) {
+        orchestrator.register(def);
+
+        String sagaId = orchestrator.start("test-saga", Map.of());
+        assertThat(orchestrator.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.WAITING);
+
+        // Advance past the park deadline but WITHIN the grace period (and under maxAttempts): the
+        // sweep re-drives (re-issues) step2, which now completes -> the saga finishes.
+        clock.advance(Duration.ofMinutes(2));
+        orchestrator.recover();
+
+        assertThat(orchestrator.getStateSnapshot(sagaId).getStatus())
+            .isEqualTo(SagaStatus.COMPLETED);
+        assertThat(step2.getExecutionCount()).isEqualTo(2); // initial park + one re-drive
         assertThat(step1.getCompensationCount()).isEqualTo(0);
         assertThat(store.findOverdueParkedSagas(farFuture(), null).sagaIds()).isEmpty();
       }

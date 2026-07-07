@@ -668,11 +668,11 @@ class ScalarDbSagaStoreTest {
   }
 
   // ---------------------------------------------------------------------------
-  // timeoutParkedStep
+  // failParkedStep
   // ---------------------------------------------------------------------------
 
   @Test
-  void timeoutParkedStep_toCompensating_transitionsAndDeletesParkedRow() throws Exception {
+  void failParkedStep_toCompensating_transitionsAndDeletesParkedRow() throws Exception {
     // Arrange — pre-pivot timeout: WAITING -> COMPENSATING, STEP_FAILED, delete the parked row
     Instant now = Instant.now();
     SagaStateSnapshot current =
@@ -685,7 +685,7 @@ class ScalarDbSagaStoreTest {
 
     // Act
     SagaStateSnapshot result =
-        store.timeoutParkedStep(
+        store.failParkedStep(
             current, 4, StepEvent.failed(1, "charge", null), SagaStatus.COMPENSATING);
 
     // Assert
@@ -698,7 +698,7 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
-  void timeoutParkedStep_toEscalatedUnboundedPark_transitionsWithoutDeletingRow() throws Exception {
+  void failParkedStep_toEscalatedUnboundedPark_transitionsWithoutDeletingRow() throws Exception {
     // Arrange — post-pivot timeout of an unbounded park: WAITING -> ESCALATED, no parked row
     Instant now = Instant.now();
     SagaStateSnapshot current =
@@ -709,8 +709,7 @@ class ScalarDbSagaStoreTest {
 
     // Act
     SagaStateSnapshot result =
-        store.timeoutParkedStep(
-            current, 4, StepEvent.failed(1, "charge", null), SagaStatus.ESCALATED);
+        store.failParkedStep(current, 4, StepEvent.failed(1, "charge", null), SagaStatus.ESCALATED);
 
     // Assert
     assertThat(result.getStatus()).isEqualTo(SagaStatus.ESCALATED);
@@ -721,7 +720,7 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
-  void timeoutParkedStep_invalidTargetStatusGiven_throwsIllegalArgumentException() {
+  void failParkedStep_invalidTargetStatusGiven_throwsIllegalArgumentException() {
     // Arrange
     Instant now = Instant.now();
     SagaStateSnapshot current =
@@ -731,13 +730,13 @@ class ScalarDbSagaStoreTest {
     // Act & Assert — only COMPENSATING / ESCALATED are valid targets
     assertThatThrownBy(
             () ->
-                store.timeoutParkedStep(
+                store.failParkedStep(
                     current, 4, StepEvent.failed(1, "charge", null), SagaStatus.RUNNING))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
-  void timeoutParkedStep_rowNotFound_throwsSagaConcurrentModificationException() throws Exception {
+  void failParkedStep_rowNotFound_throwsSagaConcurrentModificationException() throws Exception {
     // Arrange — a concurrent callback won the WAITING CK
     Instant now = Instant.now();
     SagaStateSnapshot current =
@@ -748,14 +747,14 @@ class ScalarDbSagaStoreTest {
     // Act & Assert
     assertThatThrownBy(
             () ->
-                store.timeoutParkedStep(
+                store.failParkedStep(
                     current, 1, StepEvent.failed(1, "charge", null), SagaStatus.COMPENSATING))
         .isInstanceOf(SagaConcurrentModificationException.class);
   }
 
   @Test
   void
-      timeoutParkedStep_unknownStatusAndVerifierFindsCrossTypeEvent_throwsSagaConcurrentModificationException()
+      failParkedStep_unknownStatusAndVerifierFindsCrossTypeEvent_throwsSagaConcurrentModificationException()
           throws Exception {
     // Symmetric to the resume case: the sweep's commit is ambiguous and a concurrent callback won
     // the WAITING CK, writing STEP_COMPLETED at the sequence. The verifier must not accept that as
@@ -778,8 +777,53 @@ class ScalarDbSagaStoreTest {
     // Act & Assert
     assertThatThrownBy(
             () ->
-                store.timeoutParkedStep(
+                store.failParkedStep(
                     current, 4, StepEvent.failed(1, "charge", null), SagaStatus.COMPENSATING))
+        .isInstanceOf(SagaConcurrentModificationException.class);
+  }
+
+  // ---------------------------------------------------------------------------
+  // redriveParkedStep
+  // ---------------------------------------------------------------------------
+
+  @Test
+  void redriveParkedStep_parkedRowExists_transitionsToRunningAndDeletesParkedRow()
+      throws Exception {
+    // Arrange — un-park a timed-out step to re-drive it: WAITING -> RUNNING, STEP_REISSUING, clear
+    // the parked row.
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+    Result parkedRow = mock(Result.class);
+    when(parkedRow.getTimestampTZ("parked_deadline")).thenReturn(now.plusSeconds(600));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(parkedRow));
+
+    // Act
+    SagaStateSnapshot result =
+        store.redriveParkedStep(current, 4, StepEvent.reissuing(1, "charge"));
+
+    // Assert
+    assertThat(result.getStatus()).isEqualTo(SagaStatus.RUNNING);
+    // STEP_REISSUING event insert + state insert
+    verify(tx, times(2)).insert(any(Insert.class));
+    // state delete + parked-row delete
+    verify(tx, times(2)).delete(any(Delete.class));
+    verify(tx).commit();
+  }
+
+  @Test
+  void redriveParkedStep_rowNotFound_throwsSagaConcurrentModificationException() throws Exception {
+    // Arrange — a concurrent callback / timeout won the WAITING CK
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.empty());
+
+    // Act & Assert
+    assertThatThrownBy(() -> store.redriveParkedStep(current, 1, StepEvent.reissuing(1, "charge")))
         .isInstanceOf(SagaConcurrentModificationException.class);
   }
 

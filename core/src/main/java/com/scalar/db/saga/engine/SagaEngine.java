@@ -196,6 +196,10 @@ public class SagaEngine implements AutoCloseable {
           // Park marker (RUNNING → WAITING); superseded by STEP_COMPLETED on resume or STEP_FAILED
           // on timeout, so there is nothing to fold into context here.
         }
+        case STEP_REISSUING -> {
+          // Un-park marker (WAITING → RUNNING) before a timed-out async step is re-issued; the
+          // re-execution re-parks (a fresh STEP_PENDING). Nothing to fold into context.
+        }
         case STEP_COMPLETED -> {
           StepEvent stepEvent = (StepEvent) event;
           Map<String, Object> output =

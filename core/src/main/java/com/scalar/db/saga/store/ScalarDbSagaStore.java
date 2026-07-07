@@ -359,11 +359,11 @@ public class ScalarDbSagaStore implements SagaStore {
   }
 
   @Override
-  public SagaStateSnapshot timeoutParkedStep(
+  public SagaStateSnapshot failParkedStep(
       SagaStateSnapshot current, int sequence, StepEvent failedEvent, SagaStatus targetStatus) {
     if (targetStatus != SagaStatus.COMPENSATING && targetStatus != SagaStatus.ESCALATED) {
       throw new IllegalArgumentException(
-          "timeoutParkedStep targetStatus must be COMPENSATING or ESCALATED, got " + targetStatus);
+          "failParkedStep targetStatus must be COMPENSATING or ESCALATED, got " + targetStatus);
     }
     validatePayloadSize(failedEvent.getPayload());
     String sagaId = current.getSagaId();
@@ -373,8 +373,8 @@ public class ScalarDbSagaStore implements SagaStore {
         tx -> {
           Instant now = Instant.now();
 
-          // Fail-fast pre-check on the WAITING CK; the real timeout-vs-callback exclusion is the
-          // state-row delete below (same mechanism as resumeParkedStep above).
+          // Fail-fast pre-check on the WAITING CK; the real give-up-vs-callback-vs-re-drive
+          // exclusion is the state-row delete below (same mechanism as resumeParkedStep above).
           int oldStatus = current.getStatus().getStatusCode();
           if (tx.get(buildStateGet(bucket, oldStatus, current.getUpdatedAt(), sagaId)).isEmpty()) {
             throw new SagaConcurrentModificationException(sagaId);
@@ -393,18 +393,51 @@ public class ScalarDbSagaStore implements SagaStore {
           return updated;
         },
         verifyTransitionCommitted(sagaId, sequence, failedEvent.getEventType()),
-        "time out parked step for saga " + sagaId);
+        "fail parked step for saga " + sagaId);
+  }
+
+  @Override
+  public SagaStateSnapshot redriveParkedStep(
+      SagaStateSnapshot current, int sequence, StepEvent redriveEvent) {
+    String sagaId = current.getSagaId();
+    int bucket = schema.bucketOf(sagaId);
+
+    return runInTransaction(
+        tx -> {
+          Instant now = Instant.now();
+
+          // Fail-fast pre-check on the WAITING CK; the real re-drive-vs-callback-vs-give-up
+          // exclusion is the state-row delete below (same mechanism as resumeParkedStep above).
+          int oldStatus = current.getStatus().getStatusCode();
+          if (tx.get(buildStateGet(bucket, oldStatus, current.getUpdatedAt(), sagaId)).isEmpty()) {
+            throw new SagaConcurrentModificationException(sagaId);
+          }
+
+          tx.insert(buildEventInsert(sagaId, sequence, redriveEvent, now));
+          tx.delete(buildStateDelete(bucket, oldStatus, current.getUpdatedAt(), sagaId));
+          SagaStateSnapshot updated = current.withTransition(SagaStatus.RUNNING, now);
+          tx.insert(buildStateInsert(bucket, updated));
+
+          // Clear the parked-deadline row (via the saga_id secondary index — its parked_deadline CK
+          // is unknown here); the re-execution re-parks with a fresh deadline.
+          for (Result parked : tx.scan(buildParkedIndexScan(sagaId))) {
+            tx.delete(buildParkedDelete(bucket, parked.getTimestampTZ("parked_deadline"), sagaId));
+          }
+          return updated;
+        },
+        verifyTransitionCommitted(sagaId, sequence, redriveEvent.getEventType()),
+        "redrive parked step for saga " + sagaId);
   }
 
   /**
    * Verifier for park/resume/timeout: the tx committed iff the event at {@code sequence} is present
    * <em>and</em> of {@code expectedType}. The type check matters because {@code resumeParkedStep}
-   * and {@code timeoutParkedStep} are claim-less and derive the same {@code sequence} from a
-   * WAITING saga's event count, so both target the same event CK with different types. Presence
-   * alone would let the loser of a callback-vs-timeout race read the winner's event and wrongly
-   * report its own commit as successful; matching the type proves the persisted event is ours. A
-   * mismatch (the other op won) returns empty, so the caller retries, re-reads the now-non-WAITING
-   * CK, and throws {@link SagaConcurrentModificationException}.
+   * and {@code failParkedStep} are claim-less and derive the same {@code sequence} from a WAITING
+   * saga's event count, so both target the same event CK with different types. Presence alone would
+   * let the loser of a callback-vs-timeout race read the winner's event and wrongly report its own
+   * commit as successful; matching the type proves the persisted event is ours. A mismatch (the
+   * other op won) returns empty, so the caller retries, re-reads the now-non-WAITING CK, and throws
+   * {@link SagaConcurrentModificationException}.
    */
   private CommitVerifier<SagaStateSnapshot> verifyTransitionCommitted(
       String sagaId, int sequence, EventType expectedType) {
@@ -1068,6 +1101,7 @@ public class ScalarDbSagaStore implements SagaStore {
       StepEvent event =
           switch (eventType) {
             case STEP_PENDING -> StepEvent.pending(stepIndex, name);
+            case STEP_REISSUING -> StepEvent.reissuing(stepIndex, name);
             case STEP_COMPLETED -> StepEvent.completed(stepIndex, name, payload);
             case STEP_FAILED -> StepEvent.failed(stepIndex, name, payload);
             case STEP_COMPENSATED -> StepEvent.compensated(stepIndex, name);
