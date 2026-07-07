@@ -86,8 +86,9 @@ final class HttpTransportAdapter implements TransportAdapter {
     }
 
     // For an async step, hand the participant a callback URL so it can complete the step later. The
-    // provider is null in embedded mode / when async completion is not configured (such a step is
-    // rejected at registration, so a null here means a non-async step).
+    // header is omitted when the provider is null (embedded mode / async completion not
+    // configured — such a step is rejected at registration, so a null provider here means a
+    // non-async step) or when the provider returns null for this step.
     List<Map.Entry<String, String>> headers = new ArrayList<>();
     if (http.isAsync() && callbackUrlProvider != null) {
       String callbackUrl = callbackUrlProvider.callbackUrl(context.getSagaId(), stepName);
@@ -119,8 +120,8 @@ final class HttpTransportAdapter implements TransportAdapter {
 
     // A 202 Accepted signals async acceptance: an async step parks (pending) and resumes on the
     // callback. A 202 for a non-async step is a contract violation (the participant went async for
-    // a
-    // step not declared async) — a non-retryable error rather than a silent (empty-output) success.
+    // a step not declared async) — a non-retryable error rather than a silent (empty-output)
+    // success.
     if (response.status() == HTTP_ACCEPTED) {
       if (http.isAsync()) {
         return StepResult.pending();
