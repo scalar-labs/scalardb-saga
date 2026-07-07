@@ -43,8 +43,11 @@ import org.jspecify.annotations.Nullable;
  *
  * <p>Any {@code scalar.db.saga.*} value may use a secret reference — {@code ${file:UTF-8:/path}}
  * (preferred; e.g. a Kubernetes mounted Secret) or {@code ${env:NAME}} — resolved at load time. See
- * {@link SecretResolver}. {@code scalar.db.*} store keys are left for ScalarDB to resolve with the
- * same syntax.
+ * {@link SecretResolver}. The {@code ${file:...}} form is resolved <b>only</b> in this {@code
+ * scalar.db.saga.*} namespace. {@code scalar.db.*} store keys are instead left for ScalarDB to
+ * resolve, and ScalarDB supports only {@code ${env:...}} and {@code ${sys:...}} — not {@code
+ * ${file:...}}. Use {@code ${env:...}} for {@code scalar.db.*} store secrets; a {@code ${file:...}}
+ * reference there passes through verbatim and fails later at DB-connect time.
  *
  * <p>All other properties configure the saga engine's persistence (e.g. ScalarDB connection
  * settings) and are forwarded as-is. In daemon mode, {@code
