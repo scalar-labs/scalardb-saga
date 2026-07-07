@@ -3,6 +3,7 @@ package com.scalar.db.saga.engine;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -849,6 +850,48 @@ class DefaultSagaOrchestratorTest {
       assertThat(captor.getValue().getStepName()).isEqualTo("s1");
       verify(engine).resumeFrom(def, context, 2);
       assertThat(result).isSameAs(completed);
+    }
+
+    @Test
+    void completeStepAsync_waitingSaga_returnsRunningAndDrivesAsync() {
+      // Arrange — same parked saga as the sync case; here the forward tail runs on asyncExecutor.
+      SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
+      SagaDefinition def = definition("test-saga");
+      SagaStateSnapshot running = snapshot("saga-1", SagaStatus.RUNNING);
+      List<SagaEvent> events =
+          List.of(
+              StatusEvent.started(null),
+              StepEvent.completed(0, "s0", null),
+              StepEvent.pending(1, "s1"));
+      ExecutionContext context = new ExecutionContext("saga-1", Map.of(), running);
+
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(waiting));
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(store.getEvents("saga-1")).thenReturn(events);
+      when(store.resumeParkedStep(eq(waiting), eq(events.size()), any(StepEvent.class)))
+          .thenReturn(running);
+      when(engine.replayEvents(eq(running), any())).thenReturn(context);
+
+      // Act
+      SagaStateSnapshot result =
+          orchestrator.completeStepAsync("saga-1", "s1", Map.of("paymentId", "p1"));
+
+      // Assert — returns the in-flight RUNNING snapshot at once; the drive is dispatched off-thread
+      assertThat(result).isSameAs(running);
+      verify(engine, timeout(2_000)).resumeFrom(def, context, 2);
+    }
+
+    @Test
+    void completeStepAsync_nonWaitingSaga_throwsIllegalState() {
+      // Arrange — the WAITING check is phase 1 (synchronous), so completeStepAsync still throws
+      // before dispatching anything, preserving the daemon's synchronous error mapping.
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(saga));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.completeStepAsync("saga-1", "s1", Map.of()))
+          .isInstanceOf(IllegalStateException.class);
+      verify(engine, never()).resumeFrom(any(), any(), anyInt());
     }
 
     @Test
