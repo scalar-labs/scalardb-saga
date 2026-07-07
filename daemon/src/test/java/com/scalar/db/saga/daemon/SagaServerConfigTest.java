@@ -349,6 +349,16 @@ class SagaServerConfigTest {
   }
 
   @Test
+  void load_callbackBaseUrlSlashesOnly_isEmpty() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.CALLBACK_BASE_URL_KEY, "/");
+
+    // Stripping the trailing slash leaves nothing meaningful, so it is treated as unset rather than
+    // producing an empty base URL that would yield relative callback URLs.
+    assertThat(SagaServerConfig.load(props).callbackBaseUrl()).isEmpty();
+  }
+
+  @Test
   void load_callbackSecretFileReference_isResolved(@TempDir Path dir) throws IOException {
     Path secretFile = dir.resolve("callback.secret");
     Files.writeString(secretFile, "resolved-secret-value", StandardCharsets.UTF_8);

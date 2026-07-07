@@ -387,13 +387,16 @@ public final class SagaServerConfig {
     return (value == null || value.isBlank()) ? DEFAULT_HOST : value.trim();
   }
 
-  /** Trims the callback base URL and strips a trailing {@code /}; blank ⇒ null (unset). */
+  /** Trims the callback base URL and strips trailing {@code /}s; blank (or slashes only) ⇒ null. */
   private static @Nullable String parseCallbackBaseUrl(@Nullable String value) {
     if (value == null || value.isBlank()) {
       return null;
     }
     String trimmed = value.trim();
-    return trimmed.endsWith("/") ? trimmed.substring(0, trimmed.length() - 1) : trimmed;
+    while (trimmed.endsWith("/")) {
+      trimmed = trimmed.substring(0, trimmed.length() - 1);
+    }
+    return trimmed.isEmpty() ? null : trimmed;
   }
 
   private static int parsePort(@Nullable String value, String key, int defaultPort) {
