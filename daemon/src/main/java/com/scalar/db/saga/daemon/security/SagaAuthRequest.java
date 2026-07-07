@@ -13,11 +13,10 @@ import org.jspecify.annotations.Nullable;
  * and the audit trail.
  *
  * <p>Deliberately not tied to HTTP: the REST before-handler builds one from the Javalin request
- * headers, and the gRPC interceptor (PR C5) builds one from call {@code Metadata} — so a single
- * {@link SagaSecurityProvider} authenticates both transports. Header lookup is
- * <b>case-insensitive</b> ({@code Authorization} vs {@code authorization}); providers read
- * whichever header carries their credential ({@code Authorization: Bearer …} for JWT, a configured
- * API-key header for API keys).
+ * headers, and the gRPC interceptor builds one from call {@code Metadata} — so a single {@link
+ * SagaSecurityProvider} authenticates both transports. Header lookup is <b>case-insensitive</b>
+ * ({@code Authorization} vs {@code authorization}); providers read whichever header carries their
+ * credential ({@code Authorization: Bearer …} for JWT, a configured API-key header for API keys).
  */
 public final class SagaAuthRequest {
 

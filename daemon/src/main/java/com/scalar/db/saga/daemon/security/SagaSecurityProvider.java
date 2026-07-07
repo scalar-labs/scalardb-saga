@@ -10,9 +10,10 @@ package com.scalar.db.saga.daemon.security;
  * every provider and every transport.
  *
  * <p>Built-in providers: {@link NoopSecurityProvider} (default — authenticates every request as a
- * full-access identity; for trusted/isolated networks and local dev), a JWT/JWKS provider (PR C2),
- * and a pre-shared-API-key provider (PR C3). Custom providers (mTLS, a secret manager) are SPI
- * follow-ons. A single provider instance authenticates both the REST and the gRPC transport.
+ * full-access identity; for trusted/isolated networks and local dev), {@link JwtSecurityProvider}
+ * (a JWT validated against a JWKS), and {@link ApiKeySecurityProvider} (pre-shared keys). Custom
+ * providers (mTLS, a secret manager) are SPI follow-ons. A single provider instance authenticates
+ * both the REST and the gRPC transport.
  *
  * <p>Implementations must be <b>thread-safe</b> — one instance authenticates concurrent requests.
  */

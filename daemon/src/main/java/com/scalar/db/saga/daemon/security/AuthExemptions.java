@@ -7,17 +7,16 @@ import java.util.regex.Pattern;
 
 /**
  * An allowlist of request paths that bypass the RBAC before-handler — the <b>exemption hook</b>,
- * the single agreed interface between the security layer (PR C) and routes that carry their own
- * auth.
+ * the single agreed interface between the security layer and routes that carry their own auth.
  *
  * <p>Two kinds of route are exempt from caller-facing (JWT/API-key) auth:
  *
  * <ul>
  *   <li>the <b>liveness probe</b> ({@code GET /health}) — an infrastructure probe holds no user
  *       credential;
- *   <li>the <b>async-callback route</b> ({@code POST /sagas/{id}/steps/{stepName}/complete}, from
- *       PR B) — authenticated by its per-step HMAC callback token, not by a user credential. PR B
- *       exposes {@code CallbackResource.PATH} precisely so it can be registered here.
+ *   <li>the <b>async-callback route</b> ({@code POST /sagas/{id}/steps/{stepName}/complete}) —
+ *       authenticated by its per-step HMAC callback token, not by a user credential; that route
+ *       exposes {@code CallbackResource.PATH} so it can be registered here.
  * </ul>
  *
  * <p>Patterns use Javalin path syntax: a {@code {param}} segment matches one path segment and a
