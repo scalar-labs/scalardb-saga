@@ -6,6 +6,7 @@ import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import io.javalin.Javalin;
 import io.javalin.http.Context;
 import java.util.Map;
+import java.util.regex.Pattern;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -35,6 +36,11 @@ public final class CallbackResource {
    */
   public static final String PATH = "/sagas/{id}/steps/{stepName}/complete";
 
+  /**
+   * A callback token is the lowercase-hex HMAC-SHA256 output: exactly 64 chars of {@code [0-9a-f]}.
+   */
+  private static final Pattern TOKEN_PATTERN = Pattern.compile("[0-9a-f]{64}");
+
   private CallbackResource() {}
 
   /**
@@ -62,8 +68,9 @@ public final class CallbackResource {
   /**
    * Verifies the HMAC token over {@code sagaId:stepName:iat}. Both {@code token} and {@code iat}
    * query parameters are required (the token is computed over {@code iat}, so it cannot be checked
-   * without it). Any missing or non-matching value throws {@link CallbackAuthException} → {@code
-   * 401}.
+   * without it). The token must match the lowercase-hex HMAC-SHA256 shape before the signature is
+   * checked, so a malformed value is rejected without computing an HMAC. Any missing, malformed, or
+   * non-matching value throws {@link CallbackAuthException} → {@code 401}.
    */
   private static void verifyToken(
       Context ctx, String callbackSecret, String sagaId, String stepName) {
@@ -71,6 +78,9 @@ public final class CallbackResource {
     String iat = ctx.queryParam("iat");
     if (isBlank(token) || isBlank(iat)) {
       throw new CallbackAuthException("missing callback token or iat");
+    }
+    if (!TOKEN_PATTERN.matcher(token).matches()) {
+      throw new CallbackAuthException("malformed callback token");
     }
     String data = sagaId + ":" + stepName + ":" + iat;
     if (!HmacUtils.verify(callbackSecret, data, token)) {

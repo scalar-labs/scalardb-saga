@@ -86,6 +86,29 @@ class CallbackResourceTest {
   }
 
   @Test
+  void wrongLengthToken_returns401_andDoesNotResume() throws Exception {
+    // Valid lowercase-hex charset but not the 64-char HMAC length: rejected by the shape check
+    // before any HMAC is computed.
+    String tooLong = "a".repeat(128);
+
+    HttpResponse<String> response = post("?token=" + tooLong + "&iat=" + IAT, "{}");
+
+    assertThat(response.statusCode()).isEqualTo(401);
+    verify(orchestrator, never()).completeStep(any(), any(), any());
+  }
+
+  @Test
+  void nonHexToken_returns401_andDoesNotResume() throws Exception {
+    // Correct length (64) but uppercase — outside the lowercase-hex charset.
+    String nonHex = "A".repeat(64);
+
+    HttpResponse<String> response = post("?token=" + nonHex + "&iat=" + IAT, "{}");
+
+    assertThat(response.statusCode()).isEqualTo(401);
+    verify(orchestrator, never()).completeStep(any(), any(), any());
+  }
+
+  @Test
   void missingToken_returns401() throws Exception {
     HttpResponse<String> response = post("?iat=" + IAT, "{}");
 
