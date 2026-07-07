@@ -4,6 +4,7 @@ import com.scalar.db.saga.daemon.api.ErrorMapper;
 import com.scalar.db.saga.daemon.api.HealthResource;
 import com.scalar.db.saga.daemon.api.RateLimitHandler;
 import com.scalar.db.saga.daemon.api.SagaResource;
+import com.scalar.db.saga.daemon.grpc.SagaSecurityInterceptor;
 import com.scalar.db.saga.daemon.grpc.SagaServiceImpl;
 import com.scalar.db.saga.daemon.security.AuthExemptions;
 import com.scalar.db.saga.daemon.security.SagaSecurityProvider;
@@ -14,6 +15,7 @@ import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.store.ScalarDbSagaStoreFactory;
 import io.grpc.Server;
+import io.grpc.ServerInterceptors;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.protobuf.services.HealthStatusManager;
 import io.javalin.Javalin;
@@ -132,17 +134,21 @@ public final class SagaServer implements AutoCloseable {
   /**
    * Builds (does not bind) the gRPC server: it serves {@link SagaServiceImpl} over the same {@link
    * SagaServerConfig#host()} as HTTP on its own port, delegating to the same orchestrator the REST
-   * routes use. It also registers the standard {@code grpc.health.v1.Health} service so a gRPC-only
-   * deployment stays probeable (e.g. by K8s-native gRPC probes). The wait-heavy bounded-sync calls
-   * run on a virtual-thread executor (cheap blocking); the inbound-size and metadata caps bound
-   * abuse on the unauthenticated port; server reflection is deliberately not registered (it would
-   * expose the schema to any client).
+   * routes use. The saga service is wrapped with {@link SagaSecurityInterceptor} so gRPC calls are
+   * authenticated/authorized by the same {@link SagaSecurityProvider} as REST. It also registers
+   * the standard {@code grpc.health.v1.Health} service — deliberately <b>not</b> intercepted, so a
+   * gRPC-only deployment stays probeable (e.g. by K8s-native gRPC probes) without a credential. The
+   * wait-heavy bounded-sync calls run on a virtual-thread executor (cheap blocking); the
+   * inbound-size and metadata caps bound abuse; server reflection is deliberately not registered
+   * (it would expose the schema to any client).
    */
   private Server buildGrpcServer(ExecutorService executor, HealthStatusManager health) {
     return NettyServerBuilder.forAddress(new InetSocketAddress(config.host(), config.grpcPort()))
         .addService(
-            new SagaServiceImpl(
-                orchestrator, config.syncTimeoutMillis(), config.syncMaxWaitMillis()))
+            ServerInterceptors.intercept(
+                new SagaServiceImpl(
+                    orchestrator, config.syncTimeoutMillis(), config.syncMaxWaitMillis()),
+                new SagaSecurityInterceptor(securityProvider)))
         .addService(health.getHealthService())
         .maxInboundMessageSize(config.grpcMaxInboundMessageBytes())
         .maxInboundMetadataSize(8 * 1024)
