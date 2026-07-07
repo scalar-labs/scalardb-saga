@@ -5,8 +5,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.scalar.db.saga.daemon.security.NoopSecurityProvider;
 import com.scalar.db.saga.daemon.security.SagaSecurityProvider;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Properties;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class SecurityProviderFactoryTest {
 
@@ -77,13 +81,14 @@ class SecurityProviderFactoryTest {
   }
 
   @Test
-  void create_apikeyWithReferenceKey_returnsApiKeyProvider() {
-    // Arrange — key supplied as a secret reference (an undefined ${env:...} is left verbatim by the
-    // resolver, so this needs no real environment)
+  void create_apikeyWithReferenceKey_returnsApiKeyProvider(@TempDir Path dir) throws Exception {
+    // Arrange — key supplied as a file secret reference that actually resolves
+    Path keyFile = dir.resolve("svc.key");
+    Files.writeString(keyFile, "s3cr3t", StandardCharsets.UTF_8);
     Properties properties = new Properties();
     properties.setProperty(SagaServerConfig.SECURITY_PROVIDER_KEY, "apikey");
     properties.setProperty(
-        "scalar.db.saga.server.security.apikey.key.svc.secret", "${env:SAGA_TEST_KEY}");
+        "scalar.db.saga.server.security.apikey.key.svc.secret", "${file:UTF-8:" + keyFile + "}");
     properties.setProperty("scalar.db.saga.server.security.apikey.key.svc.roles", "saga:write");
 
     // Act

@@ -110,6 +110,17 @@ class ApiKeyConfigTest {
   }
 
   @Test
+  void from_unresolvedReference_throwsException() {
+    // Arrange — the reference passed through unchanged (e.g. an undefined ${env:...} the resolver
+    // left verbatim): resolved == raw
+    Properties[] p = keyProps("svc", "${env:MISSING}", "${env:MISSING}", "saga:read");
+
+    // Act / Assert
+    assertThatThrownBy(() -> ApiKeyConfig.from(p[0], p[1]))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void from_blankResolvedSecret_throwsException() {
     // Arrange — reference is well-formed but resolves to empty (e.g. an empty secret file)
     Properties[] p = keyProps("svc", "${file:UTF-8:/run/secrets/svc}", "", "saga:read");

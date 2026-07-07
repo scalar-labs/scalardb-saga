@@ -78,7 +78,8 @@ final class ApiKeyConfig {
    *     that each key was supplied as a secret reference
    * @return the parsed configuration
    * @throws IllegalArgumentException if no key is configured, a key is inline rather than a secret
-   *     reference, a resolved key is blank, or a role is unknown/missing
+   *     reference, a reference did not resolve (unchanged after resolution), a resolved key is
+   *     blank, or a role is unknown/missing
    */
   static ApiKeyConfig from(Properties resolved, Properties raw) {
     Objects.requireNonNull(resolved, "resolved must not be null");
@@ -134,6 +135,18 @@ final class ApiKeyConfig {
     String secret = resolved.getProperty(secretKey);
     if (secret == null || secret.isBlank()) {
       throw new IllegalArgumentException("'" + secretKey + "' resolved to an empty value.");
+    }
+    // The reference passed through unchanged: it never expanded (an undefined ${env:...}, which the
+    // resolver leaves verbatim). Fail fast rather than silently treating the reference text as the
+    // key — otherwise a typo'd or unset variable becomes a literal-string key no client can
+    // present.
+    if (secret.equals(rawSecret)) {
+      throw new IllegalArgumentException(
+          "'"
+              + secretKey
+              + "' secret reference "
+              + rawSecret
+              + " did not resolve — is the referenced environment variable or file present?");
     }
     Set<SagaRole> roles = parseRoles(name, resolved.getProperty(KEY_PREFIX + name + ROLES_SUFFIX));
     String principal =
