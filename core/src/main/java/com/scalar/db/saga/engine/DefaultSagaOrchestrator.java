@@ -396,22 +396,23 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * @throws SagaConcurrentModificationException if a concurrent deadline-timeout sweep resolves the
    *     parked step first (the callback lost the race)
    */
-  @SuppressWarnings("FutureReturnValueIgnored") // fire-and-forget drive; recovery handles failures
   public SagaStateSnapshot completeStepAsync(
       String sagaId, String stepName, Map<String, Object> output) {
     ResumedStep resumed = resumeParked(sagaId, stepName, output);
     try {
-      asyncExecutor.submit(
+      // execute() (not submit()) so an escaping throwable reaches the thread's uncaught handler
+      // rather than a dropped Future; the inner catch logs any Throwable (incl. Error) since the
+      // saga is persisted as RUNNING and recovery is the backstop.
+      asyncExecutor.execute(
           () -> {
             try {
               engine.resumeFrom(resumed.def(), resumed.context(), resumed.stepIndex() + 1);
-            } catch (Exception e) {
-              // Saga state is persisted as RUNNING — recovery will pick it up.
-              logger.error("Async completion drive for saga {} failed unexpectedly", sagaId, e);
+            } catch (Throwable t) {
+              logger.error("Async completion drive for saga {} failed unexpectedly", sagaId, t);
             }
           });
     } catch (RejectedExecutionException e) {
-      // Race between close() and submit — the step is resumed (RUNNING); recovery will drive it.
+      // Race between close() and execute() — the step is resumed (RUNNING); recovery will drive it.
       logger.warn(
           "Async executor rejected completion drive for saga {} (shutting down); "
               + "recovery will handle it",
