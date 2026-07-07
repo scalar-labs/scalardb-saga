@@ -43,8 +43,11 @@ import org.jspecify.annotations.Nullable;
  *
  * <p>Any {@code scalar.db.saga.*} value may use a secret reference — {@code ${file:UTF-8:/path}}
  * (preferred; e.g. a Kubernetes mounted Secret) or {@code ${env:NAME}} — resolved at load time. See
- * {@link SecretResolver}. {@code scalar.db.*} store keys are left for ScalarDB to resolve with the
- * same syntax.
+ * {@link SecretResolver}. The {@code ${file:...}} form is resolved <b>only</b> in this {@code
+ * scalar.db.saga.*} namespace. {@code scalar.db.*} store keys are instead left for ScalarDB to
+ * resolve, and ScalarDB supports only {@code ${env:...}} and {@code ${sys:...}} — not {@code
+ * ${file:...}}. Use {@code ${env:...}} for {@code scalar.db.*} store secrets; a {@code ${file:...}}
+ * reference there passes through verbatim and fails later at DB-connect time.
  *
  * <p>All other properties configure the saga engine's persistence (e.g. ScalarDB connection
  * settings) and are forwarded as-is. In daemon mode, {@code
@@ -195,14 +198,27 @@ public final class SagaServerConfig {
    */
   private static Properties resolveSecrets(Properties properties) {
     SecretResolver resolver = new SecretResolver();
+    // Rebuild from stringPropertyNames() so every string property is flattened into one table,
+    // including any inherited from a defaults chain (new Properties(defaults)). A plain putAll or
+    // copyOf would silently drop those inherited entries. Resolve secret references only within the
+    // daemon's own scalar.db.saga.* namespace; scalar.db.* store keys pass through to ScalarDB.
     Properties resolved = new Properties();
     for (String key : properties.stringPropertyNames()) {
       String value = properties.getProperty(key);
       if (value == null) {
-        continue; // stringPropertyNames() only lists keys with values; guard for null-safety
+        continue; // stringPropertyNames() only lists string-valued keys; guard for null-safety
       }
       resolved.setProperty(key, key.startsWith(PREFIX) ? resolver.resolve(value) : value);
     }
+    // Non-string entries aren't listed by stringPropertyNames(); carry them through. forEach covers
+    // the main table only; a non-string entry in a defaults chain is intentionally not flattened
+    // (Properties are conventionally string-only, and ScalarDB reads config via getProperty).
+    properties.forEach(
+        (key, value) -> {
+          if (!(key instanceof String) || !(value instanceof String)) {
+            resolved.put(key, value);
+          }
+        });
     return resolved;
   }
 
