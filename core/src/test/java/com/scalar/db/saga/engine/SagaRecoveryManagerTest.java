@@ -423,12 +423,12 @@ class SagaRecoveryManagerTest {
 
     @Test
     void recover_overdueParkedAttemptsExhausted_givesUp() {
-      // Arrange — four park attempts (> maxAttempts=3), all recent: the count bound is spent.
+      // Arrange — three park attempts (== maxAttempts=3), all recent: the count bound is spent.
       SagaStateSnapshot waiting = snapshot(SagaStatus.WAITING);
       SagaStateSnapshot compensating = snapshot(SagaStatus.COMPENSATING);
       SagaDefinition def = definition();
       StepEvent park = StepEvent.pending(0, "debit").withTimestamp(NOW.minusSeconds(60));
-      List<SagaEvent> events = List.of(StatusEvent.started(null), park, park, park, park);
+      List<SagaEvent> events = List.of(StatusEvent.started(null), park, park, park);
       ExecutionContext ctx = mock(ExecutionContext.class);
 
       noStaleRecoverables();

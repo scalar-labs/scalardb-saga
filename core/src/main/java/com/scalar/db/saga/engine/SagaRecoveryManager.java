@@ -468,7 +468,7 @@ class SagaRecoveryManager {
       List<SagaEvent> events, int parkedIndex, SagaDefinition def) {
     long attempts =
         stepIndices(events, EventType.STEP_PENDING).filter(index -> index == parkedIndex).count();
-    if (attempts > maxRedriveAttempts(def, parkedIndex)) {
+    if (attempts >= maxRedriveAttempts(def, parkedIndex)) {
       return RedriveDecision.ATTEMPTS_EXHAUSTED;
     }
     boolean withinGrace =
