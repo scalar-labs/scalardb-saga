@@ -196,10 +196,9 @@ public final class SagaServerConfig {
   private static Properties resolveSecrets(Properties properties) {
     SecretResolver resolver = new SecretResolver();
     // Rebuild from stringPropertyNames() so every string property is flattened into one table,
-    // including any inherited from a Properties defaults chain (new Properties(defaults)) — putAll
-    // /
-    // copyOf would silently drop those. Resolve secret references only within the daemon's own
-    // scalar.db.saga.* namespace; scalar.db.* store keys pass through for ScalarDB to resolve.
+    // including any inherited from a defaults chain (new Properties(defaults)). A plain putAll or
+    // copyOf would silently drop those inherited entries. Resolve secret references only within the
+    // daemon's own scalar.db.saga.* namespace; scalar.db.* store keys pass through to ScalarDB.
     Properties resolved = new Properties();
     for (String key : properties.stringPropertyNames()) {
       String value = properties.getProperty(key);
