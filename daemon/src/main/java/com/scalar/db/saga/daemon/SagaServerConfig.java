@@ -2,6 +2,7 @@ package com.scalar.db.saga.daemon;
 
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -39,6 +40,9 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code scalar.db.saga.server.sync_max_wait_millis} — absolute ceiling (ms) on a synchronous
  *       gRPC start's server-side wait, so it can never block indefinitely (default {@code 60000});
  *       {@code sync_timeout_millis} and the client's deadline only tighten it
+ *   <li>{@code scalar.db.saga.server.security.provider} — the authentication provider (default
+ *       {@code noop} — no authentication; suitable only for a trusted/isolated network). Set to a
+ *       real provider to enforce access control
  * </ul>
  *
  * <p>Any {@code scalar.db.saga.*} value may use a secret reference — {@code ${file:UTF-8:/path}}
@@ -71,6 +75,8 @@ public final class SagaServerConfig {
   static final String SERVICE_BASE_URL_SUFFIX = ".base_url";
   static final String SYNC_TIMEOUT_MILLIS_KEY = SERVER_PREFIX + "sync_timeout_millis";
   static final String SYNC_MAX_WAIT_MILLIS_KEY = SERVER_PREFIX + "sync_max_wait_millis";
+  static final String SECURITY_PREFIX = SERVER_PREFIX + "security.";
+  static final String SECURITY_PROVIDER_KEY = SECURITY_PREFIX + "provider";
   static final String STORE_MAX_EVENT_PAYLOAD_BYTES_KEY = PREFIX + "store.max_event_payload_bytes";
   static final String DEFAULT_HOST = "0.0.0.0";
   static final int DEFAULT_PORT = 8080;
@@ -81,6 +87,8 @@ public final class SagaServerConfig {
   static final long DEFAULT_SYNC_TIMEOUT_MILLIS = 0L; // 0 = disabled (sync blocks to terminal)
   static final long DEFAULT_SYNC_MAX_WAIT_MILLIS =
       60_000L; // ceiling on a synchronous server-side wait
+  static final String DEFAULT_SECURITY_PROVIDER =
+      "noop"; // no authentication (see NoopSecurityProvider)
 
   private final String host;
   private final int port;
@@ -89,6 +97,7 @@ public final class SagaServerConfig {
   private final boolean grpcEnabled;
   private final long syncTimeoutMillis;
   private final long syncMaxWaitMillis;
+  private final String securityProvider;
   private final Properties properties;
   private final @Nullable Path definitionsPath;
   private final Map<String, String> serviceBaseUrls;
@@ -101,6 +110,7 @@ public final class SagaServerConfig {
       boolean grpcEnabled,
       long syncTimeoutMillis,
       long syncMaxWaitMillis,
+      String securityProvider,
       Properties properties,
       @Nullable Path definitionsPath,
       Map<String, String> serviceBaseUrls) {
@@ -111,6 +121,7 @@ public final class SagaServerConfig {
     this.grpcEnabled = grpcEnabled;
     this.syncTimeoutMillis = syncTimeoutMillis;
     this.syncMaxWaitMillis = syncMaxWaitMillis;
+    this.securityProvider = securityProvider;
     this.properties = applyStoreDefaults(copyOf(properties));
     this.definitionsPath = definitionsPath;
     this.serviceBaseUrls = Map.copyOf(serviceBaseUrls);
@@ -173,6 +184,7 @@ public final class SagaServerConfig {
             SYNC_MAX_WAIT_MILLIS_KEY,
             DEFAULT_SYNC_MAX_WAIT_MILLIS,
             1L);
+    String securityProvider = parseSecurityProvider(properties.getProperty(SECURITY_PROVIDER_KEY));
     String definitions = properties.getProperty(DEFINITIONS_PATH_KEY);
     Path definitionsPath =
         (definitions == null || definitions.isBlank()) ? null : Path.of(definitions.trim());
@@ -184,6 +196,7 @@ public final class SagaServerConfig {
         grpcEnabled,
         syncTimeoutMillis,
         syncMaxWaitMillis,
+        securityProvider,
         properties,
         definitionsPath,
         parseServiceBaseUrls(properties));
@@ -337,6 +350,16 @@ public final class SagaServerConfig {
   }
 
   /**
+   * Returns the configured security-provider name (normalized to lower case), defaulting to {@value
+   * #DEFAULT_SECURITY_PROVIDER} — no authentication. Selects which {@link
+   * com.scalar.db.saga.daemon.security.SagaSecurityProvider} the server authenticates requests
+   * with; the value is validated against the known providers when the provider is built.
+   */
+  public String securityProvider() {
+    return securityProvider;
+  }
+
+  /**
    * Returns a defensive copy of the underlying configuration properties forwarded to construct the
    * saga engine's persistence.
    */
@@ -360,6 +383,17 @@ public final class SagaServerConfig {
 
   private static String parseHost(@Nullable String value) {
     return (value == null || value.isBlank()) ? DEFAULT_HOST : value.trim();
+  }
+
+  /**
+   * Normalizes the security-provider name (trimmed, lower-cased), defaulting to {@value
+   * #DEFAULT_SECURITY_PROVIDER} when unset/blank. The value is validated against the known
+   * providers by the provider factory, not here.
+   */
+  private static String parseSecurityProvider(@Nullable String value) {
+    return (value == null || value.isBlank())
+        ? DEFAULT_SECURITY_PROVIDER
+        : value.trim().toLowerCase(Locale.ROOT);
   }
 
   private static int parsePort(@Nullable String value, String key, int defaultPort) {

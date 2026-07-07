@@ -1,5 +1,7 @@
 package com.scalar.db.saga.daemon.api;
 
+import com.scalar.db.saga.daemon.security.SagaAuthenticationException;
+import com.scalar.db.saga.daemon.security.SagaAuthorizationException;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
@@ -43,6 +45,29 @@ public final class ErrorMapper {
     app.exception(
         InvalidRequestException.class,
         (e, ctx) -> ctx.status(400).json(error("BAD_REQUEST", e.getMessage())));
+    // Authentication failure: the credential is missing/invalid. Log at debug — probing traffic can
+    // make this frequent — and return a generic 401 without echoing why the credential was
+    // rejected.
+    app.exception(
+        SagaAuthenticationException.class,
+        (e, ctx) -> {
+          logger.debug(
+              "Authentication failed on {} {}: {}", ctx.method(), ctx.path(), e.getMessage());
+          ctx.status(401).json(error("UNAUTHENTICATED", "Authentication required"));
+        });
+    // Authorization failure: a known caller lacks the required role. Log the principal + required
+    // role for the audit trail, and return a generic 403.
+    app.exception(
+        SagaAuthorizationException.class,
+        (e, ctx) -> {
+          logger.info(
+              "Authorization denied on {} {}: caller '{}' lacks role {}",
+              ctx.method(),
+              ctx.path(),
+              e.getPrincipal(),
+              e.getRequiredRole().wireName());
+          ctx.status(403).json(error("FORBIDDEN", "Insufficient permissions"));
+        });
     // A client-supplied value the engine rejects (e.g. an invalid saga id or an unsupported input
     // value type) surfaces as IllegalArgumentException — a client error. Map it to 400 with a
     // generic, daemon-owned message rather than echoing the engine's wording.

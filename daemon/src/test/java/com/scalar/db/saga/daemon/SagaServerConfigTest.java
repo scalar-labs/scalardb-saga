@@ -45,6 +45,33 @@ class SagaServerConfigTest {
   }
 
   @Test
+  void securityProvider_unset_defaultsToNoop() {
+    SagaServerConfig config = SagaServerConfig.load(new Properties());
+
+    assertThat(config.securityProvider()).isEqualTo(SagaServerConfig.DEFAULT_SECURITY_PROVIDER);
+  }
+
+  @Test
+  void securityProvider_setWithMixedCaseAndPadding_isNormalizedToLowerCaseTrimmed() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SECURITY_PROVIDER_KEY, "  JWT  ");
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.securityProvider()).isEqualTo("jwt");
+  }
+
+  @Test
+  void securityProvider_blank_defaultsToNoop() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SECURITY_PROVIDER_KEY, "   ");
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.securityProvider()).isEqualTo(SagaServerConfig.DEFAULT_SECURITY_PROVIDER);
+  }
+
+  @Test
   void grpcMaxInboundMessageBytes_returnsConfiguredPayloadLimit() {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY, "12345");

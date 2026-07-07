@@ -4,6 +4,9 @@ import com.scalar.db.saga.daemon.api.ErrorMapper;
 import com.scalar.db.saga.daemon.api.HealthResource;
 import com.scalar.db.saga.daemon.api.SagaResource;
 import com.scalar.db.saga.daemon.grpc.SagaServiceImpl;
+import com.scalar.db.saga.daemon.security.AuthExemptions;
+import com.scalar.db.saga.daemon.security.SagaSecurityProvider;
+import com.scalar.db.saga.daemon.security.SecurityHandler;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.definition.SagaDefinitionParser;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
@@ -61,6 +64,7 @@ public final class SagaServer implements AutoCloseable {
 
   private final SagaServerConfig config;
   private final DefaultSagaOrchestrator orchestrator;
+  private final SagaSecurityProvider securityProvider;
   // Each transport is null when disabled; SagaServerConfig guarantees at least one is enabled.
   private final @Nullable Javalin httpServer;
   private final @Nullable ExecutorService grpcExecutor;
@@ -92,7 +96,12 @@ public final class SagaServer implements AutoCloseable {
         config.grpcEnabled() ? Executors.newVirtualThreadPerTaskExecutor() : null;
     this.httpServer = httpServer;
     this.grpcExecutor = grpcExecutor;
+    // Built before wiring the transports so both can share one provider (the gRPC interceptor uses
+    // it too). A null placeholder lets the catch below close it only if it was built.
+    @Nullable SagaSecurityProvider provider = null;
     try {
+      provider = SecurityProviderFactory.create(config);
+      this.securityProvider = provider;
       loadDefinitions();
       if (httpServer != null) {
         registerRoutes(httpServer);
@@ -106,11 +115,12 @@ public final class SagaServer implements AutoCloseable {
         this.grpcServer = null;
       }
     } catch (RuntimeException e) {
-      // Release the executor and the store/DB connections held by the orchestrator if startup
-      // wiring fails.
+      // Release the executor, the security provider, and the store/DB connections held by the
+      // orchestrator if startup wiring fails.
       if (grpcExecutor != null) {
         grpcExecutor.shutdown();
       }
+      closeSecurityProvider(provider);
       orchestrator.close();
       throw e;
     }
@@ -209,6 +219,10 @@ public final class SagaServer implements AutoCloseable {
   }
 
   private void registerRoutes(Javalin httpServer) {
+    // The RBAC before-handler authenticates every request except the exempt paths. The liveness
+    // probe carries no user credential; the async-callback route (PR B) authenticates with its own
+    // per-step HMAC token and registers CallbackResource.PATH here when that work merges.
+    SecurityHandler.register(httpServer, securityProvider, AuthExemptions.of(HealthResource.PATH));
     HealthResource.register(httpServer);
     ErrorMapper.register(httpServer);
     SagaResource.register(httpServer, orchestrator, config.syncTimeoutMillis());
@@ -286,8 +300,26 @@ public final class SagaServer implements AutoCloseable {
     if (grpcExecutor != null) {
       grpcExecutor.shutdown();
     }
+    closeSecurityProvider(securityProvider);
     orchestrator.close();
     logger.info("SagaServer stopped");
+  }
+
+  /**
+   * Closes a security provider, releasing any resources it holds (e.g. a JWKS-refresh client),
+   * logging and swallowing any failure so it never masks the orchestrator drain that follows.
+   * Tolerates a {@code null} provider so the constructor's failure path can call it before the
+   * field is set.
+   */
+  private static void closeSecurityProvider(@Nullable SagaSecurityProvider provider) {
+    if (provider == null) {
+      return;
+    }
+    try {
+      provider.close();
+    } catch (Exception e) {
+      logger.warn("Failed to close security provider '{}'", provider.name(), e);
+    }
   }
 
   /**
