@@ -4,7 +4,7 @@ import com.scalar.db.saga.api.SagaStateSnapshot;
 import java.util.Objects;
 
 /** Thrown when a caller-supplied saga ID collides with an existing saga. */
-public class SagaAlreadyExistsException extends RuntimeException {
+public class SagaAlreadyExistsException extends SagaRuntimeException {
 
   private final String sagaId;
   private final SagaStateSnapshot existing;

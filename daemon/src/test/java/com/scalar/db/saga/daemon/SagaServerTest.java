@@ -12,6 +12,11 @@ import static org.mockito.Mockito.verify;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.SagaDefinitionException;
+import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
+import io.grpc.health.v1.HealthCheckRequest;
+import io.grpc.health.v1.HealthCheckResponse;
+import io.grpc.health.v1.HealthGrpc;
 import io.javalin.Javalin;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -185,5 +190,94 @@ class SagaServerTest {
     server.close();
 
     verify(orchestrator, times(1)).close();
+  }
+
+  @Test
+  void start_grpcDisabled_bindsOnlyHttp(@TempDir Path dir) throws Exception {
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    try (SagaServer server =
+        new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class)).start()) {
+      // HTTP is bound to an ephemeral port; gRPC is disabled, so grpcPort() reports the -1
+      // sentinel.
+      assertThat(server.port()).isGreaterThan(0);
+      assertThat(server.grpcPort()).isEqualTo(-1);
+    }
+  }
+
+  @Test
+  void start_httpDisabled_bindsOnlyGrpc(@TempDir Path dir) throws Exception {
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.GRPC_PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.HTTP_ENABLED_KEY, "false");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    try (SagaServer server =
+        new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class)).start()) {
+      // gRPC is bound to an ephemeral port; HTTP is disabled, so port() reports the -1 sentinel.
+      assertThat(server.grpcPort()).isGreaterThan(0);
+      assertThat(server.port()).isEqualTo(-1);
+    }
+  }
+
+  @Test
+  void start_grpcEnabled_healthServiceReportsServing(@TempDir Path dir) throws Exception {
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.GRPC_PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    try (SagaServer server =
+        new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class)).start()) {
+      ManagedChannel channel =
+          ManagedChannelBuilder.forAddress("localhost", server.grpcPort()).usePlaintext().build();
+      try {
+        // The standard grpc.health.v1.Health service is registered and reports the overall server
+        // SERVING — what a K8s-native gRPC probe checks.
+        HealthCheckResponse response =
+            HealthGrpc.newBlockingStub(channel).check(HealthCheckRequest.getDefaultInstance());
+
+        assertThat(response.getStatus()).isEqualTo(HealthCheckResponse.ServingStatus.SERVING);
+      } finally {
+        channel.shutdownNow();
+      }
+    }
+  }
+
+  private SagaServer serverWithSyncMaxWait(Path dir, long syncMaxWaitMillis) throws Exception {
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, Long.toString(syncMaxWaitMillis));
+    return new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class));
+  }
+
+  @Test
+  void grpcDrainMillis_syncMaxWaitBelowFloor_returnsFloor(@TempDir Path dir) throws Exception {
+    // A small ceiling still drains for at least the 30s floor.
+    SagaServer server = serverWithSyncMaxWait(dir, 1_000L);
+
+    assertThat(server.grpcDrainMillis()).isEqualTo(30_000L);
+  }
+
+  @Test
+  void grpcDrainMillis_syncMaxWaitAboveFloor_returnsCeilingPlusSlack(@TempDir Path dir)
+      throws Exception {
+    // A ceiling that (with slack) exceeds the floor widens the drain window past 30s, so a
+    // legitimate bounded-sync call reaches its own wait ceiling before force-cancellation.
+    SagaServer server = serverWithSyncMaxWait(dir, 60_000L);
+
+    assertThat(server.grpcDrainMillis()).isEqualTo(65_000L);
+  }
+
+  @Test
+  void grpcDrainMillis_raisedSyncMaxWait_widensWindow(@TempDir Path dir) throws Exception {
+    SagaServer server = serverWithSyncMaxWait(dir, 120_000L);
+
+    assertThat(server.grpcDrainMillis()).isEqualTo(125_000L);
   }
 }

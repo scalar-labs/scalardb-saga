@@ -40,6 +40,45 @@ class SagaServerConfigTest {
   }
 
   @Test
+  void grpcMaxInboundMessageBytes_returnsConfiguredPayloadLimit() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY, "12345");
+
+    assertThat(SagaServerConfig.load(props).grpcMaxInboundMessageBytes()).isEqualTo(12345);
+  }
+
+  @Test
+  void grpcMaxInboundMessageBytes_zeroPayloadLimit_mapsToIntegerMax() {
+    // The store reads 0 as "no limit"; gRPC's maxInboundMessageSize(0) would reject every non-empty
+    // message, so 0 must map to the effective maximum.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY, "0");
+
+    assertThat(SagaServerConfig.load(props).grpcMaxInboundMessageBytes())
+        .isEqualTo(Integer.MAX_VALUE);
+  }
+
+  @Test
+  void grpcMaxInboundMessageBytes_negativePayloadLimit_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY, "-1");
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThatThrownBy(config::grpcMaxInboundMessageBytes)
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void grpcMaxInboundMessageBytes_nonNumericPayloadLimit_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY, "not-a-number");
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThatThrownBy(config::grpcMaxInboundMessageBytes)
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void load_unsetPort_usesDefault() {
     assertThat(SagaServerConfig.load(new Properties()).port())
         .isEqualTo(SagaServerConfig.DEFAULT_PORT);
@@ -92,6 +131,47 @@ class SagaServerConfigTest {
   }
 
   @Test
+  void load_unsetSyncMaxWait_defaultsToCeiling() {
+    assertThat(SagaServerConfig.load(new Properties()).syncMaxWaitMillis())
+        .isEqualTo(SagaServerConfig.DEFAULT_SYNC_MAX_WAIT_MILLIS);
+  }
+
+  @Test
+  void load_syncMaxWaitGiven_parsesValue() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "30000");
+
+    assertThat(SagaServerConfig.load(props).syncMaxWaitMillis()).isEqualTo(30000L);
+  }
+
+  @Test
+  void load_zeroSyncMaxWait_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "0");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void load_negativeSyncMaxWait_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "-1");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void load_nonNumericSyncMaxWait_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "soon");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void load_noServiceKeys_returnsEmptyServiceBaseUrls() {
     assertThat(SagaServerConfig.load(new Properties()).serviceBaseUrls()).isEmpty();
   }
@@ -132,6 +212,63 @@ class SagaServerConfigTest {
     props.setProperty(
         SagaServerConfig.SERVICE_KEY_PREFIX + "account" + SagaServerConfig.SERVICE_BASE_URL_SUFFIX,
         "   ");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void load_unsetTransportToggles_bothEnabledByDefault() {
+    SagaServerConfig config = SagaServerConfig.load(new Properties());
+
+    assertThat(config.httpEnabled()).isTrue();
+    assertThat(config.grpcEnabled()).isTrue();
+  }
+
+  @Test
+  void load_httpDisabled_leavesGrpcEnabled() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HTTP_ENABLED_KEY, "false");
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.httpEnabled()).isFalse();
+    assertThat(config.grpcEnabled()).isTrue();
+  }
+
+  @Test
+  void load_grpcDisabled_leavesHttpEnabled() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.grpcEnabled()).isFalse();
+    assertThat(config.httpEnabled()).isTrue();
+  }
+
+  @Test
+  void load_transportToggleCaseInsensitive_isParsed() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "FALSE");
+
+    assertThat(SagaServerConfig.load(props).grpcEnabled()).isFalse();
+  }
+
+  @Test
+  void load_bothTransportsDisabled_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HTTP_ENABLED_KEY, "false");
+    props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void load_nonBooleanTransportToggle_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HTTP_ENABLED_KEY, "yes");
 
     assertThatThrownBy(() -> SagaServerConfig.load(props))
         .isInstanceOf(IllegalArgumentException.class);

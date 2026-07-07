@@ -3,7 +3,7 @@ package com.scalar.db.saga.exception;
 import java.util.Objects;
 
 /** Thrown when the saga store layer encounters a failure (e.g., database write error). */
-public class SagaPersistenceException extends RuntimeException {
+public class SagaPersistenceException extends SagaRuntimeException {
 
   public SagaPersistenceException(String message, Throwable cause) {
     super(

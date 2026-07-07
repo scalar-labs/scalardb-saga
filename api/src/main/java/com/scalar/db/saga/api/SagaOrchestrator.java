@@ -12,6 +12,10 @@ import java.util.Map;
  *
  * <p>Implementations must be thread-safe — multiple sagas execute concurrently.
  *
+ * <p>A "generated" saga ID is an opaque, unique id minted by the implementation; where it is minted
+ * is an implementation detail (the embedded orchestrator mints it server-side, a remote client may
+ * mint it client-side as an idempotency key). Callers depend only on receiving a unique id back.
+ *
  * <p>Construct the embedded implementation via its builder:
  *
  * <pre>{@code
@@ -23,8 +27,8 @@ import java.util.Map;
 public interface SagaOrchestrator extends AutoCloseable {
 
   /**
-   * Starts a new saga instance with a server-generated ID (synchronous — blocks until the saga
-   * completes or fails).
+   * Starts a new saga instance with a generated ID (synchronous — blocks until the saga completes
+   * or fails).
    *
    * <p>This method queries the store on every call to resolve the latest definition version. If you
    * know the exact version, prefer {@link #start(SagaDefinitionId, Map)} to avoid the store
@@ -55,7 +59,7 @@ public interface SagaOrchestrator extends AutoCloseable {
   void start(String sagaId, String sagaName, Map<String, Object> input);
 
   /**
-   * Starts a new saga instance with a server-generated ID, using a specific definition version
+   * Starts a new saga instance with a generated ID, using a specific definition version
    * (synchronous). The definition is resolved from the in-memory cache first, falling back to the
    * store only on a cache miss.
    *
@@ -81,7 +85,7 @@ public interface SagaOrchestrator extends AutoCloseable {
   void start(String sagaId, SagaDefinitionId id, Map<String, Object> input);
 
   /**
-   * Starts a new saga instance with a server-generated ID (asynchronous — returns immediately).
+   * Starts a new saga instance with a generated ID (asynchronous — returns immediately).
    *
    * <p>This method queries the store on every call to resolve the latest definition version. If you
    * know the exact version, prefer {@link #startAsync(SagaDefinitionId, Map)} to avoid the store
@@ -95,7 +99,7 @@ public interface SagaOrchestrator extends AutoCloseable {
   String startAsync(String sagaName, Map<String, Object> input);
 
   /**
-   * Starts a new saga instance with a server-generated ID (asynchronous with completion callback).
+   * Starts a new saga instance with a generated ID (asynchronous with completion callback).
    *
    * <p>This method queries the store on every call to resolve the latest definition version. If you
    * know the exact version, prefer {@link #startAsync(SagaDefinitionId, Map, SagaCallback)} to
@@ -106,6 +110,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @param callback callback for completion/compensation/escalation
    * @return the generated saga ID
    * @throws SagaDefinitionNotFoundException if no definition matches the given name
+   * @throws UnsupportedOperationException if the implementation cannot deliver a local completion
+   *     callback (e.g. a remote client with no server-streaming callback channel)
    */
   String startAsync(String sagaName, Map<String, Object> input, SagaCallback callback);
 
@@ -135,11 +141,13 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @param input initial data for the saga context
    * @param callback callback for completion/compensation/escalation
    * @throws SagaDefinitionNotFoundException if no definition matches the given name
+   * @throws UnsupportedOperationException if the implementation cannot deliver a local completion
+   *     callback (e.g. a remote client with no server-streaming callback channel)
    */
   void startAsync(String sagaId, String sagaName, Map<String, Object> input, SagaCallback callback);
 
   /**
-   * Starts a new saga instance with a server-generated ID, using a specific definition version
+   * Starts a new saga instance with a generated ID, using a specific definition version
    * (asynchronous). The definition is resolved from the in-memory cache first, falling back to the
    * store only on a cache miss.
    *
@@ -151,7 +159,7 @@ public interface SagaOrchestrator extends AutoCloseable {
   String startAsync(SagaDefinitionId id, Map<String, Object> input);
 
   /**
-   * Starts a new saga instance with a server-generated ID, using a specific definition version
+   * Starts a new saga instance with a generated ID, using a specific definition version
    * (asynchronous with completion callback). The definition is resolved from the in-memory cache
    * first, falling back to the store only on a cache miss.
    *
@@ -160,6 +168,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @param callback callback for completion/compensation/escalation
    * @return the generated saga ID
    * @throws SagaDefinitionNotFoundException if no definition matches the given name and version
+   * @throws UnsupportedOperationException if the implementation cannot deliver a local completion
+   *     callback (e.g. a remote client with no server-streaming callback channel)
    */
   String startAsync(SagaDefinitionId id, Map<String, Object> input, SagaCallback callback);
 
@@ -185,6 +195,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @param input initial data for the saga context
    * @param callback callback for completion/compensation/escalation
    * @throws SagaDefinitionNotFoundException if no definition matches the given name and version
+   * @throws UnsupportedOperationException if the implementation cannot deliver a local completion
+   *     callback (e.g. a remote client with no server-streaming callback channel)
    */
   void startAsync(
       String sagaId, SagaDefinitionId id, Map<String, Object> input, SagaCallback callback);

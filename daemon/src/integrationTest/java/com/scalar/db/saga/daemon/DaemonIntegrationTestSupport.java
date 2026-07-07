@@ -68,6 +68,7 @@ abstract class DaemonIntegrationTestSupport {
         "jdbc:sqlite:" + tempDbPath.toAbsolutePath() + "?busy_timeout=10000");
     props.setProperty("scalar.db.saga.store.num_buckets", "1");
     props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.GRPC_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, definitionsDir.toString());
     props.setProperty(
         SagaServerConfig.SERVICE_KEY_PREFIX + SERVICE + SagaServerConfig.SERVICE_BASE_URL_SUFFIX,
@@ -89,6 +90,11 @@ abstract class DaemonIntegrationTestSupport {
     if (tempDbPath != null) {
       Files.deleteIfExists(tempDbPath);
     }
+  }
+
+  /** The actual bound gRPC port (ephemeral). Only meaningful after the server has started. */
+  protected final int grpcPort() {
+    return server.grpcPort();
   }
 
   /** Registers the participant's HTTP endpoints — the services a definition's steps call. */

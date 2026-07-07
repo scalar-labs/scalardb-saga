@@ -3,7 +3,7 @@ package com.scalar.db.saga.exception;
 import java.util.Objects;
 
 /** Thrown when another replica is already processing a saga (optimistic locking conflict). */
-public class SagaConcurrentModificationException extends RuntimeException {
+public class SagaConcurrentModificationException extends SagaRuntimeException {
 
   private final String sagaId;
 

@@ -3,7 +3,7 @@ package com.scalar.db.saga.exception;
 import java.util.Objects;
 
 /** Thrown when looking up a saga instance that does not exist. */
-public class SagaNotFoundException extends RuntimeException {
+public class SagaNotFoundException extends SagaRuntimeException {
 
   private final String sagaId;
 

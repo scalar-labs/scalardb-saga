@@ -50,4 +50,9 @@
     <Class name="~com\.scalar\.db\.saga\.exception\..*"/>
     <Bug pattern="CT_CONSTRUCTOR_THROW"/>
   </Match>
+  <!-- Generated gRPC/protobuf stubs in the rpc module are machine-generated, not hand-written;
+       exclude them wholesale from SpotBugs (they live only in com.scalar.db.saga.rpc). -->
+  <Match>
+    <Class name="~com\.scalar\.db\.saga\.rpc\..*"/>
+  </Match>
 </FindBugsFilter>
