@@ -1,6 +1,7 @@
 package com.scalar.db.saga.daemon;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import java.io.IOException;
@@ -52,6 +53,25 @@ class SecretResolverTest {
   }
 
   @Test
+  void resolve_secretContainingReferenceSyntax_isNotRecursivelyReExpanded(@TempDir Path dir)
+      throws IOException {
+    // Arrange — a resolved secret must be treated literally. The outer file's contents are
+    // themselves a ${file:...} reference; if resolution recursed into the value, it would follow
+    // that reference and leak the inner secret instead of returning the outer file verbatim.
+    Path inner = dir.resolve("inner");
+    Files.writeString(inner, "inner-secret", StandardCharsets.UTF_8);
+    Path outer = dir.resolve("outer");
+    String nestedReference = "${file:UTF-8:" + inner + "}";
+    Files.writeString(outer, nestedReference, StandardCharsets.UTF_8);
+
+    // Act
+    String resolved = resolver.resolve("${file:UTF-8:" + outer + "}");
+
+    // Assert — the outer reference resolves exactly once, to the raw file contents.
+    assertThat(resolved).isEqualTo(nestedReference);
+  }
+
+  @Test
   void resolve_envReferenceGiven_returnsEnvValue() {
     // Arrange — use whatever environment variable the JVM actually has, for determinism.
     Map<String, String> env = System.getenv();
@@ -72,6 +92,17 @@ class SecretResolverTest {
 
     // Assert — an undefined variable is not disruptive; the reference is left as-is.
     assertThat(resolved).isEqualTo("${env:SAGA_SECRET_RESOLVER_SURELY_MISSING_VAR}");
+  }
+
+  @Test
+  void resolve_missingFileReferenceGiven_throws(@TempDir Path dir) {
+    // Arrange — a ${file:...} secret that does not exist. Unlike an undefined ${env:...} (left
+    // verbatim), a missing secret file must fail fast rather than silently resolve to a literal.
+    Path missing = dir.resolve("no-such-secret");
+
+    // Act & Assert
+    assertThatThrownBy(() -> resolver.resolve("${file:UTF-8:" + missing + "}"))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test

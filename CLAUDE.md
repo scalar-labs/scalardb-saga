@@ -26,6 +26,10 @@ Refer to `~/git/scalardb-saga-design/docs/scalardb-saga-design.md` for architect
 
 - Follow the [Google Java Style Guide](https://google.github.io/styleguide/javaguide.html)
 - Enforced by [Spotless](https://github.com/diffplug/spotless) with google-java-format (run `./gradlew spotlessApply`)
+- **Comment prose:** google-java-format reflows adjacent `//` comment lines as a paragraph and greedily rewraps at 100 columns. Dense prose makes it strand a short token (a lone `/`, `or`, or a single word) on its own line. To keep comments reflowing cleanly:
+  - Don't join words with `/` in prose (`putAll/copyOf` → `putAll or copyOf`)
+  - Prefer `;` or `.` over `—` to break clauses
+  - After editing a `//` comment, run `spotlessApply` and eyeball the result — a one-token orphan line is the tell that the prose needs rewording (you can't fix it by hand-wrapping; the reflow just re-breaks it)
 
 ## Static Analysis
 
