@@ -99,6 +99,7 @@ public final class SagaServerConfig {
   private final long syncMaxWaitMillis;
   private final String securityProvider;
   private final Properties properties;
+  private final Properties rawProperties;
   private final @Nullable Path definitionsPath;
   private final Map<String, String> serviceBaseUrls;
 
@@ -112,6 +113,7 @@ public final class SagaServerConfig {
       long syncMaxWaitMillis,
       String securityProvider,
       Properties properties,
+      Properties rawProperties,
       @Nullable Path definitionsPath,
       Map<String, String> serviceBaseUrls) {
     this.host = host;
@@ -123,6 +125,7 @@ public final class SagaServerConfig {
     this.syncMaxWaitMillis = syncMaxWaitMillis;
     this.securityProvider = securityProvider;
     this.properties = applyStoreDefaults(copyOf(properties));
+    this.rawProperties = copyOf(rawProperties);
     this.definitionsPath = definitionsPath;
     this.serviceBaseUrls = Map.copyOf(serviceBaseUrls);
   }
@@ -153,6 +156,9 @@ public final class SagaServerConfig {
    */
   public static SagaServerConfig load(Properties properties) {
     Objects.requireNonNull(properties, "properties must not be null");
+    // Keep the pre-resolution properties so a provider can tell a secret reference from an inline
+    // value (both look identical after resolution) — e.g. the API-key provider requires references.
+    Properties rawProperties = copyOf(properties);
     properties = resolveSecrets(properties);
     String host = parseHost(properties.getProperty(HOST_KEY));
     int port = parsePort(properties.getProperty(PORT_KEY), PORT_KEY, DEFAULT_PORT);
@@ -198,6 +204,7 @@ public final class SagaServerConfig {
         syncMaxWaitMillis,
         securityProvider,
         properties,
+        rawProperties,
         definitionsPath,
         parseServiceBaseUrls(properties));
   }
@@ -365,6 +372,15 @@ public final class SagaServerConfig {
    */
   public Properties properties() {
     return copyOf(properties);
+  }
+
+  /**
+   * Returns a defensive copy of the <b>pre-resolution</b> properties (secret references not yet
+   * expanded). A provider uses this to distinguish a {@code ${...}} secret reference from an inline
+   * value — indistinguishable after resolution — e.g. the API-key provider rejects inline keys.
+   */
+  Properties rawProperties() {
+    return copyOf(rawProperties);
   }
 
   /** Returns the optional path to declarative saga definitions loaded at startup. */

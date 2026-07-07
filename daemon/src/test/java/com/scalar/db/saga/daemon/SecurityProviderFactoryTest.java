@@ -75,4 +75,47 @@ class SecurityProviderFactoryTest {
     assertThatThrownBy(() -> SecurityProviderFactory.create(SagaServerConfig.load(properties)))
         .isInstanceOf(IllegalArgumentException.class);
   }
+
+  @Test
+  void create_apikeyWithReferenceKey_returnsApiKeyProvider() {
+    // Arrange — key supplied as a secret reference (an undefined ${env:...} is left verbatim by the
+    // resolver, so this needs no real environment)
+    Properties properties = new Properties();
+    properties.setProperty(SagaServerConfig.SECURITY_PROVIDER_KEY, "apikey");
+    properties.setProperty(
+        "scalar.db.saga.server.security.apikey.key.svc.secret", "${env:SAGA_TEST_KEY}");
+    properties.setProperty("scalar.db.saga.server.security.apikey.key.svc.roles", "saga:write");
+
+    // Act
+    SagaSecurityProvider provider =
+        SecurityProviderFactory.create(SagaServerConfig.load(properties));
+
+    // Assert
+    assertThat(provider.name()).isEqualTo("apikey");
+  }
+
+  @Test
+  void create_apikeyWithInlineKey_throwsException() {
+    // Arrange — an inline (non-reference) key must be rejected end-to-end through config loading
+    Properties properties = new Properties();
+    properties.setProperty(SagaServerConfig.SECURITY_PROVIDER_KEY, "apikey");
+    properties.setProperty(
+        "scalar.db.saga.server.security.apikey.key.svc.secret", "inline-plaintext-key");
+    properties.setProperty("scalar.db.saga.server.security.apikey.key.svc.roles", "saga:read");
+
+    // Act / Assert
+    assertThatThrownBy(() -> SecurityProviderFactory.create(SagaServerConfig.load(properties)))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void create_apikeyWithNoKeys_throwsException() {
+    // Arrange — 'apikey' selected but no keys configured
+    Properties properties = new Properties();
+    properties.setProperty(SagaServerConfig.SECURITY_PROVIDER_KEY, "apikey");
+
+    // Act / Assert
+    assertThatThrownBy(() -> SecurityProviderFactory.create(SagaServerConfig.load(properties)))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
 }

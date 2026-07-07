@@ -45,6 +45,20 @@ class SagaServerConfigTest {
   }
 
   @Test
+  void rawProperties_returnUnresolvedInput_withoutStoreDefaults() {
+    // Arrange
+    SagaServerConfig config = SagaServerConfig.load(new Properties());
+
+    // Assert — properties() applies the daemon store default; rawProperties() is the untouched,
+    // pre-resolution input (the boundary the API-key provider checks references against).
+    assertThat(config.properties().getProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY))
+        .isNotNull();
+    assertThat(
+            config.rawProperties().getProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY))
+        .isNull();
+  }
+
+  @Test
   void securityProvider_unset_defaultsToNoop() {
     SagaServerConfig config = SagaServerConfig.load(new Properties());
 
