@@ -78,6 +78,13 @@ public final class SecurityHandler {
    * {@link SagaRole#ADMIN} via an explicit per-route override when those routes land; there are
    * none today, so a method-based default covers the current surface.
    *
+   * <p><b>Keep in sync</b> with the gRPC mapping in {@code
+   * SagaSecurityInterceptor.requiredRoleFor}: the two transports encode the same
+   * operation&rarr;role policy in different vocabularies (HTTP verb vs gRPC method name), so an
+   * operation added to one must be mirrored in the other. When ADMIN-gated (per-route) operations
+   * land, replace both verb/method switches with a shared operation&rarr;role policy so the
+   * decision lives in one place.
+   *
    * <p>Package-private for unit testing the mapping without a running server.
    */
   static SagaRole requiredRoleFor(String method) {

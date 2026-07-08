@@ -70,7 +70,15 @@ public final class SagaSecurityInterceptor implements ServerInterceptor {
   /**
    * Resolves the minimum role a gRPC method requires: the read/poll methods need {@link
    * SagaRole#READ}; everything else (starting a saga, and any future state-changing method) needs
-   * {@link SagaRole#WRITE}. Package-private for unit testing.
+   * {@link SagaRole#WRITE}.
+   *
+   * <p><b>Keep in sync</b> with the REST mapping in {@code SecurityHandler.requiredRoleFor}: the
+   * two transports encode the same operation&rarr;role policy in different vocabularies (gRPC
+   * method name vs HTTP verb), so an operation added to one must be mirrored in the other. When
+   * ADMIN-gated operations land, replace both switches with a shared operation&rarr;role policy so
+   * the decision lives in one place.
+   *
+   * <p>Package-private for unit testing.
    */
   static SagaRole requiredRoleFor(@Nullable String bareMethodName) {
     if (bareMethodName == null) {
