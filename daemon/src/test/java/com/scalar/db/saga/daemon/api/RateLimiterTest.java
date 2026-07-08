@@ -108,6 +108,28 @@ class RateLimiterTest {
   }
 
   @Test
+  void tryAcquire_overMaxTrackedKeys_evictsToStayBounded() {
+    // Arrange — a tiny ceiling of 3 tracked keys (injected so the cap is cheap to exercise)
+    RateLimiter limiter = new RateLimiter(5, 1_000, 3);
+
+    // Act — four distinct keys within the same window, so none expires to be pruned
+    limiter.tryAcquire("a", 0);
+    limiter.tryAcquire("b", 0);
+    limiter.tryAcquire("c", 0);
+    assertThat(limiter.trackedKeys()).isEqualTo(3);
+    limiter.tryAcquire("d", 0);
+
+    // Assert — the hard ceiling holds; an arbitrary entry was evicted rather than growing to 4
+    assertThat(limiter.trackedKeys()).isEqualTo(3);
+  }
+
+  @Test
+  void constructor_nonPositiveMaxTrackedKeys_throwsException() {
+    assertThatThrownBy(() -> new RateLimiter(1, 1_000, 0))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void constructor_nonPositiveLimit_throwsException() {
     assertThatThrownBy(() -> new RateLimiter(0, 1_000))
         .isInstanceOf(IllegalArgumentException.class);

@@ -1,5 +1,6 @@
 package com.scalar.db.saga.daemon.api;
 
+import java.util.Iterator;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -8,9 +9,11 @@ import java.util.concurrent.atomic.AtomicLong;
  * key, counting from the first hit of each window.
  *
  * <p>Thread-safe and memory-bounded. Per-key state is updated atomically via {@link
- * ConcurrentHashMap#compute}; when the tracked-key count exceeds a cap, expired windows are pruned
- * so a churn of distinct keys cannot grow the map without bound. {@code nowMillis} is passed in
- * (not read from the clock) so the window logic is deterministically testable.
+ * ConcurrentHashMap#compute}. Growth is contained two ways: expired windows are swept (once per
+ * window, past a threshold) so idle keys cannot accumulate, and a hard ceiling ({@link
+ * #MAX_TRACKED_KEYS}) evicts arbitrary entries when even a large live principal set would otherwise
+ * grow the map without bound. {@code nowMillis} is passed in (not read from the clock) so the
+ * window logic is deterministically testable.
  *
  * <p>Public so a single instance can be shared across transports (the REST {@code RateLimitHandler}
  * and the gRPC {@code SagaRateLimitInterceptor}), keeping a caller's budget global rather than
@@ -22,8 +25,16 @@ public final class RateLimiter {
   // map growth from many short-lived distinct keys, without needing a background sweeper thread.
   private static final int PRUNE_THRESHOLD = 100_000;
 
+  // Absolute ceiling on tracked keys. If a large *live* principal set keeps entries from expiring
+  // (so the expired-window sweep frees nothing), evict arbitrary entries to hold the map at this
+  // bound. Each entry is small (a principal string plus a short window), so this caps worst-case
+  // memory at roughly 100 MB. A defensive backstop, not a functional limit — operators tune the
+  // request limit, not this.
+  private static final int MAX_TRACKED_KEYS = 1_000_000;
+
   private final int limit;
   private final long windowMillis;
+  private final int maxTrackedKeys;
   private final ConcurrentHashMap<String, Window> windows = new ConcurrentHashMap<>();
 
   // Epoch millis of the most recent prune. Gates pruning to at most once per window so a burst of
@@ -33,14 +44,23 @@ public final class RateLimiter {
   private final AtomicLong lastPrunedMillis = new AtomicLong(0L);
 
   public RateLimiter(int limit, long windowMillis) {
+    this(limit, windowMillis, MAX_TRACKED_KEYS);
+  }
+
+  /** Visible for testing: overrides the tracked-key ceiling so the cap can be exercised cheaply. */
+  RateLimiter(int limit, long windowMillis, int maxTrackedKeys) {
     if (limit <= 0) {
       throw new IllegalArgumentException("limit must be positive, got " + limit);
     }
     if (windowMillis <= 0) {
       throw new IllegalArgumentException("windowMillis must be positive, got " + windowMillis);
     }
+    if (maxTrackedKeys <= 0) {
+      throw new IllegalArgumentException("maxTrackedKeys must be positive, got " + maxTrackedKeys);
+    }
     this.limit = limit;
     this.windowMillis = windowMillis;
+    this.maxTrackedKeys = maxTrackedKeys;
   }
 
   /**
@@ -60,6 +80,7 @@ public final class RateLimiter {
                 (existing == null || isExpired(existing, nowMillis))
                     ? new Window(nowMillis, 1)
                     : new Window(existing.startMillis, existing.count + 1));
+    enforceMaxSize();
     return updated.count <= limit;
   }
 
@@ -75,6 +96,24 @@ public final class RateLimiter {
         && nowMillis - lastPruned > windowMillis
         && lastPrunedMillis.compareAndSet(lastPruned, nowMillis)) {
       windows.values().removeIf(window -> isExpired(window, nowMillis));
+    }
+  }
+
+  /**
+   * Holds the map at {@link #maxTrackedKeys}, evicting arbitrary entries when a large *live*
+   * principal set (nothing expired to prune) would otherwise grow it without bound. Cheap in the
+   * common case: {@link ConcurrentHashMap#size()} is near O(1) and the loop body runs only while
+   * over the cap. An evicted principal simply starts a fresh window on its next request — a
+   * best-effort degradation under pathological cardinality, preferred to unbounded growth.
+   */
+  private void enforceMaxSize() {
+    if (windows.size() <= maxTrackedKeys) {
+      return;
+    }
+    Iterator<Window> it = windows.values().iterator();
+    while (windows.size() > maxTrackedKeys && it.hasNext()) {
+      it.next();
+      it.remove();
     }
   }
 
