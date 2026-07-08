@@ -467,4 +467,24 @@ class SagaServerConfigTest {
 
     assertThat(config.host()).isEqualTo("10.9.8.7");
   }
+
+  @Test
+  void rawProperties_sagaKeyInDefaults_isPreserved() {
+    // rawProperties() is the pre-resolution copy a provider consults to tell a ${...} secret
+    // reference from an inline value. It is copied from the original input (before resolveSecrets),
+    // so copyOf must flatten the defaults chain too — otherwise a key set only in defaults is
+    // dropped from the raw copy while resolveSecrets keeps it in properties(), and a provider that
+    // discovers the key via properties() then reads null from rawProperties() (e.g. the API-key
+    // provider falsely rejecting a validly-referenced secret).
+    Properties defaults = new Properties();
+    defaults.setProperty(SagaServerConfig.SECURITY_PROVIDER_KEY, "${env:UNSET_NO_SUCH_VAR}");
+    Properties props = new Properties(defaults);
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    // The raw copy keeps the inherited key verbatim (unresolved), matching the resolved-side
+    // flatten.
+    assertThat(config.rawProperties().getProperty(SagaServerConfig.SECURITY_PROVIDER_KEY))
+        .isEqualTo("${env:UNSET_NO_SUCH_VAR}");
+  }
 }

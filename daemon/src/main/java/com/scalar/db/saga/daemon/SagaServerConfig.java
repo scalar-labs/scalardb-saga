@@ -573,9 +573,30 @@ public final class SagaServerConfig {
     return millis;
   }
 
+  /**
+   * Returns a flattened defensive copy of {@code source}. Rebuilds from {@code
+   * stringPropertyNames()} so every string property is copied into the single table, including any
+   * inherited from a defaults chain ({@code new Properties(defaults)}); a plain {@code putAll}
+   * would silently drop those inherited entries, leaving {@code getProperty} on the copy
+   * inconsistent with the resolved properties (which {@link #resolveSecrets} already flattens the
+   * same way).
+   */
   private static Properties copyOf(Properties source) {
     Properties copy = new Properties();
-    copy.putAll(source);
+    for (String key : source.stringPropertyNames()) {
+      String value = source.getProperty(key);
+      if (value == null) {
+        continue; // stringPropertyNames() only lists string-valued keys; guard for null-safety
+      }
+      copy.setProperty(key, value);
+    }
+    // Non-string entries aren't listed by stringPropertyNames(); carry the main table's through.
+    source.forEach(
+        (key, value) -> {
+          if (!(key instanceof String) || !(value instanceof String)) {
+            copy.put(key, value);
+          }
+        });
     return copy;
   }
 }
