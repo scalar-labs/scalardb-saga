@@ -3,7 +3,9 @@ package com.scalar.db.saga.daemon;
 import com.scalar.db.saga.daemon.api.ErrorMapper;
 import com.scalar.db.saga.daemon.api.HealthResource;
 import com.scalar.db.saga.daemon.api.RateLimitHandler;
+import com.scalar.db.saga.daemon.api.RateLimiter;
 import com.scalar.db.saga.daemon.api.SagaResource;
+import com.scalar.db.saga.daemon.grpc.SagaRateLimitInterceptor;
 import com.scalar.db.saga.daemon.grpc.SagaSecurityInterceptor;
 import com.scalar.db.saga.daemon.grpc.SagaServiceImpl;
 import com.scalar.db.saga.daemon.security.AuthExemptions;
@@ -16,6 +18,7 @@ import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.store.ScalarDbSagaStoreFactory;
 import io.grpc.Server;
 import io.grpc.ServerInterceptors;
+import io.grpc.ServerServiceDefinition;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.protobuf.services.HealthStatusManager;
 import io.javalin.Javalin;
@@ -66,10 +69,14 @@ public final class SagaServer implements AutoCloseable {
   private static final long GRPC_SHUTDOWN_MIN_SECONDS = 30L;
   private static final long GRPC_SHUTDOWN_SLACK_MILLIS = 5_000L;
   private static final long THREAD_POOL_IDLE_TIMEOUT_MILLIS = 60_000L;
+  private static final long RATE_LIMIT_WINDOW_MILLIS = 60_000L;
 
   private final SagaServerConfig config;
   private final DefaultSagaOrchestrator orchestrator;
   private final SagaSecurityProvider securityProvider;
+  // The shared per-principal saga-start limiter, or null when rate limiting is disabled. Shared by
+  // both transports (REST before-handler and gRPC interceptor) so a caller's budget spans both.
+  private final @Nullable RateLimiter rateLimiter;
   // Each transport is null when disabled; SagaServerConfig guarantees at least one is enabled.
   private final @Nullable Javalin httpServer;
   private final @Nullable ExecutorService grpcExecutor;
@@ -101,6 +108,10 @@ public final class SagaServer implements AutoCloseable {
         config.grpcEnabled() ? Executors.newVirtualThreadPerTaskExecutor() : null;
     this.httpServer = httpServer;
     this.grpcExecutor = grpcExecutor;
+    this.rateLimiter =
+        config.maxStartRequestsPerMinute() > 0
+            ? new RateLimiter(config.maxStartRequestsPerMinute(), RATE_LIMIT_WINDOW_MILLIS)
+            : null;
     // Built before wiring the transports so both can share one provider (the gRPC interceptor uses
     // it too). A null placeholder lets the catch below close it only if it was built.
     @Nullable SagaSecurityProvider provider = null;
@@ -135,20 +146,29 @@ public final class SagaServer implements AutoCloseable {
    * Builds (does not bind) the gRPC server: it serves {@link SagaServiceImpl} over the same {@link
    * SagaServerConfig#host()} as HTTP on its own port, delegating to the same orchestrator the REST
    * routes use. The saga service is wrapped with {@link SagaSecurityInterceptor} so gRPC calls are
-   * authenticated/authorized by the same {@link SagaSecurityProvider} as REST. It also registers
-   * the standard {@code grpc.health.v1.Health} service — deliberately <b>not</b> intercepted, so a
+   * authenticated/authorized by the same {@link SagaSecurityProvider} as REST, and — when rate
+   * limiting is enabled — a {@link SagaRateLimitInterceptor} sharing the REST transport's {@link
+   * RateLimiter}, so a caller's saga-start budget spans both transports. It also registers the
+   * standard {@code grpc.health.v1.Health} service — deliberately <b>not</b> intercepted, so a
    * gRPC-only deployment stays probeable (e.g. by K8s-native gRPC probes) without a credential. The
    * wait-heavy bounded-sync calls run on a virtual-thread executor (cheap blocking); the
    * inbound-size and metadata caps bound abuse; server reflection is deliberately not registered
    * (it would expose the schema to any client).
    */
   private Server buildGrpcServer(ExecutorService executor, HealthStatusManager health) {
+    SagaServiceImpl service =
+        new SagaServiceImpl(orchestrator, config.syncTimeoutMillis(), config.syncMaxWaitMillis());
+    SagaSecurityInterceptor security = new SagaSecurityInterceptor(securityProvider);
+    // interceptForward runs interceptors in listed order: authenticate first so the identity is on
+    // the Context, then (when enabled) rate-limit reads it — the gRPC analogue of the REST
+    // before-handler order.
+    ServerServiceDefinition sagaService =
+        rateLimiter == null
+            ? ServerInterceptors.intercept(service, security)
+            : ServerInterceptors.interceptForward(
+                service, security, new SagaRateLimitInterceptor(rateLimiter));
     return NettyServerBuilder.forAddress(new InetSocketAddress(config.host(), config.grpcPort()))
-        .addService(
-            ServerInterceptors.intercept(
-                new SagaServiceImpl(
-                    orchestrator, config.syncTimeoutMillis(), config.syncMaxWaitMillis()),
-                new SagaSecurityInterceptor(securityProvider)))
+        .addService(sagaService)
         .addService(health.getHealthService())
         .maxInboundMessageSize(config.grpcMaxInboundMessageBytes())
         .maxInboundMetadataSize(8 * 1024)
@@ -265,9 +285,10 @@ public final class SagaServer implements AutoCloseable {
     // per-step HMAC token — add CallbackResource.PATH to this list when that route lands.
     SecurityHandler.register(httpServer, securityProvider, AuthExemptions.of(HealthResource.PATH));
     // Rate limiting runs after auth (it keys off the resolved principal) and only when enabled;
-    // registered before the routes so it gates saga-start requests.
-    if (config.maxStartRequestsPerMinute() > 0) {
-      RateLimitHandler.register(httpServer, config.maxStartRequestsPerMinute());
+    // registered before the routes so it gates saga-start requests. The same limiter also gates the
+    // gRPC transport (see buildGrpcServer), so the budget is per caller, not per port.
+    if (rateLimiter != null) {
+      RateLimitHandler.register(httpServer, rateLimiter);
     }
     HealthResource.register(httpServer);
     ErrorMapper.register(httpServer);

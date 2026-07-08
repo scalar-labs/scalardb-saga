@@ -32,12 +32,13 @@ public final class RateLimitHandler {
    * Registers the rate-limit before-handler.
    *
    * @param app the Javalin app
-   * @param requestsPerMinute the per-principal limit on saga-start requests per minute (must be
-   *     positive; callers register this handler only when rate limiting is enabled)
+   * @param limiter the per-principal saga-start limiter; shared with the gRPC transport so a
+   *     caller's budget spans both, rather than being counted separately per port
    */
-  public static void register(Javalin app, int requestsPerMinute) {
+  public static void register(Javalin app, RateLimiter limiter) {
     Objects.requireNonNull(app, "app must not be null");
-    RateLimitHandler handler = new RateLimitHandler(new RateLimiter(requestsPerMinute, 60_000L));
+    Objects.requireNonNull(limiter, "limiter must not be null");
+    RateLimitHandler handler = new RateLimitHandler(limiter);
     app.before(handler::handle);
   }
 

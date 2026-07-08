@@ -66,6 +66,48 @@ class RateLimiterTest {
   }
 
   @Test
+  void tryAcquire_overPruneThreshold_prunesExpiredWindows() {
+    // Arrange — fill past the prune threshold with distinct keys whose windows all start at 0. No
+    // prune runs during the fill: the time-gate blocks it until a full window has elapsed since the
+    // initial lastPrunedMillis of 0.
+    RateLimiter limiter = new RateLimiter(1, 1_000);
+    fillDistinctKeys(limiter, 100_001, 0);
+    assertThat(limiter.trackedKeys()).isEqualTo(100_001);
+
+    // Act — one more hit a full window later, when every filled window has expired.
+    limiter.tryAcquire("trigger", 2_000);
+
+    // Assert — the expired windows were pruned, leaving only the triggering key.
+    assertThat(limiter.trackedKeys()).isEqualTo(1);
+  }
+
+  @Test
+  void tryAcquire_withinWindowOfLastPrune_skipsRedundantPrune() {
+    // Arrange — over the threshold, all windows starting at 0 (so lastPrunedMillis stays 0).
+    RateLimiter limiter = new RateLimiter(1, 1_000);
+    fillDistinctKeys(limiter, 100_001, 0);
+
+    // Act — a hit exactly one window later. The filled windows are now expired, but the gate
+    // (nowMillis - lastPruned must exceed windowMillis) is not yet open at the boundary.
+    limiter.tryAcquire("probe", 1_000);
+
+    // Assert — pruning was skipped, so the expired windows and the probe all remain.
+    assertThat(limiter.trackedKeys()).isEqualTo(100_002);
+
+    // Act — one millisecond past the window: the gate opens and pruning resumes.
+    limiter.tryAcquire("probe2", 1_001);
+
+    // Assert — the expired windows are gone; only probe (still live) and probe2 remain.
+    assertThat(limiter.trackedKeys()).isEqualTo(2);
+  }
+
+  private static void fillDistinctKeys(RateLimiter limiter, int count, long nowMillis) {
+    for (int i = 0; i < count; i++) {
+      limiter.tryAcquire("key-" + i, nowMillis);
+    }
+  }
+
+  @Test
   void constructor_nonPositiveLimit_throwsException() {
     assertThatThrownBy(() -> new RateLimiter(0, 1_000))
         .isInstanceOf(IllegalArgumentException.class);

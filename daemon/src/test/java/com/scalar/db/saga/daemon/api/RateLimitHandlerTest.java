@@ -36,7 +36,7 @@ class RateLimitHandlerTest {
             ctx.attribute(SecurityHandler.IDENTITY_ATTRIBUTE, identity);
           }
         });
-    RateLimitHandler.register(app, limit);
+    RateLimitHandler.register(app, new RateLimiter(limit, 60_000L));
     ErrorMapper.register(app);
     app.post("/sagas", ctx -> ctx.result("created"));
     app.get("/sagas/x", ctx -> ctx.result("read"));
