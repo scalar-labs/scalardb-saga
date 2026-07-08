@@ -67,6 +67,22 @@ class SagaServerConfigTest {
   }
 
   @Test
+  void insecureModeEnabled_unset_defaultsFalse() {
+    SagaServerConfig config = SagaServerConfig.load(new Properties());
+
+    assertThat(config.insecureModeEnabled())
+        .isEqualTo(SagaServerConfig.DEFAULT_INSECURE_MODE_ENABLED);
+  }
+
+  @Test
+  void insecureModeEnabled_setTrue_isParsed() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.INSECURE_MODE_ENABLED_KEY, "true");
+
+    assertThat(SagaServerConfig.load(props).insecureModeEnabled()).isTrue();
+  }
+
+  @Test
   void threadPool_configuredValues_areParsed() {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.MAX_THREADS_KEY, "50");

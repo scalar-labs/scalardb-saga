@@ -85,6 +85,7 @@ public final class SagaServerConfig {
   static final String SYNC_MAX_WAIT_MILLIS_KEY = SERVER_PREFIX + "sync_max_wait_millis";
   static final String SECURITY_PREFIX = SERVER_PREFIX + "security.";
   static final String SECURITY_PROVIDER_KEY = SECURITY_PREFIX + "provider";
+  static final String INSECURE_MODE_ENABLED_KEY = SECURITY_PREFIX + "insecure_mode.enabled";
   static final String MAX_THREADS_KEY = SERVER_PREFIX + "max_threads";
   static final String MIN_THREADS_KEY = SERVER_PREFIX + "min_threads";
   static final String DEFAULT_SAGA_TIMEOUT_MILLIS_KEY =
@@ -103,6 +104,7 @@ public final class SagaServerConfig {
       60_000L; // ceiling on a synchronous server-side wait
   static final String DEFAULT_SECURITY_PROVIDER =
       "noop"; // no authentication (see NoopSecurityProvider)
+  static final boolean DEFAULT_INSECURE_MODE_ENABLED = false; // must be enabled to run noop exposed
   static final int DEFAULT_MAX_THREADS = 200; // Jetty's own default
   static final int DEFAULT_MIN_THREADS = 8; // Jetty's own default
   static final long DEFAULT_SAGA_TIMEOUT_MILLIS =
@@ -117,6 +119,7 @@ public final class SagaServerConfig {
   private final long syncTimeoutMillis;
   private final long syncMaxWaitMillis;
   private final String securityProvider;
+  private final boolean insecureModeEnabled;
   private final int maxThreads;
   private final int minThreads;
   private final long defaultSagaTimeoutMillis;
@@ -135,6 +138,7 @@ public final class SagaServerConfig {
       long syncTimeoutMillis,
       long syncMaxWaitMillis,
       String securityProvider,
+      boolean insecureModeEnabled,
       int maxThreads,
       int minThreads,
       long defaultSagaTimeoutMillis,
@@ -151,6 +155,7 @@ public final class SagaServerConfig {
     this.syncTimeoutMillis = syncTimeoutMillis;
     this.syncMaxWaitMillis = syncMaxWaitMillis;
     this.securityProvider = securityProvider;
+    this.insecureModeEnabled = insecureModeEnabled;
     this.maxThreads = maxThreads;
     this.minThreads = minThreads;
     this.defaultSagaTimeoutMillis = defaultSagaTimeoutMillis;
@@ -222,6 +227,11 @@ public final class SagaServerConfig {
             DEFAULT_SYNC_MAX_WAIT_MILLIS,
             1L);
     String securityProvider = parseSecurityProvider(properties.getProperty(SECURITY_PROVIDER_KEY));
+    boolean insecureModeEnabled =
+        parseBoolean(
+            properties.getProperty(INSECURE_MODE_ENABLED_KEY),
+            INSECURE_MODE_ENABLED_KEY,
+            DEFAULT_INSECURE_MODE_ENABLED);
     int maxThreads =
         (int)
             parseBoundedLong(
@@ -267,6 +277,7 @@ public final class SagaServerConfig {
         syncTimeoutMillis,
         syncMaxWaitMillis,
         securityProvider,
+        insecureModeEnabled,
         maxThreads,
         minThreads,
         defaultSagaTimeoutMillis,
@@ -432,6 +443,16 @@ public final class SagaServerConfig {
    */
   public String securityProvider() {
     return securityProvider;
+  }
+
+  /**
+   * Whether the operator has acknowledged running without authentication on a network-reachable
+   * interface (the {@code insecure_mode.enabled} key). Consulted by {@link SagaServer} at startup
+   * to gate the {@code noop} provider on a non-loopback host. Defaults to {@value
+   * #DEFAULT_INSECURE_MODE_ENABLED}.
+   */
+  public boolean insecureModeEnabled() {
+    return insecureModeEnabled;
   }
 
   /**

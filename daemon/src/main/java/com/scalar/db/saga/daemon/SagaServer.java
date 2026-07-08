@@ -296,12 +296,58 @@ public final class SagaServer implements AutoCloseable {
   }
 
   /**
+   * Fails fast if the server would start unauthenticated on a network-reachable interface: the
+   * {@code noop} provider bound to a non-loopback host. The operator must configure a real
+   * provider, bind to a loopback address, or explicitly enable insecure mode via {@code
+   * insecure_mode.enabled=true}. This closes the insecure-by-default combination where an
+   * unconfigured daemon would serve full-access requests to anyone on the network.
+   */
+  private void ensureSecureBindingOrAcknowledged() {
+    if (config.securityProvider().equals("noop")
+        && !isLoopbackHost(config.host())
+        && !config.insecureModeEnabled()) {
+      throw new IllegalArgumentException(
+          "Refusing to start unauthenticated on a network-reachable interface: '"
+              + SagaServerConfig.SECURITY_PROVIDER_KEY
+              + "="
+              + config.securityProvider()
+              + "' disables authentication, but '"
+              + SagaServerConfig.HOST_KEY
+              + "="
+              + config.host()
+              + "' is not a loopback address. Configure a real security provider (jwt or apikey),"
+              + " bind '"
+              + SagaServerConfig.HOST_KEY
+              + "' to a loopback address, or set '"
+              + SagaServerConfig.INSECURE_MODE_ENABLED_KEY
+              + "=true' to acknowledge running without authentication on an exposed interface.");
+    }
+  }
+
+  /**
+   * Whether {@code host} is a loopback bind address ({@code localhost}, {@code 127.0.0.0/8}, {@code
+   * ::1}) — reachable only from the local machine, not the network. Matched on the literal (no DNS
+   * resolution); {@code 0.0.0.0} (bind all interfaces) is deliberately not loopback.
+   */
+  private static boolean isLoopbackHost(String host) {
+    String literal = host;
+    if (literal.startsWith("[") && literal.endsWith("]")) {
+      // A bracketed IPv6 literal, e.g. "[::1]".
+      literal = literal.substring(1, literal.length() - 1);
+    }
+    return literal.equalsIgnoreCase("localhost")
+        || literal.equals("::1")
+        || literal.startsWith("127.");
+  }
+
+  /**
    * Starts background recovery/retention tasks, binds the HTTP port, and begins serving.
    *
    * @return this server
    */
   public SagaServer start() {
     try {
+      ensureSecureBindingOrAcknowledged();
       orchestrator.startBackgroundTasks();
       if (httpServer != null) {
         httpServer.start(config.host(), config.port());

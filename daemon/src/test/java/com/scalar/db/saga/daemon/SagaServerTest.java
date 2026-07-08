@@ -230,9 +230,10 @@ class SagaServerTest {
   void start_portUnavailable_closesOrchestratorAndPropagates(@TempDir Path dir) throws Exception {
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     // Hold an ephemeral port with another server so SagaServer's app.start(...) fails to bind.
-    Javalin portHolder = Javalin.create().start(0);
+    Javalin portHolder = Javalin.create().start("127.0.0.1", 0);
     try {
       Properties props = new Properties();
+      props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
       props.setProperty(SagaServerConfig.PORT_KEY, Integer.toString(portHolder.port()));
       props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
       DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
@@ -260,9 +261,45 @@ class SagaServerTest {
   }
 
   @Test
+  void start_noopProviderOnNonLoopbackHost_throwsWithoutAcknowledgement(@TempDir Path dir)
+      throws Exception {
+    // Arrange — default noop provider, bound to all interfaces (0.0.0.0), not acknowledged
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "0.0.0.0");
+    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    SagaServer server =
+        new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class));
+
+    // Act / Assert — refuses to start unauthenticated on a network-reachable interface
+    assertThatThrownBy(server::start).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void start_noopOnNonLoopbackHost_startsWhenInsecureAcknowledged(@TempDir Path dir)
+      throws Exception {
+    // Arrange — the same exposed noop config, but the operator explicitly acknowledges it
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "0.0.0.0");
+    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
+    props.setProperty(SagaServerConfig.INSECURE_MODE_ENABLED_KEY, "true");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+
+    // Act / Assert — the acknowledgement lets it bind
+    try (SagaServer server =
+        new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class)).start()) {
+      assertThat(server.port()).isGreaterThan(0);
+    }
+  }
+
+  @Test
   void start_grpcDisabled_bindsOnlyHttp(@TempDir Path dir) throws Exception {
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
     props.setProperty(SagaServerConfig.PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
@@ -279,6 +316,7 @@ class SagaServerTest {
   void start_httpDisabled_bindsOnlyGrpc(@TempDir Path dir) throws Exception {
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
     props.setProperty(SagaServerConfig.GRPC_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.HTTP_ENABLED_KEY, "false");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
@@ -294,6 +332,7 @@ class SagaServerTest {
   void start_grpcEnabled_healthServiceReportsServing(@TempDir Path dir) throws Exception {
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
     props.setProperty(SagaServerConfig.PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
