@@ -1,5 +1,6 @@
 package com.scalar.db.saga.daemon.security;
 
+import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
@@ -70,7 +71,7 @@ public final class SagaAuthRequest {
     Objects.requireNonNull(headers, "headers must not be null");
     // Copy into a lower-cased table so the lookup is independent of the source map's casing and
     // immune to later mutation of the caller's map.
-    Map<String, String> normalized = new java.util.HashMap<>();
+    Map<String, String> normalized = new HashMap<>();
     headers.forEach((name, value) -> normalized.put(name.toLowerCase(Locale.ROOT), value));
     return new SagaAuthRequest(
         operation, remoteAddress, name -> normalized.get(name.toLowerCase(Locale.ROOT)));
