@@ -12,6 +12,9 @@ import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.proc.DefaultJWTClaimsVerifier;
 import com.nimbusds.jwt.proc.DefaultJWTProcessor;
 import com.nimbusds.jwt.proc.JWTProcessor;
+import java.io.Closeable;
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.text.ParseException;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -61,15 +64,36 @@ public final class JwtSecurityProvider implements SagaSecurityProvider {
   private final String rolesClaim;
 
   /**
+   * The JWKS source's closeable handle, released by {@link #close()}. The nimbus default source
+   * caches keys and refreshes ahead of expiry on a dedicated executor thread; closing it cancels
+   * that refresh and shuts the executor down. Null on the in-memory test seam, which owns no such
+   * resource.
+   */
+  private final @Nullable Closeable jwkSource;
+
+  /**
    * Visible for testing: builds a provider around an already-constructed {@link JWTProcessor}, so a
    * test can drive it with an in-memory JWKS (no network). The processor owns validation; this
-   * class only extracts the principal and roles.
+   * class only extracts the principal and roles. Holds no closeable JWKS resource.
    */
   JwtSecurityProvider(
       JWTProcessor<SecurityContext> processor, String principalClaim, String rolesClaim) {
+    this(processor, principalClaim, rolesClaim, null);
+  }
+
+  /**
+   * Visible for testing: as above, but adopts a closeable JWKS source so a test can assert {@link
+   * #close()} releases it.
+   */
+  JwtSecurityProvider(
+      JWTProcessor<SecurityContext> processor,
+      String principalClaim,
+      String rolesClaim,
+      @Nullable Closeable jwkSource) {
     this.processor = processor;
     this.principalClaim = principalClaim;
     this.rolesClaim = rolesClaim;
+    this.jwkSource = jwkSource;
   }
 
   /**
@@ -86,8 +110,8 @@ public final class JwtSecurityProvider implements SagaSecurityProvider {
   }
 
   private static JwtSecurityProvider create(JwtConfig config) {
-    // The default JWKS source caches keys and refreshes on rotation without a background thread, so
-    // the provider holds no resource to release on close.
+    // The default JWKS source caches keys and refreshes ahead of expiry on a dedicated executor
+    // thread; that executor is released by close().
     JWKSource<SecurityContext> jwkSource =
         JWKSourceBuilder.create(
                 config.jwksUrl(),
@@ -96,7 +120,11 @@ public final class JwtSecurityProvider implements SagaSecurityProvider {
             .build();
     JWTProcessor<SecurityContext> processor =
         buildProcessor(jwkSource, config.issuer(), config.audience(), config.principalClaim());
-    return new JwtSecurityProvider(processor, config.principalClaim(), config.rolesClaim());
+    return new JwtSecurityProvider(
+        processor,
+        config.principalClaim(),
+        config.rolesClaim(),
+        jwkSource instanceof Closeable closeable ? closeable : null);
   }
 
   /**
@@ -140,6 +168,20 @@ public final class JwtSecurityProvider implements SagaSecurityProvider {
   @Override
   public String name() {
     return "jwt";
+  }
+
+  @Override
+  public void close() {
+    if (jwkSource == null) {
+      return;
+    }
+    try {
+      // Cascades to RefreshAheadCachingJWKSetSource.close(): cancels the scheduled refresh and
+      // shuts down its executor. SagaServer logs (does not propagate) any failure from here.
+      jwkSource.close();
+    } catch (IOException e) {
+      throw new UncheckedIOException("Failed to close the JWKS source", e);
+    }
   }
 
   private static String bearerToken(SagaAuthRequest request) {

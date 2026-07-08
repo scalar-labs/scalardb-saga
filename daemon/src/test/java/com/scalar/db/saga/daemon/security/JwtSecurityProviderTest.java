@@ -16,10 +16,12 @@ import com.nimbusds.jose.proc.SecurityContext;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
 import com.nimbusds.jwt.proc.JWTProcessor;
+import java.io.Closeable;
 import java.time.Instant;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -53,6 +55,30 @@ class JwtSecurityProviderTest {
   @Test
   void name_returnsJwt() {
     assertThat(provider.name()).isEqualTo("jwt");
+  }
+
+  @Test
+  void close_releasesJwksSource() throws Exception {
+    // Arrange — a provider that adopts a recording closeable JWKS source
+    AtomicBoolean closed = new AtomicBoolean(false);
+    Closeable jwkSource = () -> closed.set(true);
+    JWKSource<SecurityContext> keys = new ImmutableJWKSet<>(new JWKSet(signingKey.toPublicJWK()));
+    JWTProcessor<SecurityContext> processor =
+        JwtSecurityProvider.buildProcessor(keys, ISSUER, AUDIENCE, "sub");
+    JwtSecurityProvider closeableProvider =
+        new JwtSecurityProvider(processor, "sub", "scope", jwkSource);
+
+    // Act
+    closeableProvider.close();
+
+    // Assert
+    assertThat(closed).isTrue();
+  }
+
+  @Test
+  void close_withNoOwnedResource_isNoop() {
+    // The in-memory test seam holds no closeable resource; close() must not throw.
+    provider.close();
   }
 
   @Test
