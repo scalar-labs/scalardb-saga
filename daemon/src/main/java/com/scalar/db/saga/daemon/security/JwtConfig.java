@@ -14,7 +14,8 @@ import org.jspecify.annotations.Nullable;
  *
  * <ul>
  *   <li>{@code jwks_url} (required) — the JWKS endpoint whose signing keys validate token
- *       signatures. Fetched and cached, with key-rotation refresh handled by the JWKS source.
+ *       signatures. Fetched and cached, with key-rotation refresh handled by the JWKS source. Must
+ *       use {@code https} (it is the trust anchor); a loopback host is allowed for local dev.
  *   <li>{@code issuer} (required) — the expected {@code iss}; a token from any other issuer is
  *       rejected.
  *   <li>{@code audience} (optional) — the expected {@code aud}; when set, a token must carry it.
@@ -152,11 +153,43 @@ final class JwtConfig {
   }
 
   private static URL parseUrl(String value) {
+    URL url;
     try {
-      return new URI(value).toURL();
+      url = new URI(value).toURL();
     } catch (URISyntaxException | MalformedURLException | IllegalArgumentException e) {
       throw new IllegalArgumentException("Invalid value for '" + JWKS_URL_KEY + "': " + value, e);
     }
+    // The JWKS is the JWT trust anchor: every token signature is verified against keys fetched from
+    // it, so a plaintext endpoint lets an on-path attacker swap the keys and forge tokens. Require
+    // https, except on loopback so local development against a plaintext dev IdP still works.
+    if (!"https".equalsIgnoreCase(url.getProtocol()) && !isLoopbackHost(url.getHost())) {
+      throw new IllegalArgumentException(
+          "'"
+              + JWKS_URL_KEY
+              + "' must use https (the JWKS is the JWT trust anchor; a plaintext endpoint can be"
+              + " tampered with in transit). Use https, or a loopback host for local development: "
+              + value);
+    }
+    return url;
+  }
+
+  /**
+   * Whether {@code host} is an IPv4/IPv6 loopback literal ({@code localhost}, {@code 127.0.0.0/8},
+   * {@code ::1}). Matched on the literal rather than resolved via DNS so parsing stays offline and
+   * a spoofable name cannot pass as loopback.
+   */
+  private static boolean isLoopbackHost(@Nullable String host) {
+    if (host == null || host.isEmpty()) {
+      return false;
+    }
+    String literal = host;
+    if (literal.startsWith("[") && literal.endsWith("]")) {
+      // URL.getHost keeps the brackets around an IPv6 literal (e.g. "[::1]").
+      literal = literal.substring(1, literal.length() - 1);
+    }
+    return literal.equalsIgnoreCase("localhost")
+        || literal.equals("::1")
+        || literal.startsWith("127.");
   }
 
   private static @Nullable String blankToNull(@Nullable String value) {

@@ -96,6 +96,52 @@ class JwtConfigTest {
   }
 
   @Test
+  void from_plaintextHttpJwksUrl_throwsException() {
+    // Arrange
+    Properties props = minimalProps();
+    props.setProperty(JwtConfig.JWKS_URL_KEY, "http://issuer.example/.well-known/jwks.json");
+
+    // Act / Assert
+    assertThatThrownBy(() -> JwtConfig.from(props)).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void from_nonHttpsJwksUrl_throwsException() {
+    // Arrange
+    Properties props = minimalProps();
+    props.setProperty(JwtConfig.JWKS_URL_KEY, "file:///etc/jwks.json");
+
+    // Act / Assert
+    assertThatThrownBy(() -> JwtConfig.from(props)).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void from_plaintextHttpLoopbackJwksUrl_isAllowedForLocalDev() {
+    // Arrange
+    Properties props = minimalProps();
+    props.setProperty(JwtConfig.JWKS_URL_KEY, "http://localhost:8080/jwks.json");
+
+    // Act
+    JwtConfig config = JwtConfig.from(props);
+
+    // Assert
+    assertThat(config.jwksUrl().toString()).isEqualTo("http://localhost:8080/jwks.json");
+  }
+
+  @Test
+  void from_plaintextHttpLoopbackIpJwksUrl_isAllowedForLocalDev() {
+    // Arrange
+    Properties props = minimalProps();
+    props.setProperty(JwtConfig.JWKS_URL_KEY, "http://127.0.0.1:8080/jwks.json");
+
+    // Act
+    JwtConfig config = JwtConfig.from(props);
+
+    // Assert
+    assertThat(config.jwksUrl().toString()).isEqualTo("http://127.0.0.1:8080/jwks.json");
+  }
+
+  @Test
   void from_nonNumericTimeout_throwsException() {
     // Arrange
     Properties props = minimalProps();
