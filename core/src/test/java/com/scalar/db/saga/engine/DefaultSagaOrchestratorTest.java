@@ -889,6 +889,78 @@ class DefaultSagaOrchestratorTest {
       assertThatThrownBy(() -> orchestrator.completeStepAsync("saga-1", "s1", Map.of()))
           .isInstanceOf(IllegalStateException.class);
     }
+
+    @Test
+    void completeStepAsync_executorRejected_returnsRunningAndDoesNotThrow() {
+      // Arrange — the async executor rejects the forward drive (race between close() and
+      // execute()).
+      // The step is already durably resumed (RUNNING), so completeStepAsync returns that snapshot
+      // and recovery drives the tail.
+      ExecutorService mockExecutor = mock(ExecutorService.class);
+      org.mockito.Mockito.doThrow(
+              new java.util.concurrent.RejectedExecutionException("shutting down"))
+          .when(mockExecutor)
+          .execute(any(Runnable.class));
+      DefaultSagaOrchestrator orchestratorWithMockExecutor =
+          new DefaultSagaOrchestrator(
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              mockExecutor);
+
+      SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
+      SagaDefinition def = definition("test-saga");
+      SagaStateSnapshot running = snapshot("saga-1", SagaStatus.RUNNING);
+      List<SagaEvent> events = List.of(StatusEvent.started(null), StepEvent.pending(1, "s1"));
+      ExecutionContext context = new ExecutionContext("saga-1", Map.of(), running);
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(waiting));
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(store.getEvents("saga-1")).thenReturn(events);
+      when(store.resumeParkedStep(eq(waiting), eq(events.size()), any(StepEvent.class)))
+          .thenReturn(running);
+      when(engine.replayEvents(eq(running), any())).thenReturn(context);
+
+      // Act — must not throw; the drive was rejected but the step is durably resumed.
+      SagaStateSnapshot result =
+          orchestratorWithMockExecutor.completeStepAsync("saga-1", "s1", Map.of());
+
+      // Assert — returns the RUNNING snapshot; the forward drive never ran.
+      assertThat(result).isSameAs(running);
+      verify(engine, never()).resumeFrom(any(), any(), anyInt());
+
+      orchestratorWithMockExecutor.close();
+    }
+
+    @Test
+    void completeStepAsync_driveThrows_swallowedAndReturnsRunning() {
+      // Arrange — same parked saga; the detached forward drive throws an Error (only a catch on
+      // Throwable, not Exception, contains it). completeStepAsync must still return the RUNNING
+      // snapshot — the step is durably resumed and the async failure is logged, not propagated
+      // (recovery is the backstop).
+      SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
+      SagaDefinition def = definition("test-saga");
+      SagaStateSnapshot running = snapshot("saga-1", SagaStatus.RUNNING);
+      List<SagaEvent> events = List.of(StatusEvent.started(null), StepEvent.pending(1, "s1"));
+      ExecutionContext context = new ExecutionContext("saga-1", Map.of(), running);
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(waiting));
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(store.getEvents("saga-1")).thenReturn(events);
+      when(store.resumeParkedStep(eq(waiting), eq(events.size()), any(StepEvent.class)))
+          .thenReturn(running);
+      when(engine.replayEvents(eq(running), any())).thenReturn(context);
+      when(engine.resumeFrom(eq(def), eq(context), eq(2)))
+          .thenThrow(new Error("drive failed off-thread"));
+
+      // Act — returns immediately with the RUNNING snapshot; the failure is off-thread.
+      SagaStateSnapshot result = orchestrator.completeStepAsync("saga-1", "s1", Map.of());
+
+      // Assert — the resume result is returned and the (throwing) drive was actually dispatched.
+      assertThat(result).isSameAs(running);
+      verify(engine, timeout(2_000)).resumeFrom(def, context, 2);
+    }
   }
 
   // =========================================================================
