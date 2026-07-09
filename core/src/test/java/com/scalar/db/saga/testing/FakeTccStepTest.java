@@ -91,15 +91,29 @@ class FakeTccStepTest {
   }
 
   @Test
-  void confirm_withDefaults_tracksHistoryWithoutThrowing() throws StepExecutionException {
+  void confirm_withDefaults_returnsEmptyResultAndTracksHistory() throws StepExecutionException {
     // Arrange
     FakeTccStep step = FakeTccStep.newBuilder("step1").build();
 
     // Act
-    step.confirm(contextWith("saga-1"));
+    StepResult result = step.confirm(contextWith("saga-1"));
 
     // Assert
+    assertThat(result).isEqualTo(StepResult.empty());
     assertThat(step.getConfirmations()).containsExactly("saga-1");
+  }
+
+  @Test
+  void confirm_withCustomResult_returnsConfiguredResult() throws StepExecutionException {
+    // Arrange — confirm can carry output (merged into context) or a pending result for async.
+    StepResult expected = StepResult.of("confirmationId", "C-1");
+    FakeTccStep step = FakeTccStep.newBuilder("step1").confirmReturns(expected).build();
+
+    // Act
+    StepResult result = step.confirm(contextWith("saga-1"));
+
+    // Assert
+    assertThat(result).isEqualTo(expected);
   }
 
   @Test

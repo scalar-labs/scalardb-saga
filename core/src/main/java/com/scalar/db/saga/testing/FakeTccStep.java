@@ -41,6 +41,7 @@ public final class FakeTccStep implements TccStep {
 
   private final String name;
   private final ReserveAction reserveAction;
+  private final StepResult confirmResult;
   private final @Nullable StepExecutionException confirmFailure;
   private final @Nullable StepCompensationException cancelFailure;
   private final CopyOnWriteArrayList<String> reservations = new CopyOnWriteArrayList<>();
@@ -50,6 +51,7 @@ public final class FakeTccStep implements TccStep {
   private FakeTccStep(Builder builder) {
     this.name = builder.name;
     this.reserveAction = builder.reserveAction;
+    this.confirmResult = builder.confirmResult;
     this.confirmFailure = builder.confirmFailure;
     this.cancelFailure = builder.cancelFailure;
   }
@@ -70,11 +72,12 @@ public final class FakeTccStep implements TccStep {
   }
 
   @Override
-  public void confirm(SagaContext context) throws StepExecutionException {
+  public StepResult confirm(SagaContext context) throws StepExecutionException {
     confirmations.add(context.getSagaId());
     if (confirmFailure != null) {
       throw confirmFailure;
     }
+    return confirmResult;
   }
 
   @Override
@@ -105,6 +108,7 @@ public final class FakeTccStep implements TccStep {
 
     private final String name;
     private ReserveAction reserveAction = ctx -> StepResult.empty();
+    private StepResult confirmResult = StepResult.empty();
     private @Nullable StepExecutionException confirmFailure;
     private @Nullable StepCompensationException cancelFailure;
 
@@ -135,6 +139,16 @@ public final class FakeTccStep implements TccStep {
           ctx -> {
             throw failure;
           };
+      return this;
+    }
+
+    /**
+     * Sets the result returned by {@link TccStep#confirm}. Default: {@link StepResult#empty()}.
+     * Pass {@link StepResult#pending()} to simulate an async confirmation accepted for later
+     * callback completion.
+     */
+    public Builder confirmReturns(StepResult result) {
+      this.confirmResult = Objects.requireNonNull(result, "result must not be null");
       return this;
     }
 
