@@ -8,7 +8,7 @@ package com.scalar.db.saga.daemon.security;
  * principal plus a role set. <b>Authorization</b> (does that role satisfy the endpoint?) is
  * enforced against {@link SagaIdentity#hasRole} with the same role hierarchy for every provider and
  * transport. Note that <em>which</em> role each operation requires is defined per transport —
- * {@code SecurityHandler} for REST, {@code SagaSecurityInterceptor} for gRPC — and those two
+ * {@code SagaSecurityHandler} for REST, {@code SagaSecurityInterceptor} for gRPC — and those two
  * mappings must be kept in agreement (see their {@code requiredRoleFor}).
  *
  * <p>Built-in providers: {@link NoopSecurityProvider} (default — authenticates every request as a

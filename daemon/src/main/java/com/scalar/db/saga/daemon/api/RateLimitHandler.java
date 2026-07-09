@@ -1,7 +1,7 @@
 package com.scalar.db.saga.daemon.api;
 
 import com.scalar.db.saga.daemon.security.SagaIdentity;
-import com.scalar.db.saga.daemon.security.SecurityHandler;
+import com.scalar.db.saga.daemon.security.SagaSecurityHandler;
 import io.javalin.Javalin;
 import io.javalin.http.Context;
 import java.util.Objects;
@@ -10,7 +10,7 @@ import java.util.Objects;
  * A Javalin {@code before}-handler that rate-limits saga-start requests per authenticated
  * principal, to bound how fast one caller can create sagas (a DoS control).
  *
- * <p>It runs after {@link SecurityHandler} (which resolves the caller and stores the {@link
+ * <p>It runs after {@link SagaSecurityHandler} (which resolves the caller and stores the {@link
  * SagaIdentity} on the request), and limits only <b>authenticated writes</b> — {@code POST}/{@code
  * PUT}, which today are exactly the saga-start endpoints ({@code POST /sagas}, {@code PUT
  * /sagas/{id}}). Reads ({@code GET}) are not limited, and routes with no resolved identity (the
@@ -43,7 +43,7 @@ public final class RateLimitHandler {
   }
 
   private void handle(Context ctx) {
-    SagaIdentity identity = ctx.attribute(SecurityHandler.IDENTITY_ATTRIBUTE);
+    SagaIdentity identity = ctx.attribute(SagaSecurityHandler.IDENTITY_ATTRIBUTE);
     if (identity == null) {
       // No resolved caller: an auth-exempt route (HMAC callback, health probe). Not rate-limited
       // here — the callback must not be throttled by a user's saga-start budget.

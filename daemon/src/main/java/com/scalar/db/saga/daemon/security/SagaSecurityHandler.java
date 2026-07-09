@@ -28,7 +28,7 @@ import java.util.Objects;
  * mapped to {@code 401}/{@code 403} by {@code ErrorMapper}, keeping response rendering in one
  * place.
  */
-public final class SecurityHandler {
+public final class SagaSecurityHandler {
 
   /** Request attribute key under which the authenticated {@link SagaIdentity} is stored. */
   public static final String IDENTITY_ATTRIBUTE = "saga.identity";
@@ -36,7 +36,7 @@ public final class SecurityHandler {
   private final SagaSecurityProvider provider;
   private final AuthExemptions exemptions;
 
-  private SecurityHandler(SagaSecurityProvider provider, AuthExemptions exemptions) {
+  private SagaSecurityHandler(SagaSecurityProvider provider, AuthExemptions exemptions) {
     this.provider = provider;
     this.exemptions = exemptions;
   }
@@ -53,7 +53,7 @@ public final class SecurityHandler {
     Objects.requireNonNull(app, "app must not be null");
     Objects.requireNonNull(provider, "provider must not be null");
     Objects.requireNonNull(exemptions, "exemptions must not be null");
-    SecurityHandler handler = new SecurityHandler(provider, exemptions);
+    SagaSecurityHandler handler = new SagaSecurityHandler(provider, exemptions);
     app.before(handler::handle);
   }
 

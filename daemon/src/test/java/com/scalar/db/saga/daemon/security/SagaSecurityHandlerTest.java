@@ -17,13 +17,13 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Exercises {@link SecurityHandler}'s RBAC enforcement end-to-end against a real Javalin dispatch,
- * with a stub {@link SagaSecurityProvider} keyed off an {@code X-Test-Role} header: absent → not
- * authenticated ({@code 401}); {@code read}/{@code write}/{@code admin} → an identity holding that
- * role. {@link ErrorMapper} renders the thrown auth exceptions, so this also locks in the
- * exception→status wiring (401/403).
+ * Exercises {@link SagaSecurityHandler}'s RBAC enforcement end-to-end against a real Javalin
+ * dispatch, with a stub {@link SagaSecurityProvider} keyed off an {@code X-Test-Role} header:
+ * absent → not authenticated ({@code 401}); {@code read}/{@code write}/{@code admin} → an identity
+ * holding that role. {@link ErrorMapper} renders the thrown auth exceptions, so this also locks in
+ * the exception→status wiring (401/403).
  */
-class SecurityHandlerTest {
+class SagaSecurityHandlerTest {
 
   private final HttpClient http = HttpClient.newHttpClient();
   private Javalin app;
@@ -31,14 +31,14 @@ class SecurityHandlerTest {
   @BeforeEach
   void setUp() {
     app = Javalin.create();
-    SecurityHandler.register(app, new RoleHeaderProvider(), AuthExemptions.of("/exempt"));
+    SagaSecurityHandler.register(app, new RoleHeaderProvider(), AuthExemptions.of("/exempt"));
     ErrorMapper.register(app);
     // A read-gated route (GET) that echoes the resolved principal, so a test can assert the
     // identity was stored on the request.
     app.get(
         "/read",
         ctx -> {
-          SagaIdentity identity = ctx.attribute(SecurityHandler.IDENTITY_ATTRIBUTE);
+          SagaIdentity identity = ctx.attribute(SagaSecurityHandler.IDENTITY_ATTRIBUTE);
           ctx.result("read:" + (identity == null ? "none" : identity.principal()));
         });
     // A write-gated route (POST).
@@ -117,16 +117,16 @@ class SecurityHandlerTest {
   @Test
   void requiredRoleFor_readMethods_returnRead() {
     // Assert
-    assertThat(SecurityHandler.requiredRoleFor("GET")).isEqualTo(SagaRole.READ);
-    assertThat(SecurityHandler.requiredRoleFor("HEAD")).isEqualTo(SagaRole.READ);
+    assertThat(SagaSecurityHandler.requiredRoleFor("GET")).isEqualTo(SagaRole.READ);
+    assertThat(SagaSecurityHandler.requiredRoleFor("HEAD")).isEqualTo(SagaRole.READ);
   }
 
   @Test
   void requiredRoleFor_writeMethods_returnWrite() {
     // Assert
-    assertThat(SecurityHandler.requiredRoleFor("POST")).isEqualTo(SagaRole.WRITE);
-    assertThat(SecurityHandler.requiredRoleFor("PUT")).isEqualTo(SagaRole.WRITE);
-    assertThat(SecurityHandler.requiredRoleFor("DELETE")).isEqualTo(SagaRole.WRITE);
+    assertThat(SagaSecurityHandler.requiredRoleFor("POST")).isEqualTo(SagaRole.WRITE);
+    assertThat(SagaSecurityHandler.requiredRoleFor("PUT")).isEqualTo(SagaRole.WRITE);
+    assertThat(SagaSecurityHandler.requiredRoleFor("DELETE")).isEqualTo(SagaRole.WRITE);
   }
 
   private HttpResponse<String> send(String method, String path, @Nullable String role)

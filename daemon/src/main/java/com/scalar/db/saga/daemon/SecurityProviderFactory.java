@@ -4,7 +4,6 @@ import com.scalar.db.saga.daemon.security.ApiKeySecurityProvider;
 import com.scalar.db.saga.daemon.security.JwtSecurityProvider;
 import com.scalar.db.saga.daemon.security.NoopSecurityProvider;
 import com.scalar.db.saga.daemon.security.SagaSecurityProvider;
-import java.util.Objects;
 
 /**
  * Builds the configured {@link SagaSecurityProvider} from a {@link SagaServerConfig}, selected by
@@ -27,7 +26,6 @@ final class SecurityProviderFactory {
    * @throws IllegalArgumentException if the configured provider name is not recognized
    */
   static SagaSecurityProvider create(SagaServerConfig config) {
-    Objects.requireNonNull(config, "config must not be null");
     String name = config.securityProvider();
     return switch (name) {
       case "noop" -> new NoopSecurityProvider();

@@ -4,7 +4,6 @@ import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
-import java.util.Objects;
 import java.util.Properties;
 import org.jspecify.annotations.Nullable;
 
@@ -80,7 +79,6 @@ final class JwtConfig {
    *     or a timeout is not a positive integer
    */
   static JwtConfig from(Properties properties) {
-    Objects.requireNonNull(properties, "properties must not be null");
     URL jwksUrl = parseUrl(required(properties, JWKS_URL_KEY));
     String issuer = required(properties, ISSUER_KEY);
     String audience = blankToNull(properties.getProperty(AUDIENCE_KEY));

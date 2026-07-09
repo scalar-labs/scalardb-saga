@@ -22,8 +22,8 @@ import org.slf4j.LoggerFactory;
 
 /**
  * The gRPC enforcement point, the transport-parallel of {@link
- * com.scalar.db.saga.daemon.security.SecurityHandler} (REST): authenticates each call through the
- * same {@link SagaSecurityProvider} and checks the caller holds the role the method requires
+ * com.scalar.db.saga.daemon.security.SagaSecurityHandler} (REST): authenticates each call through
+ * the same {@link SagaSecurityProvider} and checks the caller holds the role the method requires
  * (RBAC).
  *
  * <p>Applied only to the saga service (via {@code ServerInterceptors.intercept}); the standard
@@ -83,8 +83,8 @@ public final class SagaSecurityInterceptor implements ServerInterceptor {
    * SagaRole#READ}; everything else (starting a saga, and any future state-changing method) needs
    * {@link SagaRole#WRITE}.
    *
-   * <p><b>Keep in sync</b> with the REST mapping in {@code SecurityHandler.requiredRoleFor}: the
-   * two transports encode the same operation&rarr;role policy in different vocabularies (gRPC
+   * <p><b>Keep in sync</b> with the REST mapping in {@code SagaSecurityHandler.requiredRoleFor}:
+   * the two transports encode the same operation&rarr;role policy in different vocabularies (gRPC
    * method name vs HTTP verb), so an operation added to one must be mirrored in the other. When
    * ADMIN-gated operations land, replace both switches with a shared operation&rarr;role policy so
    * the decision lives in one place.

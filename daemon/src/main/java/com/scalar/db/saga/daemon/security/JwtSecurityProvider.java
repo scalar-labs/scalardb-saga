@@ -240,7 +240,7 @@ public final class JwtSecurityProvider implements SagaSecurityProvider {
     }
     List<String> tokens = new ArrayList<>();
     if (claim instanceof String s) {
-      tokens.addAll(splitWhitespace(s));
+      tokens.addAll(TextSplitter.split(s, Character::isWhitespace, false));
     } else if (claim instanceof Collection<?> collection) {
       for (Object element : collection) {
         if (element != null) {
@@ -253,25 +253,5 @@ public final class JwtSecurityProvider implements SagaSecurityProvider {
       SagaRole.fromWireName(token).ifPresent(roles::add);
     }
     return roles;
-  }
-
-  /** Splits on runs of whitespace, dropping empty tokens (without {@code String.split}). */
-  private static List<String> splitWhitespace(String value) {
-    List<String> tokens = new ArrayList<>();
-    int start = -1;
-    for (int i = 0; i < value.length(); i++) {
-      if (Character.isWhitespace(value.charAt(i))) {
-        if (start >= 0) {
-          tokens.add(value.substring(start, i));
-          start = -1;
-        }
-      } else if (start < 0) {
-        start = i;
-      }
-    }
-    if (start >= 0) {
-      tokens.add(value.substring(start));
-    }
-    return tokens;
   }
 }

@@ -124,6 +124,7 @@ public final class SagaServerConfig {
   private final int minThreads;
   private final long defaultSagaTimeoutMillis;
   private final int maxStartRequestsPerMinute;
+  private final int grpcMaxInboundMessageBytes;
   private final Properties properties;
   private final Properties rawProperties;
   private final @Nullable Path definitionsPath;
@@ -161,6 +162,7 @@ public final class SagaServerConfig {
     this.defaultSagaTimeoutMillis = defaultSagaTimeoutMillis;
     this.maxStartRequestsPerMinute = maxStartRequestsPerMinute;
     this.properties = applyStoreDefaults(copyOf(properties));
+    this.grpcMaxInboundMessageBytes = parseGrpcMaxInboundMessageBytes(this.properties);
     this.rawProperties = copyOf(rawProperties);
     this.definitionsPath = definitionsPath;
     this.serviceBaseUrls = Map.copyOf(serviceBaseUrls);
@@ -396,6 +398,15 @@ public final class SagaServerConfig {
    * messages". Defaults to {@value #DEFAULT_MAX_EVENT_PAYLOAD_BYTES} bytes.
    */
   public int grpcMaxInboundMessageBytes() {
+    return grpcMaxInboundMessageBytes;
+  }
+
+  /**
+   * Parses the gRPC inbound cap from the store's max-event-payload key once at construction (like
+   * every other setting), so an invalid value fails fast at load rather than when the server is
+   * built.
+   */
+  private static int parseGrpcMaxInboundMessageBytes(Properties properties) {
     String value = properties.getProperty(STORE_MAX_EVENT_PAYLOAD_BYTES_KEY);
     if (value == null) {
       return DEFAULT_MAX_EVENT_PAYLOAD_BYTES;

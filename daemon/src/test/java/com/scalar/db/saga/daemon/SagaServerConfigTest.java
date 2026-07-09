@@ -195,22 +195,20 @@ class SagaServerConfigTest {
   }
 
   @Test
-  void grpcMaxInboundMessageBytes_negativePayloadLimit_throwsIllegalArgumentException() {
+  void load_negativePayloadLimit_throwsIllegalArgumentException() {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY, "-1");
-    SagaServerConfig config = SagaServerConfig.load(props);
 
-    assertThatThrownBy(config::grpcMaxInboundMessageBytes)
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
-  void grpcMaxInboundMessageBytes_nonNumericPayloadLimit_throwsIllegalArgumentException() {
+  void load_nonNumericPayloadLimit_throwsIllegalArgumentException() {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY, "not-a-number");
-    SagaServerConfig config = SagaServerConfig.load(props);
 
-    assertThatThrownBy(config::grpcMaxInboundMessageBytes)
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
         .isInstanceOf(IllegalArgumentException.class);
   }
 

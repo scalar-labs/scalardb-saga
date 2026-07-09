@@ -76,10 +76,9 @@ public final class AuthExemptions {
    * [^/]+}), {@code <param>} → one-or-more segments ({@code .+}), every literal character quoted.
    */
   private static Pattern compile(String pathPattern) {
-    Objects.requireNonNull(pathPattern, "pathPattern must not be null");
     String trimmed = stripTrailingSlash(pathPattern);
     StringBuilder regex = new StringBuilder("^");
-    for (String segment : splitSegments(trimmed)) {
+    for (String segment : TextSplitter.split(trimmed, c -> c == '/', false)) {
       regex.append('/');
       if (segment.startsWith("{") && segment.endsWith("}")) {
         regex.append("[^/]+");
@@ -91,28 +90,6 @@ public final class AuthExemptions {
     }
     regex.append('$');
     return Pattern.compile(regex.toString());
-  }
-
-  /**
-   * Splits a path into its non-empty {@code /}-delimited segments. Hand-rolled rather than {@code
-   * String.split} to avoid that method's surprising trailing-empty-token behavior (and the Error
-   * Prone {@code StringSplitter} warning).
-   */
-  private static List<String> splitSegments(String path) {
-    List<String> segments = new ArrayList<>();
-    int start = 0;
-    for (int i = 0; i < path.length(); i++) {
-      if (path.charAt(i) == '/') {
-        if (i > start) {
-          segments.add(path.substring(start, i));
-        }
-        start = i + 1;
-      }
-    }
-    if (path.length() > start) {
-      segments.add(path.substring(start));
-    }
-    return segments;
   }
 
   /**

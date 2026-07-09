@@ -9,8 +9,8 @@ import com.scalar.db.saga.daemon.grpc.SagaRateLimitInterceptor;
 import com.scalar.db.saga.daemon.grpc.SagaSecurityInterceptor;
 import com.scalar.db.saga.daemon.grpc.SagaServiceImpl;
 import com.scalar.db.saga.daemon.security.AuthExemptions;
+import com.scalar.db.saga.daemon.security.SagaSecurityHandler;
 import com.scalar.db.saga.daemon.security.SagaSecurityProvider;
-import com.scalar.db.saga.daemon.security.SecurityHandler;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.definition.SagaDefinitionParser;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
@@ -283,7 +283,8 @@ public final class SagaServer implements AutoCloseable {
     // The RBAC before-handler authenticates every request except the exempt paths. The liveness
     // probe carries no user credential; the async-callback route authenticates with its own
     // per-step HMAC token — add CallbackResource.PATH to this list when that route lands.
-    SecurityHandler.register(httpServer, securityProvider, AuthExemptions.of(HealthResource.PATH));
+    SagaSecurityHandler.register(
+        httpServer, securityProvider, AuthExemptions.of(HealthResource.PATH));
     // Rate limiting runs after auth (it keys off the resolved principal) and only when enabled;
     // registered before the routes so it gates saga-start requests. The same limiter also gates the
     // gRPC transport (see buildGrpcServer), so the budget is per caller, not per port.

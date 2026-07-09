@@ -4,7 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.scalar.db.saga.daemon.security.SagaIdentity;
 import com.scalar.db.saga.daemon.security.SagaRole;
-import com.scalar.db.saga.daemon.security.SecurityHandler;
+import com.scalar.db.saga.daemon.security.SagaSecurityHandler;
 import io.javalin.Javalin;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -19,7 +19,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Exercises {@link RateLimitHandler} end-to-end against a real Javalin dispatch. A stub before
- * handler stands in for {@link SecurityHandler} by planting an identity on the request; {@code
+ * handler stands in for {@link SagaSecurityHandler} by planting an identity on the request; {@code
  * null} identity models an auth-exempt route.
  */
 class RateLimitHandlerTest {
@@ -29,11 +29,11 @@ class RateLimitHandlerTest {
 
   private Javalin start(int limit, @Nullable SagaIdentity identity) {
     app = Javalin.create();
-    // Stand in for SecurityHandler: plant (or omit) the resolved identity.
+    // Stand in for SagaSecurityHandler: plant (or omit) the resolved identity.
     app.before(
         ctx -> {
           if (identity != null) {
-            ctx.attribute(SecurityHandler.IDENTITY_ATTRIBUTE, identity);
+            ctx.attribute(SagaSecurityHandler.IDENTITY_ATTRIBUTE, identity);
           }
         });
     RateLimitHandler.register(app, new RateLimiter(limit, 60_000L));

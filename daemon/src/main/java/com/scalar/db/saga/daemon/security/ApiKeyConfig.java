@@ -3,7 +3,6 @@ package com.scalar.db.saga.daemon.security;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
 import java.util.TreeSet;
@@ -82,8 +81,6 @@ final class ApiKeyConfig {
    *     blank, or a role is unknown/missing
    */
   static ApiKeyConfig from(Properties resolved, Properties raw) {
-    Objects.requireNonNull(resolved, "resolved must not be null");
-    Objects.requireNonNull(raw, "raw must not be null");
     String header = valueOrDefault(resolved.getProperty(HEADER_KEY), DEFAULT_HEADER);
     List<Definition> definitions = new ArrayList<>();
     for (String name : keyNames(resolved)) {
@@ -161,7 +158,7 @@ final class ApiKeyConfig {
       throw new IllegalArgumentException("'" + rolesKey + "' must list at least one role.");
     }
     Set<SagaRole> roles = new LinkedHashSet<>();
-    for (String token : splitCommas(value)) {
+    for (String token : TextSplitter.split(value, c -> c == ',', true)) {
       SagaRole role =
           SagaRole.fromWireName(token)
               .orElseThrow(
@@ -178,22 +175,6 @@ final class ApiKeyConfig {
       throw new IllegalArgumentException("'" + rolesKey + "' must list at least one role.");
     }
     return roles;
-  }
-
-  /** Splits on commas, trimming each token and dropping empties (without {@code String.split}). */
-  private static List<String> splitCommas(String value) {
-    List<String> tokens = new ArrayList<>();
-    int start = 0;
-    for (int i = 0; i <= value.length(); i++) {
-      if (i == value.length() || value.charAt(i) == ',') {
-        String token = value.substring(start, i).trim();
-        if (!token.isEmpty()) {
-          tokens.add(token);
-        }
-        start = i + 1;
-      }
-    }
-    return tokens;
   }
 
   /** Whether the whole (trimmed) value is a single {@code ${...}} secret reference. */
