@@ -17,6 +17,8 @@ import java.net.SocketAddress;
 import java.util.HashMap;
 import java.util.Map;
 import org.jspecify.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * The gRPC enforcement point, the transport-parallel of {@link
@@ -35,6 +37,8 @@ import org.jspecify.annotations.Nullable;
  */
 public final class SagaSecurityInterceptor implements ServerInterceptor {
 
+  private static final Logger logger = LoggerFactory.getLogger(SagaSecurityInterceptor.class);
+
   /** Context key holding the authenticated identity for the duration of the call. */
   public static final Context.Key<SagaIdentity> IDENTITY = Context.key("saga.identity");
 
@@ -52,6 +56,13 @@ public final class SagaSecurityInterceptor implements ServerInterceptor {
       identity = provider.authenticate(toAuthRequest(call, headers));
     } catch (SagaAuthenticationException e) {
       return deny(call, Status.UNAUTHENTICATED.withDescription("Authentication required"));
+    } catch (RuntimeException e) {
+      // An unexpected provider failure (not a rejected credential) — a bug or an unwrapped
+      // transient error. Fail closed and log it server-side; map to INTERNAL rather than
+      // UNAUTHENTICATED so it is not mistaken for a bad credential (the REST path's ErrorMapper
+      // maps an unhandled error to 500 the same way). No detail leaks to the client.
+      logger.error("Unexpected error authenticating a gRPC call", e);
+      return deny(call, Status.INTERNAL.withDescription("Authentication error"));
     }
     SagaRole required = requiredRoleFor(call.getMethodDescriptor().getBareMethodName());
     if (!identity.hasRole(required)) {

@@ -144,6 +144,50 @@ class SagaSecurityInterceptorTest {
     assertThat(SagaSecurityInterceptor.requiredRoleFor(null)).isEqualTo(SagaRole.WRITE);
   }
 
+  @Test
+  void getSaga_providerThrowsUnexpectedly_isInternal() throws IOException {
+    // Arrange — a provider that fails with a non-authentication RuntimeException (a bug or an
+    // unwrapped transient error), not a rejected credential.
+    SagaSecurityProvider throwing =
+        new SagaSecurityProvider() {
+          @Override
+          public SagaIdentity authenticate(SagaAuthRequest request) {
+            throw new IllegalStateException("boom");
+          }
+
+          @Override
+          public String name() {
+            return "throwing";
+          }
+        };
+
+    // Act
+    StatusRuntimeException error = callGetExpectingError(stubFor(throwing));
+
+    // Assert — mapped to INTERNAL (fail closed), not UNAUTHENTICATED, so a server-side fault is not
+    // reported to the caller as a bad credential.
+    assertThat(error.getStatus().getCode()).isEqualTo(Status.Code.INTERNAL);
+  }
+
+  private SagaServiceBlockingStub stubFor(SagaSecurityProvider provider) throws IOException {
+    SagaOrchestrator orchestrator = mock(SagaOrchestrator.class);
+    when(orchestrator.getStateSnapshot(any())).thenReturn(snapshot("s-1", SagaStatus.RUNNING));
+    String name = InProcessServerBuilder.generateName();
+    Server server =
+        InProcessServerBuilder.forName(name)
+            .directExecutor()
+            .addService(
+                ServerInterceptors.intercept(
+                    new SagaServiceImpl(orchestrator, 0L, 60_000L),
+                    new SagaSecurityInterceptor(provider)))
+            .build()
+            .start();
+    servers.add(server);
+    ManagedChannel newChannel = InProcessChannelBuilder.forName(name).directExecutor().build();
+    channels.add(newChannel);
+    return SagaServiceGrpc.newBlockingStub(newChannel);
+  }
+
   private static StatusRuntimeException callGetExpectingError(SagaServiceBlockingStub stub) {
     return catchThrowableOfType(
         StatusRuntimeException.class,
