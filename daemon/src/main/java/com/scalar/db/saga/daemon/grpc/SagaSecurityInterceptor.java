@@ -14,8 +14,7 @@ import io.grpc.ServerCallHandler;
 import io.grpc.ServerInterceptor;
 import io.grpc.Status;
 import java.net.SocketAddress;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.Locale;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -102,20 +101,15 @@ public final class SagaSecurityInterceptor implements ServerInterceptor {
   }
 
   private static SagaAuthRequest toAuthRequest(ServerCall<?, ?> call, Metadata headers) {
-    Map<String, String> asciiHeaders = new HashMap<>();
-    for (String key : headers.keys()) {
-      if (key.endsWith(Metadata.BINARY_HEADER_SUFFIX)) {
-        continue; // binary metadata cannot be read as an ASCII string
-      }
-      String value = headers.get(Metadata.Key.of(key, Metadata.ASCII_STRING_MARSHALLER));
-      if (value != null) {
-        asciiHeaders.put(key, value);
-      }
-    }
     SocketAddress remote = call.getAttributes().get(Grpc.TRANSPORT_ATTR_REMOTE_ADDR);
-    return SagaAuthRequest.fromHeaders(
+    return SagaAuthRequest.fromHeaderLookup(
         call.getMethodDescriptor().getFullMethodName(),
         remote == null ? null : remote.toString(),
-        asciiHeaders);
+        // Read only the header the provider asks for, rather than copying every header into a map.
+        // gRPC metadata keys are lower-case, so normalize the requested name; a binary ("-bin")
+        // header is not a text credential and simply will not be found.
+        name ->
+            headers.get(
+                Metadata.Key.of(name.toLowerCase(Locale.ROOT), Metadata.ASCII_STRING_MARSHALLER)));
   }
 }
