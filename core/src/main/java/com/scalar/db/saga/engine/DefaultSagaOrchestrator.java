@@ -393,6 +393,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(sagaId, "sagaId must not be null");
     Objects.requireNonNull(stepName, "stepName must not be null");
     Objects.requireNonNull(output, "output must not be null");
+    ensureOpen();
 
     SagaStateSnapshot saga = getStateSnapshot(sagaId);
     if (saga.getStatus() != SagaStatus.WAITING) {

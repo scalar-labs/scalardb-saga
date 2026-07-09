@@ -887,6 +887,16 @@ class DefaultSagaOrchestratorTest {
       assertThatThrownBy(() -> orchestrator.completeStep("saga-1", "s1", Map.of()))
           .isInstanceOf(IllegalStateException.class);
     }
+
+    @Test
+    void completeStep_afterClose_throwsIllegalState() {
+      // Arrange
+      orchestrator.close();
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.completeStep("saga-1", "s1", Map.of()))
+          .isInstanceOf(IllegalStateException.class);
+    }
   }
 
   // =========================================================================
