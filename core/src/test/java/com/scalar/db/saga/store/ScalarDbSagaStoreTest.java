@@ -509,7 +509,7 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
-  void park_nullDeadline_writesNoParkedRow() throws Exception {
+  void park_nullDeadlineGiven_writesNoParkedRow() throws Exception {
     // Arrange
     Instant now = Instant.now();
     SagaStateSnapshot current =
