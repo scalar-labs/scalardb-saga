@@ -17,7 +17,9 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
+import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.Map;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -41,10 +43,16 @@ class CallbackResourceTest {
   @BeforeEach
   void setUp() {
     orchestrator = mock(DefaultSagaOrchestrator.class);
-    app = Javalin.create();
-    ErrorMapper.register(app);
-    CallbackResource.register(app, orchestrator, SECRET);
-    app.start(0);
+    // TTL disabled (maxAge = 0) for the base fixture; the TTL tests start their own app.
+    app = startApp(0, Clock.systemUTC());
+  }
+
+  private Javalin startApp(long maxAgeSeconds, Clock clock) {
+    Javalin a = Javalin.create();
+    ErrorMapper.register(a);
+    CallbackResource.register(a, orchestrator, SECRET, maxAgeSeconds, clock);
+    a.start(0);
+    return a;
   }
 
   @AfterEach
@@ -156,6 +164,35 @@ class CallbackResourceTest {
 
     assertThat(response.statusCode()).isEqualTo(200);
     verify(orchestrator).getStateSnapshot(SAGA_ID);
+  }
+
+  @Test
+  void expiredToken_beyondMaxAge_returns401() throws Exception {
+    // A 60s TTL with a clock one hour past the token's iat: the (validly-signed) token is expired.
+    app.stop();
+    app =
+        startApp(
+            60, Clock.fixed(Instant.ofEpochSecond(Long.parseLong(IAT) + 3600), ZoneOffset.UTC));
+
+    HttpResponse<String> response = post("?token=" + validToken() + "&iat=" + IAT, "{}");
+
+    assertThat(response.statusCode()).isEqualTo(401);
+    verify(orchestrator, never()).completeStep(any(), any(), any());
+  }
+
+  @Test
+  void freshToken_withinMaxAge_resumesAndReturns200() throws Exception {
+    // A 60s TTL with a clock 30s past the token's iat: within the TTL, so it resumes as normal.
+    app.stop();
+    app =
+        startApp(60, Clock.fixed(Instant.ofEpochSecond(Long.parseLong(IAT) + 30), ZoneOffset.UTC));
+    when(orchestrator.completeStep(eq(SAGA_ID), eq(STEP), any()))
+        .thenReturn(snapshot(SagaStatus.RUNNING));
+
+    HttpResponse<String> response = post("?token=" + validToken() + "&iat=" + IAT, "{}");
+
+    assertThat(response.statusCode()).isEqualTo(200);
+    verify(orchestrator).completeStep(eq(SAGA_ID), eq(STEP), any());
   }
 
   private String validToken() {

@@ -227,7 +227,14 @@ public final class SagaServer implements AutoCloseable {
     // is nothing to authenticate callbacks against, so async completion is not enabled.
     config
         .callbackSecret()
-        .ifPresent(secret -> CallbackResource.register(httpServer, orchestrator, secret));
+        .ifPresent(
+            secret ->
+                CallbackResource.register(
+                    httpServer,
+                    orchestrator,
+                    secret,
+                    config.callbackMaxAgeSeconds(),
+                    Clock.systemUTC()));
   }
 
   /**

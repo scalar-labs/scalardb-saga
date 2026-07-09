@@ -80,6 +80,11 @@ public final class SagaServerConfig {
   // participant for an async step. Not a secret (a plain server address), so it lives directly
   // under server.* rather than server.security.*.
   static final String CALLBACK_BASE_URL_KEY = SERVER_PREFIX + "callback_base_url";
+  // Optional TTL (seconds) on an async callback token's iat: a token older than this is rejected,
+  // so a leaked callback URL is not a non-expiring credential. 0 (default) disables the check; when
+  // set it must exceed the longest a step can legitimately stay parked (its callback timeout), or a
+  // genuine late callback is rejected.
+  static final String CALLBACK_MAX_AGE_SECONDS_KEY = SECURITY_PREFIX + "callback_max_age_seconds";
   static final String STORE_MAX_EVENT_PAYLOAD_BYTES_KEY = PREFIX + "store.max_event_payload_bytes";
   static final String DEFAULT_HOST = "0.0.0.0";
   static final int DEFAULT_PORT = 8080;
@@ -90,6 +95,7 @@ public final class SagaServerConfig {
   static final long DEFAULT_SYNC_TIMEOUT_MILLIS = 0L; // 0 = disabled (sync blocks to terminal)
   static final long DEFAULT_SYNC_MAX_WAIT_MILLIS =
       60_000L; // ceiling on a synchronous server-side wait
+  static final long DEFAULT_CALLBACK_MAX_AGE_SECONDS = 0L; // 0 = disabled (no iat TTL)
 
   private final String host;
   private final int port;
@@ -100,6 +106,7 @@ public final class SagaServerConfig {
   private final long syncMaxWaitMillis;
   private final @Nullable String callbackSecret;
   private final @Nullable String callbackBaseUrl;
+  private final long callbackMaxAgeSeconds;
   private final Properties properties;
   private final @Nullable Path definitionsPath;
   private final Map<String, String> serviceBaseUrls;
@@ -114,6 +121,7 @@ public final class SagaServerConfig {
       long syncMaxWaitMillis,
       @Nullable String callbackSecret,
       @Nullable String callbackBaseUrl,
+      long callbackMaxAgeSeconds,
       Properties properties,
       @Nullable Path definitionsPath,
       Map<String, String> serviceBaseUrls) {
@@ -126,6 +134,7 @@ public final class SagaServerConfig {
     this.syncMaxWaitMillis = syncMaxWaitMillis;
     this.callbackSecret = callbackSecret;
     this.callbackBaseUrl = callbackBaseUrl;
+    this.callbackMaxAgeSeconds = callbackMaxAgeSeconds;
     this.properties = applyStoreDefaults(copyOf(properties));
     this.definitionsPath = definitionsPath;
     this.serviceBaseUrls = Map.copyOf(serviceBaseUrls);
@@ -194,6 +203,12 @@ public final class SagaServerConfig {
     String callbackSecret =
         (callbackSecretRaw == null || callbackSecretRaw.isBlank()) ? null : callbackSecretRaw;
     String callbackBaseUrl = parseCallbackBaseUrl(properties.getProperty(CALLBACK_BASE_URL_KEY));
+    long callbackMaxAgeSeconds =
+        parseBoundedLong(
+            properties.getProperty(CALLBACK_MAX_AGE_SECONDS_KEY),
+            CALLBACK_MAX_AGE_SECONDS_KEY,
+            DEFAULT_CALLBACK_MAX_AGE_SECONDS,
+            0L);
     String definitions = properties.getProperty(DEFINITIONS_PATH_KEY);
     Path definitionsPath =
         (definitions == null || definitions.isBlank()) ? null : Path.of(definitions.trim());
@@ -207,6 +222,7 @@ public final class SagaServerConfig {
         syncMaxWaitMillis,
         callbackSecret,
         callbackBaseUrl,
+        callbackMaxAgeSeconds,
         properties,
         definitionsPath,
         parseServiceBaseUrls(properties));
@@ -375,6 +391,16 @@ public final class SagaServerConfig {
    */
   public Optional<String> callbackBaseUrl() {
     return Optional.ofNullable(callbackBaseUrl);
+  }
+
+  /**
+   * Returns the TTL (seconds) applied to an async callback token's {@code iat}: a callback whose
+   * token is older than this is rejected as expired. {@code 0} (the default) disables the check.
+   * When enabled it must exceed the longest a step can stay parked (its callback timeout), or a
+   * genuine late callback is rejected.
+   */
+  public long callbackMaxAgeSeconds() {
+    return callbackMaxAgeSeconds;
   }
 
   /**
