@@ -23,6 +23,8 @@ import java.util.List;
 import java.util.Properties;
 import java.util.Set;
 import org.jspecify.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A {@link SagaSecurityProvider} that authenticates a {@code Bearer} JWT against a remote JWKS.
@@ -38,6 +40,8 @@ import org.jspecify.annotations.Nullable;
  * <p>Thread-safe: the underlying {@link JWTProcessor} and JWKS source are safe for concurrent use.
  */
 public final class JwtSecurityProvider implements SagaSecurityProvider {
+
+  private static final Logger logger = LoggerFactory.getLogger(JwtSecurityProvider.class);
 
   private static final String BEARER_PREFIX = "Bearer ";
 
@@ -110,6 +114,14 @@ public final class JwtSecurityProvider implements SagaSecurityProvider {
   }
 
   private static JwtSecurityProvider create(JwtConfig config) {
+    if (config.audience() == null) {
+      logger.warn(
+          "No '{}' configured for the JWT security provider: a token with any 'aud' is accepted. If"
+              + " the issuer '{}' mints tokens for more than one relying party, set the audience so"
+              + " a token intended for another service cannot be replayed to the daemon.",
+          JwtConfig.AUDIENCE_KEY,
+          config.issuer());
+    }
     // The default JWKS source caches keys and refreshes ahead of expiry on a dedicated executor
     // thread; that executor is released by close().
     JWKSource<SecurityContext> jwkSource =
