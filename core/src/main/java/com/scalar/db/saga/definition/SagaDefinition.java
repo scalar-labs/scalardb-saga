@@ -424,6 +424,7 @@ public final class SagaDefinition {
     static final Set<Phase> SAGA_PHASES = EnumSet.of(Phase.EXECUTION, Phase.COMPENSATION);
     static final Set<Phase> TCC_PHASES =
         EnumSet.of(Phase.RESERVATION, Phase.CONFIRMATION, Phase.CANCELLATION);
+    static final Set<Phase> BACKWARD_PHASES = EnumSet.of(Phase.COMPENSATION, Phase.CANCELLATION);
 
     private final String service;
     private final Map<Phase, CallSpec> phases;
@@ -435,6 +436,17 @@ public final class SagaDefinition {
         // Structural guarantee: getTransport()/isTcc() read from the phase map, so an empty one is
         // never a valid ServiceStep (the builder enforces a complete phase set before this point).
         throw new IllegalArgumentException("a ServiceStep must define at least one phase");
+      }
+      for (Map.Entry<Phase, CallSpec> entry : phases.entrySet()) {
+        if (entry.getValue().isAsync() && BACKWARD_PHASES.contains(entry.getKey())) {
+          // Async completion (park + callback) applies only to forward phases; a compensation /
+          // cancellation always runs synchronously. The parser rejects this earlier with a
+          // SagaDefinitionException; this guards the programmatic-builder and store-reload paths.
+          throw new IllegalArgumentException(
+              entry.getKey()
+                  + " must not be async; async completion applies only to forward phases"
+                  + " (execution/reservation/confirmation)");
+        }
       }
       this.service = service;
       this.phases = Map.copyOf(phases);

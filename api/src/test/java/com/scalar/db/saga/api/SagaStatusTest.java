@@ -15,6 +15,7 @@ class SagaStatusTest {
     assertThat(SagaStatus.fromStatusCode(2)).isEqualTo(SagaStatus.COMPENSATING);
     assertThat(SagaStatus.fromStatusCode(3)).isEqualTo(SagaStatus.COMPENSATED);
     assertThat(SagaStatus.fromStatusCode(4)).isEqualTo(SagaStatus.ESCALATED);
+    assertThat(SagaStatus.fromStatusCode(5)).isEqualTo(SagaStatus.WAITING);
   }
 
   @Test
@@ -39,6 +40,7 @@ class SagaStatusTest {
     assertThat(SagaStatus.COMPENSATING.getStatusCode()).isEqualTo(2);
     assertThat(SagaStatus.COMPENSATED.getStatusCode()).isEqualTo(3);
     assertThat(SagaStatus.ESCALATED.getStatusCode()).isEqualTo(4);
+    assertThat(SagaStatus.WAITING.getStatusCode()).isEqualTo(5);
   }
 
   @Test
@@ -54,6 +56,7 @@ class SagaStatusTest {
     // Act & Assert
     assertThat(SagaStatus.RUNNING.isTerminal()).isFalse();
     assertThat(SagaStatus.COMPENSATING.isTerminal()).isFalse();
+    assertThat(SagaStatus.WAITING.isTerminal()).isFalse();
   }
 
   @Test
@@ -69,6 +72,7 @@ class SagaStatusTest {
     assertThat(SagaStatus.COMPLETED.isRecoverable()).isFalse();
     assertThat(SagaStatus.COMPENSATED.isRecoverable()).isFalse();
     assertThat(SagaStatus.ESCALATED.isRecoverable()).isFalse();
+    assertThat(SagaStatus.WAITING.isRecoverable()).isFalse();
   }
 
   @Test
@@ -84,5 +88,6 @@ class SagaStatusTest {
     assertThat(SagaStatus.RUNNING.isPurgeable()).isFalse();
     assertThat(SagaStatus.COMPENSATING.isPurgeable()).isFalse();
     assertThat(SagaStatus.ESCALATED.isPurgeable()).isFalse();
+    assertThat(SagaStatus.WAITING.isPurgeable()).isFalse();
   }
 }

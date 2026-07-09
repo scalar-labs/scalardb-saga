@@ -131,6 +131,19 @@ class SagaSchemaTest {
   }
 
   @Test
+  void sagaParkedTable_called_returnsMetadataWithExpectedColumns() {
+    // Act
+    TableMetadata metadata = SagaSchema.sagaParkedTable();
+
+    // Assert
+    assertThat(metadata.getColumnNames())
+        .containsExactlyInAnyOrder("bucket", "parked_deadline", "saga_id");
+    assertThat(metadata.getPartitionKeyNames()).containsExactly("bucket");
+    assertThat(metadata.getClusteringKeyNames()).containsExactly("parked_deadline", "saga_id");
+    assertThat(metadata.getSecondaryIndexNames()).contains("saga_id");
+  }
+
+  @Test
   void sagaDefinitionsTable_called_returnsMetadataWithExpectedColumns() {
     // Act
     TableMetadata metadata = SagaSchema.sagaDefinitionsTable();
@@ -162,6 +175,12 @@ class SagaSchemaTest {
         .createTable(
             eq(SagaSchema.NAMESPACE),
             eq(SagaSchema.STATE_TABLE),
+            any(TableMetadata.class),
+            eq(true));
+    verify(admin)
+        .createTable(
+            eq(SagaSchema.NAMESPACE),
+            eq(SagaSchema.PARKED_TABLE),
             any(TableMetadata.class),
             eq(true));
     verify(admin)

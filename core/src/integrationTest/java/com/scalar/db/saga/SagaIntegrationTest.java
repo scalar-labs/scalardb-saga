@@ -26,6 +26,11 @@ import com.scalar.db.saga.testing.FakeTccStep;
 import com.scalar.db.saga.testing.SimulatedCrashError;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -94,6 +99,54 @@ class SagaIntegrationTest {
               return step;
             })
         .build();
+  }
+
+  private DefaultSagaOrchestrator buildOrchestrator(Map<String, Object> steps, Clock clock) {
+    return DefaultSagaOrchestrator.newBuilder()
+        .storeFactory(ScalarDbSagaStoreFactory.create(props))
+        .stepResolver(
+            (name, cls, ctx) -> {
+              Object step = steps.get(name);
+              if (step == null) {
+                throw new IllegalArgumentException("No step registered for: " + name);
+              }
+              return step;
+            })
+        .clock(clock)
+        .build();
+  }
+
+  /** A test {@link Clock} whose instant can be advanced to drive deadline-based behavior. */
+  private static final class MutableClock extends Clock {
+    private volatile Instant instant;
+
+    MutableClock(Instant instant) {
+      this.instant = instant;
+    }
+
+    void advance(Duration duration) {
+      instant = instant.plus(duration);
+    }
+
+    @Override
+    public Instant instant() {
+      return instant;
+    }
+
+    @Override
+    public long millis() {
+      return instant.toEpochMilli();
+    }
+
+    @Override
+    public ZoneId getZone() {
+      return ZoneOffset.UTC;
+    }
+
+    @Override
+    public Clock withZone(ZoneId zone) {
+      return this;
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1001,6 +1054,88 @@ class SagaIntegrationTest {
         assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPLETED);
         assertThat(result.getDefinitionVersion()).isEqualTo("2.0");
       }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Parked-step timeout (async callback deadline expiry)
+  // ---------------------------------------------------------------------------
+
+  @Nested
+  class ParkedStepTimeout {
+
+    @Test
+    void recover_overdueParkedStepBeforePivot_compensates() throws Exception {
+      // Arrange — step2 parks (returns pending); the saga-level timeout bounds the class-step park.
+      MutableClock clock = new MutableClock(Instant.parse("2025-01-01T00:00:00Z"));
+      FakeStep step1 = FakeStep.newBuilder("step1").build();
+      FakeStep step2 = FakeStep.newBuilder("step2").executeReturns(StepResult.pending()).build();
+      SagaDefinition def =
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
+              .timeoutMillis(60_000)
+              .step("step1", STEP_CLASS)
+              .add()
+              .step("step2", STEP_CLASS)
+              .add()
+              .build();
+
+      try (SagaStore store = ScalarDbSagaStoreFactory.create(props).createStore();
+          DefaultSagaOrchestrator orchestrator =
+              buildOrchestrator(Map.of("step1", step1, "step2", step2), clock)) {
+        orchestrator.register(def);
+
+        // Act 1 — start: step1 completes, step2 parks (WAITING) with deadline = start + 60s
+        String sagaId = orchestrator.start("test-saga", Map.of());
+        assertThat(orchestrator.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.WAITING);
+
+        // Act 2 — advance past the park deadline, then run a recovery pass
+        clock.advance(Duration.ofMinutes(2));
+        orchestrator.recover();
+
+        // Assert — timed out (pre-pivot) -> compensated; the completed step rolled back; row
+        // cleared
+        assertThat(orchestrator.getStateSnapshot(sagaId).getStatus())
+            .isEqualTo(SagaStatus.COMPENSATED);
+        assertThat(step1.getCompensationCount()).isEqualTo(1);
+        assertThat(store.findOverdueParkedSagas(farFuture(), null).sagaIds()).isEmpty();
+      }
+    }
+
+    @Test
+    void recover_overdueParkedStepAfterPivot_escalates() throws Exception {
+      // Arrange — FORWARD saga (pivot = -1), so the parked step is post-pivot -> escalate
+      MutableClock clock = new MutableClock(Instant.parse("2025-01-01T00:00:00Z"));
+      FakeStep step1 = FakeStep.newBuilder("step1").executeReturns(StepResult.pending()).build();
+      SagaDefinition def =
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
+              .recoveryStrategy(RecoveryStrategy.FORWARD)
+              .timeoutMillis(60_000)
+              .step("step1", STEP_CLASS)
+              .add()
+              .build();
+
+      try (SagaStore store = ScalarDbSagaStoreFactory.create(props).createStore();
+          DefaultSagaOrchestrator orchestrator = buildOrchestrator(Map.of("step1", step1), clock)) {
+        orchestrator.register(def);
+
+        String sagaId = orchestrator.start("test-saga", Map.of());
+        assertThat(orchestrator.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.WAITING);
+
+        clock.advance(Duration.ofMinutes(2));
+        orchestrator.recover();
+
+        // Assert — post-pivot timeout escalates (no compensation); parked row cleared
+        assertThat(orchestrator.getStateSnapshot(sagaId).getStatus())
+            .isEqualTo(SagaStatus.ESCALATED);
+        assertThat(step1.getCompensationCount()).isEqualTo(0);
+        assertThat(store.findOverdueParkedSagas(farFuture(), null).sagaIds()).isEmpty();
+      }
+    }
+
+    private Instant farFuture() {
+      return Instant.parse("2100-01-01T00:00:00Z");
     }
   }
 }

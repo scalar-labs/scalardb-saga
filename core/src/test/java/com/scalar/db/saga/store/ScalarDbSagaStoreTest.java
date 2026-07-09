@@ -34,6 +34,7 @@ import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
+import com.scalar.db.saga.store.SagaStore.OverdueParked;
 import com.scalar.db.saga.store.SagaStore.Recoverables;
 import java.time.Instant;
 import java.util.List;
@@ -482,6 +483,307 @@ class ScalarDbSagaStoreTest {
   }
 
   // ---------------------------------------------------------------------------
+  // park / resumeParkedStep
+  // ---------------------------------------------------------------------------
+
+  @Test
+  void park_boundedDeadlineGiven_transitionsToWaitingAndInsertsParkedRow() throws Exception {
+    // Arrange
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+
+    // Act
+    SagaStateSnapshot result =
+        store.park(current, 3, StepEvent.pending(1, "charge"), now.plusSeconds(600));
+
+    // Assert
+    assertThat(result.getStatus()).isEqualTo(SagaStatus.WAITING);
+    verify(tx).get(any(Get.class));
+    // STEP_PENDING event insert + state insert + parked-row insert
+    verify(tx, times(3)).insert(any(Insert.class));
+    verify(tx).delete(any(Delete.class));
+    verify(tx).commit();
+  }
+
+  @Test
+  void park_nullDeadlineGiven_writesNoParkedRow() throws Exception {
+    // Arrange
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+
+    // Act
+    SagaStateSnapshot result = store.park(current, 3, StepEvent.pending(1, "charge"), null);
+
+    // Assert
+    assertThat(result.getStatus()).isEqualTo(SagaStatus.WAITING);
+    // event insert + state insert only — no parked row
+    verify(tx, times(2)).insert(any(Insert.class));
+    verify(tx).commit();
+  }
+
+  @Test
+  void park_rowNotFound_throwsSagaConcurrentModificationException() throws Exception {
+    // Arrange
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.empty());
+
+    // Act & Assert
+    assertThatThrownBy(
+            () -> store.park(current, 1, StepEvent.pending(1, "charge"), now.plusSeconds(60)))
+        .isInstanceOf(SagaConcurrentModificationException.class);
+  }
+
+  @Test
+  void resumeParkedStep_parkedRowExists_transitionsToRunningAndDeletesParkedRow() throws Exception {
+    // Arrange
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+    Result parkedRow = mock(Result.class);
+    when(parkedRow.getTimestampTZ("parked_deadline")).thenReturn(now.plusSeconds(600));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(parkedRow));
+
+    // Act
+    SagaStateSnapshot result =
+        store.resumeParkedStep(
+            current, 4, StepEvent.completed(1, "charge", "{\"paymentId\":\"p1\"}"));
+
+    // Assert
+    assertThat(result.getStatus()).isEqualTo(SagaStatus.RUNNING);
+    // STEP_COMPLETED event insert + state insert
+    verify(tx, times(2)).insert(any(Insert.class));
+    // state delete + parked-row delete
+    verify(tx, times(2)).delete(any(Delete.class));
+    verify(tx).commit();
+  }
+
+  @Test
+  void resumeParkedStep_unboundedPark_transitionsToRunningWithoutDeletingRow() throws Exception {
+    // Arrange — an unbounded park (callbackTimeoutMillis=0 and no saga-level timeout) wrote no
+    // saga_parked row, so the resume finds nothing to delete
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+
+    // Act
+    SagaStateSnapshot result =
+        store.resumeParkedStep(current, 4, StepEvent.completed(1, "charge", null));
+
+    // Assert
+    assertThat(result.getStatus()).isEqualTo(SagaStatus.RUNNING);
+    verify(tx, times(2)).insert(any(Insert.class));
+    // only the state delete — no parked-row delete
+    verify(tx).delete(any(Delete.class));
+    verify(tx).commit();
+  }
+
+  @Test
+  void resumeParkedStep_rowNotFound_throwsSagaConcurrentModificationException() throws Exception {
+    // Arrange
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.empty());
+
+    // Act & Assert
+    assertThatThrownBy(
+            () -> store.resumeParkedStep(current, 1, StepEvent.completed(1, "charge", null)))
+        .isInstanceOf(SagaConcurrentModificationException.class);
+  }
+
+  @Test
+  void
+      resumeParkedStep_unknownStatusAndVerifierFindsCrossTypeEvent_throwsSagaConcurrentModificationException()
+          throws Exception {
+    // Arrange — the callback's commit returns an unknown status, and a concurrent timeout sweep won
+    // the WAITING CK and wrote its own STEP_FAILED at the same sequence. The verifier must NOT
+    // mistake that cross-type event for our STEP_COMPLETED: it reports "not committed", the resume
+    // retries, re-reads the now-non-WAITING CK, and throws.
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
+    DistributedTransaction retryTx = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx).thenReturn(retryTx);
+    // Attempt 1: the optimistic WAITING-CK check passes, then commit is ambiguous.
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    // Verifier: the persisted event at the sequence is the sweep's STEP_FAILED, not our own.
+    Result crossTypeEvent = mock(Result.class);
+    when(crossTypeEvent.getText("event_type")).thenReturn("STEP_FAILED");
+    when(verifyTx.get(any(Get.class))).thenReturn(Optional.of(crossTypeEvent));
+    // Retry: the sweep already moved the row off the WAITING CK.
+    when(retryTx.get(any(Get.class))).thenReturn(Optional.empty());
+
+    // Act & Assert
+    assertThatThrownBy(
+            () -> store.resumeParkedStep(current, 4, StepEvent.completed(1, "charge", null)))
+        .isInstanceOf(SagaConcurrentModificationException.class);
+  }
+
+  @Test
+  void resumeParkedStep_unknownStatusAndVerifierFindsOwnEvent_returnsRunning() throws Exception {
+    // Arrange — commit is ambiguous (unknown status) but our own STEP_COMPLETED did persist at the
+    // sequence, so the type-matching verifier confirms the commit and returns the RUNNING snapshot.
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
+    DistributedTransaction loadTx = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx).thenReturn(loadTx);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    // Verifier finds our own STEP_COMPLETED, then loadStateSnapshot re-reads the committed state.
+    Result ownEvent = mock(Result.class);
+    when(ownEvent.getText("event_type")).thenReturn("STEP_COMPLETED");
+    when(verifyTx.get(any(Get.class))).thenReturn(Optional.of(ownEvent));
+    Result runningState = mockStateResult("saga-1", SagaStatus.RUNNING);
+    when(loadTx.scan(any(Scan.class))).thenReturn(List.of(runningState));
+
+    // Act
+    SagaStateSnapshot result =
+        store.resumeParkedStep(current, 4, StepEvent.completed(1, "charge", null));
+
+    // Assert
+    assertThat(result.getStatus()).isEqualTo(SagaStatus.RUNNING);
+  }
+
+  // ---------------------------------------------------------------------------
+  // timeoutParkedStep
+  // ---------------------------------------------------------------------------
+
+  @Test
+  void timeoutParkedStep_toCompensating_transitionsAndDeletesParkedRow() throws Exception {
+    // Arrange — pre-pivot timeout: WAITING -> COMPENSATING, STEP_FAILED, delete the parked row
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+    Result parkedRow = mock(Result.class);
+    when(parkedRow.getTimestampTZ("parked_deadline")).thenReturn(now.plusSeconds(600));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(parkedRow));
+
+    // Act
+    SagaStateSnapshot result =
+        store.timeoutParkedStep(
+            current, 4, StepEvent.failed(1, "charge", null), SagaStatus.COMPENSATING);
+
+    // Assert
+    assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPENSATING);
+    // STEP_FAILED event insert + state insert
+    verify(tx, times(2)).insert(any(Insert.class));
+    // state delete + parked-row delete
+    verify(tx, times(2)).delete(any(Delete.class));
+    verify(tx).commit();
+  }
+
+  @Test
+  void timeoutParkedStep_toEscalatedUnboundedPark_transitionsWithoutDeletingRow() throws Exception {
+    // Arrange — post-pivot timeout of an unbounded park: WAITING -> ESCALATED, no parked row
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+
+    // Act
+    SagaStateSnapshot result =
+        store.timeoutParkedStep(
+            current, 4, StepEvent.failed(1, "charge", null), SagaStatus.ESCALATED);
+
+    // Assert
+    assertThat(result.getStatus()).isEqualTo(SagaStatus.ESCALATED);
+    verify(tx, times(2)).insert(any(Insert.class));
+    // only the state delete — no parked-row delete
+    verify(tx).delete(any(Delete.class));
+    verify(tx).commit();
+  }
+
+  @Test
+  void timeoutParkedStep_invalidTargetStatusGiven_throwsIllegalArgumentException() {
+    // Arrange
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+
+    // Act & Assert — only COMPENSATING / ESCALATED are valid targets
+    assertThatThrownBy(
+            () ->
+                store.timeoutParkedStep(
+                    current, 4, StepEvent.failed(1, "charge", null), SagaStatus.RUNNING))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void timeoutParkedStep_rowNotFound_throwsSagaConcurrentModificationException() throws Exception {
+    // Arrange — a concurrent callback won the WAITING CK
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.empty());
+
+    // Act & Assert
+    assertThatThrownBy(
+            () ->
+                store.timeoutParkedStep(
+                    current, 1, StepEvent.failed(1, "charge", null), SagaStatus.COMPENSATING))
+        .isInstanceOf(SagaConcurrentModificationException.class);
+  }
+
+  @Test
+  void
+      timeoutParkedStep_unknownStatusAndVerifierFindsCrossTypeEvent_throwsSagaConcurrentModificationException()
+          throws Exception {
+    // Symmetric to the resume case: the sweep's commit is ambiguous and a concurrent callback won
+    // the WAITING CK, writing STEP_COMPLETED at the sequence. The verifier must not accept that as
+    // its own STEP_FAILED — it reports "not committed", retries, and throws on the moved CK.
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
+    DistributedTransaction retryTx = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx).thenReturn(retryTx);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    Result crossTypeEvent = mock(Result.class);
+    when(crossTypeEvent.getText("event_type")).thenReturn("STEP_COMPLETED");
+    when(verifyTx.get(any(Get.class))).thenReturn(Optional.of(crossTypeEvent));
+    when(retryTx.get(any(Get.class))).thenReturn(Optional.empty());
+
+    // Act & Assert
+    assertThatThrownBy(
+            () ->
+                store.timeoutParkedStep(
+                    current, 4, StepEvent.failed(1, "charge", null), SagaStatus.COMPENSATING))
+        .isInstanceOf(SagaConcurrentModificationException.class);
+  }
+
+  // ---------------------------------------------------------------------------
   // getEvents
   // ---------------------------------------------------------------------------
 
@@ -513,6 +815,25 @@ class ScalarDbSagaStoreTest {
     assertThat(stepEvent.getStepName()).isEqualTo("debit");
     assertThat(stepEvent.getPayload()).isNull();
     assertThat(stepEvent.getTimestamp()).isNotNull();
+  }
+
+  @Test
+  void getEvents_stepPendingEvent_deserializesAsStepEvent() throws Exception {
+    // Arrange
+    Result r = mockEventResult("STEP_PENDING", 1, "charge", null);
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(r));
+
+    // Act
+    List<SagaEvent> events = store.getEvents("saga-1");
+
+    // Assert
+    assertThat(events).hasSize(1);
+    assertThat(events.get(0)).isInstanceOf(StepEvent.class);
+    StepEvent stepEvent = (StepEvent) events.get(0);
+    assertThat(stepEvent.getEventType()).isEqualTo(EventType.STEP_PENDING);
+    assertThat(stepEvent.getStepIndex()).isEqualTo(1);
+    assertThat(stepEvent.getStepName()).isEqualTo("charge");
+    assertThat(stepEvent.getPayload()).isNull();
   }
 
   @Test
@@ -607,7 +928,7 @@ class ScalarDbSagaStoreTest {
         .thenReturn(List.of());
 
     // Act
-    Recoverables result = store.findRecoverable(60_000, null);
+    Recoverables result = store.findRecoverable(Instant.now(), null);
 
     // Assert
     assertThat(result.sagas()).hasSize(1);
@@ -623,16 +944,16 @@ class ScalarDbSagaStoreTest {
     when(tx.scan(any(Scan.class))).thenReturn(List.of());
 
     // Act — chain 4 calls (buckets 0-3), each returning cursor for next bucket
-    Recoverables r0 = store.findRecoverable(60_000, null);
+    Recoverables r0 = store.findRecoverable(Instant.now(), null);
     assertThat(r0.hasMore()).isTrue();
 
-    Recoverables r1 = store.findRecoverable(60_000, r0.nextCursor());
+    Recoverables r1 = store.findRecoverable(Instant.now(), r0.nextCursor());
     assertThat(r1.hasMore()).isTrue();
 
-    Recoverables r2 = store.findRecoverable(60_000, r1.nextCursor());
+    Recoverables r2 = store.findRecoverable(Instant.now(), r1.nextCursor());
     assertThat(r2.hasMore()).isTrue();
 
-    Recoverables r3 = store.findRecoverable(60_000, r2.nextCursor());
+    Recoverables r3 = store.findRecoverable(Instant.now(), r2.nextCursor());
 
     // Assert — last bucket returns null cursor
     assertThat(r3.hasMore()).isFalse();
@@ -645,7 +966,7 @@ class ScalarDbSagaStoreTest {
     when(tx.scan(any(Scan.class))).thenReturn(List.of());
 
     // Act
-    Recoverables result = store.findRecoverable(60_000, null);
+    Recoverables result = store.findRecoverable(Instant.now(), null);
 
     // Assert
     assertThat(result.sagas()).isEmpty();
@@ -654,15 +975,16 @@ class ScalarDbSagaStoreTest {
 
   @Test
   void findRecoverable_bothStatuses_returnsResultsFromAllScans() throws Exception {
-    // Arrange — each status scan returns one result
+    // Arrange — recovery scans RUNNING and COMPENSATING per bucket (WAITING is timed out via the
+    // saga_parked index, not the staleness scan); each returns one result
     Result running = mockStateResult("saga-running", SagaStatus.RUNNING);
     Result compensating = mockStateResult("saga-compensating", SagaStatus.COMPENSATING);
     when(tx.scan(any(Scan.class))).thenReturn(List.of(running)).thenReturn(List.of(compensating));
 
     // Act
-    Recoverables result = store.findRecoverable(60_000, null);
+    Recoverables result = store.findRecoverable(Instant.now(), null);
 
-    // Assert — both statuses collected
+    // Assert — both active statuses collected
     assertThat(result.sagas()).hasSize(2);
     assertThat(result.sagas())
         .extracting(SagaStateSnapshot::getSagaId)
@@ -676,7 +998,70 @@ class ScalarDbSagaStoreTest {
     when(tx.scan(any(Scan.class))).thenThrow(mock(CrudException.class));
 
     // Act & Assert
-    assertThatThrownBy(() -> store.findRecoverable(60_000, null))
+    assertThatThrownBy(() -> store.findRecoverable(Instant.now(), null))
+        .isInstanceOf(SagaPersistenceException.class);
+  }
+
+  // ---------------------------------------------------------------------------
+  // findOverdueParkedSagas
+  // ---------------------------------------------------------------------------
+
+  @Test
+  void findOverdueParkedSagas_firstCall_returnsFirstBucketIdsAndCursor() throws Exception {
+    // Arrange — the first bucket has two parked sagas whose deadline has passed
+    Result p1 = mock(Result.class);
+    when(p1.getText("saga_id")).thenReturn("saga-a");
+    Result p2 = mock(Result.class);
+    when(p2.getText("saga_id")).thenReturn("saga-b");
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(p1, p2));
+
+    // Act — one bucket per call, starting from bucket 0
+    OverdueParked result = store.findOverdueParkedSagas(Instant.now(), null);
+
+    // Assert
+    assertThat(result.sagaIds()).containsExactly("saga-a", "saga-b");
+    assertThat(result.hasMore()).isTrue(); // buckets 1..3 remain
+  }
+
+  @Test
+  void findOverdueParkedSagas_noneDue_returnsEmptyBatchWithCursor() throws Exception {
+    // Arrange
+    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+
+    // Act
+    OverdueParked result = store.findOverdueParkedSagas(Instant.now(), null);
+
+    // Assert
+    assertThat(result.sagaIds()).isEmpty();
+    assertThat(result.hasMore()).isTrue();
+  }
+
+  @Test
+  void findOverdueParkedSagas_chainedCalls_exhaustAllBuckets() throws Exception {
+    // Arrange — 4 buckets, all empty
+    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    Instant now = Instant.now();
+
+    // Act — chain through all buckets via the returned cursor
+    OverdueParked r0 = store.findOverdueParkedSagas(now, null);
+    OverdueParked r1 = store.findOverdueParkedSagas(now, r0.nextCursor());
+    OverdueParked r2 = store.findOverdueParkedSagas(now, r1.nextCursor());
+    OverdueParked r3 = store.findOverdueParkedSagas(now, r2.nextCursor());
+
+    // Assert — last bucket returns a null cursor
+    assertThat(r0.hasMore()).isTrue();
+    assertThat(r3.hasMore()).isFalse();
+    assertThat(r3.nextCursor()).isNull();
+  }
+
+  @Test
+  void findOverdueParkedSagas_storageFailureGiven_throwsSagaPersistenceException()
+      throws Exception {
+    // Arrange
+    when(tx.scan(any(Scan.class))).thenThrow(mock(CrudException.class));
+
+    // Act & Assert
+    assertThatThrownBy(() -> store.findOverdueParkedSagas(Instant.now(), null))
         .isInstanceOf(SagaPersistenceException.class);
   }
 
