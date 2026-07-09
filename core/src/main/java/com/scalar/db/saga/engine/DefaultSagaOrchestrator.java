@@ -400,9 +400,10 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       String sagaId, String stepName, Map<String, Object> output) {
     ResumedStep resumed = resumeParked(sagaId, stepName, output);
     try {
-      // execute() (not submit()) so an escaping throwable reaches the thread's uncaught handler
-      // rather than a dropped Future; the inner catch logs any Throwable (incl. Error) since the
-      // saga is persisted as RUNNING and recovery is the backstop.
+      // execute() (not submit()) because the result is ignored: submit() would return a Future we
+      // drop, which both trips SpotBugs and silently swallows failures. The inner catch handles
+      // failures instead, logging any Throwable (incl. Error); the saga is persisted as RUNNING, so
+      // recovery is the backstop.
       asyncExecutor.execute(
           () -> {
             try {
