@@ -41,7 +41,7 @@ public final class SagaRateLimitInterceptor implements ServerInterceptor {
         call.close(
             Status.RESOURCE_EXHAUSTED.withDescription("Saga-start rate limit exceeded"),
             new Metadata());
-        return new ServerCall.Listener<ReqT>() {};
+        return new ServerCall.Listener<>() {};
       }
     }
     return next.startCall(call, headers);
