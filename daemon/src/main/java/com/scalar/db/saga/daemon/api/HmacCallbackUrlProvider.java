@@ -12,8 +12,8 @@ import java.util.Objects;
  * <pre>{@code {baseUrl}/sagas/{sagaId}/steps/{stepName}/complete?token={hmac}&iat={epochSeconds}}
  * </pre>
  *
- * where {@code token} is {@link HmacUtils#hmacSha256Hex} over {@code sagaId:stepName:iat}. The
- * verifying counterpart is {@link CallbackResource}, so the two must agree on the signed-data
+ * where {@code token} is {@link HmacUtils#hmacSha256Hex} over {@link HmacUtils#callbackSignedData}.
+ * The verifying counterpart is {@link CallbackResource}, so the two must agree on the signed-data
  * layout. A fresh {@code iat} (and therefore a fresh token) is minted on every call, so a re-drive
  * re-provisions a valid URL.
  */
@@ -37,7 +37,9 @@ public final class HmacCallbackUrlProvider implements CallbackUrlProvider {
   @Override
   public String callbackUrl(String sagaId, String stepName) {
     long iat = clock.instant().getEpochSecond();
-    String token = HmacUtils.hmacSha256Hex(secret, sagaId + ":" + stepName + ":" + iat);
+    String token =
+        HmacUtils.hmacSha256Hex(
+            secret, HmacUtils.callbackSignedData(sagaId, stepName, Long.toString(iat)));
     return baseUrl
         + "/sagas/"
         + encodePathSegment(sagaId)

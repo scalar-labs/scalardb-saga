@@ -135,7 +135,8 @@ class CallbackResourceTest {
   @Test
   void tokenForDifferentStep_returns401() throws Exception {
     // A token computed over a different step name must not authorize this step.
-    String tokenForOtherStep = HmacUtils.hmacSha256Hex(SECRET, SAGA_ID + ":credit:" + IAT);
+    String tokenForOtherStep =
+        HmacUtils.hmacSha256Hex(SECRET, HmacUtils.callbackSignedData(SAGA_ID, "credit", IAT));
 
     HttpResponse<String> response = post("?token=" + tokenForOtherStep + "&iat=" + IAT, "{}");
 
@@ -212,7 +213,7 @@ class CallbackResourceTest {
   }
 
   private String validToken() {
-    return HmacUtils.hmacSha256Hex(SECRET, SAGA_ID + ":" + STEP + ":" + IAT);
+    return HmacUtils.hmacSha256Hex(SECRET, HmacUtils.callbackSignedData(SAGA_ID, STEP, IAT));
   }
 
   private HttpResponse<String> post(String query, String body) throws Exception {

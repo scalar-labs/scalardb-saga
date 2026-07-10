@@ -97,7 +97,7 @@ public final class CallbackResource {
     if (!TOKEN_PATTERN.matcher(token).matches()) {
       throw new CallbackAuthException("malformed callback token");
     }
-    String data = sagaId + ":" + stepName + ":" + iat;
+    String data = HmacUtils.callbackSignedData(sagaId, stepName, iat);
     if (!HmacUtils.verify(callbackSecret, data, token)) {
       throw new CallbackAuthException("invalid callback token");
     }

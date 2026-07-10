@@ -11,10 +11,10 @@ import javax.crypto.spec.SecretKeySpec;
  * HMAC-SHA256 helpers for the async-callback token: {@link #hmacSha256Hex} computes the signature,
  * {@link #verify} checks a presented one in constant time.
  *
- * <p>The callback token binds a parked step to its issuance — {@code hmacSha256Hex(secret, sagaId +
- * ":" + stepName + ":" + iat)} — so only a party holding the coordinator's callback secret can
- * complete the step. This is the first crypto in the repo; it deliberately uses only the JDK's JCE
- * (no third-party dependency).
+ * <p>The callback token binds a parked step to its issuance — the HMAC over {@link
+ * #callbackSignedData} — so only a party holding the coordinator's callback secret can complete the
+ * step. This is the first crypto in the repo; it deliberately uses only the JDK's JCE (no
+ * third-party dependency).
  */
 final class HmacUtils {
 
@@ -22,6 +22,21 @@ final class HmacUtils {
   private static final char[] HEX = "0123456789abcdef".toCharArray();
 
   private HmacUtils() {}
+
+  /**
+   * The canonical data signed by a callback token, binding {@code sagaId}, {@code stepName}, and
+   * {@code iat}. The two variable-length fields are length-prefixed ({@code <len>:<value>}) so the
+   * {@code :} separators are unambiguous even when a field contains a {@code :} — {@code sagaId} is
+   * client-supplied free text and step names are not constrained to exclude {@code :}. Without the
+   * prefix, distinct tuples could collide (e.g. {@code (a:b, c)} and {@code (a, b:c)} both yield
+   * {@code a:b:c:iat}), letting a token minted for one saga or step validate for another. {@code
+   * iat} is trailing so it needs no prefix. Both the minting side ({@link HmacCallbackUrlProvider})
+   * and the verifying side ({@link CallbackResource}) must sign the string produced here, so they
+   * agree on the layout.
+   */
+  static String callbackSignedData(String sagaId, String stepName, String iat) {
+    return sagaId.length() + ":" + sagaId + ":" + stepName.length() + ":" + stepName + ":" + iat;
+  }
 
   /**
    * Computes the lowercase-hex HMAC-SHA256 of {@code data} keyed by {@code secret} (both UTF-8).
