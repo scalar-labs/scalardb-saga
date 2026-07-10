@@ -12,6 +12,7 @@ import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.daemon.security.SagaAuthRequest;
+import com.scalar.db.saga.daemon.security.SagaAuthUnavailableException;
 import com.scalar.db.saga.daemon.security.SagaAuthenticationException;
 import com.scalar.db.saga.daemon.security.SagaIdentity;
 import com.scalar.db.saga.daemon.security.SagaRole;
@@ -167,6 +168,30 @@ class SagaSecurityInterceptorTest {
     // Assert — mapped to INTERNAL (fail closed), not UNAUTHENTICATED, so a server-side fault is not
     // reported to the caller as a bad credential.
     assertThat(error.getStatus().getCode()).isEqualTo(Status.Code.INTERNAL);
+  }
+
+  @Test
+  void getSaga_providerUnavailable_isUnavailable() throws IOException {
+    // Arrange — a provider that cannot verify the credential because it is unavailable (e.g. the
+    // JWKS endpoint is unreachable), not because the credential is bad.
+    SagaSecurityProvider unavailable =
+        new SagaSecurityProvider() {
+          @Override
+          public SagaIdentity authenticate(SagaAuthRequest request) {
+            throw new SagaAuthUnavailableException("jwks unreachable", new RuntimeException());
+          }
+
+          @Override
+          public String name() {
+            return "unavailable";
+          }
+        };
+
+    // Act
+    StatusRuntimeException error = callGetExpectingError(stubFor(unavailable));
+
+    // Assert — retryable UNAVAILABLE, not UNAUTHENTICATED (not a bad credential) or INTERNAL.
+    assertThat(error.getStatus().getCode()).isEqualTo(Status.Code.UNAVAILABLE);
   }
 
   private SagaServiceBlockingStub stubFor(SagaSecurityProvider provider) throws IOException {

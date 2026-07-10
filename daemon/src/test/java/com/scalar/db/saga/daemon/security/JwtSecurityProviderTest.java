@@ -7,6 +7,7 @@ import com.nimbusds.jose.JOSEException;
 import com.nimbusds.jose.JOSEObjectType;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSHeader;
+import com.nimbusds.jose.KeySourceException;
 import com.nimbusds.jose.crypto.RSASSASigner;
 import com.nimbusds.jose.jwk.JWKSet;
 import com.nimbusds.jose.jwk.RSAKey;
@@ -290,6 +291,26 @@ class JwtSecurityProviderTest {
 
     // Assert
     assertThat(identity.principal()).isEqualTo("alice");
+  }
+
+  @Test
+  void authenticate_jwksUnreachable_throwsAuthUnavailableException() throws JOSEException {
+    // Arrange — a JWKS source that fails to produce keys, standing in for an unreachable provider
+    // (nimbus throws a KeySourceException, a JOSEException, from key selection)
+    JWKSource<SecurityContext> failingSource =
+        (selector, context) -> {
+          throw new KeySourceException("JWKS endpoint unreachable");
+        };
+    JwtSecurityProvider unavailableProvider =
+        new JwtSecurityProvider(
+            JwtSecurityProvider.buildProcessor(failingSource, ISSUER, AUDIENCE, null, "sub"),
+            "sub",
+            "scope");
+    String token = sign(baseClaims("alice").build(), signingKey);
+
+    // Act / Assert — a provider outage is a retryable upstream failure, not a bad credential
+    assertThatThrownBy(() -> unavailableProvider.authenticate(bearer(token)))
+        .isInstanceOf(SagaAuthUnavailableException.class);
   }
 
   private static JWTClaimsSet.Builder baseClaims(String subject) {

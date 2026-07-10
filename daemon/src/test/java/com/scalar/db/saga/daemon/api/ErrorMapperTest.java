@@ -2,6 +2,7 @@ package com.scalar.db.saga.daemon.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.scalar.db.saga.daemon.security.SagaAuthUnavailableException;
 import io.javalin.Javalin;
 import io.javalin.http.BadRequestResponse;
 import java.net.URI;
@@ -45,6 +46,11 @@ class ErrorMapperTest {
         ctx -> {
           throw new RuntimeException("internal detail");
         });
+    app.get(
+        "/auth-unavailable",
+        ctx -> {
+          throw new SagaAuthUnavailableException("jwks unreachable", new RuntimeException());
+        });
     app.start(0);
   }
 
@@ -66,6 +72,15 @@ class ErrorMapperTest {
     HttpResponse<String> response = get("/boom");
     assertThat(response.statusCode()).isEqualTo(500);
     assertThat(response.body()).contains("Internal server error").doesNotContain("internal detail");
+  }
+
+  @Test
+  void authProviderUnavailable_mapsTo503_withoutLeakingMessage() throws Exception {
+    HttpResponse<String> response = get("/auth-unavailable");
+    assertThat(response.statusCode()).isEqualTo(503);
+    assertThat(response.body())
+        .contains("Service temporarily unavailable")
+        .doesNotContain("jwks unreachable");
   }
 
   private HttpResponse<String> get(String path) throws Exception {

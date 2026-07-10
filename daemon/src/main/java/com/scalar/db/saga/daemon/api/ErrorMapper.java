@@ -1,5 +1,6 @@
 package com.scalar.db.saga.daemon.api;
 
+import com.scalar.db.saga.daemon.security.SagaAuthUnavailableException;
 import com.scalar.db.saga.daemon.security.SagaAuthenticationException;
 import com.scalar.db.saga.daemon.security.SagaAuthorizationException;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
@@ -17,9 +18,10 @@ import org.slf4j.LoggerFactory;
  * Maps exceptions to HTTP responses with a consistent JSON error body.
  *
  * <p>Client-facing exceptions (not-found, already-exists, invalid request) are mapped to specific
- * 4xx codes with daemon-owned messages. A persistence failure maps to {@code 503}. Everything else
- * falls through to a generic {@code 500}: the real exception is logged server-side and the response
- * carries no internal detail — only the daemon's own messages are ever returned to a caller.
+ * 4xx codes with daemon-owned messages. A persistence failure or an unavailable auth provider maps
+ * to {@code 503}. Everything else falls through to a generic {@code 500}: the real exception is
+ * logged server-side and the response carries no internal detail — only the daemon's own messages
+ * are ever returned to a caller.
  */
 public final class ErrorMapper {
 
@@ -67,6 +69,15 @@ public final class ErrorMapper {
               e.getPrincipal(),
               e.getRequiredRole().wireName());
           ctx.status(403).json(error("FORBIDDEN", "Insufficient permissions"));
+        });
+    // Authentication could not be completed because the provider is unavailable (e.g. the JWKS
+    // endpoint is unreachable) — a transient upstream outage, not a bad credential. Log it and
+    // return a retryable 503, mirroring a persistence failure.
+    app.exception(
+        SagaAuthUnavailableException.class,
+        (e, ctx) -> {
+          logger.error("Authentication provider unavailable on {} {}", ctx.method(), ctx.path(), e);
+          ctx.status(503).json(error("UNAVAILABLE", "Service temporarily unavailable"));
         });
     app.exception(
         RateLimitExceededException.class,

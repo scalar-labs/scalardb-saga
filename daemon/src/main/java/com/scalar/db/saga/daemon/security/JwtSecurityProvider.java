@@ -184,10 +184,16 @@ public final class JwtSecurityProvider implements SagaSecurityProvider {
     JWTClaimsSet claims;
     try {
       claims = processor.process(token, null);
-    } catch (ParseException | BadJOSEException | JOSEException e) {
-      // Covers a malformed token, a bad signature, an unknown key, a wrong issuer/audience, and an
-      // expired token — all "the credential could not be verified" → 401.
+    } catch (ParseException | BadJOSEException e) {
+      // The credential itself is bad: malformed, a bad signature, expired, a wrong issuer or
+      // audience, an unknown key, or (when a token type is configured) a wrong typ. The caller must
+      // fix it, so this is a 401.
       throw new SagaAuthenticationException("JWT validation failed", e);
+    } catch (JOSEException e) {
+      // Verification could not be completed for a reason that is not the caller's credential, most
+      // importantly a JWKS fetch failure when the provider is unreachable (RemoteKeySourceException
+      // extends JOSEException). That is a transient upstream outage, so it is a retryable 503.
+      throw new SagaAuthUnavailableException("JWT provider unavailable", e);
     }
     return SagaIdentity.of(principal(claims), roles(claims));
   }

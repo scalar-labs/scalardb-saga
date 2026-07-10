@@ -1,6 +1,7 @@
 package com.scalar.db.saga.daemon.grpc;
 
 import com.scalar.db.saga.daemon.security.SagaAuthRequest;
+import com.scalar.db.saga.daemon.security.SagaAuthUnavailableException;
 import com.scalar.db.saga.daemon.security.SagaAuthenticationException;
 import com.scalar.db.saga.daemon.security.SagaIdentity;
 import com.scalar.db.saga.daemon.security.SagaRole;
@@ -31,8 +32,10 @@ import org.slf4j.LoggerFactory;
  * so it reads whichever one carries its credential ({@code authorization} for JWT, a configured
  * header for API keys), exactly as the REST handler does. An authentication failure closes the call
  * with {@code UNAUTHENTICATED}; a role shortfall with {@code PERMISSION_DENIED} — the gRPC
- * analogues of {@code 401}/{@code 403}. The resolved identity is attached to the gRPC {@link
- * Context} under {@link #IDENTITY} for downstream audit.
+ * analogues of {@code 401}/{@code 403}. A provider that is unavailable (e.g. an unreachable JWKS
+ * endpoint) closes the call with {@code UNAVAILABLE} — a retryable outage, not a bad credential.
+ * The resolved identity is attached to the gRPC {@link Context} under {@link #IDENTITY} for
+ * downstream audit.
  */
 public final class SagaSecurityInterceptor implements ServerInterceptor {
 
@@ -55,6 +58,12 @@ public final class SagaSecurityInterceptor implements ServerInterceptor {
       identity = provider.authenticate(toAuthRequest(call, headers));
     } catch (SagaAuthenticationException e) {
       return deny(call, Status.UNAUTHENTICATED.withDescription("Authentication required"));
+    } catch (SagaAuthUnavailableException e) {
+      // The provider could not verify the credential because it is unavailable (e.g. the JWKS
+      // endpoint is unreachable) — a transient upstream outage, not a bad credential. Map to
+      // UNAVAILABLE so the caller can retry, mirroring the REST path's 503.
+      logger.warn("Authentication provider unavailable for a gRPC call", e);
+      return deny(call, Status.UNAVAILABLE.withDescription("Service temporarily unavailable"));
     } catch (RuntimeException e) {
       // An unexpected provider failure (not a rejected credential) — a bug or an unwrapped
       // transient error. Fail closed and log it server-side; map to INTERNAL rather than
