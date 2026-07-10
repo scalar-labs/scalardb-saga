@@ -11,6 +11,7 @@ import static org.mockito.Mockito.when;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
+import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import io.javalin.Javalin;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -159,6 +160,21 @@ class CallbackResourceTest {
     when(orchestrator.completeStep(any(), any(), any()))
         .thenThrow(new IllegalStateException("saga not WAITING"));
     when(orchestrator.getStateSnapshot(SAGA_ID)).thenReturn(snapshot(SagaStatus.RUNNING));
+
+    HttpResponse<String> response = post("?token=" + validToken() + "&iat=" + IAT, "{}");
+
+    assertThat(response.statusCode()).isEqualTo(200);
+    verify(orchestrator).getStateSnapshot(SAGA_ID);
+  }
+
+  @Test
+  void callbackLostRaceToTimeoutSweep_isIdempotent200() throws Exception {
+    // The timeout sweep resolved the parked step first → completeStep throws
+    // SagaConcurrentModificationException; the route returns the saga's current state, not an
+    // error.
+    when(orchestrator.completeStep(any(), any(), any()))
+        .thenThrow(new SagaConcurrentModificationException(SAGA_ID));
+    when(orchestrator.getStateSnapshot(SAGA_ID)).thenReturn(snapshot(SagaStatus.COMPENSATING));
 
     HttpResponse<String> response = post("?token=" + validToken() + "&iat=" + IAT, "{}");
 
