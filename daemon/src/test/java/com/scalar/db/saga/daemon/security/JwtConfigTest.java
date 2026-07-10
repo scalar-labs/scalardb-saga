@@ -12,6 +12,7 @@ class JwtConfigTest {
     Properties props = new Properties();
     props.setProperty(JwtConfig.JWKS_URL_KEY, "https://issuer.example/.well-known/jwks.json");
     props.setProperty(JwtConfig.ISSUER_KEY, "https://issuer.example");
+    props.setProperty(JwtConfig.AUDIENCE_KEY, "saga-daemon");
     return props;
   }
 
@@ -24,7 +25,8 @@ class JwtConfigTest {
     assertThat(config.jwksUrl().toString())
         .isEqualTo("https://issuer.example/.well-known/jwks.json");
     assertThat(config.issuer()).isEqualTo("https://issuer.example");
-    assertThat(config.audience()).isNull();
+    assertThat(config.audience()).isEqualTo("saga-daemon");
+    assertThat(config.tokenType()).isNull();
     assertThat(config.principalClaim()).isEqualTo(JwtConfig.DEFAULT_PRINCIPAL_CLAIM);
     assertThat(config.rolesClaim()).isEqualTo(JwtConfig.DEFAULT_ROLES_CLAIM);
     assertThat(config.connectTimeoutMillis()).isEqualTo(JwtConfig.DEFAULT_TIMEOUT_MILLIS);
@@ -36,6 +38,7 @@ class JwtConfigTest {
     // Arrange
     Properties props = minimalProps();
     props.setProperty(JwtConfig.AUDIENCE_KEY, "saga-daemon");
+    props.setProperty(JwtConfig.TOKEN_TYPE_KEY, "at+jwt");
     props.setProperty(JwtConfig.PRINCIPAL_CLAIM_KEY, "email");
     props.setProperty(JwtConfig.ROLES_CLAIM_KEY, "roles");
     props.setProperty(JwtConfig.CONNECT_TIMEOUT_MILLIS_KEY, "500");
@@ -46,6 +49,7 @@ class JwtConfigTest {
 
     // Assert
     assertThat(config.audience()).isEqualTo("saga-daemon");
+    assertThat(config.tokenType()).isEqualTo("at+jwt");
     assertThat(config.principalClaim()).isEqualTo("email");
     assertThat(config.rolesClaim()).isEqualTo("roles");
     assertThat(config.connectTimeoutMillis()).isEqualTo(500);
@@ -67,22 +71,44 @@ class JwtConfigTest {
     // Arrange
     Properties props = new Properties();
     props.setProperty(JwtConfig.JWKS_URL_KEY, "https://issuer.example/jwks.json");
+    props.setProperty(JwtConfig.AUDIENCE_KEY, "saga-daemon");
 
     // Act / Assert
     assertThatThrownBy(() -> JwtConfig.from(props)).isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
-  void from_blankAudience_isTreatedAsUnset() {
-    // Arrange
+  void from_missingAudience_throwsException() {
+    // Arrange — audience is required so an ID token or a token for another service is rejected
+    Properties props = new Properties();
+    props.setProperty(JwtConfig.JWKS_URL_KEY, "https://issuer.example/jwks.json");
+    props.setProperty(JwtConfig.ISSUER_KEY, "https://issuer.example");
+
+    // Act / Assert
+    assertThatThrownBy(() -> JwtConfig.from(props)).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void from_blankAudience_throwsException() {
+    // Arrange — a blank audience is treated as unset, and audience is required
     Properties props = minimalProps();
     props.setProperty(JwtConfig.AUDIENCE_KEY, "   ");
+
+    // Act / Assert
+    assertThatThrownBy(() -> JwtConfig.from(props)).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void from_blankTokenType_isTreatedAsUnset() {
+    // Arrange
+    Properties props = minimalProps();
+    props.setProperty(JwtConfig.TOKEN_TYPE_KEY, "   ");
 
     // Act
     JwtConfig config = JwtConfig.from(props);
 
     // Assert
-    assertThat(config.audience()).isNull();
+    assertThat(config.tokenType()).isNull();
   }
 
   @Test

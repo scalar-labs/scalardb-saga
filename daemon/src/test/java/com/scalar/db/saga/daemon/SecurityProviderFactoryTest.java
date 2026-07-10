@@ -60,6 +60,7 @@ class SecurityProviderFactoryTest {
     properties.setProperty(
         "scalar.db.saga.server.security.jwt.jwks_url", "https://issuer.example/jwks.json");
     properties.setProperty("scalar.db.saga.server.security.jwt.issuer", "https://issuer.example");
+    properties.setProperty("scalar.db.saga.server.security.jwt.audience", "saga-daemon");
 
     // Act
     SagaSecurityProvider provider =

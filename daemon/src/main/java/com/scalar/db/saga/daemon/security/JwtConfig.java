@@ -11,14 +11,25 @@ import org.jspecify.annotations.Nullable;
  * Configuration for {@link JwtSecurityProvider}, parsed from {@code
  * scalar.db.saga.server.security.jwt.*} properties.
  *
+ * <p>The daemon is an OAuth 2.0 resource server: it expects an OAuth 2.0 JWT <b>access token</b>
+ * (RFC 9068), issued by your OIDC or OAuth 2.0 provider, in the {@code Authorization: Bearer}
+ * header. It is not an OIDC relying party and must not be given an OIDC <b>ID token</b> (whose
+ * {@code aud} is the client, not this API). Requiring {@code audience} below is what keeps an ID
+ * token, or a token minted for another service of the same issuer, from being replayed here.
+ *
  * <ul>
  *   <li>{@code jwks_url} (required) — the JWKS endpoint whose signing keys validate token
  *       signatures. Fetched and cached, with key-rotation refresh handled by the JWKS source. Must
  *       use {@code https} (it is the trust anchor); a loopback host is allowed for local dev.
  *   <li>{@code issuer} (required) — the expected {@code iss}; a token from any other issuer is
  *       rejected.
- *   <li>{@code audience} (optional) — the expected {@code aud}; when set, a token must carry it.
- *       Unset accepts any audience.
+ *   <li>{@code audience} (required) — the expected {@code aud}; a token must carry it. This is the
+ *       daemon's own resource identifier, so a token minted for a different relying party of the
+ *       same issuer (including an OIDC ID token) is rejected.
+ *   <li>{@code token_type} (optional) — when set, the JWT {@code typ} header must equal it; a token
+ *       with a different or absent {@code typ} is rejected. Set it to {@code at+jwt} to require the
+ *       RFC 9068 access-token type (the {@code application/at+jwt} form is also accepted). Unset
+ *       (the default) does not check {@code typ}, since not every issuer stamps one.
  *   <li>{@code principal_claim} (default {@code sub}) — the claim read as the caller's principal.
  *   <li>{@code roles_claim} (default {@code scope}) — the claim carrying the caller's roles (a
  *       space-delimited string like an OAuth2 {@code scope}, or a string array). Values matching a
@@ -37,6 +48,7 @@ final class JwtConfig {
   static final String JWKS_URL_KEY = PREFIX + "jwks_url";
   static final String ISSUER_KEY = PREFIX + "issuer";
   static final String AUDIENCE_KEY = PREFIX + "audience";
+  static final String TOKEN_TYPE_KEY = PREFIX + "token_type";
   static final String PRINCIPAL_CLAIM_KEY = PREFIX + "principal_claim";
   static final String ROLES_CLAIM_KEY = PREFIX + "roles_claim";
   static final String CONNECT_TIMEOUT_MILLIS_KEY = PREFIX + "connect_timeout_millis";
@@ -47,7 +59,8 @@ final class JwtConfig {
 
   private final URL jwksUrl;
   private final String issuer;
-  private final @Nullable String audience;
+  private final String audience;
+  private final @Nullable String tokenType;
   private final String principalClaim;
   private final String rolesClaim;
   private final int connectTimeoutMillis;
@@ -56,7 +69,8 @@ final class JwtConfig {
   private JwtConfig(
       URL jwksUrl,
       String issuer,
-      @Nullable String audience,
+      String audience,
+      @Nullable String tokenType,
       String principalClaim,
       String rolesClaim,
       int connectTimeoutMillis,
@@ -64,6 +78,7 @@ final class JwtConfig {
     this.jwksUrl = jwksUrl;
     this.issuer = issuer;
     this.audience = audience;
+    this.tokenType = tokenType;
     this.principalClaim = principalClaim;
     this.rolesClaim = rolesClaim;
     this.connectTimeoutMillis = connectTimeoutMillis;
@@ -81,14 +96,22 @@ final class JwtConfig {
   static JwtConfig from(Properties properties) {
     URL jwksUrl = parseUrl(required(properties, JWKS_URL_KEY));
     String issuer = required(properties, ISSUER_KEY);
-    String audience = blankToNull(properties.getProperty(AUDIENCE_KEY));
+    String audience = required(properties, AUDIENCE_KEY);
+    String tokenType = blankToNull(properties.getProperty(TOKEN_TYPE_KEY));
     String principalClaim =
         valueOrDefault(properties, PRINCIPAL_CLAIM_KEY, DEFAULT_PRINCIPAL_CLAIM);
     String rolesClaim = valueOrDefault(properties, ROLES_CLAIM_KEY, DEFAULT_ROLES_CLAIM);
     int connectTimeout = parsePositiveInt(properties, CONNECT_TIMEOUT_MILLIS_KEY);
     int readTimeout = parsePositiveInt(properties, READ_TIMEOUT_MILLIS_KEY);
     return new JwtConfig(
-        jwksUrl, issuer, audience, principalClaim, rolesClaim, connectTimeout, readTimeout);
+        jwksUrl,
+        issuer,
+        audience,
+        tokenType,
+        principalClaim,
+        rolesClaim,
+        connectTimeout,
+        readTimeout);
   }
 
   URL jwksUrl() {
@@ -99,8 +122,12 @@ final class JwtConfig {
     return issuer;
   }
 
-  @Nullable String audience() {
+  String audience() {
     return audience;
+  }
+
+  @Nullable String tokenType() {
+    return tokenType;
   }
 
   String principalClaim() {

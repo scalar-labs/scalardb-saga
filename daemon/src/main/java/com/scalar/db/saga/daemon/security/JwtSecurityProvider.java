@@ -1,10 +1,12 @@
 package com.scalar.db.saga.daemon.security;
 
 import com.nimbusds.jose.JOSEException;
+import com.nimbusds.jose.JOSEObjectType;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.jwk.source.JWKSource;
 import com.nimbusds.jose.jwk.source.JWKSourceBuilder;
 import com.nimbusds.jose.proc.BadJOSEException;
+import com.nimbusds.jose.proc.DefaultJOSEObjectTypeVerifier;
 import com.nimbusds.jose.proc.JWSVerificationKeySelector;
 import com.nimbusds.jose.proc.SecurityContext;
 import com.nimbusds.jose.util.DefaultResourceRetriever;
@@ -23,25 +25,23 @@ import java.util.List;
 import java.util.Properties;
 import java.util.Set;
 import org.jspecify.annotations.Nullable;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * A {@link SagaSecurityProvider} that authenticates a {@code Bearer} JWT against a remote JWKS.
  *
- * <p>The token signature is verified with a signing key fetched from the configured JWKS endpoint
- * (cached, with key-rotation refresh), and the {@code iss} / {@code exp} (and optional {@code aud})
- * claims are validated. Only <b>asymmetric</b> signature algorithms are accepted (RSA and EC
- * families) — never {@code none} or an HMAC algorithm — so a token cannot be forged by algorithm
- * confusion against a JWKS public key. The caller's principal and roles are read from configured
- * claims (see {@link JwtConfig}); a claim value matching a {@link SagaRole} wire name grants that
- * role, and any other value is ignored.
+ * <p>The daemon is an OAuth 2.0 resource server: it expects an OAuth 2.0 JWT <b>access token</b>
+ * (RFC 9068), not an OIDC ID token. The token signature is verified with a signing key fetched from
+ * the configured JWKS endpoint (cached, with key-rotation refresh), and the {@code iss}, {@code
+ * exp}, and {@code aud} claims are validated (plus the {@code typ} header when a token type is
+ * configured). Only <b>asymmetric</b> signature algorithms are accepted (RSA and EC families) —
+ * never {@code none} or an HMAC algorithm — so a token cannot be forged by algorithm confusion
+ * against a JWKS public key. The caller's principal and roles are read from configured claims (see
+ * {@link JwtConfig}); a claim value matching a {@link SagaRole} wire name grants that role, and any
+ * other value is ignored.
  *
  * <p>Thread-safe: the underlying {@link JWTProcessor} and JWKS source are safe for concurrent use.
  */
 public final class JwtSecurityProvider implements SagaSecurityProvider {
-
-  private static final Logger logger = LoggerFactory.getLogger(JwtSecurityProvider.class);
 
   private static final String BEARER_PREFIX = "Bearer ";
 
@@ -114,14 +114,6 @@ public final class JwtSecurityProvider implements SagaSecurityProvider {
   }
 
   private static JwtSecurityProvider create(JwtConfig config) {
-    if (config.audience() == null) {
-      logger.warn(
-          "No '{}' configured for the JWT security provider: a token with any 'aud' is accepted. If"
-              + " the issuer '{}' mints tokens for more than one relying party, set the audience so"
-              + " a token intended for another service cannot be replayed to the daemon.",
-          JwtConfig.AUDIENCE_KEY,
-          config.issuer());
-    }
     // The default JWKS source caches keys and refreshes ahead of expiry on a dedicated executor
     // thread; that executor is released by close().
     JWKSource<SecurityContext> jwkSource =
@@ -131,7 +123,12 @@ public final class JwtSecurityProvider implements SagaSecurityProvider {
                     config.connectTimeoutMillis(), config.readTimeoutMillis()))
             .build();
     JWTProcessor<SecurityContext> processor =
-        buildProcessor(jwkSource, config.issuer(), config.audience(), config.principalClaim());
+        buildProcessor(
+            jwkSource,
+            config.issuer(),
+            config.audience(),
+            config.tokenType(),
+            config.principalClaim());
     return new JwtSecurityProvider(
         processor,
         config.principalClaim(),
@@ -141,26 +138,44 @@ public final class JwtSecurityProvider implements SagaSecurityProvider {
 
   /**
    * Builds the {@link JWTProcessor}: verifies the signature against {@code jwkSource} using only
-   * the allowed asymmetric algorithms, and requires a matching {@code iss}, a present {@code exp},
-   * the principal claim, and (when set) a matching {@code aud}. Package-private so a test can
-   * supply an in-memory JWKS source and exercise the same verification.
+   * the allowed asymmetric algorithms, and requires a matching {@code iss} and {@code aud}, a
+   * present {@code exp}, and the principal claim. When {@code tokenType} is set, the JWS {@code
+   * typ} header must match it too. Package-private so a test can supply an in-memory JWKS source
+   * and exercise the same verification.
    */
   static JWTProcessor<SecurityContext> buildProcessor(
       JWKSource<SecurityContext> jwkSource,
       String issuer,
-      @Nullable String audience,
+      String audience,
+      @Nullable String tokenType,
       String principalClaim) {
     DefaultJWTProcessor<SecurityContext> processor = new DefaultJWTProcessor<>();
     processor.setJWSKeySelector(new JWSVerificationKeySelector<>(ALLOWED_ALGORITHMS, jwkSource));
+    if (tokenType != null) {
+      processor.setJWSTypeVerifier(typeVerifier(tokenType));
+    }
     JWTClaimsSet exactMatch = new JWTClaimsSet.Builder().issuer(issuer).build();
     // Require the principal claim and an expiry; iss presence + value are enforced by exactMatch.
     Set<String> requiredClaims = Set.of(principalClaim, "exp");
-    DefaultJWTClaimsVerifier<SecurityContext> verifier =
-        audience == null
-            ? new DefaultJWTClaimsVerifier<>(exactMatch, requiredClaims)
-            : new DefaultJWTClaimsVerifier<>(audience, exactMatch, requiredClaims);
-    processor.setJWTClaimsSetVerifier(verifier);
+    processor.setJWTClaimsSetVerifier(
+        new DefaultJWTClaimsVerifier<>(audience, exactMatch, requiredClaims));
     return processor;
+  }
+
+  /**
+   * Builds a {@code typ}-header verifier for {@code tokenType}. RFC 7519 §5.1 lets the {@code
+   * application/} media-type prefix be omitted, so both {@code <type>} and {@code
+   * application/<type>} are accepted (e.g. {@code at+jwt} and {@code application/at+jwt} for an RFC
+   * 9068 access token). Nimbus compares the value case-insensitively.
+   */
+  private static DefaultJOSEObjectTypeVerifier<SecurityContext> typeVerifier(String tokenType) {
+    String prefix = "application/";
+    String bare =
+        tokenType.regionMatches(true, 0, prefix, 0, prefix.length())
+            ? tokenType.substring(prefix.length())
+            : tokenType;
+    return new DefaultJOSEObjectTypeVerifier<>(
+        new JOSEObjectType(bare), new JOSEObjectType(prefix + bare));
   }
 
   @Override

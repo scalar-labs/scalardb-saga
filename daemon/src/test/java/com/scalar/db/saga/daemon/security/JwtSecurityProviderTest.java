@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.nimbusds.jose.JOSEException;
+import com.nimbusds.jose.JOSEObjectType;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.crypto.RSASSASigner;
@@ -28,8 +29,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Drives {@link JwtSecurityProvider} through its real {@link JWTProcessor} against an in-memory
- * JWKS (an RSA key pair generated per test), exercising signature/issuer/audience/expiry validation
- * and principal/role extraction without any network access.
+ * JWKS (an RSA key pair generated per test), exercising signature, issuer, audience, expiry, and
+ * token-type validation plus principal and role extraction without any network access.
  */
 class JwtSecurityProviderTest {
 
@@ -48,7 +49,7 @@ class JwtSecurityProviderTest {
     JWKSource<SecurityContext> jwkSource =
         new ImmutableJWKSet<>(new JWKSet(signingKey.toPublicJWK()));
     JWTProcessor<SecurityContext> processor =
-        JwtSecurityProvider.buildProcessor(jwkSource, ISSUER, AUDIENCE, "sub");
+        JwtSecurityProvider.buildProcessor(jwkSource, ISSUER, AUDIENCE, null, "sub");
     provider = new JwtSecurityProvider(processor, "sub", "scope");
   }
 
@@ -64,7 +65,7 @@ class JwtSecurityProviderTest {
     Closeable jwkSource = () -> closed.set(true);
     JWKSource<SecurityContext> keys = new ImmutableJWKSet<>(new JWKSet(signingKey.toPublicJWK()));
     JWTProcessor<SecurityContext> processor =
-        JwtSecurityProvider.buildProcessor(keys, ISSUER, AUDIENCE, "sub");
+        JwtSecurityProvider.buildProcessor(keys, ISSUER, AUDIENCE, null, "sub");
     JwtSecurityProvider closeableProvider =
         new JwtSecurityProvider(processor, "sub", "scope", jwkSource);
 
@@ -128,7 +129,9 @@ class JwtSecurityProviderTest {
         new ImmutableJWKSet<>(new JWKSet(signingKey.toPublicJWK()));
     JwtSecurityProvider arrayProvider =
         new JwtSecurityProvider(
-            JwtSecurityProvider.buildProcessor(jwkSource, ISSUER, AUDIENCE, "sub"), "sub", "roles");
+            JwtSecurityProvider.buildProcessor(jwkSource, ISSUER, AUDIENCE, null, "sub"),
+            "sub",
+            "roles");
     String token =
         sign(
             baseClaims("root").claim("roles", List.of("saga:admin", "unrelated")).build(),
@@ -226,6 +229,69 @@ class JwtSecurityProviderTest {
         .isInstanceOf(SagaAuthenticationException.class);
   }
 
+  @Test
+  void authenticate_requiredTokenTypeMatched_returnsIdentity() throws JOSEException {
+    // Arrange — provider requires typ=at+jwt; token carries exactly that
+    JwtSecurityProvider typedProvider = providerRequiringType("at+jwt");
+    String token =
+        signWithType(baseClaims("alice").build(), signingKey, new JOSEObjectType("at+jwt"));
+
+    // Act
+    SagaIdentity identity = typedProvider.authenticate(bearer(token));
+
+    // Assert
+    assertThat(identity.principal()).isEqualTo("alice");
+  }
+
+  @Test
+  void authenticate_requiredTokenTypeAsApplicationMediaType_returnsIdentity() throws JOSEException {
+    // Arrange — RFC 7519 lets the "application/" prefix be present; at+jwt config must accept it
+    JwtSecurityProvider typedProvider = providerRequiringType("at+jwt");
+    String token =
+        signWithType(
+            baseClaims("alice").build(), signingKey, new JOSEObjectType("application/at+jwt"));
+
+    // Act
+    SagaIdentity identity = typedProvider.authenticate(bearer(token));
+
+    // Assert
+    assertThat(identity.principal()).isEqualTo("alice");
+  }
+
+  @Test
+  void authenticate_wrongTokenType_throwsAuthenticationException() throws JOSEException {
+    // Arrange — provider requires at+jwt; token is a plain JWT (e.g. an ID token) typ
+    JwtSecurityProvider typedProvider = providerRequiringType("at+jwt");
+    String token = signWithType(baseClaims("alice").build(), signingKey, new JOSEObjectType("JWT"));
+
+    // Act / Assert
+    assertThatThrownBy(() -> typedProvider.authenticate(bearer(token)))
+        .isInstanceOf(SagaAuthenticationException.class);
+  }
+
+  @Test
+  void authenticate_missingTokenType_throwsAuthenticationException() throws JOSEException {
+    // Arrange — provider requires at+jwt; token has no typ header at all
+    JwtSecurityProvider typedProvider = providerRequiringType("at+jwt");
+    String token = signWithType(baseClaims("alice").build(), signingKey, null);
+
+    // Act / Assert
+    assertThatThrownBy(() -> typedProvider.authenticate(bearer(token)))
+        .isInstanceOf(SagaAuthenticationException.class);
+  }
+
+  @Test
+  void authenticate_noTokenTypeConfigured_ignoresTypHeader() throws JOSEException {
+    // Arrange — default provider (no token_type); a token with an unrelated typ still passes
+    String token = signWithType(baseClaims("alice").build(), signingKey, new JOSEObjectType("JWT"));
+
+    // Act
+    SagaIdentity identity = provider.authenticate(bearer(token));
+
+    // Assert
+    assertThat(identity.principal()).isEqualTo("alice");
+  }
+
   private static JWTClaimsSet.Builder baseClaims(String subject) {
     return new JWTClaimsSet.Builder()
         .subject(subject)
@@ -235,10 +301,27 @@ class JwtSecurityProviderTest {
   }
 
   private static String sign(JWTClaimsSet claims, RSAKey key) throws JOSEException {
-    SignedJWT jwt =
-        new SignedJWT(new JWSHeader.Builder(JWSAlgorithm.RS256).keyID(KEY_ID).build(), claims);
+    return signWithType(claims, key, null);
+  }
+
+  private static String signWithType(JWTClaimsSet claims, RSAKey key, @Nullable JOSEObjectType type)
+      throws JOSEException {
+    JWSHeader.Builder header = new JWSHeader.Builder(JWSAlgorithm.RS256).keyID(KEY_ID);
+    if (type != null) {
+      header.type(type);
+    }
+    SignedJWT jwt = new SignedJWT(header.build(), claims);
     jwt.sign(new RSASSASigner(key));
     return jwt.serialize();
+  }
+
+  private JwtSecurityProvider providerRequiringType(String tokenType) {
+    JWKSource<SecurityContext> jwkSource =
+        new ImmutableJWKSet<>(new JWKSet(signingKey.toPublicJWK()));
+    return new JwtSecurityProvider(
+        JwtSecurityProvider.buildProcessor(jwkSource, ISSUER, AUDIENCE, tokenType, "sub"),
+        "sub",
+        "scope");
   }
 
   private static SagaAuthRequest bearer(String token) {
