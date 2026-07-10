@@ -1,6 +1,7 @@
 package com.scalar.db.saga.engine;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -810,11 +811,11 @@ class DefaultSagaOrchestratorTest {
   }
 
   // =========================================================================
-  // completeStep
+  // completeStepAsync
   // =========================================================================
 
   @Nested
-  class CompleteStep {
+  class CompleteStepAsync {
 
     @Test
     void completeStepAsync_waitingSaga_returnsRunningAndDrivesAsync() {
@@ -936,10 +937,22 @@ class DefaultSagaOrchestratorTest {
 
     @Test
     void completeStepAsync_driveThrows_swallowedAndReturnsRunning() {
-      // Arrange — same parked saga; the detached forward drive throws an Error (only a catch on
-      // Throwable, not Exception, contains it). completeStepAsync must still return the RUNNING
-      // snapshot — the step is durably resumed and the async failure is logged, not propagated
-      // (recovery is the backstop).
+      // Arrange — same parked saga, but with a mocked executor so we can capture the drive Runnable
+      // and run it on the test thread. The detached forward drive throws an Error; only a catch on
+      // Throwable (not Exception) contains it, so running the captured Runnable must not throw.
+      // completeStepAsync itself returns the RUNNING snapshot — the step is durably resumed and the
+      // async failure is logged, not propagated (recovery is the backstop).
+      ExecutorService mockExecutor = mock(ExecutorService.class);
+      DefaultSagaOrchestrator orchestratorWithMockExecutor =
+          new DefaultSagaOrchestrator(
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              mockExecutor);
+
       SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
       SagaDefinition def = definition("test-saga");
       SagaStateSnapshot running = snapshot("saga-1", SagaStatus.RUNNING);
@@ -954,12 +967,20 @@ class DefaultSagaOrchestratorTest {
       when(engine.resumeFrom(eq(def), eq(context), eq(2)))
           .thenThrow(new Error("drive failed off-thread"));
 
-      // Act — returns immediately with the RUNNING snapshot; the failure is off-thread.
-      SagaStateSnapshot result = orchestrator.completeStepAsync("saga-1", "s1", Map.of());
+      // Act — returns immediately with the RUNNING snapshot; the drive Runnable is captured, not
+      // run.
+      SagaStateSnapshot result =
+          orchestratorWithMockExecutor.completeStepAsync("saga-1", "s1", Map.of());
 
-      // Assert — the resume result is returned and the (throwing) drive was actually dispatched.
+      // Assert — the resume result is returned, and running the captured drive swallows the Error
+      // (proving the catch is on Throwable, not Exception).
       assertThat(result).isSameAs(running);
-      verify(engine, timeout(2_000)).resumeFrom(def, context, 2);
+      ArgumentCaptor<Runnable> driveCaptor = ArgumentCaptor.forClass(Runnable.class);
+      verify(mockExecutor).execute(driveCaptor.capture());
+      assertThatCode(() -> driveCaptor.getValue().run()).doesNotThrowAnyException();
+      verify(engine).resumeFrom(def, context, 2);
+
+      orchestratorWithMockExecutor.close();
     }
   }
 
