@@ -69,6 +69,73 @@ class SagaServerTest {
     return SagaServerConfig.load(props);
   }
 
+  /** A declarative definition carrying its own explicit saga timeout. */
+  private static String declarativeJsonWithTimeout(String name, long timeoutMillis) {
+    return "{\"name\":\""
+        + name
+        + "\",\"mode\":\"SAGA\",\"timeoutMillis\":"
+        + timeoutMillis
+        + ",\"steps\":[{\"name\":\"s\",\"service\":\"svc\","
+        + "\"execution\":{\"method\":\"POST\",\"path\":\"/x\"},"
+        + "\"compensation\":{\"method\":\"POST\",\"path\":\"/y\"}}]}";
+  }
+
+  @Test
+  void constructor_definitionWithoutTimeout_appliesServerDefault(@TempDir Path dir)
+      throws Exception {
+    // Arrange — a definition with no timeout, and a server default of 30s
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.DEFAULT_SAGA_TIMEOUT_MILLIS_KEY, "30000");
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
+
+    // Act
+    new SagaServer(SagaServerConfig.load(props), orchestrator);
+
+    // Assert — the registered definition got the server default
+    ArgumentCaptor<SagaDefinition> captor = ArgumentCaptor.forClass(SagaDefinition.class);
+    verify(orchestrator).register(captor.capture());
+    assertThat(captor.getValue().getTimeoutMillis()).isEqualTo(30_000L);
+  }
+
+  @Test
+  void constructor_definitionWithOwnTimeout_isNotOverriddenByDefault(@TempDir Path dir)
+      throws Exception {
+    // Arrange — a definition that sets its own timeout, and a different server default
+    Files.writeString(dir.resolve("saga.json"), declarativeJsonWithTimeout("saga", 5000));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.DEFAULT_SAGA_TIMEOUT_MILLIS_KEY, "30000");
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
+
+    // Act
+    new SagaServer(SagaServerConfig.load(props), orchestrator);
+
+    // Assert — the definition's own timeout wins
+    ArgumentCaptor<SagaDefinition> captor = ArgumentCaptor.forClass(SagaDefinition.class);
+    verify(orchestrator).register(captor.capture());
+    assertThat(captor.getValue().getTimeoutMillis()).isEqualTo(5000L);
+  }
+
+  @Test
+  void constructor_noServerDefault_leavesDefinitionTimeoutUnbounded(@TempDir Path dir)
+      throws Exception {
+    // Arrange — no server default configured
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
+
+    // Act
+    new SagaServer(configWithDefinitionsPath(dir), orchestrator);
+
+    // Assert — timeout stays 0 (unbounded)
+    ArgumentCaptor<SagaDefinition> captor = ArgumentCaptor.forClass(SagaDefinition.class);
+    verify(orchestrator).register(captor.capture());
+    assertThat(captor.getValue().getTimeoutMillis()).isZero();
+  }
+
   @Test
   void constructor_definitionsDirectory_registersOnlyDefinitionFiles(@TempDir Path dir)
       throws Exception {
@@ -167,9 +234,10 @@ class SagaServerTest {
   void start_portUnavailable_closesOrchestratorAndPropagates(@TempDir Path dir) throws Exception {
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     // Hold an ephemeral port with another server so SagaServer's app.start(...) fails to bind.
-    Javalin portHolder = Javalin.create().start(0);
+    Javalin portHolder = Javalin.create().start("127.0.0.1", 0);
     try {
       Properties props = new Properties();
+      props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
       props.setProperty(SagaServerConfig.PORT_KEY, Integer.toString(portHolder.port()));
       props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
       DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
@@ -197,9 +265,45 @@ class SagaServerTest {
   }
 
   @Test
+  void start_noopProviderOnNonLoopbackHost_throwsWithoutAcknowledgement(@TempDir Path dir)
+      throws Exception {
+    // Arrange — default noop provider, bound to all interfaces (0.0.0.0), not acknowledged
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "0.0.0.0");
+    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    SagaServer server =
+        new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class));
+
+    // Act / Assert — refuses to start unauthenticated on a network-reachable interface
+    assertThatThrownBy(server::start).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void start_noopOnNonLoopbackHost_startsWhenInsecureAcknowledged(@TempDir Path dir)
+      throws Exception {
+    // Arrange — the same exposed noop config, but the operator explicitly acknowledges it
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "0.0.0.0");
+    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
+    props.setProperty(SagaServerConfig.INSECURE_MODE_ENABLED_KEY, "true");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+
+    // Act / Assert — the acknowledgement lets it bind
+    try (SagaServer server =
+        new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class)).start()) {
+      assertThat(server.port()).isGreaterThan(0);
+    }
+  }
+
+  @Test
   void start_grpcDisabled_bindsOnlyHttp(@TempDir Path dir) throws Exception {
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
     props.setProperty(SagaServerConfig.PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
@@ -213,10 +317,29 @@ class SagaServerTest {
   }
 
   @Test
+  void start_withExplicitMaxQueuedRequests_bindsWithBoundedQueue(@TempDir Path dir)
+      throws Exception {
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
+    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.MAX_QUEUED_REQUESTS_KEY, "16"); // small explicit cap
+    try (SagaServer server =
+        new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class)).start()) {
+      // The 4-arg QueuedThreadPool (bounded job queue) boots and binds the HTTP port; a bad queue
+      // capacity would otherwise surface here as a startup failure.
+      assertThat(server.port()).isGreaterThan(0);
+    }
+  }
+
+  @Test
   void start_callbackSecretWithoutBaseUrl_registersCallbackRoute(@TempDir Path dir)
       throws Exception {
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
     props.setProperty(SagaServerConfig.PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
@@ -234,6 +357,7 @@ class SagaServerTest {
   void start_noCallbackSecret_callbackRouteAbsent(@TempDir Path dir) throws Exception {
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
     props.setProperty(SagaServerConfig.PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
@@ -261,6 +385,7 @@ class SagaServerTest {
   void start_httpDisabled_bindsOnlyGrpc(@TempDir Path dir) throws Exception {
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
     props.setProperty(SagaServerConfig.GRPC_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.HTTP_ENABLED_KEY, "false");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
@@ -276,6 +401,7 @@ class SagaServerTest {
   void start_grpcEnabled_healthServiceReportsServing(@TempDir Path dir) throws Exception {
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
     props.setProperty(SagaServerConfig.PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());

@@ -4,14 +4,23 @@ import com.scalar.db.saga.daemon.api.CallbackResource;
 import com.scalar.db.saga.daemon.api.ErrorMapper;
 import com.scalar.db.saga.daemon.api.HealthResource;
 import com.scalar.db.saga.daemon.api.HmacCallbackUrlProvider;
+import com.scalar.db.saga.daemon.api.RateLimitHandler;
+import com.scalar.db.saga.daemon.api.RateLimiter;
 import com.scalar.db.saga.daemon.api.SagaResource;
+import com.scalar.db.saga.daemon.grpc.SagaRateLimitInterceptor;
+import com.scalar.db.saga.daemon.grpc.SagaSecurityInterceptor;
 import com.scalar.db.saga.daemon.grpc.SagaServiceImpl;
+import com.scalar.db.saga.daemon.security.AuthExemptions;
+import com.scalar.db.saga.daemon.security.SagaSecurityHandler;
+import com.scalar.db.saga.daemon.security.SagaSecurityProvider;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.definition.SagaDefinitionParser;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.store.ScalarDbSagaStoreFactory;
 import io.grpc.Server;
+import io.grpc.ServerInterceptors;
+import io.grpc.ServerServiceDefinition;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.protobuf.services.HealthStatusManager;
 import io.javalin.Javalin;
@@ -32,6 +41,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Stream;
+import org.eclipse.jetty.util.BlockingArrayQueue;
+import org.eclipse.jetty.util.thread.QueuedThreadPool;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -61,9 +72,15 @@ public final class SagaServer implements AutoCloseable {
   private static final Logger logger = LoggerFactory.getLogger(SagaServer.class);
   private static final long GRPC_SHUTDOWN_MIN_SECONDS = 30L;
   private static final long GRPC_SHUTDOWN_SLACK_MILLIS = 5_000L;
+  private static final long THREAD_POOL_IDLE_TIMEOUT_MILLIS = 60_000L;
+  private static final long RATE_LIMIT_WINDOW_MILLIS = 60_000L;
 
   private final SagaServerConfig config;
   private final DefaultSagaOrchestrator orchestrator;
+  private final SagaSecurityProvider securityProvider;
+  // The shared per-principal saga-start limiter, or null when rate limiting is disabled. Shared by
+  // both transports (REST before-handler and gRPC interceptor) so a caller's budget spans both.
+  private final @Nullable RateLimiter rateLimiter;
   // Each transport is null when disabled; SagaServerConfig guarantees at least one is enabled.
   private final @Nullable Javalin httpServer;
   private final @Nullable ExecutorService grpcExecutor;
@@ -90,12 +107,21 @@ public final class SagaServer implements AutoCloseable {
   SagaServer(SagaServerConfig config, DefaultSagaOrchestrator orchestrator) {
     this.config = Objects.requireNonNull(config, "config must not be null");
     this.orchestrator = Objects.requireNonNull(orchestrator, "orchestrator must not be null");
-    Javalin httpServer = config.httpEnabled() ? Javalin.create() : null;
+    Javalin httpServer = config.httpEnabled() ? createHttpServer(config) : null;
     ExecutorService grpcExecutor =
         config.grpcEnabled() ? Executors.newVirtualThreadPerTaskExecutor() : null;
     this.httpServer = httpServer;
     this.grpcExecutor = grpcExecutor;
+    this.rateLimiter =
+        config.maxStartRequestsPerMinute() > 0
+            ? new RateLimiter(config.maxStartRequestsPerMinute(), RATE_LIMIT_WINDOW_MILLIS)
+            : null;
+    // Built before wiring the transports so both can share one provider (the gRPC interceptor uses
+    // it too). A null placeholder lets the catch below close it only if it was built.
+    @Nullable SagaSecurityProvider provider = null;
     try {
+      provider = SecurityProviderFactory.create(config);
+      this.securityProvider = provider;
       loadDefinitions();
       if (httpServer != null) {
         registerRoutes(httpServer);
@@ -109,11 +135,12 @@ public final class SagaServer implements AutoCloseable {
         this.grpcServer = null;
       }
     } catch (RuntimeException e) {
-      // Release the executor and the store/DB connections held by the orchestrator if startup
-      // wiring fails.
+      // Release the executor, the security provider, and the store/DB connections held by the
+      // orchestrator if startup wiring fails.
       if (grpcExecutor != null) {
         grpcExecutor.shutdown();
       }
+      closeSecurityProvider(provider);
       orchestrator.close();
       throw e;
     }
@@ -122,17 +149,30 @@ public final class SagaServer implements AutoCloseable {
   /**
    * Builds (does not bind) the gRPC server: it serves {@link SagaServiceImpl} over the same {@link
    * SagaServerConfig#host()} as HTTP on its own port, delegating to the same orchestrator the REST
-   * routes use. It also registers the standard {@code grpc.health.v1.Health} service so a gRPC-only
-   * deployment stays probeable (e.g. by K8s-native gRPC probes). The wait-heavy bounded-sync calls
-   * run on a virtual-thread executor (cheap blocking); the inbound-size and metadata caps bound
-   * abuse on the unauthenticated port; server reflection is deliberately not registered (it would
-   * expose the schema to any client).
+   * routes use. The saga service is wrapped with {@link SagaSecurityInterceptor} so gRPC calls are
+   * authenticated/authorized by the same {@link SagaSecurityProvider} as REST, and — when rate
+   * limiting is enabled — a {@link SagaRateLimitInterceptor} sharing the REST transport's {@link
+   * RateLimiter}, so a caller's saga-start budget spans both transports. It also registers the
+   * standard {@code grpc.health.v1.Health} service — deliberately <b>not</b> intercepted, so a
+   * gRPC-only deployment stays probeable (e.g. by K8s-native gRPC probes) without a credential. The
+   * wait-heavy bounded-sync calls run on a virtual-thread executor (cheap blocking); the
+   * inbound-size and metadata caps bound abuse; server reflection is deliberately not registered
+   * (it would expose the schema to any client).
    */
   private Server buildGrpcServer(ExecutorService executor, HealthStatusManager health) {
+    SagaServiceImpl service =
+        new SagaServiceImpl(orchestrator, config.syncTimeoutMillis(), config.syncMaxWaitMillis());
+    SagaSecurityInterceptor security = new SagaSecurityInterceptor(securityProvider);
+    // interceptForward runs interceptors in listed order: authenticate first so the identity is on
+    // the Context, then (when enabled) rate-limit reads it — the gRPC analogue of the REST
+    // before-handler order.
+    ServerServiceDefinition sagaService =
+        rateLimiter == null
+            ? ServerInterceptors.intercept(service, security)
+            : ServerInterceptors.interceptForward(
+                service, security, new SagaRateLimitInterceptor(rateLimiter));
     return NettyServerBuilder.forAddress(new InetSocketAddress(config.host(), config.grpcPort()))
-        .addService(
-            new SagaServiceImpl(
-                orchestrator, config.syncTimeoutMillis(), config.syncMaxWaitMillis()))
+        .addService(sagaService)
         .addService(health.getHealthService())
         .maxInboundMessageSize(config.grpcMaxInboundMessageBytes())
         .maxInboundMetadataSize(8 * 1024)
@@ -211,7 +251,24 @@ public final class SagaServer implements AutoCloseable {
                 + " declarative service step, or run the engine in embedded mode for code steps.");
       }
     }
-    orchestrator.register(definition);
+    orchestrator.register(applyDefaultTimeout(definition));
+  }
+
+  /**
+   * Applies the server-wide default saga timeout to a definition that specified none ({@code
+   * timeoutMillis == 0}), so a daemon-hosted saga cannot run without a deadline. A definition's own
+   * timeout is left untouched, and when no default is configured this is a no-op.
+   */
+  private SagaDefinition applyDefaultTimeout(SagaDefinition definition) {
+    long defaultTimeout = config.defaultSagaTimeoutMillis();
+    if (defaultTimeout > 0 && definition.getTimeoutMillis() == 0) {
+      logger.info(
+          "Applying default timeout of {} ms to saga '{}' (no timeout set)",
+          defaultTimeout,
+          definition.getName());
+      return definition.withTimeoutMillis(defaultTimeout);
+    }
+    return definition;
   }
 
   private static boolean isDefinitionFile(Path path) {
@@ -219,7 +276,40 @@ public final class SagaServer implements AutoCloseable {
     return name.endsWith(".json") || name.endsWith(".yaml") || name.endsWith(".yml");
   }
 
+  /**
+   * Builds the Javalin app with a bounded Jetty thread pool <b>and</b> a bounded job queue, so a
+   * burst of slow requests can exhaust neither request-handling threads nor memory. {@code
+   * maxThreads} caps concurrency; the idle timeout lets the pool shrink back toward {@code
+   * minThreads} when quiet; and once all threads are busy, at most {@code maxQueuedRequests} more
+   * requests wait before the server sheds load (fast failure) rather than queueing unboundedly.
+   */
+  private static Javalin createHttpServer(SagaServerConfig config) {
+    int queueCap = config.maxQueuedRequests();
+    // A fixed-capacity queue (initial == growBy == max == cap): it never grows past the cap, so the
+    // backlog is memory-bounded and the pool rejects further work once threads and queue are full.
+    BlockingArrayQueue<Runnable> jobQueue = new BlockingArrayQueue<>(queueCap, queueCap, queueCap);
+    return Javalin.create(
+        cfg ->
+            cfg.jetty.threadPool =
+                new QueuedThreadPool(
+                    config.maxThreads(),
+                    config.minThreads(),
+                    (int) THREAD_POOL_IDLE_TIMEOUT_MILLIS,
+                    jobQueue));
+  }
+
   private void registerRoutes(Javalin httpServer) {
+    // The RBAC before-handler authenticates every request except the exempt paths. The liveness
+    // probe carries no user credential; the async-callback route authenticates with its own
+    // per-step HMAC token — add CallbackResource.PATH to this list when that route lands.
+    SagaSecurityHandler.register(
+        httpServer, securityProvider, AuthExemptions.of(HealthResource.PATH));
+    // Rate limiting runs after auth (it keys off the resolved principal) and only when enabled;
+    // registered before the routes so it gates saga-start requests. The same limiter also gates the
+    // gRPC transport (see buildGrpcServer), so the budget is per caller, not per port.
+    if (rateLimiter != null) {
+      RateLimitHandler.register(httpServer, rateLimiter);
+    }
     HealthResource.register(httpServer);
     ErrorMapper.register(httpServer);
     SagaResource.register(httpServer, orchestrator, config.syncTimeoutMillis());
@@ -238,12 +328,81 @@ public final class SagaServer implements AutoCloseable {
   }
 
   /**
+   * Fails fast if the server would start unauthenticated on a network-reachable interface: the
+   * {@code noop} provider bound to a non-loopback host. The operator must configure a real
+   * provider, bind to a loopback address, or explicitly enable insecure mode via {@code
+   * insecure_mode.enabled=true}. This closes the insecure-by-default combination where an
+   * unconfigured daemon would serve full-access requests to anyone on the network.
+   */
+  private void ensureSecureBindingOrAcknowledged() {
+    if (config.securityProvider().equals("noop")
+        && !isLoopbackHost(config.host())
+        && !config.insecureModeEnabled()) {
+      throw new IllegalArgumentException(
+          "Refusing to start unauthenticated on a network-reachable interface: '"
+              + SagaServerConfig.SECURITY_PROVIDER_KEY
+              + "="
+              + config.securityProvider()
+              + "' disables authentication, but '"
+              + SagaServerConfig.HOST_KEY
+              + "="
+              + config.host()
+              + "' is not a loopback address. Configure a real security provider (jwt or apikey),"
+              + " bind '"
+              + SagaServerConfig.HOST_KEY
+              + "' to a loopback address, or set '"
+              + SagaServerConfig.INSECURE_MODE_ENABLED_KEY
+              + "=true' to acknowledge running without authentication on an exposed interface.");
+    }
+  }
+
+  /**
+   * Warns when the saga-start rate limit is configured under the {@code noop} provider, where it
+   * cannot behave per-principal. {@code noop} resolves every request to the single {@code
+   * "anonymous"} principal, so the per-principal limiter degrades to one global bucket shared by
+   * all callers — one client can consume the whole budget for everyone. Not an error (a global cap
+   * is the only sensible behavior without a per-caller identity), but the operator should know the
+   * limit is only meaningful once a real provider (jwt or apikey) is configured.
+   */
+  private void warnIfRateLimitGlobalUnderNoop() {
+    if (rateLimiter != null && config.securityProvider().equals("noop")) {
+      logger.warn(
+          "'{}={}' is set, but '{}={}' resolves every request to a single principal, so the"
+              + " per-principal saga-start limit acts as one global bucket shared by all callers."
+              + " Configure a real security provider (jwt or apikey) for the limit to apply"
+              + " per-principal.",
+          SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY,
+          config.maxStartRequestsPerMinute(),
+          SagaServerConfig.SECURITY_PROVIDER_KEY,
+          config.securityProvider());
+    }
+  }
+
+  /**
+   * Whether {@code host} is a loopback bind address ({@code localhost}, {@code 127.0.0.0/8}, {@code
+   * ::1}) — reachable only from the local machine, not the network. Matched on the literal (no DNS
+   * resolution); {@code 0.0.0.0} (bind all interfaces) is deliberately not loopback.
+   */
+  private static boolean isLoopbackHost(String host) {
+    String literal = host;
+    if (literal.startsWith("[") && literal.endsWith("]")) {
+      // A bracketed IPv6 literal, e.g. "[::1]".
+      literal = literal.substring(1, literal.length() - 1);
+    }
+    return literal.equalsIgnoreCase("localhost")
+        || literal.equals("::1")
+        || literal.startsWith("127.");
+  }
+
+  /**
    * Starts background recovery/retention tasks, binds the HTTP port, and begins serving.
    *
    * @return this server
    */
   public SagaServer start() {
     try {
+      ensureSecureBindingOrAcknowledged();
+      warnIfRateLimitGlobalUnderNoop();
       orchestrator.startBackgroundTasks();
       if (httpServer != null) {
         httpServer.start(config.host(), config.port());
@@ -309,8 +468,26 @@ public final class SagaServer implements AutoCloseable {
     if (grpcExecutor != null) {
       grpcExecutor.shutdown();
     }
+    closeSecurityProvider(securityProvider);
     orchestrator.close();
     logger.info("SagaServer stopped");
+  }
+
+  /**
+   * Closes a security provider, releasing any resources it holds (e.g. a JWKS-refresh client),
+   * logging and swallowing any failure so it never masks the orchestrator drain that follows.
+   * Tolerates a {@code null} provider so the constructor's failure path can call it before the
+   * field is set.
+   */
+  private static void closeSecurityProvider(@Nullable SagaSecurityProvider provider) {
+    if (provider == null) {
+      return;
+    }
+    try {
+      provider.close();
+    } catch (Exception e) {
+      logger.warn("Failed to close security provider '{}'", provider.name(), e);
+    }
   }
 
   /**

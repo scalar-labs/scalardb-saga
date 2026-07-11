@@ -11,6 +11,12 @@ import java.util.Map;
  */
 public final class HealthResource {
 
+  /**
+   * The liveness route path. Exposed as a constant so the security layer can exempt this
+   * infrastructure probe — which carries no user credential — from caller-facing auth.
+   */
+  public static final String PATH = "/health";
+
   private HealthResource() {}
 
   /**
@@ -19,6 +25,6 @@ public final class HealthResource {
    * @param app the Javalin app
    */
   public static void register(Javalin app) {
-    app.get("/health", ctx -> ctx.json(Map.of("status", "UP")));
+    app.get(PATH, ctx -> ctx.json(Map.of("status", "UP")));
   }
 }

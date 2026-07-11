@@ -45,6 +45,174 @@ class SagaServerConfigTest {
   }
 
   @Test
+  void rawProperties_returnUnresolvedInput_withoutStoreDefaults() {
+    // Arrange
+    SagaServerConfig config = SagaServerConfig.load(new Properties());
+
+    // Assert — properties() applies the daemon store default; rawProperties() is the untouched,
+    // pre-resolution input (the boundary the API-key provider checks references against).
+    assertThat(config.properties().getProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY))
+        .isNotNull();
+    assertThat(
+            config.rawProperties().getProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY))
+        .isNull();
+  }
+
+  @Test
+  void threadPool_unset_appliesDefaults() {
+    SagaServerConfig config = SagaServerConfig.load(new Properties());
+
+    assertThat(config.maxThreads()).isEqualTo(SagaServerConfig.DEFAULT_MAX_THREADS);
+    assertThat(config.minThreads()).isEqualTo(SagaServerConfig.DEFAULT_MIN_THREADS);
+  }
+
+  @Test
+  void insecureModeEnabled_unset_defaultsFalse() {
+    SagaServerConfig config = SagaServerConfig.load(new Properties());
+
+    assertThat(config.insecureModeEnabled())
+        .isEqualTo(SagaServerConfig.DEFAULT_INSECURE_MODE_ENABLED);
+  }
+
+  @Test
+  void insecureModeEnabled_setTrue_isParsed() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.INSECURE_MODE_ENABLED_KEY, "true");
+
+    assertThat(SagaServerConfig.load(props).insecureModeEnabled()).isTrue();
+  }
+
+  @Test
+  void threadPool_configuredValues_areParsed() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.MAX_THREADS_KEY, "50");
+    props.setProperty(SagaServerConfig.MIN_THREADS_KEY, "4");
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.maxThreads()).isEqualTo(50);
+    assertThat(config.minThreads()).isEqualTo(4);
+  }
+
+  @Test
+  void threadPool_minExceedsMax_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.MAX_THREADS_KEY, "4");
+    props.setProperty(SagaServerConfig.MIN_THREADS_KEY, "8");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void threadPool_zeroMaxThreads_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.MAX_THREADS_KEY, "0");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void maxQueuedRequests_unset_defaultsToMultipleOfMaxThreads() {
+    SagaServerConfig config = SagaServerConfig.load(new Properties());
+
+    assertThat(config.maxQueuedRequests())
+        .isEqualTo(
+            SagaServerConfig.DEFAULT_MAX_QUEUED_REQUESTS_PER_THREAD
+                * SagaServerConfig.DEFAULT_MAX_THREADS);
+  }
+
+  @Test
+  void maxQueuedRequests_unset_scalesWithConfiguredMaxThreads() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.MAX_THREADS_KEY, "50");
+
+    // The default derives from maxThreads, so the shed point stays proportional to the pool.
+    assertThat(SagaServerConfig.load(props).maxQueuedRequests())
+        .isEqualTo(SagaServerConfig.DEFAULT_MAX_QUEUED_REQUESTS_PER_THREAD * 50);
+  }
+
+  @Test
+  void maxQueuedRequests_configured_isParsed() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.MAX_QUEUED_REQUESTS_KEY, "500");
+
+    assertThat(SagaServerConfig.load(props).maxQueuedRequests()).isEqualTo(500);
+  }
+
+  @Test
+  void maxQueuedRequests_zero_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.MAX_QUEUED_REQUESTS_KEY, "0");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void defaultSagaTimeoutMillis_unset_defaultsToDisabled() {
+    assertThat(SagaServerConfig.load(new Properties()).defaultSagaTimeoutMillis()).isZero();
+  }
+
+  @Test
+  void defaultSagaTimeoutMillis_configured_isParsed() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.DEFAULT_SAGA_TIMEOUT_MILLIS_KEY, "30000");
+
+    assertThat(SagaServerConfig.load(props).defaultSagaTimeoutMillis()).isEqualTo(30_000L);
+  }
+
+  @Test
+  void defaultSagaTimeoutMillis_negative_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.DEFAULT_SAGA_TIMEOUT_MILLIS_KEY, "-1");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void maxStartRequestsPerMinute_unset_defaultsToDisabled() {
+    assertThat(SagaServerConfig.load(new Properties()).maxStartRequestsPerMinute()).isZero();
+  }
+
+  @Test
+  void maxStartRequestsPerMinute_configured_isParsed() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY, "100");
+
+    assertThat(SagaServerConfig.load(props).maxStartRequestsPerMinute()).isEqualTo(100);
+  }
+
+  @Test
+  void securityProvider_unset_defaultsToNoop() {
+    SagaServerConfig config = SagaServerConfig.load(new Properties());
+
+    assertThat(config.securityProvider()).isEqualTo(SagaServerConfig.DEFAULT_SECURITY_PROVIDER);
+  }
+
+  @Test
+  void securityProvider_setWithMixedCaseAndPadding_isNormalizedToLowerCaseTrimmed() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SECURITY_PROVIDER_KEY, "  JWT  ");
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.securityProvider()).isEqualTo("jwt");
+  }
+
+  @Test
+  void securityProvider_blank_defaultsToNoop() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SECURITY_PROVIDER_KEY, "   ");
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.securityProvider()).isEqualTo(SagaServerConfig.DEFAULT_SECURITY_PROVIDER);
+  }
+
+  @Test
   void grpcMaxInboundMessageBytes_returnsConfiguredPayloadLimit() {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY, "12345");
@@ -64,22 +232,20 @@ class SagaServerConfigTest {
   }
 
   @Test
-  void grpcMaxInboundMessageBytes_negativePayloadLimit_throwsIllegalArgumentException() {
+  void load_negativePayloadLimit_throwsIllegalArgumentException() {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY, "-1");
-    SagaServerConfig config = SagaServerConfig.load(props);
 
-    assertThatThrownBy(config::grpcMaxInboundMessageBytes)
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
-  void grpcMaxInboundMessageBytes_nonNumericPayloadLimit_throwsIllegalArgumentException() {
+  void load_nonNumericPayloadLimit_throwsIllegalArgumentException() {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY, "not-a-number");
-    SagaServerConfig config = SagaServerConfig.load(props);
 
-    assertThatThrownBy(config::grpcMaxInboundMessageBytes)
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
@@ -436,5 +602,25 @@ class SagaServerConfigTest {
     SagaServerConfig config = SagaServerConfig.load(props);
 
     assertThat(config.host()).isEqualTo("10.9.8.7");
+  }
+
+  @Test
+  void rawProperties_sagaKeyInDefaults_isPreserved() {
+    // rawProperties() is the pre-resolution copy a provider consults to tell a ${...} secret
+    // reference from an inline value. It is copied from the original input (before resolveSecrets),
+    // so copyOf must flatten the defaults chain too — otherwise a key set only in defaults is
+    // dropped from the raw copy while resolveSecrets keeps it in properties(), and a provider that
+    // discovers the key via properties() then reads null from rawProperties() (e.g. the API-key
+    // provider falsely rejecting a validly-referenced secret).
+    Properties defaults = new Properties();
+    defaults.setProperty(SagaServerConfig.SECURITY_PROVIDER_KEY, "${env:UNSET_NO_SUCH_VAR}");
+    Properties props = new Properties(defaults);
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    // The raw copy keeps the inherited key verbatim (unresolved), matching the resolved-side
+    // flatten.
+    assertThat(config.rawProperties().getProperty(SagaServerConfig.SECURITY_PROVIDER_KEY))
+        .isEqualTo("${env:UNSET_NO_SUCH_VAR}");
   }
 }

@@ -2,6 +2,7 @@ package com.scalar.db.saga.daemon;
 
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -39,6 +40,24 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code scalar.db.saga.server.sync_max_wait_millis} — absolute ceiling (ms) on a synchronous
  *       gRPC start's server-side wait, so it can never block indefinitely (default {@code 60000});
  *       {@code sync_timeout_millis} and the client's deadline only tighten it
+ *   <li>{@code scalar.db.saga.server.security.provider} — the authentication provider (default
+ *       {@code noop} — no authentication; suitable only for a trusted/isolated network). Set to a
+ *       real provider to enforce access control
+ *   <li>{@code scalar.db.saga.server.max_threads} / {@code min_threads} — HTTP request thread-pool
+ *       bounds (defaults {@code 200} / {@code 8}); the max caps concurrent request threads so a
+ *       burst of slow requests cannot exhaust threads
+ *   <li>{@code scalar.db.saga.server.max_queued_requests} — cap on requests waiting for a handler
+ *       thread once all {@code max_threads} are busy; further requests are shed (fast failure)
+ *       rather than queued unboundedly. Defaults to {@code 2 × max_threads}, bounding worst-case
+ *       queueing delay to roughly twice a request's service time
+ *   <li>{@code scalar.db.saga.server.default_saga_timeout_millis} — a default saga timeout applied
+ *       to a loaded definition that set none ({@code 0} = unbounded); {@code 0} (default) disables
+ *       it. A definition's own timeout always wins
+ *   <li>{@code scalar.db.saga.server.max_start_requests_per_minute} — per-principal rate limit on
+ *       {@code POST}/{@code PUT /sagas}; {@code 0} (default) disables rate limiting. The limit is
+ *       keyed on the authenticated principal, so it is only per-caller once a real provider (jwt or
+ *       apikey) is configured; under {@code noop} every request is the same {@code "anonymous"}
+ *       principal and the limit acts as one global bucket shared by all callers
  * </ul>
  *
  * <p>Any {@code scalar.db.saga.*} value may use a secret reference — {@code ${file:UTF-8:/path}}
@@ -71,10 +90,13 @@ public final class SagaServerConfig {
   static final String SERVICE_BASE_URL_SUFFIX = ".base_url";
   static final String SYNC_TIMEOUT_MILLIS_KEY = SERVER_PREFIX + "sync_timeout_millis";
   static final String SYNC_MAX_WAIT_MILLIS_KEY = SERVER_PREFIX + "sync_max_wait_millis";
-  // Security keys — daemon-only (embedded mode delegates auth to the host framework). The HMAC
-  // callback secret enables async-callback authentication; its value may be a ${file:}/${env:}
-  // secret reference (resolved by resolveSecrets, like every other scalar.db.saga.* key).
+  // Security keys — daemon-only (embedded mode delegates auth to the host framework).
   static final String SECURITY_PREFIX = SERVER_PREFIX + "security.";
+  static final String SECURITY_PROVIDER_KEY = SECURITY_PREFIX + "provider";
+  static final String INSECURE_MODE_ENABLED_KEY = SECURITY_PREFIX + "insecure_mode.enabled";
+  // The HMAC callback secret enables async-callback authentication; its value may be a
+  // ${file:}/${env:} secret reference (resolved by resolveSecrets, like every other
+  // scalar.db.saga.* key).
   static final String CALLBACK_SECRET_KEY = SECURITY_PREFIX + "callback_secret";
   // The daemon's externally-reachable base URL, used to build the callback URL handed to a
   // participant for an async step. Not a secret (a plain server address), so it lives directly
@@ -85,6 +107,13 @@ public final class SagaServerConfig {
   // set it must exceed the longest a step can legitimately stay parked (its callback timeout), or a
   // genuine late callback is rejected.
   static final String CALLBACK_MAX_AGE_SECONDS_KEY = SECURITY_PREFIX + "callback_max_age_seconds";
+  static final String MAX_THREADS_KEY = SERVER_PREFIX + "max_threads";
+  static final String MIN_THREADS_KEY = SERVER_PREFIX + "min_threads";
+  static final String MAX_QUEUED_REQUESTS_KEY = SERVER_PREFIX + "max_queued_requests";
+  static final String DEFAULT_SAGA_TIMEOUT_MILLIS_KEY =
+      SERVER_PREFIX + "default_saga_timeout_millis";
+  static final String MAX_START_REQUESTS_PER_MINUTE_KEY =
+      SERVER_PREFIX + "max_start_requests_per_minute";
   static final String STORE_MAX_EVENT_PAYLOAD_BYTES_KEY = PREFIX + "store.max_event_payload_bytes";
   static final String DEFAULT_HOST = "0.0.0.0";
   static final int DEFAULT_PORT = 8080;
@@ -95,7 +124,18 @@ public final class SagaServerConfig {
   static final long DEFAULT_SYNC_TIMEOUT_MILLIS = 0L; // 0 = disabled (sync blocks to terminal)
   static final long DEFAULT_SYNC_MAX_WAIT_MILLIS =
       60_000L; // ceiling on a synchronous server-side wait
+  static final String DEFAULT_SECURITY_PROVIDER =
+      "noop"; // no authentication (see NoopSecurityProvider)
+  static final boolean DEFAULT_INSECURE_MODE_ENABLED = false; // must be enabled to run noop exposed
   static final long DEFAULT_CALLBACK_MAX_AGE_SECONDS = 0L; // 0 = disabled (no iat TTL)
+  static final int DEFAULT_MAX_THREADS = 200; // Jetty's own default
+  static final int DEFAULT_MIN_THREADS = 8; // Jetty's own default
+  // Default queue cap = this multiple of maxThreads, bounding worst-case queueing delay to about
+  // this many request service-times before the server sheds load.
+  static final int DEFAULT_MAX_QUEUED_REQUESTS_PER_THREAD = 2;
+  static final long DEFAULT_SAGA_TIMEOUT_MILLIS =
+      0L; // 0 = disabled (definition's own timeout wins)
+  static final int DEFAULT_MAX_START_REQUESTS_PER_MINUTE = 0; // 0 = disabled (no rate limiting)
 
   private final String host;
   private final int port;
@@ -104,10 +144,19 @@ public final class SagaServerConfig {
   private final boolean grpcEnabled;
   private final long syncTimeoutMillis;
   private final long syncMaxWaitMillis;
+  private final String securityProvider;
+  private final boolean insecureModeEnabled;
   private final @Nullable String callbackSecret;
   private final @Nullable String callbackBaseUrl;
   private final long callbackMaxAgeSeconds;
+  private final int maxThreads;
+  private final int minThreads;
+  private final int maxQueuedRequests;
+  private final long defaultSagaTimeoutMillis;
+  private final int maxStartRequestsPerMinute;
+  private final int grpcMaxInboundMessageBytes;
   private final Properties properties;
+  private final Properties rawProperties;
   private final @Nullable Path definitionsPath;
   private final Map<String, String> serviceBaseUrls;
 
@@ -119,10 +168,18 @@ public final class SagaServerConfig {
       boolean grpcEnabled,
       long syncTimeoutMillis,
       long syncMaxWaitMillis,
+      String securityProvider,
+      boolean insecureModeEnabled,
       @Nullable String callbackSecret,
       @Nullable String callbackBaseUrl,
       long callbackMaxAgeSeconds,
+      int maxThreads,
+      int minThreads,
+      int maxQueuedRequests,
+      long defaultSagaTimeoutMillis,
+      int maxStartRequestsPerMinute,
       Properties properties,
+      Properties rawProperties,
       @Nullable Path definitionsPath,
       Map<String, String> serviceBaseUrls) {
     this.host = host;
@@ -132,10 +189,19 @@ public final class SagaServerConfig {
     this.grpcEnabled = grpcEnabled;
     this.syncTimeoutMillis = syncTimeoutMillis;
     this.syncMaxWaitMillis = syncMaxWaitMillis;
+    this.securityProvider = securityProvider;
+    this.insecureModeEnabled = insecureModeEnabled;
     this.callbackSecret = callbackSecret;
     this.callbackBaseUrl = callbackBaseUrl;
     this.callbackMaxAgeSeconds = callbackMaxAgeSeconds;
+    this.maxThreads = maxThreads;
+    this.minThreads = minThreads;
+    this.maxQueuedRequests = maxQueuedRequests;
+    this.defaultSagaTimeoutMillis = defaultSagaTimeoutMillis;
+    this.maxStartRequestsPerMinute = maxStartRequestsPerMinute;
     this.properties = applyStoreDefaults(copyOf(properties));
+    this.grpcMaxInboundMessageBytes = parseGrpcMaxInboundMessageBytes(this.properties);
+    this.rawProperties = copyOf(rawProperties);
     this.definitionsPath = definitionsPath;
     this.serviceBaseUrls = Map.copyOf(serviceBaseUrls);
   }
@@ -166,6 +232,9 @@ public final class SagaServerConfig {
    */
   public static SagaServerConfig load(Properties properties) {
     Objects.requireNonNull(properties, "properties must not be null");
+    // Keep the pre-resolution properties so a provider can tell a secret reference from an inline
+    // value (both look identical after resolution) — e.g. the API-key provider requires references.
+    Properties rawProperties = copyOf(properties);
     properties = resolveSecrets(properties);
     String host = parseHost(properties.getProperty(HOST_KEY));
     int port = parsePort(properties.getProperty(PORT_KEY), PORT_KEY, DEFAULT_PORT);
@@ -197,6 +266,12 @@ public final class SagaServerConfig {
             SYNC_MAX_WAIT_MILLIS_KEY,
             DEFAULT_SYNC_MAX_WAIT_MILLIS,
             1L);
+    String securityProvider = parseSecurityProvider(properties.getProperty(SECURITY_PROVIDER_KEY));
+    boolean insecureModeEnabled =
+        parseBoolean(
+            properties.getProperty(INSECURE_MODE_ENABLED_KEY),
+            INSECURE_MODE_ENABLED_KEY,
+            DEFAULT_INSECURE_MODE_ENABLED);
     // Treat blank as unset (no callback auth configured → no callback route). Do not trim: an HMAC
     // secret is opaque and could legitimately contain leading/trailing characters.
     String callbackSecretRaw = properties.getProperty(CALLBACK_SECRET_KEY);
@@ -209,6 +284,50 @@ public final class SagaServerConfig {
             CALLBACK_MAX_AGE_SECONDS_KEY,
             DEFAULT_CALLBACK_MAX_AGE_SECONDS,
             0L);
+    int maxThreads =
+        (int)
+            parseBoundedLong(
+                properties.getProperty(MAX_THREADS_KEY), MAX_THREADS_KEY, DEFAULT_MAX_THREADS, 1L);
+    int minThreads =
+        (int)
+            parseBoundedLong(
+                properties.getProperty(MIN_THREADS_KEY), MIN_THREADS_KEY, DEFAULT_MIN_THREADS, 1L);
+    if (minThreads > maxThreads) {
+      throw new IllegalArgumentException(
+          "'"
+              + MIN_THREADS_KEY
+              + "' ("
+              + minThreads
+              + ") must not exceed '"
+              + MAX_THREADS_KEY
+              + "' ("
+              + maxThreads
+              + ").");
+    }
+    // Cap the handler-thread backlog. Unset defaults to a multiple of maxThreads so the worst-case
+    // queueing delay stays proportional to the pool (about that many request service-times) rather
+    // than being an absolute number that means wildly different latency at different pool sizes.
+    // Computed in long to avoid int overflow before the (int) narrowing.
+    int maxQueuedRequests =
+        (int)
+            parseBoundedLong(
+                properties.getProperty(MAX_QUEUED_REQUESTS_KEY),
+                MAX_QUEUED_REQUESTS_KEY,
+                (long) DEFAULT_MAX_QUEUED_REQUESTS_PER_THREAD * maxThreads,
+                1L);
+    long defaultSagaTimeoutMillis =
+        parseBoundedLong(
+            properties.getProperty(DEFAULT_SAGA_TIMEOUT_MILLIS_KEY),
+            DEFAULT_SAGA_TIMEOUT_MILLIS_KEY,
+            DEFAULT_SAGA_TIMEOUT_MILLIS,
+            0L);
+    int maxStartRequestsPerMinute =
+        (int)
+            parseBoundedLong(
+                properties.getProperty(MAX_START_REQUESTS_PER_MINUTE_KEY),
+                MAX_START_REQUESTS_PER_MINUTE_KEY,
+                DEFAULT_MAX_START_REQUESTS_PER_MINUTE,
+                0L);
     String definitions = properties.getProperty(DEFINITIONS_PATH_KEY);
     Path definitionsPath =
         (definitions == null || definitions.isBlank()) ? null : Path.of(definitions.trim());
@@ -220,10 +339,18 @@ public final class SagaServerConfig {
         grpcEnabled,
         syncTimeoutMillis,
         syncMaxWaitMillis,
+        securityProvider,
+        insecureModeEnabled,
         callbackSecret,
         callbackBaseUrl,
         callbackMaxAgeSeconds,
+        maxThreads,
+        minThreads,
+        maxQueuedRequests,
+        defaultSagaTimeoutMillis,
+        maxStartRequestsPerMinute,
         properties,
+        rawProperties,
         definitionsPath,
         parseServiceBaseUrls(properties));
   }
@@ -329,32 +456,6 @@ public final class SagaServerConfig {
   }
 
   /**
-   * Returns the gRPC server's maximum inbound message size in bytes, aligned with the store's
-   * max-event-payload cap so neither transport accepts an input the store would reject (and so an
-   * unauthenticated caller cannot push an oversized message). The store's {@code 0} ("no limit") is
-   * mapped to {@link Integer#MAX_VALUE} here, since gRPC reads {@code 0} as "reject all non-empty
-   * messages". Defaults to {@value #DEFAULT_MAX_EVENT_PAYLOAD_BYTES} bytes.
-   */
-  public int grpcMaxInboundMessageBytes() {
-    String value = properties.getProperty(STORE_MAX_EVENT_PAYLOAD_BYTES_KEY);
-    if (value == null) {
-      return DEFAULT_MAX_EVENT_PAYLOAD_BYTES;
-    }
-    int bytes;
-    try {
-      bytes = Integer.parseInt(value.trim());
-    } catch (NumberFormatException e) {
-      throw new IllegalArgumentException(
-          "Invalid value for '" + STORE_MAX_EVENT_PAYLOAD_BYTES_KEY + "': " + value, e);
-    }
-    if (bytes < 0) {
-      throw new IllegalArgumentException(
-          "'" + STORE_MAX_EVENT_PAYLOAD_BYTES_KEY + "' must not be negative, got " + bytes);
-    }
-    return bytes == 0 ? Integer.MAX_VALUE : bytes;
-  }
-
-  /**
    * Returns the synchronous-start timeout in milliseconds, or {@code 0} when disabled (the
    * default). When positive, a synchronous {@code POST}/{@code PUT} that has not reached a terminal
    * state within this bound returns {@code 202} and the saga keeps running on the engine's executor
@@ -373,6 +474,26 @@ public final class SagaServerConfig {
    */
   public long syncMaxWaitMillis() {
     return syncMaxWaitMillis;
+  }
+
+  /**
+   * Returns the configured security-provider name (normalized to lower case), defaulting to {@value
+   * #DEFAULT_SECURITY_PROVIDER} — no authentication. Selects which {@link
+   * com.scalar.db.saga.daemon.security.SagaSecurityProvider} the server authenticates requests
+   * with; the value is validated against the known providers when the provider is built.
+   */
+  public String securityProvider() {
+    return securityProvider;
+  }
+
+  /**
+   * Whether the operator has acknowledged running without authentication on a network-reachable
+   * interface (the {@code insecure_mode.enabled} key). Consulted by {@link SagaServer} at startup
+   * to gate the {@code noop} provider on a non-loopback host. Defaults to {@value
+   * #DEFAULT_INSECURE_MODE_ENABLED}.
+   */
+  public boolean insecureModeEnabled() {
+    return insecureModeEnabled;
   }
 
   /**
@@ -404,11 +525,76 @@ public final class SagaServerConfig {
   }
 
   /**
+   * Returns the maximum size of the HTTP (Jetty) request-handling thread pool (default {@value
+   * #DEFAULT_MAX_THREADS}). Caps concurrent request threads so a burst of slow requests cannot
+   * exhaust threads.
+   */
+  public int maxThreads() {
+    return maxThreads;
+  }
+
+  /**
+   * Returns the minimum (core) size of the HTTP thread pool (default {@value
+   * #DEFAULT_MIN_THREADS}).
+   */
+  public int minThreads() {
+    return minThreads;
+  }
+
+  /**
+   * Returns the cap on requests waiting for a handler thread once all {@link #maxThreads()} are
+   * busy. Beyond it the server sheds load (fast failure) instead of queueing unboundedly. Defaults
+   * to {@value #DEFAULT_MAX_QUEUED_REQUESTS_PER_THREAD} × {@link #maxThreads()}, keeping the
+   * worst-case queueing delay proportional to the pool.
+   */
+  public int maxQueuedRequests() {
+    return maxQueuedRequests;
+  }
+
+  /**
+   * Returns the server-wide default saga timeout (ms) applied to a loaded definition that specified
+   * none ({@code 0} = unbounded); {@code 0} (the default) disables it. A definition's own timeout
+   * always takes precedence — this only fills in for definitions that left it unset, so a
+   * daemon-hosted saga cannot run without a deadline.
+   */
+  public long defaultSagaTimeoutMillis() {
+    return defaultSagaTimeoutMillis;
+  }
+
+  /**
+   * Returns the per-principal rate limit on saga-start requests ({@code POST}/{@code PUT /sagas}),
+   * in requests per minute; {@code 0} (the default) disables rate limiting.
+   */
+  public int maxStartRequestsPerMinute() {
+    return maxStartRequestsPerMinute;
+  }
+
+  /**
+   * Returns the gRPC server's maximum inbound message size in bytes, aligned with the store's
+   * max-event-payload cap so neither transport accepts an input the store would reject (and so an
+   * unauthenticated caller cannot push an oversized message). The store's {@code 0} ("no limit") is
+   * mapped to {@link Integer#MAX_VALUE} here, since gRPC reads {@code 0} as "reject all non-empty
+   * messages". Defaults to {@value #DEFAULT_MAX_EVENT_PAYLOAD_BYTES} bytes.
+   */
+  public int grpcMaxInboundMessageBytes() {
+    return grpcMaxInboundMessageBytes;
+  }
+
+  /**
    * Returns a defensive copy of the underlying configuration properties forwarded to construct the
    * saga engine's persistence.
    */
   public Properties properties() {
     return copyOf(properties);
+  }
+
+  /**
+   * Returns a defensive copy of the <b>pre-resolution</b> properties (secret references not yet
+   * expanded). A provider uses this to distinguish a {@code ${...}} secret reference from an inline
+   * value — indistinguishable after resolution — e.g. the API-key provider rejects inline keys.
+   */
+  Properties rawProperties() {
+    return copyOf(rawProperties);
   }
 
   /** Returns the optional path to declarative saga definitions loaded at startup. */
@@ -427,6 +613,17 @@ public final class SagaServerConfig {
 
   private static String parseHost(@Nullable String value) {
     return (value == null || value.isBlank()) ? DEFAULT_HOST : value.trim();
+  }
+
+  /**
+   * Normalizes the security-provider name (trimmed, lower-cased), defaulting to {@value
+   * #DEFAULT_SECURITY_PROVIDER} when unset/blank. The value is validated against the known
+   * providers by the provider factory, not here.
+   */
+  private static String parseSecurityProvider(@Nullable String value) {
+    return (value == null || value.isBlank())
+        ? DEFAULT_SECURITY_PROVIDER
+        : value.trim().toLowerCase(Locale.ROOT);
   }
 
   /** Trims the callback base URL and strips trailing {@code /}s; blank (or slashes only) ⇒ null. */
@@ -499,9 +696,54 @@ public final class SagaServerConfig {
     return millis;
   }
 
+  /**
+   * Parses the gRPC inbound cap from the store's max-event-payload key once at construction (like
+   * every other setting), so an invalid value fails fast at load rather than when the server is
+   * built.
+   */
+  private static int parseGrpcMaxInboundMessageBytes(Properties properties) {
+    String value = properties.getProperty(STORE_MAX_EVENT_PAYLOAD_BYTES_KEY);
+    if (value == null) {
+      return DEFAULT_MAX_EVENT_PAYLOAD_BYTES;
+    }
+    int bytes;
+    try {
+      bytes = Integer.parseInt(value.trim());
+    } catch (NumberFormatException e) {
+      throw new IllegalArgumentException(
+          "Invalid value for '" + STORE_MAX_EVENT_PAYLOAD_BYTES_KEY + "': " + value, e);
+    }
+    if (bytes < 0) {
+      throw new IllegalArgumentException(
+          "'" + STORE_MAX_EVENT_PAYLOAD_BYTES_KEY + "' must not be negative, got " + bytes);
+    }
+    return bytes == 0 ? Integer.MAX_VALUE : bytes;
+  }
+
+  /**
+   * Returns a flattened defensive copy of {@code source}. Rebuilds from {@code
+   * stringPropertyNames()} so every string property is copied into the single table, including any
+   * inherited from a defaults chain ({@code new Properties(defaults)}); a plain {@code putAll}
+   * would silently drop those inherited entries, leaving {@code getProperty} on the copy
+   * inconsistent with the resolved properties (which {@link #resolveSecrets} already flattens the
+   * same way).
+   */
   private static Properties copyOf(Properties source) {
     Properties copy = new Properties();
-    copy.putAll(source);
+    for (String key : source.stringPropertyNames()) {
+      String value = source.getProperty(key);
+      if (value == null) {
+        continue; // stringPropertyNames() only lists string-valued keys; guard for null-safety
+      }
+      copy.setProperty(key, value);
+    }
+    // Non-string entries aren't listed by stringPropertyNames(); carry the main table's through.
+    source.forEach(
+        (key, value) -> {
+          if (!(key instanceof String) || !(value instanceof String)) {
+            copy.put(key, value);
+          }
+        });
     return copy;
   }
 }

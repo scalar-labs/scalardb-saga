@@ -9,6 +9,12 @@
     <Class name="~.*Test$"/>
     <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
   </Match>
+  <!-- A value-returning call inside an assertThatThrownBy lambda intentionally ignores its result
+       (the call is expected to throw). Covers nested test classes too. -->
+  <Match>
+    <Class name="~.*Test(\$.*)?"/>
+    <Bug pattern="RV_RETURN_VALUE_IGNORED_INFERRED"/>
+  </Match>
   <!-- Constructors called inside assertThatThrownBy lambdas are not meant to be thrown -->
   <Match>
     <Class name="~.*Test(\$.*)?"/>

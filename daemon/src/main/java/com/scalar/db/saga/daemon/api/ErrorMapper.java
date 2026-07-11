@@ -1,5 +1,8 @@
 package com.scalar.db.saga.daemon.api;
 
+import com.scalar.db.saga.daemon.security.SagaAuthUnavailableException;
+import com.scalar.db.saga.daemon.security.SagaAuthenticationException;
+import com.scalar.db.saga.daemon.security.SagaAuthorizationException;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
@@ -15,9 +18,10 @@ import org.slf4j.LoggerFactory;
  * Maps exceptions to HTTP responses with a consistent JSON error body.
  *
  * <p>Client-facing exceptions (not-found, already-exists, invalid request) are mapped to specific
- * 4xx codes with daemon-owned messages. A persistence failure maps to {@code 503}. Everything else
- * falls through to a generic {@code 500}: the real exception is logged server-side and the response
- * carries no internal detail — only the daemon's own messages are ever returned to a caller.
+ * 4xx codes with daemon-owned messages. A persistence failure or an unavailable auth provider maps
+ * to {@code 503}. Everything else falls through to a generic {@code 500}: the real exception is
+ * logged server-side and the response carries no internal detail — only the daemon's own messages
+ * are ever returned to a caller.
  */
 public final class ErrorMapper {
 
@@ -43,6 +47,45 @@ public final class ErrorMapper {
     app.exception(
         InvalidRequestException.class,
         (e, ctx) -> ctx.status(400).json(error("BAD_REQUEST", e.getMessage())));
+    // Authentication failure: the credential is missing/invalid. Log at debug — probing traffic can
+    // make this frequent — and return a generic 401 without echoing why the credential was
+    // rejected.
+    app.exception(
+        SagaAuthenticationException.class,
+        (e, ctx) -> {
+          logger.debug(
+              "Authentication failed on {} {}: {}", ctx.method(), ctx.path(), e.getMessage());
+          ctx.status(401).json(error("UNAUTHENTICATED", "Authentication required"));
+        });
+    // Authorization failure: a known caller lacks the required role. Log the principal + required
+    // role for the audit trail, and return a generic 403.
+    app.exception(
+        SagaAuthorizationException.class,
+        (e, ctx) -> {
+          logger.info(
+              "Authorization denied on {} {}: caller '{}' lacks role {}",
+              ctx.method(),
+              ctx.path(),
+              e.getPrincipal(),
+              e.getRequiredRole().wireName());
+          ctx.status(403).json(error("FORBIDDEN", "Insufficient permissions"));
+        });
+    // Authentication could not be completed because the provider is unavailable (e.g. the JWKS
+    // endpoint is unreachable) — a transient upstream outage, not a bad credential. Log it and
+    // return a retryable 503, mirroring a persistence failure.
+    app.exception(
+        SagaAuthUnavailableException.class,
+        (e, ctx) -> {
+          logger.error("Authentication provider unavailable on {} {}", ctx.method(), ctx.path(), e);
+          ctx.status(503).json(error("UNAVAILABLE", "Service temporarily unavailable"));
+        });
+    app.exception(
+        RateLimitExceededException.class,
+        (e, ctx) -> {
+          logger.debug(
+              "Rate limit exceeded on {} {}: {}", ctx.method(), ctx.path(), e.getMessage());
+          ctx.status(429).json(error("TOO_MANY_REQUESTS", "Rate limit exceeded"));
+        });
     // A client-supplied value the engine rejects (e.g. an invalid saga id or an unsupported input
     // value type) surfaces as IllegalArgumentException — a client error. Map it to 400 with a
     // generic, daemon-owned message rather than echoing the engine's wording.

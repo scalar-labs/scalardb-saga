@@ -67,6 +67,7 @@ abstract class DaemonIntegrationTestSupport {
         "scalar.db.contact_points",
         "jdbc:sqlite:" + tempDbPath.toAbsolutePath() + "?busy_timeout=10000");
     props.setProperty("scalar.db.saga.store.num_buckets", "1");
+    props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
     props.setProperty(SagaServerConfig.PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, definitionsDir.toString());
