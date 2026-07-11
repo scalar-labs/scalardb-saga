@@ -85,9 +85,10 @@ public final class SagaSecurityHandler {
    * land, replace both verb/method switches with a shared operation&rarr;role policy so the
    * decision lives in one place.
    *
-   * <p>Package-private for unit testing the mapping without a running server.
+   * <p>Public (not package-private) so the cross-transport parity test can assert this against the
+   * gRPC mapping from another package; also unit-tested directly without a running server.
    */
-  static SagaRole requiredRoleFor(String method) {
+  public static SagaRole requiredRoleFor(String method) {
     return switch (method) {
       case "GET", "HEAD" -> SagaRole.READ;
       // POST/PUT/PATCH/DELETE and any other method are treated as state-changing (write). This is

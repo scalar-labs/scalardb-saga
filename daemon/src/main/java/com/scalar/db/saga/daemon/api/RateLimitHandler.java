@@ -49,8 +49,7 @@ public final class RateLimitHandler {
       // here — the callback must not be throttled by a user's saga-start budget.
       return;
     }
-    String method = ctx.method().name();
-    if (!method.equals("POST") && !method.equals("PUT")) {
+    if (!isRateLimited(ctx.method().name())) {
       // Only state-changing saga-start requests are limited; reads are cheap.
       return;
     }
@@ -58,5 +57,16 @@ public final class RateLimitHandler {
       throw new RateLimitExceededException(
           "Saga-start rate limit exceeded for principal '" + identity.principal() + "'");
     }
+  }
+
+  /**
+   * Whether an HTTP method is rate-limited: {@code POST}/{@code PUT} — today's saga-start endpoints
+   * ({@code POST /sagas}, {@code PUT /sagas/{id}}) — are limited; reads ({@code GET}) are not.
+   * Mirrors the gRPC interceptor's rate-limit predicate, which limits everything but the read/poll
+   * methods. Public (not package-private) so the cross-transport parity test can assert against the
+   * real rule from another package rather than re-encoding it.
+   */
+  public static boolean isRateLimited(String method) {
+    return method.equals("POST") || method.equals("PUT");
   }
 }
