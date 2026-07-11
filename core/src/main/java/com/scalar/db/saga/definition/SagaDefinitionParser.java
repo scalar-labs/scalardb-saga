@@ -182,6 +182,7 @@ public final class SagaDefinitionParser {
     }
     String service = stepNode.get("service").asText();
     CallSpecCodec.requireSagaPhases(stepNode, stepName, SagaDefinitionException::new);
+    CallSpecCodec.rejectAsyncOnBackwardPhase(stepNode, stepName, SagaDefinitionException::new);
     CallSpec.Transport transport = CallSpecCodec.parseTransport(stepNode, stepName);
     SagaDefinition.DeclarativeStepBuilder sb =
         builder
@@ -215,6 +216,7 @@ public final class SagaDefinitionParser {
     }
     String service = stepNode.get("service").asText();
     CallSpecCodec.requireTccPhases(stepNode, stepName, SagaDefinitionException::new);
+    CallSpecCodec.rejectAsyncOnBackwardPhase(stepNode, stepName, SagaDefinitionException::new);
     CallSpec.Transport transport = CallSpecCodec.parseTransport(stepNode, stepName);
     SagaDefinition.TccDeclarativeStepBuilder sb =
         builder

@@ -56,6 +56,30 @@ class StepEventTest {
     assertThat(event.getPayload()).isEqualTo("{\"error\":\"unreachable\"}");
   }
 
+  @Test
+  void pending_validStepGiven_createsEventWithStepInfo() {
+    // Act
+    StepEvent event = StepEvent.pending(1, "charge");
+
+    // Assert
+    assertThat(event.getEventType()).isEqualTo(EventType.STEP_PENDING);
+    assertThat(event.getStepIndex()).isEqualTo(1);
+    assertThat(event.getStepName()).isEqualTo("charge");
+    assertThat(event.getPayload()).isNull();
+  }
+
+  @Test
+  void reissuing_validStepGiven_createsEventWithStepInfo() {
+    // Act
+    StepEvent event = StepEvent.reissuing(1, "charge");
+
+    // Assert
+    assertThat(event.getEventType()).isEqualTo(EventType.STEP_REISSUING);
+    assertThat(event.getStepIndex()).isEqualTo(1);
+    assertThat(event.getStepName()).isEqualTo("charge");
+    assertThat(event.getPayload()).isNull();
+  }
+
   // --- withTimestamp ---
 
   @Test
@@ -136,6 +160,19 @@ class StepEventTest {
   void compensationFailed_negativeStepIndexGiven_throwsIllegalArgumentException() {
     // Act & Assert
     assertThatThrownBy(() -> StepEvent.compensationFailed(-1, "notify", null))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void pending_nullStepNameGiven_throwsNullPointerException() {
+    // Act & Assert
+    assertThatThrownBy(() -> StepEvent.pending(0, null)).isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void pending_negativeStepIndexGiven_throwsIllegalArgumentException() {
+    // Act & Assert
+    assertThatThrownBy(() -> StepEvent.pending(-1, "charge"))
         .isInstanceOf(IllegalArgumentException.class);
   }
 

@@ -35,9 +35,11 @@ public interface TccStep {
    * fail.
    *
    * @param context the saga execution context
+   * @return the step output; {@link StepResult#pending()} if the confirmation was accepted for
+   *     asynchronous completion (the participant completes it later via a callback)
    * @throws StepExecutionException if confirmation fails
    */
-  void confirm(SagaContext context) throws StepExecutionException;
+  StepResult confirm(SagaContext context) throws StepExecutionException;
 
   /**
    * Cancel phase: releases the reservation. Called when any step's {@code reserve} fails.

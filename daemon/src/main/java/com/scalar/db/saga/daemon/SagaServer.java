@@ -1,7 +1,9 @@
 package com.scalar.db.saga.daemon;
 
+import com.scalar.db.saga.daemon.api.CallbackResource;
 import com.scalar.db.saga.daemon.api.ErrorMapper;
 import com.scalar.db.saga.daemon.api.HealthResource;
+import com.scalar.db.saga.daemon.api.HmacCallbackUrlProvider;
 import com.scalar.db.saga.daemon.api.RateLimitHandler;
 import com.scalar.db.saga.daemon.api.RateLimiter;
 import com.scalar.db.saga.daemon.api.SagaResource;
@@ -28,6 +30,7 @@ import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
@@ -183,6 +186,14 @@ public final class SagaServer implements AutoCloseable {
         DefaultSagaOrchestrator.newBuilder()
             .storeFactory(ScalarDbSagaStoreFactory.create(config.properties()));
     config.serviceBaseUrls().forEach((name, baseUrl) -> builder.httpEndpoint(name, baseUrl).add());
+    // Enable async-callback provisioning only when both the callback base URL and secret are set;
+    // otherwise no provider is wired and registering an async definition fails fast (in the
+    // engine).
+    if (config.callbackBaseUrl().isPresent() && config.callbackSecret().isPresent()) {
+      builder.callbackUrlProvider(
+          new HmacCallbackUrlProvider(
+              config.callbackBaseUrl().get(), config.callbackSecret().get(), Clock.systemUTC()));
+    }
     return builder.build();
   }
 
@@ -294,6 +305,18 @@ public final class SagaServer implements AutoCloseable {
     HealthResource.register(httpServer);
     ErrorMapper.register(httpServer);
     SagaResource.register(httpServer, orchestrator, config.syncTimeoutMillis());
+    // The async-callback route exists only when a callback secret is configured; without it there
+    // is nothing to authenticate callbacks against, so async completion is not enabled.
+    config
+        .callbackSecret()
+        .ifPresent(
+            secret ->
+                CallbackResource.register(
+                    httpServer,
+                    orchestrator,
+                    secret,
+                    config.callbackMaxAgeSeconds(),
+                    Clock.systemUTC()));
   }
 
   /**

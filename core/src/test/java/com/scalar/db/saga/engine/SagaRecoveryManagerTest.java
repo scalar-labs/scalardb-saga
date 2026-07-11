@@ -5,6 +5,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -14,10 +15,14 @@ import static org.mockito.Mockito.when;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.definition.SagaDefinition;
+import com.scalar.db.saga.definition.SagaDefinition.RecoveryStrategy;
+import com.scalar.db.saga.exception.SagaConcurrentModificationException;
+import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaStore;
+import com.scalar.db.saga.store.SagaStore.OverdueParked;
 import com.scalar.db.saga.store.SagaStore.Recoverables;
-import com.scalar.db.saga.store.SagaStore.RecoverablesCursor;
+import com.scalar.db.saga.store.SagaStore.ScanCursor;
 import com.scalar.db.saga.store.StatusEvent;
 import com.scalar.db.saga.store.StepEvent;
 import java.time.Clock;
@@ -59,6 +64,10 @@ class SagaRecoveryManagerTest {
     config =
         new RecoveryConfig(60_000, 30, GRACE_PERIOD, 1000, 10, Clock.fixed(NOW, ZoneOffset.UTC));
     manager = new SagaRecoveryManager(store, engine, registry, OWNER_ID, config, scheduler);
+    // Default: no overdue parked sagas — the recover() staleness-scan tests don't exercise pass 2.
+    lenient()
+        .when(store.findOverdueParkedSagas(any(), any()))
+        .thenReturn(new OverdueParked(List.of(), null));
   }
 
   private static SagaStateSnapshot snapshot(SagaStatus status) {
@@ -77,7 +86,7 @@ class SagaRecoveryManagerTest {
   }
 
   private void setupSinglePageRecovery(SagaStateSnapshot saga) {
-    when(store.findRecoverable(anyLong(), any())).thenReturn(new Recoverables(List.of(saga), null));
+    when(store.findRecoverable(any(), any())).thenReturn(new Recoverables(List.of(saga), null));
     when(store.claimForRecovery(saga, OWNER_ID)).thenReturn(Optional.of(saga));
   }
 
@@ -91,7 +100,7 @@ class SagaRecoveryManagerTest {
     @Test
     void recover_noRecoverableSagas_doesNothing() {
       // Arrange
-      when(store.findRecoverable(anyLong(), any())).thenReturn(new Recoverables(List.of(), null));
+      when(store.findRecoverable(any(), any())).thenReturn(new Recoverables(List.of(), null));
 
       // Act
       manager.recover();
@@ -114,12 +123,12 @@ class SagaRecoveryManagerTest {
               DEF_VERSION,
               NOW.minusSeconds(300),
               NOW);
-      RecoverablesCursor cursor = mock(RecoverablesCursor.class);
+      ScanCursor cursor = mock(ScanCursor.class);
       SagaDefinition def = definition();
       ExecutionContext ctx1 = mock(ExecutionContext.class);
       ExecutionContext ctx2 = mock(ExecutionContext.class);
 
-      when(store.findRecoverable(anyLong(), any()))
+      when(store.findRecoverable(any(), any()))
           .thenReturn(new Recoverables(List.of(saga1), cursor))
           .thenReturn(new Recoverables(List.of(saga2), null));
       when(store.claimForRecovery(saga1, OWNER_ID)).thenReturn(Optional.of(saga1));
@@ -144,8 +153,7 @@ class SagaRecoveryManagerTest {
     void recover_claimFails_skipsSaga() {
       // Arrange
       SagaStateSnapshot saga = snapshot(SagaStatus.RUNNING);
-      when(store.findRecoverable(anyLong(), any()))
-          .thenReturn(new Recoverables(List.of(saga), null));
+      when(store.findRecoverable(any(), any())).thenReturn(new Recoverables(List.of(saga), null));
       when(store.claimForRecovery(saga, OWNER_ID)).thenReturn(Optional.empty());
 
       // Act
@@ -183,13 +191,13 @@ class SagaRecoveryManagerTest {
               DEF_VERSION,
               NOW.minusSeconds(300),
               NOW);
-      RecoverablesCursor cursor = mock(RecoverablesCursor.class);
+      ScanCursor cursor = mock(ScanCursor.class);
       SagaDefinition def = definition();
       ExecutionContext ctx1 = mock(ExecutionContext.class);
       ExecutionContext ctx2 = mock(ExecutionContext.class);
 
       // Page 1 has 2 sagas (hits batch limit), page 2 has 1 more
-      when(store.findRecoverable(anyLong(), any()))
+      when(store.findRecoverable(any(), any()))
           .thenReturn(new Recoverables(List.of(saga1, saga2), cursor));
       when(store.claimForRecovery(saga1, OWNER_ID)).thenReturn(Optional.of(saga1));
       when(store.claimForRecovery(saga2, OWNER_ID)).thenReturn(Optional.of(saga2));
@@ -209,7 +217,7 @@ class SagaRecoveryManagerTest {
       verify(engine).resumeFrom(eq(def), eq(ctx2), eq(0));
       verify(store, never()).claimForRecovery(eq(saga3), any());
       // findRecoverable called only once — batch limit stopped before second page
-      verify(store).findRecoverable(anyLong(), any());
+      verify(store).findRecoverable(any(), any());
     }
 
     @Test
@@ -228,7 +236,7 @@ class SagaRecoveryManagerTest {
       SagaDefinition def = definition();
       ExecutionContext ctx2 = mock(ExecutionContext.class);
 
-      when(store.findRecoverable(anyLong(), any()))
+      when(store.findRecoverable(any(), any()))
           .thenReturn(new Recoverables(List.of(saga1, saga2), null));
       when(store.claimForRecovery(saga1, OWNER_ID)).thenThrow(new RuntimeException("store error"));
       when(store.claimForRecovery(saga2, OWNER_ID)).thenReturn(Optional.of(saga2));
@@ -244,6 +252,236 @@ class SagaRecoveryManagerTest {
       verify(store, never()).getEvents(saga1.getSagaId());
       // Assert — saga2 was still recovered despite saga1 failure
       verify(engine).resumeFrom(eq(def), eq(ctx2), eq(0));
+    }
+  }
+
+  // =========================================================================
+  // recover() — parked-step timeout sweep
+  // =========================================================================
+
+  @Nested
+  class ParkedTimeout {
+
+    private void noStaleRecoverables() {
+      when(store.findRecoverable(any(), any())).thenReturn(new Recoverables(List.of(), null));
+    }
+
+    @Test
+    void recover_overdueParkedBeforePivot_timesOutToCompensatingAndCompensates() {
+      // Arrange — parked at pre-pivot step 0 (BACKWARD saga: pivot = last step)
+      SagaStateSnapshot waiting = snapshot(SagaStatus.WAITING);
+      SagaStateSnapshot compensating = snapshot(SagaStatus.COMPENSATING);
+      SagaDefinition def = definition();
+      List<SagaEvent> events = List.of(StatusEvent.started(null), StepEvent.pending(0, "debit"));
+      ExecutionContext ctx = mock(ExecutionContext.class);
+
+      noStaleRecoverables();
+      when(store.findOverdueParkedSagas(any(), any()))
+          .thenReturn(new OverdueParked(List.of(SAGA_ID), null));
+      when(store.getStateSnapshot(SAGA_ID)).thenReturn(Optional.of(waiting));
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(def);
+      when(store.failParkedStep(
+              eq(waiting), anyInt(), any(StepEvent.class), eq(SagaStatus.COMPENSATING)))
+          .thenReturn(compensating);
+      when(engine.replayEvents(eq(compensating), any())).thenReturn(ctx);
+
+      // Act
+      manager.recover();
+
+      // Assert — STEP_FAILED for the parked step, WAITING -> COMPENSATING, then compensate from it
+      ArgumentCaptor<StepEvent> failed = ArgumentCaptor.forClass(StepEvent.class);
+      verify(store)
+          .failParkedStep(eq(waiting), anyInt(), failed.capture(), eq(SagaStatus.COMPENSATING));
+      assertThat(failed.getValue().getEventType()).isEqualTo(EventType.STEP_FAILED);
+      assertThat(failed.getValue().getStepIndex()).isEqualTo(0);
+      verify(engine).compensateFrom(def, ctx, 0);
+    }
+
+    @Test
+    void recover_overdueParkedAfterPivot_timesOutToEscalated() {
+      // Arrange — FORWARD saga: pivot = -1, so the parked step is post-pivot -> escalate
+      SagaStateSnapshot waiting = snapshot(SagaStatus.WAITING);
+      SagaDefinition forwardDef =
+          SagaDefinition.newBuilder(SAGA_NAME)
+              .saga()
+              .recoveryStrategy(RecoveryStrategy.FORWARD)
+              .step("debit", "com.example.DebitStep")
+              .add()
+              .build();
+      List<SagaEvent> events = List.of(StatusEvent.started(null), StepEvent.pending(0, "debit"));
+
+      noStaleRecoverables();
+      when(store.findOverdueParkedSagas(any(), any()))
+          .thenReturn(new OverdueParked(List.of(SAGA_ID), null));
+      when(store.getStateSnapshot(SAGA_ID)).thenReturn(Optional.of(waiting));
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(forwardDef);
+
+      // Act
+      manager.recover();
+
+      // Assert
+      verify(store)
+          .failParkedStep(eq(waiting), anyInt(), any(StepEvent.class), eq(SagaStatus.ESCALATED));
+      verify(engine, never()).compensateFrom(any(), any(), anyInt());
+    }
+
+    @Test
+    void recover_overdueParkedNoLongerWaiting_skips() {
+      // Arrange — a callback already resumed it (now RUNNING); the sweep must not time it out
+      noStaleRecoverables();
+      when(store.findOverdueParkedSagas(any(), any()))
+          .thenReturn(new OverdueParked(List.of(SAGA_ID), null));
+      when(store.getStateSnapshot(SAGA_ID)).thenReturn(Optional.of(snapshot(SagaStatus.RUNNING)));
+
+      // Act
+      manager.recover();
+
+      // Assert
+      verify(store, never()).failParkedStep(any(), anyInt(), any(), any());
+    }
+
+    @Test
+    void recover_missingDefinitionForParkedSaga_escalatesClearingParkedRow() {
+      // Arrange — definition gone: escalate via failParkedStep(ESCALATED) so the parked row
+      // clears
+      SagaStateSnapshot waiting = snapshot(SagaStatus.WAITING);
+      List<SagaEvent> events = List.of(StatusEvent.started(null), StepEvent.pending(0, "debit"));
+
+      noStaleRecoverables();
+      when(store.findOverdueParkedSagas(any(), any()))
+          .thenReturn(new OverdueParked(List.of(SAGA_ID), null));
+      when(store.getStateSnapshot(SAGA_ID)).thenReturn(Optional.of(waiting));
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(null);
+
+      // Act
+      manager.recover();
+
+      // Assert — escalated through the parked-clearing op, not a plain recordStatusEvent
+      verify(store)
+          .failParkedStep(eq(waiting), anyInt(), any(StepEvent.class), eq(SagaStatus.ESCALATED));
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any());
+    }
+
+    @Test
+    void recover_concurrentCallbackWonRace_swallowsConflict() {
+      // Arrange — failParkedStep loses the WAITING-CK race (a callback resumed it first)
+      SagaStateSnapshot waiting = snapshot(SagaStatus.WAITING);
+      SagaDefinition def = definition();
+      List<SagaEvent> events = List.of(StatusEvent.started(null), StepEvent.pending(0, "debit"));
+
+      noStaleRecoverables();
+      when(store.findOverdueParkedSagas(any(), any()))
+          .thenReturn(new OverdueParked(List.of(SAGA_ID), null));
+      when(store.getStateSnapshot(SAGA_ID)).thenReturn(Optional.of(waiting));
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(def);
+      when(store.failParkedStep(any(), anyInt(), any(), eq(SagaStatus.COMPENSATING)))
+          .thenThrow(mock(SagaConcurrentModificationException.class));
+
+      // Act & Assert — recover() must not propagate the conflict
+      manager.recover();
+      verify(engine, never()).compensateFrom(any(), any(), anyInt());
+    }
+
+    @Test
+    void recover_overdueParkedWithinRedriveBounds_redrivesInsteadOfGivingUp() {
+      // Arrange — one park attempt, 30 min ago (within the 1h grace, under maxAttempts=3):
+      // re-drive.
+      SagaStateSnapshot waiting = snapshot(SagaStatus.WAITING);
+      SagaStateSnapshot running = snapshot(SagaStatus.RUNNING);
+      SagaDefinition def = definition();
+      List<SagaEvent> events =
+          List.of(
+              StatusEvent.started(null),
+              StepEvent.pending(0, "debit").withTimestamp(NOW.minusSeconds(1800)));
+      ExecutionContext ctx = mock(ExecutionContext.class);
+
+      noStaleRecoverables();
+      when(store.findOverdueParkedSagas(any(), any()))
+          .thenReturn(new OverdueParked(List.of(SAGA_ID), null));
+      when(store.getStateSnapshot(SAGA_ID)).thenReturn(Optional.of(waiting));
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(def);
+      when(store.redriveParkedStep(eq(waiting), anyInt(), any(StepEvent.class)))
+          .thenReturn(running);
+      when(engine.replayEvents(eq(running), any())).thenReturn(ctx);
+
+      // Act
+      manager.recover();
+
+      // Assert — un-parked (STEP_REISSUING) and re-issued from the parked step; not timed out.
+      ArgumentCaptor<StepEvent> redrive = ArgumentCaptor.forClass(StepEvent.class);
+      verify(store).redriveParkedStep(eq(waiting), anyInt(), redrive.capture());
+      assertThat(redrive.getValue().getEventType()).isEqualTo(EventType.STEP_REISSUING);
+      assertThat(redrive.getValue().getStepIndex()).isEqualTo(0);
+      verify(engine).resumeFrom(def, ctx, 0);
+      verify(store, never()).failParkedStep(any(), anyInt(), any(), any());
+    }
+
+    @Test
+    void recover_overdueParkedAttemptsExhausted_givesUp() {
+      // Arrange — three park attempts (== maxAttempts=3), all recent: the count bound is spent.
+      SagaStateSnapshot waiting = snapshot(SagaStatus.WAITING);
+      SagaStateSnapshot compensating = snapshot(SagaStatus.COMPENSATING);
+      SagaDefinition def = definition();
+      StepEvent park = StepEvent.pending(0, "debit").withTimestamp(NOW.minusSeconds(60));
+      List<SagaEvent> events = List.of(StatusEvent.started(null), park, park, park);
+      ExecutionContext ctx = mock(ExecutionContext.class);
+
+      noStaleRecoverables();
+      when(store.findOverdueParkedSagas(any(), any()))
+          .thenReturn(new OverdueParked(List.of(SAGA_ID), null));
+      when(store.getStateSnapshot(SAGA_ID)).thenReturn(Optional.of(waiting));
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(def);
+      when(store.failParkedStep(
+              eq(waiting), anyInt(), any(StepEvent.class), eq(SagaStatus.COMPENSATING)))
+          .thenReturn(compensating);
+      when(engine.replayEvents(eq(compensating), any())).thenReturn(ctx);
+
+      // Act
+      manager.recover();
+
+      // Assert — gave up (timed out), did not re-drive.
+      verify(store)
+          .failParkedStep(eq(waiting), anyInt(), any(StepEvent.class), eq(SagaStatus.COMPENSATING));
+      verify(store, never()).redriveParkedStep(any(), anyInt(), any());
+    }
+
+    @Test
+    void recover_overdueParkedGraceExceeded_givesUp() {
+      // Arrange — one park attempt (count within bound) but 2h ago (> 1h grace): the grace bound is
+      // spent.
+      SagaStateSnapshot waiting = snapshot(SagaStatus.WAITING);
+      SagaStateSnapshot compensating = snapshot(SagaStatus.COMPENSATING);
+      SagaDefinition def = definition();
+      List<SagaEvent> events =
+          List.of(
+              StatusEvent.started(null),
+              StepEvent.pending(0, "debit").withTimestamp(NOW.minusSeconds(7200)));
+      ExecutionContext ctx = mock(ExecutionContext.class);
+
+      noStaleRecoverables();
+      when(store.findOverdueParkedSagas(any(), any()))
+          .thenReturn(new OverdueParked(List.of(SAGA_ID), null));
+      when(store.getStateSnapshot(SAGA_ID)).thenReturn(Optional.of(waiting));
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(def);
+      when(store.failParkedStep(
+              eq(waiting), anyInt(), any(StepEvent.class), eq(SagaStatus.COMPENSATING)))
+          .thenReturn(compensating);
+      when(engine.replayEvents(eq(compensating), any())).thenReturn(ctx);
+
+      // Act
+      manager.recover();
+
+      // Assert
+      verify(store)
+          .failParkedStep(eq(waiting), anyInt(), any(StepEvent.class), eq(SagaStatus.COMPENSATING));
+      verify(store, never()).redriveParkedStep(any(), anyInt(), any());
     }
   }
 

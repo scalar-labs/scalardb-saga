@@ -4,6 +4,7 @@ import com.scalar.db.saga.api.SagaContext;
 import com.scalar.db.saga.api.Step;
 import com.scalar.db.saga.api.StepResult;
 import com.scalar.db.saga.api.TccStep;
+import com.scalar.db.saga.definition.TccStepNaming;
 import com.scalar.db.saga.exception.StepCompensationException;
 import com.scalar.db.saga.exception.StepExecutionException;
 
@@ -21,7 +22,7 @@ class TccReserveStep implements Step {
 
   TccReserveStep(TccStep tccStep) {
     this.tccStep = tccStep;
-    this.name = tccStep.getName() + ".reserve";
+    this.name = tccStep.getName() + TccStepNaming.RESERVE_SUFFIX;
   }
 
   @Override

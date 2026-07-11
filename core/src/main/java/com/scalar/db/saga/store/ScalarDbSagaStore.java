@@ -284,6 +284,143 @@ public class ScalarDbSagaStore implements SagaStore {
         "record transition for saga " + sagaId);
   }
 
+  // ---------------------------------------------------------------------------
+  // Async park / resume
+  // ---------------------------------------------------------------------------
+
+  @Override
+  public SagaStateSnapshot park(
+      SagaStateSnapshot current,
+      int sequence,
+      StepEvent pendingEvent,
+      @Nullable Instant parkedDeadline) {
+    String sagaId = current.getSagaId();
+    int bucket = schema.bucketOf(sagaId);
+
+    return runInTransaction(
+        tx -> {
+          Instant now = Instant.now();
+
+          // Optimistic check: the row must still be at the snapshot's (RUNNING) CK.
+          int oldStatus = current.getStatus().getStatusCode();
+          if (tx.get(buildStateGet(bucket, oldStatus, current.getUpdatedAt(), sagaId)).isEmpty()) {
+            throw new SagaConcurrentModificationException(sagaId);
+          }
+
+          tx.insert(buildEventInsert(sagaId, sequence, pendingEvent, now));
+          tx.delete(buildStateDelete(bucket, oldStatus, current.getUpdatedAt(), sagaId));
+          SagaStateSnapshot updated = current.withTransition(SagaStatus.WAITING, now);
+          tx.insert(buildStateInsert(bucket, updated));
+          // A bounded park records its deadline for the recovery sweeper; an unbounded park
+          // (null deadline) writes no row and is never timed out.
+          if (parkedDeadline != null) {
+            tx.insert(buildParkedInsert(bucket, parkedDeadline, sagaId));
+          }
+          return updated;
+        },
+        verifyTransitionCommitted(sagaId, sequence, pendingEvent.getEventType()),
+        "park saga " + sagaId);
+  }
+
+  @Override
+  public SagaStateSnapshot resumeParkedStep(
+      SagaStateSnapshot current, int sequence, StepEvent completedEvent) {
+    validatePayloadSize(completedEvent.getPayload());
+    return transitionParkedStep(
+        current, sequence, completedEvent, SagaStatus.RUNNING, "resume parked step");
+  }
+
+  @Override
+  public SagaStateSnapshot failParkedStep(
+      SagaStateSnapshot current, int sequence, StepEvent failedEvent, SagaStatus targetStatus) {
+    if (targetStatus != SagaStatus.COMPENSATING && targetStatus != SagaStatus.ESCALATED) {
+      throw new IllegalArgumentException(
+          "failParkedStep targetStatus must be COMPENSATING or ESCALATED, got " + targetStatus);
+    }
+    validatePayloadSize(failedEvent.getPayload());
+    return transitionParkedStep(current, sequence, failedEvent, targetStatus, "fail parked step");
+  }
+
+  @Override
+  public SagaStateSnapshot redriveParkedStep(
+      SagaStateSnapshot current, int sequence, StepEvent redriveEvent) {
+    return transitionParkedStep(
+        current, sequence, redriveEvent, SagaStatus.RUNNING, "redrive parked step");
+  }
+
+  /**
+   * Shared body for the three claim-less transitions out of {@code WAITING} — {@code
+   * resumeParkedStep} (callback), {@code failParkedStep} (give-up), and {@code redriveParkedStep}
+   * (re-drive). In one transaction, after a fail-fast pre-check that the row is still at the
+   * snapshot's ({@code WAITING}) CK, it appends {@code event}, transitions the saga to {@code
+   * targetStatus}, and clears the parked-deadline row (found via the saga_id secondary index since
+   * its {@code parked_deadline} CK is unknown here; an unbounded park left none).
+   *
+   * <p>The state-row delete is the real mutual-exclusion point: two transitions deleting the same
+   * {@code WAITING} CK conflict at commit, so exactly one commits; a loser retries, re-reads an
+   * empty CK in the pre-check, and throws {@link SagaConcurrentModificationException}. Kept in one
+   * place so the three race-safety-critical paths cannot silently diverge.
+   */
+  private SagaStateSnapshot transitionParkedStep(
+      SagaStateSnapshot current,
+      int sequence,
+      StepEvent event,
+      SagaStatus targetStatus,
+      String op) {
+    String sagaId = current.getSagaId();
+    int bucket = schema.bucketOf(sagaId);
+
+    return runInTransaction(
+        tx -> {
+          Instant now = Instant.now();
+
+          // Fail-fast pre-check on the WAITING CK; the state-row delete below is the real
+          // exclusion.
+          int oldStatus = current.getStatus().getStatusCode();
+          if (tx.get(buildStateGet(bucket, oldStatus, current.getUpdatedAt(), sagaId)).isEmpty()) {
+            throw new SagaConcurrentModificationException(sagaId);
+          }
+
+          tx.insert(buildEventInsert(sagaId, sequence, event, now));
+          tx.delete(buildStateDelete(bucket, oldStatus, current.getUpdatedAt(), sagaId));
+          SagaStateSnapshot updated = current.withTransition(targetStatus, now);
+          tx.insert(buildStateInsert(bucket, updated));
+
+          for (Result parked : tx.scan(buildParkedIndexScan(sagaId))) {
+            tx.delete(buildParkedDelete(bucket, parked.getTimestampTZ("parked_deadline"), sagaId));
+          }
+          return updated;
+        },
+        verifyTransitionCommitted(sagaId, sequence, event.getEventType()),
+        op + " for saga " + sagaId);
+  }
+
+  /**
+   * Verifier for park/resume/timeout: the tx committed iff the event at {@code sequence} is present
+   * <em>and</em> of {@code expectedType}. The type check matters because {@code resumeParkedStep}
+   * and {@code failParkedStep} are claim-less and derive the same {@code sequence} from a WAITING
+   * saga's event count, so both target the same event CK with different types. Presence alone would
+   * let the loser of a callback-vs-timeout race read the winner's event and wrongly report its own
+   * commit as successful; matching the type proves the persisted event is ours. A mismatch (the
+   * other op won) returns empty, so the caller retries, re-reads the now-non-WAITING CK, and throws
+   * {@link SagaConcurrentModificationException}.
+   */
+  private CommitVerifier<SagaStateSnapshot> verifyTransitionCommitted(
+      String sagaId, int sequence, EventType expectedType) {
+    return () ->
+        runInTransaction(
+            tx -> {
+              Optional<Result> event = tx.get(buildEventGet(sagaId, sequence));
+              if (event.isPresent()
+                  && expectedType.name().equals(event.get().getText("event_type"))) {
+                return loadStateSnapshot(sagaId);
+              }
+              return Optional.empty();
+            },
+            null,
+            "verify transition " + sagaId + " seq " + sequence);
+  }
+
   @Override
   public List<SagaEvent> getEvents(String sagaId) {
     return runInTransaction(
@@ -321,8 +458,7 @@ public class ScalarDbSagaStore implements SagaStore {
   // ---------------------------------------------------------------------------
 
   @Override
-  public Recoverables findRecoverable(
-      long recoveryTimeoutMillis, @Nullable RecoverablesCursor cursor) {
+  public Recoverables findRecoverable(Instant threshold, @Nullable ScanCursor cursor) {
     int startBucket = 0;
     if (cursor instanceof BucketCursor(int nextBucket)) {
       startBucket = nextBucket;
@@ -332,7 +468,6 @@ public class ScalarDbSagaStore implements SagaStore {
       return new Recoverables(List.of(), null);
     }
 
-    Instant threshold = Instant.now().minusMillis(recoveryTimeoutMillis);
     int bucket = startBucket;
 
     List<SagaStateSnapshot> result =
@@ -358,7 +493,7 @@ public class ScalarDbSagaStore implements SagaStore {
             "find recoverable sagas");
 
     int nextBucket = startBucket + 1;
-    @Nullable RecoverablesCursor nextCursor =
+    @Nullable ScanCursor nextCursor =
         nextBucket < schema.getNumBuckets() ? new BucketCursor(nextBucket) : null;
     return new Recoverables(result, nextCursor);
   }
@@ -446,6 +581,41 @@ public class ScalarDbSagaStore implements SagaStore {
       // Best effort — conflict with executing thread is expected and harmless
       logger.warn("markForRecovery failed for saga {} (best-effort)", sagaId, e);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Parked-step timeout (async WAITING sagas)
+  // ---------------------------------------------------------------------------
+
+  @Override
+  public OverdueParked findOverdueParkedSagas(Instant threshold, @Nullable ScanCursor cursor) {
+    int startBucket = 0;
+    if (cursor instanceof BucketCursor(int nextBucket)) {
+      startBucket = nextBucket;
+    }
+    if (startBucket >= schema.getNumBuckets()) {
+      return new OverdueParked(List.of(), null);
+    }
+
+    int bucket = startBucket;
+    List<String> sagaIds =
+        runInTransaction(
+            tx -> {
+              // Cap the scan to bound memory; anything beyond is picked up next recovery cycle.
+              List<Result> rows =
+                  tx.scan(
+                      Scan.newBuilder(buildParkedRangeScan(bucket, threshold))
+                          .limit(config.getRecoveryScanLimit())
+                          .build());
+              return rows.stream().map(r -> r.getText("saga_id")).toList();
+            },
+            null,
+            "find overdue parked sagas");
+
+    int nextBucket = startBucket + 1;
+    @Nullable ScanCursor nextCursor =
+        nextBucket < schema.getNumBuckets() ? new BucketCursor(nextBucket) : null;
+    return new OverdueParked(sagaIds, nextCursor);
   }
 
   // ---------------------------------------------------------------------------
@@ -754,6 +924,52 @@ public class ScalarDbSagaStore implements SagaStore {
         .build();
   }
 
+  /** Scans one {@code saga_parked} bucket for deadlines in {@code [EPOCH, threshold]}. */
+  private Scan buildParkedRangeScan(int bucket, Instant threshold) {
+    return Scan.newBuilder()
+        .namespace(SagaSchema.NAMESPACE)
+        .table(SagaSchema.PARKED_TABLE)
+        .partitionKey(Key.ofInt("bucket", bucket))
+        .start(Key.newBuilder().addTimestampTZ("parked_deadline", Instant.EPOCH).build(), true)
+        .end(Key.newBuilder().addTimestampTZ("parked_deadline", threshold).build(), true)
+        .build();
+  }
+
+  private Insert buildParkedInsert(int bucket, Instant parkedDeadline, String sagaId) {
+    return Insert.newBuilder()
+        .namespace(SagaSchema.NAMESPACE)
+        .table(SagaSchema.PARKED_TABLE)
+        .partitionKey(Key.ofInt("bucket", bucket))
+        .clusteringKey(parkedClusteringKey(parkedDeadline, sagaId))
+        .build();
+  }
+
+  private Delete buildParkedDelete(int bucket, Instant parkedDeadline, String sagaId) {
+    return Delete.newBuilder()
+        .namespace(SagaSchema.NAMESPACE)
+        .table(SagaSchema.PARKED_TABLE)
+        .partitionKey(Key.ofInt("bucket", bucket))
+        .clusteringKey(parkedClusteringKey(parkedDeadline, sagaId))
+        .build();
+  }
+
+  /** Looks up a single {@code saga_parked} row by {@code saga_id} via the secondary index. */
+  private Scan buildParkedIndexScan(String sagaId) {
+    return Scan.newBuilder()
+        .namespace(SagaSchema.NAMESPACE)
+        .table(SagaSchema.PARKED_TABLE)
+        .indexKey(Key.ofText("saga_id", sagaId))
+        .limit(1)
+        .build();
+  }
+
+  private static Key parkedClusteringKey(Instant parkedDeadline, String sagaId) {
+    return Key.newBuilder()
+        .addTimestampTZ("parked_deadline", parkedDeadline)
+        .addText("saga_id", sagaId)
+        .build();
+  }
+
   // -- saga_definitions builders --
 
   private Insert buildDefinitionInsert(String name, String version, String json) {
@@ -850,6 +1066,8 @@ public class ScalarDbSagaStore implements SagaStore {
       String name = Objects.requireNonNull(stepName, "stepName must not be null for step events");
       StepEvent event =
           switch (eventType) {
+            case STEP_PENDING -> StepEvent.pending(stepIndex, name);
+            case STEP_REISSUING -> StepEvent.reissuing(stepIndex, name);
             case STEP_COMPLETED -> StepEvent.completed(stepIndex, name, payload);
             case STEP_FAILED -> StepEvent.failed(stepIndex, name, payload);
             case STEP_COMPENSATED -> StepEvent.compensated(stepIndex, name);
@@ -947,5 +1165,5 @@ public class ScalarDbSagaStore implements SagaStore {
   // ---------------------------------------------------------------------------
 
   /** Internal cursor tracking which bucket to scan next. */
-  private record BucketCursor(int nextBucket) implements RecoverablesCursor {}
+  private record BucketCursor(int nextBucket) implements ScanCursor {}
 }

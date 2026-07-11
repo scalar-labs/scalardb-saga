@@ -36,6 +36,8 @@ public final class CallSpecCodec {
   private static final String STRING_BODY = "stringBody";
   private static final String CONTENT_TYPE = "contentType";
   private static final String OUTPUT = "output";
+  private static final String ASYNC = "async";
+  private static final String CALLBACK_TIMEOUT_MILLIS = "callbackTimeoutMillis";
   private static final String STEP_CLASS = "stepClass";
   private static final String SERVICE = "service";
   private static final String EXECUTION = "execution";
@@ -47,7 +49,16 @@ public final class CallSpecCodec {
   // The HTTP call spec's own keys. The values of QUERY/JSON_BODY/OUTPUT are free-form user maps and
   // are not validated here.
   private static final Set<String> KNOWN_HTTP_FIELDS =
-      Set.of(METHOD, PATH, QUERY, JSON_BODY, STRING_BODY, CONTENT_TYPE, OUTPUT);
+      Set.of(
+          METHOD,
+          PATH,
+          QUERY,
+          JSON_BODY,
+          STRING_BODY,
+          CONTENT_TYPE,
+          OUTPUT,
+          ASYNC,
+          CALLBACK_TIMEOUT_MILLIS);
 
   private CallSpecCodec() {}
 
@@ -142,6 +153,12 @@ public final class CallSpecCodec {
     if (isPresent(node, OUTPUT)) {
       callBuilder.output(readStringMap(node.get(OUTPUT), stepName, OUTPUT));
     }
+    if (isPresent(node, ASYNC)) {
+      callBuilder.async(node.get(ASYNC).asBoolean());
+    }
+    if (isPresent(node, CALLBACK_TIMEOUT_MILLIS)) {
+      callBuilder.callbackTimeoutMillis(node.get(CALLBACK_TIMEOUT_MILLIS).asLong());
+    }
     try {
       return callBuilder.build();
     } catch (IllegalStateException e) {
@@ -175,6 +192,12 @@ public final class CallSpecCodec {
         }
         if (!http.getOutput().isEmpty()) {
           node.set(OUTPUT, toJsonMap(mapper, http.getOutput()));
+        }
+        if (http.isAsync()) {
+          node.put(ASYNC, true);
+        }
+        if (http.callbackTimeoutMillis() > 0) {
+          node.put(CALLBACK_TIMEOUT_MILLIS, http.callbackTimeoutMillis());
         }
       }
     }
@@ -265,6 +288,30 @@ public final class CallSpecCodec {
           "TCC declarative service step '"
               + name
               + "' must define 'reservation', 'confirmation', and 'cancellation'");
+    }
+  }
+
+  /**
+   * Rejects an {@code async} marker on a backward phase (compensation / cancellation). Async
+   * completion — the participant parking the saga and calling back — applies only to forward phases
+   * (execution / reservation / confirmation); a compensation/cancellation always runs
+   * synchronously. This is a parse-path precheck (called by {@code SagaDefinitionParser}); the
+   * {@code error} factory keeps the failure type layer-appropriate. The programmatic-builder and
+   * store-reload paths are guarded independently by the {@code ServiceStep} constructor.
+   */
+  public static void rejectAsyncOnBackwardPhase(
+      JsonNode stepNode, String name, Function<String, RuntimeException> error) {
+    for (String phase : new String[] {COMPENSATION, CANCELLATION}) {
+      JsonNode phaseNode = stepNode.get(phase);
+      if (phaseNode != null && isPresent(phaseNode, ASYNC) && phaseNode.get(ASYNC).asBoolean()) {
+        throw error.apply(
+            "Step '"
+                + name
+                + "' phase '"
+                + phase
+                + "' must not be async; async completion applies only to forward phases"
+                + " (execution/reservation/confirmation)");
+      }
     }
   }
 

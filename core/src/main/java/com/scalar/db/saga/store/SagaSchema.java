@@ -9,11 +9,12 @@ import com.scalar.db.io.DataType;
 /**
  * Schema definitions for the saga persistence tables.
  *
- * <p>Defines three tables:
+ * <p>Defines four tables:
  *
  * <ul>
  *   <li>{@code saga_events} — append-only event log, partitioned by saga ID
  *   <li>{@code saga_state} — mutable status/recovery table, bucket-partitioned for parallel scans
+ *   <li>{@code saga_parked} — deadline index for async-parked (WAITING) steps, bucket-partitioned
  *   <li>{@code saga_definitions} — saga definition registry
  * </ul>
  */
@@ -22,6 +23,7 @@ public final class SagaSchema {
   public static final String NAMESPACE = "saga";
   public static final String EVENTS_TABLE = "saga_events";
   public static final String STATE_TABLE = "saga_state";
+  public static final String PARKED_TABLE = "saga_parked";
   public static final String DEFINITIONS_TABLE = "saga_definitions";
 
   /** Default number of buckets for partitioning {@code saga_state}. */
@@ -119,6 +121,32 @@ public final class SagaSchema {
   }
 
   /**
+   * Deadline index for async-parked (WAITING) steps, bucket-partitioned like {@code saga_state}.
+   *
+   * <p>Partition key: {@code bucket}. Clustering key: {@code (parked_deadline, saga_id)}. Secondary
+   * index on {@code saga_id} so a resume or timeout can find and delete a saga's row without
+   * knowing its deadline.
+   *
+   * <p>One row per parked saga, written when a step parks ({@code RUNNING → WAITING}, atomically
+   * with the state transition) and deleted when it resumes or is timed out. Recovery times parked
+   * steps out with an efficient range scan per bucket: {@code parked_deadline <= now}, reading only
+   * the expired ones. A step with no timeout (wait indefinitely) has no row here. Kept out of
+   * {@code saga_state} so parking — a minority feature — never touches the recovery/retention
+   * clustering key.
+   */
+  public static TableMetadata sagaParkedTable() {
+    return TableMetadata.newBuilder()
+        .addColumn("bucket", DataType.INT) // PK: hash(saga_id) % numBuckets
+        .addColumn("parked_deadline", DataType.TIMESTAMPTZ) // CK1: absolute timeout deadline
+        .addColumn("saga_id", DataType.TEXT) // CK2: unique identifier
+        .addPartitionKey("bucket")
+        .addClusteringKey("parked_deadline", Scan.Ordering.Order.ASC)
+        .addClusteringKey("saga_id", Scan.Ordering.Order.ASC)
+        .addSecondaryIndex("saga_id")
+        .build();
+  }
+
+  /**
    * Saga definition registry.
    *
    * <p>Partition key: {@code saga_name}. Clustering key: {@code definition_version}.
@@ -144,6 +172,7 @@ public final class SagaSchema {
     admin.createNamespace(NAMESPACE, true);
     admin.createTable(NAMESPACE, EVENTS_TABLE, sagaEventsTable(), true);
     admin.createTable(NAMESPACE, STATE_TABLE, sagaStateTable(), true);
+    admin.createTable(NAMESPACE, PARKED_TABLE, sagaParkedTable(), true);
     admin.createTable(NAMESPACE, DEFINITIONS_TABLE, sagaDefinitionsTable(), true);
   }
 }

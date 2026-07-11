@@ -281,4 +281,39 @@ class SagaDefinitionDeclarativeStepTest {
     // Assert
     assertThat(definition.getSteps()).hasSize(2);
   }
+
+  @Test
+  void declarativeStep_asyncExecutionGiven_buildsStep() {
+    // Act
+    SagaDefinition definition =
+        SagaDefinition.newBuilder("transfer")
+            .saga()
+            .serviceStep("debit", "account-service")
+            .execution(HttpCall.newBuilder("/debit").async(true).build())
+            .compensation(call("/debit/reverse"))
+            .add()
+            .build();
+
+    // Assert
+    ServiceStep step = (ServiceStep) definition.getSteps().get(0);
+    assertThat(((HttpCall) step.getPhase(Phase.EXECUTION).orElseThrow()).isAsync()).isTrue();
+  }
+
+  @Test
+  void declarativeStep_asyncCompensationGiven_throwsException() {
+    // Arrange — async completion applies only to forward phases; a compensation is synchronous.
+    HttpCall asyncCompensation = HttpCall.newBuilder("/debit/reverse").async(true).build();
+
+    // Act & Assert
+    assertThatThrownBy(
+            () ->
+                SagaDefinition.newBuilder("transfer")
+                    .saga()
+                    .serviceStep("debit", "account-service")
+                    .execution(call("/debit"))
+                    .compensation(asyncCompensation)
+                    .add()
+                    .build())
+        .isInstanceOf(IllegalArgumentException.class);
+  }
 }

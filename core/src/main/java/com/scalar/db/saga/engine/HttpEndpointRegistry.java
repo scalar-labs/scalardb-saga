@@ -7,10 +7,12 @@ import com.scalar.db.saga.definition.CallSpec;
 import com.scalar.db.saga.definition.SagaDefinition.ServiceStep.Phase;
 import com.scalar.db.saga.engine.StepResolver.ResolutionContext;
 import com.scalar.db.saga.exception.SagaDefinitionException;
+import com.scalar.db.saga.transport.CallbackUrlProvider;
 import com.scalar.db.saga.transport.HttpEndpoint;
 import com.scalar.db.saga.transport.HttpServiceConfig;
 import java.util.HashMap;
 import java.util.Map;
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -36,11 +38,25 @@ final class HttpEndpointRegistry implements ResolutionContext, AutoCloseable {
     this.endpoints = Map.copyOf(endpoints);
   }
 
-  /** Creates a registry with one {@link HttpEndpoint} per {@code name → config} entry. */
+  /**
+   * Creates a registry with no async-callback provisioning (see {@link #create(Map,
+   * CallbackUrlProvider)}).
+   */
   static HttpEndpointRegistry create(Map<String, HttpServiceConfig> endpointConfigs) {
+    return create(endpointConfigs, null);
+  }
+
+  /**
+   * Creates a registry with one {@link HttpEndpoint} per {@code name → config} entry, wiring {@code
+   * callbackUrlProvider} (engine-global; {@code null} when async completion is not configured) into
+   * each endpoint's declarative transport.
+   */
+  static HttpEndpointRegistry create(
+      Map<String, HttpServiceConfig> endpointConfigs,
+      @Nullable CallbackUrlProvider callbackUrlProvider) {
     Map<String, HttpEndpoint> endpoints = new HashMap<>();
     for (Map.Entry<String, HttpServiceConfig> entry : endpointConfigs.entrySet()) {
-      endpoints.put(entry.getKey(), HttpEndpoint.create(entry.getValue()));
+      endpoints.put(entry.getKey(), HttpEndpoint.create(entry.getValue(), callbackUrlProvider));
     }
     return new HttpEndpointRegistry(endpoints);
   }

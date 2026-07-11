@@ -40,6 +40,26 @@ public final class StepEvent implements SagaEvent {
   // Factory methods
   // ---------------------------------------------------------------------------
 
+  /**
+   * Creates a {@link EventType#STEP_PENDING} event, marking that a forward step has parked on an
+   * async callback ({@code RUNNING → WAITING}). Carries no payload — the step's output arrives
+   * later with the {@link EventType#STEP_COMPLETED} event when the callback resumes it.
+   */
+  public static StepEvent pending(int stepIndex, String stepName) {
+    return new StepEvent(EventType.STEP_PENDING, stepIndex, stepName, null, null);
+  }
+
+  /**
+   * Creates a {@link EventType#STEP_REISSUING} event, marking that the recovery sweep un-parked a
+   * timed-out async step to re-issue its call ({@code WAITING → RUNNING}). Like {@link #pending},
+   * it carries no payload and is folded to a no-op on replay; the subsequent re-park appends a
+   * fresh {@link EventType#STEP_PENDING}. The count of {@code STEP_PENDING} events bounds the
+   * re-drive attempts.
+   */
+  public static StepEvent reissuing(int stepIndex, String stepName) {
+    return new StepEvent(EventType.STEP_REISSUING, stepIndex, stepName, null, null);
+  }
+
   /** Creates a {@link EventType#STEP_COMPLETED} event. */
   public static StepEvent completed(int stepIndex, String stepName, @Nullable String payload) {
     return new StepEvent(EventType.STEP_COMPLETED, stepIndex, stepName, payload, null);

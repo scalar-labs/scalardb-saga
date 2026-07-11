@@ -305,4 +305,67 @@ class HttpCallTest {
   void producedContextKeys_noOutput_isEmpty() {
     assertThat(HttpCall.newBuilder("/debit").build().producedContextKeys()).isEmpty();
   }
+
+  @Test
+  void build_asyncGiven_setsAsync() {
+    // Act
+    HttpCall call = HttpCall.newBuilder("/debit").async(true).build();
+
+    // Assert
+    assertThat(call.isAsync()).isTrue();
+  }
+
+  @Test
+  void build_pathOnlyGiven_asyncDefaultsToFalse() {
+    assertThat(HttpCall.newBuilder("/debit").build().isAsync()).isFalse();
+  }
+
+  @Test
+  void equals_asyncDiffers_notEqual() {
+    // Arrange
+    HttpCall async = HttpCall.newBuilder("/debit").async(true).build();
+    HttpCall sync = HttpCall.newBuilder("/debit").build();
+
+    // Assert
+    assertThat(async).isNotEqualTo(sync);
+  }
+
+  @Test
+  void build_callbackTimeoutMillisGiven_setsCallbackTimeout() {
+    // Act
+    HttpCall call =
+        HttpCall.newBuilder("/debit").async(true).callbackTimeoutMillis(600_000).build();
+
+    // Assert
+    assertThat(call.callbackTimeoutMillis()).isEqualTo(600_000);
+  }
+
+  @Test
+  void build_pathOnlyGiven_callbackTimeoutDefaultsToZero() {
+    assertThat(HttpCall.newBuilder("/debit").build().callbackTimeoutMillis()).isZero();
+  }
+
+  @Test
+  void build_negativeCallbackTimeoutMillisGiven_throwsException() {
+    // Act & Assert
+    assertThatThrownBy(() -> HttpCall.newBuilder("/debit").callbackTimeoutMillis(-1).build())
+        .isInstanceOf(IllegalStateException.class);
+  }
+
+  @Test
+  void equals_callbackTimeoutDiffers_notEqual() {
+    // Arrange
+    HttpCall a = HttpCall.newBuilder("/debit").async(true).callbackTimeoutMillis(1000).build();
+    HttpCall b = HttpCall.newBuilder("/debit").async(true).callbackTimeoutMillis(2000).build();
+
+    // Assert
+    assertThat(a).isNotEqualTo(b);
+  }
+
+  @Test
+  void build_callbackTimeoutWithoutAsyncGiven_throwsException() {
+    // Act & Assert — a callback timeout is meaningless without async; reject it at build time
+    assertThatThrownBy(() -> HttpCall.newBuilder("/debit").callbackTimeoutMillis(1000).build())
+        .isInstanceOf(IllegalStateException.class);
+  }
 }

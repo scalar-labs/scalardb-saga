@@ -2,7 +2,6 @@ package com.scalar.db.saga.engine;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -11,6 +10,7 @@ import com.scalar.db.saga.api.SagaContext;
 import com.scalar.db.saga.api.StepResult;
 import com.scalar.db.saga.api.TccStep;
 import com.scalar.db.saga.exception.StepExecutionException;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class TccConfirmStepTest {
@@ -27,10 +27,12 @@ class TccConfirmStepTest {
   }
 
   @Test
-  void execute_called_delegatesToConfirmAndReturnsEmpty() throws StepExecutionException {
+  void execute_called_delegatesToConfirmAndReturnsItsResult() throws StepExecutionException {
     // Arrange
     TccStep tccStep = mock(TccStep.class);
     SagaContext context = mock(SagaContext.class);
+    StepResult confirmResult = StepResult.of(Map.of("confirmationId", "C-1"));
+    when(tccStep.confirm(context)).thenReturn(confirmResult);
     TccConfirmStep step = new TccConfirmStep(tccStep);
 
     // Act
@@ -38,7 +40,23 @@ class TccConfirmStepTest {
 
     // Assert
     verify(tccStep).confirm(context);
-    assertThat(result).isEqualTo(StepResult.empty());
+    assertThat(result).isSameAs(confirmResult);
+  }
+
+  @Test
+  void execute_confirmReturnsPending_propagatesPending() throws StepExecutionException {
+    // Arrange — an async confirmation (202 Accepted) parks the saga; the pending result must not be
+    // swallowed.
+    TccStep tccStep = mock(TccStep.class);
+    SagaContext context = mock(SagaContext.class);
+    when(tccStep.confirm(context)).thenReturn(StepResult.pending());
+    TccConfirmStep step = new TccConfirmStep(tccStep);
+
+    // Act
+    StepResult result = step.execute(context);
+
+    // Assert
+    assertThat(result.isPending()).isTrue();
   }
 
   @Test
@@ -59,8 +77,7 @@ class TccConfirmStepTest {
     TccStep tccStep = mock(TccStep.class);
     SagaContext context = mock(SagaContext.class);
     StepExecutionException exception = new StepExecutionException("confirm failed", true);
-    // Use doThrow since confirm returns void
-    doThrow(exception).when(tccStep).confirm(context);
+    when(tccStep.confirm(context)).thenThrow(exception);
     TccConfirmStep step = new TccConfirmStep(tccStep);
 
     // Act & Assert

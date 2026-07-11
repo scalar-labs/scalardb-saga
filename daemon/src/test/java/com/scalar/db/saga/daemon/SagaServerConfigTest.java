@@ -265,6 +265,29 @@ class SagaServerConfigTest {
   }
 
   @Test
+  void load_unsetCallbackMaxAge_disabledByDefault() {
+    assertThat(SagaServerConfig.load(new Properties()).callbackMaxAgeSeconds())
+        .isEqualTo(SagaServerConfig.DEFAULT_CALLBACK_MAX_AGE_SECONDS);
+  }
+
+  @Test
+  void load_callbackMaxAgeGiven_parsesValue() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.CALLBACK_MAX_AGE_SECONDS_KEY, "3600");
+
+    assertThat(SagaServerConfig.load(props).callbackMaxAgeSeconds()).isEqualTo(3600L);
+  }
+
+  @Test
+  void load_negativeCallbackMaxAge_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.CALLBACK_MAX_AGE_SECONDS_KEY, "-1");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void load_unsetSyncMaxWait_defaultsToCeiling() {
     assertThat(SagaServerConfig.load(new Properties()).syncMaxWaitMillis())
         .isEqualTo(SagaServerConfig.DEFAULT_SYNC_MAX_WAIT_MILLIS);
@@ -433,6 +456,68 @@ class SagaServerConfigTest {
 
     assertThat(config.properties().getProperty("scalar.db.contact_points"))
         .isEqualTo("${file:UTF-8:/does/not/exist}");
+  }
+
+  @Test
+  void load_unsetCallbackSecret_isEmpty() {
+    assertThat(SagaServerConfig.load(new Properties()).callbackSecret()).isEmpty();
+  }
+
+  @Test
+  void load_blankCallbackSecret_isEmpty() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.CALLBACK_SECRET_KEY, "   ");
+
+    assertThat(SagaServerConfig.load(props).callbackSecret()).isEmpty();
+  }
+
+  @Test
+  void load_callbackSecretGiven_isPresent() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.CALLBACK_SECRET_KEY, "s3cr3t-key");
+
+    assertThat(SagaServerConfig.load(props).callbackSecret()).contains("s3cr3t-key");
+  }
+
+  @Test
+  void load_unsetCallbackBaseUrl_isEmpty() {
+    assertThat(SagaServerConfig.load(new Properties()).callbackBaseUrl()).isEmpty();
+  }
+
+  @Test
+  void load_callbackBaseUrlGiven_isPresent() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.CALLBACK_BASE_URL_KEY, "http://daemon:8080");
+
+    assertThat(SagaServerConfig.load(props).callbackBaseUrl()).contains("http://daemon:8080");
+  }
+
+  @Test
+  void load_callbackBaseUrlTrailingSlash_isStripped() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.CALLBACK_BASE_URL_KEY, "http://daemon:8080/");
+
+    assertThat(SagaServerConfig.load(props).callbackBaseUrl()).contains("http://daemon:8080");
+  }
+
+  @Test
+  void load_callbackBaseUrlSlashesOnly_isEmpty() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.CALLBACK_BASE_URL_KEY, "/");
+
+    // Stripping the trailing slash leaves nothing meaningful, so it is treated as unset rather than
+    // producing an empty base URL that would yield relative callback URLs.
+    assertThat(SagaServerConfig.load(props).callbackBaseUrl()).isEmpty();
+  }
+
+  @Test
+  void load_callbackSecretFileReference_isResolved(@TempDir Path dir) throws IOException {
+    Path secretFile = dir.resolve("callback.secret");
+    Files.writeString(secretFile, "resolved-secret-value", StandardCharsets.UTF_8);
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.CALLBACK_SECRET_KEY, "${file:UTF-8:" + secretFile + "}");
+
+    assertThat(SagaServerConfig.load(props).callbackSecret()).contains("resolved-secret-value");
   }
 
   @Test

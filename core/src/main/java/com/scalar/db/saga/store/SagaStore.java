@@ -81,6 +81,74 @@ public interface SagaStore extends AutoCloseable {
    */
   SagaStateSnapshot recordStatusEvent(SagaStateSnapshot current, int sequence, StatusEvent event);
 
+  /**
+   * Parks a forward step on an async callback, in one transaction: appends {@code pendingEvent},
+   * transitions the saga {@code RUNNING → WAITING}, and — when {@code parkedDeadline} is non-null —
+   * writes a {@code saga_parked} row so the recovery sweeper can time it out. A {@code null}
+   * deadline means "wait indefinitely" and writes no {@code saga_parked} row.
+   *
+   * @param current the current ({@code RUNNING}) snapshot (used for optimistic concurrency)
+   * @param sequence the event sequence number
+   * @param pendingEvent the {@link EventType#STEP_PENDING} event marking which step parked
+   * @param parkedDeadline the absolute timeout deadline, or {@code null} for an unbounded wait
+   * @return the post-transition ({@code WAITING}) snapshot
+   */
+  SagaStateSnapshot park(
+      SagaStateSnapshot current,
+      int sequence,
+      StepEvent pendingEvent,
+      @Nullable Instant parkedDeadline);
+
+  /**
+   * Resumes a parked step when its callback arrives, in one transaction: appends {@code
+   * completedEvent}, transitions the saga {@code WAITING → RUNNING}, and deletes the {@code
+   * saga_parked} row (if any). The optimistic check on the {@code WAITING} row makes this and the
+   * deadline-timeout sweep mutually exclusive.
+   *
+   * @param current the current ({@code WAITING}) snapshot (used for optimistic concurrency)
+   * @param sequence the event sequence number
+   * @param completedEvent the {@link EventType#STEP_COMPLETED} event carrying the callback output
+   * @return the post-transition ({@code RUNNING}) snapshot
+   */
+  SagaStateSnapshot resumeParkedStep(
+      SagaStateSnapshot current, int sequence, StepEvent completedEvent);
+
+  /**
+   * Fails (gives up on) a parked step, in one transaction: appends {@code failedEvent}, transitions
+   * the saga {@code WAITING → targetStatus}, and deletes the {@code saga_parked} row (if any). Used
+   * by the recovery sweep once a parked step's re-drive budget is spent (retry attempts or grace
+   * period), or when its definition can't be resolved. The optimistic check on the {@code WAITING}
+   * row makes this and a concurrent callback ({@link #resumeParkedStep}) / re-drive ({@link
+   * #redriveParkedStep}) mutually exclusive.
+   *
+   * @param current the current ({@code WAITING}) snapshot (used for optimistic concurrency)
+   * @param sequence the event sequence number
+   * @param failedEvent the {@link EventType#STEP_FAILED} event for the given-up step
+   * @param targetStatus {@code COMPENSATING} (pre-pivot, will compensate) or {@code ESCALATED}
+   *     (post-pivot, needs manual resolution)
+   * @return the post-transition snapshot
+   * @throws IllegalArgumentException if {@code targetStatus} is not {@code COMPENSATING} or {@code
+   *     ESCALATED}
+   */
+  SagaStateSnapshot failParkedStep(
+      SagaStateSnapshot current, int sequence, StepEvent failedEvent, SagaStatus targetStatus);
+
+  /**
+   * Un-parks a timed-out step to re-drive it, in one transaction: appends {@code redriveEvent}
+   * ({@link EventType#STEP_REISSUING}), transitions the saga {@code WAITING → RUNNING}, and deletes
+   * the {@code saga_parked} row. The recovery sweep then re-executes the step, which re-parks it
+   * with a fresh deadline. The optimistic check on the {@code WAITING} row makes this and a
+   * concurrent callback ({@link #resumeParkedStep}) / timeout ({@link #failParkedStep}) mutually
+   * exclusive.
+   *
+   * @param current the current ({@code WAITING}) snapshot (used for optimistic concurrency)
+   * @param sequence the event sequence number
+   * @param redriveEvent the {@link EventType#STEP_REISSUING} event for the un-parked step
+   * @return the post-transition ({@code RUNNING}) snapshot
+   */
+  SagaStateSnapshot redriveParkedStep(
+      SagaStateSnapshot current, int sequence, StepEvent redriveEvent);
+
   /** Returns all events for the given saga, ordered by sequence number. */
   List<SagaEvent> getEvents(String sagaId);
 
@@ -103,17 +171,18 @@ public interface SagaStore extends AutoCloseable {
 
   /**
    * Finds sagas in {@link SagaStatus#RUNNING} or {@link SagaStatus#COMPENSATING} status whose
-   * {@code updated_at} is older than the recovery timeout threshold.
+   * {@code updated_at} is older than the given threshold. The caller computes the staleness cutoff
+   * from its clock, mirroring {@link #findOverdueParkedSagas} and {@link #findByStatusOlderThan}.
    *
    * <p>Each call returns a batch of results. Pass the cursor from the previous result to continue
    * scanning, or {@code null} to start from the beginning. A {@code null} cursor in the returned
    * {@link Recoverables} indicates that the scan is complete.
    *
-   * @param recoveryTimeoutMillis the staleness threshold in milliseconds
+   * @param threshold the staleness cutoff — only sagas updated before this are returned
    * @param cursor the cursor from a previous call, or {@code null} to start a new scan
    * @return recoverable sagas and a cursor for the next batch
    */
-  Recoverables findRecoverable(long recoveryTimeoutMillis, @Nullable RecoverablesCursor cursor);
+  Recoverables findRecoverable(Instant threshold, @Nullable ScanCursor cursor);
 
   /**
    * Attempts to claim a saga for recovery by updating its owner. Returns an empty {@link Optional}
@@ -133,6 +202,26 @@ public interface SagaStore extends AutoCloseable {
    * @param sagaId the saga instance ID
    */
   void markForRecovery(String sagaId);
+
+  // ---------------------------------------------------------------------------
+  // Parked-step timeout (async WAITING sagas)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Finds parked (async {@code WAITING}) sagas whose timeout deadline is at or before {@code
+   * threshold}, from the dedicated {@code saga_parked} index. Used by recovery to time out async
+   * steps whose callback never arrived. A parked step with no timeout (wait indefinitely) has no
+   * index row and is never returned.
+   *
+   * <p>Cursor-paged one bucket per call, like {@link #findRecoverable}: pass the previous result's
+   * cursor to continue, or {@code null} to start. A {@code null} {@link OverdueParked#nextCursor()}
+   * in the result means the scan is complete.
+   *
+   * @param threshold the cutoff time — parked sagas with a deadline at or before this are returned
+   * @param cursor the cursor from a previous call, or {@code null} to start a new scan
+   * @return a batch of overdue parked saga IDs and a cursor for the next batch
+   */
+  OverdueParked findOverdueParkedSagas(Instant threshold, @Nullable ScanCursor cursor);
 
   // ---------------------------------------------------------------------------
   // Data retention
@@ -171,7 +260,7 @@ public interface SagaStore extends AutoCloseable {
    * @param sagas the recoverable saga snapshots in this batch
    * @param nextCursor cursor for the next batch, or {@code null} if the scan is complete
    */
-  record Recoverables(List<SagaStateSnapshot> sagas, @Nullable RecoverablesCursor nextCursor) {
+  record Recoverables(List<SagaStateSnapshot> sagas, @Nullable ScanCursor nextCursor) {
 
     /** Creates a new instance, defensively copying the sagas list. */
     public Recoverables {
@@ -185,8 +274,29 @@ public interface SagaStore extends AutoCloseable {
   }
 
   /**
-   * Opaque cursor for paginating through recoverable sagas returned by {@link #findRecoverable}.
-   * Implementations define the internal state (e.g., partition index, page token).
+   * Result of {@link #findOverdueParkedSagas}: a batch of overdue parked saga IDs and an optional
+   * cursor for the next batch.
+   *
+   * @param sagaIds the overdue parked saga IDs in this batch
+   * @param nextCursor cursor for the next batch, or {@code null} if the scan is complete
    */
-  interface RecoverablesCursor {}
+  record OverdueParked(List<String> sagaIds, @Nullable ScanCursor nextCursor) {
+
+    /** Creates a new instance, defensively copying the IDs list. */
+    public OverdueParked {
+      sagaIds = List.copyOf(sagaIds);
+    }
+
+    /** Returns {@code true} if there are more results to fetch. */
+    public boolean hasMore() {
+      return nextCursor != null;
+    }
+  }
+
+  /**
+   * Opaque cursor for paginating a bucket-partitioned scan ({@link #findRecoverable}, {@link
+   * #findOverdueParkedSagas}). Implementations define the internal state (e.g., the next bucket
+   * index).
+   */
+  interface ScanCursor {}
 }

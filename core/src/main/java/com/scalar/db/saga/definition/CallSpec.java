@@ -65,4 +65,21 @@ public abstract sealed class CallSpec permits HttpCall {
    * May be empty.
    */
   public abstract Set<String> producedContextKeys();
+
+  /**
+   * Whether this call may complete <b>asynchronously</b>: the participant may acknowledge the
+   * request and deliver the result later via an external callback (parking the saga), instead of
+   * returning it in the response. Meaningful only on a forward phase (execution / reservation /
+   * confirmation) — a {@code ServiceStep} rejects an async backward-phase (compensation /
+   * cancellation) call. Daemon-mode only; embedded mode always blocks until completion.
+   */
+  public abstract boolean isAsync();
+
+  /**
+   * The callback-wait deadline in milliseconds: after this call parks on a {@code 202} (see {@link
+   * #isAsync()}), how long to wait for the external callback before the recovery sweeper times the
+   * step out. {@code 0} means "wait indefinitely" — bounded only by the saga-level timeout. Ignored
+   * for a non-async call.
+   */
+  public abstract long callbackTimeoutMillis();
 }

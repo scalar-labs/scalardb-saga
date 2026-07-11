@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -33,6 +34,7 @@ import com.scalar.db.saga.store.StatusEvent;
 import com.scalar.db.saga.store.StepEvent;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -302,7 +304,7 @@ class SagaEngineTest {
     }
 
     @Test
-    void executeSaga_stepReturnsPending_parksWithoutRecordingCompletion() throws Exception {
+    void executeSaga_stepReturnsPending_parksSaga() throws Exception {
       // Arrange — step1 returns pending, step2 should not be reached
       Step step1 = mock(Step.class);
       when(step1.getName()).thenReturn("s1");
@@ -312,17 +314,59 @@ class SagaEngineTest {
       registerStep("s2", step2);
       SagaDefinition def = sagaDefinitionWithRetry("s1", "s2");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.park(any(), anyInt(), any(StepEvent.class), any())).thenReturn(saga);
 
       // Act
       engine.executeSaga(def, saga, Map.of());
 
-      // Assert — step2 never executed (saga parked)
+      // Assert — step1 parked via store.park with a STEP_PENDING event (class step → no deadline)
+      ArgumentCaptor<StepEvent> pendingCaptor = ArgumentCaptor.forClass(StepEvent.class);
+      verify(store).park(any(), anyInt(), pendingCaptor.capture(), isNull());
+      assertThat(pendingCaptor.getValue().getEventType()).isEqualTo(EventType.STEP_PENDING);
+      assertThat(pendingCaptor.getValue().getStepName()).isEqualTo("s1");
+      // step2 never reached, and no SAGA_COMPLETED transition (the saga is parked)
       verify(step2, never()).execute(any(SagaContext.class));
-      // No STEP_COMPLETED event recorded for step1
-      verify(store, never()).recordStepEvent(anyString(), anyInt(), any(StepEvent.class));
-      // No SAGA_COMPLETED transition
       verify(store, never()).recordStatusEvent(any(), anyInt(), any(StatusEvent.class));
+    }
+
+    @Test
+    void executeSaga_stepReturnsPendingWithSagaTimeout_parksWithBoundedDeadline() throws Exception {
+      // Arrange — a fixed clock so the parked deadline is deterministic. A saga-level timeout caps
+      // the park deadline even for a class step (callback = 0), giving deadline = now + saga
+      // timeout.
+      Clock fixedClock = Clock.fixed(NOW, ZoneOffset.UTC);
+      SagaEngine clockEngine =
+          new SagaEngine(
+              store,
+              new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
+              OWNER_ID,
+              new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
+              fixedClock);
+      Step step1 = mock(Step.class);
+      when(step1.getName()).thenReturn("s1");
+      when(step1.execute(any(SagaContext.class))).thenReturn(StepResult.pending());
+      registerStep("s1", step1);
+      SagaDefinition def =
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
+              .defaultRetryPolicy(fastRetryPolicy())
+              .timeoutMillis(60_000)
+              .step("s1", "com.example.s1")
+              .add()
+              .build();
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      when(store.park(any(), anyInt(), any(StepEvent.class), any())).thenReturn(saga);
+
+      // Act
+      clockEngine.executeSaga(def, saga, Map.of());
+      clockEngine.close();
+
+      // Assert — parked with a deadline of exactly now + saga timeout (the class step contributes
+      // no bound of its own)
+      ArgumentCaptor<Instant> deadlineCaptor = ArgumentCaptor.forClass(Instant.class);
+      verify(store).park(any(), anyInt(), any(StepEvent.class), deadlineCaptor.capture());
+      assertThat(deadlineCaptor.getValue())
+          .isEqualTo(Instant.ofEpochMilli(NOW.toEpochMilli() + 60_000));
     }
   }
 
@@ -453,6 +497,7 @@ class SagaEngineTest {
       when(step.getName()).thenReturn(name);
       try {
         when(step.reserve(any(SagaContext.class))).thenReturn(StepResult.empty());
+        when(step.confirm(any(SagaContext.class))).thenReturn(StepResult.empty());
       } catch (StepExecutionException e) {
         throw new RuntimeException(e);
       }
@@ -1226,7 +1271,7 @@ class SagaEngineTest {
     private List<StepWithPolicy> createPlan(Step... steps) {
       List<StepWithPolicy> plan = new ArrayList<>();
       for (Step step : steps) {
-        plan.add(new StepWithPolicy(step, fastRetryPolicy(), fastRetryPolicy(), 0));
+        plan.add(new StepWithPolicy(step, fastRetryPolicy(), fastRetryPolicy(), 0, 0));
       }
       return plan;
     }

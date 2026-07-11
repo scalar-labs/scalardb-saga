@@ -18,6 +18,8 @@ public enum EventType {
   SAGA_ESCALATED,
 
   // --- Step-level (StepEvent) ---
+  STEP_PENDING,
+  STEP_REISSUING,
   STEP_COMPLETED,
   STEP_FAILED,
   STEP_COMPENSATED,

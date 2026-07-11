@@ -97,6 +97,33 @@ public final class CrashingStoreDecorator implements SagaStore {
   }
 
   @Override
+  public SagaStateSnapshot park(
+      SagaStateSnapshot current,
+      int sequence,
+      StepEvent pendingEvent,
+      @Nullable Instant parkedDeadline) {
+    return delegate.park(current, sequence, pendingEvent, parkedDeadline);
+  }
+
+  @Override
+  public SagaStateSnapshot resumeParkedStep(
+      SagaStateSnapshot current, int sequence, StepEvent completedEvent) {
+    return delegate.resumeParkedStep(current, sequence, completedEvent);
+  }
+
+  @Override
+  public SagaStateSnapshot failParkedStep(
+      SagaStateSnapshot current, int sequence, StepEvent failedEvent, SagaStatus targetStatus) {
+    return delegate.failParkedStep(current, sequence, failedEvent, targetStatus);
+  }
+
+  @Override
+  public SagaStateSnapshot redriveParkedStep(
+      SagaStateSnapshot current, int sequence, StepEvent redriveEvent) {
+    return delegate.redriveParkedStep(current, sequence, redriveEvent);
+  }
+
+  @Override
   public List<SagaEvent> getEvents(String sagaId) {
     return delegate.getEvents(sagaId);
   }
@@ -112,9 +139,8 @@ public final class CrashingStoreDecorator implements SagaStore {
   }
 
   @Override
-  public Recoverables findRecoverable(
-      long recoveryTimeoutMillis, @Nullable RecoverablesCursor cursor) {
-    return delegate.findRecoverable(recoveryTimeoutMillis, cursor);
+  public Recoverables findRecoverable(Instant threshold, @Nullable ScanCursor cursor) {
+    return delegate.findRecoverable(threshold, cursor);
   }
 
   @Override
@@ -125,6 +151,11 @@ public final class CrashingStoreDecorator implements SagaStore {
   @Override
   public void markForRecovery(String sagaId) {
     delegate.markForRecovery(sagaId);
+  }
+
+  @Override
+  public OverdueParked findOverdueParkedSagas(Instant threshold, @Nullable ScanCursor cursor) {
+    return delegate.findOverdueParkedSagas(threshold, cursor);
   }
 
   @Override

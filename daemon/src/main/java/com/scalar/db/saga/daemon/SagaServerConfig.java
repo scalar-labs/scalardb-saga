@@ -83,9 +83,23 @@ public final class SagaServerConfig {
   static final String SERVICE_BASE_URL_SUFFIX = ".base_url";
   static final String SYNC_TIMEOUT_MILLIS_KEY = SERVER_PREFIX + "sync_timeout_millis";
   static final String SYNC_MAX_WAIT_MILLIS_KEY = SERVER_PREFIX + "sync_max_wait_millis";
+  // Security keys — daemon-only (embedded mode delegates auth to the host framework).
   static final String SECURITY_PREFIX = SERVER_PREFIX + "security.";
   static final String SECURITY_PROVIDER_KEY = SECURITY_PREFIX + "provider";
   static final String INSECURE_MODE_ENABLED_KEY = SECURITY_PREFIX + "insecure_mode.enabled";
+  // The HMAC callback secret enables async-callback authentication; its value may be a
+  // ${file:}/${env:} secret reference (resolved by resolveSecrets, like every other
+  // scalar.db.saga.* key).
+  static final String CALLBACK_SECRET_KEY = SECURITY_PREFIX + "callback_secret";
+  // The daemon's externally-reachable base URL, used to build the callback URL handed to a
+  // participant for an async step. Not a secret (a plain server address), so it lives directly
+  // under server.* rather than server.security.*.
+  static final String CALLBACK_BASE_URL_KEY = SERVER_PREFIX + "callback_base_url";
+  // Optional TTL (seconds) on an async callback token's iat: a token older than this is rejected,
+  // so a leaked callback URL is not a non-expiring credential. 0 (default) disables the check; when
+  // set it must exceed the longest a step can legitimately stay parked (its callback timeout), or a
+  // genuine late callback is rejected.
+  static final String CALLBACK_MAX_AGE_SECONDS_KEY = SECURITY_PREFIX + "callback_max_age_seconds";
   static final String MAX_THREADS_KEY = SERVER_PREFIX + "max_threads";
   static final String MIN_THREADS_KEY = SERVER_PREFIX + "min_threads";
   static final String DEFAULT_SAGA_TIMEOUT_MILLIS_KEY =
@@ -105,6 +119,7 @@ public final class SagaServerConfig {
   static final String DEFAULT_SECURITY_PROVIDER =
       "noop"; // no authentication (see NoopSecurityProvider)
   static final boolean DEFAULT_INSECURE_MODE_ENABLED = false; // must be enabled to run noop exposed
+  static final long DEFAULT_CALLBACK_MAX_AGE_SECONDS = 0L; // 0 = disabled (no iat TTL)
   static final int DEFAULT_MAX_THREADS = 200; // Jetty's own default
   static final int DEFAULT_MIN_THREADS = 8; // Jetty's own default
   static final long DEFAULT_SAGA_TIMEOUT_MILLIS =
@@ -120,6 +135,9 @@ public final class SagaServerConfig {
   private final long syncMaxWaitMillis;
   private final String securityProvider;
   private final boolean insecureModeEnabled;
+  private final @Nullable String callbackSecret;
+  private final @Nullable String callbackBaseUrl;
+  private final long callbackMaxAgeSeconds;
   private final int maxThreads;
   private final int minThreads;
   private final long defaultSagaTimeoutMillis;
@@ -140,6 +158,9 @@ public final class SagaServerConfig {
       long syncMaxWaitMillis,
       String securityProvider,
       boolean insecureModeEnabled,
+      @Nullable String callbackSecret,
+      @Nullable String callbackBaseUrl,
+      long callbackMaxAgeSeconds,
       int maxThreads,
       int minThreads,
       long defaultSagaTimeoutMillis,
@@ -157,6 +178,9 @@ public final class SagaServerConfig {
     this.syncMaxWaitMillis = syncMaxWaitMillis;
     this.securityProvider = securityProvider;
     this.insecureModeEnabled = insecureModeEnabled;
+    this.callbackSecret = callbackSecret;
+    this.callbackBaseUrl = callbackBaseUrl;
+    this.callbackMaxAgeSeconds = callbackMaxAgeSeconds;
     this.maxThreads = maxThreads;
     this.minThreads = minThreads;
     this.defaultSagaTimeoutMillis = defaultSagaTimeoutMillis;
@@ -234,6 +258,18 @@ public final class SagaServerConfig {
             properties.getProperty(INSECURE_MODE_ENABLED_KEY),
             INSECURE_MODE_ENABLED_KEY,
             DEFAULT_INSECURE_MODE_ENABLED);
+    // Treat blank as unset (no callback auth configured → no callback route). Do not trim: an HMAC
+    // secret is opaque and could legitimately contain leading/trailing characters.
+    String callbackSecretRaw = properties.getProperty(CALLBACK_SECRET_KEY);
+    String callbackSecret =
+        (callbackSecretRaw == null || callbackSecretRaw.isBlank()) ? null : callbackSecretRaw;
+    String callbackBaseUrl = parseCallbackBaseUrl(properties.getProperty(CALLBACK_BASE_URL_KEY));
+    long callbackMaxAgeSeconds =
+        parseBoundedLong(
+            properties.getProperty(CALLBACK_MAX_AGE_SECONDS_KEY),
+            CALLBACK_MAX_AGE_SECONDS_KEY,
+            DEFAULT_CALLBACK_MAX_AGE_SECONDS,
+            0L);
     int maxThreads =
         (int)
             parseBoundedLong(
@@ -280,6 +316,9 @@ public final class SagaServerConfig {
         syncMaxWaitMillis,
         securityProvider,
         insecureModeEnabled,
+        callbackSecret,
+        callbackBaseUrl,
+        callbackMaxAgeSeconds,
         maxThreads,
         minThreads,
         defaultSagaTimeoutMillis,
@@ -391,41 +430,6 @@ public final class SagaServerConfig {
   }
 
   /**
-   * Returns the gRPC server's maximum inbound message size in bytes, aligned with the store's
-   * max-event-payload cap so neither transport accepts an input the store would reject (and so an
-   * unauthenticated caller cannot push an oversized message). The store's {@code 0} ("no limit") is
-   * mapped to {@link Integer#MAX_VALUE} here, since gRPC reads {@code 0} as "reject all non-empty
-   * messages". Defaults to {@value #DEFAULT_MAX_EVENT_PAYLOAD_BYTES} bytes.
-   */
-  public int grpcMaxInboundMessageBytes() {
-    return grpcMaxInboundMessageBytes;
-  }
-
-  /**
-   * Parses the gRPC inbound cap from the store's max-event-payload key once at construction (like
-   * every other setting), so an invalid value fails fast at load rather than when the server is
-   * built.
-   */
-  private static int parseGrpcMaxInboundMessageBytes(Properties properties) {
-    String value = properties.getProperty(STORE_MAX_EVENT_PAYLOAD_BYTES_KEY);
-    if (value == null) {
-      return DEFAULT_MAX_EVENT_PAYLOAD_BYTES;
-    }
-    int bytes;
-    try {
-      bytes = Integer.parseInt(value.trim());
-    } catch (NumberFormatException e) {
-      throw new IllegalArgumentException(
-          "Invalid value for '" + STORE_MAX_EVENT_PAYLOAD_BYTES_KEY + "': " + value, e);
-    }
-    if (bytes < 0) {
-      throw new IllegalArgumentException(
-          "'" + STORE_MAX_EVENT_PAYLOAD_BYTES_KEY + "' must not be negative, got " + bytes);
-    }
-    return bytes == 0 ? Integer.MAX_VALUE : bytes;
-  }
-
-  /**
    * Returns the synchronous-start timeout in milliseconds, or {@code 0} when disabled (the
    * default). When positive, a synchronous {@code POST}/{@code PUT} that has not reached a terminal
    * state within this bound returns {@code 202} and the saga keeps running on the engine's executor
@@ -467,20 +471,31 @@ public final class SagaServerConfig {
   }
 
   /**
-   * Returns a defensive copy of the underlying configuration properties forwarded to construct the
-   * saga engine's persistence.
+   * Returns the HMAC secret used to authenticate async-callback requests, or empty when unset. When
+   * empty, the daemon registers no callback route (async completion is not enabled). The value may
+   * be supplied as a {@code ${file:}}/{@code ${env:}} secret reference.
    */
-  public Properties properties() {
-    return copyOf(properties);
+  public Optional<String> callbackSecret() {
+    return Optional.ofNullable(callbackSecret);
   }
 
   /**
-   * Returns a defensive copy of the <b>pre-resolution</b> properties (secret references not yet
-   * expanded). A provider uses this to distinguish a {@code ${...}} secret reference from an inline
-   * value — indistinguishable after resolution — e.g. the API-key provider rejects inline keys.
+   * Returns the daemon's externally-reachable base URL used to build async-step callback URLs, or
+   * empty when unset. Any trailing {@code /} is stripped so a callback path can be appended
+   * directly.
    */
-  Properties rawProperties() {
-    return copyOf(rawProperties);
+  public Optional<String> callbackBaseUrl() {
+    return Optional.ofNullable(callbackBaseUrl);
+  }
+
+  /**
+   * Returns the TTL (seconds) applied to an async callback token's {@code iat}: a callback whose
+   * token is older than this is rejected as expired. {@code 0} (the default) disables the check.
+   * When enabled it must exceed the longest a step can stay parked (its callback timeout), or a
+   * genuine late callback is rejected.
+   */
+  public long callbackMaxAgeSeconds() {
+    return callbackMaxAgeSeconds;
   }
 
   /**
@@ -518,6 +533,34 @@ public final class SagaServerConfig {
     return maxStartRequestsPerMinute;
   }
 
+  /**
+   * Returns the gRPC server's maximum inbound message size in bytes, aligned with the store's
+   * max-event-payload cap so neither transport accepts an input the store would reject (and so an
+   * unauthenticated caller cannot push an oversized message). The store's {@code 0} ("no limit") is
+   * mapped to {@link Integer#MAX_VALUE} here, since gRPC reads {@code 0} as "reject all non-empty
+   * messages". Defaults to {@value #DEFAULT_MAX_EVENT_PAYLOAD_BYTES} bytes.
+   */
+  public int grpcMaxInboundMessageBytes() {
+    return grpcMaxInboundMessageBytes;
+  }
+
+  /**
+   * Returns a defensive copy of the underlying configuration properties forwarded to construct the
+   * saga engine's persistence.
+   */
+  public Properties properties() {
+    return copyOf(properties);
+  }
+
+  /**
+   * Returns a defensive copy of the <b>pre-resolution</b> properties (secret references not yet
+   * expanded). A provider uses this to distinguish a {@code ${...}} secret reference from an inline
+   * value — indistinguishable after resolution — e.g. the API-key provider rejects inline keys.
+   */
+  Properties rawProperties() {
+    return copyOf(rawProperties);
+  }
+
   /** Returns the optional path to declarative saga definitions loaded at startup. */
   public Optional<Path> definitionsPath() {
     return Optional.ofNullable(definitionsPath);
@@ -545,6 +588,18 @@ public final class SagaServerConfig {
     return (value == null || value.isBlank())
         ? DEFAULT_SECURITY_PROVIDER
         : value.trim().toLowerCase(Locale.ROOT);
+  }
+
+  /** Trims the callback base URL and strips trailing {@code /}s; blank (or slashes only) ⇒ null. */
+  private static @Nullable String parseCallbackBaseUrl(@Nullable String value) {
+    if (value == null || value.isBlank()) {
+      return null;
+    }
+    String trimmed = value.trim();
+    while (trimmed.endsWith("/")) {
+      trimmed = trimmed.substring(0, trimmed.length() - 1);
+    }
+    return trimmed.isEmpty() ? null : trimmed;
   }
 
   private static int parsePort(@Nullable String value, String key, int defaultPort) {
@@ -603,6 +658,30 @@ public final class SagaServerConfig {
           "'" + key + "' must be >= " + minInclusive + ", got " + millis);
     }
     return millis;
+  }
+
+  /**
+   * Parses the gRPC inbound cap from the store's max-event-payload key once at construction (like
+   * every other setting), so an invalid value fails fast at load rather than when the server is
+   * built.
+   */
+  private static int parseGrpcMaxInboundMessageBytes(Properties properties) {
+    String value = properties.getProperty(STORE_MAX_EVENT_PAYLOAD_BYTES_KEY);
+    if (value == null) {
+      return DEFAULT_MAX_EVENT_PAYLOAD_BYTES;
+    }
+    int bytes;
+    try {
+      bytes = Integer.parseInt(value.trim());
+    } catch (NumberFormatException e) {
+      throw new IllegalArgumentException(
+          "Invalid value for '" + STORE_MAX_EVENT_PAYLOAD_BYTES_KEY + "': " + value, e);
+    }
+    if (bytes < 0) {
+      throw new IllegalArgumentException(
+          "'" + STORE_MAX_EVENT_PAYLOAD_BYTES_KEY + "' must not be negative, got " + bytes);
+    }
+    return bytes == 0 ? Integer.MAX_VALUE : bytes;
   }
 
   /**
