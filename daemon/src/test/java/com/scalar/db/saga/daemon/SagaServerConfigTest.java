@@ -114,6 +114,43 @@ class SagaServerConfigTest {
   }
 
   @Test
+  void maxQueuedRequests_unset_defaultsToMultipleOfMaxThreads() {
+    SagaServerConfig config = SagaServerConfig.load(new Properties());
+
+    assertThat(config.maxQueuedRequests())
+        .isEqualTo(
+            SagaServerConfig.DEFAULT_MAX_QUEUED_REQUESTS_PER_THREAD
+                * SagaServerConfig.DEFAULT_MAX_THREADS);
+  }
+
+  @Test
+  void maxQueuedRequests_unset_scalesWithConfiguredMaxThreads() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.MAX_THREADS_KEY, "50");
+
+    // The default derives from maxThreads, so the shed point stays proportional to the pool.
+    assertThat(SagaServerConfig.load(props).maxQueuedRequests())
+        .isEqualTo(SagaServerConfig.DEFAULT_MAX_QUEUED_REQUESTS_PER_THREAD * 50);
+  }
+
+  @Test
+  void maxQueuedRequests_configured_isParsed() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.MAX_QUEUED_REQUESTS_KEY, "500");
+
+    assertThat(SagaServerConfig.load(props).maxQueuedRequests()).isEqualTo(500);
+  }
+
+  @Test
+  void maxQueuedRequests_zero_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.MAX_QUEUED_REQUESTS_KEY, "0");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void defaultSagaTimeoutMillis_unset_defaultsToDisabled() {
     assertThat(SagaServerConfig.load(new Properties()).defaultSagaTimeoutMillis()).isZero();
   }

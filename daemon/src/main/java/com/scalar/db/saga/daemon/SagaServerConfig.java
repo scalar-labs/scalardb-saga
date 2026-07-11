@@ -46,6 +46,10 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code scalar.db.saga.server.max_threads} / {@code min_threads} — HTTP request thread-pool
  *       bounds (defaults {@code 200} / {@code 8}); the max caps concurrent request threads so a
  *       burst of slow requests cannot exhaust threads
+ *   <li>{@code scalar.db.saga.server.max_queued_requests} — cap on requests waiting for a handler
+ *       thread once all {@code max_threads} are busy; further requests are shed (fast failure)
+ *       rather than queued unboundedly. Defaults to {@code 2 × max_threads}, bounding worst-case
+ *       queueing delay to roughly twice a request's service time
  *   <li>{@code scalar.db.saga.server.default_saga_timeout_millis} — a default saga timeout applied
  *       to a loaded definition that set none ({@code 0} = unbounded); {@code 0} (default) disables
  *       it. A definition's own timeout always wins
@@ -105,6 +109,7 @@ public final class SagaServerConfig {
   static final String CALLBACK_MAX_AGE_SECONDS_KEY = SECURITY_PREFIX + "callback_max_age_seconds";
   static final String MAX_THREADS_KEY = SERVER_PREFIX + "max_threads";
   static final String MIN_THREADS_KEY = SERVER_PREFIX + "min_threads";
+  static final String MAX_QUEUED_REQUESTS_KEY = SERVER_PREFIX + "max_queued_requests";
   static final String DEFAULT_SAGA_TIMEOUT_MILLIS_KEY =
       SERVER_PREFIX + "default_saga_timeout_millis";
   static final String MAX_START_REQUESTS_PER_MINUTE_KEY =
@@ -125,6 +130,9 @@ public final class SagaServerConfig {
   static final long DEFAULT_CALLBACK_MAX_AGE_SECONDS = 0L; // 0 = disabled (no iat TTL)
   static final int DEFAULT_MAX_THREADS = 200; // Jetty's own default
   static final int DEFAULT_MIN_THREADS = 8; // Jetty's own default
+  // Default queue cap = this multiple of maxThreads, bounding worst-case queueing delay to about
+  // this many request service-times before the server sheds load.
+  static final int DEFAULT_MAX_QUEUED_REQUESTS_PER_THREAD = 2;
   static final long DEFAULT_SAGA_TIMEOUT_MILLIS =
       0L; // 0 = disabled (definition's own timeout wins)
   static final int DEFAULT_MAX_START_REQUESTS_PER_MINUTE = 0; // 0 = disabled (no rate limiting)
@@ -143,6 +151,7 @@ public final class SagaServerConfig {
   private final long callbackMaxAgeSeconds;
   private final int maxThreads;
   private final int minThreads;
+  private final int maxQueuedRequests;
   private final long defaultSagaTimeoutMillis;
   private final int maxStartRequestsPerMinute;
   private final int grpcMaxInboundMessageBytes;
@@ -166,6 +175,7 @@ public final class SagaServerConfig {
       long callbackMaxAgeSeconds,
       int maxThreads,
       int minThreads,
+      int maxQueuedRequests,
       long defaultSagaTimeoutMillis,
       int maxStartRequestsPerMinute,
       Properties properties,
@@ -186,6 +196,7 @@ public final class SagaServerConfig {
     this.callbackMaxAgeSeconds = callbackMaxAgeSeconds;
     this.maxThreads = maxThreads;
     this.minThreads = minThreads;
+    this.maxQueuedRequests = maxQueuedRequests;
     this.defaultSagaTimeoutMillis = defaultSagaTimeoutMillis;
     this.maxStartRequestsPerMinute = maxStartRequestsPerMinute;
     this.properties = applyStoreDefaults(copyOf(properties));
@@ -293,6 +304,17 @@ public final class SagaServerConfig {
               + maxThreads
               + ").");
     }
+    // Cap the handler-thread backlog. Unset defaults to a multiple of maxThreads so the worst-case
+    // queueing delay stays proportional to the pool (about that many request service-times) rather
+    // than being an absolute number that means wildly different latency at different pool sizes.
+    // Computed in long to avoid int overflow before the (int) narrowing.
+    int maxQueuedRequests =
+        (int)
+            parseBoundedLong(
+                properties.getProperty(MAX_QUEUED_REQUESTS_KEY),
+                MAX_QUEUED_REQUESTS_KEY,
+                (long) DEFAULT_MAX_QUEUED_REQUESTS_PER_THREAD * maxThreads,
+                1L);
     long defaultSagaTimeoutMillis =
         parseBoundedLong(
             properties.getProperty(DEFAULT_SAGA_TIMEOUT_MILLIS_KEY),
@@ -324,6 +346,7 @@ public final class SagaServerConfig {
         callbackMaxAgeSeconds,
         maxThreads,
         minThreads,
+        maxQueuedRequests,
         defaultSagaTimeoutMillis,
         maxStartRequestsPerMinute,
         properties,
@@ -516,6 +539,16 @@ public final class SagaServerConfig {
    */
   public int minThreads() {
     return minThreads;
+  }
+
+  /**
+   * Returns the cap on requests waiting for a handler thread once all {@link #maxThreads()} are
+   * busy. Beyond it the server sheds load (fast failure) instead of queueing unboundedly. Defaults
+   * to {@value #DEFAULT_MAX_QUEUED_REQUESTS_PER_THREAD} × {@link #maxThreads()}, keeping the
+   * worst-case queueing delay proportional to the pool.
+   */
+  public int maxQueuedRequests() {
+    return maxQueuedRequests;
   }
 
   /**

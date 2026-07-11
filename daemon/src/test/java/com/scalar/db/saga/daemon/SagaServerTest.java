@@ -317,6 +317,24 @@ class SagaServerTest {
   }
 
   @Test
+  void start_withExplicitMaxQueuedRequests_bindsWithBoundedQueue(@TempDir Path dir)
+      throws Exception {
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
+    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.MAX_QUEUED_REQUESTS_KEY, "16"); // small explicit cap
+    try (SagaServer server =
+        new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class)).start()) {
+      // The 4-arg QueuedThreadPool (bounded job queue) boots and binds the HTTP port; a bad queue
+      // capacity would otherwise surface here as a startup failure.
+      assertThat(server.port()).isGreaterThan(0);
+    }
+  }
+
+  @Test
   void start_callbackSecretWithoutBaseUrl_registersCallbackRoute(@TempDir Path dir)
       throws Exception {
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));

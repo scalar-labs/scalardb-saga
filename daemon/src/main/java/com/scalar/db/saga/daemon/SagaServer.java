@@ -41,6 +41,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Stream;
+import org.eclipse.jetty.util.BlockingArrayQueue;
 import org.eclipse.jetty.util.thread.QueuedThreadPool;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -276,18 +277,25 @@ public final class SagaServer implements AutoCloseable {
   }
 
   /**
-   * Builds the Javalin app with a bounded Jetty thread pool, so a burst of slow requests cannot
-   * exhaust request-handling threads. {@code maxThreads} caps concurrency; the idle timeout lets
-   * the pool shrink back toward {@code minThreads} when quiet.
+   * Builds the Javalin app with a bounded Jetty thread pool <b>and</b> a bounded job queue, so a
+   * burst of slow requests can exhaust neither request-handling threads nor memory. {@code
+   * maxThreads} caps concurrency; the idle timeout lets the pool shrink back toward {@code
+   * minThreads} when quiet; and once all threads are busy, at most {@code maxQueuedRequests} more
+   * requests wait before the server sheds load (fast failure) rather than queueing unboundedly.
    */
   private static Javalin createHttpServer(SagaServerConfig config) {
+    int queueCap = config.maxQueuedRequests();
+    // A fixed-capacity queue (initial == growBy == max == cap): it never grows past the cap, so the
+    // backlog is memory-bounded and the pool rejects further work once threads and queue are full.
+    BlockingArrayQueue<Runnable> jobQueue = new BlockingArrayQueue<>(queueCap, queueCap, queueCap);
     return Javalin.create(
         cfg ->
             cfg.jetty.threadPool =
                 new QueuedThreadPool(
                     config.maxThreads(),
                     config.minThreads(),
-                    (int) THREAD_POOL_IDLE_TIMEOUT_MILLIS));
+                    (int) THREAD_POOL_IDLE_TIMEOUT_MILLIS,
+                    jobQueue));
   }
 
   private void registerRoutes(Javalin httpServer) {
