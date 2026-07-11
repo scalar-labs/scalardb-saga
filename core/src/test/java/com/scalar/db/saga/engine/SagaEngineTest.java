@@ -34,6 +34,7 @@ import com.scalar.db.saga.store.StatusEvent;
 import com.scalar.db.saga.store.StepEvent;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -330,8 +331,17 @@ class SagaEngineTest {
 
     @Test
     void executeSaga_stepReturnsPendingWithSagaTimeout_parksWithBoundedDeadline() throws Exception {
-      // Arrange — a saga-level timeout caps the park deadline even for a class step (callback = 0),
-      // so the park gets a non-null deadline
+      // Arrange — a fixed clock so the parked deadline is deterministic. A saga-level timeout caps
+      // the park deadline even for a class step (callback = 0), giving deadline = now + saga
+      // timeout.
+      Clock fixedClock = Clock.fixed(NOW, ZoneOffset.UTC);
+      SagaEngine clockEngine =
+          new SagaEngine(
+              store,
+              new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
+              OWNER_ID,
+              new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
+              fixedClock);
       Step step1 = mock(Step.class);
       when(step1.getName()).thenReturn("s1");
       when(step1.execute(any(SagaContext.class))).thenReturn(StepResult.pending());
@@ -348,12 +358,15 @@ class SagaEngineTest {
       when(store.park(any(), anyInt(), any(StepEvent.class), any())).thenReturn(saga);
 
       // Act
-      engine.executeSaga(def, saga, Map.of());
+      clockEngine.executeSaga(def, saga, Map.of());
+      clockEngine.close();
 
-      // Assert — parked with a non-null deadline bounded by the saga timeout
+      // Assert — parked with a deadline of exactly now + saga timeout (the class step contributes
+      // no bound of its own)
       ArgumentCaptor<Instant> deadlineCaptor = ArgumentCaptor.forClass(Instant.class);
       verify(store).park(any(), anyInt(), any(StepEvent.class), deadlineCaptor.capture());
-      assertThat(deadlineCaptor.getValue()).isNotNull();
+      assertThat(deadlineCaptor.getValue())
+          .isEqualTo(Instant.ofEpochMilli(NOW.toEpochMilli() + 60_000));
     }
   }
 
@@ -484,6 +497,7 @@ class SagaEngineTest {
       when(step.getName()).thenReturn(name);
       try {
         when(step.reserve(any(SagaContext.class))).thenReturn(StepResult.empty());
+        when(step.confirm(any(SagaContext.class))).thenReturn(StepResult.empty());
       } catch (StepExecutionException e) {
         throw new RuntimeException(e);
       }

@@ -5,6 +5,7 @@ import com.scalar.db.saga.api.StepResult;
 import com.scalar.db.saga.api.TccStep;
 import com.scalar.db.saga.definition.CallSpec;
 import com.scalar.db.saga.definition.SagaDefinition.ServiceStep.Phase;
+import com.scalar.db.saga.definition.TccStepNaming;
 import com.scalar.db.saga.exception.StepCompensationException;
 import com.scalar.db.saga.exception.StepExecutionException;
 import java.util.Map;
@@ -44,19 +45,23 @@ final class DeclarativeBindingTccStep implements TccStep {
     return name;
   }
 
+  // Each phase calls out under its phase-qualified step name (e.g. seat.reserve). This must match
+  // the name the engine's TccReserveStep/TccConfirmStep wrappers record in the STEP_PENDING marker,
+  // so an async step's callback URL (keyed on the name passed here) resolves to the parked step.
+
   @Override
   public StepResult reserve(SagaContext context) throws StepExecutionException {
     try {
-      return transport.call(reserve, context, name);
+      return transport.call(reserve, context, name + TccStepNaming.RESERVE_SUFFIX);
     } catch (TransportException e) {
       throw new StepExecutionException(e, e.isRetryable(), e.knownNotCommitted());
     }
   }
 
   @Override
-  public void confirm(SagaContext context) throws StepExecutionException {
+  public StepResult confirm(SagaContext context) throws StepExecutionException {
     try {
-      transport.call(confirm, context, name);
+      return transport.call(confirm, context, name + TccStepNaming.CONFIRM_SUFFIX);
     } catch (TransportException e) {
       throw new StepExecutionException(e, e.isRetryable());
     }
@@ -65,7 +70,7 @@ final class DeclarativeBindingTccStep implements TccStep {
   @Override
   public void cancel(SagaContext context) throws StepCompensationException {
     try {
-      transport.call(cancel, context, name);
+      transport.call(cancel, context, name + TccStepNaming.CANCEL_SUFFIX);
     } catch (TransportException e) {
       throw new StepCompensationException(e);
     }

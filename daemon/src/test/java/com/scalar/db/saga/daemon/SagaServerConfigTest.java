@@ -136,6 +136,29 @@ class SagaServerConfigTest {
   }
 
   @Test
+  void load_unsetCallbackMaxAge_disabledByDefault() {
+    assertThat(SagaServerConfig.load(new Properties()).callbackMaxAgeSeconds())
+        .isEqualTo(SagaServerConfig.DEFAULT_CALLBACK_MAX_AGE_SECONDS);
+  }
+
+  @Test
+  void load_callbackMaxAgeGiven_parsesValue() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.CALLBACK_MAX_AGE_SECONDS_KEY, "3600");
+
+    assertThat(SagaServerConfig.load(props).callbackMaxAgeSeconds()).isEqualTo(3600L);
+  }
+
+  @Test
+  void load_negativeCallbackMaxAge_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.CALLBACK_MAX_AGE_SECONDS_KEY, "-1");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void load_unsetSyncMaxWait_defaultsToCeiling() {
     assertThat(SagaServerConfig.load(new Properties()).syncMaxWaitMillis())
         .isEqualTo(SagaServerConfig.DEFAULT_SYNC_MAX_WAIT_MILLIS);

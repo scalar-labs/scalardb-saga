@@ -480,7 +480,9 @@ class ReflectiveStepResolverTest {
     }
 
     @Override
-    public void confirm(SagaContext context) throws StepExecutionException {}
+    public StepResult confirm(SagaContext context) throws StepExecutionException {
+      return StepResult.empty();
+    }
 
     @Override
     public void cancel(SagaContext context) throws StepCompensationException {}

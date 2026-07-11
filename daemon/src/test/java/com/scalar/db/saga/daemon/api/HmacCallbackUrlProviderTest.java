@@ -25,7 +25,8 @@ class HmacCallbackUrlProviderTest {
         .endsWith("&iat=1700000000");
     // The token verifies against the same secret + signed data the receiving route recomputes.
     String token = url.substring(url.indexOf("token=") + "token=".length(), url.indexOf("&iat="));
-    assertThat(HmacUtils.verify(SECRET, "saga-1:debit:1700000000", token)).isTrue();
+    String signedData = HmacUtils.callbackSignedData("saga-1", "debit", "1700000000");
+    assertThat(HmacUtils.verify(SECRET, signedData, token)).isTrue();
   }
 
   @Test

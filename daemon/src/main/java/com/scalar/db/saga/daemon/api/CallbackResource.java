@@ -5,9 +5,9 @@ import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import io.javalin.Javalin;
 import io.javalin.http.Context;
+import java.time.Clock;
 import java.util.Map;
 import java.util.regex.Pattern;
-import org.jspecify.annotations.Nullable;
 
 /**
  * Registers the async-callback completion route:
@@ -22,7 +22,9 @@ import org.jspecify.annotations.Nullable;
  * <p><b>Auth.</b> This route is authenticated by the HMAC callback token, <em>not</em> by the
  * caller-facing auth (e.g. JWT) that guards the other endpoints — a participant service holds a
  * signed callback URL, not a user credential. {@link #PATH} is exposed as the single contract by
- * which a future auth layer exempts this route from that auth.
+ * which a future auth layer exempts this route from that auth. An optional {@code iat} TTL
+ * (configured via {@code register}) additionally rejects a token older than a maximum age, so a
+ * leaked callback URL is not a non-expiring credential.
  *
  * <p><b>Idempotency.</b> A callback for a saga that is no longer {@code WAITING} — a duplicate
  * callback (a prior one already resumed it) or a late one (the timeout sweep already resolved it) —
@@ -51,15 +53,22 @@ public final class CallbackResource {
    * @param orchestrator the orchestrator whose {@link DefaultSagaOrchestrator#completeStepAsync}
    *     resumes the parked saga
    * @param callbackSecret the HMAC secret the callback token is verified against
+   * @param maxAgeSeconds the {@code iat} TTL in seconds; a token older than this is rejected as
+   *     expired. {@code 0} disables the check
+   * @param clock the clock used to age the token's {@code iat} against {@code maxAgeSeconds}
    */
   public static void register(
-      Javalin app, DefaultSagaOrchestrator orchestrator, String callbackSecret) {
+      Javalin app,
+      DefaultSagaOrchestrator orchestrator,
+      String callbackSecret,
+      long maxAgeSeconds,
+      Clock clock) {
     app.post(
         PATH,
         ctx -> {
           String sagaId = ctx.pathParam("id");
           String stepName = ctx.pathParam("stepName");
-          verifyToken(ctx, callbackSecret, sagaId, stepName);
+          verifyToken(ctx, callbackSecret, maxAgeSeconds, clock, sagaId, stepName);
           Map<String, Object> output = parseOutput(ctx);
           SagaStateSnapshot snapshot = complete(orchestrator, sagaId, stepName, output);
           ctx.status(200).json(SagaSnapshotResponse.from(snapshot));
@@ -67,25 +76,52 @@ public final class CallbackResource {
   }
 
   /**
-   * Verifies the HMAC token over {@code sagaId:stepName:iat}. Both {@code token} and {@code iat}
-   * query parameters are required (the token is computed over {@code iat}, so it cannot be checked
-   * without it). The token must match the lowercase-hex HMAC-SHA256 shape before the signature is
-   * checked, so a malformed value is rejected without computing an HMAC. Any missing, malformed, or
-   * non-matching value throws {@link CallbackAuthException} → {@code 401}.
+   * Verifies the HMAC token over the data produced by {@link HmacUtils#callbackSignedData}. Both
+   * {@code token} and {@code iat} query parameters are required (the token is computed over {@code
+   * iat}, so it cannot be checked without it). The token must match the lowercase-hex HMAC-SHA256
+   * shape before the signature is checked, so a malformed value is rejected without computing an
+   * HMAC. When {@code maxAgeSeconds} is positive, an authenticated token older than that is
+   * rejected as expired. Any missing, malformed, non-matching, or expired value throws {@link
+   * CallbackAuthException} → {@code 401}.
    */
   private static void verifyToken(
-      Context ctx, String callbackSecret, String sagaId, String stepName) {
+      Context ctx,
+      String callbackSecret,
+      long maxAgeSeconds,
+      Clock clock,
+      String sagaId,
+      String stepName) {
     String token = ctx.queryParam("token");
     String iat = ctx.queryParam("iat");
-    if (isBlank(token) || isBlank(iat)) {
+    if (token == null || token.isBlank() || iat == null || iat.isBlank()) {
       throw new CallbackAuthException("missing callback token or iat");
     }
     if (!TOKEN_PATTERN.matcher(token).matches()) {
       throw new CallbackAuthException("malformed callback token");
     }
-    String data = sagaId + ":" + stepName + ":" + iat;
+    String data = HmacUtils.callbackSignedData(sagaId, stepName, iat);
     if (!HmacUtils.verify(callbackSecret, data, token)) {
       throw new CallbackAuthException("invalid callback token");
+    }
+    if (maxAgeSeconds > 0) {
+      requireFresh(iat, maxAgeSeconds, clock);
+    }
+  }
+
+  /**
+   * Enforces the {@code iat} TTL: rejects an already-authenticated token whose issue time is more
+   * than {@code maxAgeSeconds} old. Because the signature has been verified, {@code iat} is the
+   * value the daemon minted; a value that does not parse as epoch seconds is treated as malformed.
+   */
+  private static void requireFresh(String iat, long maxAgeSeconds, Clock clock) {
+    long issuedAtEpochSecond;
+    try {
+      issuedAtEpochSecond = Long.parseLong(iat);
+    } catch (NumberFormatException e) {
+      throw new CallbackAuthException("malformed callback iat");
+    }
+    if (clock.instant().getEpochSecond() - issuedAtEpochSecond > maxAgeSeconds) {
+      throw new CallbackAuthException("expired callback token");
     }
   }
 
@@ -130,9 +166,5 @@ public final class CallbackResource {
     } catch (IllegalStateException | SagaConcurrentModificationException e) {
       return orchestrator.getStateSnapshot(sagaId);
     }
-  }
-
-  private static boolean isBlank(@Nullable String value) {
-    return value == null || value.isBlank();
   }
 }
