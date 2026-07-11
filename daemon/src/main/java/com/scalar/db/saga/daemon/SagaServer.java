@@ -299,11 +299,15 @@ public final class SagaServer implements AutoCloseable {
   }
 
   private void registerRoutes(Javalin httpServer) {
-    // The RBAC before-handler authenticates every request except the exempt paths. The liveness
-    // probe carries no user credential; the async-callback route authenticates with its own
-    // per-step HMAC token — add CallbackResource.PATH to this list when that route lands.
+    // The RBAC before-handler authenticates every request except the exempt paths. Two routes carry
+    // no caller credential and so bypass it: the liveness probe (unauthenticated by design) and the
+    // async-callback route, which authenticates with its own per-step HMAC token rather than a JWT
+    // or API key. Without the callback exemption, a real provider would reject a participant's
+    // callback with 401 before its HMAC check ran, breaking async completion.
     SagaSecurityHandler.register(
-        httpServer, securityProvider, AuthExemptions.of(HealthResource.PATH));
+        httpServer,
+        securityProvider,
+        AuthExemptions.of(HealthResource.PATH, CallbackResource.PATH));
     // Rate limiting runs after auth (it keys off the resolved principal) and only when enabled;
     // registered before the routes so it gates saga-start requests. The same limiter also gates the
     // gRPC transport (see buildGrpcServer), so the budget is per caller, not per port.
