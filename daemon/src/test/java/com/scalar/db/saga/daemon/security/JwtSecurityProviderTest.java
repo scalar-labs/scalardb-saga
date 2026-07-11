@@ -8,6 +8,7 @@ import com.nimbusds.jose.JOSEObjectType;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.KeySourceException;
+import com.nimbusds.jose.crypto.MACSigner;
 import com.nimbusds.jose.crypto.RSASSASigner;
 import com.nimbusds.jose.jwk.JWKSet;
 import com.nimbusds.jose.jwk.RSAKey;
@@ -16,6 +17,7 @@ import com.nimbusds.jose.jwk.source.ImmutableJWKSet;
 import com.nimbusds.jose.jwk.source.JWKSource;
 import com.nimbusds.jose.proc.SecurityContext;
 import com.nimbusds.jwt.JWTClaimsSet;
+import com.nimbusds.jwt.PlainJWT;
 import com.nimbusds.jwt.SignedJWT;
 import com.nimbusds.jwt.proc.JWTProcessor;
 import java.io.Closeable;
@@ -200,6 +202,35 @@ class JwtSecurityProviderTest {
     // Arrange — signed with a key whose public half is not in the JWKS (kid still points at the
     // trusted key, so the signature check fails)
     String token = sign(baseClaims("alice").build(), rogueKey);
+
+    // Act / Assert
+    assertThatThrownBy(() -> provider.authenticate(bearer(token)))
+        .isInstanceOf(SagaAuthenticationException.class);
+  }
+
+  @Test
+  void authenticate_hmacForgedWithPublicKeyBytes_throwsAuthenticationException()
+      throws JOSEException {
+    // Arrange — the RS256→HS256 algorithm-confusion attack: forge an HS256 token using the trusted
+    // RSA public key's encoded bytes as the HMAC secret. A verifier that accepted HMAC would
+    // recompute the same MAC from the published public key and wrongly trust the token; the
+    // provider allows only asymmetric algorithms, so no verification key is selected.
+    byte[] publicKeyBytes = signingKey.toRSAPublicKey().getEncoded();
+    SignedJWT jwt =
+        new SignedJWT(
+            new JWSHeader.Builder(JWSAlgorithm.HS256).keyID(KEY_ID).build(),
+            baseClaims("alice").build());
+    jwt.sign(new MACSigner(publicKeyBytes));
+
+    // Act / Assert
+    assertThatThrownBy(() -> provider.authenticate(bearer(jwt.serialize())))
+        .isInstanceOf(SagaAuthenticationException.class);
+  }
+
+  @Test
+  void authenticate_unsignedNoneAlgToken_throwsAuthenticationException() {
+    // Arrange — an unsecured (alg:none) token with otherwise-valid claims
+    String token = new PlainJWT(baseClaims("alice").build()).serialize();
 
     // Act / Assert
     assertThatThrownBy(() -> provider.authenticate(bearer(token)))
