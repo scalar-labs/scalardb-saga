@@ -75,12 +75,13 @@ public final class CallbackResource {
   }
 
   /**
-   * Verifies the HMAC token over {@code sagaId:stepName:iat}. Both {@code token} and {@code iat}
-   * query parameters are required (the token is computed over {@code iat}, so it cannot be checked
-   * without it). The token must match the lowercase-hex HMAC-SHA256 shape before the signature is
-   * checked, so a malformed value is rejected without computing an HMAC. When {@code maxAgeSeconds}
-   * is positive, an authenticated token older than that is rejected as expired. Any missing,
-   * malformed, non-matching, or expired value throws {@link CallbackAuthException} → {@code 401}.
+   * Verifies the HMAC token over the data produced by {@link HmacUtils#callbackSignedData}. Both
+   * {@code token} and {@code iat} query parameters are required (the token is computed over {@code
+   * iat}, so it cannot be checked without it). The token must match the lowercase-hex HMAC-SHA256
+   * shape before the signature is checked, so a malformed value is rejected without computing an
+   * HMAC. When {@code maxAgeSeconds} is positive, an authenticated token older than that is
+   * rejected as expired. Any missing, malformed, non-matching, or expired value throws {@link
+   * CallbackAuthException} → {@code 401}.
    */
   private static void verifyToken(
       Context ctx,
