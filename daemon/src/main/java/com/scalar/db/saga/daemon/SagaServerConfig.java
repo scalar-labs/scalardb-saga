@@ -50,7 +50,10 @@ import org.jspecify.annotations.Nullable;
  *       to a loaded definition that set none ({@code 0} = unbounded); {@code 0} (default) disables
  *       it. A definition's own timeout always wins
  *   <li>{@code scalar.db.saga.server.max_start_requests_per_minute} — per-principal rate limit on
- *       {@code POST}/{@code PUT /sagas}; {@code 0} (default) disables rate limiting
+ *       {@code POST}/{@code PUT /sagas}; {@code 0} (default) disables rate limiting. The limit is
+ *       keyed on the authenticated principal, so it is only per-caller once a real provider (jwt or
+ *       apikey) is configured; under {@code noop} every request is the same {@code "anonymous"}
+ *       principal and the limit acts as one global bucket shared by all callers
  * </ul>
  *
  * <p>Any {@code scalar.db.saga.*} value may use a secret reference — {@code ${file:UTF-8:/path}}

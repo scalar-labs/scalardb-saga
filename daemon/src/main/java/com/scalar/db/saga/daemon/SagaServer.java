@@ -349,6 +349,28 @@ public final class SagaServer implements AutoCloseable {
   }
 
   /**
+   * Warns when the saga-start rate limit is configured under the {@code noop} provider, where it
+   * cannot behave per-principal. {@code noop} resolves every request to the single {@code
+   * "anonymous"} principal, so the per-principal limiter degrades to one global bucket shared by
+   * all callers — one client can consume the whole budget for everyone. Not an error (a global cap
+   * is the only sensible behavior without a per-caller identity), but the operator should know the
+   * limit is only meaningful once a real provider (jwt or apikey) is configured.
+   */
+  private void warnIfRateLimitGlobalUnderNoop() {
+    if (rateLimiter != null && config.securityProvider().equals("noop")) {
+      logger.warn(
+          "'{}={}' is set, but '{}={}' resolves every request to a single principal, so the"
+              + " per-principal saga-start limit acts as one global bucket shared by all callers."
+              + " Configure a real security provider (jwt or apikey) for the limit to apply"
+              + " per-principal.",
+          SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY,
+          config.maxStartRequestsPerMinute(),
+          SagaServerConfig.SECURITY_PROVIDER_KEY,
+          config.securityProvider());
+    }
+  }
+
+  /**
    * Whether {@code host} is a loopback bind address ({@code localhost}, {@code 127.0.0.0/8}, {@code
    * ::1}) — reachable only from the local machine, not the network. Matched on the literal (no DNS
    * resolution); {@code 0.0.0.0} (bind all interfaces) is deliberately not loopback.
@@ -372,6 +394,7 @@ public final class SagaServer implements AutoCloseable {
   public SagaServer start() {
     try {
       ensureSecureBindingOrAcknowledged();
+      warnIfRateLimitGlobalUnderNoop();
       orchestrator.startBackgroundTasks();
       if (httpServer != null) {
         httpServer.start(config.host(), config.port());
