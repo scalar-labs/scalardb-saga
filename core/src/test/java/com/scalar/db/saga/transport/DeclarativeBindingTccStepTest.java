@@ -38,15 +38,15 @@ class DeclarativeBindingTccStepTest {
   void reserve_callsReservationSpec_returnsStepResultFromOutput() throws Exception {
     // Arrange
     TransportAdapter transport = mock(TransportAdapter.class);
-    when(transport.call(eq(RESERVATION), any(), eq("seat")))
-        .thenReturn(Map.of("reservationId", "R-1"));
+    when(transport.call(eq(RESERVATION), any(), eq("seat.reserve")))
+        .thenReturn(StepResult.of(Map.of("reservationId", "R-1")));
 
     // Act
     StepResult result = adapter(transport).reserve(CTX);
 
     // Assert
     assertThat(result.getOutput()).containsEntry("reservationId", "R-1");
-    verify(transport).call(eq(RESERVATION), any(), eq("seat"));
+    verify(transport).call(eq(RESERVATION), any(), eq("seat.reserve"));
   }
 
   @Test
@@ -101,7 +101,7 @@ class DeclarativeBindingTccStepTest {
     adapter(transport).confirm(CTX);
 
     // Assert
-    verify(transport).call(eq(CONFIRMATION), any(), eq("seat"));
+    verify(transport).call(eq(CONFIRMATION), any(), eq("seat.confirm"));
   }
 
   @Test
@@ -124,7 +124,7 @@ class DeclarativeBindingTccStepTest {
     adapter(transport).cancel(CTX);
 
     // Assert
-    verify(transport).call(eq(CANCELLATION), any(), eq("seat"));
+    verify(transport).call(eq(CANCELLATION), any(), eq("seat.cancel"));
   }
 
   @Test

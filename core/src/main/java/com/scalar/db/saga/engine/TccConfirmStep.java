@@ -4,6 +4,7 @@ import com.scalar.db.saga.api.SagaContext;
 import com.scalar.db.saga.api.Step;
 import com.scalar.db.saga.api.StepResult;
 import com.scalar.db.saga.api.TccStep;
+import com.scalar.db.saga.definition.TccStepNaming;
 import com.scalar.db.saga.exception.StepCompensationException;
 import com.scalar.db.saga.exception.StepExecutionException;
 
@@ -21,7 +22,7 @@ class TccConfirmStep implements Step {
 
   TccConfirmStep(TccStep tccStep) {
     this.tccStep = tccStep;
-    this.name = tccStep.getName() + ".confirm";
+    this.name = tccStep.getName() + TccStepNaming.CONFIRM_SUFFIX;
   }
 
   @Override
@@ -31,8 +32,7 @@ class TccConfirmStep implements Step {
 
   @Override
   public StepResult execute(SagaContext context) throws StepExecutionException {
-    tccStep.confirm(context);
-    return StepResult.empty();
+    return tccStep.confirm(context);
   }
 
   @Override

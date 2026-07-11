@@ -18,6 +18,10 @@ import io.grpc.health.v1.HealthCheckRequest;
 import io.grpc.health.v1.HealthCheckResponse;
 import io.grpc.health.v1.HealthGrpc;
 import io.javalin.Javalin;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Properties;
@@ -206,6 +210,51 @@ class SagaServerTest {
       assertThat(server.port()).isGreaterThan(0);
       assertThat(server.grpcPort()).isEqualTo(-1);
     }
+  }
+
+  @Test
+  void start_callbackSecretWithoutBaseUrl_registersCallbackRoute(@TempDir Path dir)
+      throws Exception {
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.CALLBACK_SECRET_KEY, "s3cr3t"); // secret set, no base URL
+    try (SagaServer server =
+        new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class)).start()) {
+      // The callback route is gated on the secret alone (verifying a callback needs no base URL),
+      // so
+      // it is registered: a bad-token request is authenticated-and-rejected (401), not 404.
+      assertThat(postComplete(server.port()).statusCode()).isEqualTo(401);
+    }
+  }
+
+  @Test
+  void start_noCallbackSecret_callbackRouteAbsent(@TempDir Path dir) throws Exception {
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    // No callback secret configured → no callback route registered.
+    try (SagaServer server =
+        new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class)).start()) {
+      assertThat(postComplete(server.port()).statusCode()).isEqualTo(404);
+    }
+  }
+
+  private static HttpResponse<String> postComplete(int port) throws Exception {
+    URI uri =
+        URI.create(
+            "http://localhost:" + port + "/sagas/s1/steps/step1/complete?token=deadbeef&iat=1");
+    return HttpClient.newHttpClient()
+        .send(
+            HttpRequest.newBuilder(uri)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{}"))
+                .build(),
+            HttpResponse.BodyHandlers.ofString());
   }
 
   @Test

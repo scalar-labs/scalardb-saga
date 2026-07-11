@@ -49,6 +49,12 @@ public final class ErrorMapper {
     app.exception(
         IllegalArgumentException.class,
         (e, ctx) -> ctx.status(400).json(error("BAD_REQUEST", "Invalid request parameter")));
+    // An async-callback request with a missing or invalid HMAC token. The response is deliberately
+    // generic (does not distinguish missing from invalid) so it is not an oracle.
+    app.exception(
+        CallbackAuthException.class,
+        (e, ctx) ->
+            ctx.status(401).json(error("UNAUTHORIZED", "Invalid or missing callback token")));
     app.exception(
         SagaAlreadyExistsException.class,
         (e, ctx) -> {

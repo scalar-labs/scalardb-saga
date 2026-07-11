@@ -5,6 +5,7 @@ import com.scalar.db.saga.api.Step;
 import com.scalar.db.saga.api.TccStep;
 import com.scalar.db.saga.definition.CallSpec;
 import com.scalar.db.saga.definition.SagaDefinition.ServiceStep.Phase;
+import com.scalar.db.saga.exception.SagaDefinitionException;
 import java.net.http.HttpClient;
 import java.time.Duration;
 import java.util.Map;
@@ -47,17 +48,23 @@ public final class HttpEndpoint implements AutoCloseable {
   private final HttpClient client;
   private final boolean ownsClient;
   private final TransportAdapter transportAdapter;
+  private final @Nullable CallbackUrlProvider callbackUrlProvider;
 
   private HttpEndpoint(
-      HttpExchange exchange, String baseUrl, HttpClient client, boolean ownsClient) {
+      HttpExchange exchange,
+      String baseUrl,
+      HttpClient client,
+      boolean ownsClient,
+      @Nullable CallbackUrlProvider callbackUrlProvider) {
     this.exchange = exchange;
     this.baseUrl = baseUrl;
     this.client = client;
     this.ownsClient = ownsClient;
+    this.callbackUrlProvider = callbackUrlProvider;
     // The declarative transport adapter rides the SAME exchange as the SagaHttpClient, so both
     // front-ends share one client/policy/status-classification path (the "one engine per endpoint"
     // invariant).
-    this.transportAdapter = new HttpTransportAdapter(baseUrl, exchange);
+    this.transportAdapter = new HttpTransportAdapter(baseUrl, exchange, callbackUrlProvider);
   }
 
   /**
@@ -72,6 +79,16 @@ public final class HttpEndpoint implements AutoCloseable {
    *     set
    */
   public static HttpEndpoint create(HttpServiceConfig config) {
+    return create(config, null);
+  }
+
+  /**
+   * Builds an endpoint from {@code config} (see {@link #create(HttpServiceConfig)}), wiring {@code
+   * callbackUrlProvider} into the declarative transport so an async step's outgoing request carries
+   * a callback URL. A {@code null} provider disables async-callback provisioning.
+   */
+  public static HttpEndpoint create(
+      HttpServiceConfig config, @Nullable CallbackUrlProvider callbackUrlProvider) {
     HttpClient client;
     boolean ownsClient;
     @Nullable HttpClient supplied = config.httpClient();
@@ -101,7 +118,7 @@ public final class HttpEndpoint implements AutoCloseable {
       ownsClient = true;
     }
     HttpExchange exchange = new HttpExchange(client, policyOf(config), config.defaultHeaders());
-    return new HttpEndpoint(exchange, config.baseUrl(), client, ownsClient);
+    return new HttpEndpoint(exchange, config.baseUrl(), client, ownsClient, callbackUrlProvider);
   }
 
   private static OutboundHttpPolicy policyOf(HttpServiceConfig config) {
@@ -128,6 +145,7 @@ public final class HttpEndpoint implements AutoCloseable {
    * stepName}, riding this endpoint's shared {@link HttpExchange}.
    */
   public Step toStep(String stepName, Map<Phase, CallSpec> phases) {
+    requireCallbackProviderForAsync(stepName, phases);
     return new DeclarativeBindingStep(stepName, transportAdapter, phases);
   }
 
@@ -136,7 +154,29 @@ public final class HttpEndpoint implements AutoCloseable {
    * stepName}, riding this endpoint's shared {@link HttpExchange}.
    */
   public TccStep toTccStep(String stepName, Map<Phase, CallSpec> phases) {
+    requireCallbackProviderForAsync(stepName, phases);
     return new DeclarativeBindingTccStep(stepName, transportAdapter, phases);
+  }
+
+  /**
+   * Fails fast (at plan build / registration) if a step declares an async phase but no callback URL
+   * provider is configured — such a step would park on a {@code 202} but never receive a callback
+   * URL, so it could never be completed. Requires the operator to configure the callback base URL +
+   * secret before registering an async definition.
+   */
+  private void requireCallbackProviderForAsync(String stepName, Map<Phase, CallSpec> phases) {
+    if (callbackUrlProvider != null) {
+      return;
+    }
+    for (CallSpec spec : phases.values()) {
+      if (spec.isAsync()) {
+        throw new SagaDefinitionException(
+            "Step '"
+                + stepName
+                + "' is async, but async completion is not configured. Set the daemon's callback"
+                + " base URL and callback secret before registering an async definition.");
+      }
+    }
   }
 
   /** The shared {@link HttpExchange} both front-ends ride (package-private; for identity tests). */

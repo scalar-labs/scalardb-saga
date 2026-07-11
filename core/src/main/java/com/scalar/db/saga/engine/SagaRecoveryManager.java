@@ -2,7 +2,9 @@ package com.scalar.db.saga.engine;
 
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.definition.RetryPolicy;
 import com.scalar.db.saga.definition.SagaDefinition;
+import com.scalar.db.saga.definition.SagaDefinition.StepDefinition;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.StepExecutionException;
 import com.scalar.db.saga.store.EventType;
@@ -354,18 +356,18 @@ class SagaRecoveryManager {
   }
 
   /**
-   * Times out one overdue parked ({@code WAITING}) saga: fails the parked step and either
-   * compensates (pre-pivot) or escalates (post-pivot), clearing its {@code saga_parked} row in the
-   * same transaction. No claim is taken — the optimistic WAITING-CK check in {@link
-   * SagaStore#timeoutParkedStep} is the cross-replica de-dup and the callback-vs-timeout guard.
-   *
-   * <p>This is the give-up floor (retry budget spent). The re-drive retry layer is added with the
-   * callback-token provisioning (a later PR-B chunk).
+   * Recovers one overdue parked ({@code WAITING}) saga. While within the re-drive bounds (the park-
+   * attempt count vs the step's retry max-attempts AND the elapsed-since-first-park vs the grace
+   * period), it un-parks and re-issues the step — so a transient participant failure is retried
+   * before the saga rolls back or escalates. Once a bound is spent it gives up: fails the parked
+   * step and either compensates (pre-pivot) or escalates (post-pivot), clearing the {@code
+   * saga_parked} row. No claim is taken — the optimistic WAITING-CK check in the store ops is the
+   * cross-replica de-dup and the callback-vs-timeout-vs-redrive guard.
    */
   private void recoverParkedTimeoutOne(String sagaId) {
     Optional<SagaStateSnapshot> snapshot = store.getStateSnapshot(sagaId);
     if (snapshot.isEmpty() || snapshot.get().getStatus() != SagaStatus.WAITING) {
-      // Already resolved (a callback won, or it moved on) — nothing to time out.
+      // Already resolved (a callback won, or it moved on) — nothing to do.
       return;
     }
     SagaStateSnapshot saga = snapshot.get();
@@ -385,34 +387,55 @@ class SagaRecoveryManager {
           "Escalating parked saga {}: definition {} not found",
           sagaId,
           saga.getDefinitionVersion());
-      store.timeoutParkedStep(
+      store.failParkedStep(
           saga,
           events.size(),
-          timeoutFailedEvent(
+          giveUpFailedEvent(
               parkedIndex, stepName, "definition " + saga.getDefinitionVersion() + " not found"),
           SagaStatus.ESCALATED);
       return;
     }
 
-    StepEvent failedEvent =
-        timeoutFailedEvent(parkedIndex, stepName, "async callback deadline exceeded");
+    // Re-drive (retry) the parked step while within the attempt-count and grace bounds: un-park it
+    // (WAITING -> RUNNING) and re-issue it, which re-parks with a fresh deadline. Only once a bound
+    // is spent do we give up below.
+    RedriveDecision decision = redriveDecision(events, parkedIndex, def);
+    if (decision == RedriveDecision.REDRIVE) {
+      StepEvent reissueEvent = StepEvent.reissuing(parkedIndex, stepName);
+      SagaStateSnapshot running = store.redriveParkedStep(saga, events.size(), reissueEvent);
+      List<SagaEvent> updatedEvents = new ArrayList<>(events);
+      updatedEvents.add(reissueEvent);
+      ExecutionContext context = engine.replayEvents(running, updatedEvents);
+      engine.resumeFrom(def, context, parkedIndex);
+      return;
+    }
+
+    // Give up: the re-drive budget is spent — record which bound was hit for the event log.
+    String reason =
+        decision == RedriveDecision.ATTEMPTS_EXHAUSTED
+            ? "async re-drive attempts exhausted"
+            : "async re-drive grace period exceeded";
+    StepEvent failedEvent = giveUpFailedEvent(parkedIndex, stepName, reason);
     if (parkedIndex <= def.getPivotIndex()) {
       // Pre-pivot: WAITING -> COMPENSATING + STEP_FAILED + clear parked, then compensate from the
-      // timed-out step (knownNotCommitted=false — the async step may have committed server-side).
+      // failed step (knownNotCommitted=false — the async step may have committed server-side).
       SagaStateSnapshot compensating =
-          store.timeoutParkedStep(saga, events.size(), failedEvent, SagaStatus.COMPENSATING);
-      // The timeout appended failedEvent at events.size() and nothing else; a successful
-      // timeoutParkedStep proves, via its WAITING-CK check, that the log was untouched since we
-      // read
-      // `events`, so append locally rather than re-reading (replayEvents ignores the timestamp).
+          store.failParkedStep(saga, events.size(), failedEvent, SagaStatus.COMPENSATING);
+      // failParkedStep appended failedEvent at events.size() and nothing else; its successful
+      // WAITING-CK check proves the log was untouched since we read `events`, so append locally
+      // rather than re-reading (replayEvents ignores the timestamp).
       List<SagaEvent> updatedEvents = new ArrayList<>(events);
       updatedEvents.add(failedEvent);
       ExecutionContext context = engine.replayEvents(compensating, updatedEvents);
       engine.compensateFrom(def, context, parkedIndex);
     } else {
-      // Post-pivot: cannot roll back, and the give-up floor does not re-drive forward — escalate.
-      logger.warn("Escalating parked saga {}: step {} timed out post-pivot", sagaId, parkedIndex);
-      store.timeoutParkedStep(saga, events.size(), failedEvent, SagaStatus.ESCALATED);
+      // Post-pivot: cannot roll back and the give-up floor does not re-drive forward — escalate.
+      logger.warn(
+          "Escalating parked saga {}: step {} gave up post-pivot ({})",
+          sagaId,
+          parkedIndex,
+          reason);
+      store.failParkedStep(saga, events.size(), failedEvent, SagaStatus.ESCALATED);
     }
   }
 
@@ -427,12 +450,68 @@ class SagaRecoveryManager {
     return parked;
   }
 
+  /** Whether to re-drive a timed-out parked step, or which bound made it give up. */
+  private enum RedriveDecision {
+    REDRIVE,
+    ATTEMPTS_EXHAUSTED,
+    GRACE_EXCEEDED
+  }
+
   /**
-   * A {@code STEP_FAILED} event for a timed-out parked step, with {@code knownNotCommitted=false}:
+   * Decides whether a timed-out parked step is re-driven rather than given up on. Re-drives only
+   * within BOTH bounds: the park-attempt count ({@code STEP_PENDING} events at the step) within the
+   * step's retry max-attempts — caps hammering a dead participant under a short callback timeout —
+   * AND the time since the first park within the compensation grace period — caps total stuck time
+   * under a long one. Otherwise returns which bound was hit (attempts checked first).
+   */
+  private RedriveDecision redriveDecision(
+      List<SagaEvent> events, int parkedIndex, SagaDefinition def) {
+    long attempts =
+        stepIndices(events, EventType.STEP_PENDING).filter(index -> index == parkedIndex).count();
+    if (attempts >= maxRedriveAttempts(def, parkedIndex)) {
+      return RedriveDecision.ATTEMPTS_EXHAUSTED;
+    }
+    boolean withinGrace =
+        events.stream()
+            .filter(
+                e ->
+                    e instanceof StepEvent step
+                        && step.getEventType() == EventType.STEP_PENDING
+                        && step.getStepIndex() == parkedIndex)
+            .map(SagaEvent::getTimestamp)
+            .filter(Objects::nonNull)
+            .findFirst()
+            .map(
+                firstPark ->
+                    Duration.between(firstPark, config.clock().instant())
+                            .compareTo(config.compensationGracePeriod())
+                        <= 0)
+            .orElse(false);
+    return withinGrace ? RedriveDecision.REDRIVE : RedriveDecision.GRACE_EXCEEDED;
+  }
+
+  /**
+   * The parked step's effective retry max-attempts: the step's own policy, else the saga default,
+   * else the engine default (mirrors {@code SagaEngine.resolveRetryPolicy}).
+   */
+  private static int maxRedriveAttempts(SagaDefinition def, int stepIndex) {
+    StepDefinition stepDef = def.getSteps().get(stepIndex);
+    RetryPolicy policy = stepDef.getRetryPolicy();
+    if (policy == null) {
+      policy = def.getDefaultRetryPolicy();
+    }
+    if (policy == null) {
+      policy = RetryPolicy.defaultPolicy();
+    }
+    return policy.getMaxAttempts();
+  }
+
+  /**
+   * A {@code STEP_FAILED} event for a given-up parked step, with {@code knownNotCommitted=false}:
    * an async step whose callback never arrived may have committed server-side, so compensation must
    * include it.
    */
-  private static StepEvent timeoutFailedEvent(int stepIndex, String stepName, String reason) {
+  private static StepEvent giveUpFailedEvent(int stepIndex, String stepName, String reason) {
     return StepEvent.failed(
         stepIndex,
         stepName,

@@ -497,6 +497,7 @@ class SagaEngineTest {
       when(step.getName()).thenReturn(name);
       try {
         when(step.reserve(any(SagaContext.class))).thenReturn(StepResult.empty());
+        when(step.confirm(any(SagaContext.class))).thenReturn(StepResult.empty());
       } catch (StepExecutionException e) {
         throw new RuntimeException(e);
       }

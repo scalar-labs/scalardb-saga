@@ -42,7 +42,7 @@ final class DeclarativeBindingStep implements Step {
   @Override
   public StepResult execute(SagaContext context) throws StepExecutionException {
     try {
-      return StepResult.of(transport.call(execute, context, name));
+      return transport.call(execute, context, name);
     } catch (TransportException e) {
       throw new StepExecutionException(e, e.isRetryable(), e.knownNotCommitted());
     }

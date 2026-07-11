@@ -68,6 +68,18 @@ class StepEventTest {
     assertThat(event.getPayload()).isNull();
   }
 
+  @Test
+  void reissuing_validStepGiven_createsEventWithStepInfo() {
+    // Act
+    StepEvent event = StepEvent.reissuing(1, "charge");
+
+    // Assert
+    assertThat(event.getEventType()).isEqualTo(EventType.STEP_REISSUING);
+    assertThat(event.getStepIndex()).isEqualTo(1);
+    assertThat(event.getStepName()).isEqualTo("charge");
+    assertThat(event.getPayload()).isNull();
+  }
+
   // --- withTimestamp ---
 
   @Test
