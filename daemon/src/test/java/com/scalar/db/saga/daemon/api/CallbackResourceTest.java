@@ -170,10 +170,10 @@ class CallbackResourceTest {
 
   @Test
   void callbackLostRaceToTimeoutSweep_isIdempotent200() throws Exception {
-    // The timeout sweep resolved the parked step first → completeStep throws
+    // The timeout sweep resolved the parked step first → completeStepAsync throws
     // SagaConcurrentModificationException; the route returns the saga's current state, not an
     // error.
-    when(orchestrator.completeStep(any(), any(), any()))
+    when(orchestrator.completeStepAsync(any(), any(), any()))
         .thenThrow(new SagaConcurrentModificationException(SAGA_ID));
     when(orchestrator.getStateSnapshot(SAGA_ID)).thenReturn(snapshot(SagaStatus.COMPENSATING));
 
@@ -194,7 +194,7 @@ class CallbackResourceTest {
     HttpResponse<String> response = post("?token=" + validToken() + "&iat=" + IAT, "{}");
 
     assertThat(response.statusCode()).isEqualTo(401);
-    verify(orchestrator, never()).completeStep(any(), any(), any());
+    verify(orchestrator, never()).completeStepAsync(any(), any(), any());
   }
 
   @Test
@@ -203,13 +203,13 @@ class CallbackResourceTest {
     app.stop();
     app =
         startApp(60, Clock.fixed(Instant.ofEpochSecond(Long.parseLong(IAT) + 30), ZoneOffset.UTC));
-    when(orchestrator.completeStep(eq(SAGA_ID), eq(STEP), any()))
+    when(orchestrator.completeStepAsync(eq(SAGA_ID), eq(STEP), any()))
         .thenReturn(snapshot(SagaStatus.RUNNING));
 
     HttpResponse<String> response = post("?token=" + validToken() + "&iat=" + IAT, "{}");
 
     assertThat(response.statusCode()).isEqualTo(200);
-    verify(orchestrator).completeStep(eq(SAGA_ID), eq(STEP), any());
+    verify(orchestrator).completeStepAsync(eq(SAGA_ID), eq(STEP), any());
   }
 
   private String validToken() {
