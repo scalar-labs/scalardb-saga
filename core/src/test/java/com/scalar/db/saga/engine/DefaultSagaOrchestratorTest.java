@@ -1,8 +1,10 @@
 package com.scalar.db.saga.engine;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -809,19 +811,18 @@ class DefaultSagaOrchestratorTest {
   }
 
   // =========================================================================
-  // completeStep
+  // completeStepAsync
   // =========================================================================
 
   @Nested
-  class CompleteStep {
+  class CompleteStepAsync {
 
     @Test
-    void completeStep_waitingSaga_resumesFromNextStep() {
-      // Arrange — saga is parked on step 1 (STEP_PENDING); the callback completes it
+    void completeStepAsync_waitingSaga_returnsRunningAndDrivesAsync() {
+      // Arrange — same parked saga as the sync case; here the forward tail runs on asyncExecutor.
       SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
       SagaDefinition def = definition("test-saga");
       SagaStateSnapshot running = snapshot("saga-1", SagaStatus.RUNNING);
-      SagaStateSnapshot completed = snapshot("saga-1", SagaStatus.COMPLETED);
       List<SagaEvent> events =
           List.of(
               StatusEvent.started(null),
@@ -835,35 +836,37 @@ class DefaultSagaOrchestratorTest {
       when(store.resumeParkedStep(eq(waiting), eq(events.size()), any(StepEvent.class)))
           .thenReturn(running);
       when(engine.replayEvents(eq(running), any())).thenReturn(context);
-      when(engine.resumeFrom(eq(def), eq(context), eq(2))).thenReturn(completed);
 
       // Act
       SagaStateSnapshot result =
-          orchestrator.completeStep("saga-1", "s1", Map.of("paymentId", "p1"));
+          orchestrator.completeStepAsync("saga-1", "s1", Map.of("paymentId", "p1"));
 
-      // Assert — resumes step 1 via STEP_COMPLETED, then continues from step 2
+      // Assert — resumes step 1 via a STEP_COMPLETED event, returns the in-flight RUNNING snapshot
+      // at once, and dispatches the forward drive (from step 2) off-thread.
       ArgumentCaptor<StepEvent> captor = ArgumentCaptor.forClass(StepEvent.class);
       verify(store).resumeParkedStep(eq(waiting), eq(events.size()), captor.capture());
       assertThat(captor.getValue().getEventType()).isEqualTo(EventType.STEP_COMPLETED);
       assertThat(captor.getValue().getStepIndex()).isEqualTo(1);
       assertThat(captor.getValue().getStepName()).isEqualTo("s1");
-      verify(engine).resumeFrom(def, context, 2);
-      assertThat(result).isSameAs(completed);
+      assertThat(result).isSameAs(running);
+      verify(engine, timeout(2_000)).resumeFrom(def, context, 2);
     }
 
     @Test
-    void completeStep_nonWaitingSaga_throwsIllegalState() {
-      // Arrange
+    void completeStepAsync_nonWaitingSaga_throwsIllegalState() {
+      // Arrange — the WAITING check is phase 1 (synchronous), so completeStepAsync still throws
+      // before dispatching anything, preserving the daemon's synchronous error mapping.
       SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
       when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(saga));
 
       // Act & Assert
-      assertThatThrownBy(() -> orchestrator.completeStep("saga-1", "s1", Map.of()))
+      assertThatThrownBy(() -> orchestrator.completeStepAsync("saga-1", "s1", Map.of()))
           .isInstanceOf(IllegalStateException.class);
+      verify(engine, never()).resumeFrom(any(), any(), anyInt());
     }
 
     @Test
-    void completeStep_stepNameMismatch_throwsIllegalArgument() {
+    void completeStepAsync_stepNameMismatch_throwsIllegalArgument() {
       // Arrange — saga is parked on "s1" but the callback names a different step
       SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
       List<SagaEvent> events = List.of(StatusEvent.started(null), StepEvent.pending(1, "s1"));
@@ -871,12 +874,12 @@ class DefaultSagaOrchestratorTest {
       when(store.getEvents("saga-1")).thenReturn(events);
 
       // Act & Assert
-      assertThatThrownBy(() -> orchestrator.completeStep("saga-1", "other", Map.of()))
+      assertThatThrownBy(() -> orchestrator.completeStepAsync("saga-1", "other", Map.of()))
           .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
-    void completeStep_noParkedStep_throwsIllegalState() {
+    void completeStepAsync_noParkedStep_throwsIllegalState() {
       // Arrange — WAITING but no STEP_PENDING marker in history (defensive)
       SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
       List<SagaEvent> events = List.of(StatusEvent.started(null));
@@ -884,18 +887,100 @@ class DefaultSagaOrchestratorTest {
       when(store.getEvents("saga-1")).thenReturn(events);
 
       // Act & Assert
-      assertThatThrownBy(() -> orchestrator.completeStep("saga-1", "s1", Map.of()))
+      assertThatThrownBy(() -> orchestrator.completeStepAsync("saga-1", "s1", Map.of()))
           .isInstanceOf(IllegalStateException.class);
     }
 
     @Test
-    void completeStep_afterClose_throwsIllegalState() {
-      // Arrange
-      orchestrator.close();
+    void completeStepAsync_executorRejected_returnsRunningAndDoesNotThrow() {
+      // Arrange — the async executor rejects the forward drive (race between close() and
+      // execute()).
+      // The step is already durably resumed (RUNNING), so completeStepAsync returns that snapshot
+      // and recovery drives the tail.
+      ExecutorService mockExecutor = mock(ExecutorService.class);
+      org.mockito.Mockito.doThrow(
+              new java.util.concurrent.RejectedExecutionException("shutting down"))
+          .when(mockExecutor)
+          .execute(any(Runnable.class));
+      DefaultSagaOrchestrator orchestratorWithMockExecutor =
+          new DefaultSagaOrchestrator(
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              mockExecutor);
 
-      // Act & Assert
-      assertThatThrownBy(() -> orchestrator.completeStep("saga-1", "s1", Map.of()))
-          .isInstanceOf(IllegalStateException.class);
+      SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
+      SagaDefinition def = definition("test-saga");
+      SagaStateSnapshot running = snapshot("saga-1", SagaStatus.RUNNING);
+      List<SagaEvent> events = List.of(StatusEvent.started(null), StepEvent.pending(1, "s1"));
+      ExecutionContext context = new ExecutionContext("saga-1", Map.of(), running);
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(waiting));
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(store.getEvents("saga-1")).thenReturn(events);
+      when(store.resumeParkedStep(eq(waiting), eq(events.size()), any(StepEvent.class)))
+          .thenReturn(running);
+      when(engine.replayEvents(eq(running), any())).thenReturn(context);
+
+      // Act — must not throw; the drive was rejected but the step is durably resumed.
+      SagaStateSnapshot result =
+          orchestratorWithMockExecutor.completeStepAsync("saga-1", "s1", Map.of());
+
+      // Assert — returns the RUNNING snapshot; the forward drive never ran.
+      assertThat(result).isSameAs(running);
+      verify(engine, never()).resumeFrom(any(), any(), anyInt());
+
+      orchestratorWithMockExecutor.close();
+    }
+
+    @Test
+    void completeStepAsync_driveThrows_swallowedAndReturnsRunning() {
+      // Arrange — same parked saga, but with a mocked executor so we can capture the drive Runnable
+      // and run it on the test thread. The detached forward drive throws an Error; only a catch on
+      // Throwable (not Exception) contains it, so running the captured Runnable must not throw.
+      // completeStepAsync itself returns the RUNNING snapshot — the step is durably resumed and the
+      // async failure is logged, not propagated (recovery is the backstop).
+      ExecutorService mockExecutor = mock(ExecutorService.class);
+      DefaultSagaOrchestrator orchestratorWithMockExecutor =
+          new DefaultSagaOrchestrator(
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              mockExecutor);
+
+      SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
+      SagaDefinition def = definition("test-saga");
+      SagaStateSnapshot running = snapshot("saga-1", SagaStatus.RUNNING);
+      List<SagaEvent> events = List.of(StatusEvent.started(null), StepEvent.pending(1, "s1"));
+      ExecutionContext context = new ExecutionContext("saga-1", Map.of(), running);
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(waiting));
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(store.getEvents("saga-1")).thenReturn(events);
+      when(store.resumeParkedStep(eq(waiting), eq(events.size()), any(StepEvent.class)))
+          .thenReturn(running);
+      when(engine.replayEvents(eq(running), any())).thenReturn(context);
+      when(engine.resumeFrom(eq(def), eq(context), eq(2)))
+          .thenThrow(new Error("drive failed off-thread"));
+
+      // Act — returns immediately with the RUNNING snapshot; the drive Runnable is captured, not
+      // run.
+      SagaStateSnapshot result =
+          orchestratorWithMockExecutor.completeStepAsync("saga-1", "s1", Map.of());
+
+      // Assert — the resume result is returned, and running the captured drive swallows the Error
+      // (proving the catch is on Throwable, not Exception).
+      assertThat(result).isSameAs(running);
+      ArgumentCaptor<Runnable> driveCaptor = ArgumentCaptor.forClass(Runnable.class);
+      verify(mockExecutor).execute(driveCaptor.capture());
+      assertThatCode(() -> driveCaptor.getValue().run()).doesNotThrowAnyException();
+      verify(engine).resumeFrom(def, context, 2);
+
+      orchestratorWithMockExecutor.close();
     }
   }
 

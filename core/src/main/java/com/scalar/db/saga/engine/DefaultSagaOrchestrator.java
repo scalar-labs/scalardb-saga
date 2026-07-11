@@ -377,20 +377,60 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   /**
    * Resumes a parked ({@code WAITING}) saga when the async callback for its parked step arrives:
    * atomically records {@code STEP_COMPLETED} (carrying {@code output}), transitions {@code WAITING
-   * -> RUNNING}, and deletes the {@code saga_parked} row, then continues forward execution from the
-   * next step.
+   * -> RUNNING}, and deletes the {@code saga_parked} row. Returns as soon as the step is durably
+   * resumed — the {@code RUNNING} snapshot, not the saga's final state — and runs the forward tail
+   * on the async executor rather than the caller's thread.
+   *
+   * <p>This lets the daemon callback endpoint ack a participant the moment its result is persisted,
+   * instead of holding the request open for the whole downstream saga. The exceptions below are
+   * thrown synchronously (before dispatch), so a caller can still map them. If the detached drive
+   * throws or the process dies mid-tail, the saga is {@code RUNNING} and recovery resumes it — the
+   * same backstop as any running saga.
    *
    * @param sagaId the parked saga
    * @param stepName the step the callback completes (must be the currently parked step)
    * @param output the step's output, merged into the saga context for downstream steps
-   * @return the resulting state snapshot after forward execution runs (or re-parks / terminates)
+   * @return the {@code RUNNING} snapshot immediately after the parked step is resumed
    * @throws IllegalStateException if the saga is not {@code WAITING}
    * @throws IllegalArgumentException if {@code stepName} is not the currently parked step
    * @throws SagaConcurrentModificationException if a concurrent deadline-timeout sweep resolves the
    *     parked step first (the callback lost the race)
    */
-  public SagaStateSnapshot completeStep(
+  public SagaStateSnapshot completeStepAsync(
       String sagaId, String stepName, Map<String, Object> output) {
+    ResumedStep resumed = resumeParked(sagaId, stepName, output);
+    try {
+      // execute() (not submit()) because the result is ignored: submit() would return a Future we
+      // drop, which both trips SpotBugs and silently swallows failures. The inner catch handles
+      // failures instead, logging any Throwable (incl. Error); the saga is persisted as RUNNING, so
+      // recovery is the backstop.
+      asyncExecutor.execute(
+          () -> {
+            try {
+              engine.resumeFrom(resumed.def(), resumed.context(), resumed.stepIndex() + 1);
+            } catch (Throwable t) {
+              logger.error("Async completion drive for saga {} failed unexpectedly", sagaId, t);
+            }
+          });
+    } catch (RejectedExecutionException e) {
+      // Race between close() and execute() — the step is resumed (RUNNING); recovery will drive it.
+      logger.warn(
+          "Async executor rejected completion drive for saga {} (shutting down); "
+              + "recovery will handle it",
+          sagaId,
+          e);
+    }
+    return resumed.running();
+  }
+
+  /**
+   * Phase 1 of completing a parked step: validates the saga is {@code WAITING} and {@code stepName}
+   * is the parked step, atomically records {@code STEP_COMPLETED} + {@code WAITING -> RUNNING} and
+   * deletes the {@code saga_parked} row, then rebuilds the execution context. Kept separate from
+   * the forward drive so {@link #completeStepAsync} can return once this synchronous phase commits
+   * and run the drive on the async executor. Returns everything the forward drive needs.
+   */
+  private ResumedStep resumeParked(String sagaId, String stepName, Map<String, Object> output) {
     Objects.requireNonNull(sagaId, "sagaId must not be null");
     Objects.requireNonNull(stepName, "stepName must not be null");
     Objects.requireNonNull(output, "output must not be null");
@@ -424,17 +464,19 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
               + running.getStatus());
     }
 
-    // Replay (now folds the callback output into context) and continue from the next step. The
-    // resume appended completedEvent at events.size() and nothing else; a successful resume proves,
-    // via its WAITING-CK check, that the saga was untouched since we read `events` (a parked saga's
-    // log only grows through a CK-changing transition), so appending locally reproduces the
-    // persisted
-    // log without a second read (replayEvents ignores the event timestamp).
+    // Replay to fold the callback output into context. The resume appended completedEvent at
+    // events.size() and nothing else, and its WAITING-CK check proves the log was untouched since
+    // we read `events` (a parked saga's log grows only through a CK-changing transition). So we
+    // append locally instead of re-reading (replayEvents ignores the event timestamp).
     List<SagaEvent> updatedEvents = new ArrayList<>(events);
     updatedEvents.add(completedEvent);
     ExecutionContext context = engine.replayEvents(running, updatedEvents);
-    return engine.resumeFrom(def, context, stepIndex + 1);
+    return new ResumedStep(running, def, context, stepIndex);
   }
+
+  /** Phase-1 result of completing a parked step: the resumed saga and where to drive it from. */
+  private record ResumedStep(
+      SagaStateSnapshot running, SagaDefinition def, ExecutionContext context, int stepIndex) {}
 
   /**
    * Returns the step index of the currently parked step — the most recent {@code STEP_PENDING} for

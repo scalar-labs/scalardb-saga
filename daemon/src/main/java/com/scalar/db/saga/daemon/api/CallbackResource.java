@@ -15,7 +15,8 @@ import java.util.regex.Pattern;
  * <ul>
  *   <li>{@code POST /sagas/{id}/steps/{stepName}/complete?token=&iat=} — a participant reports the
  *       result of an async (parked) step. The daemon verifies the per-step HMAC callback token,
- *       then resumes the saga from the next step via {@link DefaultSagaOrchestrator#completeStep}.
+ *       then resumes the saga from the next step via {@link
+ *       DefaultSagaOrchestrator#completeStepAsync}.
  * </ul>
  *
  * <p><b>Auth.</b> This route is authenticated by the HMAC callback token, <em>not</em> by the
@@ -49,8 +50,8 @@ public final class CallbackResource {
    * Registers the callback route on the given app.
    *
    * @param app the Javalin app
-   * @param orchestrator the orchestrator whose {@link DefaultSagaOrchestrator#completeStep} resumes
-   *     the parked saga
+   * @param orchestrator the orchestrator whose {@link DefaultSagaOrchestrator#completeStepAsync}
+   *     resumes the parked saga
    * @param callbackSecret the HMAC secret the callback token is verified against
    * @param maxAgeSeconds the {@code iat} TTL in seconds; a token older than this is rejected as
    *     expired. {@code 0} disables the check
@@ -146,11 +147,14 @@ public final class CallbackResource {
   }
 
   /**
-   * Resumes the parked step, mapping the "no longer WAITING" cases to an idempotent snapshot read:
-   * a duplicate callback ({@link IllegalStateException} — already resumed) or a callback that lost
-   * the race to the timeout sweep ({@link SagaConcurrentModificationException}) returns the saga's
-   * current state instead of failing. A wrong step name ({@link IllegalArgumentException}) and an
-   * unknown saga ({@code SagaNotFoundException}) propagate to the error mapper (400 / 404).
+   * Resumes the parked step and returns the resulting snapshot. On success this is the in-flight
+   * {@code RUNNING} state — the forward drive runs asynchronously, so the callback is acked as soon
+   * as the step is durably resumed rather than after the rest of the saga. The "no longer WAITING"
+   * cases map to an idempotent snapshot read: a duplicate callback ({@link IllegalStateException} —
+   * already resumed) or a callback that lost the race to the timeout sweep ({@link
+   * SagaConcurrentModificationException}) returns the saga's current state instead of failing. A
+   * wrong step name ({@link IllegalArgumentException}) and an unknown saga ({@code
+   * SagaNotFoundException}) propagate to the error mapper (400 / 404).
    */
   private static SagaStateSnapshot complete(
       DefaultSagaOrchestrator orchestrator,
@@ -158,7 +162,7 @@ public final class CallbackResource {
       String stepName,
       Map<String, Object> output) {
     try {
-      return orchestrator.completeStep(sagaId, stepName, output);
+      return orchestrator.completeStepAsync(sagaId, stepName, output);
     } catch (IllegalStateException | SagaConcurrentModificationException e) {
       return orchestrator.getStateSnapshot(sagaId);
     }
