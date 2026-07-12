@@ -163,8 +163,22 @@ public final class SagaQuery {
       return this;
     }
 
-    /** Builds the query. */
+    /**
+     * Builds the query.
+     *
+     * @throws IllegalArgumentException if both {@code updatedAfter} and {@code updatedBefore} are
+     *     set and {@code updatedAfter} is strictly after {@code updatedBefore} (an empty window).
+     *     The bounds are inclusive, so an equal {@code updatedAfter} and {@code updatedBefore} is
+     *     allowed and selects that single instant.
+     */
     public SagaQuery build() {
+      if (updatedAfter != null && updatedBefore != null && updatedAfter.isAfter(updatedBefore)) {
+        throw new IllegalArgumentException(
+            "updatedAfter must be before or equal to updatedBefore: updatedAfter="
+                + updatedAfter
+                + ", updatedBefore="
+                + updatedBefore);
+      }
       return new SagaQuery(this);
     }
   }

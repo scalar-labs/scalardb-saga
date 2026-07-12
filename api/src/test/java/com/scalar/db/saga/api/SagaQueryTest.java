@@ -75,6 +75,57 @@ class SagaQueryTest {
   }
 
   @Test
+  public void build_updatedAfterAfterUpdatedBeforeGiven_throwsException() {
+    // Arrange
+    Instant after = Instant.parse("2026-02-01T00:00:00Z");
+    Instant before = Instant.parse("2026-01-01T00:00:00Z");
+
+    // Act & Assert
+    assertThatThrownBy(
+            () -> SagaQuery.newBuilder().updatedAfter(after).updatedBefore(before).build())
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  public void build_updatedAfterEqualsUpdatedBeforeGiven_accepted() {
+    // Arrange — inclusive bounds, so an equal window selecting a single instant is valid
+    Instant instant = Instant.parse("2026-01-01T00:00:00Z");
+
+    // Act
+    SagaQuery query = SagaQuery.newBuilder().updatedAfter(instant).updatedBefore(instant).build();
+
+    // Assert
+    assertThat(query.getUpdatedAfter()).isEqualTo(instant);
+    assertThat(query.getUpdatedBefore()).isEqualTo(instant);
+  }
+
+  @Test
+  public void build_updatedAfterBeforeUpdatedBeforeGiven_accepted() {
+    // Arrange
+    Instant after = Instant.parse("2026-01-01T00:00:00Z");
+    Instant before = Instant.parse("2026-02-01T00:00:00Z");
+
+    // Act
+    SagaQuery query = SagaQuery.newBuilder().updatedAfter(after).updatedBefore(before).build();
+
+    // Assert
+    assertThat(query.getUpdatedAfter()).isEqualTo(after);
+    assertThat(query.getUpdatedBefore()).isEqualTo(before);
+  }
+
+  @Test
+  public void build_onlyOneUpdatedBoundGiven_accepted() {
+    // Arrange
+    Instant instant = Instant.parse("2026-01-01T00:00:00Z");
+
+    // Act & Assert — a single bound never triggers the window check
+    assertThat(SagaQuery.newBuilder().updatedAfter(instant).build().getUpdatedAfter())
+        .isEqualTo(instant);
+    assertThat(SagaQuery.newBuilder().updatedBefore(instant).build().getUpdatedBefore())
+        .isEqualTo(instant);
+  }
+
+  @Test
   public void equals_sameFieldsGiven_areEqual() {
     // Arrange
     SagaQuery a = SagaQuery.newBuilder().status(SagaStatus.RUNNING).pageSize(10).build();
