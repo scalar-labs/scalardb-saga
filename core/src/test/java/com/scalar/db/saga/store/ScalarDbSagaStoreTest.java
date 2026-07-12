@@ -20,11 +20,14 @@ import com.scalar.db.api.Get;
 import com.scalar.db.api.Insert;
 import com.scalar.db.api.Result;
 import com.scalar.db.api.Scan;
+import com.scalar.db.api.TransactionCrudOperable;
 import com.scalar.db.exception.transaction.CommitConflictException;
 import com.scalar.db.exception.transaction.CrudConflictException;
 import com.scalar.db.exception.transaction.CrudException;
 import com.scalar.db.exception.transaction.TransactionException;
 import com.scalar.db.exception.transaction.UnknownTransactionStatusException;
+import com.scalar.db.saga.api.SagaPage;
+import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.definition.RetryPolicy;
@@ -36,7 +39,9 @@ import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.store.SagaStore.OverdueParked;
 import com.scalar.db.saga.store.SagaStore.Recoverables;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -45,6 +50,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.stubbing.OngoingStubbing;
 
 @ExtendWith(MockitoExtension.class)
 class ScalarDbSagaStoreTest {
@@ -1796,6 +1802,171 @@ class ScalarDbSagaStoreTest {
   }
 
   // ---------------------------------------------------------------------------
+  // listStateSnapshots (orchestration + fail-closed token; no-drop reassembly is an IT)
+  // ---------------------------------------------------------------------------
+
+  @Test
+  void listStateSnapshots_emptyStore_returnsEmptyPageWithNullToken() throws Exception {
+    // Arrange
+    stubScanner();
+
+    // Act
+    SagaPage<SagaStateSnapshot> page =
+        store.listStateSnapshots(SagaQuery.newBuilder().status(SagaStatus.RUNNING).build());
+
+    // Assert
+    assertThat(page.getItems()).isEmpty();
+    assertThat(page.hasMore()).isFalse();
+    assertThat(page.getNextPageToken()).isNull();
+  }
+
+  @Test
+  void listStateSnapshots_statusFilter_scansOneSlicePerBucket() throws Exception {
+    // Arrange — 4 buckets, single status filter => 4 slice scanners
+    stubScanner();
+
+    // Act
+    store.listStateSnapshots(SagaQuery.newBuilder().status(SagaStatus.ESCALATED).build());
+
+    // Assert
+    verify(tx, times(4)).getScanner(any(Scan.class));
+  }
+
+  @Test
+  void listStateSnapshots_noStatusFilter_scansEveryStatusPerBucket() throws Exception {
+    // Arrange — 4 buckets x 6 status codes => 24 slice scanners when nothing matches
+    stubScanner();
+
+    // Act
+    store.listStateSnapshots(SagaQuery.newBuilder().build());
+
+    // Assert
+    verify(tx, times(4 * SagaStatus.values().length)).getScanner(any(Scan.class));
+  }
+
+  @Test
+  void listStateSnapshots_pageNotFilled_returnsNullToken() throws Exception {
+    // Arrange — one match total, well under the default page size
+    stubScanner(mockStateResult("saga-a", SagaStatus.RUNNING));
+
+    // Act
+    SagaPage<SagaStateSnapshot> page =
+        store.listStateSnapshots(SagaQuery.newBuilder().status(SagaStatus.RUNNING).build());
+
+    // Assert
+    assertThat(page.getItems()).extracting(SagaStateSnapshot::getSagaId).containsExactly("saga-a");
+    assertThat(page.getNextPageToken()).isNull();
+  }
+
+  @Test
+  void listStateSnapshots_pageFilled_returnsNonNullToken() throws Exception {
+    // Arrange — a full page (pageSize 1) means there may be more
+    stubScanner(mockStateResult("saga-a", SagaStatus.RUNNING));
+
+    // Act
+    SagaPage<SagaStateSnapshot> page =
+        store.listStateSnapshots(
+            SagaQuery.newBuilder().status(SagaStatus.RUNNING).pageSize(1).build());
+
+    // Assert
+    assertThat(page.getItems()).hasSize(1);
+    assertThat(page.hasMore()).isTrue();
+    assertThat(page.getNextPageToken()).isNotBlank();
+  }
+
+  @Test
+  void listStateSnapshots_cohortStraddlesPageBoundary_completesCohortWithoutSplitting()
+      throws Exception {
+    // Arrange — pageSize 2, but three sagas share timestamp t2, straddling the boundary.
+    Instant t1 = Instant.parse("2026-01-01T00:00:01Z");
+    Instant t2 = Instant.parse("2026-01-01T00:00:02Z");
+    Instant t3 = Instant.parse("2026-01-01T00:00:03Z");
+    stubScanner(
+        mockStateResult("a", SagaStatus.RUNNING, t1),
+        mockStateResult("b", SagaStatus.RUNNING, t2),
+        mockStateResult("c", SagaStatus.RUNNING, t2),
+        mockStateResult("d", SagaStatus.RUNNING, t2),
+        mockStateResult("e", SagaStatus.RUNNING, t3));
+
+    // Act
+    SagaPage<SagaStateSnapshot> page =
+        store.listStateSnapshots(
+            SagaQuery.newBuilder().status(SagaStatus.RUNNING).pageSize(2).build());
+
+    // Assert — the t2 cohort (b, c, d) is completed rather than split; e is left for the next page.
+    assertThat(page.getItems())
+        .extracting(SagaStateSnapshot::getSagaId)
+        .containsExactly("a", "b", "c", "d");
+    assertThat(page.hasMore()).isTrue();
+  }
+
+  @Test
+  void listStateSnapshots_malformedTokenGiven_throwsIllegalArgumentException() {
+    // Act & Assert — not valid Base64URL; rejected before any scan
+    assertThatThrownBy(
+            () ->
+                store.listStateSnapshots(
+                    SagaQuery.newBuilder().pageToken("!!!not-base64!!!").build()))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void listStateSnapshots_tokenBucketOutOfRangeGiven_throwsIllegalArgumentException() {
+    // Arrange — bucket 999 with a 4-bucket schema
+    String token = encodePageToken("1", 999, 0, "2026-01-01T00:00:00Z");
+
+    // Act & Assert
+    assertThatThrownBy(
+            () -> store.listStateSnapshots(SagaQuery.newBuilder().pageToken(token).build()))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void listStateSnapshots_tokenUnknownVersionGiven_throwsIllegalArgumentException() {
+    // Arrange — version "2" is not recognized
+    String token = encodePageToken("2", 0, 0, "2026-01-01T00:00:00Z");
+
+    // Act & Assert
+    assertThatThrownBy(
+            () -> store.listStateSnapshots(SagaQuery.newBuilder().pageToken(token).build()))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void listStateSnapshots_tokenStatusNotInFilterGiven_throwsIllegalArgumentException() {
+    // Arrange — query filters RUNNING(0) but the token points at COMPLETED(1)
+    String token = encodePageToken("1", 0, 1, "2026-01-01T00:00:00Z");
+
+    // Act & Assert
+    assertThatThrownBy(
+            () ->
+                store.listStateSnapshots(
+                    SagaQuery.newBuilder().status(SagaStatus.RUNNING).pageToken(token).build()))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  /** Stubs {@code tx.getScanner(...)} to return a scanner that yields {@code rows} then drains. */
+  private void stubScanner(Result... rows) throws Exception {
+    TransactionCrudOperable.Scanner scanner = mock(TransactionCrudOperable.Scanner.class);
+    OngoingStubbing<Optional<Result>> stub = when(scanner.one());
+    for (Result r : rows) {
+      stub = stub.thenReturn(Optional.of(r));
+    }
+    stub.thenReturn(Optional.empty());
+    when(tx.getScanner(any(Scan.class))).thenReturn(scanner);
+  }
+
+  private static String encodePageToken(
+      String version, int bucket, int statusCode, String updatedAtIso) {
+    String payload =
+        String.join(
+            "|", version, Integer.toString(bucket), Integer.toString(statusCode), updatedAtIso);
+    return Base64.getUrlEncoder()
+        .withoutPadding()
+        .encodeToString(payload.getBytes(StandardCharsets.UTF_8));
+  }
+
+  // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
 
@@ -1849,6 +2020,15 @@ class ScalarDbSagaStoreTest {
     lenient()
         .when(r.getTimestampTZ("updated_at"))
         .thenReturn(Instant.parse("2026-01-01T00:00:00Z"));
+    return r;
+  }
+
+  /**
+   * Like {@link #mockStateResult(String, SagaStatus)} but with a caller-chosen {@code updated_at}.
+   */
+  private Result mockStateResult(String sagaId, SagaStatus status, Instant updatedAt) {
+    Result r = mockStateResult(sagaId, status);
+    lenient().when(r.getTimestampTZ("updated_at")).thenReturn(updatedAt);
     return r;
   }
 

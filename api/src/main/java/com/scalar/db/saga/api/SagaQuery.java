@@ -1,0 +1,171 @@
+package com.scalar.db.saga.api;
+
+import java.time.Instant;
+import java.util.Objects;
+import net.jcip.annotations.Immutable;
+import org.jspecify.annotations.Nullable;
+
+/**
+ * A paginated query over saga state snapshots, used by the Admin API's listing operation.
+ *
+ * <p>Filtering is limited to what the {@code saga_state} clustering key supports efficiently: an
+ * optional {@link SagaStatus} and an optional {@code updated_at} time window. There is deliberately
+ * no name filter — {@code saga_name} is not in the clustering key and is not selective, so
+ * filtering by it would require an unindexed full scan.
+ *
+ * <p>Pagination uses an opaque {@link #getPageToken() page token}. Pass {@code null} (or omit it)
+ * to start from the beginning; pass the token from the previous {@link SagaPage#getNextPageToken()}
+ * to continue. Listing is best-effort under concurrent mutation.
+ */
+@Immutable
+public final class SagaQuery {
+
+  /** Default page size when none is specified. */
+  public static final int DEFAULT_PAGE_SIZE = 100;
+
+  /**
+   * The maximum <b>requested</b> {@link #getPageSize() page size}. This bounds the requested
+   * target, not the exact size of a returned {@link SagaPage} — a page may run slightly larger (see
+   * {@link Builder#pageSize(int)}).
+   */
+  public static final int MAX_PAGE_SIZE = 1000;
+
+  private final @Nullable SagaStatus status;
+  private final @Nullable Instant updatedAfter;
+  private final @Nullable Instant updatedBefore;
+  private final int pageSize;
+  private final @Nullable String pageToken;
+
+  private SagaQuery(Builder builder) {
+    this.status = builder.status;
+    this.updatedAfter = builder.updatedAfter;
+    this.updatedBefore = builder.updatedBefore;
+    this.pageSize = builder.pageSize;
+    this.pageToken = builder.pageToken;
+  }
+
+  /** Returns a new builder. */
+  public static Builder newBuilder() {
+    return new Builder();
+  }
+
+  /** The status to filter by, or {@code null} to list all statuses. */
+  public @Nullable SagaStatus getStatus() {
+    return status;
+  }
+
+  /** Inclusive lower bound on {@code updated_at}, or {@code null} for no lower bound. */
+  public @Nullable Instant getUpdatedAfter() {
+    return updatedAfter;
+  }
+
+  /** Inclusive upper bound on {@code updated_at}, or {@code null} for no upper bound. */
+  public @Nullable Instant getUpdatedBefore() {
+    return updatedBefore;
+  }
+
+  /**
+   * The <b>target</b> number of results per page. A returned {@link SagaPage} usually has at most
+   * this many items but may have slightly more — see {@link Builder#pageSize(int)}.
+   */
+  public int getPageSize() {
+    return pageSize;
+  }
+
+  /** The opaque continuation token, or {@code null} to start from the beginning. */
+  public @Nullable String getPageToken() {
+    return pageToken;
+  }
+
+  @Override
+  public boolean equals(@Nullable Object o) {
+    if (this == o) return true;
+    if (!(o instanceof SagaQuery)) return false;
+    SagaQuery that = (SagaQuery) o;
+    return pageSize == that.pageSize
+        && status == that.status
+        && Objects.equals(updatedAfter, that.updatedAfter)
+        && Objects.equals(updatedBefore, that.updatedBefore)
+        && Objects.equals(pageToken, that.pageToken);
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(status, updatedAfter, updatedBefore, pageSize, pageToken);
+  }
+
+  @Override
+  public String toString() {
+    return "SagaQuery{"
+        + "status="
+        + status
+        + ", updatedAfter="
+        + updatedAfter
+        + ", updatedBefore="
+        + updatedBefore
+        + ", pageSize="
+        + pageSize
+        + ", pageToken='"
+        + pageToken
+        + "'}";
+  }
+
+  /** Builder for {@link SagaQuery}. */
+  public static final class Builder {
+
+    private @Nullable SagaStatus status;
+    private @Nullable Instant updatedAfter;
+    private @Nullable Instant updatedBefore;
+    private int pageSize = DEFAULT_PAGE_SIZE;
+    private @Nullable String pageToken;
+
+    private Builder() {}
+
+    /** Sets the status filter (or {@code null} to list all statuses). */
+    public Builder status(@Nullable SagaStatus status) {
+      this.status = status;
+      return this;
+    }
+
+    /** Sets the inclusive {@code updated_at} lower bound. */
+    public Builder updatedAfter(@Nullable Instant updatedAfter) {
+      this.updatedAfter = updatedAfter;
+      return this;
+    }
+
+    /** Sets the inclusive {@code updated_at} upper bound. */
+    public Builder updatedBefore(@Nullable Instant updatedBefore) {
+      this.updatedBefore = updatedBefore;
+      return this;
+    }
+
+    /**
+     * Sets the <b>target</b> page size. A returned {@link SagaPage} usually has at most this many
+     * items, but may have slightly more: results are grouped by {@code updated_at} and a page never
+     * splits a cohort (rows sharing a timestamp), so a cohort straddling the limit is completed
+     * rather than cut. This bounds the requested target only, in {@code [1, MAX_PAGE_SIZE]}.
+     *
+     * @param pageSize the target results per page, in {@code [1, MAX_PAGE_SIZE]}
+     * @throws IllegalArgumentException if out of range
+     */
+    public Builder pageSize(int pageSize) {
+      if (pageSize < 1 || pageSize > MAX_PAGE_SIZE) {
+        throw new IllegalArgumentException(
+            "pageSize must be in [1, " + MAX_PAGE_SIZE + "]: " + pageSize);
+      }
+      this.pageSize = pageSize;
+      return this;
+    }
+
+    /** Sets the opaque continuation token. */
+    public Builder pageToken(@Nullable String pageToken) {
+      this.pageToken = pageToken;
+      return this;
+    }
+
+    /** Builds the query. */
+    public SagaQuery build() {
+      return new SagaQuery(this);
+    }
+  }
+}

@@ -9,12 +9,15 @@ import com.scalar.db.api.Get;
 import com.scalar.db.api.Insert;
 import com.scalar.db.api.Result;
 import com.scalar.db.api.Scan;
+import com.scalar.db.api.TransactionCrudOperable;
 import com.scalar.db.exception.transaction.AbortException;
 import com.scalar.db.exception.transaction.CommitConflictException;
 import com.scalar.db.exception.transaction.CrudConflictException;
 import com.scalar.db.exception.transaction.TransactionException;
 import com.scalar.db.exception.transaction.UnknownTransactionStatusException;
 import com.scalar.db.io.Key;
+import com.scalar.db.saga.api.SagaPage;
+import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.definition.SagaDefinition;
@@ -25,6 +28,7 @@ import com.scalar.db.saga.exception.SagaPersistenceException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -58,6 +62,24 @@ public class ScalarDbSagaStore implements SagaStore {
           .filter(SagaStatus::isRecoverable)
           .mapToInt(SagaStatus::getStatusCode)
           .toArray();
+
+  /**
+   * All status codes in ascending order — the stable sweep order for an all-status admin listing.
+   */
+  private static final int[] ALL_STATUS_CODES =
+      java.util.Arrays.stream(SagaStatus.values())
+          .mapToInt(SagaStatus::getStatusCode)
+          .sorted()
+          .toArray();
+
+  /** Format version prefix for the opaque list page token. */
+  private static final String PAGE_TOKEN_VERSION = "1";
+
+  /**
+   * Upper {@code updated_at} sentinel for an open-ended range scan (within ScalarDB's TIMESTAMPTZ
+   * range). Keeps the end key the same clustering-key width as the start key.
+   */
+  private static final Instant MAX_TIMESTAMPTZ = Instant.parse("9999-12-31T23:59:59.999Z");
 
   private final DistributedTransactionManager txManager;
   private final ObjectMapper objectMapper;
@@ -453,6 +475,159 @@ public class ScalarDbSagaStore implements SagaStore {
     return loadStateSnapshot(sagaId);
   }
 
+  /**
+   * Lists {@code saga_state} snapshots for {@link SagaStore#listStateSnapshots}, paginating by
+   * <b>whole {@code updated_at} cohorts</b> — a page boundary never splits the rows that share a
+   * single timestamp.
+   *
+   * <h4>Why cohort pagination, and not a keyset cursor on {@code saga_id}</h4>
+   *
+   * The natural way to page a bucket-partitioned scan is a keyset cursor over the clustering key
+   * {@code (status, updated_at, saga_id)}. Two ScalarDB properties rule that out here:
+   *
+   * <ul>
+   *   <li>A {@code Scan} can only range on the <b>last</b> clustering-key column it specifies, with
+   *       the preceding columns pinned to equality. Resuming "strictly after {@code (updated_at,
+   *       saga_id)}" would range on two columns at once, which ScalarDB rejects.
+   *   <li>More fundamentally, ScalarDB does <b>not normalize TEXT collation</b>: the ordering of
+   *       {@code saga_id} (a TEXT clustering key) is whatever the underlying database does and is
+   *       not guaranteed to match byte order or Java {@code String} ordering. Any scheme that uses
+   *       {@code saga_id} as a tiebreaker — a sentinel upper bound, or an in-memory {@code >}
+   *       filter — is only correct on backends whose TEXT collation happens to match our
+   *       assumption, a silent no-drop hazard at exact-timestamp ties.
+   * </ul>
+   *
+   * <p>So this design never compares {@code saga_id} at all. The cursor is {@code (bucket, status,
+   * updated_at)} and resume is a pure {@code updated_at > cursor} range. {@code updated_at} is a
+   * timestamp, not TEXT, so its ordering is collation-independent and consistent across every
+   * backend. To keep the cursor sound without a {@code saga_id} tiebreaker, a page returns a
+   * timestamp's cohort <b>in full or not at all</b>: when a slice fills the page limit, {@link
+   * #scanSlice} streams on just far enough to <b>complete</b> the cohort straddling the boundary,
+   * then stops at the next cohort and sets the cursor to the completed cohort's timestamp.
+   *
+   * <h4>Trade-off</h4>
+   *
+   * Page size is approximate: a full page can run slightly <b>over</b> {@code pageSize} — it
+   * completes the cohort straddling the limit rather than splitting it — and a lone timestamp whose
+   * cohort exceeds {@code pageSize} is returned as one over-sized page. Both are fine for a
+   * low-frequency admin listing and are well worth avoiding a collation-dependent {@code saga_id}
+   * tiebreaker. Listing is best-effort under concurrent mutation.
+   */
+  @Override
+  public SagaPage<SagaStateSnapshot> listStateSnapshots(SagaQuery query) {
+    int numBuckets = schema.getNumBuckets();
+    int pageSize = query.getPageSize();
+    @Nullable Instant updatedAfter = query.getUpdatedAfter();
+    Instant endTs = query.getUpdatedBefore() != null ? query.getUpdatedBefore() : MAX_TIMESTAMPTZ;
+
+    // Which status slices to sweep, in a stable ascending order, and where a token resumes.
+    int[] statusCodes =
+        query.getStatus() != null
+            ? new int[] {query.getStatus().getStatusCode()}
+            : ALL_STATUS_CODES;
+    @Nullable PageCursor cursor =
+        query.getPageToken() == null
+            ? null
+            : PageCursor.decode(query.getPageToken(), numBuckets, statusCodes);
+
+    List<SagaStateSnapshot> items = new ArrayList<>();
+    int startBucket = cursor != null ? cursor.bucket() : 0;
+
+    for (int bucket = startBucket; bucket < numBuckets; bucket++) {
+      int startStatusIdx =
+          (cursor != null && bucket == cursor.bucket())
+              ? indexOfStatus(statusCodes, cursor.statusCode())
+              : 0;
+      for (int si = startStatusIdx; si < statusCodes.length; si++) {
+        int statusCode = statusCodes[si];
+        // Resume from the token only in the exact (bucket, status) slice it points at.
+        @Nullable Instant afterTs =
+            (cursor != null && bucket == cursor.bucket() && statusCode == cursor.statusCode())
+                ? cursor.updatedAt()
+                : null;
+        SliceResult result =
+            scanSlice(bucket, statusCode, afterTs, updatedAfter, endTs, pageSize - items.size());
+        items.addAll(result.rows());
+        if (result.resumeTs() != null) {
+          // The page filled within this slice; the token resumes it after the last complete cohort.
+          return new SagaPage<>(
+              items, new PageCursor(bucket, statusCode, result.resumeTs()).encode());
+        }
+        // Slice drained — move on to the next one.
+      }
+    }
+    // Every slice was swept to the end.
+    return new SagaPage<>(items, null);
+  }
+
+  /**
+   * Scans one {@code (bucket, status)} slice in its own transaction (never one tx across a page),
+   * returning whole {@code updated_at} cohorts up to about {@code limit} rows.
+   *
+   * <p>Streams the slice in clustering order with a {@link TransactionCrudOperable.Scanner}: once
+   * it holds at least {@code limit} rows it keeps pulling only far enough to finish the cohort in
+   * progress, then stops at the first row of the next cohort (which belongs to the next page — the
+   * timestamp-exclusive cursor re-reads it). This is a single pass — no dropped-then-re-read
+   * trailing cohort, no separate full-cohort scan, and no {@code saga_id} comparison — so it also
+   * completes an over-sized single-timestamp cohort for free. The scanner lives entirely within
+   * this one (read-only) transaction and is closed before commit.
+   *
+   * @return the rows plus, when the slice was <b>not</b> drained, the last complete timestamp to
+   *     resume after; {@link SliceResult#resumeTs()} is {@code null} when the slice is fully
+   *     drained
+   */
+  private SliceResult scanSlice(
+      int bucket,
+      int statusCode,
+      @Nullable Instant afterTs,
+      @Nullable Instant updatedAfter,
+      Instant endTs,
+      int limit) {
+    return runInTransaction(
+        tx -> {
+          Instant startTs;
+          boolean startInclusive;
+          if (afterTs != null) {
+            startTs = afterTs; // resume strictly after the last fully-returned timestamp
+            startInclusive = false;
+          } else {
+            startTs = updatedAfter != null ? updatedAfter : Instant.EPOCH;
+            startInclusive = true;
+          }
+
+          List<SagaStateSnapshot> rows = new ArrayList<>();
+          @Nullable Instant lastTs = null; // timestamp of the last row accepted
+          try (TransactionCrudOperable.Scanner scanner =
+              tx.getScanner(
+                  buildStateRangeScan(bucket, statusCode, startTs, startInclusive, endTs))) {
+            for (Optional<Result> next = scanner.one(); next.isPresent(); next = scanner.one()) {
+              Result r = next.get();
+              Instant ts = r.getTimestampTZ("updated_at");
+              if (rows.size() >= limit && !ts.equals(lastTs)) {
+                break; // limit met and a new cohort begins — leave it for the next page
+              }
+              rows.add(toSagaStateSnapshot(r));
+              lastTs = ts;
+            }
+          }
+          // Short of the limit ⇒ the slice drained with room to spare (no resume point). Otherwise
+          // resume strictly after the last complete cohort's timestamp.
+          @Nullable Instant resumeTs = rows.size() >= limit ? lastTs : null;
+          return new SliceResult(rows, resumeTs);
+        },
+        null,
+        "list saga snapshots");
+  }
+
+  private static int indexOfStatus(int[] statusCodes, int statusCode) {
+    for (int i = 0; i < statusCodes.length; i++) {
+      if (statusCodes[i] == statusCode) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
   // ---------------------------------------------------------------------------
   // Recovery
   // ---------------------------------------------------------------------------
@@ -480,7 +655,8 @@ public class ScalarDbSagaStore implements SagaStore {
               for (int status : RECOVERABLE_STATUS_CODES) {
                 List<Result> rows =
                     tx.scan(
-                        Scan.newBuilder(buildStateRangeScan(bucket, status, threshold))
+                        Scan.newBuilder(
+                                buildStateRangeScan(bucket, status, Instant.EPOCH, true, threshold))
                             .limit(scanLimit)
                             .build());
                 for (Result r : rows) {
@@ -642,7 +818,9 @@ public class ScalarDbSagaStore implements SagaStore {
         tx -> {
           List<Result> rows =
               tx.scan(
-                  Scan.newBuilder(buildStateRangeScan(bucket, status.getStatusCode(), threshold))
+                  Scan.newBuilder(
+                          buildStateRangeScan(
+                              bucket, status.getStatusCode(), Instant.EPOCH, true, threshold))
                       .limit(maxResults)
                       .build());
           return rows.stream().map(this::toSagaStateSnapshot).toList();
@@ -904,21 +1082,27 @@ public class ScalarDbSagaStore implements SagaStore {
         .build();
   }
 
-  private Scan buildStateRangeScan(int bucket, int status, Instant threshold) {
+  /**
+   * Builds an {@code updated_at}-range scan over one {@code (bucket, status)} slice of {@code
+   * saga_state}, from {@code [startTs .. endInclusive]} on the second clustering-key column ({@code
+   * status} fixed). ScalarDB only allows ranging on the last specified clustering key, which is why
+   * the Admin listing paginates by whole {@code updated_at} cohorts rather than a {@code saga_id}
+   * keyset (see {@link #listStateSnapshots}). Recovery and retention call this as {@code (EPOCH,
+   * true, threshold)}, reproducing their original {@code [EPOCH, threshold]} scan exactly.
+   */
+  private Scan buildStateRangeScan(
+      int bucket, int status, Instant startTs, boolean startInclusive, Instant endInclusive) {
     return Scan.newBuilder()
         .namespace(SagaSchema.NAMESPACE)
         .table(SagaSchema.STATE_TABLE)
         .partitionKey(Key.ofInt("bucket", bucket))
         .start(
-            Key.newBuilder()
-                .addInt("status", status)
-                .addTimestampTZ("updated_at", Instant.EPOCH)
-                .build(),
-            true)
+            Key.newBuilder().addInt("status", status).addTimestampTZ("updated_at", startTs).build(),
+            startInclusive)
         .end(
             Key.newBuilder()
                 .addInt("status", status)
-                .addTimestampTZ("updated_at", threshold)
+                .addTimestampTZ("updated_at", endInclusive)
                 .build(),
             true)
         .build();
@@ -1166,4 +1350,68 @@ public class ScalarDbSagaStore implements SagaStore {
 
   /** Internal cursor tracking which bucket to scan next. */
   private record BucketCursor(int nextBucket) implements ScanCursor {}
+
+  /**
+   * Result of scanning one {@code (bucket, status)} slice: the rows to emit, and — when the slice
+   * was not drained — the last <b>complete</b> {@code updated_at} to resume after. A {@code null}
+   * {@link #resumeTs()} means the slice was fully drained within {@code [.., updatedBefore]}.
+   */
+  private record SliceResult(List<SagaStateSnapshot> rows, @Nullable Instant resumeTs) {}
+
+  /**
+   * The wire-portable position of an Admin listing: the {@code (bucket, status, updated_at)} of the
+   * last fully-returned timestamp cohort. There is deliberately no {@code saga_id} — pagination
+   * never compares that TEXT column, since ScalarDB does not normalize its collation (see {@link
+   * #listStateSnapshots}). Encoded as an opaque, versioned Base64URL token; decoding is fail-closed
+   * — any malformed, out-of-range, unknown-version, or filter-mismatched token throws {@link
+   * IllegalArgumentException} (mapped to 400) rather than silently scanning the wrong data. The
+   * token carries only a scan position within already-authorized data, so it is not signed.
+   */
+  private record PageCursor(int bucket, int statusCode, Instant updatedAt) {
+
+    private static final String DELIMITER = "|";
+
+    String encode() {
+      String payload =
+          String.join(
+              DELIMITER,
+              PAGE_TOKEN_VERSION,
+              Integer.toString(bucket),
+              Integer.toString(statusCode),
+              updatedAt.toString());
+      return Base64.getUrlEncoder()
+          .withoutPadding()
+          .encodeToString(payload.getBytes(StandardCharsets.UTF_8));
+    }
+
+    static PageCursor decode(String token, int numBuckets, int[] allowedStatusCodes) {
+      String payload;
+      try {
+        payload = new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8);
+      } catch (IllegalArgumentException e) {
+        throw new IllegalArgumentException("Malformed page token", e);
+      }
+      String[] parts = payload.split("\\" + DELIMITER, 4);
+      if (parts.length != 4 || !PAGE_TOKEN_VERSION.equals(parts[0])) {
+        throw new IllegalArgumentException("Unrecognized page token");
+      }
+      int bucket;
+      int statusCode;
+      Instant updatedAt;
+      try {
+        bucket = Integer.parseInt(parts[1]);
+        statusCode = Integer.parseInt(parts[2]);
+        updatedAt = Instant.parse(parts[3]);
+      } catch (RuntimeException e) {
+        throw new IllegalArgumentException("Malformed page token", e);
+      }
+      if (bucket < 0 || bucket >= numBuckets) {
+        throw new IllegalArgumentException("Page token bucket out of range");
+      }
+      if (indexOfStatus(allowedStatusCodes, statusCode) < 0) {
+        throw new IllegalArgumentException("Page token does not match the query");
+      }
+      return new PageCursor(bucket, statusCode, updatedAt);
+    }
+  }
 }

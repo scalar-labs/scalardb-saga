@@ -1,5 +1,7 @@
 package com.scalar.db.saga.store;
 
+import com.scalar.db.saga.api.SagaPage;
+import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.definition.SagaDefinition;
@@ -162,8 +164,26 @@ public interface SagaStore extends AutoCloseable {
   /** Looks up the current state snapshot for the given saga. */
   Optional<SagaStateSnapshot> getStateSnapshot(String sagaId);
 
-  // Admin query methods (listStateSnapshots, countByStatus, countBySagaName) will be added
-  // in the Admin API phase once SagaQuery and SagaPage are defined.
+  /**
+   * Lists saga state snapshots matching the given query, one page at a time. Used by the Admin
+   * API's listing operation.
+   *
+   * <p>Results are grouped by {@code (bucket, status)} and ordered by the clustering key within
+   * each group; they are not globally sorted by time. Pagination uses the query's opaque {@link
+   * SagaQuery#getPageToken() page token}; a {@code null} {@link SagaPage#getNextPageToken()} in the
+   * result indicates the listing is complete. Listing is best-effort under concurrent mutation: a
+   * saga whose status changes mid-listing may appear zero, one, or two times, but progress is
+   * monotonic and terminates.
+   *
+   * <p>Aggregate counts ({@code countByStatus}/{@code countBySagaName}) are intentionally not part
+   * of this interface — they belong in the observability (OTel) layer, not a transactional store
+   * scan.
+   *
+   * @param query the filter, page size, and continuation token
+   * @return a page of matching snapshots and a token for the next page
+   * @throws IllegalArgumentException if the page token is malformed or does not match the query
+   */
+  SagaPage<SagaStateSnapshot> listStateSnapshots(SagaQuery query);
 
   // ---------------------------------------------------------------------------
   // Recovery

@@ -1,5 +1,7 @@
 package com.scalar.db.saga.testing;
 
+import com.scalar.db.saga.api.SagaPage;
+import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.definition.SagaDefinition;
@@ -136,6 +138,11 @@ public final class CrashingStoreDecorator implements SagaStore {
   @Override
   public Optional<SagaStateSnapshot> getStateSnapshot(String sagaId) {
     return delegate.getStateSnapshot(sagaId);
+  }
+
+  @Override
+  public SagaPage<SagaStateSnapshot> listStateSnapshots(SagaQuery query) {
+    return delegate.listStateSnapshots(query);
   }
 
   @Override
