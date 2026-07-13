@@ -26,6 +26,7 @@ import com.scalar.db.exception.transaction.CrudConflictException;
 import com.scalar.db.exception.transaction.CrudException;
 import com.scalar.db.exception.transaction.TransactionException;
 import com.scalar.db.exception.transaction.UnknownTransactionStatusException;
+import com.scalar.db.io.Key;
 import com.scalar.db.saga.api.SagaPage;
 import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
@@ -41,7 +42,9 @@ import com.scalar.db.saga.store.SagaStore.OverdueParked;
 import com.scalar.db.saga.store.SagaStore.Recoverables;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -1802,7 +1805,7 @@ class ScalarDbSagaStoreTest {
   }
 
   // ---------------------------------------------------------------------------
-  // listStateSnapshots (orchestration + fail-closed token; no-drop reassembly is an IT)
+  // listStateSnapshots (orchestration + fail-closed token; boundary no-drop unit + full IT)
   // ---------------------------------------------------------------------------
 
   @Test
@@ -1898,6 +1901,48 @@ class ScalarDbSagaStoreTest {
         .extracting(SagaStateSnapshot::getSagaId)
         .containsExactly("a", "b", "c", "d");
     assertThat(page.hasMore()).isTrue();
+  }
+
+  @Test
+  void listStateSnapshots_boundaryAcrossTwoPages_noDropNoDuplicate() throws Exception {
+    // Arrange — three cohorts; the t2 cohort (b, c, d) straddles the pageSize-2 boundary. The
+    // scanner honors the resume range, so page 2 sees exactly what a real backend would after the
+    // cursor — this exercises the no-drop, no-duplicate boundary rather than hand-feeding page 2.
+    Instant t1 = Instant.parse("2026-01-01T00:00:01Z");
+    Instant t2 = Instant.parse("2026-01-01T00:00:02Z");
+    Instant t3 = Instant.parse("2026-01-01T00:00:03Z");
+    stubScannerHonoringRange(
+        mockStateResult("a", SagaStatus.RUNNING, t1),
+        mockStateResult("b", SagaStatus.RUNNING, t2),
+        mockStateResult("c", SagaStatus.RUNNING, t2),
+        mockStateResult("d", SagaStatus.RUNNING, t2),
+        mockStateResult("e", SagaStatus.RUNNING, t3));
+
+    // Act — page 1, then page 2 resuming from page 1's token under the same filters.
+    SagaPage<SagaStateSnapshot> page1 =
+        store.listStateSnapshots(
+            SagaQuery.newBuilder().status(SagaStatus.RUNNING).pageSize(2).build());
+    SagaPage<SagaStateSnapshot> page2 =
+        store.listStateSnapshots(
+            SagaQuery.newBuilder()
+                .status(SagaStatus.RUNNING)
+                .pageSize(2)
+                .pageToken(page1.getNextPageToken())
+                .build());
+
+    // Assert — page 1 completes the straddling t2 cohort and reports more.
+    assertThat(page1.getItems())
+        .extracting(SagaStateSnapshot::getSagaId)
+        .containsExactly("a", "b", "c", "d");
+    assertThat(page1.getNextPageToken()).isNotBlank();
+    // Page 2 resumes strictly after t2: e is not dropped, and none of a–d reappear.
+    assertThat(page2.getItems()).extracting(SagaStateSnapshot::getSagaId).containsExactly("e");
+    assertThat(page2.getNextPageToken()).isNull();
+    // The two pages reassemble the full set, each row exactly once.
+    List<String> reassembled = new ArrayList<>();
+    page1.getItems().forEach(s -> reassembled.add(s.getSagaId()));
+    page2.getItems().forEach(s -> reassembled.add(s.getSagaId()));
+    assertThat(reassembled).containsExactly("a", "b", "c", "d", "e");
   }
 
   @Test
@@ -2019,13 +2064,57 @@ class ScalarDbSagaStoreTest {
 
   /** Stubs {@code tx.getScanner(...)} to return a scanner that yields {@code rows} then drains. */
   private void stubScanner(Result... rows) throws Exception {
+    // Build the scanner before the outer stubbing starts; nesting when() inside thenReturn(...)
+    // trips Mockito's UnfinishedStubbingException.
+    TransactionCrudOperable.Scanner scanner = scannerOver(List.of(rows));
+    when(tx.getScanner(any(Scan.class))).thenReturn(scanner);
+  }
+
+  /**
+   * Stubs {@code tx.getScanner(...)} to honor each scan's clustering-key range: a scanner yields
+   * exactly the {@code master} rows in the requested {@code (bucket, status)} slice whose {@code
+   * updated_at} falls within the scan's bounds, respecting {@code startInclusive}. Unlike {@link
+   * #stubScanner}, this lets one dataset drive real multi-page pagination, so the resume cursor
+   * genuinely excludes already-returned cohorts rather than the test hand-feeding each page.
+   */
+  private void stubScannerHonoringRange(Result... master) throws Exception {
+    when(tx.getScanner(any(Scan.class)))
+        .thenAnswer(
+            invocation -> {
+              Scan scan = invocation.getArgument(0);
+              int bucket = scan.getPartitionKey().getIntValue(0);
+              Key start = scan.getStartClusteringKey().orElseThrow();
+              int status = start.getIntValue(0);
+              Instant startTs = start.getTimestampTZValue(1);
+              boolean startInclusive = scan.getStartInclusive();
+              Instant endTs = scan.getEndClusteringKey().orElseThrow().getTimestampTZValue(1);
+
+              List<Result> slice = new ArrayList<>();
+              for (Result r : master) {
+                if (r.getInt("bucket") != bucket || r.getInt("status") != status) {
+                  continue;
+                }
+                Instant ts = r.getTimestampTZ("updated_at");
+                boolean afterStart = startInclusive ? !ts.isBefore(startTs) : ts.isAfter(startTs);
+                if (afterStart && !ts.isAfter(endTs)) {
+                  slice.add(r);
+                }
+              }
+              slice.sort(Comparator.comparing(r -> r.getTimestampTZ("updated_at")));
+              return scannerOver(slice);
+            });
+  }
+
+  /** A scanner mock that yields {@code rows} in order, then drains. */
+  private static TransactionCrudOperable.Scanner scannerOver(List<Result> rows)
+      throws CrudException {
     TransactionCrudOperable.Scanner scanner = mock(TransactionCrudOperable.Scanner.class);
     OngoingStubbing<Optional<Result>> stub = when(scanner.one());
     for (Result r : rows) {
       stub = stub.thenReturn(Optional.of(r));
     }
     stub.thenReturn(Optional.empty());
-    when(tx.getScanner(any(Scan.class))).thenReturn(scanner);
+    return scanner;
   }
 
   private static String encodePageToken(
