@@ -1484,9 +1484,10 @@ class ScalarDbSagaStoreTest {
     Result r = mockEventResult("UNKNOWN_TYPE", -1, null, null);
     when(tx.scan(any(Scan.class))).thenReturn(List.of(r));
 
-    // Act & Assert
+    // Act & Assert — an unreadable stored event is a permanent failure: not retryable.
     assertThatThrownBy(() -> store.getEvents("saga-1"))
-        .isInstanceOf(SagaPersistenceException.class);
+        .isInstanceOfSatisfying(
+            SagaPersistenceException.class, e -> assertThat(e.isRetryable()).isFalse());
   }
 
   @SuppressWarnings("NullAway")
@@ -1591,10 +1592,11 @@ class ScalarDbSagaStoreTest {
             ScalarDbSagaStoreConfig.builder().transactionRetryCount(2).build());
     doThrow(mock(CrudConflictException.class)).when(tx).insert(any(Insert.class));
 
-    // Act & Assert
+    // Act & Assert — a retry-exhausted store failure is transient: retryable.
     assertThatThrownBy(
             () -> retryStore.recordStepEvent("saga-1", 1, StepEvent.completed(0, "s", null)))
-        .isInstanceOf(SagaPersistenceException.class);
+        .isInstanceOfSatisfying(
+            SagaPersistenceException.class, e -> assertThat(e.isRetryable()).isTrue());
   }
 
   @Test

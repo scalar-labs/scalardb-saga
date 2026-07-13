@@ -108,11 +108,18 @@ public final class ErrorMapper {
           body.put("existing", SagaSnapshotResponse.from(e.getExisting()));
           ctx.status(409).json(body);
         });
+    // A transient store failure is retryable (503); a permanent one (e.g. a serialization or parse
+    // error) is not — surface it as 500 so the client does not retry it futilely.
     app.exception(
         SagaPersistenceException.class,
         (e, ctx) -> {
-          logger.error("Persistence error on {} {}", ctx.method(), ctx.path(), e);
-          ctx.status(503).json(error("UNAVAILABLE", "Service temporarily unavailable"));
+          if (e.isRetryable()) {
+            logger.error("Transient persistence error on {} {}", ctx.method(), ctx.path(), e);
+            ctx.status(503).json(error("UNAVAILABLE", "Service temporarily unavailable"));
+          } else {
+            logger.error("Permanent persistence error on {} {}", ctx.method(), ctx.path(), e);
+            ctx.status(500).json(error("INTERNAL", "Internal server error"));
+          }
         });
     // Catch-all: never leak an unmapped exception's message; log it and return a generic 500.
     app.exception(

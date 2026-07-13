@@ -91,7 +91,7 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
       admin.createCoordinatorTables(true);
       SagaSchema.createAll(admin);
     } catch (Exception e) {
-      throw new SagaPersistenceException("Failed to create saga schema", e);
+      throw SagaPersistenceException.retryable("Failed to create saga schema", e);
     }
   }
 
