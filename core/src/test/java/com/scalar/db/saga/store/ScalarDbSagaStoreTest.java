@@ -1688,6 +1688,35 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
+  void
+      runInTransaction_unknownStatusWithVerifierThrowsNonRetryablePersistenceException_propagatesImmediately()
+          throws Exception {
+    // Arrange — UTSE on commit; the verifier throws a permanent (non-retryable) persistence
+    // failure. It must propagate as-is, not be retried and masked as a retryable failure.
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    SagaPersistenceException verifierError =
+        SagaPersistenceException.nonRetryable("bad payload", new RuntimeException("parse"));
+    ScalarDbSagaStore store2 =
+        new ScalarDbSagaStore(
+            txManager, objectMapper, schema, ScalarDbSagaStoreConfig.builder().build());
+
+    // Act & Assert
+    assertThatThrownBy(
+            () ->
+                store2.runInTransaction(
+                    tx -> Boolean.TRUE,
+                    () -> {
+                      throw verifierError;
+                    },
+                    "test operation"))
+        .isSameAs(verifierError)
+        .isInstanceOfSatisfying(
+            SagaPersistenceException.class, e -> assertThat(e.isRetryable()).isFalse());
+    // Only one transaction attempt — no retries after a non-retryable failure from the verifier.
+    verify(txManager, times(1)).begin();
+  }
+
+  @Test
   void runInTransaction_unknownStatusReadOnly_retriesWholeTransaction() throws Exception {
     // Arrange — first tx: UTSE on commit (read-only, null verifier). Second tx: succeeds.
     DistributedTransaction tx2 = mock(DistributedTransaction.class);

@@ -776,6 +776,12 @@ public class ScalarDbSagaStore implements SagaStore {
             }
             break; // Verified not committed — retry the transaction
           } catch (Exception ve) {
+            // A permanent (non-retryable) persistence failure — e.g. a deserialization or parse
+            // error while verifying — fails identically on every attempt; propagate it as-is
+            // instead of retrying and masking it as the retryable failure thrown below.
+            if (ve instanceof SagaPersistenceException pe && !pe.isRetryable()) {
+              throw pe;
+            }
             // Business-logic or programming errors propagate immediately.
             // Only SagaPersistenceException (infrastructure failure from inner
             // transactions) and checked exceptions are retried.
