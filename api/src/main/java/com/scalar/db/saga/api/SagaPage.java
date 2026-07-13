@@ -16,9 +16,12 @@ import org.jspecify.annotations.Nullable;
  *       previous page's {@link #getNextPageToken()} until it returns {@code null} (equivalently,
  *       until {@link #hasMore()} is {@code false}). Do <b>not</b> stop just because a page returned
  *       fewer items than requested.
- *   <li><b>The item count is approximate.</b> A page may hold slightly more or fewer than the
- *       requested {@code pageSize} (see {@link SagaQuery.Builder#pageSize(int)}), so never build
- *       logic on {@code getItems().size() == pageSize}.
+ *   <li><b>The item count is not bounded by {@code pageSize}.</b> A page may hold fewer than the
+ *       requested {@code pageSize}, or <b>more</b> — potentially by an arbitrarily large amount,
+ *       since a page never splits a group of equal-keyed rows and one such group can itself exceed
+ *       {@code pageSize} (see {@link SagaQuery.Builder#pageSize(int)}). Never build logic on {@code
+ *       getItems().size() == pageSize}, and do not treat {@code pageSize} as a hard upper bound
+ *       when sizing buffers or response limits.
  *   <li><b>The last page may be empty.</b> A non-{@code null} token does not guarantee the next
  *       page has items — the final call can return an empty {@link #getItems()} with a {@code null}
  *       token. The token-driven loop above handles this correctly.
@@ -54,9 +57,11 @@ public final class SagaPage<T> {
   }
 
   /**
-   * The results in this page (unmodifiable). The count is the requested {@code pageSize} at most in
-   * the common case, but may be slightly larger when the underlying query completes a group of
-   * equal-keyed rows straddling the page boundary rather than splitting it.
+   * The results in this page (unmodifiable). {@code pageSize} is a target, not a hard upper bound:
+   * the count is at most the requested {@code pageSize} in the common case, but can exceed it — by
+   * up to a full group of equal-keyed rows, which is not itself bounded by {@code pageSize} — when
+   * the underlying query completes such a group straddling the page boundary rather than splitting
+   * it. See {@link SagaQuery.Builder#pageSize(int)}.
    */
   public List<T> getItems() {
     return items;
