@@ -505,13 +505,33 @@ public class ScalarDbSagaStore implements SagaStore {
    * #scanSlice} streams on just far enough to <b>complete</b> the cohort straddling the boundary,
    * then stops at the next cohort and sets the cursor to the completed cohort's timestamp.
    *
-   * <h4>Trade-off</h4>
+   * <h4>Trade-off: {@code pageSize} is a target, and the memory bound is cohort size</h4>
    *
-   * Page size is approximate: a full page can run slightly <b>over</b> {@code pageSize} — it
-   * completes the cohort straddling the limit rather than splitting it — and a lone timestamp whose
-   * cohort exceeds {@code pageSize} is returned as one over-sized page. Both are fine for a
-   * low-frequency admin listing and are well worth avoiding a collation-dependent {@code saga_id}
-   * tiebreaker. Listing is best-effort under concurrent mutation.
+   * Because a page never splits a cohort, {@code pageSize} is a <b>target</b>, not a cap: a full
+   * page runs <b>over</b> it to finish the cohort straddling the limit, and a single cohort larger
+   * than {@code pageSize} is returned whole as one over-sized page. So the rows materialized for
+   * one page are bounded by the <b>largest cohort</b> (rows sharing one {@code updated_at} within a
+   * bucket), <b>not</b> by {@code pageSize}. That is the one unbounded quantity in this path:
+   * recovery caps its analogous per-status scan (see {@link
+   * ScalarDbSagaStoreConfig#getRecoveryScanLimit()}), but this listing does not. A pathological
+   * cohort — e.g. a mass transition stamping many sagas with the same millisecond {@code
+   * updated_at}, divided only across {@code numBuckets} — therefore drives peak memory for the
+   * call. Operators should provision heap and response limits for the largest expected cohort, not
+   * for {@code pageSize}. Listing is best-effort under concurrent mutation.
+   *
+   * <h4>Future option: bound memory by splitting cohorts on {@code saga_id}</h4>
+   *
+   * To cap memory at {@code pageSize} and make page sizes exact, pagination could page
+   * <b>within</b> a cohort using {@code saga_id} — the trailing clustering-key column — as a keyset
+   * tiebreaker. The objection above is about a <b>global</b> {@code (updated_at, saga_id)} keyset
+   * (two ranging columns; and sentinel or in-memory schemes that assume an order). An
+   * <b>intra-cohort</b> keyset sidesteps both: with {@code updated_at} pinned to equality a scan
+   * ranges on {@code saga_id} alone, and resuming with the backend's own {@code saga_id > last}
+   * predicate is collation-safe — it relies only on each backend being self-consistent, never on an
+   * assumed Java or byte order. It is deferred because it reintroduces a {@code saga_id} comparison
+   * and a two-phase resume scan (finish the cohort, then advance {@code updated_at}) on mid-cohort
+   * resumes. It can be added later <b>without breaking compatibility</b>: today's cursor is a valid
+   * future cursor with no intra-cohort offset, so existing page tokens keep resuming correctly.
    */
   @Override
   public SagaPage<SagaStateSnapshot> listStateSnapshots(SagaQuery query) {
