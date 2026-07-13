@@ -525,10 +525,13 @@ public class ScalarDbSagaStore implements SagaStore {
         query.getStatus() != null
             ? new int[] {query.getStatus().getStatusCode()}
             : ALL_STATUS_CODES;
+    // A token is bound to the filters that produced it; reusing it under different filters is
+    // rejected rather than silently resuming against the wrong data.
+    String filterKey = PageCursor.filterKey(query);
     @Nullable PageCursor cursor =
         query.getPageToken() == null
             ? null
-            : PageCursor.decode(query.getPageToken(), numBuckets, statusCodes);
+            : PageCursor.decode(query.getPageToken(), numBuckets, statusCodes, filterKey);
 
     List<SagaStateSnapshot> items = new ArrayList<>();
     int startBucket = cursor != null ? cursor.bucket() : 0;
@@ -551,7 +554,7 @@ public class ScalarDbSagaStore implements SagaStore {
         if (result.resumeTs() != null) {
           // The page filled within this slice; the token resumes it after the last complete cohort.
           return new SagaPage<>(
-              items, new PageCursor(bucket, statusCode, result.resumeTs()).encode());
+              items, new PageCursor(bucket, statusCode, result.resumeTs()).encode(filterKey));
         }
         // Slice drained — move on to the next one.
       }
@@ -1362,20 +1365,57 @@ public class ScalarDbSagaStore implements SagaStore {
    * The wire-portable position of an Admin listing: the {@code (bucket, status, updated_at)} of the
    * last fully-returned timestamp cohort. There is deliberately no {@code saga_id} — pagination
    * never compares that TEXT column, since ScalarDB does not normalize its collation (see {@link
-   * #listStateSnapshots}). Encoded as an opaque, versioned Base64URL token; decoding is fail-closed
-   * — any malformed, out-of-range, unknown-version, or filter-mismatched token throws {@link
+   * #listStateSnapshots}).
+   *
+   * <p>The token also carries a {@link #filterKey(SagaQuery) filter key} — the normalized status
+   * and time-window filters that produced it. On decode the key must match the current query's
+   * filters, so a token minted under one filter set (say {@code status=RUNNING}) cannot silently
+   * resume a different query (say unfiltered, or a wider time window): widening the filters would
+   * otherwise skip earlier buckets and status slices, and a changed lower time bound would be
+   * overridden by the cursor timestamp and return out-of-window rows.
+   *
+   * <p>Encoded as an opaque, versioned Base64URL token; decoding is fail-closed — any malformed,
+   * out-of-range, unknown-version, or filter-mismatched token throws {@link
    * IllegalArgumentException} (mapped to 400) rather than silently scanning the wrong data. The
-   * token carries only a scan position within already-authorized data, so it is not signed.
+   * token carries only a scan position and filter key within already-authorized data, so it is not
+   * signed.
    */
   private record PageCursor(int bucket, int statusCode, Instant updatedAt) {
 
     private static final String DELIMITER = "|";
 
-    String encode() {
+    /** Filter-key token for "no status filter" (list every status). */
+    private static final String ANY_STATUS = "*";
+
+    /** Filter-key token for an absent time bound (no lower or no upper bound). */
+    private static final String NO_BOUND = "-";
+
+    /**
+     * The normalized status and time-window filters, as a canonical {@code status|after|before}
+     * string embedded in the token and re-checked on decode. Two queries share a key exactly when
+     * they sweep the same slices over the same window, so a key mismatch means the token belongs to
+     * a different query. The sub-parts use the same {@link #DELIMITER} as the outer payload, which
+     * is safe: none of {@link SagaStatus} codes (integers) nor {@link Instant} strings (ISO-8601)
+     * contain {@code "|"}.
+     */
+    static String filterKey(SagaQuery query) {
+      String status =
+          query.getStatus() == null
+              ? ANY_STATUS
+              : Integer.toString(query.getStatus().getStatusCode());
+      String after =
+          query.getUpdatedAfter() == null ? NO_BOUND : query.getUpdatedAfter().toString();
+      String before =
+          query.getUpdatedBefore() == null ? NO_BOUND : query.getUpdatedBefore().toString();
+      return String.join(DELIMITER, status, after, before);
+    }
+
+    String encode(String filterKey) {
       String payload =
           String.join(
               DELIMITER,
               PAGE_TOKEN_VERSION,
+              filterKey, // three sub-parts: status, after, before
               Integer.toString(bucket),
               Integer.toString(statusCode),
               updatedAt.toString());
@@ -1384,30 +1424,39 @@ public class ScalarDbSagaStore implements SagaStore {
           .encodeToString(payload.getBytes(StandardCharsets.UTF_8));
     }
 
-    static PageCursor decode(String token, int numBuckets, int[] allowedStatusCodes) {
+    static PageCursor decode(
+        String token, int numBuckets, int[] allowedStatusCodes, String expectedFilterKey) {
       String payload;
       try {
         payload = new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8);
       } catch (IllegalArgumentException e) {
         throw new IllegalArgumentException("Malformed page token", e);
       }
-      String[] parts = payload.split("\\" + DELIMITER, 4);
-      if (parts.length != 4 || !PAGE_TOKEN_VERSION.equals(parts[0])) {
+      // version | status | after | before | bucket | statusCode | updatedAt
+      String[] parts = payload.split("\\" + DELIMITER, 7);
+      if (parts.length != 7 || !PAGE_TOKEN_VERSION.equals(parts[0])) {
         throw new IllegalArgumentException("Unrecognized page token");
+      }
+      String filterKey = String.join(DELIMITER, parts[1], parts[2], parts[3]);
+      if (!expectedFilterKey.equals(filterKey)) {
+        throw new IllegalArgumentException("Page token does not match the query");
       }
       int bucket;
       int statusCode;
       Instant updatedAt;
       try {
-        bucket = Integer.parseInt(parts[1]);
-        statusCode = Integer.parseInt(parts[2]);
-        updatedAt = Instant.parse(parts[3]);
+        bucket = Integer.parseInt(parts[4]);
+        statusCode = Integer.parseInt(parts[5]);
+        updatedAt = Instant.parse(parts[6]);
       } catch (RuntimeException e) {
         throw new IllegalArgumentException("Malformed page token", e);
       }
       if (bucket < 0 || bucket >= numBuckets) {
         throw new IllegalArgumentException("Page token bucket out of range");
       }
+      // Defense in depth: even with a matching filter key the token is unsigned, so guard the
+      // resume math against a tampered statusCode outside the swept set (would index out of
+      // bounds).
       if (indexOfStatus(allowedStatusCodes, statusCode) < 0) {
         throw new IllegalArgumentException("Page token does not match the query");
       }

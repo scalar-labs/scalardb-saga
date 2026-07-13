@@ -1912,8 +1912,8 @@ class ScalarDbSagaStoreTest {
 
   @Test
   void listStateSnapshots_tokenBucketOutOfRangeGiven_throwsIllegalArgumentException() {
-    // Arrange — bucket 999 with a 4-bucket schema
-    String token = encodePageToken("1", 999, 0, "2026-01-01T00:00:00Z");
+    // Arrange — bucket 999 with a 4-bucket schema; filter key matches the unfiltered query
+    String token = encodePageToken("1", "*|-|-", 999, 0, "2026-01-01T00:00:00Z");
 
     // Act & Assert
     assertThatThrownBy(
@@ -1924,7 +1924,7 @@ class ScalarDbSagaStoreTest {
   @Test
   void listStateSnapshots_tokenUnknownVersionGiven_throwsIllegalArgumentException() {
     // Arrange — version "2" is not recognized
-    String token = encodePageToken("2", 0, 0, "2026-01-01T00:00:00Z");
+    String token = encodePageToken("2", "*|-|-", 0, 0, "2026-01-01T00:00:00Z");
 
     // Act & Assert
     assertThatThrownBy(
@@ -1934,8 +1934,9 @@ class ScalarDbSagaStoreTest {
 
   @Test
   void listStateSnapshots_tokenStatusNotInFilterGiven_throwsIllegalArgumentException() {
-    // Arrange — query filters RUNNING(0) but the token points at COMPLETED(1)
-    String token = encodePageToken("1", 0, 1, "2026-01-01T00:00:00Z");
+    // Arrange — query filters RUNNING(0) and the filter key matches, but the cursor status is
+    // COMPLETED(1), outside the swept set: the defense-in-depth membership check rejects it.
+    String token = encodePageToken("1", "0|-|-", 0, 1, "2026-01-01T00:00:00Z");
 
     // Act & Assert
     assertThatThrownBy(
@@ -1943,6 +1944,77 @@ class ScalarDbSagaStoreTest {
                 store.listStateSnapshots(
                     SagaQuery.newBuilder().status(SagaStatus.RUNNING).pageToken(token).build()))
         .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void listStateSnapshots_tokenFromStatusFilterReusedByUnfilteredQuery_throwsException()
+      throws Exception {
+    // Arrange — mint a real token from a status=RUNNING query (pageSize 1 fills the page).
+    stubScanner(mockStateResult("saga-a", SagaStatus.RUNNING));
+    String token =
+        store
+            .listStateSnapshots(
+                SagaQuery.newBuilder().status(SagaStatus.RUNNING).pageSize(1).build())
+            .getNextPageToken();
+    assertThat(token).isNotBlank();
+
+    // Act & Assert — reusing it on an unfiltered query would silently skip earlier buckets and
+    // status slices; the filter-key mismatch rejects it instead.
+    assertThatThrownBy(
+            () -> store.listStateSnapshots(SagaQuery.newBuilder().pageToken(token).build()))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void listStateSnapshots_tokenReusedWithDifferentUpdatedAfter_throwsException() throws Exception {
+    // Arrange — mint a token from a query bounded by updatedAfter = Jan 1.
+    Instant after = Instant.parse("2026-01-01T00:00:00Z");
+    stubScanner(mockStateResult("saga-a", SagaStatus.RUNNING));
+    String token =
+        store
+            .listStateSnapshots(
+                SagaQuery.newBuilder()
+                    .status(SagaStatus.RUNNING)
+                    .updatedAfter(after)
+                    .pageSize(1)
+                    .build())
+            .getNextPageToken();
+    assertThat(token).isNotBlank();
+
+    // Act & Assert — reusing it under a later updatedAfter would let the cursor timestamp override
+    // the new lower bound and return out-of-window rows; the filter-key mismatch rejects it.
+    Instant laterAfter = Instant.parse("2026-02-01T00:00:00Z");
+    assertThatThrownBy(
+            () ->
+                store.listStateSnapshots(
+                    SagaQuery.newBuilder()
+                        .status(SagaStatus.RUNNING)
+                        .updatedAfter(laterAfter)
+                        .pageToken(token)
+                        .build()))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void listStateSnapshots_tokenReusedBySameQuery_resumesSuccessfully() throws Exception {
+    // Arrange — mint a token from a status=RUNNING query, then reuse it with the SAME filters.
+    stubScanner(mockStateResult("saga-a", SagaStatus.RUNNING));
+    String token =
+        store
+            .listStateSnapshots(
+                SagaQuery.newBuilder().status(SagaStatus.RUNNING).pageSize(1).build())
+            .getNextPageToken();
+    assertThat(token).isNotBlank();
+    stubScanner(); // second page drains empty
+
+    // Act — the matching filter key is accepted and the query resumes without throwing.
+    SagaPage<SagaStateSnapshot> page =
+        store.listStateSnapshots(
+            SagaQuery.newBuilder().status(SagaStatus.RUNNING).pageSize(1).pageToken(token).build());
+
+    // Assert
+    assertThat(page.getItems()).isEmpty();
+    assertThat(page.getNextPageToken()).isNull();
   }
 
   /** Stubs {@code tx.getScanner(...)} to return a scanner that yields {@code rows} then drains. */
@@ -1957,10 +2029,15 @@ class ScalarDbSagaStoreTest {
   }
 
   private static String encodePageToken(
-      String version, int bucket, int statusCode, String updatedAtIso) {
+      String version, String filterKey, int bucket, int statusCode, String updatedAtIso) {
     String payload =
         String.join(
-            "|", version, Integer.toString(bucket), Integer.toString(statusCode), updatedAtIso);
+            "|",
+            version,
+            filterKey,
+            Integer.toString(bucket),
+            Integer.toString(statusCode),
+            updatedAtIso);
     return Base64.getUrlEncoder()
         .withoutPadding()
         .encodeToString(payload.getBytes(StandardCharsets.UTF_8));
