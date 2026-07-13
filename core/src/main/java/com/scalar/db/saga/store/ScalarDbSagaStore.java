@@ -532,6 +532,18 @@ public class ScalarDbSagaStore implements SagaStore {
    * and a two-phase resume scan (finish the cohort, then advance {@code updated_at}) on mid-cohort
    * resumes. It can be added later <b>without breaking compatibility</b>: today's cursor is a valid
    * future cursor with no intra-cohort offset, so existing page tokens keep resuming correctly.
+   *
+   * <h4>Cost: sequential per-slice transactions, {@code O(numBuckets × statuses)} per page</h4>
+   *
+   * Each {@code (bucket, status)} slice is scanned in its own read-only transaction (see {@link
+   * #scanSlice}), and the slices are swept sequentially until the page fills or every slice drains.
+   * A page therefore costs up to {@code numBuckets × statuses} round-trips <b>independent of how
+   * many rows it returns</b> — a sparse or empty match walks every slice before returning (at
+   * defaults, 16 buckets × 6 statuses = 96; a status filter collapses the inner sweep to one, so up
+   * to {@code numBuckets}). This is acceptable for a low-frequency admin listing: the cost is
+   * latency, not correctness, and every transaction is read-only. The escape hatch, if it ever
+   * matters, is a concurrent per-bucket fan-out, deferred because the bucket-ordered cursor would
+   * then need a cross-bucket merge and a different resume scheme.
    */
   @Override
   public SagaPage<SagaStateSnapshot> listStateSnapshots(SagaQuery query) {
@@ -1411,6 +1423,15 @@ public class ScalarDbSagaStore implements SagaStore {
     private static final String NO_BOUND = "-";
 
     /**
+     * Defensive upper bound on the encoded token length, checked before Base64 decoding so the core
+     * library is self-defending even when called outside the daemon's request-size limits. A valid
+     * token is well under this (~160 chars today, and still comfortably under even once a future
+     * intra-cohort {@code saga_id} is added); this only rejects absurd input, it is not a tight
+     * format check.
+     */
+    private static final int MAX_ENCODED_LENGTH = 512;
+
+    /**
      * The normalized status and time-window filters, as a canonical {@code status|after|before}
      * string embedded in the token and re-checked on decode. Two queries share a key exactly when
      * they sweep the same slices over the same window, so a key mismatch means the token belongs to
@@ -1446,6 +1467,11 @@ public class ScalarDbSagaStore implements SagaStore {
 
     static PageCursor decode(
         String token, int numBuckets, int[] allowedStatusCodes, String expectedFilterKey) {
+      // Reject an oversized token before allocating its decoded bytes (defense in depth; the daemon
+      // also bounds request size).
+      if (token.length() > MAX_ENCODED_LENGTH) {
+        throw new IllegalArgumentException("Page token too long");
+      }
       String payload;
       try {
         payload = new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8);
