@@ -31,7 +31,6 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -263,77 +262,33 @@ class SagaRecoveryManager {
 
   private void recoverRunning(
       SagaDefinition def, ExecutionContext context, List<SagaEvent> events) {
-    // Check if step failures have been stuck longer than the grace period.
-    // Sagas with no STEP_FAILED events (crash recovery) skip escalation and proceed to resume.
+    // Grace-period policy (recovery-specific): escalate if a step failure has been stuck past the
+    // grace period. Sagas with no STEP_FAILED events (crash recovery) skip this and act directly.
     if (isStuckLongerThanGracePeriod(events, EventType.STEP_FAILED, EventType.STEP_COMPLETED)) {
       escalate(context, "step retry stuck for over " + config.compensationGracePeriod());
       return;
     }
-
-    // A durable STEP_FAILED at or before the pivot means the engine had already exhausted retries
-    // and decided to compensate: the forward path records STEP_FAILED, then transitions to
-    // COMPENSATING. A crash between those two writes leaves the saga RUNNING with the failure
-    // recorded but compensation never started. Resuming forward here would re-run a step whose side
-    // effect may have committed (an in-doubt failure) and, if the re-run then proved non-delivery,
-    // skip it — orphaning the original side effect. Drive compensation instead, mirroring
-    // recoverCompensating's fromStep computation: an in-doubt/possibly-committed failure (in
-    // failedIndicesToCompensate) is included; a knownNotCommitted=true failure is skipped (start
-    // from the highest completed). A POST-pivot failure is intentionally left to resume forward —
-    // FORWARD/MIXED recovery re-attempts the failed step rather than compensating past the pivot.
-    int pivotIndex = def.getPivotIndex();
-    if (hasUnresolvedPrePivotFailure(events, pivotIndex)) {
-      int fromStep =
-          Math.max(
-              stepIndices(events, EventType.STEP_COMPLETED).max().orElse(-1),
-              failedIndicesToCompensate(events)
-                  .filter(index -> index <= pivotIndex)
-                  .max()
-                  .orElse(-1));
-      engine.compensateFrom(def, context, fromStep);
-      return;
-    }
-
-    int lastCompleted = stepIndices(events, EventType.STEP_COMPLETED).max().orElse(-1);
-
-    engine.resumeFrom(def, context, lastCompleted + 1);
+    apply(RecoveryActionResolver.resolve(events, def, SagaStatus.RUNNING), def, context);
   }
 
   private void recoverCompensating(
       SagaDefinition def, ExecutionContext context, List<SagaEvent> events) {
-    // Check if compensation has been stuck longer than the grace period.
+    // Grace-period policy (recovery-specific): compensation stuck past the grace period escalates.
     if (isStuckLongerThanGracePeriod(
         events, EventType.STEP_COMPENSATION_FAILED, EventType.STEP_COMPENSATED)) {
       escalate(context, "compensation stuck for over " + config.compensationGracePeriod());
       return;
     }
+    apply(RecoveryActionResolver.resolve(events, def, SagaStatus.COMPENSATING), def, context);
+  }
 
-    int lastCompensated =
-        stepIndices(events, EventType.STEP_COMPENSATED).min().orElse(Integer.MAX_VALUE);
-
-    int fromStep;
-    if (lastCompensated < Integer.MAX_VALUE) {
-      fromStep = lastCompensated - 1;
-    } else {
-      // No compensation started yet (crash after the COMPENSATING transition, before any step was
-      // compensated). Start from the highest completed step OR the highest forward failure whose
-      // non-delivery was NOT proven — that failed step may have committed and must be compensated
-      // too. A knownNotCommitted failure is safely skipped.
-      fromStep =
-          Math.max(
-              stepIndices(events, EventType.STEP_COMPLETED).max().orElse(-1),
-              failedIndicesToCompensate(events).max().orElse(-1));
+  /** Drives the {@link RecoveryAction} chosen by {@link RecoveryActionResolver#resolve}. */
+  private void apply(RecoveryAction action, SagaDefinition def, ExecutionContext context) {
+    switch (action) {
+      case RecoveryAction.Compensate compensate ->
+          engine.compensateFrom(def, context, compensate.fromStep());
+      case RecoveryAction.Resume resume -> engine.resumeFrom(def, context, resume.fromStep());
     }
-
-    // Pivot-scope invariant (documented, not enforced): unlike the forward path's
-    // `if (i <= pivotIndex)` guard, this does not clamp fromStep to the pivot — it does not need
-    // to. A saga reaches COMPENSATING only via a PRE-pivot forward failure, which stops execution
-    // at that step, so every completed/failed index here is necessarily <= pivotIndex and fromStep
-    // cannot point past the pivot. If a future path ever drives a past-the-pivot saga into
-    // COMPENSATING (most likely a manual cancel/abort API), this breaks: such a saga cannot be
-    // cleanly auto-rolled-back, so it must fail loud (escalate), NOT silently clamp here — that
-    // would leave a torn saga (pre-pivot undone, post-pivot still committed). Handle the pivot
-    // scope when that path is introduced.
-    engine.compensateFrom(def, context, fromStep);
   }
 
   private void recoverParkedTimeoutOneSafely(String sagaId) {
@@ -467,7 +422,9 @@ class SagaRecoveryManager {
   private RedriveDecision redriveDecision(
       List<SagaEvent> events, int parkedIndex, SagaDefinition def) {
     long attempts =
-        stepIndices(events, EventType.STEP_PENDING).filter(index -> index == parkedIndex).count();
+        RecoveryActionResolver.stepIndices(events, EventType.STEP_PENDING)
+            .filter(index -> index == parkedIndex)
+            .count();
     if (attempts >= maxRedriveAttempts(def, parkedIndex)) {
       return RedriveDecision.ATTEMPTS_EXHAUSTED;
     }
@@ -519,35 +476,6 @@ class SagaRecoveryManager {
   }
 
   /**
-   * STEP_FAILED indices whose persisted payload does not prove non-delivery — those failed steps
-   * may have committed, so compensation must include them. A {@code knownNotCommitted} failure
-   * (proven non-delivery) is excluded.
-   */
-  private static IntStream failedIndicesToCompensate(List<SagaEvent> events) {
-    return events.stream()
-        .filter(e -> e instanceof StepEvent)
-        .map(e -> (StepEvent) e)
-        .filter(e -> e.getEventType() == EventType.STEP_FAILED)
-        .filter(e -> !EventPayloadSerializer.isKnownNotCommitted(e.getPayload()))
-        .mapToInt(StepEvent::getStepIndex);
-  }
-
-  /**
-   * Returns whether a RUNNING saga has a forward failure at or before the pivot that no later
-   * {@code STEP_COMPLETED} at the same index resolved. Such a failure means the engine had decided
-   * to compensate (retries exhausted) but crashed before the {@code COMPENSATING} transition, so
-   * recovery must compensate rather than resume forward. Post-pivot failures are excluded — those
-   * are resumed forward (FORWARD/MIXED recovery).
-   */
-  private static boolean hasUnresolvedPrePivotFailure(List<SagaEvent> events, int pivotIndex) {
-    Set<Integer> resolvedIndices =
-        stepIndices(events, EventType.STEP_COMPLETED).boxed().collect(Collectors.toSet());
-    return stepIndices(events, EventType.STEP_FAILED)
-        .filter(index -> index <= pivotIndex)
-        .anyMatch(index -> !resolvedIndices.contains(index));
-  }
-
-  /**
    * Checks if a saga has been stuck longer than the grace period by examining step-level failure
    * events. Returns {@code false} if no matching failure events exist (e.g., crash recovery where
    * the saga was interrupted, not failed).
@@ -558,7 +486,9 @@ class SagaRecoveryManager {
     // Since events are append-only and ordered, a success at the same index
     // always follows the failure — the step cannot succeed before it fails.
     Set<Integer> resolvedIndices =
-        stepIndices(events, successEventType).boxed().collect(Collectors.toSet());
+        RecoveryActionResolver.stepIndices(events, successEventType)
+            .boxed()
+            .collect(Collectors.toSet());
 
     Optional<Instant> firstUnresolvedFailure =
         events.stream()
@@ -584,13 +514,5 @@ class SagaRecoveryManager {
     logger.warn("Escalating saga {}: {}", context.getSagaId(), reason);
     store.recordStatusEvent(
         context.getCurrentState(), context.nextSequence(), StatusEvent.escalated(reason));
-  }
-
-  private static IntStream stepIndices(List<SagaEvent> events, EventType eventType) {
-    return events.stream()
-        .filter(e -> e instanceof StepEvent)
-        .map(e -> (StepEvent) e)
-        .filter(e -> e.getEventType() == eventType)
-        .mapToInt(StepEvent::getStepIndex);
   }
 }
