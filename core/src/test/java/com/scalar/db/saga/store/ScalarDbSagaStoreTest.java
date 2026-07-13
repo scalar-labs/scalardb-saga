@@ -1956,6 +1956,17 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
+  void listStateSnapshots_tokenTooLongGiven_throwsIllegalArgumentException() {
+    // Arrange — far longer than any valid cursor; rejected before Base64 decoding
+    String token = "A".repeat(1000);
+
+    // Act & Assert
+    assertThatThrownBy(
+            () -> store.listStateSnapshots(SagaQuery.newBuilder().pageToken(token).build()))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void listStateSnapshots_tokenBucketOutOfRangeGiven_throwsIllegalArgumentException() {
     // Arrange — bucket 999 with a 4-bucket schema; filter key matches the unfiltered query
     String token = encodePageToken("1", "*|-|-", 999, 0, "2026-01-01T00:00:00Z");
