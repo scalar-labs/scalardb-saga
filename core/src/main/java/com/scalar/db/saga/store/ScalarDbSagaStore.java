@@ -1433,7 +1433,7 @@ public class ScalarDbSagaStore implements SagaStore {
         throw new IllegalArgumentException("Malformed page token", e);
       }
       // version | status | after | before | bucket | statusCode | updatedAt
-      String[] parts = payload.split("\\" + DELIMITER, 7);
+      String[] parts = payload.split(Pattern.quote(DELIMITER), 7);
       if (parts.length != 7 || !PAGE_TOKEN_VERSION.equals(parts[0])) {
         throw new IllegalArgumentException("Unrecognized page token");
       }
