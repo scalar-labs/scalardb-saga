@@ -1,5 +1,6 @@
 package com.scalar.db.saga.api;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
@@ -52,7 +53,7 @@ public final class SagaPage<T> {
    */
   public SagaPage(List<T> items, @Nullable String nextPageToken) {
     Objects.requireNonNull(items, "items must not be null");
-    this.items = Collections.unmodifiableList(new java.util.ArrayList<>(items));
+    this.items = Collections.unmodifiableList(new ArrayList<>(items));
     this.nextPageToken = nextPageToken;
   }
 
