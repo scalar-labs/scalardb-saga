@@ -32,6 +32,11 @@ import org.jspecify.annotations.Nullable;
  * then drive the saga inline in the direction {@link RecoveryActionResolver#resolve} chooses,
  * exactly as automatic recovery would (minus the grace-period wait).
  *
+ * <p>The single-saga mutations drive inline and return the driven snapshot. The bulk {@link
+ * #resetEscalated(SagaQuery, String)} sweep instead only un-escalates each row and hands the drive
+ * to the recovery loop (via {@link SagaStore#markForRecovery}), so one call never blocks on a whole
+ * page of participant round-trips.
+ *
  * <p>The operator identity is read from the injected {@link OperatorContext}, never from the
  * caller; every mutation requires a non-blank {@code reason}, sanitized before it is persisted.
  */
@@ -225,7 +230,7 @@ public class DefaultSagaAdminService implements SagaAdminService {
         continue;
       }
       try {
-        driveReset(snapshot, def, operator, sanitizedReason);
+        markReset(snapshot, def, operator, sanitizedReason);
         resetCount++;
       } catch (SagaConcurrentModificationException e) {
         // Lost the CAS race to a concurrent writer — leave it for the next sweep.
@@ -253,6 +258,24 @@ public class DefaultSagaAdminService implements SagaAdminService {
     RecoveryAction action = RecoveryActionResolver.resolve(events, def, snapshot.getStatus());
     StatusEvent resetEvent = StatusEvent.reset(action.targetStatus(), operator, reason);
     return recordAndRecover(snapshot, def, events, action, resetEvent);
+  }
+
+  /**
+   * Un-escalates {@code snapshot} durably — the same audit-carrying CAS transition as {@link
+   * #driveReset} — but hands the drive to the recovery loop via {@link SagaStore#markForRecovery}
+   * instead of running it inline. The bulk sweep uses this so a single call never blocks on a whole
+   * page of participant round-trips: the sweeper then drives each un-escalated saga through the
+   * same {@link RecoveryActionResolver}/{@link SagaEngine#recover} path the inline reset would
+   * have. The un-escalation is the durable work; the drive is only an optimization, so deferring it
+   * is safe.
+   */
+  private void markReset(
+      SagaStateSnapshot snapshot, SagaDefinition def, String operator, String reason) {
+    List<SagaEvent> events = store.getEvents(snapshot.getSagaId());
+    RecoveryAction action = RecoveryActionResolver.resolve(events, def, snapshot.getStatus());
+    StatusEvent resetEvent = StatusEvent.reset(action.targetStatus(), operator, reason);
+    store.recordStatusEvent(snapshot, events.size(), resetEvent);
+    store.markForRecovery(snapshot.getSagaId());
   }
 
   /**

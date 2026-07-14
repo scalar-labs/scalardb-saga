@@ -94,8 +94,9 @@ public interface SagaAdminService extends AutoCloseable {
   SagaStateSnapshot resetEscalated(String sagaId, String reason);
 
   /**
-   * Un-escalates every {@code ESCALATED} saga in one page of {@code query} and drives each in the
-   * direction the engine would take. The query's {@code status} filter is fixed to {@code
+   * Un-escalates every {@code ESCALATED} saga in one page of {@code query}, handing each to the
+   * recovery loop to drive in the direction the engine would take — so the call returns without
+   * blocking on the drives themselves. The query's {@code status} filter is fixed to {@code
    * ESCALATED}; supplying a conflicting status is an error. Drive the sweep by {@link
    * ResetResult#getNextPageToken()} until it is {@code null}.
    *

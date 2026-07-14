@@ -11,12 +11,12 @@ import org.jspecify.annotations.Nullable;
  * Outcome of a bulk {@link SagaAdminService#resetEscalated(SagaQuery, String)} over one page of
  * escalated sagas.
  *
- * <p>{@link #getResetCount()} rows were un-escalated and driven. {@link #getSkipped()} lists the
- * rows that matched the scan but were <b>not</b> actioned, each with a {@link SkipReason} so the
- * operator can follow up on exactly the right sagas — a lost optimistic-concurrency race (likely
- * transient) versus an unresolvable definition (needs an operational fix). Pagination mirrors
- * {@link SagaPage}: drive the sweep by {@link #getNextPageToken()} until it is {@code null}, not by
- * the counts.
+ * <p>{@link #getResetCount()} rows were un-escalated and handed to the recovery loop to drive.
+ * {@link #getSkipped()} lists the rows that matched the scan but were <b>not</b> actioned, each
+ * with a {@link SkipReason} so the operator can follow up on exactly the right sagas — a lost
+ * optimistic-concurrency race (likely transient) versus an unresolvable definition (needs an
+ * operational fix). Pagination mirrors {@link SagaPage}: drive the sweep by {@link
+ * #getNextPageToken()} until it is {@code null}, not by the counts.
  */
 @Immutable
 public final class ResetResult {
@@ -84,7 +84,7 @@ public final class ResetResult {
     this.nextPageToken = nextPageToken;
   }
 
-  /** The number of sagas un-escalated and driven in this page. */
+  /** The number of sagas un-escalated and handed to the recovery loop in this page. */
   public int getResetCount() {
     return resetCount;
   }

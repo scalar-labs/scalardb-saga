@@ -380,9 +380,6 @@ class DefaultSagaAdminServiceTest {
     when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(backwardDef());
     when(registry.resolve("gone", "v9")).thenReturn(null);
     when(store.getEvents("ok")).thenReturn(events);
-    ExecutionContext ctx = mock(ExecutionContext.class);
-    when(engine.replayEvents(ok, events)).thenReturn(ctx);
-    when(ctx.getCurrentState()).thenReturn(ok);
     when(store.recordStatusEvent(eq(ok), anyInt(), any())).thenReturn(ok);
 
     // Act
@@ -394,6 +391,9 @@ class DefaultSagaAdminServiceTest {
         .containsExactly(
             new ResetResult.SkippedSaga("nodef", ResetResult.SkipReason.DEFINITION_NOT_FOUND));
     assertThat(result.getNextPageToken()).isEqualTo("next-token");
+    // The bulk sweep hands the drive to recovery rather than driving inline.
+    verify(store).markForRecovery("ok");
+    verify(engine, never()).recover(any(), any(), any());
   }
 
   @Test
@@ -406,7 +406,6 @@ class DefaultSagaAdminServiceTest {
         List.of(StatusEvent.started(null), StepEvent.completed(0, "debit", null));
     when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(backwardDef());
     when(store.getEvents("race")).thenReturn(events);
-    when(engine.replayEvents(racing, events)).thenReturn(mock(ExecutionContext.class));
     when(store.recordStatusEvent(eq(racing), anyInt(), any()))
         .thenThrow(new SagaConcurrentModificationException("race"));
 
@@ -418,6 +417,8 @@ class DefaultSagaAdminServiceTest {
     assertThat(result.getSkipped())
         .containsExactly(
             new ResetResult.SkippedSaga("race", ResetResult.SkipReason.CONCURRENT_MODIFICATION));
+    // The lost CAS aborts before the hand-off, so the row is never marked for recovery.
+    verify(store, never()).markForRecovery(any());
   }
 
   // ---------------------------------------------------------------------------
