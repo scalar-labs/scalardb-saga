@@ -229,16 +229,12 @@ public class ScalarDbSagaStore implements SagaStore {
           tx.insert(buildEventInsert(sagaId, sequence, event, Instant.now()));
           return Boolean.TRUE;
         },
-        () -> {
-          // Verify the event was committed by re-reading it
-          return runInTransaction(
-              tx -> {
-                Optional<Result> result = tx.get(buildEventGet(sagaId, sequence));
-                return result.isPresent() ? Optional.of(Boolean.TRUE) : Optional.empty();
-              },
-              null,
-              "verify event " + sagaId + " seq " + sequence);
-        },
+        () ->
+            // Verify the event committed AND is ours (matching type) — not another writer's event
+            // at the same sequence. See eventCommittedWithType.
+            eventCommittedWithType(sagaId, sequence, event.getEventType())
+                ? Optional.of(Boolean.TRUE)
+                : Optional.empty(),
         "append event for saga " + sagaId);
   }
 
@@ -271,16 +267,7 @@ public class ScalarDbSagaStore implements SagaStore {
           tx.insert(buildStateInsert(bucket, updated));
           return updated;
         },
-        () ->
-            runInTransaction(
-                tx -> {
-                  if (tx.get(buildEventGet(sagaId, sequence)).isPresent()) {
-                    return loadStateSnapshot(sagaId);
-                  }
-                  return Optional.empty();
-                },
-                null,
-                "verify transition " + sagaId + " seq " + sequence),
+        verifyTransitionCommitted(sagaId, sequence, event.getEventType()),
         "record transition for saga " + sagaId);
   }
 
@@ -396,29 +383,37 @@ public class ScalarDbSagaStore implements SagaStore {
   }
 
   /**
-   * Verifier for park/resume/timeout: the tx committed iff the event at {@code sequence} is present
-   * <em>and</em> of {@code expectedType}. The type check matters because {@code resumeParkedStep}
-   * and {@code failParkedStep} are claim-less and derive the same {@code sequence} from a WAITING
-   * saga's event count, so both target the same event CK with different types. Presence alone would
-   * let the loser of a callback-vs-timeout race read the winner's event and wrongly report its own
-   * commit as successful; matching the type proves the persisted event is ours. A mismatch (the
-   * other op won) returns empty, so the caller retries, re-reads the now-non-WAITING CK, and throws
+   * Whether the event at {@code sequence} is present <em>and</em> of {@code expectedType}. This is
+   * the post-{@code UnknownTransactionStatus} verification check every event write shares: presence
+   * alone answers "did some event land at this sequence?", but only the type match additionally
+   * proves the persisted event is the one <em>this</em> operation wrote. That distinction matters
+   * wherever two writers can target the same event CK — a claim-less callback-vs-timeout race, or a
+   * live executor racing a recovery claim — otherwise the loser could read the winner's event and
+   * wrongly report its own commit as successful.
+   */
+  private boolean eventCommittedWithType(String sagaId, int sequence, EventType expectedType) {
+    return runInTransaction(
+        tx -> {
+          Optional<Result> event = tx.get(buildEventGet(sagaId, sequence));
+          return event.isPresent() && expectedType.name().equals(event.get().getText("event_type"));
+        },
+        null,
+        "verify event " + sagaId + " seq " + sequence);
+  }
+
+  /**
+   * Verifier for a state transition (park/resume/timeout, {@code recordStatusEvent}): the tx
+   * committed iff the event at {@code sequence} is present and of {@code expectedType} (see {@link
+   * #eventCommittedWithType}). On a match it returns the resulting state snapshot; a mismatch (the
+   * other op won) returns empty, so the caller retries, re-reads the now-moved CK, and throws
    * {@link SagaConcurrentModificationException}.
    */
   private CommitVerifier<SagaStateSnapshot> verifyTransitionCommitted(
       String sagaId, int sequence, EventType expectedType) {
     return () ->
-        runInTransaction(
-            tx -> {
-              Optional<Result> event = tx.get(buildEventGet(sagaId, sequence));
-              if (event.isPresent()
-                  && expectedType.name().equals(event.get().getText("event_type"))) {
-                return loadStateSnapshot(sagaId);
-              }
-              return Optional.empty();
-            },
-            null,
-            "verify transition " + sagaId + " seq " + sequence);
+        eventCommittedWithType(sagaId, sequence, expectedType)
+            ? loadStateSnapshot(sagaId)
+            : Optional.empty();
   }
 
   @Override
