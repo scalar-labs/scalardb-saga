@@ -1944,6 +1944,42 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
+  void listStateSnapshots_cohortLargerThanPageSize_returnsWholeCohortInOneOversizedPage()
+      throws Exception {
+    // Arrange — pageSize 2, but a single t1 cohort of 5 fills the whole slice with no other
+    // timestamp, so the scanner drains without ever reaching a new cohort.
+    Instant t1 = Instant.parse("2026-01-01T00:00:01Z");
+    stubScannerHonoringRange(
+        mockStateResult("a", SagaStatus.RUNNING, t1),
+        mockStateResult("b", SagaStatus.RUNNING, t1),
+        mockStateResult("c", SagaStatus.RUNNING, t1),
+        mockStateResult("d", SagaStatus.RUNNING, t1),
+        mockStateResult("e", SagaStatus.RUNNING, t1));
+
+    // Act — page 1, then page 2 resuming from page 1's token under the same filters.
+    SagaPage<SagaStateSnapshot> page1 =
+        store.listStateSnapshots(
+            SagaQuery.newBuilder().status(SagaStatus.RUNNING).pageSize(2).build());
+    SagaPage<SagaStateSnapshot> page2 =
+        store.listStateSnapshots(
+            SagaQuery.newBuilder()
+                .status(SagaStatus.RUNNING)
+                .pageSize(2)
+                .pageToken(page1.getNextPageToken())
+                .build());
+
+    // Assert — the cohort is never split: all 5 come back in one over-sized page.
+    assertThat(page1.getItems())
+        .extracting(SagaStateSnapshot::getSagaId)
+        .containsExactly("a", "b", "c", "d", "e");
+    // An exactly-drained slice is indistinguishable from a stopped-at-boundary one, so the page
+    // still carries a token; following it costs one extra round trip and yields nothing.
+    assertThat(page1.getNextPageToken()).isNotBlank();
+    assertThat(page2.getItems()).isEmpty();
+    assertThat(page2.getNextPageToken()).isNull();
+  }
+
+  @Test
   void listStateSnapshots_boundaryAcrossTwoPages_noDropNoDuplicate() throws Exception {
     // Arrange — three cohorts; the t2 cohort (b, c, d) straddles the pageSize-2 boundary. The
     // scanner honors the resume range, so page 2 sees exactly what a real backend would after the
