@@ -129,13 +129,13 @@ public final class SagaQuery {
       return this;
     }
 
-    /** Sets the inclusive {@code updated_at} lower bound. */
+    /** Sets the inclusive {@code updated_at} lower bound (or {@code null} for no lower bound). */
     public Builder updatedAfter(@Nullable Instant updatedAfter) {
       this.updatedAfter = updatedAfter;
       return this;
     }
 
-    /** Sets the inclusive {@code updated_at} upper bound. */
+    /** Sets the inclusive {@code updated_at} upper bound (or {@code null} for no upper bound). */
     public Builder updatedBefore(@Nullable Instant updatedBefore) {
       this.updatedBefore = updatedBefore;
       return this;

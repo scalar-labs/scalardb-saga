@@ -27,6 +27,7 @@ import com.scalar.db.exception.transaction.CrudException;
 import com.scalar.db.exception.transaction.TransactionException;
 import com.scalar.db.exception.transaction.UnknownTransactionStatusException;
 import com.scalar.db.io.Key;
+import com.scalar.db.io.TimestampTZColumn;
 import com.scalar.db.saga.api.SagaPage;
 import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
@@ -1807,6 +1808,45 @@ class ScalarDbSagaStoreTest {
   // ---------------------------------------------------------------------------
   // listStateSnapshots (orchestration + fail-closed token; boundary no-drop unit + full IT)
   // ---------------------------------------------------------------------------
+
+  @Test
+  void listStateSnapshots_updatedAfterAboveTimestampTzMaxGiven_throwsException() {
+    // Arrange
+    SagaQuery query =
+        SagaQuery.newBuilder().updatedAfter(TimestampTZColumn.MAX_VALUE.plusMillis(1)).build();
+
+    // Act & Assert
+    assertThatThrownBy(() -> store.listStateSnapshots(query))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void listStateSnapshots_updatedBeforeBelowTimestampTzMinGiven_throwsException() {
+    // Arrange
+    SagaQuery query =
+        SagaQuery.newBuilder().updatedBefore(TimestampTZColumn.MIN_VALUE.minusMillis(1)).build();
+
+    // Act & Assert
+    assertThatThrownBy(() -> store.listStateSnapshots(query))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void listStateSnapshots_updatedBoundsAtTimestampTzExtremesGiven_accepted() throws Exception {
+    // Arrange — the inclusive endpoints of the TIMESTAMPTZ domain are valid and start a real scan
+    stubScanner();
+
+    // Act
+    SagaPage<SagaStateSnapshot> page =
+        store.listStateSnapshots(
+            SagaQuery.newBuilder()
+                .updatedAfter(TimestampTZColumn.MIN_VALUE)
+                .updatedBefore(TimestampTZColumn.MAX_VALUE)
+                .build());
+
+    // Assert
+    assertThat(page.getItems()).isEmpty();
+  }
 
   @Test
   void listStateSnapshots_emptyStore_returnsEmptyPageWithNullToken() throws Exception {

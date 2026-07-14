@@ -16,6 +16,7 @@ import com.scalar.db.exception.transaction.CrudConflictException;
 import com.scalar.db.exception.transaction.TransactionException;
 import com.scalar.db.exception.transaction.UnknownTransactionStatusException;
 import com.scalar.db.io.Key;
+import com.scalar.db.io.TimestampTZColumn;
 import com.scalar.db.saga.api.SagaPage;
 import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
@@ -74,12 +75,6 @@ public class ScalarDbSagaStore implements SagaStore {
 
   /** Format version prefix for the opaque list page token. */
   private static final String PAGE_TOKEN_VERSION = "1";
-
-  /**
-   * Upper {@code updated_at} sentinel for an open-ended range scan (within ScalarDB's TIMESTAMPTZ
-   * range). Keeps the end key the same clustering-key width as the start key.
-   */
-  private static final Instant MAX_TIMESTAMPTZ = Instant.parse("9999-12-31T23:59:59.999Z");
 
   private final DistributedTransactionManager txManager;
   private final ObjectMapper objectMapper;
@@ -549,8 +544,13 @@ public class ScalarDbSagaStore implements SagaStore {
   public SagaPage<SagaStateSnapshot> listStateSnapshots(SagaQuery query) {
     int numBuckets = schema.getNumBuckets();
     int pageSize = query.getPageSize();
-    @Nullable Instant updatedAfter = query.getUpdatedAfter();
-    Instant endTs = query.getUpdatedBefore() != null ? query.getUpdatedBefore() : MAX_TIMESTAMPTZ;
+    @Nullable Instant updatedAfter =
+        requireInTimestampTzRange(query.getUpdatedAfter(), "updatedAfter");
+    @Nullable Instant updatedBefore =
+        requireInTimestampTzRange(query.getUpdatedBefore(), "updatedBefore");
+    // Open-ended upper bound: scan to the max instant TIMESTAMPTZ can store. That sentinel keeps
+    // the end key at the same clustering-key width as the start key.
+    Instant endTs = updatedBefore != null ? updatedBefore : TimestampTZColumn.MAX_VALUE;
 
     // Which status slices to sweep, in a stable ascending order, and where a token resumes.
     int[] statusCodes =
@@ -661,6 +661,32 @@ public class ScalarDbSagaStore implements SagaStore {
       }
     }
     return -1;
+  }
+
+  /**
+   * Rejects an {@code updated_at} bound outside the range this store's TIMESTAMPTZ column can hold,
+   * with a clear message, rather than letting it surface as a lower-level exception when the scan
+   * key is built. Sub-millisecond precision needs no handling here: the scan routes the bound
+   * through {@link TimestampTZColumn#of}, which truncates it to match the millisecond-granular
+   * stored values.
+   *
+   * @return {@code bound} unchanged (including {@code null}, which means no bound)
+   */
+  private static @Nullable Instant requireInTimestampTzRange(
+      @Nullable Instant bound, String field) {
+    if (bound != null
+        && (bound.isBefore(TimestampTZColumn.MIN_VALUE)
+            || bound.isAfter(TimestampTZColumn.MAX_VALUE))) {
+      throw new IllegalArgumentException(
+          field
+              + " must be in ["
+              + TimestampTZColumn.MIN_VALUE
+              + ", "
+              + TimestampTZColumn.MAX_VALUE
+              + "]: "
+              + bound);
+    }
+    return bound;
   }
 
   // ---------------------------------------------------------------------------
