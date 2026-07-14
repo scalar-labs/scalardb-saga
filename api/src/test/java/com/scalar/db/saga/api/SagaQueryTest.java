@@ -144,4 +144,42 @@ class SagaQueryTest {
     // Assert
     assertThat(a).isNotEqualTo(b);
   }
+
+  @Test
+  public void equals_nullGiven_areNotEqual() {
+    // Assert
+    assertThat(SagaQuery.newBuilder().status(SagaStatus.RUNNING).build()).isNotEqualTo(null);
+  }
+
+  @Test
+  public void equals_differentTypeGiven_areNotEqual() {
+    // Assert
+    assertThat(SagaQuery.newBuilder().status(SagaStatus.RUNNING).build())
+        .isNotEqualTo("not a query");
+  }
+
+  @Test
+  public void toString_called_containsKeyFields() {
+    // Arrange
+    Instant after = Instant.parse("2026-01-01T00:00:00Z");
+    Instant before = Instant.parse("2026-02-01T00:00:00Z");
+    SagaQuery query =
+        SagaQuery.newBuilder()
+            .status(SagaStatus.ESCALATED)
+            .updatedAfter(after)
+            .updatedBefore(before)
+            .pageSize(50)
+            .pageToken("tok")
+            .build();
+
+    // Act
+    String result = query.toString();
+
+    // Assert
+    assertThat(result).contains("ESCALATED");
+    assertThat(result).contains(after.toString());
+    assertThat(result).contains(before.toString());
+    assertThat(result).contains("50");
+    assertThat(result).contains("tok");
+  }
 }
