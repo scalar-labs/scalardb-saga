@@ -384,12 +384,14 @@ public class ScalarDbSagaStore implements SagaStore {
 
   /**
    * Whether the event at {@code sequence} is present <em>and</em> of {@code expectedType}. This is
-   * the post-{@code UnknownTransactionStatus} verification check every event write shares: presence
-   * alone answers "did some event land at this sequence?", but only the type match additionally
-   * proves the persisted event is the one <em>this</em> operation wrote. That distinction matters
-   * wherever two writers can target the same event CK — a claim-less callback-vs-timeout race, or a
-   * live executor racing a recovery claim — otherwise the loser could read the winner's event and
-   * wrongly report its own commit as successful.
+   * the post-{@code UnknownTransactionStatus} verification check the event-append and transition
+   * paths share: presence alone answers "did some event land at this sequence?", but only the type
+   * match additionally proves an event of <em>our</em> type committed. Where racers are guaranteed
+   * to use distinct types (a claim-less callback-vs-timeout race, or a live executor racing a
+   * recovery claim), that proves the persisted event is ours; otherwise the loser could read the
+   * winner's event and wrongly report its own commit as successful. Paths whose racers write the
+   * same type at the same sequence (e.g. {@code createSaga}) verify by state rather than by this
+   * check.
    */
   private boolean eventCommittedWithType(String sagaId, int sequence, EventType expectedType) {
     return runInTransaction(
