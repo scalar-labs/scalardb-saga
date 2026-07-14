@@ -1979,6 +1979,51 @@ class ScalarDbSagaStoreTest {
     assertThat(page2.getNextPageToken()).isNull();
   }
 
+  /**
+   * Guards the one case that makes {@code scanSlice} return a resume timestamp even though the
+   * slice drained. That looks like a wart worth removing: track why the loop exited, and report no
+   * resume point on a clean drain. Doing only that drops rows. A non-null resume timestamp is also
+   * what stops the sweep, so suppressing it here lets the sweep reach the next slice with {@code
+   * limit = pageSize - items.size() = 0}; a zero-limit scan then breaks on its first row before
+   * recording a timestamp, reports "drained" in turn, and the sweep swallows every slice left. The
+   * spurious token costs one empty round trip. Removing it costs correctness unless the zero limit
+   * is handled too.
+   */
+  @Test
+  void listStateSnapshots_sliceDrainsExactlyAtLimitWithLaterBucketPending_keepsLaterRows()
+      throws Exception {
+    // Arrange — pageSize 2 and bucket 0 holds exactly 2 rows, so its slice drains precisely at the
+    // limit with no next cohort to break on. Bucket 1 still holds a row that must not be lost.
+    Instant t1 = Instant.parse("2026-01-01T00:00:01Z");
+    Instant t2 = Instant.parse("2026-01-01T00:00:02Z");
+    stubScannerHonoringRange(
+        mockStateResult("a", SagaStatus.RUNNING, t1),
+        mockStateResult("b", SagaStatus.RUNNING, t1),
+        inBucket(mockStateResult("c", SagaStatus.RUNNING, t2), 1));
+
+    // Act — sweep every page until the token runs out.
+    List<String> reassembled = new ArrayList<>();
+    String token = null;
+    for (int i = 0; i < 5; i++) {
+      SagaPage<SagaStateSnapshot> page =
+          store.listStateSnapshots(
+              SagaQuery.newBuilder()
+                  .status(SagaStatus.RUNNING)
+                  .pageSize(2)
+                  .pageToken(token)
+                  .build());
+      page.getItems().forEach(s -> reassembled.add(s.getSagaId()));
+      token = page.getNextPageToken();
+      if (token == null) {
+        break;
+      }
+    }
+
+    // Assert — the exact drain must not swallow bucket 1's row.
+    assertThat(token).isNull();
+    assertThat(reassembled).containsExactly("a", "b", "c");
+  }
+
   @Test
   void listStateSnapshots_boundaryAcrossTwoPages_noDropNoDuplicate() throws Exception {
     // Arrange — three cohorts; the t2 cohort (b, c, d) straddles the pageSize-2 boundary. The
@@ -2282,6 +2327,12 @@ class ScalarDbSagaStoreTest {
   private Result mockStateResult(String sagaId, SagaStatus status, Instant updatedAt) {
     Result r = mockStateResult(sagaId, status);
     lenient().when(r.getTimestampTZ("updated_at")).thenReturn(updatedAt);
+    return r;
+  }
+
+  /** Moves a mocked row into {@code bucket}, so one dataset can span several partitions. */
+  private static Result inBucket(Result r, int bucket) {
+    lenient().when(r.getInt("bucket")).thenReturn(bucket);
     return r;
   }
 
