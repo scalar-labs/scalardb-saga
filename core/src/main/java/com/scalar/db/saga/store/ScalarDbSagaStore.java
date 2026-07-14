@@ -1270,6 +1270,10 @@ public class ScalarDbSagaStore implements SagaStore {
             case SAGA_COMPLETED -> StatusEvent.completed();
             case SAGA_COMPENSATED -> StatusEvent.compensated();
             case SAGA_ESCALATED -> StatusEvent.escalated(payload != null ? payload : "");
+            case SAGA_FORCE_COMPLETED ->
+                StatusEvent.reconstruct(eventType, SagaStatus.COMPLETED, payload);
+            case SAGA_RECOVERED, SAGA_RESET ->
+                StatusEvent.reconstruct(eventType, AdminAuditPayload.target(payload), payload);
             default ->
                 throw new SagaPersistenceException(
                     "Unknown saga event type: " + eventType,

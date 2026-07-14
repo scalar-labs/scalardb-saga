@@ -1,5 +1,6 @@
 package com.scalar.db.saga.engine;
 
+import com.scalar.db.saga.api.SagaAdminService;
 import com.scalar.db.saga.api.SagaCallback;
 import com.scalar.db.saga.api.SagaDefinitionId;
 import com.scalar.db.saga.api.SagaOrchestrator;
@@ -49,11 +50,16 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
 
   private static final Logger logger = LoggerFactory.getLogger(DefaultSagaOrchestrator.class);
 
+  // Embedded mode has no authenticated user, so admin interventions are attributed to this fixed
+  // principal. A remote front end injects the request's authenticated identity instead.
+  private static final String EMBEDDED_OPERATOR = "embedded";
+
   private final SagaEngine engine;
   private final SagaStore store;
   private final SagaDefinitionRegistry definitionRegistry;
   private final SagaRecoveryManager recoveryManager;
   private final SagaRetentionManager retentionManager;
+  private final SagaAdminService adminService;
   private final long shutdownTimeoutMillis;
   private final ExecutorService asyncExecutor;
   private volatile boolean closed;
@@ -89,6 +95,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     this.definitionRegistry = definitionRegistry;
     this.recoveryManager = recoveryManager;
     this.retentionManager = retentionManager;
+    this.adminService =
+        new DefaultSagaAdminService(store, engine, definitionRegistry, () -> EMBEDDED_OPERATOR);
     this.shutdownTimeoutMillis = shutdownTimeoutMillis;
     this.asyncExecutor = asyncExecutor;
   }
@@ -368,6 +376,19 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   public SagaStateSnapshot getStateSnapshot(String sagaId) {
     Objects.requireNonNull(sagaId, "sagaId must not be null");
     return store.getStateSnapshot(sagaId).orElseThrow(() -> new SagaNotFoundException(sagaId));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Admin
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Returns the {@link SagaAdminService} control plane backed by this orchestrator's store and
+   * engine: list and inspect sagas, and recover, force-complete, or reset the ones that need an
+   * operator. Interventions are attributed to a fixed embedded principal.
+   */
+  public SagaAdminService adminService() {
+    return adminService;
   }
 
   // ---------------------------------------------------------------------------

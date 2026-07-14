@@ -79,6 +79,100 @@ class StatusEventTest {
     assertThat(event.getPayload()).isEqualTo(reason);
   }
 
+  // --- operator interventions (Admin API) ---
+
+  @Test
+  void forceCompleted_operatorAndReasonGiven_createsCompletedEventWithAudit() {
+    // Act
+    StatusEvent event = StatusEvent.forceCompleted("alice", "confirmed done downstream");
+
+    // Assert
+    assertThat(event.getEventType()).isEqualTo(EventType.SAGA_FORCE_COMPLETED);
+    assertThat(event.getTargetStatus()).isEqualTo(SagaStatus.COMPLETED);
+    assertThat(AdminAuditPayload.operator(event.getPayload())).isEqualTo("alice");
+    assertThat(AdminAuditPayload.reason(event.getPayload())).isEqualTo("confirmed done downstream");
+  }
+
+  @Test
+  void recovered_compensatingTargetGiven_createsRecoveredEventTargetingCompensating() {
+    // Act
+    StatusEvent event = StatusEvent.recovered(SagaStatus.COMPENSATING, "bob", "rolling back");
+
+    // Assert
+    assertThat(event.getEventType()).isEqualTo(EventType.SAGA_RECOVERED);
+    assertThat(event.getTargetStatus()).isEqualTo(SagaStatus.COMPENSATING);
+    assertThat(AdminAuditPayload.operator(event.getPayload())).isEqualTo("bob");
+    assertThat(AdminAuditPayload.reason(event.getPayload())).isEqualTo("rolling back");
+  }
+
+  @Test
+  void recovered_runningTargetGiven_createsRecoveredEventTargetingRunning() {
+    // Act
+    StatusEvent event = StatusEvent.recovered(SagaStatus.RUNNING, "bob", "downstream restored");
+
+    // Assert
+    assertThat(event.getEventType()).isEqualTo(EventType.SAGA_RECOVERED);
+    assertThat(event.getTargetStatus()).isEqualTo(SagaStatus.RUNNING);
+  }
+
+  @Test
+  void reset_compensatingTargetGiven_createsResetEventTargetingCompensating() {
+    // Act
+    StatusEvent event = StatusEvent.reset(SagaStatus.COMPENSATING, "carol", "un-escalating");
+
+    // Assert
+    assertThat(event.getEventType()).isEqualTo(EventType.SAGA_RESET);
+    assertThat(event.getTargetStatus()).isEqualTo(SagaStatus.COMPENSATING);
+    assertThat(AdminAuditPayload.reason(event.getPayload())).isEqualTo("un-escalating");
+  }
+
+  @Test
+  void reset_runningTargetGiven_createsResetEventTargetingRunning() {
+    // Act
+    StatusEvent event = StatusEvent.reset(SagaStatus.RUNNING, "carol", "resume forward");
+
+    // Assert
+    assertThat(event.getEventType()).isEqualTo(EventType.SAGA_RESET);
+    assertThat(event.getTargetStatus()).isEqualTo(SagaStatus.RUNNING);
+  }
+
+  @Test
+  void recovered_terminalTargetGiven_throwsIllegalArgumentException() {
+    // Act & Assert
+    assertThatThrownBy(() -> StatusEvent.recovered(SagaStatus.COMPLETED, "bob", "why"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void reset_waitingTargetGiven_throwsIllegalArgumentException() {
+    // Act & Assert
+    assertThatThrownBy(() -> StatusEvent.reset(SagaStatus.WAITING, "carol", "why"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @SuppressWarnings("NullAway")
+  @Test
+  void forceCompleted_nullOperatorGiven_throwsNullPointerException() {
+    // Act & Assert
+    assertThatThrownBy(() -> StatusEvent.forceCompleted(null, "reason"))
+        .isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void reconstruct_targetAndPayloadGiven_buildsEventWithoutReEncoding() {
+    // Arrange — the payload the store persisted for a recovered-to-COMPENSATING event
+    String payload = AdminAuditPayload.encode("bob", "rolling back", SagaStatus.COMPENSATING);
+
+    // Act
+    StatusEvent event =
+        StatusEvent.reconstruct(EventType.SAGA_RECOVERED, SagaStatus.COMPENSATING, payload);
+
+    // Assert
+    assertThat(event.getEventType()).isEqualTo(EventType.SAGA_RECOVERED);
+    assertThat(event.getTargetStatus()).isEqualTo(SagaStatus.COMPENSATING);
+    assertThat(event.getPayload()).isEqualTo(payload);
+  }
+
   // --- withTimestamp ---
 
   @Test

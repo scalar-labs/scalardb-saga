@@ -146,4 +146,54 @@ class RecoveryActionResolverTest {
     // Assert
     assertThat(action).isEqualTo(new RecoveryAction.Compensate(1));
   }
+
+  // --- ESCALATED: direction reconstructed from the stream (Admin API un-escalation) ---
+
+  @Test
+  public void resolve_escalatedThatWasCompensatingGiven_continuesCompensation() {
+    // Arrange — escalated out of COMPENSATING (a SAGA_COMPENSATING event is in the stream), step 1
+    // already compensated.
+    List<SagaEvent> events =
+        List.of(
+            StepEvent.completed(0, "debit", null),
+            StepEvent.completed(1, "credit", null),
+            StatusEvent.compensating(),
+            StepEvent.compensated(1, "credit"));
+
+    // Act
+    RecoveryAction action =
+        RecoveryActionResolver.resolve(events, backwardDef(), SagaStatus.ESCALATED);
+
+    // Assert — reconstructed as COMPENSATING; continue one below the lowest compensated step.
+    assertThat(action).isEqualTo(new RecoveryAction.Compensate(0));
+  }
+
+  @Test
+  public void resolve_escalatedPostPivotFailureGiven_resumesForward() {
+    // Arrange — FORWARD saga, failed post-pivot, never compensated -> reconstructed as RUNNING.
+    List<SagaEvent> events =
+        List.of(StepEvent.completed(0, "debit", null), StepEvent.failed(1, "credit", null));
+
+    // Act
+    RecoveryAction action =
+        RecoveryActionResolver.resolve(events, forwardDef(), SagaStatus.ESCALATED);
+
+    // Assert — resume forward from the step after the highest completed one.
+    assertThat(action).isEqualTo(new RecoveryAction.Resume(1));
+  }
+
+  @Test
+  public void resolve_escalatedPrePivotFailureGiven_compensatesIncludingFailedStep() {
+    // Arrange — pre-pivot failure, never reached COMPENSATING -> reconstructed as RUNNING, but the
+    // unresolved pre-pivot failure means compensate.
+    List<SagaEvent> events =
+        List.of(StepEvent.completed(0, "debit", null), StepEvent.failed(1, "credit", null));
+
+    // Act
+    RecoveryAction action =
+        RecoveryActionResolver.resolve(events, backwardDef(), SagaStatus.ESCALATED);
+
+    // Assert
+    assertThat(action).isEqualTo(new RecoveryAction.Compensate(1));
+  }
 }

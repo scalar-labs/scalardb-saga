@@ -1,5 +1,7 @@
 package com.scalar.db.saga.engine;
 
+import com.scalar.db.saga.api.SagaStatus;
+
 /**
  * The recovery action for a non-terminal saga, as decided by {@link
  * RecoveryActionResolver#resolve}: either drive compensation from a step, or resume forward
@@ -8,6 +10,18 @@ package com.scalar.db.saga.engine;
  * decision.
  */
 sealed interface RecoveryAction permits RecoveryAction.Compensate, RecoveryAction.Resume {
+
+  /**
+   * The status the saga occupies while this action is driven — {@code COMPENSATING} for a
+   * compensate, {@code RUNNING} for a resume. The Admin API uses it as the target status of the
+   * intervention event it records before driving.
+   */
+  default SagaStatus targetStatus() {
+    return switch (this) {
+      case Compensate compensate -> SagaStatus.COMPENSATING;
+      case Resume resume -> SagaStatus.RUNNING;
+    };
+  }
 
   /** Drive compensation starting at {@code fromStep} (compensating downward from it). */
   record Compensate(int fromStep) implements RecoveryAction {}

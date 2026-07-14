@@ -182,6 +182,19 @@ public class SagaEngine implements AutoCloseable {
     }
   }
 
+  /**
+   * Carries out a resolved {@link RecoveryAction} by dispatching to {@link #compensateFrom} or
+   * {@link #resumeFrom}. Shared by automatic recovery ({@link SagaRecoveryManager}) and the Admin
+   * API so both drive a decided action the same way.
+   */
+  void recover(RecoveryAction action, SagaDefinition def, ExecutionContext context) {
+    switch (action) {
+      case RecoveryAction.Compensate compensate ->
+          compensateFrom(def, context, compensate.fromStep());
+      case RecoveryAction.Resume resume -> resumeFrom(def, context, resume.fromStep());
+    }
+  }
+
   /** Replays events to reconstruct an ExecutionContext for crash recovery. */
   public ExecutionContext replayEvents(SagaStateSnapshot saga, List<SagaEvent> events) {
     ExecutionContext context = new ExecutionContext(saga.getSagaId(), Map.of(), saga);

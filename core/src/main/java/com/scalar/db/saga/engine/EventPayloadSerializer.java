@@ -70,6 +70,15 @@ public final class EventPayloadSerializer {
   }
 
   /**
+   * The {@code message} field of a serialized error {@code payload} (see {@link #serializeError}),
+   * or {@code null} if the payload is absent or carries no string message. Used to surface a step
+   * failure's error text on the admin timeline without exposing the raw payload.
+   */
+  public static @Nullable String errorMessage(@Nullable String payload) {
+    return deserializeMap(payload).get(MESSAGE) instanceof String message ? message : null;
+  }
+
+  /**
    * Whether a STEP_FAILED error {@code payload} marks the failure as known-not-committed. Defaults
    * to {@code false} — the safe value — for a {@code null}, legacy (pre-flag), or unparseable
    * payload, so recovery compensates the failed step unless non-delivery was positively recorded.

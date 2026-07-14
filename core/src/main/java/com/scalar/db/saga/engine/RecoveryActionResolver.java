@@ -25,9 +25,9 @@ final class RecoveryActionResolver {
   private RecoveryActionResolver() {}
 
   /**
-   * Decides the recovery action for a non-terminal saga from its event stream, mirroring the
-   * engine's forward/backward recovery rules exactly. This is the accumulation of the in-doubt /
-   * {@code knownNotCommitted} fixes, so callers must use it rather than re-deriving the decision:
+   * Decides the recovery action for a saga from its event stream, mirroring the engine's
+   * forward/backward recovery rules exactly. This is the accumulation of the in-doubt / {@code
+   * knownNotCommitted} fixes, so callers must use it rather than re-deriving the decision:
    *
    * <ul>
    *   <li>{@code COMPENSATING} &rarr; {@link RecoveryAction.Compensate} from the highest
@@ -39,10 +39,15 @@ final class RecoveryActionResolver {
    *       knownNotCommitted} one.
    *   <li>{@code RUNNING} otherwise &rarr; {@link RecoveryAction.Resume} from the step after the
    *       highest completed one. A post-pivot failure is resumed forward, not compensated.
+   *   <li>{@code ESCALATED} (an escalated saga being un-escalated by the Admin API) &rarr; the
+   *       direction it was heading before it escalated is reconstructed from the event stream (the
+   *       snapshot status no longer carries it), then resolved as {@code COMPENSATING} or {@code
+   *       RUNNING} above.
    * </ul>
    */
   static RecoveryAction resolve(List<SagaEvent> events, SagaDefinition def, SagaStatus status) {
-    if (status == SagaStatus.COMPENSATING) {
+    SagaStatus effective = status == SagaStatus.ESCALATED ? reconstructDirection(events) : status;
+    if (effective == SagaStatus.COMPENSATING) {
       return new RecoveryAction.Compensate(stepIndexToCompensateFrom(events));
     }
 
@@ -91,6 +96,23 @@ final class RecoveryActionResolver {
     return Math.max(
         stepIndices(events, EventType.STEP_COMPLETED).max().orElse(-1),
         failedIndicesToCompensate(events).max().orElse(-1));
+  }
+
+  /**
+   * Reconstructs the direction an escalated saga was heading before it escalated: {@code
+   * COMPENSATING} if the event stream shows it had entered compensation, otherwise {@code RUNNING}.
+   * The snapshot status is {@code ESCALATED}, so the direction must come from the stream.
+   */
+  private static SagaStatus reconstructDirection(List<SagaEvent> events) {
+    for (SagaEvent event : events) {
+      EventType type = event.getEventType();
+      if (type == EventType.SAGA_COMPENSATING
+          || type == EventType.STEP_COMPENSATED
+          || type == EventType.STEP_COMPENSATION_FAILED) {
+        return SagaStatus.COMPENSATING;
+      }
+    }
+    return SagaStatus.RUNNING;
   }
 
   /**

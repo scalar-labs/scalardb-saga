@@ -17,6 +17,15 @@ public enum EventType {
   SAGA_COMPENSATED,
   SAGA_ESCALATED,
 
+  // --- Operator interventions (Admin API, StatusEvent) ---
+  // A discrete action an operator performed, recorded for audit. The past-participle name is the
+  // completed action, not the resulting status: SAGA_RECOVERED and SAGA_RESET transition to an
+  // in-progress state (COMPENSATING or RUNNING, carried on the event), unlike the status-mirroring
+  // events above, so the direction the engine drives is recorded on the event's target status.
+  SAGA_FORCE_COMPLETED,
+  SAGA_RECOVERED,
+  SAGA_RESET,
+
   // --- Step-level (StepEvent) ---
   STEP_PENDING,
   STEP_REISSUING,

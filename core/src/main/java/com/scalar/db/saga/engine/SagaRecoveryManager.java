@@ -268,7 +268,7 @@ class SagaRecoveryManager {
       escalate(context, "step retry stuck for over " + config.compensationGracePeriod());
       return;
     }
-    apply(RecoveryActionResolver.resolve(events, def, SagaStatus.RUNNING), def, context);
+    engine.recover(RecoveryActionResolver.resolve(events, def, SagaStatus.RUNNING), def, context);
   }
 
   private void recoverCompensating(
@@ -279,16 +279,8 @@ class SagaRecoveryManager {
       escalate(context, "compensation stuck for over " + config.compensationGracePeriod());
       return;
     }
-    apply(RecoveryActionResolver.resolve(events, def, SagaStatus.COMPENSATING), def, context);
-  }
-
-  /** Drives the {@link RecoveryAction} chosen by {@link RecoveryActionResolver#resolve}. */
-  private void apply(RecoveryAction action, SagaDefinition def, ExecutionContext context) {
-    switch (action) {
-      case RecoveryAction.Compensate compensate ->
-          engine.compensateFrom(def, context, compensate.fromStep());
-      case RecoveryAction.Resume resume -> engine.resumeFrom(def, context, resume.fromStep());
-    }
+    engine.recover(
+        RecoveryActionResolver.resolve(events, def, SagaStatus.COMPENSATING), def, context);
   }
 
   private void recoverParkedTimeoutOneSafely(String sagaId) {
