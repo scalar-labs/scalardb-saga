@@ -58,7 +58,12 @@ public final class AdminAuditPayload {
           "Admin audit payload has no status: " + payload,
           new IllegalStateException("missing status field"));
     }
-    return SagaStatus.fromStatusCode(number.intValue());
+    try {
+      return SagaStatus.fromStatusCode(number.intValue());
+    } catch (IllegalArgumentException e) {
+      throw new SagaPersistenceException(
+          "Admin audit payload has an unknown status: " + payload, e);
+    }
   }
 
   /** The operator recorded in {@code payload}, or {@code null} if absent. */

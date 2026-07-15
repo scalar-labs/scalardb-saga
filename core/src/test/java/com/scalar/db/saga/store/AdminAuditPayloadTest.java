@@ -51,6 +51,14 @@ class AdminAuditPayloadTest {
   }
 
   @Test
+  void target_unknownStatusCodeGiven_throwsSagaPersistenceException() {
+    // Act & Assert — a corrupt status code is storage corruption, not a bad request
+    assertThatThrownBy(() -> AdminAuditPayload.target("{\"status\":99}"))
+        .isInstanceOf(SagaPersistenceException.class)
+        .hasCauseInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void target_nullPayloadGiven_throwsSagaPersistenceException() {
     // Act & Assert
     assertThatThrownBy(() -> AdminAuditPayload.target(null))
