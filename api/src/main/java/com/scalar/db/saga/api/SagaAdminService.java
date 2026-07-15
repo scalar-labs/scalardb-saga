@@ -55,9 +55,13 @@ public interface SagaAdminService extends AutoCloseable {
    * compensate a pre-pivot failure, resume a post-pivot one — immediately, rather than waiting for
    * the recovery grace period. Accepts a {@code RUNNING} or {@code COMPENSATING} saga.
    *
+   * <p>The drive runs synchronously on the calling thread, so the call blocks until the saga
+   * completes, compensates, or parks.
+   *
    * @param sagaId the saga instance ID
    * @param reason why the operator is intervening (recorded for audit; must be non-blank)
-   * @return the saga's snapshot after the intervention is recorded
+   * @return the saga's snapshot after the drive — its resulting status (e.g. {@code COMPLETED},
+   *     {@code COMPENSATED}, still {@code COMPENSATING}, or {@code WAITING})
    * @throws SagaNotFoundException if no such saga exists
    * @throws SagaStatePreconditionException if the saga is {@code ESCALATED} (use {@link
    *     #resetEscalated} or {@link #forceComplete}), {@code WAITING}, or terminal
@@ -84,9 +88,13 @@ public interface SagaAdminService extends AutoCloseable {
    * take (compensate or resume forward). Use this to triage one escalated saga back into the active
    * flow; use {@link #resetEscalated(SagaQuery, String)} to sweep many at once.
    *
+   * <p>The drive runs synchronously on the calling thread, so the call blocks until the saga
+   * completes, compensates, or parks.
+   *
    * @param sagaId the saga instance ID
    * @param reason why the operator is un-escalating (recorded for audit; must be non-blank)
-   * @return the saga's snapshot after the intervention is recorded
+   * @return the saga's snapshot after the drive — its resulting status (e.g. {@code COMPLETED},
+   *     {@code COMPENSATED}, still {@code COMPENSATING}, or {@code WAITING})
    * @throws SagaNotFoundException if no such saga exists
    * @throws SagaStatePreconditionException if the saga is not {@code ESCALATED}
    * @throws SagaConcurrentModificationException if a concurrent writer changed the saga first
