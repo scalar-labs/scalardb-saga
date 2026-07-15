@@ -26,6 +26,7 @@ import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import com.scalar.db.saga.store.AdminAuditPayload;
 import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
+import com.scalar.db.saga.store.SagaStateAndEvents;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.StatusEvent;
 import com.scalar.db.saga.store.StepEvent;
@@ -479,7 +480,7 @@ class DefaultSagaAdminServiceTest {
   @Test
   void getSagaDetail_missingSaga_throwsNotFound() {
     // Arrange
-    when(store.getStateSnapshot(SAGA_ID)).thenReturn(Optional.empty());
+    when(store.getStateWithEvents(SAGA_ID)).thenReturn(Optional.empty());
 
     // Act & Assert
     assertThatThrownBy(() -> service.getSagaDetail(SAGA_ID))
@@ -498,13 +499,14 @@ class DefaultSagaAdminServiceTest {
             StatusEvent.escalated("retries exhausted").withTimestamp(TS),
             StatusEvent.recovered(SagaStatus.COMPENSATING, "bob", "rolling back")
                 .withTimestamp(TS));
-    when(store.getStateSnapshot(SAGA_ID)).thenReturn(Optional.of(snap));
-    when(store.getEvents(SAGA_ID)).thenReturn(events);
+    when(store.getStateWithEvents(SAGA_ID))
+        .thenReturn(Optional.of(new SagaStateAndEvents(snap, events)));
 
     // Act
     SagaDetail detail = service.getSagaDetail(SAGA_ID);
 
-    // Assert
+    // Assert — the snapshot and timeline come from the one atomic read
+    assertThat(detail.getSnapshot()).isEqualTo(snap);
     List<TimelineEvent> timeline = detail.getTimeline();
     assertThat(timeline).hasSize(5);
 

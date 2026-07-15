@@ -455,6 +455,25 @@ public class ScalarDbSagaStore implements SagaStore {
   }
 
   @Override
+  public Optional<SagaStateAndEvents> getStateWithEvents(String sagaId) {
+    return runInTransaction(
+        tx -> {
+          Optional<SagaStateSnapshot> snapshot =
+              tx.scan(buildStateIndexScan(sagaId)).stream()
+                  .findFirst()
+                  .map(this::toSagaStateSnapshot);
+          if (snapshot.isEmpty()) {
+            return Optional.<SagaStateAndEvents>empty();
+          }
+          List<SagaEvent> events =
+              tx.scan(buildEventScan(sagaId)).stream().map(this::toSagaEvent).toList();
+          return Optional.of(new SagaStateAndEvents(snapshot.get(), events));
+        },
+        null, // read-only — retry the whole transaction on UTSE
+        "get saga state with events " + sagaId);
+  }
+
+  @Override
   public int getEventCount(String sagaId) {
     return runInTransaction(
         tx -> {

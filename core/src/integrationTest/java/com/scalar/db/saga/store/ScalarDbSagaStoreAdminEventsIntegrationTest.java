@@ -8,6 +8,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Properties;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -126,5 +127,27 @@ class ScalarDbSagaStoreAdminEventsIntegrationTest {
     assertThat(reloaded.getEventType()).isEqualTo(EventType.SAGA_FORCE_COMPLETED);
     assertThat(reloaded.getTargetStatus()).isEqualTo(SagaStatus.COMPLETED);
     assertThat(AdminAuditPayload.operator(reloaded.getPayload())).isEqualTo("carol");
+  }
+
+  @Test
+  void getStateWithEvents_returnsSnapshotAndFullEventStreamAtomically() {
+    // Arrange — a saga escalated by the engine (SAGA_STARTED @ seq 0, SAGA_ESCALATED @ seq 1)
+    SagaStateSnapshot running = newRunningSaga("saga-detail");
+    store.recordStatusEvent(running, 1, StatusEvent.escalated("stuck"), running.getOwnerId());
+
+    // Act
+    Optional<SagaStateAndEvents> result = store.getStateWithEvents("saga-detail");
+
+    // Assert — the snapshot's status is paired with the full, ordered event stream in one read
+    assertThat(result).isPresent();
+    assertThat(result.get().snapshot().getStatus()).isEqualTo(SagaStatus.ESCALATED);
+    assertThat(result.get().events())
+        .extracting(SagaEvent::getEventType)
+        .containsExactly(EventType.SAGA_STARTED, EventType.SAGA_ESCALATED);
+  }
+
+  @Test
+  void getStateWithEvents_missingSaga_returnsEmpty() {
+    assertThat(store.getStateWithEvents("no-such-saga")).isEmpty();
   }
 }

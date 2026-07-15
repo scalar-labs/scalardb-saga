@@ -15,6 +15,7 @@ import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import com.scalar.db.saga.store.AdminAuditPayload;
 import com.scalar.db.saga.store.SagaEvent;
+import com.scalar.db.saga.store.SagaStateAndEvents;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.StatusEvent;
 import com.scalar.db.saga.store.StepEvent;
@@ -74,12 +75,19 @@ public class DefaultSagaAdminService implements SagaAdminService {
   @Override
   public SagaDetail getSagaDetail(String sagaId) {
     Objects.requireNonNull(sagaId, "sagaId must not be null");
-    SagaStateSnapshot snapshot = requireSnapshot(sagaId);
-    List<TimelineEvent> timeline = new ArrayList<>();
-    for (SagaEvent event : store.getEvents(sagaId)) {
+    // One atomic read pairs the snapshot with its event stream, so the status is always coherent
+    // with the timeline (a concurrent transition can't wedge a newer event past a stale snapshot).
+    SagaStateAndEvents data =
+        store.getStateWithEvents(sagaId).orElseThrow(() -> new SagaNotFoundException(sagaId));
+    return new SagaDetail(data.snapshot(), toTimeline(data.events()));
+  }
+
+  private static List<TimelineEvent> toTimeline(List<SagaEvent> events) {
+    List<TimelineEvent> timeline = new ArrayList<>(events.size());
+    for (SagaEvent event : events) {
       timeline.add(toTimelineEvent(event));
     }
-    return new SagaDetail(snapshot, timeline);
+    return timeline;
   }
 
   /**

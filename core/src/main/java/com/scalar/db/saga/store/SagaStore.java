@@ -170,6 +170,14 @@ public interface SagaStore extends AutoCloseable {
   Optional<SagaStateSnapshot> getStateSnapshot(String sagaId);
 
   /**
+   * Reads a saga's state snapshot and its full event stream in a single transaction, so the two are
+   * a coherent point-in-time view — a concurrent status transition cannot pair a stale snapshot
+   * with a timeline that already contains the newer event. Returns empty if the saga does not
+   * exist.
+   */
+  Optional<SagaStateAndEvents> getStateWithEvents(String sagaId);
+
+  /**
    * Lists saga state snapshots matching the given query, one page at a time. Used by the Admin
    * API's listing operation.
    *
