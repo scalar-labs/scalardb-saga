@@ -443,7 +443,7 @@ class DefaultSagaAdminServiceTest {
   }
 
   @Test
-  void recoverSaga_controlCharsInReason_areStrippedInAudit() {
+  void recoverSaga_controlCharsInReason_areReplacedWithSpacesInAudit() {
     // Arrange
     SagaStateSnapshot running = snapshot(SagaStatus.RUNNING);
     List<SagaEvent> events =
@@ -456,8 +456,8 @@ class DefaultSagaAdminServiceTest {
     // Act — newline (log-forging vector) must not survive into the audit record
     service.recoverSaga(SAGA_ID, "line1\nline2");
 
-    // Assert
-    assertThat(AdminAuditPayload.reason(audit.getValue().getPayload())).isEqualTo("line1line2");
+    // Assert — the word boundary survives as a space
+    assertThat(AdminAuditPayload.reason(audit.getValue().getPayload())).isEqualTo("line1 line2");
   }
 
   @Test

@@ -349,7 +349,7 @@ public class DefaultSagaAdminService implements SagaAdminService {
 
   private static String validateReason(String reason) {
     Objects.requireNonNull(reason, "reason must not be null");
-    String sanitized = stripControlChars(reason).trim();
+    String sanitized = sanitizeControlChars(reason).trim();
     if (sanitized.isEmpty()) {
       throw new IllegalArgumentException("reason must not be blank");
     }
@@ -360,14 +360,15 @@ public class DefaultSagaAdminService implements SagaAdminService {
     return sanitized;
   }
 
-  /** Removes ISO control characters (newlines included) — log-forging defense. */
-  private static String stripControlChars(String value) {
+  /**
+   * Replaces ISO control characters (newlines included) with spaces; log-forging defense. Spaces
+   * rather than removal so that a multi-line reason keeps its word boundaries once flattened.
+   */
+  private static String sanitizeControlChars(String value) {
     StringBuilder sb = new StringBuilder(value.length());
     for (int i = 0; i < value.length(); i++) {
       char c = value.charAt(i);
-      if (!Character.isISOControl(c)) {
-        sb.append(c);
-      }
+      sb.append(Character.isISOControl(c) ? ' ' : c);
     }
     return sb.toString();
   }
