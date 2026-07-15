@@ -505,6 +505,6 @@ class SagaRecoveryManager {
   private void escalate(ExecutionContext context, String reason) {
     logger.warn("Escalating saga {}: {}", context.getSagaId(), reason);
     store.recordStatusEvent(
-        context.getCurrentState(), context.nextSequence(), StatusEvent.escalated(reason));
+        context.getCurrentState(), context.nextSequence(), StatusEvent.escalated(reason), ownerId);
   }
 }

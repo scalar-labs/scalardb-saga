@@ -266,7 +266,7 @@ public class ScalarDbSagaStore implements SagaStore {
 
   @Override
   public SagaStateSnapshot recordStatusEvent(
-      SagaStateSnapshot current, int sequence, StatusEvent event) {
+      SagaStateSnapshot current, int sequence, StatusEvent event, String ownerId) {
     validatePayloadSize(event.getPayload());
     String sagaId = current.getSagaId();
     SagaStatus newStatus = event.getTargetStatus();
@@ -289,7 +289,7 @@ public class ScalarDbSagaStore implements SagaStore {
 
           tx.insert(buildEventInsert(sagaId, sequence, event, now));
           tx.delete(buildStateDelete(bucket, oldStatus, current.getUpdatedAt(), sagaId));
-          SagaStateSnapshot updated = current.withTransition(newStatus, now);
+          SagaStateSnapshot updated = current.withTransition(newStatus, ownerId, now);
           tx.insert(buildStateInsert(bucket, updated));
           return updated;
         },

@@ -177,7 +177,8 @@ public class DefaultSagaAdminService implements SagaAdminService {
     StatusEvent forceCompletedEvent = StatusEvent.forceCompleted(operator, sanitizedReason);
     // ESCALATED -> COMPLETED, atomic with the audit; no drive (terminal). A lost CAS (a concurrent
     // admin/recovery) surfaces as SagaConcurrentModificationException (409).
-    return store.recordStatusEvent(snapshot, store.getEventCount(sagaId), forceCompletedEvent);
+    return store.recordStatusEvent(
+        snapshot, store.getEventCount(sagaId), forceCompletedEvent, engine.ownerId());
   }
 
   @Override
@@ -274,7 +275,7 @@ public class DefaultSagaAdminService implements SagaAdminService {
     List<SagaEvent> events = store.getEvents(snapshot.getSagaId());
     RecoveryAction action = RecoveryActionResolver.resolve(events, def, snapshot.getStatus());
     StatusEvent resetEvent = StatusEvent.reset(action.targetStatus(), operator, reason);
-    store.recordStatusEvent(snapshot, events.size(), resetEvent);
+    store.recordStatusEvent(snapshot, events.size(), resetEvent, engine.ownerId());
     store.markForRecovery(snapshot.getSagaId());
   }
 
@@ -292,7 +293,7 @@ public class DefaultSagaAdminService implements SagaAdminService {
       StatusEvent interventionEvent) {
     ExecutionContext context = engine.replayEvents(snapshot, events);
     SagaStateSnapshot recorded =
-        store.recordStatusEvent(snapshot, events.size(), interventionEvent);
+        store.recordStatusEvent(snapshot, events.size(), interventionEvent, engine.ownerId());
     context.setCurrentState(recorded);
     context.setNextEventSequence(events.size() + 1);
     engine.recover(action, def, context);

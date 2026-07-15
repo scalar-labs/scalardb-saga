@@ -68,7 +68,7 @@ class SagaAdminServiceIntegrationTest {
   private void seedEscalated(String sagaId) {
     SagaStateSnapshot running =
         store.createSaga(sagaId, "order-saga", "owner", Map.of("amount", 100), "v1");
-    store.recordStatusEvent(running, 1, StatusEvent.escalated("retries exhausted"));
+    store.recordStatusEvent(running, 1, StatusEvent.escalated("retries exhausted"), "owner");
   }
 
   @Test

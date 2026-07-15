@@ -96,7 +96,7 @@ class DefaultSagaAdminServiceTest {
     when(engine.replayEvents(before, events)).thenReturn(ctx);
     when(ctx.getCurrentState()).thenReturn(after);
     ArgumentCaptor<StatusEvent> captor = ArgumentCaptor.forClass(StatusEvent.class);
-    when(store.recordStatusEvent(eq(before), anyInt(), captor.capture()))
+    when(store.recordStatusEvent(eq(before), anyInt(), captor.capture(), any()))
         .thenReturn(snapshot(SagaStatus.COMPENSATING));
     return captor;
   }
@@ -258,7 +258,8 @@ class DefaultSagaAdminServiceTest {
     when(store.getStateSnapshot(SAGA_ID)).thenReturn(Optional.of(escalated));
     when(store.getEventCount(SAGA_ID)).thenReturn(5);
     ArgumentCaptor<StatusEvent> audit = ArgumentCaptor.forClass(StatusEvent.class);
-    when(store.recordStatusEvent(eq(escalated), eq(5), audit.capture())).thenReturn(completed);
+    when(store.recordStatusEvent(eq(escalated), eq(5), audit.capture(), any()))
+        .thenReturn(completed);
 
     // Act
     SagaStateSnapshot result = service.forceComplete(SAGA_ID, "confirmed done");
@@ -380,7 +381,7 @@ class DefaultSagaAdminServiceTest {
     when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(backwardDef());
     when(registry.resolve("gone", "v9")).thenReturn(null);
     when(store.getEvents("ok")).thenReturn(events);
-    when(store.recordStatusEvent(eq(ok), anyInt(), any())).thenReturn(ok);
+    when(store.recordStatusEvent(eq(ok), anyInt(), any(), any())).thenReturn(ok);
 
     // Act
     ResetResult result = service.resetEscalated(SagaQuery.newBuilder().build(), "sweep");
@@ -406,7 +407,7 @@ class DefaultSagaAdminServiceTest {
         List.of(StatusEvent.started(null), StepEvent.completed(0, "debit", null));
     when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(backwardDef());
     when(store.getEvents("race")).thenReturn(events);
-    when(store.recordStatusEvent(eq(racing), anyInt(), any()))
+    when(store.recordStatusEvent(eq(racing), anyInt(), any(), any()))
         .thenThrow(new SagaConcurrentModificationException("race"));
 
     // Act

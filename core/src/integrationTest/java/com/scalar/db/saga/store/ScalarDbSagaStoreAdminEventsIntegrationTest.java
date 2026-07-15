@@ -63,7 +63,10 @@ class ScalarDbSagaStoreAdminEventsIntegrationTest {
     // Act — an operator recovers it in the compensate direction
     SagaStateSnapshot after =
         store.recordStatusEvent(
-            running, 1, StatusEvent.recovered(SagaStatus.COMPENSATING, "alice", "rolling back"));
+            running,
+            1,
+            StatusEvent.recovered(SagaStatus.COMPENSATING, "alice", "rolling back"),
+            running.getOwnerId());
 
     // Assert — status transitioned, and the event reconstructs with the right variable target +
     // audit
@@ -80,12 +83,16 @@ class ScalarDbSagaStoreAdminEventsIntegrationTest {
     // Arrange — a RUNNING saga escalated by the engine, then reset by an operator
     SagaStateSnapshot running = newRunningSaga("saga-reset");
     SagaStateSnapshot escalated =
-        store.recordStatusEvent(running, 1, StatusEvent.escalated("retries exhausted"));
+        store.recordStatusEvent(
+            running, 1, StatusEvent.escalated("retries exhausted"), running.getOwnerId());
 
     // Act — un-escalate in the resume-forward direction
     SagaStateSnapshot after =
         store.recordStatusEvent(
-            escalated, 2, StatusEvent.reset(SagaStatus.RUNNING, "bob", "downstream restored"));
+            escalated,
+            2,
+            StatusEvent.reset(SagaStatus.RUNNING, "bob", "downstream restored"),
+            escalated.getOwnerId());
 
     // Assert
     assertThat(after.getStatus()).isEqualTo(SagaStatus.RUNNING);
@@ -100,12 +107,15 @@ class ScalarDbSagaStoreAdminEventsIntegrationTest {
     // Arrange — a RUNNING saga escalated by the engine
     SagaStateSnapshot running = newRunningSaga("saga-forced");
     SagaStateSnapshot escalated =
-        store.recordStatusEvent(running, 1, StatusEvent.escalated("stuck"));
+        store.recordStatusEvent(running, 1, StatusEvent.escalated("stuck"), running.getOwnerId());
 
     // Act — an operator force-completes it
     SagaStateSnapshot after =
         store.recordStatusEvent(
-            escalated, 2, StatusEvent.forceCompleted("carol", "confirmed done"));
+            escalated,
+            2,
+            StatusEvent.forceCompleted("carol", "confirmed done"),
+            escalated.getOwnerId());
 
     // Assert — a distinct event type survives, so the forced override is never mistaken for a
     // genuine completion, and the prior ESCALATED history remains in the stream

@@ -444,12 +444,13 @@ class ScalarDbSagaStoreTest {
     Result existingRow = mock(Result.class);
     when(tx.get(any(Get.class))).thenReturn(Optional.of(existingRow));
 
-    // Act
-    SagaStateSnapshot result = store.recordStatusEvent(current, 5, event);
+    // Act — a different replica records the transition; owner_id is re-stamped to it
+    SagaStateSnapshot result = store.recordStatusEvent(current, 5, event, "engine-2");
 
     // Assert
     assertThat(result.getSagaId()).isEqualTo("saga-1");
     assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPLETED);
+    assertThat(result.getOwnerId()).isEqualTo("engine-2");
     assertThat(result.getUpdatedAt()).isAfterOrEqualTo(now);
     verify(tx).get(any(Get.class));
     // event insert + state insert
@@ -468,7 +469,8 @@ class ScalarDbSagaStoreTest {
     when(tx.get(any(Get.class))).thenReturn(Optional.empty());
 
     // Act & Assert
-    assertThatThrownBy(() -> store.recordStatusEvent(current, 1, StatusEvent.completed()))
+    assertThatThrownBy(
+            () -> store.recordStatusEvent(current, 1, StatusEvent.completed(), "engine-1"))
         .isInstanceOf(SagaConcurrentModificationException.class);
   }
 
@@ -484,7 +486,8 @@ class ScalarDbSagaStoreTest {
     doThrow(mock(CommitConflictException.class)).when(tx).commit();
 
     // Act & Assert
-    assertThatThrownBy(() -> store.recordStatusEvent(current, 1, StatusEvent.completed()))
+    assertThatThrownBy(
+            () -> store.recordStatusEvent(current, 1, StatusEvent.completed(), "engine-1"))
         .isInstanceOf(SagaPersistenceException.class);
   }
 
