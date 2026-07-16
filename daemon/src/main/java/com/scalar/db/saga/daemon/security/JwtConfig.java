@@ -1,5 +1,6 @@
 package com.scalar.db.saga.daemon.security;
 
+import com.scalar.db.saga.daemon.LoopbackHost;
 import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -187,7 +188,7 @@ final class JwtConfig {
     // The JWKS is the JWT trust anchor: every token signature is verified against keys fetched from
     // it, so a plaintext endpoint lets an on-path attacker swap the keys and forge tokens. Require
     // https, except on loopback so local development against a plaintext dev IdP still works.
-    if (!"https".equalsIgnoreCase(url.getProtocol()) && !isLoopbackHost(url.getHost())) {
+    if (!"https".equalsIgnoreCase(url.getProtocol()) && !LoopbackHost.isLoopback(url.getHost())) {
       throw new IllegalArgumentException(
           "'"
               + JWKS_URL_KEY
@@ -196,25 +197,6 @@ final class JwtConfig {
               + value);
     }
     return url;
-  }
-
-  /**
-   * Whether {@code host} is an IPv4/IPv6 loopback literal ({@code localhost}, {@code 127.0.0.0/8},
-   * {@code ::1}). Matched on the literal rather than resolved via DNS so parsing stays offline and
-   * a spoofable name cannot pass as loopback.
-   */
-  private static boolean isLoopbackHost(@Nullable String host) {
-    if (host == null || host.isEmpty()) {
-      return false;
-    }
-    String literal = host;
-    if (literal.startsWith("[") && literal.endsWith("]")) {
-      // URL.getHost keeps the brackets around an IPv6 literal (e.g. "[::1]").
-      literal = literal.substring(1, literal.length() - 1);
-    }
-    return literal.equalsIgnoreCase("localhost")
-        || literal.equals("::1")
-        || literal.startsWith("127.");
   }
 
   private static @Nullable String blankToNull(@Nullable String value) {
