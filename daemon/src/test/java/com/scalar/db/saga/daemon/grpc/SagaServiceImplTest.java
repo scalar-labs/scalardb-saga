@@ -238,10 +238,10 @@ class SagaServiceImplTest {
   // ---------------------------------------------------------------------------
 
   @Test
-  void startSaga_persistenceError_returnsUnavailableWithoutLeakingMessage() {
+  void startSaga_retryablePersistenceError_returnsUnavailableWithoutLeakingMessage() {
     when(orchestrator.startAsync("transfer", Map.of()))
         .thenThrow(
-            new SagaPersistenceException(
+            SagaPersistenceException.retryable(
                 "DB write failed on secret_table host=10.0.0.5", new RuntimeException("io")));
 
     assertThatThrownBy(() -> stub(0).startSaga(startByName("transfer", true)))
@@ -252,6 +252,25 @@ class SagaServiceImplTest {
               assertThat(e.getStatus().getDescription())
                   .isEqualTo("Service temporarily unavailable");
               assertThat(e.getStatus().getDescription()).doesNotContain("secret_table", "10.0.0.5");
+            });
+  }
+
+  @Test
+  void startSaga_permanentPersistenceError_returnsInternalWithoutLeakingMessage() {
+    // A permanent persistence failure (e.g. serialization) must not be reported as a retryable
+    // UNAVAILABLE — the client would retry it futilely. It maps to INTERNAL instead.
+    when(orchestrator.startAsync("transfer", Map.of()))
+        .thenThrow(
+            SagaPersistenceException.nonRetryable(
+                "Failed to serialize payload for secret_table", new RuntimeException("bad json")));
+
+    assertThatThrownBy(() -> stub(0).startSaga(startByName("transfer", true)))
+        .isInstanceOfSatisfying(
+            StatusRuntimeException.class,
+            e -> {
+              assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INTERNAL);
+              assertThat(e.getStatus().getDescription()).isEqualTo("Internal server error");
+              assertThat(e.getStatus().getDescription()).doesNotContain("secret_table");
             });
   }
 

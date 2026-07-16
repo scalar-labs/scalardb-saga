@@ -1484,9 +1484,10 @@ class ScalarDbSagaStoreTest {
     Result r = mockEventResult("UNKNOWN_TYPE", -1, null, null);
     when(tx.scan(any(Scan.class))).thenReturn(List.of(r));
 
-    // Act & Assert
+    // Act & Assert — an unreadable stored event is a permanent failure: not retryable.
     assertThatThrownBy(() -> store.getEvents("saga-1"))
-        .isInstanceOf(SagaPersistenceException.class);
+        .isInstanceOfSatisfying(
+            SagaPersistenceException.class, e -> assertThat(e.isRetryable()).isFalse());
   }
 
   @SuppressWarnings("NullAway")
@@ -1591,10 +1592,11 @@ class ScalarDbSagaStoreTest {
             ScalarDbSagaStoreConfig.builder().transactionRetryCount(2).build());
     doThrow(mock(CrudConflictException.class)).when(tx).insert(any(Insert.class));
 
-    // Act & Assert
+    // Act & Assert — a retry-exhausted store failure is transient: retryable.
     assertThatThrownBy(
             () -> retryStore.recordStepEvent("saga-1", 1, StepEvent.completed(0, "s", null)))
-        .isInstanceOf(SagaPersistenceException.class);
+        .isInstanceOfSatisfying(
+            SagaPersistenceException.class, e -> assertThat(e.isRetryable()).isTrue());
   }
 
   @Test
@@ -1682,6 +1684,35 @@ class ScalarDbSagaStoreTest {
                     "test operation"))
         .isSameAs(verifierError);
     // Only one transaction attempt — no retries after RuntimeException from verifier
+    verify(txManager, times(1)).begin();
+  }
+
+  @Test
+  void
+      runInTransaction_unknownStatusWithVerifierThrowsNonRetryablePersistenceException_propagatesImmediately()
+          throws Exception {
+    // Arrange — UTSE on commit; the verifier throws a permanent (non-retryable) persistence
+    // failure. It must propagate as-is, not be retried and masked as a retryable failure.
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    SagaPersistenceException verifierError =
+        SagaPersistenceException.nonRetryable("bad payload", new RuntimeException("parse"));
+    ScalarDbSagaStore store2 =
+        new ScalarDbSagaStore(
+            txManager, objectMapper, schema, ScalarDbSagaStoreConfig.builder().build());
+
+    // Act & Assert
+    assertThatThrownBy(
+            () ->
+                store2.runInTransaction(
+                    tx -> Boolean.TRUE,
+                    () -> {
+                      throw verifierError;
+                    },
+                    "test operation"))
+        .isSameAs(verifierError)
+        .isInstanceOfSatisfying(
+            SagaPersistenceException.class, e -> assertThat(e.isRetryable()).isFalse());
+    // Only one transaction attempt — no retries after a non-retryable failure from the verifier.
     verify(txManager, times(1)).begin();
   }
 

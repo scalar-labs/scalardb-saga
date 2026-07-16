@@ -49,9 +49,15 @@ final class GrpcErrorMapper {
       return status(
           Status.Code.ALREADY_EXISTS, "A saga already exists with id '" + e.getSagaId() + "'");
     }
-    if (t instanceof SagaPersistenceException) {
-      logger.error("Persistence error handling gRPC call", t);
-      return status(Status.Code.UNAVAILABLE, "Service temporarily unavailable");
+    if (t instanceof SagaPersistenceException e) {
+      // A transient store failure is retryable (UNAVAILABLE); a permanent one (e.g. a serialization
+      // or parse error) is not — surface it as INTERNAL so the client does not retry it futilely.
+      if (e.isRetryable()) {
+        logger.error("Transient persistence error handling gRPC call", t);
+        return status(Status.Code.UNAVAILABLE, "Service temporarily unavailable");
+      }
+      logger.error("Permanent persistence error handling gRPC call", t);
+      return status(Status.Code.INTERNAL, "Internal server error");
     }
     // Catch-all: never leak an unmapped exception's message; log it and return a generic INTERNAL.
     logger.error("Unhandled error handling gRPC call", t);
