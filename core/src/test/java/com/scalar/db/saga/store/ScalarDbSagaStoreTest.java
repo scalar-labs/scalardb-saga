@@ -1,6 +1,7 @@
 package com.scalar.db.saga.store;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -432,6 +433,50 @@ class ScalarDbSagaStoreTest {
         .isInstanceOf(SagaPersistenceException.class);
   }
 
+  @Test
+  void recordStepEvent_unknownStatusAndVerifierFindsCrossTypeEvent_doesNotReportSuccess()
+      throws Exception {
+    // Arrange — the append's commit is ambiguous (unknown status) and a DIFFERENT writer's event
+    // sits at the same sequence. The type-aware verifier must NOT mistake it for ours: it reports
+    // "not committed", and with one attempt the op exhausts and throws rather than falsely
+    // succeeding (the old presence-only check would have returned success here).
+    ScalarDbSagaStore singleAttemptStore =
+        new ScalarDbSagaStore(
+            txManager,
+            objectMapper,
+            schema,
+            ScalarDbSagaStoreConfig.builder().transactionRetryCount(1).build());
+    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    Result crossTypeEvent = mock(Result.class);
+    when(crossTypeEvent.getText("event_type")).thenReturn("STEP_FAILED");
+    when(verifyTx.get(any(Get.class))).thenReturn(Optional.of(crossTypeEvent));
+
+    // Act & Assert
+    assertThatThrownBy(
+            () ->
+                singleAttemptStore.recordStepEvent(
+                    "saga-1", 3, StepEvent.completed(1, "charge", null)))
+        .isInstanceOf(SagaPersistenceException.class);
+  }
+
+  @Test
+  void recordStepEvent_unknownStatusAndVerifierFindsOwnEvent_succeeds() throws Exception {
+    // Arrange — commit is ambiguous but our own STEP_COMPLETED did persist at the sequence, so the
+    // type-matching verifier confirms the commit and the append completes.
+    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    Result ownEvent = mock(Result.class);
+    when(ownEvent.getText("event_type")).thenReturn("STEP_COMPLETED");
+    when(verifyTx.get(any(Get.class))).thenReturn(Optional.of(ownEvent));
+
+    // Act & Assert
+    assertThatCode(() -> store.recordStepEvent("saga-1", 3, StepEvent.completed(1, "charge", null)))
+        .doesNotThrowAnyException();
+  }
+
   // ---------------------------------------------------------------------------
   // recordStatusEvent
   // ---------------------------------------------------------------------------
@@ -490,6 +535,62 @@ class ScalarDbSagaStoreTest {
     // Act & Assert
     assertThatThrownBy(() -> store.recordStatusEvent(current, 1, StatusEvent.completed()))
         .isInstanceOf(SagaPersistenceException.class);
+  }
+
+  @Test
+  void
+      recordStatusEvent_unknownStatusAndVerifierFindsCrossTypeEvent_throwsSagaConcurrentModificationException()
+          throws Exception {
+    // Arrange — the transition's commit is ambiguous and a DIFFERENT writer won the CK and wrote a
+    // cross-type status event at the same sequence. The type-aware verifier must NOT mistake it for
+    // ours: it reports "not committed", the op retries, re-reads the now-moved CK, and throws.
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
+    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
+    DistributedTransaction retryTx = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx).thenReturn(retryTx);
+    // Attempt 1: the optimistic CK check passes, then commit is ambiguous.
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    // Verifier: the persisted event at the sequence is another writer's, not our SAGA_COMPENSATING.
+    Result crossTypeEvent = mock(Result.class);
+    when(crossTypeEvent.getText("event_type")).thenReturn("SAGA_COMPLETED");
+    when(verifyTx.get(any(Get.class))).thenReturn(Optional.of(crossTypeEvent));
+    // Retry: the row has moved off the old CK.
+    when(retryTx.get(any(Get.class))).thenReturn(Optional.empty());
+
+    // Act & Assert
+    assertThatThrownBy(() -> store.recordStatusEvent(current, 5, StatusEvent.compensating()))
+        .isInstanceOf(SagaConcurrentModificationException.class);
+  }
+
+  @Test
+  void recordStatusEvent_unknownStatusAndVerifierFindsOwnEvent_returnsTransitionedSnapshot()
+      throws Exception {
+    // Arrange — commit is ambiguous but our own SAGA_COMPENSATING did persist at the sequence, so
+    // the type-matching verifier confirms the commit and returns the transitioned snapshot.
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
+    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
+    DistributedTransaction loadTx = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx).thenReturn(loadTx);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    Result ownEvent = mock(Result.class);
+    when(ownEvent.getText("event_type")).thenReturn("SAGA_COMPENSATING");
+    when(verifyTx.get(any(Get.class))).thenReturn(Optional.of(ownEvent));
+    Result compensatingState = mockStateResult("saga-1", SagaStatus.COMPENSATING);
+    when(loadTx.scan(any(Scan.class))).thenReturn(List.of(compensatingState));
+
+    // Act
+    SagaStateSnapshot result = store.recordStatusEvent(current, 5, StatusEvent.compensating());
+
+    // Assert
+    assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPENSATING);
   }
 
   // ---------------------------------------------------------------------------

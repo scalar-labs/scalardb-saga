@@ -246,16 +246,13 @@ public class ScalarDbSagaStore implements SagaStore {
           tx.insert(buildEventInsert(sagaId, sequence, event, Instant.now()));
           return Boolean.TRUE;
         },
-        () -> {
-          // Verify the event was committed by re-reading it
-          return runInTransaction(
-              tx -> {
-                Optional<Result> result = tx.get(buildEventGet(sagaId, sequence));
-                return result.isPresent() ? Optional.of(Boolean.TRUE) : Optional.empty();
-              },
-              null,
-              "verify event " + sagaId + " seq " + sequence);
-        },
+        () ->
+            // Verify an event of our type committed at this sequence. This rules out another
+            // writer's differently-typed event; it does not prove the event is ours, since a
+            // same-type racer is indistinguishable. See eventCommittedWithType.
+            eventCommittedWithType(sagaId, sequence, event.getEventType())
+                ? Optional.of(Boolean.TRUE)
+                : Optional.empty(),
         "append event for saga " + sagaId);
   }
 
@@ -288,16 +285,7 @@ public class ScalarDbSagaStore implements SagaStore {
           tx.insert(buildStateInsert(bucket, updated));
           return updated;
         },
-        () ->
-            runInTransaction(
-                tx -> {
-                  if (tx.get(buildEventGet(sagaId, sequence)).isPresent()) {
-                    return loadStateSnapshot(sagaId);
-                  }
-                  return Optional.empty();
-                },
-                null,
-                "verify transition " + sagaId + " seq " + sequence),
+        verifyTransitionCommitted(sagaId, sequence, event.getEventType()),
         "record transition for saga " + sagaId);
   }
 
@@ -413,29 +401,53 @@ public class ScalarDbSagaStore implements SagaStore {
   }
 
   /**
-   * Verifier for park/resume/timeout: the tx committed iff the event at {@code sequence} is present
-   * <em>and</em> of {@code expectedType}. The type check matters because {@code resumeParkedStep}
-   * and {@code failParkedStep} are claim-less and derive the same {@code sequence} from a WAITING
-   * saga's event count, so both target the same event CK with different types. Presence alone would
-   * let the loser of a callback-vs-timeout race read the winner's event and wrongly report its own
-   * commit as successful; matching the type proves the persisted event is ours. A mismatch (the
-   * other op won) returns empty, so the caller retries, re-reads the now-non-WAITING CK, and throws
-   * {@link SagaConcurrentModificationException}.
+   * Whether the event at {@code sequence} is present <em>and</em> of {@code expectedType}. This is
+   * the post-{@code UnknownTransactionStatus} verification check the event-append and transition
+   * paths share: presence alone answers "did some event land at this sequence?", and the type match
+   * narrows that to "an event of our type landed".
+   *
+   * <p><b>This does not identify the writer.</b> The type describes the row; it does not say who
+   * wrote it. Two racers appending the same type at the same sequence are indistinguishable here,
+   * so a loser whose commit returned unknown can read the winner's event and wrongly report its own
+   * commit as successful. What the check does buy is the exclusion of cross-type false positives,
+   * such as a callback racing a deadline timeout, or a live executor racing a recovery claim.
+   *
+   * <p><b>Known gap.</b> {@link #resumeParkedStep} and {@link #recordStepEvent} can have same-type
+   * racers: at-least-once callback delivery, and the timeout re-drive of a slow-but-live
+   * participant, both let two {@code completeStepAsync} calls append {@code STEP_COMPLETED} at the
+   * same sequence. Their outputs can differ even when the participant is correctly idempotent: the
+   * {@code sagaId + stepName} dedup key skips the duplicate <em>write</em>, but a saga provides no
+   * isolation, so a result read back from state can observe a value another saga committed in
+   * between. Differing outputs are themselves fine; the defect is that the loser drives the saga on
+   * an output that was never persisted, so the live run and the durable log disagree about which
+   * one won. Closing this needs a per-append identifier persisted with the event and compared here,
+   * replacing the type comparison; that is tracked separately because it changes the {@code
+   * saga_events} schema.
+   */
+  private boolean eventCommittedWithType(String sagaId, int sequence, EventType expectedType) {
+    return runInTransaction(
+        tx -> {
+          Optional<Result> event = tx.get(buildEventGet(sagaId, sequence));
+          return event.isPresent() && expectedType.name().equals(event.get().getText("event_type"));
+        },
+        null,
+        "verify event " + sagaId + " seq " + sequence);
+  }
+
+  /**
+   * Verifier for a state transition (park, resume, timeout, {@code recordStatusEvent}): treats the
+   * tx as committed when the event at {@code sequence} is present and of {@code expectedType} (see
+   * {@link #eventCommittedWithType}, whose writer-identity gap this inherits). On a match it
+   * returns the resulting state snapshot; a mismatch (the other op won) returns empty, so the
+   * caller retries, re-reads the now-moved CK, and throws {@link
+   * SagaConcurrentModificationException}.
    */
   private CommitVerifier<SagaStateSnapshot> verifyTransitionCommitted(
       String sagaId, int sequence, EventType expectedType) {
     return () ->
-        runInTransaction(
-            tx -> {
-              Optional<Result> event = tx.get(buildEventGet(sagaId, sequence));
-              if (event.isPresent()
-                  && expectedType.name().equals(event.get().getText("event_type"))) {
-                return loadStateSnapshot(sagaId);
-              }
-              return Optional.empty();
-            },
-            null,
-            "verify transition " + sagaId + " seq " + sequence);
+        eventCommittedWithType(sagaId, sequence, expectedType)
+            ? loadStateSnapshot(sagaId)
+            : Optional.empty();
   }
 
   @Override
