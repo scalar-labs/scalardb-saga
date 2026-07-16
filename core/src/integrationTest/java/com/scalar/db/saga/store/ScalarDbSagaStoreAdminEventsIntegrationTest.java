@@ -17,8 +17,8 @@ import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Integration test proving the Admin API's operator-intervention events ({@code
- * SAGA_FORCE_COMPLETED / SAGA_RECOVERED / SAGA_RESET}) survive a real (SQLite-backed) ScalarDB
- * round trip. The variable target of {@code SAGA_RECOVERED}/{@code SAGA_RESET} ({@code
+ * SAGA_FORCE_COMPLETED / SAGA_RECOVERING / SAGA_RESET}) survive a real (SQLite-backed) ScalarDB
+ * round trip. The variable target of {@code SAGA_RECOVERING}/{@code SAGA_RESET} ({@code
  * COMPENSATING} or {@code RUNNING}) is reconstructed from the persisted payload, which mock-based
  * unit tests cannot exercise.
  */
@@ -57,23 +57,23 @@ class ScalarDbSagaStoreAdminEventsIntegrationTest {
   }
 
   @Test
-  void recordStatusEvent_recoveredToCompensating_roundTripsTargetAndAudit() {
+  void recordStatusEvent_recoveringToCompensating_roundTripsTargetAndAudit() {
     // Arrange — a RUNNING saga (SAGA_STARTED is sequence 0)
-    SagaStateSnapshot running = newRunningSaga("saga-recovered");
+    SagaStateSnapshot running = newRunningSaga("saga-recovering");
 
     // Act — an operator recovers it in the compensate direction
     SagaStateSnapshot after =
         store.recordStatusEvent(
             running,
             1,
-            StatusEvent.recovered(SagaStatus.COMPENSATING, "alice", "rolling back"),
+            StatusEvent.recovering(SagaStatus.COMPENSATING, "alice", "rolling back"),
             running.getOwnerId());
 
     // Assert — status transitioned, and the event reconstructs with the right variable target +
     // audit
     assertThat(after.getStatus()).isEqualTo(SagaStatus.COMPENSATING);
-    StatusEvent reloaded = lastEvent("saga-recovered");
-    assertThat(reloaded.getEventType()).isEqualTo(EventType.SAGA_RECOVERED);
+    StatusEvent reloaded = lastEvent("saga-recovering");
+    assertThat(reloaded.getEventType()).isEqualTo(EventType.SAGA_RECOVERING);
     assertThat(reloaded.getTargetStatus()).isEqualTo(SagaStatus.COMPENSATING);
     assertThat(AdminAuditPayload.operator(reloaded.getPayload())).isEqualTo("alice");
     assertThat(AdminAuditPayload.reason(reloaded.getPayload())).isEqualTo("rolling back");

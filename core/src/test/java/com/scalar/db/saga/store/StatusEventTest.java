@@ -94,24 +94,24 @@ class StatusEventTest {
   }
 
   @Test
-  void recovered_compensatingTargetGiven_createsRecoveredEventTargetingCompensating() {
+  void recovering_compensatingTargetGiven_createsRecoveringEventTargetingCompensating() {
     // Act
-    StatusEvent event = StatusEvent.recovered(SagaStatus.COMPENSATING, "bob", "rolling back");
+    StatusEvent event = StatusEvent.recovering(SagaStatus.COMPENSATING, "bob", "rolling back");
 
     // Assert
-    assertThat(event.getEventType()).isEqualTo(EventType.SAGA_RECOVERED);
+    assertThat(event.getEventType()).isEqualTo(EventType.SAGA_RECOVERING);
     assertThat(event.getTargetStatus()).isEqualTo(SagaStatus.COMPENSATING);
     assertThat(AdminAuditPayload.operator(event.getPayload())).isEqualTo("bob");
     assertThat(AdminAuditPayload.reason(event.getPayload())).isEqualTo("rolling back");
   }
 
   @Test
-  void recovered_runningTargetGiven_createsRecoveredEventTargetingRunning() {
+  void recovering_runningTargetGiven_createsRecoveringEventTargetingRunning() {
     // Act
-    StatusEvent event = StatusEvent.recovered(SagaStatus.RUNNING, "bob", "downstream restored");
+    StatusEvent event = StatusEvent.recovering(SagaStatus.RUNNING, "bob", "downstream restored");
 
     // Assert
-    assertThat(event.getEventType()).isEqualTo(EventType.SAGA_RECOVERED);
+    assertThat(event.getEventType()).isEqualTo(EventType.SAGA_RECOVERING);
     assertThat(event.getTargetStatus()).isEqualTo(SagaStatus.RUNNING);
   }
 
@@ -137,9 +137,9 @@ class StatusEventTest {
   }
 
   @Test
-  void recovered_terminalTargetGiven_throwsIllegalArgumentException() {
+  void recovering_terminalTargetGiven_throwsIllegalArgumentException() {
     // Act & Assert
-    assertThatThrownBy(() -> StatusEvent.recovered(SagaStatus.COMPLETED, "bob", "why"))
+    assertThatThrownBy(() -> StatusEvent.recovering(SagaStatus.COMPLETED, "bob", "why"))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
@@ -160,15 +160,15 @@ class StatusEventTest {
 
   @Test
   void reconstruct_targetAndPayloadGiven_buildsEventWithoutReEncoding() {
-    // Arrange — the payload the store persisted for a recovered-to-COMPENSATING event
+    // Arrange — the payload the store persisted for a recovering-to-COMPENSATING event
     String payload = AdminAuditPayload.encode("bob", "rolling back", SagaStatus.COMPENSATING);
 
     // Act
     StatusEvent event =
-        StatusEvent.reconstruct(EventType.SAGA_RECOVERED, SagaStatus.COMPENSATING, payload);
+        StatusEvent.reconstruct(EventType.SAGA_RECOVERING, SagaStatus.COMPENSATING, payload);
 
     // Assert
-    assertThat(event.getEventType()).isEqualTo(EventType.SAGA_RECOVERED);
+    assertThat(event.getEventType()).isEqualTo(EventType.SAGA_RECOVERING);
     assertThat(event.getTargetStatus()).isEqualTo(SagaStatus.COMPENSATING);
     assertThat(event.getPayload()).isEqualTo(payload);
   }

@@ -12,12 +12,13 @@ import org.jspecify.annotations.Nullable;
 
 /**
  * Codec for the audit payload carried by the operator-intervention status events ({@link
- * EventType#SAGA_FORCE_COMPLETED}, {@link EventType#SAGA_RECOVERED}, {@link EventType#SAGA_RESET}).
+ * EventType#SAGA_FORCE_COMPLETED}, {@link EventType#SAGA_RECOVERING}, {@link
+ * EventType#SAGA_RESET}).
  *
  * <p>The payload records who performed the intervention ({@code operator}), why ({@code reason}),
  * and the {@code status} the engine was driven to. The target status is persisted here — not just
  * derived from the event type, as it is for the engine's own status events — because a variable-
- * target intervention ({@code SAGA_RECOVERED}/{@code SAGA_RESET} may drive to {@code COMPENSATING}
+ * target intervention ({@code SAGA_RECOVERING}/{@code SAGA_RESET} may drive to {@code COMPENSATING}
  * or {@code RUNNING}) must be reconstructable from the event stream, where the row itself stores
  * only the event type.
  */

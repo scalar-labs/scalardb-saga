@@ -31,7 +31,7 @@ class TimelineEventTest {
     // Act
     TimelineEvent e =
         new TimelineEvent(
-            TS, "SAGA_RECOVERED", null, null, SagaStatus.COMPENSATING, "rolling back", "alice");
+            TS, "SAGA_RECOVERING", null, null, SagaStatus.COMPENSATING, "rolling back", "alice");
 
     // Assert
     assertThat(e.getStepIndex()).isNull();

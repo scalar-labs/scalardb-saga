@@ -46,7 +46,7 @@ public final class TimelineEvent {
     return timestamp;
   }
 
-  /** The event type name (e.g. {@code "STEP_FAILED"}, {@code "SAGA_RECOVERED"}). */
+  /** The event type name (e.g. {@code "STEP_FAILED"}, {@code "SAGA_RECOVERING"}). */
   public String getType() {
     return type;
   }

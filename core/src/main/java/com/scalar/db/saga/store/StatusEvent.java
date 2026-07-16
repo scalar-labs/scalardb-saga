@@ -79,12 +79,14 @@ public final class StatusEvent implements SagaEvent {
   }
 
   /**
-   * Creates a {@link EventType#SAGA_RECOVERED} event: an operator drove a stuck {@code
-   * RUNNING}/{@code COMPENSATING} saga in the direction recovery would take it. {@code target} is
-   * the resulting status — {@code COMPENSATING} (compensate) or {@code RUNNING} (resume forward).
+   * Creates a {@link EventType#SAGA_RECOVERING} event: an operator forced a stuck {@code
+   * RUNNING}/{@code COMPENSATING} saga to be driven now, in the direction recovery would take it,
+   * rather than waiting for the scheduled sweep. {@code target} is the resulting status — {@code
+   * COMPENSATING} (compensate) or {@code RUNNING} (resume forward). Recorded before the drive it
+   * requests, so it names the phase the saga enters; the outcome follows in later events.
    */
-  public static StatusEvent recovered(SagaStatus target, String operator, String reason) {
-    return intervention(EventType.SAGA_RECOVERED, target, operator, reason);
+  public static StatusEvent recovering(SagaStatus target, String operator, String reason) {
+    return intervention(EventType.SAGA_RECOVERING, target, operator, reason);
   }
 
   /**
@@ -110,7 +112,7 @@ public final class StatusEvent implements SagaEvent {
 
   /**
    * Rehydrates an operator-intervention event ({@link EventType#SAGA_FORCE_COMPLETED}, {@link
-   * EventType#SAGA_RECOVERED}, {@link EventType#SAGA_RESET}) from the stored event stream. Unlike
+   * EventType#SAGA_RECOVERING}, {@link EventType#SAGA_RESET}) from the stored event stream. Unlike
    * the public factories, this takes the already-persisted target and payload directly — the store
    * reconstructs a variable target from the payload (see {@link AdminAuditPayload#target}) — rather
    * than re-encoding a fresh payload.

@@ -131,7 +131,7 @@ public class DefaultSagaAdminService implements SagaAdminService {
   private static @Nullable String statusDetail(StatusEvent status) {
     return switch (status.getEventType()) {
       case SAGA_ESCALATED -> status.getPayload(); // the escalation reason (plain text)
-      case SAGA_FORCE_COMPLETED, SAGA_RECOVERED, SAGA_RESET ->
+      case SAGA_FORCE_COMPLETED, SAGA_RECOVERING, SAGA_RESET ->
           AdminAuditPayload.reason(status.getPayload());
       default -> null; // SAGA_STARTED carries the saga input — never exposed here
     };
@@ -139,7 +139,7 @@ public class DefaultSagaAdminService implements SagaAdminService {
 
   private static @Nullable String statusOperator(StatusEvent status) {
     return switch (status.getEventType()) {
-      case SAGA_FORCE_COMPLETED, SAGA_RECOVERED, SAGA_RESET ->
+      case SAGA_FORCE_COMPLETED, SAGA_RECOVERING, SAGA_RESET ->
           AdminAuditPayload.operator(status.getPayload());
       default -> null;
     };
@@ -167,9 +167,9 @@ public class DefaultSagaAdminService implements SagaAdminService {
     SagaDefinition def = resolveDefinitionOrThrow(snapshot);
     List<SagaEvent> events = store.getEvents(sagaId);
     RecoveryAction action = RecoveryActionResolver.resolve(events, def, status);
-    StatusEvent recoveredEvent =
-        StatusEvent.recovered(action.targetStatus(), operator, sanitizedReason);
-    return recordAndRecover(snapshot, def, events, action, recoveredEvent);
+    StatusEvent recoveringEvent =
+        StatusEvent.recovering(action.targetStatus(), operator, sanitizedReason);
+    return recordAndRecover(snapshot, def, events, action, recoveringEvent);
   }
 
   @Override

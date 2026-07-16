@@ -183,8 +183,8 @@ class DefaultSagaAdminServiceTest {
     // Act
     service.recoverSaga(SAGA_ID, "downstream broke");
 
-    // Assert — recovered event to COMPENSATING, and the engine compensates from step 1
-    assertThat(audit.getValue().getEventType()).isEqualTo(EventType.SAGA_RECOVERED);
+    // Assert — recovering event to COMPENSATING, and the engine compensates from step 1
+    assertThat(audit.getValue().getEventType()).isEqualTo(EventType.SAGA_RECOVERING);
     assertThat(audit.getValue().getTargetStatus()).isEqualTo(SagaStatus.COMPENSATING);
     assertThat(AdminAuditPayload.operator(audit.getValue().getPayload())).isEqualTo(OPERATOR);
     assertThat(AdminAuditPayload.reason(audit.getValue().getPayload()))
@@ -210,8 +210,8 @@ class DefaultSagaAdminServiceTest {
     // Act
     service.recoverSaga(SAGA_ID, "resume it");
 
-    // Assert — recovered event to RUNNING, engine resumes forward from step 1
-    assertThat(audit.getValue().getEventType()).isEqualTo(EventType.SAGA_RECOVERED);
+    // Assert — recovering event to RUNNING, engine resumes forward from step 1
+    assertThat(audit.getValue().getEventType()).isEqualTo(EventType.SAGA_RECOVERING);
     assertThat(audit.getValue().getTargetStatus()).isEqualTo(SagaStatus.RUNNING);
     verify(engine)
         .recover(
@@ -497,7 +497,7 @@ class DefaultSagaAdminServiceTest {
             StepEvent.completed(0, "debit", "{\"balance\":900}").withTimestamp(TS),
             StepEvent.failed(1, "credit", "{\"message\":\"gateway down\"}").withTimestamp(TS),
             StatusEvent.escalated("retries exhausted").withTimestamp(TS),
-            StatusEvent.recovered(SagaStatus.COMPENSATING, "bob", "rolling back")
+            StatusEvent.recovering(SagaStatus.COMPENSATING, "bob", "rolling back")
                 .withTimestamp(TS));
     when(store.getStateWithEvents(SAGA_ID))
         .thenReturn(Optional.of(new SagaStateAndEvents(snap, events)));
@@ -528,8 +528,8 @@ class DefaultSagaAdminServiceTest {
     // SAGA_ESCALATED — the escalation reason is surfaced
     assertThat(timeline.get(3).getDetail()).isEqualTo("retries exhausted");
 
-    // SAGA_RECOVERED — the operator and reason are surfaced
-    assertThat(timeline.get(4).getType()).isEqualTo("SAGA_RECOVERED");
+    // SAGA_RECOVERING — the operator and reason are surfaced
+    assertThat(timeline.get(4).getType()).isEqualTo("SAGA_RECOVERING");
     assertThat(timeline.get(4).getResultingStatus()).isEqualTo(SagaStatus.COMPENSATING);
     assertThat(timeline.get(4).getDetail()).isEqualTo("rolling back");
     assertThat(timeline.get(4).getOperator()).isEqualTo("bob");
