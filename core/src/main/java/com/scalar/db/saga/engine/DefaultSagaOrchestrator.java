@@ -925,11 +925,12 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
         // threads to stop, and GC reclaims them. Hence no engine.shutdown() here.
         //
         // Catch Throwable, not Exception: ownership transfers to the caller only on a successful
-        // return, so an Error raised after the store is created (e.g. NoClassDefFoundError or
-        // ExceptionInInitializerError from DB-driver class loading in HttpEndpointRegistry.create()
-        // or buildStepResolver()) would otherwise unwind past this block and leak the store. The
-        // resources are still released, and t is rethrown unchanged. Precise rethrow keeps this
-        // compiling without a throws clause: the try body raises no checked exceptions.
+        // return, so an Error raised after the store is created would otherwise unwind past this
+        // block and leak the store. Everything below createStore() can raise one: a
+        // NoClassDefFoundError or ExceptionInInitializerError from first-touch loading of the HTTP
+        // client stack, or an OutOfMemoryError while building the clients or the engine's
+        // executors. The resources are still released, and t is rethrown unchanged. Precise rethrow
+        // keeps this compiling without a throws clause: the try body raises no checked exceptions.
         if (httpEndpointRegistry != null) {
           try {
             httpEndpointRegistry.close();
