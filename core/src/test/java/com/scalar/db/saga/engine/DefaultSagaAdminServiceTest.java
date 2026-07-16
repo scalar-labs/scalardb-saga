@@ -445,12 +445,39 @@ class DefaultSagaAdminServiceTest {
     // Act
     ResetResult result = service.resetEscalated(SagaQuery.newBuilder().build(), "sweep");
 
-    // Assert — the corrupt saga is reported, the healthy one behind it is still reset
+    // Assert — the corrupt saga is reported, with the decode failure as detail, and the healthy
+    // one behind it is still reset
     assertThat(result.getResetCount()).isEqualTo(1);
     assertThat(result.getSkipped())
         .containsExactly(
-            new ResetResult.SkippedSaga("bad", ResetResult.SkipReason.CORRUPT_EVENT_STREAM));
+            new ResetResult.SkippedSaga(
+                "bad",
+                ResetResult.SkipReason.CORRUPT_EVENT_STREAM,
+                "Unknown event type: SAGA_FROM_THE_FUTURE"));
     verify(store).markForRecovery("ok");
+  }
+
+  @Test
+  void resetEscalated_bulkCorruptDefinition_skipsAsDefinitionNotFound() {
+    // Arrange — the saga's stored definition cannot be decoded, so resolve throws non-retryably.
+    // That is not a store outage: the sweep must skip this one saga, not abort on the whole page.
+    SagaStateSnapshot bad =
+        new SagaStateSnapshot("bad", SAGA_NAME, SagaStatus.ESCALATED, "o", DEF_VERSION, TS, TS);
+    when(store.listStateSnapshots(any())).thenReturn(new SagaPage<>(List.of(bad), null));
+    when(registry.resolve(SAGA_NAME, DEF_VERSION))
+        .thenThrow(
+            SagaPersistenceException.nonRetryable(
+                "Failed to deserialize definition", new IllegalArgumentException("boom")));
+
+    // Act
+    ResetResult result = service.resetEscalated(SagaQuery.newBuilder().build(), "sweep");
+
+    // Assert — skipped as unresolvable, never force-driven
+    assertThat(result.getResetCount()).isZero();
+    assertThat(result.getSkipped())
+        .containsExactly(
+            new ResetResult.SkippedSaga("bad", ResetResult.SkipReason.DEFINITION_NOT_FOUND));
+    verify(store, never()).markForRecovery(any());
   }
 
   @Test

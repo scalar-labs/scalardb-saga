@@ -230,39 +230,64 @@ public class DefaultSagaAdminService implements SagaAdminService {
     int resetCount = 0;
     List<ResetResult.SkippedSaga> skipped = new ArrayList<>();
     for (SagaStateSnapshot snapshot : page.getItems()) {
-      SagaDefinition def =
-          definitionRegistry.resolve(snapshot.getSagaName(), snapshot.getDefinitionVersion());
+      String sagaId = snapshot.getSagaId();
+
+      SagaDefinition def = null;
+      try {
+        def = definitionRegistry.resolve(snapshot.getSagaName(), snapshot.getDefinitionVersion());
+      } catch (SagaPersistenceException e) {
+        // The stored definition could not be decoded. It yields nothing usable, so fall through to
+        // the unresolvable path rather than failing the whole sweep over one saga.
+        abortSweepIfStoreFailing(e);
+      }
       if (def == null) {
-        // Unresolvable definition — cannot compute a plan; never force-driven.
+        // Unresolvable definition — absent, or stored bytes that cannot be decoded. Either way
+        // there is no plan to compute, and the remedy is the same: re-register it, then re-run.
         skipped.add(
-            new ResetResult.SkippedSaga(
-                snapshot.getSagaId(), ResetResult.SkipReason.DEFINITION_NOT_FOUND));
+            new ResetResult.SkippedSaga(sagaId, ResetResult.SkipReason.DEFINITION_NOT_FOUND));
         continue;
       }
+
+      List<SagaEvent> events;
       try {
-        markReset(snapshot, def, operator, sanitizedReason);
+        events = store.getEvents(sagaId);
+      } catch (SagaPersistenceException e) {
+        // This saga's own event stream cannot be decoded, and a retry reads the same bytes. Skip
+        // it rather than abort: a saga that resets successfully leaves the ESCALATED scan, so
+        // aborting here would make every re-run stop on this same saga and strand every saga
+        // behind it. Carry the decode failure so the operator knows which saga to inspect and why.
+        abortSweepIfStoreFailing(e);
+        skipped.add(
+            new ResetResult.SkippedSaga(
+                sagaId, ResetResult.SkipReason.CORRUPT_EVENT_STREAM, e.getMessage()));
+        continue;
+      }
+
+      try {
+        markReset(snapshot, def, events, operator, sanitizedReason);
         resetCount++;
       } catch (SagaConcurrentModificationException e) {
         // Lost the CAS race to a concurrent writer — leave it for the next sweep.
         skipped.add(
-            new ResetResult.SkippedSaga(
-                snapshot.getSagaId(), ResetResult.SkipReason.CONCURRENT_MODIFICATION));
-      } catch (SagaPersistenceException e) {
-        if (e.isRetryable()) {
-          // The store itself is failing, not this saga. Every remaining row would fail the same
-          // way, so stop and surface it rather than reporting a page of misleading skips.
-          throw e;
-        }
-        // This saga's own event stream cannot be read back, and a retry would fail identically.
-        // Skip it rather than abort: a saga that resets successfully leaves the ESCALATED scan,
-        // so aborting here would make every re-run stop on this same saga and permanently strand
-        // every saga behind it.
-        skipped.add(
-            new ResetResult.SkippedSaga(
-                snapshot.getSagaId(), ResetResult.SkipReason.CORRUPT_EVENT_STREAM));
+            new ResetResult.SkippedSaga(sagaId, ResetResult.SkipReason.CONCURRENT_MODIFICATION));
       }
     }
     return new ResetResult(resetCount, skipped, page.getNextPageToken());
+  }
+
+  /**
+   * Aborts the sweep when the failure is the store itself failing, rather than this one saga being
+   * bad. A retryable persistence exception is transient infrastructure trouble — and the store has
+   * already exhausted its own retries reaching this point — so every remaining row would fail the
+   * same way; the sweep stops and lets the caller re-run the whole call once the store recovers.
+   * Re-running loses nothing: a saga that was not reset is still {@code ESCALATED}, so the next
+   * sweep resumes exactly where this one stopped. Returns for a permanent (non-retryable) failure,
+   * so the caller can skip this one saga and keep sweeping.
+   */
+  private static void abortSweepIfStoreFailing(SagaPersistenceException e) {
+    if (e.isRetryable()) {
+      throw e;
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -290,11 +315,15 @@ public class DefaultSagaAdminService implements SagaAdminService {
    * page of participant round-trips: the sweeper then drives each un-escalated saga through the
    * same {@link RecoveryActionResolver}/{@link SagaEngine#recover} path the inline reset would
    * have. The un-escalation is the durable work; the drive is only an optimization, so deferring it
-   * is safe.
+   * is safe. Takes {@code events} from the caller, which has already read them (and handled an
+   * unreadable stream per saga), so the sweep does not read the same stream twice.
    */
   private void markReset(
-      SagaStateSnapshot snapshot, SagaDefinition def, String operator, String reason) {
-    List<SagaEvent> events = store.getEvents(snapshot.getSagaId());
+      SagaStateSnapshot snapshot,
+      SagaDefinition def,
+      List<SagaEvent> events,
+      String operator,
+      String reason) {
     RecoveryAction action = RecoveryActionResolver.resolve(events, def, snapshot.getStatus());
     StatusEvent resetEvent = StatusEvent.reset(action.targetStatus(), operator, reason);
     store.recordStatusEvent(snapshot, events.size(), resetEvent, engine.ownerId());

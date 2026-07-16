@@ -14,9 +14,10 @@ import org.jspecify.annotations.Nullable;
  * <p>{@link #getResetCount()} rows were un-escalated and handed to the recovery loop to drive.
  * {@link #getSkipped()} lists the rows that matched the scan but were <b>not</b> actioned, each
  * with a {@link SkipReason} so the operator can follow up on exactly the right sagas — a lost
- * optimistic-concurrency race (likely transient) versus an unresolvable definition (needs an
- * operational fix). Pagination mirrors {@link SagaPage}: drive the sweep by {@link
- * #getNextPageToken()} until it is {@code null}, not by the counts.
+ * optimistic-concurrency race (likely transient), an unresolvable definition (needs an operational
+ * fix), or an undecodable event stream (needs manual inspection). Pagination mirrors {@link
+ * SagaPage}: drive the sweep by {@link #getNextPageToken()} until it is {@code null}, not by the
+ * counts.
  */
 @Immutable
 public final class ResetResult {
@@ -27,12 +28,16 @@ public final class ResetResult {
      * Lost an optimistic-concurrency race to a concurrent writer; likely resolves on a later sweep.
      */
     CONCURRENT_MODIFICATION,
-    /** The saga's definition version could not be resolved; register/redeploy it, then retry. */
+    /**
+     * The saga's definition version could not be resolved — it is not registered, or its stored
+     * form could not be decoded. Register/redeploy it, then retry.
+     */
     DEFINITION_NOT_FOUND,
     /**
-     * The saga's stored event stream could not be read back, and a retry would fail identically —
-     * its data is damaged, or was written by a newer version this one cannot decode. Needs manual
-     * inspection; the rest of the sweep is unaffected.
+     * The saga's stored event stream could not be decoded, and a retry would fail identically — its
+     * data is damaged, or was written by an incompatible version. Those two are indistinguishable
+     * from here (decoding fails the same way either way); the specific failure is in {@link
+     * SkippedSaga#getDetail()}. Needs manual inspection; the rest of the sweep is unaffected.
      */
     CORRUPT_EVENT_STREAM
   }
@@ -43,10 +48,16 @@ public final class ResetResult {
 
     private final String sagaId;
     private final SkipReason reason;
+    @Nullable private final String detail;
 
     public SkippedSaga(String sagaId, SkipReason reason) {
+      this(sagaId, reason, null);
+    }
+
+    public SkippedSaga(String sagaId, SkipReason reason, @Nullable String detail) {
       this.sagaId = Objects.requireNonNull(sagaId, "sagaId must not be null");
       this.reason = Objects.requireNonNull(reason, "reason must not be null");
+      this.detail = detail;
     }
 
     public String getSagaId() {
@@ -57,22 +68,33 @@ public final class ResetResult {
       return reason;
     }
 
+    /**
+     * A human-readable description of the specific failure, when the {@link #getReason() reason}
+     * alone does not pin it down — e.g. which event type could not be decoded. {@code null} when
+     * the reason is self-explanatory.
+     */
+    @Nullable public String getDetail() {
+      return detail;
+    }
+
     @Override
     public boolean equals(@Nullable Object o) {
       if (this == o) return true;
       if (!(o instanceof SkippedSaga)) return false;
       SkippedSaga that = (SkippedSaga) o;
-      return sagaId.equals(that.sagaId) && reason == that.reason;
+      return sagaId.equals(that.sagaId)
+          && reason == that.reason
+          && Objects.equals(detail, that.detail);
     }
 
     @Override
     public int hashCode() {
-      return Objects.hash(sagaId, reason);
+      return Objects.hash(sagaId, reason, detail);
     }
 
     @Override
     public String toString() {
-      return "SkippedSaga{sagaId='" + sagaId + "', reason=" + reason + '}';
+      return "SkippedSaga{sagaId='" + sagaId + "', reason=" + reason + ", detail=" + detail + '}';
     }
   }
 
@@ -96,7 +118,8 @@ public final class ResetResult {
   }
 
   /**
-   * The matched sagas that were skipped (lost CAS race or unresolvable definition), unmodifiable.
+   * The matched sagas that were skipped, each with its {@link SkipReason}, unmodifiable. A skip is
+   * always per-saga; a failure of the store itself aborts the sweep instead.
    */
   public List<SkippedSaga> getSkipped() {
     return skipped;

@@ -118,4 +118,28 @@ class ResetResultTest {
     assertThatThrownBy(() -> new SkippedSaga(null, SkipReason.CONCURRENT_MODIFICATION))
         .isInstanceOf(NullPointerException.class);
   }
+
+  @Test
+  void skippedSaga_detailGiven_exposesItAndNullByDefault() {
+    // Arrange
+    SkippedSaga withDetail =
+        new SkippedSaga("s-1", SkipReason.CORRUPT_EVENT_STREAM, "Unknown event type: X");
+    SkippedSaga withoutDetail = new SkippedSaga("s-1", SkipReason.DEFINITION_NOT_FOUND);
+
+    // Act & Assert
+    assertThat(withDetail.getDetail()).isEqualTo("Unknown event type: X");
+    assertThat(withoutDetail.getDetail()).isNull();
+  }
+
+  @Test
+  void skippedSaga_differentDetailGiven_areNotEqual() {
+    // Arrange — same saga and reason, but a different detail must not compare equal
+    SkippedSaga a = new SkippedSaga("s-1", SkipReason.CORRUPT_EVENT_STREAM, "bad payload");
+    SkippedSaga b = new SkippedSaga("s-1", SkipReason.CORRUPT_EVENT_STREAM, "unknown type");
+    SkippedSaga noDetail = new SkippedSaga("s-1", SkipReason.CORRUPT_EVENT_STREAM);
+
+    // Act & Assert
+    assertThat(a).isNotEqualTo(b);
+    assertThat(a).isNotEqualTo(noDetail);
+  }
 }
