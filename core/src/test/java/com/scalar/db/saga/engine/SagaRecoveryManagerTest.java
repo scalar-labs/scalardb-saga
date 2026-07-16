@@ -701,6 +701,170 @@ class SagaRecoveryManagerTest {
     }
 
     @Test
+    void recover_runningSagaResetWithinGracePeriod_drivesInsteadOfReEscalating() {
+      // Arrange — an operator un-escalated this saga 10 minutes ago. The failure it was stuck on is
+      // still 2 hours old and always will be, so anchoring on the failure alone would escalate it
+      // straight back and undo the intervention without ever driving it.
+      SagaStateSnapshot saga = snapshot(SagaStatus.RUNNING);
+      ExecutionContext ctx = mock(ExecutionContext.class);
+      SagaDefinition def = definition();
+
+      List<SagaEvent> events =
+          List.of(
+              StepEvent.completed(0, "debit", null).withTimestamp(NOW.minusSeconds(7200)),
+              StepEvent.failed(1, "credit", null).withTimestamp(NOW.minusSeconds(7200)),
+              StatusEvent.escalated("step retry stuck").withTimestamp(NOW.minusSeconds(3600)),
+              StatusEvent.reset(SagaStatus.RUNNING, "ops", "downstream fixed")
+                  .withTimestamp(NOW.minusSeconds(600)));
+
+      setupSinglePageRecovery(saga);
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(engine.replayEvents(saga, events)).thenReturn(ctx);
+      when(ctx.getCurrentState()).thenReturn(saga);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(def);
+
+      // Act
+      manager.recover();
+
+      // Assert — driven, and never re-escalated
+      verify(engine).recover(any(RecoveryAction.class), eq(def), eq(ctx));
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any(), any());
+    }
+
+    @Test
+    void recover_runningSagaResetLongerAgoThanGracePeriod_escalates() {
+      // Arrange — the operator's reset is itself now older than the grace period, so the saga has
+      // had its fresh window and failed to make progress. It escalates again, honestly.
+      SagaStateSnapshot saga = snapshot(SagaStatus.RUNNING);
+      ExecutionContext ctx = mock(ExecutionContext.class);
+      SagaStateSnapshot newState = snapshot(SagaStatus.ESCALATED);
+
+      List<SagaEvent> events =
+          List.of(
+              StepEvent.completed(0, "debit", null).withTimestamp(NOW.minusSeconds(28800)),
+              StepEvent.failed(1, "credit", null).withTimestamp(NOW.minusSeconds(28800)),
+              StatusEvent.reset(SagaStatus.RUNNING, "ops", "downstream fixed")
+                  .withTimestamp(NOW.minusSeconds(7200)));
+
+      setupSinglePageRecovery(saga);
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(engine.replayEvents(saga, events)).thenReturn(ctx);
+      when(ctx.getCurrentState()).thenReturn(saga);
+      when(ctx.nextSequence()).thenReturn(3);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(definition());
+      when(store.recordStatusEvent(eq(saga), eq(3), any(StatusEvent.class), any()))
+          .thenReturn(newState);
+
+      // Act
+      manager.recover();
+
+      // Assert
+      ArgumentCaptor<StatusEvent> captor = ArgumentCaptor.forClass(StatusEvent.class);
+      verify(store).recordStatusEvent(eq(saga), eq(3), captor.capture(), any());
+      assertThat(captor.getValue().getTargetStatus()).isEqualTo(SagaStatus.ESCALATED);
+      verify(engine, never()).recover(any(), any(), any());
+    }
+
+    @Test
+    void recover_runningSagaFailingAgainAfterReset_escalatesOnTheNewerFailure() {
+      // Arrange — the reset drove the saga, the retry failed again 2 hours ago, and nothing has
+      // happened since. The newer failure outlives the intervention, so the clock anchors on the
+      // failure again and the saga escalates.
+      SagaStateSnapshot saga = snapshot(SagaStatus.RUNNING);
+      ExecutionContext ctx = mock(ExecutionContext.class);
+      SagaStateSnapshot newState = snapshot(SagaStatus.ESCALATED);
+
+      List<SagaEvent> events =
+          List.of(
+              StepEvent.completed(0, "debit", null).withTimestamp(NOW.minusSeconds(28800)),
+              StepEvent.failed(1, "credit", null).withTimestamp(NOW.minusSeconds(28800)),
+              StatusEvent.reset(SagaStatus.RUNNING, "ops", "downstream fixed")
+                  .withTimestamp(NOW.minusSeconds(10800)),
+              StepEvent.failed(1, "credit", null).withTimestamp(NOW.minusSeconds(7200)));
+
+      setupSinglePageRecovery(saga);
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(engine.replayEvents(saga, events)).thenReturn(ctx);
+      when(ctx.getCurrentState()).thenReturn(saga);
+      when(ctx.nextSequence()).thenReturn(4);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(definition());
+      when(store.recordStatusEvent(eq(saga), eq(4), any(StatusEvent.class), any()))
+          .thenReturn(newState);
+
+      // Act
+      manager.recover();
+
+      // Assert
+      verify(store).recordStatusEvent(eq(saga), eq(4), any(StatusEvent.class), any());
+      verify(engine, never()).recover(any(), any(), any());
+    }
+
+    @Test
+    void recover_compensatingSagaResetWithinGracePeriod_drivesInsteadOfReEscalating() {
+      // Arrange — the compensation-stuck shape: the one an operator most often bulk-resets.
+      SagaStateSnapshot saga = snapshot(SagaStatus.COMPENSATING);
+      ExecutionContext ctx = mock(ExecutionContext.class);
+      SagaDefinition def = definition();
+
+      List<SagaEvent> events =
+          List.of(
+              StepEvent.completed(0, "debit", null).withTimestamp(NOW.minusSeconds(7200)),
+              StatusEvent.compensating().withTimestamp(NOW.minusSeconds(7200)),
+              StepEvent.compensationFailed(0, "debit", null).withTimestamp(NOW.minusSeconds(7200)),
+              StatusEvent.escalated("compensation stuck").withTimestamp(NOW.minusSeconds(3600)),
+              StatusEvent.reset(SagaStatus.COMPENSATING, "ops", "downstream fixed")
+                  .withTimestamp(NOW.minusSeconds(600)));
+
+      setupSinglePageRecovery(saga);
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(engine.replayEvents(saga, events)).thenReturn(ctx);
+      when(ctx.getCurrentState()).thenReturn(saga);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(def);
+
+      // Act
+      manager.recover();
+
+      // Assert
+      verify(engine).recover(any(RecoveryAction.Compensate.class), eq(def), eq(ctx));
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any(), any());
+    }
+
+    @Test
+    void recover_runningSagaRecoveringWithinGracePeriod_stillEscalatesOnTheFailure() {
+      // Arrange — recoverSaga only forces a drive the sweep would do anyway, on a saga that never
+      // left the recovery cycle, so SAGA_RECOVERING must NOT buy the saga a fresh grace period.
+      // Only un-escalating (SAGA_RESET) restarts the clock.
+      SagaStateSnapshot saga = snapshot(SagaStatus.RUNNING);
+      ExecutionContext ctx = mock(ExecutionContext.class);
+      SagaStateSnapshot newState = snapshot(SagaStatus.ESCALATED);
+
+      List<SagaEvent> events =
+          List.of(
+              StepEvent.completed(0, "debit", null).withTimestamp(NOW.minusSeconds(7200)),
+              StepEvent.failed(1, "credit", null).withTimestamp(NOW.minusSeconds(7200)),
+              StatusEvent.recovering(SagaStatus.RUNNING, "ops", "retry")
+                  .withTimestamp(NOW.minusSeconds(600)));
+
+      setupSinglePageRecovery(saga);
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(engine.replayEvents(saga, events)).thenReturn(ctx);
+      when(ctx.getCurrentState()).thenReturn(saga);
+      when(ctx.nextSequence()).thenReturn(3);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(definition());
+      when(store.recordStatusEvent(eq(saga), eq(3), any(StatusEvent.class), any()))
+          .thenReturn(newState);
+
+      // Act
+      manager.recover();
+
+      // Assert
+      ArgumentCaptor<StatusEvent> captor = ArgumentCaptor.forClass(StatusEvent.class);
+      verify(store).recordStatusEvent(eq(saga), eq(3), captor.capture(), any());
+      assertThat(captor.getValue().getTargetStatus()).isEqualTo(SagaStatus.ESCALATED);
+      verify(engine, never()).recover(any(), any(), any());
+    }
+
+    @Test
     void recover_runningSagaWithMixedResolvedAndUnresolvedFailures_escalatesOnUnresolved() {
       // Arrange
       SagaStateSnapshot saga = snapshot(SagaStatus.RUNNING);

@@ -471,6 +471,16 @@ class SagaRecoveryManager {
    * Checks if a saga has been stuck longer than the grace period by examining step-level failure
    * events. Returns {@code false} if no matching failure events exist (e.g., crash recovery where
    * the saga was interrupted, not failed).
+   *
+   * <p>Un-escalating restarts the clock: the stuck period is measured from the later of the
+   * unresolved failure and the most recent {@code SAGA_RESET}. An escalated saga is outside the
+   * recovery cycle entirely, so re-admitting it has to grant a fresh grace period — the failure it
+   * was stuck on only ages, so anchoring on that alone would escalate it straight back on the next
+   * pass, undoing the reset without ever driving it.
+   *
+   * <p>{@code SAGA_RECOVERING} deliberately does not restart the clock. It only forces a drive the
+   * scheduled sweep would do anyway, on a saga that never left the recovery cycle; extending the
+   * deadline would make escalation timing depend on whether an operator happened to intervene.
    */
   private boolean isStuckLongerThanGracePeriod(
       List<SagaEvent> events, EventType failureEventType, EventType successEventType) {
@@ -492,14 +502,33 @@ class SagaRecoveryManager {
             .map(SagaEvent::getTimestamp)
             .filter(Objects::nonNull)
             .findFirst();
-    // no unresolved failure events — crash recovery or all failures resolved
-    return firstUnresolvedFailure
-        .filter(
-            instant ->
-                Duration.between(instant, config.clock().instant())
-                        .compareTo(config.compensationGracePeriod())
-                    > 0)
-        .isPresent();
+    if (firstUnresolvedFailure.isEmpty()) {
+      // no unresolved failure events — crash recovery or all failures resolved
+      return false;
+    }
+
+    Instant anchor = firstUnresolvedFailure.get();
+    Optional<Instant> reset = lastResetTimestamp(events);
+    if (reset.isPresent() && reset.get().isAfter(anchor)) {
+      anchor = reset.get();
+    }
+    return Duration.between(anchor, config.clock().instant())
+            .compareTo(config.compensationGracePeriod())
+        > 0;
+  }
+
+  /**
+   * The most recent timestamp at which an operator un-escalated this saga, if any. Compared by
+   * timestamp rather than taken as the last matching event, because events are stamped by whichever
+   * replica writes them, so stream order and clock order can diverge; taking the latest also yields
+   * the failure, correctly, when a fresh failure follows the reset.
+   */
+  private static Optional<Instant> lastResetTimestamp(List<SagaEvent> events) {
+    return events.stream()
+        .filter(e -> e.getEventType() == EventType.SAGA_RESET)
+        .map(SagaEvent::getTimestamp)
+        .filter(Objects::nonNull)
+        .max(Instant::compareTo);
   }
 
   private void escalate(ExecutionContext context, String reason) {
