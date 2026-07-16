@@ -14,7 +14,7 @@ import org.jspecify.annotations.Nullable;
  * prevent. The parse is fail-closed: anything non-numeric is not loopback.
  *
  * <p>Shared by {@code JwtConfig}'s JWKS-https trust-anchor exception and {@link SagaServer}'s
- * network-exposure bind warning so the two cannot drift.
+ * unauthenticated-exposure bind check, which refuses to start, so the two cannot drift.
  */
 public final class LoopbackHost {
 
