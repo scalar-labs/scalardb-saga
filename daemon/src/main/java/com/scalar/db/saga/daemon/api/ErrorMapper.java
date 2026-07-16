@@ -18,10 +18,11 @@ import org.slf4j.LoggerFactory;
  * Maps exceptions to HTTP responses with a consistent JSON error body.
  *
  * <p>Client-facing exceptions (not-found, already-exists, invalid request) are mapped to specific
- * 4xx codes with daemon-owned messages. A persistence failure or an unavailable auth provider maps
- * to {@code 503}. Everything else falls through to a generic {@code 500}: the real exception is
- * logged server-side and the response carries no internal detail — only the daemon's own messages
- * are ever returned to a caller.
+ * 4xx codes with daemon-owned messages. A transient persistence failure or an unavailable auth
+ * provider maps to {@code 503}; a permanent persistence failure maps to {@code 500}, like the
+ * catch-all. Everything else falls through to a generic {@code 500}: the real exception is logged
+ * server-side and the response carries no internal detail — only the daemon's own messages are ever
+ * returned to a caller.
  */
 public final class ErrorMapper {
 
