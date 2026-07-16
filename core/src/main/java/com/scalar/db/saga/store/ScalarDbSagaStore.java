@@ -230,8 +230,9 @@ public class ScalarDbSagaStore implements SagaStore {
           return Boolean.TRUE;
         },
         () ->
-            // Verify the event committed AND is ours (matching type) — not another writer's event
-            // at the same sequence. See eventCommittedWithType.
+            // Verify an event of our type committed at this sequence. This rules out another
+            // writer's differently-typed event; it does not prove the event is ours, since a
+            // same-type racer is indistinguishable. See eventCommittedWithType.
             eventCommittedWithType(sagaId, sequence, event.getEventType())
                 ? Optional.of(Boolean.TRUE)
                 : Optional.empty(),
@@ -385,13 +386,26 @@ public class ScalarDbSagaStore implements SagaStore {
   /**
    * Whether the event at {@code sequence} is present <em>and</em> of {@code expectedType}. This is
    * the post-{@code UnknownTransactionStatus} verification check the event-append and transition
-   * paths share: presence alone answers "did some event land at this sequence?", but only the type
-   * match additionally proves an event of <em>our</em> type committed. Where racers are guaranteed
-   * to use distinct types (a claim-less callback-vs-timeout race, or a live executor racing a
-   * recovery claim), that proves the persisted event is ours; otherwise the loser could read the
-   * winner's event and wrongly report its own commit as successful. Paths whose racers write the
-   * same type at the same sequence (e.g. {@code createSaga}) verify by state rather than by this
-   * check.
+   * paths share: presence alone answers "did some event land at this sequence?", and the type match
+   * narrows that to "an event of our type landed".
+   *
+   * <p><b>This does not identify the writer.</b> The type describes the row; it does not say who
+   * wrote it. Two racers appending the same type at the same sequence are indistinguishable here,
+   * so a loser whose commit returned unknown can read the winner's event and wrongly report its own
+   * commit as successful. What the check does buy is the exclusion of cross-type false positives,
+   * such as a callback racing a deadline timeout, or a live executor racing a recovery claim.
+   *
+   * <p><b>Known gap.</b> {@link #resumeParkedStep} and {@link #recordStepEvent} can have same-type
+   * racers: at-least-once callback delivery, and the timeout re-drive of a slow-but-live
+   * participant, both let two {@code completeStepAsync} calls append {@code STEP_COMPLETED} at the
+   * same sequence. Their outputs can differ even when the participant is correctly idempotent: the
+   * {@code sagaId + stepName} dedup key skips the duplicate <em>write</em>, but a saga provides no
+   * isolation, so a result read back from state can observe a value another saga committed in
+   * between. Differing outputs are themselves fine; the defect is that the loser drives the saga on
+   * an output that was never persisted, so the live run and the durable log disagree about which
+   * one won. Closing this needs a per-append identifier persisted with the event and compared here,
+   * replacing the type comparison; that is tracked separately because it changes the {@code
+   * saga_events} schema.
    */
   private boolean eventCommittedWithType(String sagaId, int sequence, EventType expectedType) {
     return runInTransaction(
@@ -404,11 +418,12 @@ public class ScalarDbSagaStore implements SagaStore {
   }
 
   /**
-   * Verifier for a state transition (park/resume/timeout, {@code recordStatusEvent}): the tx
-   * committed iff the event at {@code sequence} is present and of {@code expectedType} (see {@link
-   * #eventCommittedWithType}). On a match it returns the resulting state snapshot; a mismatch (the
-   * other op won) returns empty, so the caller retries, re-reads the now-moved CK, and throws
-   * {@link SagaConcurrentModificationException}.
+   * Verifier for a state transition (park, resume, timeout, {@code recordStatusEvent}): treats the
+   * tx as committed when the event at {@code sequence} is present and of {@code expectedType} (see
+   * {@link #eventCommittedWithType}, whose writer-identity gap this inherits). On a match it
+   * returns the resulting state snapshot; a mismatch (the other op won) returns empty, so the
+   * caller retries, re-reads the now-moved CK, and throws {@link
+   * SagaConcurrentModificationException}.
    */
   private CommitVerifier<SagaStateSnapshot> verifyTransitionCommitted(
       String sagaId, int sequence, EventType expectedType) {
