@@ -123,8 +123,21 @@ class ScalarDbSagaStoreListIntegrationTest {
 
     // Act & Assert — everything is updated at ~now.
     Instant future = Instant.now().plus(1, ChronoUnit.DAYS);
-    assertThat(collected(SagaStatus.RUNNING, future, 100)).hasSize(3);
-    assertThat(collected(SagaStatus.RUNNING, Instant.EPOCH, 100)).isEmpty();
+    assertThat(collectedBefore(SagaStatus.RUNNING, future, 100)).hasSize(3);
+    assertThat(collectedBefore(SagaStatus.RUNNING, Instant.EPOCH, 100)).isEmpty();
+  }
+
+  @Test
+  void listStateSnapshots_updatedAfterWindow_boundsResults() {
+    // Arrange
+    for (int i = 0; i < 3; i++) {
+      store.createSaga("a-" + i, "order-saga", "engine-1", Map.of(), "v1");
+    }
+
+    // Act & Assert — everything is updated at ~now.
+    Instant future = Instant.now().plus(1, ChronoUnit.DAYS);
+    assertThat(collectedAfter(SagaStatus.RUNNING, Instant.EPOCH, 100)).hasSize(3);
+    assertThat(collectedAfter(SagaStatus.RUNNING, future, 100)).isEmpty();
   }
 
   @Test
@@ -149,11 +162,20 @@ class ScalarDbSagaStoreListIntegrationTest {
     return collect(SagaQuery.newBuilder().status(status).pageSize(pageSize).build());
   }
 
-  private List<String> collected(SagaStatus status, Instant updatedBefore, int pageSize) {
+  private List<String> collectedBefore(SagaStatus status, Instant updatedBefore, int pageSize) {
     return collect(
         SagaQuery.newBuilder()
             .status(status)
             .updatedBefore(updatedBefore)
+            .pageSize(pageSize)
+            .build());
+  }
+
+  private List<String> collectedAfter(SagaStatus status, Instant updatedAfter, int pageSize) {
+    return collect(
+        SagaQuery.newBuilder()
+            .status(status)
+            .updatedAfter(updatedAfter)
             .pageSize(pageSize)
             .build());
   }

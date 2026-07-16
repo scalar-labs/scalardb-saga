@@ -42,7 +42,7 @@ public final class AdminAuditPayload {
     try {
       return MAPPER.writeValueAsString(map);
     } catch (JsonProcessingException e) {
-      throw new SagaPersistenceException("Failed to serialize admin audit payload", e);
+      throw SagaPersistenceException.nonRetryable("Failed to serialize admin audit payload", e);
     }
   }
 
@@ -55,14 +55,14 @@ public final class AdminAuditPayload {
   static SagaStatus target(@Nullable String payload) {
     Object value = decode(payload).get(STATUS);
     if (!(value instanceof Number number)) {
-      throw new SagaPersistenceException(
+      throw SagaPersistenceException.nonRetryable(
           "Admin audit payload has no status: " + payload,
           new IllegalStateException("missing status field"));
     }
     try {
       return SagaStatus.fromStatusCode(number.intValue());
     } catch (IllegalArgumentException e) {
-      throw new SagaPersistenceException(
+      throw SagaPersistenceException.nonRetryable(
           "Admin audit payload has an unknown status: " + payload, e);
     }
   }
@@ -85,7 +85,7 @@ public final class AdminAuditPayload {
       Map<String, Object> map = MAPPER.readValue(payload, MAP_TYPE);
       return map == null ? Collections.emptyMap() : map;
     } catch (JsonProcessingException e) {
-      throw new SagaPersistenceException("Failed to parse admin audit payload", e);
+      throw SagaPersistenceException.nonRetryable("Failed to parse admin audit payload", e);
     }
   }
 }

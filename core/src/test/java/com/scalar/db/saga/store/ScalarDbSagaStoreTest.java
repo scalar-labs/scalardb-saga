@@ -26,6 +26,8 @@ import com.scalar.db.exception.transaction.CrudConflictException;
 import com.scalar.db.exception.transaction.CrudException;
 import com.scalar.db.exception.transaction.TransactionException;
 import com.scalar.db.exception.transaction.UnknownTransactionStatusException;
+import com.scalar.db.io.Key;
+import com.scalar.db.io.TimestampTZColumn;
 import com.scalar.db.saga.api.SagaPage;
 import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
@@ -41,7 +43,9 @@ import com.scalar.db.saga.store.SagaStore.OverdueParked;
 import com.scalar.db.saga.store.SagaStore.Recoverables;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -1493,9 +1497,10 @@ class ScalarDbSagaStoreTest {
     Result r = mockEventResult("UNKNOWN_TYPE", -1, null, null);
     when(tx.scan(any(Scan.class))).thenReturn(List.of(r));
 
-    // Act & Assert
+    // Act & Assert — an unreadable stored event is a permanent failure: not retryable.
     assertThatThrownBy(() -> store.getEvents("saga-1"))
-        .isInstanceOf(SagaPersistenceException.class);
+        .isInstanceOfSatisfying(
+            SagaPersistenceException.class, e -> assertThat(e.isRetryable()).isFalse());
   }
 
   @SuppressWarnings("NullAway")
@@ -1600,10 +1605,11 @@ class ScalarDbSagaStoreTest {
             ScalarDbSagaStoreConfig.builder().transactionRetryCount(2).build());
     doThrow(mock(CrudConflictException.class)).when(tx).insert(any(Insert.class));
 
-    // Act & Assert
+    // Act & Assert — a retry-exhausted store failure is transient: retryable.
     assertThatThrownBy(
             () -> retryStore.recordStepEvent("saga-1", 1, StepEvent.completed(0, "s", null)))
-        .isInstanceOf(SagaPersistenceException.class);
+        .isInstanceOfSatisfying(
+            SagaPersistenceException.class, e -> assertThat(e.isRetryable()).isTrue());
   }
 
   @Test
@@ -1691,6 +1697,35 @@ class ScalarDbSagaStoreTest {
                     "test operation"))
         .isSameAs(verifierError);
     // Only one transaction attempt — no retries after RuntimeException from verifier
+    verify(txManager, times(1)).begin();
+  }
+
+  @Test
+  void
+      runInTransaction_unknownStatusWithVerifierThrowsNonRetryablePersistenceException_propagatesImmediately()
+          throws Exception {
+    // Arrange — UTSE on commit; the verifier throws a permanent (non-retryable) persistence
+    // failure. It must propagate as-is, not be retried and masked as a retryable failure.
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    SagaPersistenceException verifierError =
+        SagaPersistenceException.nonRetryable("bad payload", new RuntimeException("parse"));
+    ScalarDbSagaStore store2 =
+        new ScalarDbSagaStore(
+            txManager, objectMapper, schema, ScalarDbSagaStoreConfig.builder().build());
+
+    // Act & Assert
+    assertThatThrownBy(
+            () ->
+                store2.runInTransaction(
+                    tx -> Boolean.TRUE,
+                    () -> {
+                      throw verifierError;
+                    },
+                    "test operation"))
+        .isSameAs(verifierError)
+        .isInstanceOfSatisfying(
+            SagaPersistenceException.class, e -> assertThat(e.isRetryable()).isFalse());
+    // Only one transaction attempt — no retries after a non-retryable failure from the verifier.
     verify(txManager, times(1)).begin();
   }
 
@@ -1805,8 +1840,47 @@ class ScalarDbSagaStoreTest {
   }
 
   // ---------------------------------------------------------------------------
-  // listStateSnapshots (orchestration + fail-closed token; no-drop reassembly is an IT)
+  // listStateSnapshots (orchestration + fail-closed token; boundary no-drop unit + full IT)
   // ---------------------------------------------------------------------------
+
+  @Test
+  void listStateSnapshots_updatedAfterAboveTimestampTzMaxGiven_throwsException() {
+    // Arrange
+    SagaQuery query =
+        SagaQuery.newBuilder().updatedAfter(TimestampTZColumn.MAX_VALUE.plusMillis(1)).build();
+
+    // Act & Assert
+    assertThatThrownBy(() -> store.listStateSnapshots(query))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void listStateSnapshots_updatedBeforeBelowTimestampTzMinGiven_throwsException() {
+    // Arrange
+    SagaQuery query =
+        SagaQuery.newBuilder().updatedBefore(TimestampTZColumn.MIN_VALUE.minusMillis(1)).build();
+
+    // Act & Assert
+    assertThatThrownBy(() -> store.listStateSnapshots(query))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void listStateSnapshots_updatedBoundsAtTimestampTzExtremesGiven_accepted() throws Exception {
+    // Arrange — the inclusive endpoints of the TIMESTAMPTZ domain are valid and start a real scan
+    stubScanner();
+
+    // Act
+    SagaPage<SagaStateSnapshot> page =
+        store.listStateSnapshots(
+            SagaQuery.newBuilder()
+                .updatedAfter(TimestampTZColumn.MIN_VALUE)
+                .updatedBefore(TimestampTZColumn.MAX_VALUE)
+                .build());
+
+    // Assert
+    assertThat(page.getItems()).isEmpty();
+  }
 
   @Test
   void listStateSnapshots_emptyStore_returnsEmptyPageWithNullToken() throws Exception {
@@ -1904,6 +1978,129 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
+  void listStateSnapshots_cohortLargerThanPageSize_returnsWholeCohortInOneOversizedPage()
+      throws Exception {
+    // Arrange — pageSize 2, but a single t1 cohort of 5 fills the whole slice with no other
+    // timestamp, so the scanner drains without ever reaching a new cohort.
+    Instant t1 = Instant.parse("2026-01-01T00:00:01Z");
+    stubScannerHonoringRange(
+        mockStateResult("a", SagaStatus.RUNNING, t1),
+        mockStateResult("b", SagaStatus.RUNNING, t1),
+        mockStateResult("c", SagaStatus.RUNNING, t1),
+        mockStateResult("d", SagaStatus.RUNNING, t1),
+        mockStateResult("e", SagaStatus.RUNNING, t1));
+
+    // Act — page 1, then page 2 resuming from page 1's token under the same filters.
+    SagaPage<SagaStateSnapshot> page1 =
+        store.listStateSnapshots(
+            SagaQuery.newBuilder().status(SagaStatus.RUNNING).pageSize(2).build());
+    SagaPage<SagaStateSnapshot> page2 =
+        store.listStateSnapshots(
+            SagaQuery.newBuilder()
+                .status(SagaStatus.RUNNING)
+                .pageSize(2)
+                .pageToken(page1.getNextPageToken())
+                .build());
+
+    // Assert — the cohort is never split: all 5 come back in one over-sized page.
+    assertThat(page1.getItems())
+        .extracting(SagaStateSnapshot::getSagaId)
+        .containsExactly("a", "b", "c", "d", "e");
+    // An exactly-drained slice is indistinguishable from a stopped-at-boundary one, so the page
+    // still carries a token; following it costs one extra round trip and yields nothing.
+    assertThat(page1.getNextPageToken()).isNotBlank();
+    assertThat(page2.getItems()).isEmpty();
+    assertThat(page2.getNextPageToken()).isNull();
+  }
+
+  /**
+   * Guards the one case that makes {@code scanSlice} return a resume timestamp even though the
+   * slice drained. That looks like a wart worth removing: track why the loop exited, and report no
+   * resume point on a clean drain. Doing only that drops rows. A non-null resume timestamp is also
+   * what stops the sweep, so suppressing it here lets the sweep reach the next slice with {@code
+   * limit = pageSize - items.size() = 0}; a zero-limit scan then breaks on its first row before
+   * recording a timestamp, reports "drained" in turn, and the sweep swallows every slice left. The
+   * spurious token costs one empty round trip. Removing it costs correctness unless the zero limit
+   * is handled too.
+   */
+  @Test
+  void listStateSnapshots_sliceDrainsExactlyAtLimitWithLaterBucketPending_keepsLaterRows()
+      throws Exception {
+    // Arrange — pageSize 2 and bucket 0 holds exactly 2 rows, so its slice drains precisely at the
+    // limit with no next cohort to break on. Bucket 1 still holds a row that must not be lost.
+    Instant t1 = Instant.parse("2026-01-01T00:00:01Z");
+    Instant t2 = Instant.parse("2026-01-01T00:00:02Z");
+    stubScannerHonoringRange(
+        mockStateResult("a", SagaStatus.RUNNING, t1),
+        mockStateResult("b", SagaStatus.RUNNING, t1),
+        inBucket(mockStateResult("c", SagaStatus.RUNNING, t2), 1));
+
+    // Act — sweep every page until the token runs out.
+    List<String> reassembled = new ArrayList<>();
+    String token = null;
+    for (int i = 0; i < 5; i++) {
+      SagaPage<SagaStateSnapshot> page =
+          store.listStateSnapshots(
+              SagaQuery.newBuilder()
+                  .status(SagaStatus.RUNNING)
+                  .pageSize(2)
+                  .pageToken(token)
+                  .build());
+      page.getItems().forEach(s -> reassembled.add(s.getSagaId()));
+      token = page.getNextPageToken();
+      if (token == null) {
+        break;
+      }
+    }
+
+    // Assert — the exact drain must not swallow bucket 1's row.
+    assertThat(token).isNull();
+    assertThat(reassembled).containsExactly("a", "b", "c");
+  }
+
+  @Test
+  void listStateSnapshots_boundaryAcrossTwoPages_noDropNoDuplicate() throws Exception {
+    // Arrange — three cohorts; the t2 cohort (b, c, d) straddles the pageSize-2 boundary. The
+    // scanner honors the resume range, so page 2 sees exactly what a real backend would after the
+    // cursor — this exercises the no-drop, no-duplicate boundary rather than hand-feeding page 2.
+    Instant t1 = Instant.parse("2026-01-01T00:00:01Z");
+    Instant t2 = Instant.parse("2026-01-01T00:00:02Z");
+    Instant t3 = Instant.parse("2026-01-01T00:00:03Z");
+    stubScannerHonoringRange(
+        mockStateResult("a", SagaStatus.RUNNING, t1),
+        mockStateResult("b", SagaStatus.RUNNING, t2),
+        mockStateResult("c", SagaStatus.RUNNING, t2),
+        mockStateResult("d", SagaStatus.RUNNING, t2),
+        mockStateResult("e", SagaStatus.RUNNING, t3));
+
+    // Act — page 1, then page 2 resuming from page 1's token under the same filters.
+    SagaPage<SagaStateSnapshot> page1 =
+        store.listStateSnapshots(
+            SagaQuery.newBuilder().status(SagaStatus.RUNNING).pageSize(2).build());
+    SagaPage<SagaStateSnapshot> page2 =
+        store.listStateSnapshots(
+            SagaQuery.newBuilder()
+                .status(SagaStatus.RUNNING)
+                .pageSize(2)
+                .pageToken(page1.getNextPageToken())
+                .build());
+
+    // Assert — page 1 completes the straddling t2 cohort and reports more.
+    assertThat(page1.getItems())
+        .extracting(SagaStateSnapshot::getSagaId)
+        .containsExactly("a", "b", "c", "d");
+    assertThat(page1.getNextPageToken()).isNotBlank();
+    // Page 2 resumes strictly after t2: e is not dropped, and none of a–d reappear.
+    assertThat(page2.getItems()).extracting(SagaStateSnapshot::getSagaId).containsExactly("e");
+    assertThat(page2.getNextPageToken()).isNull();
+    // The two pages reassemble the full set, each row exactly once.
+    List<String> reassembled = new ArrayList<>();
+    page1.getItems().forEach(s -> reassembled.add(s.getSagaId()));
+    page2.getItems().forEach(s -> reassembled.add(s.getSagaId()));
+    assertThat(reassembled).containsExactly("a", "b", "c", "d", "e");
+  }
+
+  @Test
   void listStateSnapshots_malformedTokenGiven_throwsIllegalArgumentException() {
     // Act & Assert — not valid Base64URL; rejected before any scan
     assertThatThrownBy(
@@ -1914,9 +2111,20 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
+  void listStateSnapshots_tokenTooLongGiven_throwsIllegalArgumentException() {
+    // Arrange — far longer than any valid cursor; rejected before Base64 decoding
+    String token = "A".repeat(1000);
+
+    // Act & Assert
+    assertThatThrownBy(
+            () -> store.listStateSnapshots(SagaQuery.newBuilder().pageToken(token).build()))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void listStateSnapshots_tokenBucketOutOfRangeGiven_throwsIllegalArgumentException() {
-    // Arrange — bucket 999 with a 4-bucket schema
-    String token = encodePageToken("1", 999, 0, "2026-01-01T00:00:00Z");
+    // Arrange — bucket 999 with a 4-bucket schema; filter key matches the unfiltered query
+    String token = encodePageToken("1", "*|-|-", 999, 0, "2026-01-01T00:00:00Z");
 
     // Act & Assert
     assertThatThrownBy(
@@ -1927,7 +2135,7 @@ class ScalarDbSagaStoreTest {
   @Test
   void listStateSnapshots_tokenUnknownVersionGiven_throwsIllegalArgumentException() {
     // Arrange — version "2" is not recognized
-    String token = encodePageToken("2", 0, 0, "2026-01-01T00:00:00Z");
+    String token = encodePageToken("2", "*|-|-", 0, 0, "2026-01-01T00:00:00Z");
 
     // Act & Assert
     assertThatThrownBy(
@@ -1937,8 +2145,9 @@ class ScalarDbSagaStoreTest {
 
   @Test
   void listStateSnapshots_tokenStatusNotInFilterGiven_throwsIllegalArgumentException() {
-    // Arrange — query filters RUNNING(0) but the token points at COMPLETED(1)
-    String token = encodePageToken("1", 0, 1, "2026-01-01T00:00:00Z");
+    // Arrange — query filters RUNNING(0) and the filter key matches, but the cursor status is
+    // COMPLETED(1), outside the swept set: the defense-in-depth membership check rejects it.
+    String token = encodePageToken("1", "0|-|-", 0, 1, "2026-01-01T00:00:00Z");
 
     // Act & Assert
     assertThatThrownBy(
@@ -1948,22 +2157,142 @@ class ScalarDbSagaStoreTest {
         .isInstanceOf(IllegalArgumentException.class);
   }
 
+  @Test
+  void listStateSnapshots_tokenFromStatusFilterReusedByUnfilteredQuery_throwsException()
+      throws Exception {
+    // Arrange — mint a real token from a status=RUNNING query (pageSize 1 fills the page).
+    stubScanner(mockStateResult("saga-a", SagaStatus.RUNNING));
+    String token =
+        store
+            .listStateSnapshots(
+                SagaQuery.newBuilder().status(SagaStatus.RUNNING).pageSize(1).build())
+            .getNextPageToken();
+    assertThat(token).isNotBlank();
+
+    // Act & Assert — reusing it on an unfiltered query would silently skip earlier buckets and
+    // status slices; the filter-key mismatch rejects it instead.
+    assertThatThrownBy(
+            () -> store.listStateSnapshots(SagaQuery.newBuilder().pageToken(token).build()))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void listStateSnapshots_tokenReusedWithDifferentUpdatedAfter_throwsException() throws Exception {
+    // Arrange — mint a token from a query bounded by updatedAfter = Jan 1.
+    Instant after = Instant.parse("2026-01-01T00:00:00Z");
+    stubScanner(mockStateResult("saga-a", SagaStatus.RUNNING));
+    String token =
+        store
+            .listStateSnapshots(
+                SagaQuery.newBuilder()
+                    .status(SagaStatus.RUNNING)
+                    .updatedAfter(after)
+                    .pageSize(1)
+                    .build())
+            .getNextPageToken();
+    assertThat(token).isNotBlank();
+
+    // Act & Assert — reusing it under a later updatedAfter would let the cursor timestamp override
+    // the new lower bound and return out-of-window rows; the filter-key mismatch rejects it.
+    Instant laterAfter = Instant.parse("2026-02-01T00:00:00Z");
+    assertThatThrownBy(
+            () ->
+                store.listStateSnapshots(
+                    SagaQuery.newBuilder()
+                        .status(SagaStatus.RUNNING)
+                        .updatedAfter(laterAfter)
+                        .pageToken(token)
+                        .build()))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void listStateSnapshots_tokenReusedBySameQuery_resumesSuccessfully() throws Exception {
+    // Arrange — mint a token from a status=RUNNING query, then reuse it with the SAME filters.
+    stubScanner(mockStateResult("saga-a", SagaStatus.RUNNING));
+    String token =
+        store
+            .listStateSnapshots(
+                SagaQuery.newBuilder().status(SagaStatus.RUNNING).pageSize(1).build())
+            .getNextPageToken();
+    assertThat(token).isNotBlank();
+    stubScanner(); // second page drains empty
+
+    // Act — the matching filter key is accepted and the query resumes without throwing.
+    SagaPage<SagaStateSnapshot> page =
+        store.listStateSnapshots(
+            SagaQuery.newBuilder().status(SagaStatus.RUNNING).pageSize(1).pageToken(token).build());
+
+    // Assert
+    assertThat(page.getItems()).isEmpty();
+    assertThat(page.getNextPageToken()).isNull();
+  }
+
   /** Stubs {@code tx.getScanner(...)} to return a scanner that yields {@code rows} then drains. */
   private void stubScanner(Result... rows) throws Exception {
+    // Build the scanner before the outer stubbing starts; nesting when() inside thenReturn(...)
+    // trips Mockito's UnfinishedStubbingException.
+    TransactionCrudOperable.Scanner scanner = scannerOver(List.of(rows));
+    when(tx.getScanner(any(Scan.class))).thenReturn(scanner);
+  }
+
+  /**
+   * Stubs {@code tx.getScanner(...)} to honor each scan's clustering-key range: a scanner yields
+   * exactly the {@code master} rows in the requested {@code (bucket, status)} slice whose {@code
+   * updated_at} falls within the scan's bounds, respecting {@code startInclusive}. Unlike {@link
+   * #stubScanner}, this lets one dataset drive real multi-page pagination, so the resume cursor
+   * genuinely excludes already-returned cohorts rather than the test hand-feeding each page.
+   */
+  private void stubScannerHonoringRange(Result... master) throws Exception {
+    when(tx.getScanner(any(Scan.class)))
+        .thenAnswer(
+            invocation -> {
+              Scan scan = invocation.getArgument(0);
+              int bucket = scan.getPartitionKey().getIntValue(0);
+              Key start = scan.getStartClusteringKey().orElseThrow();
+              int status = start.getIntValue(0);
+              Instant startTs = start.getTimestampTZValue(1);
+              boolean startInclusive = scan.getStartInclusive();
+              Instant endTs = scan.getEndClusteringKey().orElseThrow().getTimestampTZValue(1);
+
+              List<Result> slice = new ArrayList<>();
+              for (Result r : master) {
+                if (r.getInt("bucket") != bucket || r.getInt("status") != status) {
+                  continue;
+                }
+                Instant ts = r.getTimestampTZ("updated_at");
+                boolean afterStart = startInclusive ? !ts.isBefore(startTs) : ts.isAfter(startTs);
+                if (afterStart && !ts.isAfter(endTs)) {
+                  slice.add(r);
+                }
+              }
+              slice.sort(Comparator.comparing(r -> r.getTimestampTZ("updated_at")));
+              return scannerOver(slice);
+            });
+  }
+
+  /** A scanner mock that yields {@code rows} in order, then drains. */
+  private static TransactionCrudOperable.Scanner scannerOver(List<Result> rows)
+      throws CrudException {
     TransactionCrudOperable.Scanner scanner = mock(TransactionCrudOperable.Scanner.class);
     OngoingStubbing<Optional<Result>> stub = when(scanner.one());
     for (Result r : rows) {
       stub = stub.thenReturn(Optional.of(r));
     }
     stub.thenReturn(Optional.empty());
-    when(tx.getScanner(any(Scan.class))).thenReturn(scanner);
+    return scanner;
   }
 
   private static String encodePageToken(
-      String version, int bucket, int statusCode, String updatedAtIso) {
+      String version, String filterKey, int bucket, int statusCode, String updatedAtIso) {
     String payload =
         String.join(
-            "|", version, Integer.toString(bucket), Integer.toString(statusCode), updatedAtIso);
+            "|",
+            version,
+            filterKey,
+            Integer.toString(bucket),
+            Integer.toString(statusCode),
+            updatedAtIso);
     return Base64.getUrlEncoder()
         .withoutPadding()
         .encodeToString(payload.getBytes(StandardCharsets.UTF_8));
@@ -2032,6 +2361,12 @@ class ScalarDbSagaStoreTest {
   private Result mockStateResult(String sagaId, SagaStatus status, Instant updatedAt) {
     Result r = mockStateResult(sagaId, status);
     lenient().when(r.getTimestampTZ("updated_at")).thenReturn(updatedAt);
+    return r;
+  }
+
+  /** Moves a mocked row into {@code bucket}, so one dataset can span several partitions. */
+  private static Result inBucket(Result r, int bucket) {
+    lenient().when(r.getInt("bucket")).thenReturn(bucket);
     return r;
   }
 

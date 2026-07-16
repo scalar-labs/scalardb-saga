@@ -22,6 +22,7 @@ import com.scalar.db.saga.definition.SagaDefinition.RecoveryStrategy;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import com.scalar.db.saga.store.AdminAuditPayload;
 import com.scalar.db.saga.store.EventType;
@@ -421,6 +422,53 @@ class DefaultSagaAdminServiceTest {
             new ResetResult.SkippedSaga("race", ResetResult.SkipReason.CONCURRENT_MODIFICATION));
     // The lost CAS aborts before the hand-off, so the row is never marked for recovery.
     verify(store, never()).markForRecovery(any());
+  }
+
+  @Test
+  void resetEscalated_bulkCorruptEventStream_skipsItAndSweepsTheRest() {
+    // Arrange — "bad" cannot be read back at all; "ok" is healthy and ordered after it. A reset
+    // saga leaves the ESCALATED scan, so aborting on "bad" would strand "ok" on every re-run too.
+    SagaStateSnapshot bad =
+        new SagaStateSnapshot("bad", SAGA_NAME, SagaStatus.ESCALATED, "o", DEF_VERSION, TS, TS);
+    SagaStateSnapshot ok =
+        new SagaStateSnapshot("ok", SAGA_NAME, SagaStatus.ESCALATED, "o", DEF_VERSION, TS, TS);
+    when(store.listStateSnapshots(any())).thenReturn(new SagaPage<>(List.of(bad, ok), null));
+    when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(backwardDef());
+    when(store.getEvents("bad"))
+        .thenThrow(
+            SagaPersistenceException.nonRetryable(
+                "Unknown event type: SAGA_FROM_THE_FUTURE", new IllegalArgumentException("boom")));
+    when(store.getEvents("ok"))
+        .thenReturn(List.of(StatusEvent.started(null), StepEvent.completed(0, "debit", null)));
+    when(store.recordStatusEvent(eq(ok), anyInt(), any(), any())).thenReturn(ok);
+
+    // Act
+    ResetResult result = service.resetEscalated(SagaQuery.newBuilder().build(), "sweep");
+
+    // Assert — the corrupt saga is reported, the healthy one behind it is still reset
+    assertThat(result.getResetCount()).isEqualTo(1);
+    assertThat(result.getSkipped())
+        .containsExactly(
+            new ResetResult.SkippedSaga("bad", ResetResult.SkipReason.CORRUPT_EVENT_STREAM));
+    verify(store).markForRecovery("ok");
+  }
+
+  @Test
+  void resetEscalated_bulkRetryableStoreFailure_abortsRatherThanSkipping() {
+    // Arrange — the store is failing, not this saga. Every remaining row would fail the same way,
+    // so the sweep must surface it instead of reporting a page of misleading skips.
+    SagaStateSnapshot down =
+        new SagaStateSnapshot("down", SAGA_NAME, SagaStatus.ESCALATED, "o", DEF_VERSION, TS, TS);
+    when(store.listStateSnapshots(any())).thenReturn(new SagaPage<>(List.of(down), null));
+    when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(backwardDef());
+    when(store.getEvents("down"))
+        .thenThrow(
+            SagaPersistenceException.retryable(
+                "store unavailable", new IllegalStateException("conn refused")));
+
+    // Act & Assert
+    assertThatThrownBy(() -> service.resetEscalated(SagaQuery.newBuilder().build(), "sweep"))
+        .isInstanceOf(SagaPersistenceException.class);
   }
 
   // ---------------------------------------------------------------------------

@@ -368,6 +368,43 @@ class SagaServerTest {
     }
   }
 
+  @Test
+  void start_realProviderConfigured_callbackPathBypassesCallerAuth(@TempDir Path dir)
+      throws Exception {
+    // Arrange — a real (api-key) provider, so the RBAC before-handler enforces caller auth on gated
+    // routes. No callback secret is set, so the callback route itself is not registered; the
+    // exemption is by path pattern, so it applies regardless.
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Path keyFile = Files.writeString(dir.resolve("apikey.secret"), "s3cr3t-key");
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
+    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.SECURITY_PROVIDER_KEY, "apikey");
+    props.setProperty(
+        "scalar.db.saga.server.security.apikey.key.svc.secret", "${file:UTF-8:" + keyFile + "}");
+    props.setProperty("scalar.db.saga.server.security.apikey.key.svc.roles", "saga:write");
+    try (SagaServer server =
+        new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class)).start()) {
+      // A credential-less request to a gated route is rejected by the before-handler — proving the
+      // provider actually enforces auth.
+      assertThat(getSaga(server.port()).statusCode()).isEqualTo(401);
+      // The same credential-less request to the callback path is exempt, so the before-handler lets
+      // it through to route resolution: with no callback route registered that is a 404 — crucially
+      // not the 401 an unexempt path returns. Before this exemption, a participant's async callback
+      // (HMAC-authed, no caller credential) was 401'd before its HMAC check ever ran.
+      assertThat(postComplete(server.port()).statusCode()).isEqualTo(404);
+    }
+  }
+
+  private static HttpResponse<String> getSaga(int port) throws Exception {
+    return HttpClient.newHttpClient()
+        .send(
+            HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/sagas/s1")).build(),
+            HttpResponse.BodyHandlers.ofString());
+  }
+
   private static HttpResponse<String> postComplete(int port) throws Exception {
     URI uri =
         URI.create(

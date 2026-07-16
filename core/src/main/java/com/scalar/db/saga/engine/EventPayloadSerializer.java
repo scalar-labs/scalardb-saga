@@ -40,7 +40,7 @@ public final class EventPayloadSerializer {
     try {
       return MAPPER.writeValueAsString(data);
     } catch (JsonProcessingException e) {
-      throw new SagaPersistenceException("Failed to serialize event payload", e);
+      throw SagaPersistenceException.nonRetryable("Failed to serialize event payload", e);
     }
   }
 
@@ -52,7 +52,7 @@ public final class EventPayloadSerializer {
     try {
       return MAPPER.readValue(json, MAP_TYPE);
     } catch (JsonProcessingException e) {
-      throw new SagaPersistenceException("Failed to deserialize event payload", e);
+      throw SagaPersistenceException.nonRetryable("Failed to deserialize event payload", e);
     }
   }
 
@@ -65,7 +65,7 @@ public final class EventPayloadSerializer {
     try {
       return MAPPER.writeValueAsString(error);
     } catch (JsonProcessingException ex) {
-      throw new SagaPersistenceException("Failed to serialize error payload", ex);
+      throw SagaPersistenceException.nonRetryable("Failed to serialize error payload", ex);
     }
   }
 

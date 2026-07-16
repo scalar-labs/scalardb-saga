@@ -68,4 +68,52 @@ class SagaPageTest {
     // Assert
     assertThat(a).isEqualTo(b).hasSameHashCodeAs(b);
   }
+
+  @Test
+  public void equals_differentItemsGiven_areNotEqual() {
+    // Arrange
+    SagaPage<String> a = new SagaPage<>(List.of("a", "b"), "tok");
+    SagaPage<String> b = new SagaPage<>(List.of("a", "c"), "tok");
+
+    // Assert
+    assertThat(a).isNotEqualTo(b);
+  }
+
+  @Test
+  public void equals_differentNextPageTokenGiven_areNotEqual() {
+    // Arrange
+    SagaPage<String> a = new SagaPage<>(List.of("a", "b"), "tok");
+    SagaPage<String> b = new SagaPage<>(List.of("a", "b"), "other");
+    SagaPage<String> lastPage = new SagaPage<>(List.of("a", "b"), null);
+
+    // Assert
+    assertThat(a).isNotEqualTo(b);
+    assertThat(a).isNotEqualTo(lastPage);
+  }
+
+  @Test
+  public void equals_nullGiven_areNotEqual() {
+    // Assert
+    assertThat(new SagaPage<>(List.of("a"), "tok")).isNotEqualTo(null);
+  }
+
+  @Test
+  public void equals_differentTypeGiven_areNotEqual() {
+    // Assert
+    assertThat(new SagaPage<>(List.of("a"), "tok")).isNotEqualTo("not a page");
+  }
+
+  @Test
+  public void toString_called_containsItemsAndNextPageToken() {
+    // Arrange
+    SagaPage<String> page = new SagaPage<>(List.of("a", "b"), "tok");
+
+    // Act
+    String result = page.toString();
+
+    // Assert
+    assertThat(result).contains("a");
+    assertThat(result).contains("b");
+    assertThat(result).contains("tok");
+  }
 }

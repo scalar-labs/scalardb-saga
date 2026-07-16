@@ -3,6 +3,7 @@ package com.scalar.db.saga.daemon.api;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.scalar.db.saga.daemon.security.SagaAuthUnavailableException;
+import com.scalar.db.saga.exception.SagaPersistenceException;
 import io.javalin.Javalin;
 import io.javalin.http.BadRequestResponse;
 import java.net.URI;
@@ -51,6 +52,18 @@ class ErrorMapperTest {
         ctx -> {
           throw new SagaAuthUnavailableException("jwks unreachable", new RuntimeException());
         });
+    app.get(
+        "/persist-transient",
+        ctx -> {
+          throw SagaPersistenceException.retryable(
+              "db down on secret_table", new RuntimeException("io"));
+        });
+    app.get(
+        "/persist-permanent",
+        ctx -> {
+          throw SagaPersistenceException.nonRetryable(
+              "bad json for secret_table", new RuntimeException("parse"));
+        });
     app.start(0);
   }
 
@@ -81,6 +94,24 @@ class ErrorMapperTest {
     assertThat(response.body())
         .contains("Service temporarily unavailable")
         .doesNotContain("jwks unreachable");
+  }
+
+  @Test
+  void retryablePersistenceError_mapsTo503_withoutLeakingMessage() throws Exception {
+    HttpResponse<String> response = get("/persist-transient");
+    assertThat(response.statusCode()).isEqualTo(503);
+    assertThat(response.body())
+        .contains("Service temporarily unavailable")
+        .doesNotContain("secret_table");
+  }
+
+  @Test
+  void permanentPersistenceError_mapsTo500_withoutLeakingMessage() throws Exception {
+    // A permanent persistence failure must not be a retryable 503 — the client would retry it
+    // futilely. It maps to a generic 500 instead, still without leaking the internal message.
+    HttpResponse<String> response = get("/persist-permanent");
+    assertThat(response.statusCode()).isEqualTo(500);
+    assertThat(response.body()).contains("Internal server error").doesNotContain("secret_table");
   }
 
   private HttpResponse<String> get(String path) throws Exception {

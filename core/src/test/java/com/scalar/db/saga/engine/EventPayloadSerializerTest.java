@@ -1,7 +1,9 @@
 package com.scalar.db.saga.engine;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.scalar.db.saga.exception.SagaPersistenceException;
 import java.math.BigDecimal;
 import java.util.Collections;
 import java.util.Map;
@@ -71,6 +73,15 @@ class EventPayloadSerializerTest {
 
     // Assert
     assertThat(result).isEmpty();
+  }
+
+  @Test
+  void deserializeMap_malformedJsonGiven_throwsNonRetryablePersistenceException() {
+    // Act & Assert — a malformed payload is a permanent (non-retryable) failure: retrying the
+    // deserialize can never succeed, so it must not be surfaced to clients as a retryable error.
+    assertThatThrownBy(() -> EventPayloadSerializer.deserializeMap("{not json"))
+        .isInstanceOfSatisfying(
+            SagaPersistenceException.class, e -> assertThat(e.isRetryable()).isFalse());
   }
 
   @Test

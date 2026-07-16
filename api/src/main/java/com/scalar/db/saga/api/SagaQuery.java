@@ -25,8 +25,9 @@ public final class SagaQuery {
 
   /**
    * The maximum <b>requested</b> {@link #getPageSize() page size}. This bounds the requested
-   * target, not the exact size of a returned {@link SagaPage} — a page may run slightly larger (see
-   * {@link Builder#pageSize(int)}).
+   * target, not the exact size of a returned {@link SagaPage}. Because a page never splits a cohort
+   * (rows sharing one {@code updated_at}), a returned page may exceed the target — and even this
+   * maximum — by up to a full cohort; see {@link Builder#pageSize(int)}.
    */
   public static final int MAX_PAGE_SIZE = 1000;
 
@@ -65,8 +66,9 @@ public final class SagaQuery {
   }
 
   /**
-   * The <b>target</b> number of results per page. A returned {@link SagaPage} usually has at most
-   * this many items but may have slightly more — see {@link Builder#pageSize(int)}.
+   * The <b>target</b> number of results per page. A returned {@link SagaPage} may exceed this
+   * target by up to a full {@code updated_at} cohort, which is not bounded by the target — see
+   * {@link Builder#pageSize(int)}.
    */
   public int getPageSize() {
     return pageSize;
@@ -127,23 +129,27 @@ public final class SagaQuery {
       return this;
     }
 
-    /** Sets the inclusive {@code updated_at} lower bound. */
+    /** Sets the inclusive {@code updated_at} lower bound (or {@code null} for no lower bound). */
     public Builder updatedAfter(@Nullable Instant updatedAfter) {
       this.updatedAfter = updatedAfter;
       return this;
     }
 
-    /** Sets the inclusive {@code updated_at} upper bound. */
+    /** Sets the inclusive {@code updated_at} upper bound (or {@code null} for no upper bound). */
     public Builder updatedBefore(@Nullable Instant updatedBefore) {
       this.updatedBefore = updatedBefore;
       return this;
     }
 
     /**
-     * Sets the <b>target</b> page size. A returned {@link SagaPage} usually has at most this many
-     * items, but may have slightly more: results are grouped by {@code updated_at} and a page never
-     * splits a cohort (rows sharing a timestamp), so a cohort straddling the limit is completed
-     * rather than cut. This bounds the requested target only, in {@code [1, MAX_PAGE_SIZE]}.
+     * Sets the <b>target</b> page size. A returned {@link SagaPage} may exceed this target: results
+     * are grouped by {@code updated_at} and a page never splits a cohort (rows sharing one
+     * timestamp), so a cohort straddling the limit is completed rather than cut. A single cohort
+     * larger than the target is returned whole as one over-sized page, so a page may exceed the
+     * target — and even {@link SagaQuery#MAX_PAGE_SIZE} — by the full cohort size; it is not an
+     * upper bound on the returned item count. Callers should provision memory and response limits
+     * for the largest expected cohort, not for this target. This bounds the requested target only,
+     * in {@code [1, MAX_PAGE_SIZE]}.
      *
      * @param pageSize the target results per page, in {@code [1, MAX_PAGE_SIZE]}
      * @throws IllegalArgumentException if out of range
@@ -163,8 +169,22 @@ public final class SagaQuery {
       return this;
     }
 
-    /** Builds the query. */
+    /**
+     * Builds the query.
+     *
+     * @throws IllegalArgumentException if both {@code updatedAfter} and {@code updatedBefore} are
+     *     set and {@code updatedAfter} is strictly after {@code updatedBefore} (an empty window).
+     *     The bounds are inclusive, so an equal {@code updatedAfter} and {@code updatedBefore} is
+     *     allowed and selects that single instant.
+     */
     public SagaQuery build() {
+      if (updatedAfter != null && updatedBefore != null && updatedAfter.isAfter(updatedBefore)) {
+        throw new IllegalArgumentException(
+            "updatedAfter must be before or equal to updatedBefore: updatedAfter="
+                + updatedAfter
+                + ", updatedBefore="
+                + updatedBefore);
+      }
       return new SagaQuery(this);
     }
   }

@@ -28,7 +28,13 @@ public final class ResetResult {
      */
     CONCURRENT_MODIFICATION,
     /** The saga's definition version could not be resolved; register/redeploy it, then retry. */
-    DEFINITION_NOT_FOUND
+    DEFINITION_NOT_FOUND,
+    /**
+     * The saga's stored event stream could not be read back, and a retry would fail identically —
+     * its data is damaged, or was written by a newer version this one cannot decode. Needs manual
+     * inspection; the rest of the sweep is unaffected.
+     */
+    CORRUPT_EVENT_STREAM
   }
 
   /** A saga that matched the sweep but was not reset, with the reason. */

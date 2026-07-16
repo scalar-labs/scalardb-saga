@@ -12,6 +12,7 @@ import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import com.scalar.db.saga.store.AdminAuditPayload;
 import com.scalar.db.saga.store.SagaEvent;
@@ -246,6 +247,19 @@ public class DefaultSagaAdminService implements SagaAdminService {
         skipped.add(
             new ResetResult.SkippedSaga(
                 snapshot.getSagaId(), ResetResult.SkipReason.CONCURRENT_MODIFICATION));
+      } catch (SagaPersistenceException e) {
+        if (e.isRetryable()) {
+          // The store itself is failing, not this saga. Every remaining row would fail the same
+          // way, so stop and surface it rather than reporting a page of misleading skips.
+          throw e;
+        }
+        // This saga's own event stream cannot be read back, and a retry would fail identically.
+        // Skip it rather than abort: a saga that resets successfully leaves the ESCALATED scan,
+        // so aborting here would make every re-run stop on this same saga and permanently strand
+        // every saga behind it.
+        skipped.add(
+            new ResetResult.SkippedSaga(
+                snapshot.getSagaId(), ResetResult.SkipReason.CORRUPT_EVENT_STREAM));
       }
     }
     return new ResetResult(resetCount, skipped, page.getNextPageToken());

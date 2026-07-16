@@ -108,9 +108,11 @@ public interface SagaAdminService extends AutoCloseable {
    * ESCALATED}; supplying a conflicting status is an error. Drive the sweep by {@link
    * ResetResult#getNextPageToken()} until it is {@code null}.
    *
-   * <p>Each row is un-escalated under its own optimistic-concurrency guard: a row that lost a race
-   * or whose definition could not be resolved is listed in {@link ResetResult#getSkipped()} with
-   * its reason, never force-driven.
+   * <p>Each row is un-escalated under its own optimistic-concurrency guard. A row that lost a race,
+   * whose definition could not be resolved, or whose stored event stream cannot be read back is
+   * listed in {@link ResetResult#getSkipped()} with its reason, never force-driven — one unusable
+   * saga never stops the sweep from reaching the rest. A failure of the store itself is not a
+   * per-row skip: it aborts the call, since every remaining row would fail the same way.
    *
    * @param query the page of escalated sagas to sweep (status filter fixed to {@code ESCALATED})
    * @param reason why the operator is un-escalating (recorded per row for audit; must be non-blank)

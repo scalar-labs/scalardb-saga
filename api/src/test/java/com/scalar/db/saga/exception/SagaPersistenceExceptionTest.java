@@ -8,31 +8,47 @@ import org.junit.jupiter.api.Test;
 class SagaPersistenceExceptionTest {
 
   @Test
-  void constructor_messageAndCauseGiven_setsBoth() {
+  void retryable_messageAndCauseGiven_setsBothAndIsRetryable() {
     // Arrange
     RuntimeException cause = new RuntimeException("db error");
 
     // Act
-    SagaPersistenceException e = new SagaPersistenceException("store write failed", cause);
+    SagaPersistenceException e = SagaPersistenceException.retryable("store write failed", cause);
 
     // Assert
     assertThat(e.getMessage()).isEqualTo("store write failed");
     assertThat(e.getCause()).isSameAs(cause);
+    assertThat(e.isRetryable()).isTrue();
+  }
+
+  @Test
+  void nonRetryable_messageAndCauseGiven_setsBothAndIsNotRetryable() {
+    // Arrange
+    RuntimeException cause = new RuntimeException("bad json");
+
+    // Act
+    SagaPersistenceException e =
+        SagaPersistenceException.nonRetryable("serialization failed", cause);
+
+    // Assert
+    assertThat(e.getMessage()).isEqualTo("serialization failed");
+    assertThat(e.getCause()).isSameAs(cause);
+    assertThat(e.isRetryable()).isFalse();
   }
 
   @SuppressWarnings("NullAway")
   @Test
-  void constructor_nullMessageGiven_throwsNullPointerException() {
+  void retryable_nullMessageGiven_throwsNullPointerException() {
     // Arrange & Act & Assert
-    assertThatThrownBy(() -> new SagaPersistenceException(null, new RuntimeException()))
+    assertThatThrownBy(() -> SagaPersistenceException.retryable(null, new RuntimeException()))
         .isInstanceOf(NullPointerException.class);
   }
 
   @SuppressWarnings("NullAway")
   @Test
-  void constructor_nullCauseGiven_throwsNullPointerException() {
+  void nonRetryable_nullCauseGiven_throwsNullPointerException() {
     // Arrange & Act & Assert
-    assertThatThrownBy(() -> new SagaPersistenceException("message", null))
+    assertThatThrownBy(() -> SagaPersistenceException.nonRetryable("message", null))
         .isInstanceOf(NullPointerException.class);
   }
 
