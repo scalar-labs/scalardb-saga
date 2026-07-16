@@ -340,7 +340,7 @@ public final class SagaServer implements AutoCloseable {
    */
   private void ensureSecureBindingOrAcknowledged() {
     if (config.securityProvider().equals("noop")
-        && !isLoopbackHost(config.host())
+        && !LoopbackHost.isLoopback(config.host())
         && !config.insecureModeEnabled()) {
       throw new IllegalArgumentException(
           "Refusing to start unauthenticated on a network-reachable interface: '"
@@ -380,22 +380,6 @@ public final class SagaServer implements AutoCloseable {
           SagaServerConfig.SECURITY_PROVIDER_KEY,
           config.securityProvider());
     }
-  }
-
-  /**
-   * Whether {@code host} is a loopback bind address ({@code localhost}, {@code 127.0.0.0/8}, {@code
-   * ::1}) — reachable only from the local machine, not the network. Matched on the literal (no DNS
-   * resolution); {@code 0.0.0.0} (bind all interfaces) is deliberately not loopback.
-   */
-  private static boolean isLoopbackHost(String host) {
-    String literal = host;
-    if (literal.startsWith("[") && literal.endsWith("]")) {
-      // A bracketed IPv6 literal, e.g. "[::1]".
-      literal = literal.substring(1, literal.length() - 1);
-    }
-    return literal.equalsIgnoreCase("localhost")
-        || literal.equals("::1")
-        || literal.startsWith("127.");
   }
 
   /**

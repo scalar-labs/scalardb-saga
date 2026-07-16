@@ -168,6 +168,18 @@ class JwtConfigTest {
   }
 
   @Test
+  void from_plaintextHttpSpoofableLoopbackNameJwksUrl_throwsException() {
+    // Arrange
+    // "127.attacker.org" is a DNS hostname that merely starts with "127."; it is not loopback, so a
+    // plaintext JWKS there must be rejected rather than trusted as the token signing anchor.
+    Properties props = minimalProps();
+    props.setProperty(JwtConfig.JWKS_URL_KEY, "http://127.attacker.org/jwks.json");
+
+    // Act / Assert
+    assertThatThrownBy(() -> JwtConfig.from(props)).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void from_nonNumericTimeout_throwsException() {
     // Arrange
     Properties props = minimalProps();
