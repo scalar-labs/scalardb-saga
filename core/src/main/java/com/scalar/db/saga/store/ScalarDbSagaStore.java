@@ -783,8 +783,8 @@ public class ScalarDbSagaStore implements SagaStore {
               throw pe;
             }
             // Business-logic or programming errors propagate immediately.
-            // Only SagaPersistenceException (infrastructure failure from inner
-            // transactions) and checked exceptions are retried.
+            // Only a retryable SagaPersistenceException (infrastructure failure from
+            // inner transactions) and checked exceptions are retried.
             if (ve instanceof RuntimeException re && !(ve instanceof SagaPersistenceException)) {
               throw re;
             }
