@@ -937,28 +937,36 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
             recoveryManager,
             retentionManager,
             shutdownTimeoutMillis);
-      } catch (Exception e) {
+      } catch (Throwable t) {
         // Roll back the resources that hold real external connections: the store (DB sessions) and
         // the HTTP endpoint registry (holds HTTP clients). Each is null if its own creation threw,
         // so each close is null-guarded. The engine and the recovery/retention managers constructed
         // inside the try only hold executors that stay inert until started — their threads spin up
         // on start()/first task, never during build — so a failed build leaves them with no live
         // threads to stop, and GC reclaims them. Hence no engine.shutdown() here.
+        //
+        // Catch Throwable, not Exception: ownership transfers to the caller only on a successful
+        // return, so an Error raised after the store is created would otherwise unwind past this
+        // block and leak the store. Everything below createStore() can raise one: a
+        // NoClassDefFoundError or ExceptionInInitializerError from first-touch loading of the HTTP
+        // client stack, or an OutOfMemoryError while building the clients or the engine's
+        // executors. The resources are still released, and t is rethrown unchanged. Precise rethrow
+        // keeps this compiling without a throws clause: the try body raises no checked exceptions.
         if (httpEndpointRegistry != null) {
           try {
             httpEndpointRegistry.close();
-          } catch (Exception closeException) {
-            e.addSuppressed(closeException);
+          } catch (Throwable closeException) {
+            t.addSuppressed(closeException);
           }
         }
         if (store != null) {
           try {
             store.close();
-          } catch (Exception closeException) {
-            e.addSuppressed(closeException);
+          } catch (Throwable closeException) {
+            t.addSuppressed(closeException);
           }
         }
-        throw e;
+        throw t;
       }
     }
 

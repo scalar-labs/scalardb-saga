@@ -4,8 +4,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import com.scalar.db.saga.store.SagaStore;
+import java.net.http.HttpClient;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -235,6 +238,33 @@ class DefaultSagaOrchestratorBuilderTest {
   }
 
   @Test
+  void build_errorAfterStoreCreated_rollsBackStoreAndRethrows() {
+    // Arrange — an Error raised after the store is created (here while building the HTTP endpoint
+    // registry) must still roll back the store, or its live DB sessions leak. A supplied HttpClient
+    // combined with a non-empty allowlist makes HttpEndpoint.create() call followRedirects(); stub
+    // that to throw an Error. The rollback catches Throwable, so it handles this where a plain
+    // catch (Exception) would let the Error unwind past the close.
+    SagaStore store = mock(SagaStore.class);
+    HttpClient redirectThrowingClient = mock(HttpClient.class);
+    when(redirectThrowingClient.followRedirects()).thenThrow(new SimulatedError());
+
+    // Act & Assert — the Error propagates unchanged...
+    assertThatThrownBy(
+            () ->
+                DefaultSagaOrchestrator.newBuilder()
+                    .storeFactory(() -> store)
+                    .httpEndpoint("svc", "http://svc:8080")
+                    .allowedHosts("svc")
+                    .httpClient(redirectThrowingClient)
+                    .add()
+                    .build())
+        .isInstanceOf(SimulatedError.class);
+
+    // ...and the store created before the failure is closed rather than leaked.
+    verify(store).close();
+  }
+
+  @Test
   void build_withResources_returnsDefaultSagaOrchestrator() {
     // Arrange
     SagaStore store = mock(SagaStore.class);
@@ -363,5 +393,10 @@ class DefaultSagaOrchestratorBuilderTest {
     assertThat(explicitRecovery.clock()).isSameAs(configClock);
     assertThat(explicitRetention.clock()).isSameAs(configClock);
     orchestrator.close();
+  }
+
+  /** An Error (not an Exception) used to exercise the build() rollback's catch (Throwable). */
+  private static final class SimulatedError extends Error {
+    private static final long serialVersionUID = 1L;
   }
 }
