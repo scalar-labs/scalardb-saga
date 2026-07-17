@@ -3,6 +3,7 @@ package com.scalar.db.saga.daemon.api;
 import com.scalar.db.saga.api.SagaCallback;
 import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
+import com.scalar.db.saga.daemon.security.SagaOperation;
 import io.javalin.Javalin;
 import io.javalin.http.Context;
 import java.util.Map;
@@ -80,7 +81,8 @@ public final class SagaResource {
             String sagaId = orchestrator.start(request.requireSagaName(), input);
             respondSync(ctx, orchestrator, sagaId);
           }
-        });
+        },
+        SagaOperation.START_SAGA);
 
     app.put(
         "/sagas/{id}",
@@ -101,11 +103,13 @@ public final class SagaResource {
             orchestrator.start(sagaId, request.requireSagaName(), input);
             respondSync(ctx, orchestrator, sagaId);
           }
-        });
+        },
+        SagaOperation.START_SAGA);
 
     app.get(
         "/sagas/{id}",
-        ctx -> respond(ctx, 200, orchestrator.getStateSnapshot(ctx.pathParam("id"))));
+        ctx -> respond(ctx, 200, orchestrator.getStateSnapshot(ctx.pathParam("id"))),
+        SagaOperation.GET_SAGA);
   }
 
   /**

@@ -1,82 +1,191 @@
 package com.scalar.db.saga.daemon.grpc;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 
-import com.scalar.db.saga.daemon.api.RateLimitHandler;
+import com.scalar.db.saga.api.SagaOrchestrator;
+import com.scalar.db.saga.daemon.api.CallbackResource;
+import com.scalar.db.saga.daemon.api.HealthResource;
+import com.scalar.db.saga.daemon.api.SagaResource;
+import com.scalar.db.saga.daemon.security.SagaOperation;
 import com.scalar.db.saga.daemon.security.SagaRole;
-import com.scalar.db.saga.daemon.security.SagaSecurityHandler;
-import java.util.List;
+import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
+import com.scalar.db.saga.rpc.SagaServiceGrpc;
+import io.grpc.MethodDescriptor;
+import io.javalin.Javalin;
+import io.javalin.router.Endpoint;
+import io.javalin.security.RouteRole;
+import java.time.Clock;
+import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Set;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
 
 /**
- * Cross-transport policy parity: for every saga operation the REST and gRPC transports must resolve
- * the same required role and the same rate-limit treatment, even though REST keys on the HTTP verb
- * ({@link SagaSecurityHandler#requiredRoleFor}, {@link RateLimitHandler#isRateLimited}) and gRPC
- * keys on the RPC method name ({@link SagaSecurityInterceptor#requiredRoleFor}, {@link
- * SagaRateLimitInterceptor#isRateLimited}). The two mappings are maintained independently — aligned
- * only by "Keep in sync" comments today — so this test turns that comment discipline into a CI
- * gate: a future divergence fails the build rather than silently drifting.
+ * The permanent cross-transport guard on the daemon's access policy.
  *
- * <p>Each operation also pins its expected role and rate-limit treatment, so the two transports
- * cannot pass by agreeing on the <em>wrong</em> value. Extend {@link #OPERATIONS} when an operation
- * is added to the REST/RPC surface.
+ * <p>Its shape follows from where the risk actually lives. Both transports now resolve their policy
+ * from {@link SagaOperation}, so asserting that they agree with each other would be true by
+ * construction and would prove nothing. What can still go wrong is the <b>mapping</b>: a route or
+ * an RPC exposed without an operation, or under the wrong one. So this test asserts three things
+ * instead:
  *
- * <p>Lives in the {@code grpc} test package so it can read the two package-private gRPC resolvers
- * directly; the two REST-side resolvers are public. When the switches are eventually replaced by a
- * shared {@code operation -> role} policy (see the admin-API plan), this test survives as the
- * regression guard that the two per-transport vocabulary mappings still agree.
+ * <ol>
+ *   <li>the policy table itself — every operation's required role and rate-limit treatment, stated
+ *       literally, so changing the policy has to be a deliberate edit here;
+ *   <li>gRPC completeness — every method on the generated service descriptor maps to the expected
+ *       operation, and nothing is mapped that is not a real method;
+ *   <li>REST completeness — every registered route carries the expected operation, and none is
+ *       untagged.
+ * </ol>
+ *
+ * <p>(2) and (3) enumerate the real registrations rather than a hand-written list, which is what
+ * makes "added an endpoint, forgot the policy" a build failure. That matters most for the
+ * fail-closed resolver: an untagged route is refused at runtime, so without this test the first
+ * sign of a missing tag would be a dead endpoint in production.
  */
 class TransportPolicyParityTest {
 
-  /** A saga operation, how each transport names it, and its expected policy. */
-  private record Operation(
-      String name,
-      String restVerb,
-      String grpcMethod,
-      SagaRole expectedRole,
-      boolean expectedRateLimited) {}
+  /** The expected policy for every operation. Stated literally; not derived from the enum. */
+  private static final Map<SagaOperation, ExpectedPolicy> EXPECTED_POLICY =
+      new EnumMap<>(
+          Map.of(
+              SagaOperation.HEALTH, new ExpectedPolicy(null, false),
+              SagaOperation.CALLBACK, new ExpectedPolicy(null, false),
+              SagaOperation.START_SAGA, new ExpectedPolicy(SagaRole.WRITE, true),
+              SagaOperation.GET_SAGA, new ExpectedPolicy(SagaRole.READ, false),
+              SagaOperation.AWAIT_SAGA, new ExpectedPolicy(SagaRole.READ, false)));
 
-  // The known saga operations. Starting a saga is one gRPC method (StartSaga) but two REST verbs
-  // (POST /sagas to create, PUT /sagas/{id} for a versioned start), so both verbs are listed
-  // against StartSaga to exercise each.
-  private static final List<Operation> OPERATIONS =
-      List.of(
-          new Operation("start (create)", "POST", "StartSaga", SagaRole.WRITE, true),
-          new Operation("start (versioned)", "PUT", "StartSaga", SagaRole.WRITE, true),
-          new Operation("get", "GET", "GetSaga", SagaRole.READ, false),
-          new Operation("await", "GET", "AwaitSaga", SagaRole.READ, false));
+  /** The expected operation for every gRPC method, by bare method name. */
+  private static final Map<String, SagaOperation> EXPECTED_GRPC_METHODS =
+      Map.of(
+          "StartSaga", SagaOperation.START_SAGA,
+          "GetSaga", SagaOperation.GET_SAGA,
+          "AwaitSaga", SagaOperation.AWAIT_SAGA);
+
+  /** The expected operation for every REST route, by {@code "METHOD path"}. */
+  private static final Map<String, SagaOperation> EXPECTED_REST_ROUTES =
+      Map.of(
+          "GET /health", SagaOperation.HEALTH,
+          "POST /sagas/{id}/steps/{stepName}/complete", SagaOperation.CALLBACK,
+          "POST /sagas", SagaOperation.START_SAGA,
+          "PUT /sagas/{id}", SagaOperation.START_SAGA,
+          "GET /sagas/{id}", SagaOperation.GET_SAGA);
+
+  private record ExpectedPolicy(@Nullable SagaRole role, boolean limited) {}
 
   @Test
-  void requiredRole_matchesExpectedAndAgreesAcrossTransports() {
-    for (Operation op : OPERATIONS) {
-      // Arrange / Act
-      SagaRole rest = SagaSecurityHandler.requiredRoleFor(op.restVerb());
-      SagaRole grpc = SagaSecurityInterceptor.requiredRoleFor(op.grpcMethod());
+  void policyTable_matchesExpected() {
+    // Assert — the table covers every operation, so a new one cannot be added without a decision
+    // being recorded here
+    assertThat(EXPECTED_POLICY.keySet())
+        .as("every SagaOperation must have an expected policy")
+        .containsExactlyInAnyOrder(SagaOperation.values());
 
-      // Assert — each transport resolves the expected role (so they cannot agree on a wrong value).
-      assertThat(rest)
-          .as("REST role for '%s' (%s)", op.name(), op.restVerb())
-          .isEqualTo(op.expectedRole());
-      assertThat(grpc)
-          .as("gRPC role for '%s' (%s)", op.name(), op.grpcMethod())
-          .isEqualTo(op.expectedRole());
-    }
+    EXPECTED_POLICY.forEach(
+        (operation, expected) -> {
+          assertThat(operation.requiredRole())
+              .as("required role for %s", operation)
+              .isEqualTo(expected.role());
+          assertThat(operation.rateLimited())
+              .as("rate-limit treatment for %s", operation)
+              .isEqualTo(expected.limited());
+        });
   }
 
   @Test
-  void rateLimitTreatment_matchesExpectedAndAgreesAcrossTransports() {
-    for (Operation op : OPERATIONS) {
-      // Arrange / Act
-      boolean rest = RateLimitHandler.isRateLimited(op.restVerb());
-      boolean grpc = SagaRateLimitInterceptor.isRateLimited(op.grpcMethod());
-
-      // Assert — each transport applies the expected rate-limit treatment.
-      assertThat(rest)
-          .as("REST rate-limit for '%s' (%s)", op.name(), op.restVerb())
-          .isEqualTo(op.expectedRateLimited());
-      assertThat(grpc)
-          .as("gRPC rate-limit for '%s' (%s)", op.name(), op.grpcMethod())
-          .isEqualTo(op.expectedRateLimited());
+  void grpcMethods_allMapToTheExpectedOperation() {
+    // Arrange — the generated descriptor is the source of truth for what is actually exposed
+    Set<String> exposed = new LinkedHashSet<>();
+    for (MethodDescriptor<?, ?> method : SagaServiceGrpc.getServiceDescriptor().getMethods()) {
+      exposed.add(method.getBareMethodName());
     }
+
+    // Assert — every exposed method resolves to the expected operation
+    assertThat(exposed)
+        .as("every exposed gRPC method must have an expected operation")
+        .containsExactlyInAnyOrderElementsOf(EXPECTED_GRPC_METHODS.keySet());
+    for (String bareMethodName : exposed) {
+      assertThat(GrpcOperations.fromBareMethodName(bareMethodName))
+          .as("operation for gRPC method '%s'", bareMethodName)
+          .isEqualTo(EXPECTED_GRPC_METHODS.get(bareMethodName));
+    }
+
+    // Assert — nothing is mapped that is not a real method (a stale mapping hides a rename)
+    assertThat(GrpcOperations.mappedMethodNames())
+        .as("no mapped gRPC method may be absent from the service descriptor")
+        .containsExactlyInAnyOrderElementsOf(exposed);
+  }
+
+  @Test
+  void grpcMethod_unmappedGiven_resolvesToNoOperation() {
+    // Assert — an unmapped or absent method has no policy, so its interceptor refuses it rather
+    // than defaulting it to a role
+    assertThat(GrpcOperations.fromBareMethodName("NoSuchMethod")).isNull();
+    assertThat(GrpcOperations.fromBareMethodName(null)).isNull();
+  }
+
+  @Test
+  void restRoutes_allCarryTheExpectedOperation() {
+    // Arrange — register the real routes, exactly as SagaServer does
+    Javalin app = Javalin.create();
+    HealthResource.register(app);
+    SagaResource.register(app, mock(SagaOrchestrator.class), 0L);
+    CallbackResource.register(
+        app, mock(DefaultSagaOrchestrator.class), "test-secret", 0L, Clock.systemUTC());
+
+    // Act — enumerate what was actually registered, skipping the before/after handlers
+    Map<String, SagaOperation> registered = new HashMap<>();
+    Set<String> untagged = new LinkedHashSet<>();
+    for (Endpoint endpoint : registeredHttpEndpoints(app)) {
+      String route = endpoint.getMethod() + " " + endpoint.getPath();
+      SagaOperation operation = operationOf(endpoint.getRoles());
+      if (operation == null) {
+        untagged.add(route);
+      } else {
+        registered.put(route, operation);
+      }
+    }
+
+    // Assert — no route may be registered without an operation. Such a route is refused at runtime
+    // (fail closed), so this assertion is what turns a forgotten tag into a build failure rather
+    // than a dead endpoint discovered in production.
+    assertThat(untagged).as("every registered REST route must declare a SagaOperation").isEmpty();
+    assertThat(registered)
+        .as("every REST route must carry the expected operation")
+        .containsExactlyInAnyOrderEntriesOf(EXPECTED_REST_ROUTES);
+  }
+
+  /**
+   * The app's registered HTTP-verb endpoints, excluding the before/after filter handlers. Reads the
+   * router straight off the config rather than through {@code javalinServlet()}, whose concrete
+   * type depends on which server backs the app.
+   */
+  private static Iterable<Endpoint> registeredHttpEndpoints(Javalin app) {
+    Set<Endpoint> endpoints = new LinkedHashSet<>();
+    app.unsafeConfig()
+        .pvt
+        .internalRouter
+        .allHttpHandlers()
+        .forEach(
+            parsed -> {
+              Endpoint endpoint = parsed.getEndpoint();
+              if (endpoint.getMethod().isHttpMethod()) {
+                endpoints.add(endpoint);
+              }
+            });
+    return endpoints;
+  }
+
+  private static @Nullable SagaOperation operationOf(Set<RouteRole> roles) {
+    for (RouteRole role : roles) {
+      if (role instanceof SagaOperation operation) {
+        return operation;
+      }
+    }
+    return null;
   }
 }

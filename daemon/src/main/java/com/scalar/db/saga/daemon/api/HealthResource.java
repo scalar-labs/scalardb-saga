@@ -1,5 +1,6 @@
 package com.scalar.db.saga.daemon.api;
 
+import com.scalar.db.saga.daemon.security.SagaOperation;
 import io.javalin.Javalin;
 import java.util.Map;
 
@@ -11,20 +12,19 @@ import java.util.Map;
  */
 public final class HealthResource {
 
-  /**
-   * The liveness route path. Exposed as a constant so the security layer can exempt this
-   * infrastructure probe — which carries no user credential — from caller-facing auth.
-   */
+  /** The liveness route path. */
   public static final String PATH = "/health";
 
   private HealthResource() {}
 
   /**
-   * Registers the liveness route on the given app.
+   * Registers the liveness route on the given app, tagged {@link SagaOperation#HEALTH} so the
+   * security layer exempts this infrastructure probe — which carries no user credential — from
+   * caller-facing auth.
    *
    * @param app the Javalin app
    */
   public static void register(Javalin app) {
-    app.get(PATH, ctx -> ctx.json(Map.of("status", "UP")));
+    app.get(PATH, ctx -> ctx.json(Map.of("status", "UP")), SagaOperation.HEALTH);
   }
 }

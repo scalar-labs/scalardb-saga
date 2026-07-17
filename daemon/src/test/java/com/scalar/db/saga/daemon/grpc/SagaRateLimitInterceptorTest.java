@@ -106,19 +106,6 @@ class SagaRateLimitInterceptorTest {
     }
   }
 
-  @Test
-  void isRateLimited_readMethods_areNotLimited() {
-    assertThat(SagaRateLimitInterceptor.isRateLimited("GetSaga")).isFalse();
-    assertThat(SagaRateLimitInterceptor.isRateLimited("AwaitSaga")).isFalse();
-  }
-
-  @Test
-  void isRateLimited_writeUnknownOrNullMethods_areLimited() {
-    assertThat(SagaRateLimitInterceptor.isRateLimited("StartSaga")).isTrue();
-    assertThat(SagaRateLimitInterceptor.isRateLimited("FutureMethod")).isTrue();
-    assertThat(SagaRateLimitInterceptor.isRateLimited(null)).isTrue();
-  }
-
   private SagaSnapshot start() {
     return stub()
         .startSaga(StartSagaRequest.newBuilder().setName("transfer").setAsync(true).build());

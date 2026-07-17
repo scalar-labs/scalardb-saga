@@ -10,7 +10,6 @@ import com.scalar.db.saga.daemon.api.SagaResource;
 import com.scalar.db.saga.daemon.grpc.SagaRateLimitInterceptor;
 import com.scalar.db.saga.daemon.grpc.SagaSecurityInterceptor;
 import com.scalar.db.saga.daemon.grpc.SagaServiceImpl;
-import com.scalar.db.saga.daemon.security.AuthExemptions;
 import com.scalar.db.saga.daemon.security.SagaSecurityHandler;
 import com.scalar.db.saga.daemon.security.SagaSecurityProvider;
 import com.scalar.db.saga.definition.SagaDefinition;
@@ -299,18 +298,18 @@ public final class SagaServer implements AutoCloseable {
   }
 
   private void registerRoutes(Javalin httpServer) {
-    // The RBAC before-handler authenticates every request except the exempt paths. Two routes carry
-    // no caller credential and so bypass it: the liveness probe (unauthenticated by design) and the
-    // async-callback route, which authenticates with its own per-step HMAC token rather than a JWT
-    // or API key. Without the callback exemption, a real provider would reject a participant's
-    // callback with 401 before its HMAC check ran, breaking async completion.
-    SagaSecurityHandler.register(
-        httpServer,
-        securityProvider,
-        AuthExemptions.of(HealthResource.PATH, CallbackResource.PATH));
-    // Rate limiting runs after auth (it keys off the resolved principal) and only when enabled;
-    // registered before the routes so it gates saga-start requests. The same limiter also gates the
-    // gRPC transport (see buildGrpcServer), so the budget is per caller, not per port.
+    // The RBAC handler authenticates every matched route according to the SagaOperation the route
+    // declares; the two routes that carry no caller credential (the liveness probe, and the
+    // async-callback route with its own per-step HMAC) are tagged with an auth-exempt operation
+    // rather than listed here, so a route's policy travels with its registration.
+    SagaSecurityHandler.register(httpServer, securityProvider);
+    // Rate limiting runs after auth (it keys off the resolved principal) and only when enabled.
+    // Both
+    // are beforeMatched handlers, and this registration order is what puts the limiter after the
+    // authenticator; Javalin would run either ahead of the other only if they were on different
+    // stages. The same limiter also gates the gRPC transport (see buildGrpcServer), so the budget
+    // is
+    // per caller, not per port.
     if (rateLimiter != null) {
       RateLimitHandler.register(httpServer, rateLimiter);
     }
