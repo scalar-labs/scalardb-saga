@@ -565,7 +565,8 @@ class ScalarDbSagaStoreTest {
     when(retryTx.get(any(Get.class))).thenReturn(Optional.empty());
 
     // Act & Assert
-    assertThatThrownBy(() -> store.recordStatusEvent(current, 5, StatusEvent.compensating()))
+    assertThatThrownBy(
+            () -> store.recordStatusEvent(current, 5, StatusEvent.compensating(), "engine-1"))
         .isInstanceOf(SagaConcurrentModificationException.class);
   }
 
@@ -590,7 +591,8 @@ class ScalarDbSagaStoreTest {
     when(loadTx.scan(any(Scan.class))).thenReturn(List.of(compensatingState));
 
     // Act
-    SagaStateSnapshot result = store.recordStatusEvent(current, 5, StatusEvent.compensating());
+    SagaStateSnapshot result =
+        store.recordStatusEvent(current, 5, StatusEvent.compensating(), "engine-2");
 
     // Assert
     assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPENSATING);
