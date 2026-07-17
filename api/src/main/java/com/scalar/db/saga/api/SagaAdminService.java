@@ -1,6 +1,7 @@
 package com.scalar.db.saga.api;
 
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
+import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
 
@@ -19,7 +20,10 @@ import com.scalar.db.saga.exception.SagaStatePreconditionException;
  * SagaStatePreconditionException} (wrong state — HTTP 422). Losing an optimistic-concurrency race
  * to a concurrent writer (another operator, or automatic recovery) throws {@link
  * SagaConcurrentModificationException} (HTTP 409). A missing saga throws {@link
- * SagaNotFoundException} (HTTP 404).
+ * SagaNotFoundException} (HTTP 404). A mutation that must drive the saga needs its definition; if
+ * the registry no longer holds the one the saga was started with, it throws {@link
+ * SagaDefinitionNotFoundException} (HTTP 404). Re-register the definition to make the saga
+ * recoverable.
  */
 public interface SagaAdminService extends AutoCloseable {
 
@@ -65,6 +69,8 @@ public interface SagaAdminService extends AutoCloseable {
    * @throws SagaNotFoundException if no such saga exists
    * @throws SagaStatePreconditionException if the saga is {@code ESCALATED} (use {@link
    *     #resetEscalated} or {@link #forceComplete}), {@code WAITING}, or terminal
+   * @throws SagaDefinitionNotFoundException if the saga's definition is no longer registered, so
+   *     the engine cannot drive it
    * @throws SagaConcurrentModificationException if a concurrent writer changed the saga first
    */
   SagaStateSnapshot recoverSaga(String sagaId, String reason);
@@ -97,6 +103,9 @@ public interface SagaAdminService extends AutoCloseable {
    *     {@code COMPENSATED}, still {@code COMPENSATING}, or {@code WAITING})
    * @throws SagaNotFoundException if no such saga exists
    * @throws SagaStatePreconditionException if the saga is not {@code ESCALATED}
+   * @throws SagaDefinitionNotFoundException if the saga's definition is no longer registered, so
+   *     the engine cannot drive it — the single-saga counterpart of the bulk form's {@link
+   *     ResetResult.SkipReason#DEFINITION_NOT_FOUND}
    * @throws SagaConcurrentModificationException if a concurrent writer changed the saga first
    */
   SagaStateSnapshot resetEscalated(String sagaId, String reason);
