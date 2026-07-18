@@ -2,9 +2,11 @@ package com.scalar.db.saga.daemon.grpc;
 
 import com.scalar.db.saga.daemon.api.InvalidRequestException;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
+import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
+import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import org.jspecify.annotations.Nullable;
@@ -48,6 +50,17 @@ final class GrpcErrorMapper {
       // No existing-snapshot detail: the client re-fetches via GetSaga if it needs it.
       return status(
           Status.Code.ALREADY_EXISTS, "A saga already exists with id '" + e.getSagaId() + "'");
+    }
+    if (t instanceof SagaStatePreconditionException e) {
+      // An admin mutation on a saga in the wrong state — a precondition failure, not transient, so
+      // FAILED_PRECONDITION (the gRPC analogue of REST 422). The daemon-owned code is surfaced (its
+      // wording is the contract); the exception's message is not.
+      return status(Status.Code.FAILED_PRECONDITION, e.getCode().name());
+    }
+    if (t instanceof SagaConcurrentModificationException) {
+      // A lost compare-and-set — a transient race, so ABORTED (the gRPC analogue of REST 409); a
+      // retry may now succeed against the new state.
+      return status(Status.Code.ABORTED, "The saga was concurrently modified; retry");
     }
     if (t instanceof SagaPersistenceException e) {
       // A transient store failure is retryable (UNAVAILABLE); a permanent one (e.g. a serialization

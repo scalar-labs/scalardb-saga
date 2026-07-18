@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package rpc;
+
+option java_multiple_files = true;
+option java_package = "com.scalar.db.saga.rpc";
+option java_outer_classname = "AdminProto";
+
+import "google/protobuf/timestamp.proto";
+import "saga.proto";
+
+// The gRPC rendering of the saga operational control plane — the wire parallel of the daemon's
+// SagaAdminResource (REST). List sagas, and the direction-agnostic operator interventions. Every
+// method requires the ADMIN role; the operator identity is taken from the authenticated call, never
+// from a request field, so a caller cannot forge who acted. A wrong-state precondition is
+// FAILED_PRECONDITION; a lost compare-and-set is ABORTED (the gRPC analogues of REST 422 / 409).
+service AdminService {
+  // Lists sagas matching the filter, one page at a time. Drive pagination by the response's
+  // `next_page_token` until it is absent.
+  rpc ListSagas (ListSagasRequest) returns (ListSagasResponse);
+
+  // Recovers a stuck (RUNNING/COMPENSATING) saga by driving it in the direction the engine's pivot
+  // chooses. FAILED_PRECONDITION if the saga is ESCALATED, WAITING, or terminal.
+  rpc RecoverSaga (InterventionRequest) returns (SagaSnapshot);
+
+  // Overrides an ESCALATED saga to COMPLETED. FAILED_PRECONDITION if it is not ESCALATED.
+  rpc ForceComplete (InterventionRequest) returns (SagaSnapshot);
+
+  // Un-escalates one ESCALATED saga and drives it. FAILED_PRECONDITION if it is not ESCALATED.
+  rpc ResetEscalated (InterventionRequest) returns (SagaSnapshot);
+
+  // Un-escalates a page of ESCALATED sagas, handing each drive to the recovery loop; returns the
+  // per-page counts and the token to continue the sweep.
+  rpc ResetEscalatedBulk (ResetEscalatedBulkRequest) returns (ResetResult);
+}
+
+// A single-saga intervention: which saga, and the operator's reason (recorded for audit; the engine
+// rejects a blank reason as INVALID_ARGUMENT). The operator identity is NOT here — it comes from the
+// authenticated call.
+message InterventionRequest {
+  string saga_id = 1;
+  string reason = 2;
+}
+
+message ListSagasRequest {
+  optional SagaStatus status = 1;                      // status filter; absent = all statuses
+  optional google.protobuf.Timestamp updated_after = 2;   // inclusive lower bound on updated_at
+  optional google.protobuf.Timestamp updated_before = 3;  // inclusive upper bound on updated_at
+  optional int32 page_size = 4;                        // target page size; server clamps the range
+  optional string page_token = 5;                      // opaque continuation token
+}
+
+message ListSagasResponse {
+  repeated SagaSnapshot sagas = 1;
+  optional string next_page_token = 2;  // absent on the last page
+}
+
+message ResetEscalatedBulkRequest {
+  string reason = 1;                                   // operator reason (recorded per row)
+  optional google.protobuf.Timestamp updated_after = 2;
+  optional google.protobuf.Timestamp updated_before = 3;
+  optional int32 page_size = 4;
+  optional string page_token = 5;
+  // No status filter: the sweep is defined as ESCALATED sagas, which the engine pins.
+}
+
+message ResetResult {
+  int32 reset_count = 1;
+  repeated SkippedSaga skipped = 2;
+  optional string next_page_token = 3;  // absent when the sweep reached the end of the matching set
+}
+
+// A saga the sweep matched but did not reset, with a machine-readable reason and optional detail.
+message SkippedSaga {
+  string saga_id = 1;
+  SkipReason reason = 2;
+  optional string detail = 3;
+}
+
+// Mapped to/from the api ResetResult.SkipReason enum BY NAME (as with SagaStatus, the zero value is
+// a proto3-reserved _UNSPECIFIED with no api counterpart).
+enum SkipReason {
+  SKIP_REASON_UNSPECIFIED = 0;
+  SKIP_REASON_CONCURRENT_MODIFICATION = 1;
+  SKIP_REASON_DEFINITION_NOT_FOUND = 2;
+  SKIP_REASON_CORRUPT_EVENT_STREAM = 3;
+}

@@ -11,6 +11,7 @@ import com.scalar.db.saga.daemon.api.SagaResource;
 import com.scalar.db.saga.daemon.security.SagaOperation;
 import com.scalar.db.saga.daemon.security.SagaRole;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
+import com.scalar.db.saga.rpc.AdminServiceGrpc;
 import com.scalar.db.saga.rpc.SagaServiceGrpc;
 import io.grpc.MethodDescriptor;
 import io.javalin.Javalin;
@@ -65,12 +66,18 @@ class TransportPolicyParityTest {
               Map.entry(SagaOperation.FORCE_COMPLETE, new ExpectedPolicy(SagaRole.ADMIN, true)),
               Map.entry(SagaOperation.RESET_ESCALATED, new ExpectedPolicy(SagaRole.ADMIN, true))));
 
-  /** The expected operation for every gRPC method, by bare method name. */
+  /** The expected operation for every gRPC method (across both services), by bare method name. */
   private static final Map<String, SagaOperation> EXPECTED_GRPC_METHODS =
-      Map.of(
-          "StartSaga", SagaOperation.START_SAGA,
-          "GetSaga", SagaOperation.GET_SAGA,
-          "AwaitSaga", SagaOperation.AWAIT_SAGA);
+      Map.ofEntries(
+          Map.entry("StartSaga", SagaOperation.START_SAGA),
+          Map.entry("GetSaga", SagaOperation.GET_SAGA),
+          Map.entry("AwaitSaga", SagaOperation.AWAIT_SAGA),
+          Map.entry("GetSagaDetail", SagaOperation.GET_SAGA_DETAIL),
+          Map.entry("ListSagas", SagaOperation.LIST_SAGAS),
+          Map.entry("RecoverSaga", SagaOperation.RECOVER_SAGA),
+          Map.entry("ForceComplete", SagaOperation.FORCE_COMPLETE),
+          Map.entry("ResetEscalated", SagaOperation.RESET_ESCALATED),
+          Map.entry("ResetEscalatedBulk", SagaOperation.RESET_ESCALATED));
 
   /** The expected operation for every REST route, by {@code "METHOD path"}. */
   private static final Map<String, SagaOperation> EXPECTED_REST_ROUTES =
@@ -110,9 +117,14 @@ class TransportPolicyParityTest {
 
   @Test
   void grpcMethods_allMapToTheExpectedOperation() {
-    // Arrange — the generated descriptor is the source of truth for what is actually exposed
+    // Arrange — the generated descriptors are the source of truth for what is actually exposed,
+    // over
+    // both the saga service and the admin service
     Set<String> exposed = new LinkedHashSet<>();
     for (MethodDescriptor<?, ?> method : SagaServiceGrpc.getServiceDescriptor().getMethods()) {
+      exposed.add(method.getBareMethodName());
+    }
+    for (MethodDescriptor<?, ?> method : AdminServiceGrpc.getServiceDescriptor().getMethods()) {
       exposed.add(method.getBareMethodName());
     }
 

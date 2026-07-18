@@ -20,10 +20,16 @@ import org.jspecify.annotations.Nullable;
 final class GrpcOperations {
 
   private static final Map<String, SagaOperation> BY_BARE_METHOD_NAME =
-      Map.of(
-          "StartSaga", SagaOperation.START_SAGA,
-          "GetSaga", SagaOperation.GET_SAGA,
-          "AwaitSaga", SagaOperation.AWAIT_SAGA);
+      Map.ofEntries(
+          Map.entry("StartSaga", SagaOperation.START_SAGA),
+          Map.entry("GetSaga", SagaOperation.GET_SAGA),
+          Map.entry("AwaitSaga", SagaOperation.AWAIT_SAGA),
+          Map.entry("GetSagaDetail", SagaOperation.GET_SAGA_DETAIL),
+          Map.entry("ListSagas", SagaOperation.LIST_SAGAS),
+          Map.entry("RecoverSaga", SagaOperation.RECOVER_SAGA),
+          Map.entry("ForceComplete", SagaOperation.FORCE_COMPLETE),
+          Map.entry("ResetEscalated", SagaOperation.RESET_ESCALATED),
+          Map.entry("ResetEscalatedBulk", SagaOperation.RESET_ESCALATED));
 
   private GrpcOperations() {}
 

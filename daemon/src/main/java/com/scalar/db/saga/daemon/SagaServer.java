@@ -8,6 +8,7 @@ import com.scalar.db.saga.daemon.api.RateLimitHandler;
 import com.scalar.db.saga.daemon.api.RateLimiter;
 import com.scalar.db.saga.daemon.api.SagaAdminResource;
 import com.scalar.db.saga.daemon.api.SagaResource;
+import com.scalar.db.saga.daemon.grpc.AdminServiceImpl;
 import com.scalar.db.saga.daemon.grpc.SagaRateLimitInterceptor;
 import com.scalar.db.saga.daemon.grpc.SagaSecurityInterceptor;
 import com.scalar.db.saga.daemon.grpc.SagaServiceImpl;
@@ -18,7 +19,9 @@ import com.scalar.db.saga.definition.SagaDefinitionParser;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.store.ScalarDbSagaStoreFactory;
+import io.grpc.BindableService;
 import io.grpc.Server;
+import io.grpc.ServerInterceptor;
 import io.grpc.ServerInterceptors;
 import io.grpc.ServerServiceDefinition;
 import io.grpc.netty.NettyServerBuilder;
@@ -31,6 +34,7 @@ import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
@@ -162,23 +166,37 @@ public final class SagaServer implements AutoCloseable {
   private Server buildGrpcServer(ExecutorService executor, HealthStatusManager health) {
     SagaServiceImpl service =
         new SagaServiceImpl(orchestrator, config.syncTimeoutMillis(), config.syncMaxWaitMillis());
+    AdminServiceImpl adminService = new AdminServiceImpl(orchestrator, adminDriveDeadlineMillis());
     SagaSecurityInterceptor security = new SagaSecurityInterceptor(securityProvider);
-    // interceptForward runs interceptors in listed order: authenticate first so the identity is on
-    // the Context, then (when enabled) rate-limit reads it — the gRPC analogue of the REST
-    // before-handler order.
-    ServerServiceDefinition sagaService =
-        rateLimiter == null
-            ? ServerInterceptors.intercept(service, security)
-            : ServerInterceptors.interceptForward(
-                service, security, new SagaRateLimitInterceptor(rateLimiter));
     return NettyServerBuilder.forAddress(new InetSocketAddress(config.host(), config.grpcPort()))
-        .addService(sagaService)
+        .addService(intercepted(service, security))
+        .addService(intercepted(adminService, security))
         .addService(health.getHealthService())
         .maxInboundMessageSize(config.grpcMaxInboundMessageBytes())
         .maxInboundMetadataSize(8 * 1024)
         .executor(executor)
         .permitKeepAliveTime(1, TimeUnit.MINUTES)
         .build();
+  }
+
+  /**
+   * Wraps a service with the security interceptor and, when rate limiting is enabled, the
+   * rate-limit interceptor. This is <b>load-bearing for every service that carries privileged RPCs,
+   * the admin service above all</b>: a bare {@code addService(adminService)} would ship every
+   * destructive admin RPC unauthenticated (identical to the deliberately-exempt health service).
+   * The interceptors are applied per service, so each intercepted service must be wrapped here — a
+   * missed wrap does not fail to compile, it silently exposes the service. {@code interceptForward}
+   * runs the interceptors in list order, so authentication runs first — putting the identity on the
+   * {@code Context} — before rate limiting reads it (the gRPC analogue of the REST handler order).
+   */
+  private ServerServiceDefinition intercepted(
+      BindableService service, SagaSecurityInterceptor security) {
+    List<ServerInterceptor> interceptors = new ArrayList<>();
+    interceptors.add(security);
+    if (rateLimiter != null) {
+      interceptors.add(new SagaRateLimitInterceptor(rateLimiter));
+    }
+    return ServerInterceptors.interceptForward(service, interceptors);
   }
 
   private static DefaultSagaOrchestrator buildDefaultSagaOrchestrator(SagaServerConfig config) {

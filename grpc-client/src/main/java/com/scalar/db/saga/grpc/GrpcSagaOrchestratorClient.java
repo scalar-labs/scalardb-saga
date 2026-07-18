@@ -14,6 +14,7 @@ import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaTimeoutException;
 import com.scalar.db.saga.exception.SagaUnavailableException;
 import com.scalar.db.saga.rpc.AwaitSagaRequest;
+import com.scalar.db.saga.rpc.GetSagaDetailRequest;
 import com.scalar.db.saga.rpc.GetSagaRequest;
 import com.scalar.db.saga.rpc.SagaServiceGrpc;
 import com.scalar.db.saga.rpc.SagaServiceGrpc.SagaServiceBlockingStub;
@@ -202,7 +203,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
     Objects.requireNonNull(sagaId, "sagaId must not be null");
     try {
       SagaSnapshot snapshot = stub().getSaga(GetSagaRequest.newBuilder().setSagaId(sagaId).build());
-      return ClientProtoMappers.toApi(snapshot);
+      return ClientProtoMappers.fromProto(snapshot);
     } catch (StatusRuntimeException e) {
       throw mapSagaCall(e, sagaId);
     }
@@ -210,11 +211,14 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
 
   @Override
   public SagaDetail getSagaDetail(String sagaId) {
-    // Placeholder until the gRPC SagaService gains a GetSagaDetail RPC and the mapper for it. Wired
-    // when the admin/detail surface lands on the wire; until then an embedded caller has the read
-    // and a gRPC caller does not.
-    throw new UnsupportedOperationException(
-        "getSagaDetail is not yet available over the gRPC client");
+    Objects.requireNonNull(sagaId, "sagaId must not be null");
+    try {
+      com.scalar.db.saga.rpc.SagaDetail detail =
+          stub().getSagaDetail(GetSagaDetailRequest.newBuilder().setSagaId(sagaId).build());
+      return ClientProtoMappers.fromProto(detail);
+    } catch (StatusRuntimeException e) {
+      throw mapSagaCall(e, sagaId);
+    }
   }
 
   @Override

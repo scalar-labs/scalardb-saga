@@ -27,6 +27,11 @@ service SagaService {
 
   // Returns the current snapshot; NOT_FOUND if no saga has the given id.
   rpc GetSaga (GetSagaRequest) returns (SagaSnapshot);
+
+  // Returns a saga's state plus its redacted event timeline (metadata and failure error /
+  // intervention reason only — never a raw step input/output payload). An application read for
+  // diagnosing its own saga's failure; NOT_FOUND if no saga has the given id.
+  rpc GetSagaDetail (GetSagaDetailRequest) returns (SagaDetail);
 }
 
 message StartSagaRequest {
@@ -44,6 +49,28 @@ message AwaitSagaRequest {
 
 message GetSagaRequest {
   string saga_id = 1;
+}
+
+message GetSagaDetailRequest {
+  string saga_id = 1;
+}
+
+message SagaDetail {
+  SagaSnapshot saga = 1;
+  repeated TimelineEvent timeline = 2;
+}
+
+// One event in a saga's timeline. Carries metadata plus the failure error or intervention reason
+// only; a raw step input/output payload is never included. The nullable api fields are proto3
+// `optional` so absence round-trips (a missing `detail` is distinct from an empty one).
+message TimelineEvent {
+  google.protobuf.Timestamp timestamp = 1;
+  string type = 2;                        // the event type name (e.g. STEP_FAILED)
+  optional int32 step_index = 3;          // set for step events
+  optional string step_name = 4;          // set for step events
+  optional SagaStatus resulting_status = 5;  // set for status events
+  optional string detail = 6;             // failure error or intervention reason, when present
+  optional string operator = 7;           // the operator, for an intervention event
 }
 
 message SagaSnapshot {

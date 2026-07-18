@@ -1,11 +1,16 @@
 package com.scalar.db.saga.grpc;
 
 import com.google.protobuf.Timestamp;
+import com.scalar.db.saga.api.SagaDetail;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.api.TimelineEvent;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.rpc.SagaSnapshot;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Converts the generated {@code rpc} wire types back to api value types — the inverse of the
@@ -23,11 +28,11 @@ final class ClientProtoMappers {
    * server-internal recovery-coordination field that the remote API deliberately does not surface
    * (parity with the REST DTO), so a remote snapshot never carries a real owner.
    */
-  static SagaStateSnapshot toApi(SagaSnapshot snapshot) {
+  static SagaStateSnapshot fromProto(SagaSnapshot snapshot) {
     return new SagaStateSnapshot(
         snapshot.getSagaId(),
         snapshot.getName(),
-        toApiStatus(snapshot.getStatus()),
+        fromProtoStatus(snapshot.getStatus()),
         "",
         snapshot.getDefinitionVersion(),
         toInstant(snapshot.getCreatedAt()),
@@ -40,7 +45,7 @@ final class ClientProtoMappers {
    * SAGA_STATUS_UNSPECIFIED} and the proto3 {@code UNRECOGNIZED} sentinel loudly rather than
    * degrading silently.
    */
-  static SagaStatus toApiStatus(com.scalar.db.saga.rpc.SagaStatus status) {
+  static SagaStatus fromProtoStatus(com.scalar.db.saga.rpc.SagaStatus status) {
     String name = status.name();
     if (!name.startsWith(STATUS_PREFIX) || name.equals(STATUS_PREFIX + "UNSPECIFIED")) {
       throw new SagaRuntimeException("Unexpected wire saga status: " + name);
@@ -50,6 +55,36 @@ final class ClientProtoMappers {
     } catch (IllegalArgumentException e) {
       throw new SagaRuntimeException("Unexpected wire saga status: " + name, e);
     }
+  }
+
+  /** Maps a wire detail (snapshot + timeline) back to an api detail. */
+  static SagaDetail fromProto(com.scalar.db.saga.rpc.SagaDetail detail) {
+    List<TimelineEvent> timeline = new ArrayList<>(detail.getTimelineCount());
+    for (com.scalar.db.saga.rpc.TimelineEvent event : detail.getTimelineList()) {
+      timeline.add(fromProto(event));
+    }
+    return new SagaDetail(fromProto(detail.getSaga()), timeline);
+  }
+
+  /**
+   * Maps one wire timeline event back to an api event. A proto3 {@code optional} that is unset maps
+   * to a {@code null} api field, the inverse of the server mapper's set-only-when-present.
+   */
+  static TimelineEvent fromProto(com.scalar.db.saga.rpc.TimelineEvent event) {
+    @Nullable Integer stepIndex = event.hasStepIndex() ? event.getStepIndex() : null;
+    @Nullable String stepName = event.hasStepName() ? event.getStepName() : null;
+    @Nullable SagaStatus resultingStatus =
+        event.hasResultingStatus() ? fromProtoStatus(event.getResultingStatus()) : null;
+    @Nullable String detail = event.hasDetail() ? event.getDetail() : null;
+    @Nullable String operator = event.hasOperator() ? event.getOperator() : null;
+    return new TimelineEvent(
+        toInstant(event.getTimestamp()),
+        event.getType(),
+        stepIndex,
+        stepName,
+        resultingStatus,
+        detail,
+        operator);
   }
 
   private static Instant toInstant(Timestamp timestamp) {

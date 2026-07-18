@@ -10,7 +10,9 @@ import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.daemon.api.InvalidRequestException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.rpc.AwaitSagaRequest;
+import com.scalar.db.saga.rpc.GetSagaDetailRequest;
 import com.scalar.db.saga.rpc.GetSagaRequest;
+import com.scalar.db.saga.rpc.SagaDetail;
 import com.scalar.db.saga.rpc.SagaServiceGrpc;
 import com.scalar.db.saga.rpc.SagaSnapshot;
 import com.scalar.db.saga.rpc.StartSagaRequest;
@@ -107,6 +109,18 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
   public void getSaga(GetSagaRequest request, StreamObserver<SagaSnapshot> responseObserver) {
     try {
       respond(responseObserver, orchestrator.getStateSnapshot(request.getSagaId()));
+    } catch (RuntimeException e) {
+      responseObserver.onError(GrpcErrorMapper.toStatusRuntimeException(e));
+    }
+  }
+
+  @Override
+  public void getSagaDetail(
+      GetSagaDetailRequest request, StreamObserver<SagaDetail> responseObserver) {
+    try {
+      responseObserver.onNext(
+          ProtoMappers.toProto(orchestrator.getSagaDetail(request.getSagaId())));
+      responseObserver.onCompleted();
     } catch (RuntimeException e) {
       responseObserver.onError(GrpcErrorMapper.toStatusRuntimeException(e));
     }

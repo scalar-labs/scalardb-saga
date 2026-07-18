@@ -13,14 +13,17 @@ import static org.mockito.Mockito.when;
 import com.google.protobuf.ByteString;
 import com.scalar.db.saga.api.SagaCallback;
 import com.scalar.db.saga.api.SagaDefinitionId;
+import com.scalar.db.saga.api.SagaDetail;
 import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.api.TimelineEvent;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.rpc.AwaitSagaRequest;
+import com.scalar.db.saga.rpc.GetSagaDetailRequest;
 import com.scalar.db.saga.rpc.GetSagaRequest;
 import com.scalar.db.saga.rpc.SagaServiceGrpc;
 import com.scalar.db.saga.rpc.SagaServiceGrpc.SagaServiceBlockingStub;
@@ -55,6 +58,8 @@ import org.mockito.ArgumentCaptor;
  * bound (genuine timed wait), or never (the bound elapses and the running snapshot is returned).
  */
 class SagaServiceImplTest {
+
+  private static final Instant TS = Instant.ofEpochSecond(1_700_000_000L, 123);
 
   private SagaOrchestrator orchestrator;
   private final List<ManagedChannel> channels = new ArrayList<>();
@@ -136,6 +141,54 @@ class SagaServiceImplTest {
     verify(orchestrator).getStateSnapshot("s-9");
     assertThat(response.getStatus())
         .isEqualTo(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_COMPLETED);
+  }
+
+  @Test
+  void getSagaDetail_delegatesAndMapsTimeline() {
+    // Arrange — a nullable-field mix: a step event (index/name, no status) and an intervention
+    // status event (status/operator/reason)
+    SagaStateSnapshot snap = snapshot("s-7", SagaStatus.COMPENSATED);
+    TimelineEvent stepFailed =
+        new TimelineEvent(TS, "STEP_FAILED", 1, "credit", null, "gateway down", null);
+    TimelineEvent recovering =
+        new TimelineEvent(
+            TS, "SAGA_RECOVERING", null, null, SagaStatus.COMPENSATING, "rolling back", "bob");
+    when(orchestrator.getSagaDetail("s-7"))
+        .thenReturn(new SagaDetail(snap, List.of(stepFailed, recovering)));
+
+    // Act
+    com.scalar.db.saga.rpc.SagaDetail response =
+        stub(0).getSagaDetail(GetSagaDetailRequest.newBuilder().setSagaId("s-7").build());
+
+    // Assert — the snapshot maps, and the nullable fields round-trip as set/unset optionals
+    verify(orchestrator).getSagaDetail("s-7");
+    assertThat(response.getSaga().getStatus())
+        .isEqualTo(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_COMPENSATED);
+    assertThat(response.getTimelineCount()).isEqualTo(2);
+
+    com.scalar.db.saga.rpc.TimelineEvent step = response.getTimeline(0);
+    assertThat(step.getType()).isEqualTo("STEP_FAILED");
+    assertThat(step.getStepIndex()).isEqualTo(1);
+    assertThat(step.getStepName()).isEqualTo("credit");
+    assertThat(step.getDetail()).isEqualTo("gateway down");
+    assertThat(step.hasResultingStatus()).isFalse();
+    assertThat(step.hasOperator()).isFalse();
+
+    com.scalar.db.saga.rpc.TimelineEvent status = response.getTimeline(1);
+    assertThat(status.hasStepIndex()).isFalse();
+    assertThat(status.getResultingStatus())
+        .isEqualTo(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_COMPENSATING);
+    assertThat(status.getOperator()).isEqualTo("bob");
+    assertThat(status.getDetail()).isEqualTo("rolling back");
+  }
+
+  @Test
+  void getSagaDetail_sagaNotFound_returnsNotFound() {
+    when(orchestrator.getSagaDetail("missing")).thenThrow(new SagaNotFoundException("missing"));
+
+    assertCode(
+        () -> stub(0).getSagaDetail(GetSagaDetailRequest.newBuilder().setSagaId("missing").build()),
+        Status.Code.NOT_FOUND);
   }
 
   @Test
