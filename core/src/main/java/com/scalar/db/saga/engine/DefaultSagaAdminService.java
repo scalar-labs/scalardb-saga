@@ -24,8 +24,14 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import net.jcip.annotations.ThreadSafe;
 import org.jspecify.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Embedded implementation of the {@link SagaAdminService} control plane. Reads delegate to the
@@ -39,28 +45,68 @@ import org.jspecify.annotations.Nullable;
  * to the recovery loop (via {@link SagaStore#markForRecovery}), so one call never blocks on a whole
  * page of participant round-trips.
  *
+ * <p>A single-saga drive can also be bounded, by constructing with a positive drive deadline: past
+ * it the drive is abandoned and the saga's current state returned, leaving the recovery loop to
+ * finish. Both cases lean on the same property the bulk sweep already does — the status transition
+ * is the durable work and the drive is only an optimization — so the caller tells a settled drive
+ * from an abandoned one by whether the returned status is terminal. Embedded callers leave the
+ * deadline unset and drive to completion.
+ *
  * <p>The operator identity is read from the injected {@link OperatorContext}, never from the
- * caller; every mutation requires a non-blank {@code reason}, sanitized before it is persisted.
+ * caller; every mutation requires a non-blank {@code reason}, sanitized before it is persisted, and
+ * an operator unfit to persist is rejected outright rather than mutated to fit.
  */
 @ThreadSafe
 public class DefaultSagaAdminService implements SagaAdminService {
 
+  private static final Logger logger = LoggerFactory.getLogger(DefaultSagaAdminService.class);
+
   private static final int MAX_REASON_LENGTH = 1024;
+
+  /**
+   * The longest operator principal that may be stamped on an audit record. 256 clears every
+   * realistic principal shape with headroom — RFC 5321 caps an email address at 254 octets, and a
+   * JWT {@code sub} is far shorter in practice — while staying well under {@link
+   * #MAX_REASON_LENGTH}: a principal should never run longer than a sentence of justification.
+   */
+  private static final int MAX_OPERATOR_LENGTH = 256;
 
   private final SagaStore store;
   private final SagaEngine engine;
   private final SagaDefinitionRegistry definitionRegistry;
   private final OperatorContext operatorContext;
+  private final long driveDeadlineMillis;
 
+  /** Creates a service whose single-saga drives run to completion on the calling thread. */
   DefaultSagaAdminService(
       SagaStore store,
       SagaEngine engine,
       SagaDefinitionRegistry definitionRegistry,
       OperatorContext operatorContext) {
+    this(store, engine, definitionRegistry, operatorContext, 0L);
+  }
+
+  /**
+   * Creates a service that bounds how long a single-saga mutation drives before returning.
+   *
+   * @param driveDeadlineMillis the longest a {@code recoverSaga} or single-saga {@code
+   *     resetEscalated} call drives before returning the saga's current state and leaving the rest
+   *     to the recovery loop. {@code 0} or less drives on the calling thread with no bound, which
+   *     is what an embedded caller wants: there is no request to time out, and the caller chose to
+   *     block. A server exposing these over a transport should pass its own request budget, so a
+   *     slow saga cannot pin a request thread past a gateway's patience.
+   */
+  DefaultSagaAdminService(
+      SagaStore store,
+      SagaEngine engine,
+      SagaDefinitionRegistry definitionRegistry,
+      OperatorContext operatorContext,
+      long driveDeadlineMillis) {
     this.store = store;
     this.engine = engine;
     this.definitionRegistry = definitionRegistry;
     this.operatorContext = operatorContext;
+    this.driveDeadlineMillis = driveDeadlineMillis;
   }
 
   // ---------------------------------------------------------------------------
@@ -332,9 +378,16 @@ public class DefaultSagaAdminService implements SagaAdminService {
 
   /**
    * Records the audit-carrying status transition atomically (the CAS guard), then drives the saga
-   * inline in the resolved direction. The engine's compensate path skips its own transition when
-   * the saga is already {@code COMPENSATING} (the state the audit event just set), so there is no
-   * double transition.
+   * in the resolved direction. The engine's compensate path skips its own transition when the saga
+   * is already {@code COMPENSATING} (the state the audit event just set), so there is no double
+   * transition.
+   *
+   * <p>The order is the reason a drive deadline can exist at all: the transition is recorded
+   * <b>before</b> the drive starts and its failures — a lost CAS, a wrong state — surface from this
+   * method regardless of the deadline. Only the drive is bounded, and the drive is merely an
+   * optimization over letting the recovery loop pick the saga up, exactly as {@link #markReset}
+   * already relies on. A deadline around this method as a whole could expire before the transition
+   * was recorded, and would then have to report success for work that had not happened.
    */
   private SagaStateSnapshot recordAndRecover(
       SagaStateSnapshot snapshot,
@@ -347,8 +400,75 @@ public class DefaultSagaAdminService implements SagaAdminService {
         store.recordStatusEvent(snapshot, events.size(), interventionEvent, engine.ownerId());
     context.setCurrentState(recorded);
     context.setNextEventSequence(events.size() + 1);
-    engine.recover(action, def, context);
-    return context.getCurrentState();
+    if (driveDeadlineMillis <= 0) {
+      // Unbounded: drive on the calling thread, which is what an embedded caller wants and keeps
+      // this path identical to one with no deadline configured at all.
+      engine.recover(action, def, context);
+      return context.getCurrentState();
+    }
+    return boundedRecover(snapshot.getSagaId(), def, action, context);
+  }
+
+  /**
+   * Drives the saga on the engine's executor, waiting at most {@link #driveDeadlineMillis} for it.
+   * Past the deadline the drive is abandoned — not cancelled — and the saga's current stored state
+   * is returned; the recovery loop finishes what is left, since the un-escalation or resume
+   * transition is already durable.
+   *
+   * <p>The caller distinguishes the two outcomes from the returned status: terminal means the drive
+   * settled, non-terminal means it is still running. That is the same contract the daemon's bounded
+   * synchronous start already exposes, where a timeout is not an error but a {@code 202}.
+   *
+   * <p>On expiry the state is re-read from the store rather than taken from {@code context}: the
+   * abandoned drive still owns that context, which is not thread-safe, so reading it here would
+   * race. A normal completion is safe to read, because awaiting the future establishes the
+   * happens-before edge.
+   */
+  @SuppressWarnings(
+      "FutureReturnValueIgnored") // the post-deadline logging handler is fire-and-forget
+  private SagaStateSnapshot boundedRecover(
+      String sagaId, SagaDefinition def, RecoveryAction action, ExecutionContext context) {
+    CompletableFuture<Void> drive =
+        CompletableFuture.runAsync(() -> engine.recover(action, def, context), engine.executor());
+    try {
+      drive.get(driveDeadlineMillis, TimeUnit.MILLISECONDS);
+      return context.getCurrentState();
+    } catch (TimeoutException e) {
+      logger.info(
+          "Admin drive of saga {} exceeded the {}ms deadline; returning its current state and"
+              + " leaving the rest to recovery",
+          sagaId,
+          driveDeadlineMillis);
+      // The drive outlives this request, so its eventual failure would otherwise vanish into a
+      // future nobody holds.
+      drive.whenComplete(
+          (ignored, error) -> {
+            if (error != null) {
+              logger.warn("Abandoned admin drive of saga {} later failed", sagaId, error);
+            }
+          });
+      return requireSnapshot(sagaId);
+    } catch (InterruptedException e) {
+      // Shutdown, most likely. The transition is durable, so reporting the current state is honest.
+      Thread.currentThread().interrupt();
+      return requireSnapshot(sagaId);
+    } catch (ExecutionException e) {
+      throw rethrow(e.getCause());
+    }
+  }
+
+  /**
+   * Rethrows a drive failure as it would have surfaced had the drive run on this thread, so
+   * bounding it does not change which exception a caller sees.
+   */
+  private static RuntimeException rethrow(@Nullable Throwable cause) {
+    if (cause instanceof RuntimeException runtimeException) {
+      return runtimeException;
+    }
+    if (cause instanceof Error error) {
+      throw error;
+    }
+    return new IllegalStateException("Admin drive failed", cause);
   }
 
   // ---------------------------------------------------------------------------
@@ -425,11 +545,53 @@ public class DefaultSagaAdminService implements SagaAdminService {
     return sb.toString();
   }
 
+  /**
+   * Returns the operator to stamp on the audit record, rejecting one that is unfit to persist.
+   *
+   * <p>Unlike {@link #validateReason}, which sanitizes, this <b>rejects</b>. A reason is free text,
+   * so flattening a newline out of it is lossy but harmless. An operator is an identity: a mutated
+   * principal attributes the action to someone who is not exactly that principal, which is a false
+   * audit record — worse than no record at all, given the audit exists precisely to answer who did
+   * this. For the same reason the value is not trimmed; a principal with edge whitespace is a
+   * different principal, not a formatting artifact.
+   *
+   * <p>The checks live here, at the persist point every {@link OperatorContext} implementation
+   * funnels through, rather than in whichever caller supplies the identity. They are latent in
+   * embedded mode, whose principal is a fixed constant; they bind once a daemon wires an
+   * authenticated principal through. That principal is not forgeable — it comes from a signed token
+   * — but its <em>claim</em> is operator-configurable, and pointing it at a claim the end user can
+   * edit (some identity providers let a user set their own {@code name} or {@code email}) would
+   * otherwise put user-controlled text into an audit record unbounded and unchecked.
+   *
+   * <p>Failures are {@link IllegalStateException}, not {@link IllegalArgumentException}: the
+   * operator is injected by the server, so an unusable one is a server or identity-provider
+   * misconfiguration rather than a defect in the caller's request.
+   *
+   * @throws IllegalStateException if the operator is blank, over {@link #MAX_OPERATOR_LENGTH}
+   *     characters, or contains a control character
+   */
   private String operator() {
     String operator = operatorContext.currentOperator();
     if (operator.isBlank()) {
       throw new IllegalStateException(
-          "OperatorContext returned a blank operator; refusing to write an anonymous audit record");
+          "OperatorContext returned a blank operator; rejecting the admin operation rather than"
+              + " attributing it to an anonymous principal");
+    }
+    if (operator.length() > MAX_OPERATOR_LENGTH) {
+      // The value itself is deliberately kept out of the message: it is the untrusted thing here.
+      throw new IllegalStateException(
+          "OperatorContext returned an operator of "
+              + operator.length()
+              + " characters, over the maximum of "
+              + MAX_OPERATOR_LENGTH
+              + "; rejecting the admin operation");
+    }
+    for (int i = 0; i < operator.length(); i++) {
+      if (Character.isISOControl(operator.charAt(i))) {
+        throw new IllegalStateException(
+            "OperatorContext returned an operator containing a control character; rejecting the"
+                + " admin operation rather than attributing it to a mutated principal");
+      }
     }
     return operator;
   }

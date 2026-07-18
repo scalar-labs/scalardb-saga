@@ -188,6 +188,17 @@ public class SagaEngine implements AutoCloseable {
   }
 
   /**
+   * The engine's task executor, so a caller that must not block its own thread indefinitely can run
+   * a drive on it instead. A virtual thread per task, so submitting a drive that itself submits
+   * step executions cannot starve a pool. {@link #close()} shuts it down, which interrupts any
+   * drive still running — safe, because a drive is only ever an optimization over letting the
+   * recovery loop finish the saga.
+   */
+  ExecutorService executor() {
+    return executor;
+  }
+
+  /**
    * Carries out a resolved {@link RecoveryAction} by dispatching to {@link #compensateFrom} or
    * {@link #resumeFrom}. Shared by automatic recovery ({@link SagaRecoveryManager}) and the Admin
    * API so both drive a decided action the same way.

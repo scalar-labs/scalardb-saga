@@ -5,6 +5,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -34,6 +36,10 @@ import com.scalar.db.saga.store.StepEvent;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -56,6 +62,7 @@ class DefaultSagaAdminServiceTest {
   private SagaEngine engine;
   private SagaDefinitionRegistry registry;
   private DefaultSagaAdminService service;
+  private ExecutorService driveExecutor;
 
   @BeforeEach
   void setUp() {
@@ -63,6 +70,12 @@ class DefaultSagaAdminServiceTest {
     engine = mock(SagaEngine.class);
     registry = mock(SagaDefinitionRegistry.class);
     service = new DefaultSagaAdminService(store, engine, registry, () -> OPERATOR);
+    driveExecutor = Executors.newVirtualThreadPerTaskExecutor();
+  }
+
+  @AfterEach
+  void tearDown() {
+    driveExecutor.shutdownNow();
   }
 
   // A 2-step BACKWARD saga: pivot = the last step (index 1).
@@ -546,6 +559,190 @@ class DefaultSagaAdminServiceTest {
     // Act & Assert
     assertThatThrownBy(() -> blankOp.recoverSaga(SAGA_ID, "why"))
         .isInstanceOf(IllegalStateException.class);
+  }
+
+  // ---------------------------------------------------------------------------
+  // operator — rejected rather than sanitized, and rejected before anything is written
+  // ---------------------------------------------------------------------------
+
+  @Test
+  void recoverSaga_operatorWithControlCharGiven_throwsIllegalStateAndWritesNothing() {
+    // Arrange — unlike a reason, a principal is never flattened to fit: a mutated principal is a
+    // false audit record
+    DefaultSagaAdminService service = serviceWithOperator("op\nalice");
+
+    // Act & Assert
+    assertThatThrownBy(() -> service.recoverSaga(SAGA_ID, "why"))
+        .isInstanceOf(IllegalStateException.class);
+    verifyNothingWritten();
+  }
+
+  @Test
+  void recoverSaga_operatorOverMaxLengthGiven_throwsIllegalStateAndWritesNothing() {
+    // Arrange — 257 chars, one over the bound
+    DefaultSagaAdminService service = serviceWithOperator("a".repeat(257));
+
+    // Act & Assert
+    assertThatThrownBy(() -> service.recoverSaga(SAGA_ID, "why"))
+        .isInstanceOf(IllegalStateException.class);
+    verifyNothingWritten();
+  }
+
+  @Test
+  void recoverSaga_operatorAtMaxLengthGiven_isAccepted() {
+    // Arrange — exactly at the bound; an email is capped at 254 octets, so this must still pass
+    String operator = "a".repeat(256);
+    ArgumentCaptor<StatusEvent> audit = arrangeDrivableSaga();
+
+    // Act
+    serviceWithOperator(operator).recoverSaga(SAGA_ID, "why");
+
+    // Assert
+    assertThat(AdminAuditPayload.operator(audit.getValue().getPayload())).isEqualTo(operator);
+  }
+
+  @Test
+  void recoverSaga_operatorWithSurroundingSpacesGiven_isRecordedUntrimmed() {
+    // Arrange — a principal with edge whitespace is a different principal, not a formatting
+    // artifact, so it is recorded exactly as the server injected it
+    String operator = " op-alice ";
+    ArgumentCaptor<StatusEvent> audit = arrangeDrivableSaga();
+
+    // Act
+    serviceWithOperator(operator).recoverSaga(SAGA_ID, "why");
+
+    // Assert
+    assertThat(AdminAuditPayload.operator(audit.getValue().getPayload())).isEqualTo(operator);
+  }
+
+  private DefaultSagaAdminService serviceWithOperator(String operator) {
+    return new DefaultSagaAdminService(store, engine, registry, () -> operator);
+  }
+
+  /** Asserts the mutation aborted before persisting anything or touching the saga. */
+  private void verifyNothingWritten() {
+    verify(store, never()).recordStatusEvent(any(), anyInt(), any(), any());
+    verify(engine, never()).recover(any(), any(), any());
+  }
+
+  /** Arranges a RUNNING saga that resolves to a drive, and returns the audit-event captor. */
+  private ArgumentCaptor<StatusEvent> arrangeDrivableSaga() {
+    SagaStateSnapshot running = snapshot(SagaStatus.RUNNING);
+    List<SagaEvent> events =
+        List.of(
+            StatusEvent.started(null),
+            StepEvent.completed(0, "debit", null),
+            StepEvent.failed(1, "credit", null));
+    when(store.getStateSnapshot(SAGA_ID)).thenReturn(Optional.of(running));
+    when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(backwardDef());
+    when(store.getEvents(SAGA_ID)).thenReturn(events);
+    return stubDrive(running, events);
+  }
+
+  // ---------------------------------------------------------------------------
+  // drive deadline — bounds the drive only, never the durable transition
+  // ---------------------------------------------------------------------------
+
+  @Test
+  void recoverSaga_withDriveDeadline_driveSettlesInTime_returnsDrivenState() {
+    // Arrange
+    arrangeDrivableSaga();
+
+    // Act
+    SagaStateSnapshot result = boundedService(5_000L).recoverSaga(SAGA_ID, "why");
+
+    // Assert — the drive ran to completion, so the caller sees the terminal state it produced
+    assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPENSATED);
+    verify(engine).recover(any(), any(), any());
+  }
+
+  @Test
+  void recoverSaga_withDriveDeadline_driveOverruns_returnsStoredStateWithTransitionDurable()
+      throws Exception {
+    // Arrange — a drive that outlives the deadline. The second getStateSnapshot is the post-expiry
+    // re-read: the abandoned drive still owns the ExecutionContext, so its state cannot be read.
+    SagaStateSnapshot running = snapshot(SagaStatus.RUNNING);
+    List<SagaEvent> events =
+        List.of(
+            StatusEvent.started(null),
+            StepEvent.completed(0, "debit", null),
+            StepEvent.failed(1, "credit", null));
+    when(store.getStateSnapshot(SAGA_ID))
+        .thenReturn(Optional.of(running), Optional.of(snapshot(SagaStatus.COMPENSATING)));
+    when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(backwardDef());
+    when(store.getEvents(SAGA_ID)).thenReturn(events);
+    stubDrive(running, events);
+    CountDownLatch release = new CountDownLatch(1);
+    doAnswer(
+            invocation -> {
+              release.await();
+              return null;
+            })
+        .when(engine)
+        .recover(any(), any(), any());
+
+    try {
+      // Act
+      SagaStateSnapshot result = boundedService(50L).recoverSaga(SAGA_ID, "why");
+
+      // Assert — a non-terminal state, which is how the caller tells "still running" from "settled"
+      assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPENSATING);
+      // The transition is durable even though the drive was abandoned — that is what makes leaving
+      // the rest to the recovery loop safe, rather than losing the intervention.
+      verify(store).recordStatusEvent(eq(running), anyInt(), any(), any());
+    } finally {
+      release.countDown();
+    }
+  }
+
+  @Test
+  void recoverSaga_withDriveDeadline_lostCas_throwsRatherThanReportingAcceptance() {
+    // Arrange — the CAS that co-commits the audit loses to a concurrent admin/recovery
+    when(store.getStateSnapshot(SAGA_ID)).thenReturn(Optional.of(snapshot(SagaStatus.RUNNING)));
+    when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(backwardDef());
+    when(store.getEvents(SAGA_ID)).thenReturn(List.of(StatusEvent.started(null)));
+    when(store.recordStatusEvent(any(), anyInt(), any(), any()))
+        .thenThrow(new SagaConcurrentModificationException(SAGA_ID));
+
+    // Act & Assert — the deadline bounds the drive, never the transition. Were the bound wrapped
+    // around the whole call instead, this failure could land after a timeout had already reported
+    // the intervention as accepted.
+    assertThatThrownBy(() -> boundedService(50L).recoverSaga(SAGA_ID, "why"))
+        .isInstanceOf(SagaConcurrentModificationException.class);
+    verify(engine, never()).recover(any(), any(), any());
+  }
+
+  @Test
+  void recoverSaga_withDriveDeadline_driveThrows_surfacesTheDrivesOwnException() {
+    // Arrange
+    arrangeDrivableSaga();
+    doThrow(SagaPersistenceException.retryable("store died", new RuntimeException("io")))
+        .when(engine)
+        .recover(any(), any(), any());
+
+    // Act & Assert — bounding the drive must not change which exception a caller sees, so the
+    // cause is unwrapped from the ExecutionException the executor wraps it in
+    assertThatThrownBy(() -> boundedService(5_000L).recoverSaga(SAGA_ID, "why"))
+        .isInstanceOf(SagaPersistenceException.class)
+        .hasMessage("store died");
+  }
+
+  @Test
+  void recoverSaga_withoutDriveDeadline_drivesOnTheCallingThread() {
+    // Arrange — the embedded default: no deadline, so no executor is involved at all
+    arrangeDrivableSaga();
+
+    // Act
+    SagaStateSnapshot result = service.recoverSaga(SAGA_ID, "why");
+
+    // Assert — unchanged from before the deadline existed
+    assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPENSATED);
+    verify(engine, never()).executor();
+  }
+
+  private DefaultSagaAdminService boundedService(long deadlineMillis) {
+    when(engine.executor()).thenReturn(driveExecutor);
+    return new DefaultSagaAdminService(store, engine, registry, () -> OPERATOR, deadlineMillis);
   }
 
   // ---------------------------------------------------------------------------
