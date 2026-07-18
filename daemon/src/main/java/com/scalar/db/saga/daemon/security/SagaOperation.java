@@ -53,8 +53,14 @@ public enum SagaOperation implements RouteRole {
    * Listing sagas — global enumeration across application boundaries (a saga carries no application
    * identity to scope a list to), so it is an operator investigation, not an application read;
    * {@link SagaRole#ADMIN}. Aggregate counts belong on the observability plane (metrics), not here.
+   *
+   * <p>Not rate-limited: the daemon's only limiter is the saga-start budget ({@code
+   * max_start_requests_per_minute}), and folding admin calls into it would let paging through a
+   * list silently consume a caller's saga-start budget under a knob that names and documents only
+   * starts. The admin surface is instead gated by {@link SagaRole#ADMIN} to trusted operators; a
+   * dedicated admin limit can be added later if enumeration needs its own DoS control.
    */
-  LIST_SAGAS(SagaRole.ADMIN, true),
+  LIST_SAGAS(SagaRole.ADMIN, false),
 
   /**
    * Inspecting one saga's detail and timeline. An application diagnosing its own saga by an id it
@@ -63,14 +69,24 @@ public enum SagaOperation implements RouteRole {
    */
   GET_SAGA_DETAIL(SagaRole.READ, false),
 
-  /** Recovering a stuck saga (admin intervention). Destructive, so {@link SagaRole#ADMIN}. */
-  RECOVER_SAGA(SagaRole.ADMIN, true),
+  /**
+   * Recovering a stuck saga (admin intervention). Destructive, so {@link SagaRole#ADMIN}. Not
+   * rate-limited: incident response must not be throttled by the saga-start budget (see {@link
+   * #LIST_SAGAS}).
+   */
+  RECOVER_SAGA(SagaRole.ADMIN, false),
 
-  /** Force-completing an escalated saga (admin intervention). {@link SagaRole#ADMIN}. */
-  FORCE_COMPLETE(SagaRole.ADMIN, true),
+  /**
+   * Force-completing an escalated saga (admin intervention). {@link SagaRole#ADMIN}. Not
+   * rate-limited (see {@link #RECOVER_SAGA}).
+   */
+  FORCE_COMPLETE(SagaRole.ADMIN, false),
 
-  /** Resetting escalated sagas, single or bulk (admin intervention). {@link SagaRole#ADMIN}. */
-  RESET_ESCALATED(SagaRole.ADMIN, true);
+  /**
+   * Resetting escalated sagas, single or bulk (admin intervention). {@link SagaRole#ADMIN}. Not
+   * rate-limited (see {@link #RECOVER_SAGA}).
+   */
+  RESET_ESCALATED(SagaRole.ADMIN, false);
 
   private final @Nullable SagaRole requiredRole;
   private final boolean rateLimited;
