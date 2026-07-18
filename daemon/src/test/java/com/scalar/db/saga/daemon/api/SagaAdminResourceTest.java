@@ -8,8 +8,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.scalar.db.saga.api.ResetResult;
 import com.scalar.db.saga.api.SagaAdminService;
 import com.scalar.db.saga.api.SagaPage;
+import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.daemon.security.SagaAuthRequest;
@@ -236,6 +238,44 @@ class SagaAdminResourceTest {
     HttpResponse<String> response =
         send("POST", "/sagas/s1/force-complete", "admin", "{\"reason\":\"x\"}");
     assertThat(response.statusCode()).isEqualTo(409);
+  }
+
+  @Test
+  void forceComplete_adminRoleGiven_returns200() throws Exception {
+    // Arrange — force-complete is terminal (ESCALATED -> COMPLETED), always a settled 200
+    when(adminService.forceComplete(eq(SAGA_ID), any())).thenReturn(snapshot(SagaStatus.COMPLETED));
+
+    // Act
+    HttpResponse<String> response =
+        send("POST", "/sagas/s1/force-complete", "admin", "{\"reason\":\"done downstream\"}");
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(200);
+    assertThat(response.body()).contains("\"sagaId\":\"s1\"").contains("COMPLETED");
+  }
+
+  @Test
+  void bulkReset_adminRoleGiven_returns200WithItemizedResult() throws Exception {
+    // Arrange — one reset, one skipped, and a continuation token
+    when(adminService.resetEscalated(any(SagaQuery.class), any()))
+        .thenReturn(
+            new ResetResult(
+                1,
+                List.of(
+                    new ResetResult.SkippedSaga(
+                        "s2", ResetResult.SkipReason.CONCURRENT_MODIFICATION)),
+                "next-token"));
+
+    // Act
+    HttpResponse<String> response =
+        send("POST", "/admin/reset-escalated", "admin", "{\"reason\":\"sweep\"}");
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(200);
+    assertThat(response.body())
+        .contains("\"resetCount\":1")
+        .contains("CONCURRENT_MODIFICATION")
+        .contains("next-token");
   }
 
   @Test
