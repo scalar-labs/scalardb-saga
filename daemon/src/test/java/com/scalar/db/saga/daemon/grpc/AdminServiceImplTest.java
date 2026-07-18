@@ -211,6 +211,47 @@ class AdminServiceImplTest {
   }
 
   @Test
+  void resetEscalated_writeRoleGiven_permissionDenied() {
+    assertCode(
+        () ->
+            stub("write")
+                .resetEscalated(
+                    InterventionRequest.newBuilder().setSagaId("s-1").setReason("x").build()),
+        Status.Code.PERMISSION_DENIED);
+  }
+
+  @Test
+  void resetEscalated_adminRoleGiven_drivesAndReturnsSnapshot() {
+    // Arrange
+    when(adminService.resetEscalated(eq("s-1"), any()))
+        .thenReturn(snapshot(SagaStatus.COMPENSATED));
+
+    // Act
+    var response =
+        stub("admin")
+            .resetEscalated(
+                InterventionRequest.newBuilder().setSagaId("s-1").setReason("x").build());
+
+    // Assert — the RPC drives the single-saga reset and returns its snapshot
+    assertThat(response.getSagaId()).isEqualTo("s-1");
+    verify(adminService).resetEscalated("s-1", "x");
+  }
+
+  @Test
+  void resetEscalated_wrongState_failedPrecondition() {
+    when(adminService.resetEscalated(eq("s-1"), any()))
+        .thenThrow(
+            new SagaStatePreconditionException(
+                "s-1", SagaStatePreconditionException.Code.SAGA_WRONG_STATE, "not escalated"));
+    assertCode(
+        () ->
+            stub("admin")
+                .resetEscalated(
+                    InterventionRequest.newBuilder().setSagaId("s-1").setReason("x").build()),
+        Status.Code.FAILED_PRECONDITION);
+  }
+
+  @Test
   void forceComplete_lostCas_aborted() {
     when(adminService.forceComplete(eq("s-1"), any()))
         .thenThrow(new SagaConcurrentModificationException("s-1"));
