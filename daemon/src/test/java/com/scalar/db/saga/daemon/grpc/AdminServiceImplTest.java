@@ -41,6 +41,7 @@ import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -158,6 +159,24 @@ class AdminServiceImplTest {
     verify(orchestrator).adminService(operator.capture(), eq(DRIVE_DEADLINE_MILLIS));
     assertThat(operator.getValue().currentOperator()).isEqualTo("root");
     verify(adminService).recoverSaga("s-1", "stuck");
+  }
+
+  @Test
+  void recoverSaga_tightClientDeadline_boundsDriveInsteadOfGoingUnbounded() {
+    // Arrange
+    when(adminService.recoverSaga(eq("s-1"), any())).thenReturn(snapshot(SagaStatus.COMPENSATED));
+
+    // Act — a client deadline at or under the slack (100ms). timeRemaining - slack is <= 0, which
+    // must floor to a bounded 1ms rather than 0; 0 or less means "unbounded, drive on the calling
+    // thread" downstream, so this is the case that would block the gRPC request thread.
+    stub("admin")
+        .withDeadlineAfter(100, TimeUnit.MILLISECONDS)
+        .recoverSaga(InterventionRequest.newBuilder().setSagaId("s-1").setReason("stuck").build());
+
+    // Assert — the drive bound handed to the factory is the floored 1ms (bounded), never 0
+    ArgumentCaptor<Long> bound = ArgumentCaptor.forClass(Long.class);
+    verify(orchestrator).adminService(any(OperatorContext.class), bound.capture());
+    assertThat(bound.getValue()).isEqualTo(1L);
   }
 
   @Test

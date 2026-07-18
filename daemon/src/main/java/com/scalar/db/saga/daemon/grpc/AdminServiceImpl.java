@@ -145,8 +145,14 @@ public final class AdminServiceImpl extends AdminServiceGrpc.AdminServiceImplBas
     long bound = adminDriveDeadlineMillis;
     Deadline deadline = Context.current().getDeadline();
     if (deadline != null) {
+      // Floor at 1ms, not 0. This mirrors SagaServiceImpl.computeBoundMillis, but 0 means opposite
+      // things at the two call sites: there it feeds an await where 0 is "return immediately"; here
+      // it feeds DefaultSagaAdminService where 0 or less means "unbounded, drive on the calling
+      // thread." A tight or already-expired client deadline would otherwise clamp remaining to 0,
+      // flipping the drive to unbounded on the gRPC request thread. Keeping it at least 1 keeps the
+      // drive bounded; it times out fast and returns the current state.
       long remaining =
-          Math.max(0L, deadline.timeRemaining(TimeUnit.MILLISECONDS) - DEADLINE_SLACK_MILLIS);
+          Math.max(1L, deadline.timeRemaining(TimeUnit.MILLISECONDS) - DEADLINE_SLACK_MILLIS);
       bound = Math.min(bound, remaining);
     }
     return bound;
