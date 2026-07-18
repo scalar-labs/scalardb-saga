@@ -27,16 +27,17 @@ import org.slf4j.LoggerFactory;
  * SagaOperation} requires (RBAC). The method is mapped to its operation by {@link GrpcOperations},
  * so both transports enforce one shared policy rather than two per-transport encodings of it.
  *
- * <p>Applied only to the saga service (via {@code ServerInterceptors.intercept}); the standard
- * health service is left unintercepted so K8s-native gRPC probes need no credential. Credentials
- * are read from the call's request {@link Metadata} — every ASCII header is passed to the provider,
- * so it reads whichever one carries its credential ({@code authorization} for JWT, a configured
- * header for API keys), exactly as the REST handler does. An authentication failure closes the call
- * with {@code UNAUTHENTICATED}; a role shortfall with {@code PERMISSION_DENIED} — the gRPC
- * analogues of {@code 401}/{@code 403}. A provider that is unavailable (e.g. an unreachable JWKS
- * endpoint) closes the call with {@code UNAVAILABLE} — a retryable outage, not a bad credential.
- * The resolved identity is attached to the gRPC {@link Context} under {@link #IDENTITY} for
- * downstream audit.
+ * <p>Applied to every privileged gRPC service — the saga service and the admin service, each
+ * wrapped in {@code SagaServer} via {@code ServerInterceptors} — so a new service carrying
+ * privileged RPCs must be wrapped here too; the standard health service is deliberately left
+ * unintercepted so K8s-native gRPC probes need no credential. Credentials are read from the call's
+ * request {@link Metadata} — every ASCII header is passed to the provider, so it reads whichever
+ * one carries its credential ({@code authorization} for JWT, a configured header for API keys),
+ * exactly as the REST handler does. An authentication failure closes the call with {@code
+ * UNAUTHENTICATED}; a role shortfall with {@code PERMISSION_DENIED} — the gRPC analogues of {@code
+ * 401}/{@code 403}. A provider that is unavailable (e.g. an unreachable JWKS endpoint) closes the
+ * call with {@code UNAVAILABLE} — a retryable outage, not a bad credential. The resolved identity
+ * is attached to the gRPC {@link Context} under {@link #IDENTITY} for downstream audit.
  */
 public final class SagaSecurityInterceptor implements ServerInterceptor {
 
