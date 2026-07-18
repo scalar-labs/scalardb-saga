@@ -222,11 +222,16 @@ public class DefaultSagaAdminService implements SagaAdminService {
         // This saga's own event stream cannot be decoded, and a retry reads the same bytes. Skip
         // it rather than abort: a saga that resets successfully leaves the ESCALATED scan, so
         // aborting here would make every re-run stop on this same saga and strand every saga
-        // behind it. Carry the decode failure so the operator knows which saga to inspect and why.
+        // behind it.
         abortSweepIfStoreFailing(e);
+        // Log the decode failure server-side keyed by sagaId; do not surface the exception message
+        // to the caller. A decode error can echo the raw stored bytes (business data or PII), and
+        // only fixed daemon-owned messages are ever returned. The reason code is the caller-facing
+        // contract; the specifics live in the log.
+        logger.warn(
+            "Corrupt event stream for saga {} during bulk resetEscalated; skipping it", sagaId, e);
         skipped.add(
-            new ResetResult.SkippedSaga(
-                sagaId, ResetResult.SkipReason.CORRUPT_EVENT_STREAM, e.getMessage()));
+            new ResetResult.SkippedSaga(sagaId, ResetResult.SkipReason.CORRUPT_EVENT_STREAM));
         continue;
       }
 

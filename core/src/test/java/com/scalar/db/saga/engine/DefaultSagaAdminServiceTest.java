@@ -455,15 +455,14 @@ class DefaultSagaAdminServiceTest {
     // Act
     ResetResult result = service.resetEscalated(SagaQuery.newBuilder().build(), "sweep");
 
-    // Assert — the corrupt saga is reported, with the decode failure as detail, and the healthy
-    // one behind it is still reset
+    // Assert — the corrupt saga is reported by its reason code, and the healthy one behind it is
+    // still reset. The raw decode message is never returned (it can echo stored bytes); it is
+    // logged server-side instead.
     assertThat(result.getResetCount()).isEqualTo(1);
     assertThat(result.getSkipped())
         .containsExactly(
-            new ResetResult.SkippedSaga(
-                "bad",
-                ResetResult.SkipReason.CORRUPT_EVENT_STREAM,
-                "Unknown event type: SAGA_FROM_THE_FUTURE"));
+            new ResetResult.SkippedSaga("bad", ResetResult.SkipReason.CORRUPT_EVENT_STREAM));
+    assertThat(result.getSkipped().get(0).getDetail()).isNull();
     verify(store).markForRecovery("ok");
   }
 
