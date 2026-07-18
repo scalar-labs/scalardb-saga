@@ -145,8 +145,8 @@ class SagaRecoveryManagerTest {
       manager.recover();
 
       // Assert
-      verify(engine).resumeFrom(eq(def), eq(ctx1), eq(0));
-      verify(engine).resumeFrom(eq(def), eq(ctx2), eq(0));
+      verify(engine).recover(eq(new RecoveryAction.Resume(0)), eq(def), eq(ctx1));
+      verify(engine).recover(eq(new RecoveryAction.Resume(0)), eq(def), eq(ctx2));
     }
 
     @Test
@@ -213,8 +213,8 @@ class SagaRecoveryManagerTest {
       smallManager.recover();
 
       // Assert — processed 2, hit batch limit, did not scan page 2
-      verify(engine).resumeFrom(eq(def), eq(ctx1), eq(0));
-      verify(engine).resumeFrom(eq(def), eq(ctx2), eq(0));
+      verify(engine).recover(eq(new RecoveryAction.Resume(0)), eq(def), eq(ctx1));
+      verify(engine).recover(eq(new RecoveryAction.Resume(0)), eq(def), eq(ctx2));
       verify(store, never()).claimForRecovery(eq(saga3), any());
       // findRecoverable called only once — batch limit stopped before second page
       verify(store).findRecoverable(any(), any());
@@ -251,7 +251,7 @@ class SagaRecoveryManagerTest {
       // Assert — saga1 recovery stopped at claim failure
       verify(store, never()).getEvents(saga1.getSagaId());
       // Assert — saga2 was still recovered despite saga1 failure
-      verify(engine).resumeFrom(eq(def), eq(ctx2), eq(0));
+      verify(engine).recover(eq(new RecoveryAction.Resume(0)), eq(def), eq(ctx2));
     }
   }
 
@@ -362,7 +362,7 @@ class SagaRecoveryManagerTest {
       // Assert — escalated through the parked-clearing op, not a plain recordStatusEvent
       verify(store)
           .failParkedStep(eq(waiting), anyInt(), any(StepEvent.class), eq(SagaStatus.ESCALATED));
-      verify(store, never()).recordStatusEvent(any(), anyInt(), any());
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any(), any());
     }
 
     @Test
@@ -509,7 +509,7 @@ class SagaRecoveryManagerTest {
       manager.recover();
 
       // Assert
-      verify(engine).resumeFrom(def, ctx, 0);
+      verify(engine).recover(new RecoveryAction.Resume(0), def, ctx);
     }
 
     @Test
@@ -533,7 +533,7 @@ class SagaRecoveryManagerTest {
       manager.recover();
 
       // Assert — resume from step 2 (after last completed at index 1)
-      verify(engine).resumeFrom(def, ctx, 2);
+      verify(engine).recover(new RecoveryAction.Resume(2), def, ctx);
     }
 
     @Test
@@ -555,17 +555,18 @@ class SagaRecoveryManagerTest {
       when(ctx.getCurrentState()).thenReturn(saga);
       when(ctx.nextSequence()).thenReturn(2);
       when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(definition());
-      when(store.recordStatusEvent(eq(saga), eq(2), any(StatusEvent.class))).thenReturn(newState);
+      when(store.recordStatusEvent(eq(saga), eq(2), any(StatusEvent.class), any()))
+          .thenReturn(newState);
 
       // Act
       manager.recover();
 
       // Assert
       ArgumentCaptor<StatusEvent> captor = ArgumentCaptor.forClass(StatusEvent.class);
-      verify(store).recordStatusEvent(eq(saga), eq(2), captor.capture());
+      verify(store).recordStatusEvent(eq(saga), eq(2), captor.capture(), any());
       StatusEvent event = captor.getValue();
       assertThat(event.getTargetStatus()).isEqualTo(SagaStatus.ESCALATED);
-      verify(engine, never()).resumeFrom(any(), any(), anyInt());
+      verify(engine, never()).recover(any(RecoveryAction.Resume.class), any(), any());
     }
 
     @Test
@@ -595,9 +596,9 @@ class SagaRecoveryManagerTest {
       manager.recover();
 
       // Assert — compensate including the failed step 1; do not resume forward.
-      verify(engine).compensateFrom(def, ctx, 1);
-      verify(engine, never()).resumeFrom(any(), any(), anyInt());
-      verify(store, never()).recordStatusEvent(any(), anyInt(), any());
+      verify(engine).recover(new RecoveryAction.Compensate(1), def, ctx);
+      verify(engine, never()).recover(any(RecoveryAction.Resume.class), any(), any());
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any(), any());
     }
 
     @Test
@@ -627,9 +628,9 @@ class SagaRecoveryManagerTest {
       manager.recover();
 
       // Assert — proven-non-delivery step 1 is skipped; compensate from the highest completed (0).
-      verify(engine).compensateFrom(def, ctx, 0);
-      verify(engine, never()).resumeFrom(any(), any(), anyInt());
-      verify(store, never()).recordStatusEvent(any(), anyInt(), any());
+      verify(engine).recover(new RecoveryAction.Compensate(0), def, ctx);
+      verify(engine, never()).recover(any(RecoveryAction.Resume.class), any(), any());
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any(), any());
     }
 
     @Test
@@ -665,9 +666,9 @@ class SagaRecoveryManagerTest {
       manager.recover();
 
       // Assert — resume forward at the failed post-pivot step; never compensate.
-      verify(engine).resumeFrom(def, ctx, 1);
-      verify(engine, never()).compensateFrom(any(), any(), anyInt());
-      verify(store, never()).recordStatusEvent(any(), anyInt(), any());
+      verify(engine).recover(new RecoveryAction.Resume(1), def, ctx);
+      verify(engine, never()).recover(any(RecoveryAction.Compensate.class), any(), any());
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any(), any());
     }
 
     @Test
@@ -695,8 +696,172 @@ class SagaRecoveryManagerTest {
       manager.recover();
 
       // Assert — failure resolved, resumes from step 2 (after last completed at index 1)
-      verify(engine).resumeFrom(def, ctx, 2);
-      verify(store, never()).recordStatusEvent(any(), anyInt(), any());
+      verify(engine).recover(new RecoveryAction.Resume(2), def, ctx);
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any(), any());
+    }
+
+    @Test
+    void recover_runningSagaResetWithinGracePeriod_drivesInsteadOfReEscalating() {
+      // Arrange — an operator un-escalated this saga 10 minutes ago. The failure it was stuck on is
+      // still 2 hours old and always will be, so anchoring on the failure alone would escalate it
+      // straight back and undo the intervention without ever driving it.
+      SagaStateSnapshot saga = snapshot(SagaStatus.RUNNING);
+      ExecutionContext ctx = mock(ExecutionContext.class);
+      SagaDefinition def = definition();
+
+      List<SagaEvent> events =
+          List.of(
+              StepEvent.completed(0, "debit", null).withTimestamp(NOW.minusSeconds(7200)),
+              StepEvent.failed(1, "credit", null).withTimestamp(NOW.minusSeconds(7200)),
+              StatusEvent.escalated("step retry stuck").withTimestamp(NOW.minusSeconds(3600)),
+              StatusEvent.reset(SagaStatus.RUNNING, "ops", "downstream fixed")
+                  .withTimestamp(NOW.minusSeconds(600)));
+
+      setupSinglePageRecovery(saga);
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(engine.replayEvents(saga, events)).thenReturn(ctx);
+      when(ctx.getCurrentState()).thenReturn(saga);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(def);
+
+      // Act
+      manager.recover();
+
+      // Assert — driven, and never re-escalated
+      verify(engine).recover(any(RecoveryAction.class), eq(def), eq(ctx));
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any(), any());
+    }
+
+    @Test
+    void recover_runningSagaResetLongerAgoThanGracePeriod_escalates() {
+      // Arrange — the operator's reset is itself now older than the grace period, so the saga has
+      // had its fresh window and failed to make progress. It escalates again, honestly.
+      SagaStateSnapshot saga = snapshot(SagaStatus.RUNNING);
+      ExecutionContext ctx = mock(ExecutionContext.class);
+      SagaStateSnapshot newState = snapshot(SagaStatus.ESCALATED);
+
+      List<SagaEvent> events =
+          List.of(
+              StepEvent.completed(0, "debit", null).withTimestamp(NOW.minusSeconds(28800)),
+              StepEvent.failed(1, "credit", null).withTimestamp(NOW.minusSeconds(28800)),
+              StatusEvent.reset(SagaStatus.RUNNING, "ops", "downstream fixed")
+                  .withTimestamp(NOW.minusSeconds(7200)));
+
+      setupSinglePageRecovery(saga);
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(engine.replayEvents(saga, events)).thenReturn(ctx);
+      when(ctx.getCurrentState()).thenReturn(saga);
+      when(ctx.nextSequence()).thenReturn(3);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(definition());
+      when(store.recordStatusEvent(eq(saga), eq(3), any(StatusEvent.class), any()))
+          .thenReturn(newState);
+
+      // Act
+      manager.recover();
+
+      // Assert
+      ArgumentCaptor<StatusEvent> captor = ArgumentCaptor.forClass(StatusEvent.class);
+      verify(store).recordStatusEvent(eq(saga), eq(3), captor.capture(), any());
+      assertThat(captor.getValue().getTargetStatus()).isEqualTo(SagaStatus.ESCALATED);
+      verify(engine, never()).recover(any(), any(), any());
+    }
+
+    @Test
+    void recover_runningSagaFailingAgainAfterReset_escalatesOnTheNewerFailure() {
+      // Arrange — the reset drove the saga, the retry failed again 2 hours ago, and nothing has
+      // happened since. The newer failure outlives the intervention, so the clock anchors on the
+      // failure again and the saga escalates.
+      SagaStateSnapshot saga = snapshot(SagaStatus.RUNNING);
+      ExecutionContext ctx = mock(ExecutionContext.class);
+      SagaStateSnapshot newState = snapshot(SagaStatus.ESCALATED);
+
+      List<SagaEvent> events =
+          List.of(
+              StepEvent.completed(0, "debit", null).withTimestamp(NOW.minusSeconds(28800)),
+              StepEvent.failed(1, "credit", null).withTimestamp(NOW.minusSeconds(28800)),
+              StatusEvent.reset(SagaStatus.RUNNING, "ops", "downstream fixed")
+                  .withTimestamp(NOW.minusSeconds(10800)),
+              StepEvent.failed(1, "credit", null).withTimestamp(NOW.minusSeconds(7200)));
+
+      setupSinglePageRecovery(saga);
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(engine.replayEvents(saga, events)).thenReturn(ctx);
+      when(ctx.getCurrentState()).thenReturn(saga);
+      when(ctx.nextSequence()).thenReturn(4);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(definition());
+      when(store.recordStatusEvent(eq(saga), eq(4), any(StatusEvent.class), any()))
+          .thenReturn(newState);
+
+      // Act
+      manager.recover();
+
+      // Assert
+      verify(store).recordStatusEvent(eq(saga), eq(4), any(StatusEvent.class), any());
+      verify(engine, never()).recover(any(), any(), any());
+    }
+
+    @Test
+    void recover_compensatingSagaResetWithinGracePeriod_drivesInsteadOfReEscalating() {
+      // Arrange — the compensation-stuck shape: the one an operator most often bulk-resets.
+      SagaStateSnapshot saga = snapshot(SagaStatus.COMPENSATING);
+      ExecutionContext ctx = mock(ExecutionContext.class);
+      SagaDefinition def = definition();
+
+      List<SagaEvent> events =
+          List.of(
+              StepEvent.completed(0, "debit", null).withTimestamp(NOW.minusSeconds(7200)),
+              StatusEvent.compensating().withTimestamp(NOW.minusSeconds(7200)),
+              StepEvent.compensationFailed(0, "debit", null).withTimestamp(NOW.minusSeconds(7200)),
+              StatusEvent.escalated("compensation stuck").withTimestamp(NOW.minusSeconds(3600)),
+              StatusEvent.reset(SagaStatus.COMPENSATING, "ops", "downstream fixed")
+                  .withTimestamp(NOW.minusSeconds(600)));
+
+      setupSinglePageRecovery(saga);
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(engine.replayEvents(saga, events)).thenReturn(ctx);
+      when(ctx.getCurrentState()).thenReturn(saga);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(def);
+
+      // Act
+      manager.recover();
+
+      // Assert
+      verify(engine).recover(any(RecoveryAction.Compensate.class), eq(def), eq(ctx));
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any(), any());
+    }
+
+    @Test
+    void recover_runningSagaRecoveringWithinGracePeriod_stillEscalatesOnTheFailure() {
+      // Arrange — recoverSaga only forces a drive the sweep would do anyway, on a saga that never
+      // left the recovery cycle, so SAGA_RECOVERING must NOT buy the saga a fresh grace period.
+      // Only un-escalating (SAGA_RESET) restarts the clock.
+      SagaStateSnapshot saga = snapshot(SagaStatus.RUNNING);
+      ExecutionContext ctx = mock(ExecutionContext.class);
+      SagaStateSnapshot newState = snapshot(SagaStatus.ESCALATED);
+
+      List<SagaEvent> events =
+          List.of(
+              StepEvent.completed(0, "debit", null).withTimestamp(NOW.minusSeconds(7200)),
+              StepEvent.failed(1, "credit", null).withTimestamp(NOW.minusSeconds(7200)),
+              StatusEvent.recovering(SagaStatus.RUNNING, "ops", "retry")
+                  .withTimestamp(NOW.minusSeconds(600)));
+
+      setupSinglePageRecovery(saga);
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(engine.replayEvents(saga, events)).thenReturn(ctx);
+      when(ctx.getCurrentState()).thenReturn(saga);
+      when(ctx.nextSequence()).thenReturn(3);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(definition());
+      when(store.recordStatusEvent(eq(saga), eq(3), any(StatusEvent.class), any()))
+          .thenReturn(newState);
+
+      // Act
+      manager.recover();
+
+      // Assert
+      ArgumentCaptor<StatusEvent> captor = ArgumentCaptor.forClass(StatusEvent.class);
+      verify(store).recordStatusEvent(eq(saga), eq(3), captor.capture(), any());
+      assertThat(captor.getValue().getTargetStatus()).isEqualTo(SagaStatus.ESCALATED);
+      verify(engine, never()).recover(any(), any(), any());
     }
 
     @Test
@@ -719,14 +884,15 @@ class SagaRecoveryManagerTest {
       when(ctx.getCurrentState()).thenReturn(saga);
       when(ctx.nextSequence()).thenReturn(3);
       when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(definition());
-      when(store.recordStatusEvent(eq(saga), eq(3), any(StatusEvent.class))).thenReturn(newState);
+      when(store.recordStatusEvent(eq(saga), eq(3), any(StatusEvent.class), any()))
+          .thenReturn(newState);
 
       // Act
       manager.recover();
 
       // Assert — step 1 failure is unresolved and beyond grace period → escalate
-      verify(store).recordStatusEvent(eq(saga), eq(3), any(StatusEvent.class));
-      verify(engine, never()).resumeFrom(any(), any(), anyInt());
+      verify(store).recordStatusEvent(eq(saga), eq(3), any(StatusEvent.class), any());
+      verify(engine, never()).recover(any(RecoveryAction.Resume.class), any(), any());
     }
 
     @Test
@@ -750,7 +916,7 @@ class SagaRecoveryManagerTest {
       manager.recover();
 
       // Assert
-      verify(engine).resumeFrom(def, ctx, 1);
+      verify(engine).recover(new RecoveryAction.Resume(1), def, ctx);
     }
   }
 
@@ -783,7 +949,7 @@ class SagaRecoveryManagerTest {
       manager.recover();
 
       // Assert — last compensated was index 1, so resume from 0
-      verify(engine).compensateFrom(def, ctx, 0);
+      verify(engine).recover(new RecoveryAction.Compensate(0), def, ctx);
     }
 
     @Test
@@ -809,7 +975,7 @@ class SagaRecoveryManagerTest {
       manager.recover();
 
       // Assert — compensation includes the failed step 2, not just the completed steps.
-      verify(engine).compensateFrom(def, ctx, 2);
+      verify(engine).recover(new RecoveryAction.Compensate(2), def, ctx);
     }
 
     @Test
@@ -836,7 +1002,7 @@ class SagaRecoveryManagerTest {
       manager.recover();
 
       // Assert — the proven-non-delivery failed step is skipped; start from the highest completed.
-      verify(engine).compensateFrom(def, ctx, 1);
+      verify(engine).recover(new RecoveryAction.Compensate(1), def, ctx);
     }
 
     @Test
@@ -865,8 +1031,8 @@ class SagaRecoveryManagerTest {
       manager.recover();
 
       // Assert — failure resolved, resumes compensation from step 0 (before last compensated at 1)
-      verify(engine).compensateFrom(def, ctx, 0);
-      verify(store, never()).recordStatusEvent(any(), anyInt(), any());
+      verify(engine).recover(new RecoveryAction.Compensate(0), def, ctx);
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any(), any());
     }
 
     @Test
@@ -888,16 +1054,17 @@ class SagaRecoveryManagerTest {
       when(ctx.getCurrentState()).thenReturn(saga);
       when(ctx.nextSequence()).thenReturn(2);
       when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(definition());
-      when(store.recordStatusEvent(eq(saga), eq(2), any(StatusEvent.class))).thenReturn(newState);
+      when(store.recordStatusEvent(eq(saga), eq(2), any(StatusEvent.class), any()))
+          .thenReturn(newState);
 
       // Act
       manager.recover();
 
       // Assert
       ArgumentCaptor<StatusEvent> captor = ArgumentCaptor.forClass(StatusEvent.class);
-      verify(store).recordStatusEvent(eq(saga), eq(2), captor.capture());
+      verify(store).recordStatusEvent(eq(saga), eq(2), captor.capture(), any());
       assertThat(captor.getValue().getTargetStatus()).isEqualTo(SagaStatus.ESCALATED);
-      verify(engine, never()).compensateFrom(any(), any(), anyInt());
+      verify(engine, never()).recover(any(RecoveryAction.Compensate.class), any(), any());
     }
   }
 
@@ -921,19 +1088,20 @@ class SagaRecoveryManagerTest {
       when(ctx.getCurrentState()).thenReturn(saga);
       when(ctx.nextSequence()).thenReturn(0);
       when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(null);
-      when(store.recordStatusEvent(eq(saga), eq(0), any(StatusEvent.class))).thenReturn(newState);
+      when(store.recordStatusEvent(eq(saga), eq(0), any(StatusEvent.class), any()))
+          .thenReturn(newState);
 
       // Act
       manager.recover();
 
       // Assert
       ArgumentCaptor<StatusEvent> captor = ArgumentCaptor.forClass(StatusEvent.class);
-      verify(store).recordStatusEvent(eq(saga), eq(0), captor.capture());
+      verify(store).recordStatusEvent(eq(saga), eq(0), captor.capture(), any());
       StatusEvent event = captor.getValue();
       assertThat(event.getTargetStatus()).isEqualTo(SagaStatus.ESCALATED);
       assertThat(event.getPayload()).contains("not found");
-      verify(engine, never()).resumeFrom(any(), any(), anyInt());
-      verify(engine, never()).compensateFrom(any(), any(), anyInt());
+      verify(engine, never()).recover(any(RecoveryAction.Resume.class), any(), any());
+      verify(engine, never()).recover(any(RecoveryAction.Compensate.class), any(), any());
     }
   }
 

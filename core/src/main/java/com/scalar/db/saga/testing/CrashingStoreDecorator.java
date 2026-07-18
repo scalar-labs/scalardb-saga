@@ -7,6 +7,7 @@ import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
+import com.scalar.db.saga.store.SagaStateAndEvents;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.StatusEvent;
 import com.scalar.db.saga.store.StepEvent;
@@ -94,8 +95,8 @@ public final class CrashingStoreDecorator implements SagaStore {
 
   @Override
   public SagaStateSnapshot recordStatusEvent(
-      SagaStateSnapshot current, int sequence, StatusEvent event) {
-    return delegate.recordStatusEvent(current, sequence, event);
+      SagaStateSnapshot current, int sequence, StatusEvent event, String ownerId) {
+    return delegate.recordStatusEvent(current, sequence, event, ownerId);
   }
 
   @Override
@@ -138,6 +139,11 @@ public final class CrashingStoreDecorator implements SagaStore {
   @Override
   public Optional<SagaStateSnapshot> getStateSnapshot(String sagaId) {
     return delegate.getStateSnapshot(sagaId);
+  }
+
+  @Override
+  public Optional<SagaStateAndEvents> getStateWithEvents(String sagaId) {
+    return delegate.getStateWithEvents(sagaId);
   }
 
   @Override

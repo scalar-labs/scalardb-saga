@@ -47,6 +47,20 @@ public final class SagaStateSnapshot {
         sagaId, sagaName, newStatus, ownerId, definitionVersion, createdAt, newUpdatedAt);
   }
 
+  /**
+   * Like {@link #withTransition(SagaStatus, Instant)}, but also stamps {@code newOwnerId} as the
+   * replica now processing this saga — used when the transition is recorded by a different replica
+   * (e.g. an admin intervention) so {@code owner_id} reflects the current driver.
+   */
+  public SagaStateSnapshot withTransition(
+      SagaStatus newStatus, String newOwnerId, Instant newUpdatedAt) {
+    Objects.requireNonNull(newStatus, "newStatus must not be null");
+    Objects.requireNonNull(newOwnerId, "newOwnerId must not be null");
+    Objects.requireNonNull(newUpdatedAt, "newUpdatedAt must not be null");
+    return new SagaStateSnapshot(
+        sagaId, sagaName, newStatus, newOwnerId, definitionVersion, createdAt, newUpdatedAt);
+  }
+
   public String getSagaId() {
     return sagaId;
   }

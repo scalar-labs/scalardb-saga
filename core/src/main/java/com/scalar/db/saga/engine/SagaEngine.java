@@ -93,6 +93,11 @@ public class SagaEngine implements AutoCloseable {
     this.clock = clock;
   }
 
+  /** The owner id this engine stamps on transitions it records (used by the admin service). */
+  String ownerId() {
+    return ownerId;
+  }
+
   // ---------------------------------------------------------------------------
   // Public API
   // ---------------------------------------------------------------------------
@@ -179,6 +184,19 @@ public class SagaEngine implements AutoCloseable {
       compensate(plan, context, fromStep);
     } finally {
       unregisterActive(sagaId);
+    }
+  }
+
+  /**
+   * Carries out a resolved {@link RecoveryAction} by dispatching to {@link #compensateFrom} or
+   * {@link #resumeFrom}. Shared by automatic recovery ({@link SagaRecoveryManager}) and the Admin
+   * API so both drive a decided action the same way.
+   */
+  void recover(RecoveryAction action, SagaDefinition def, ExecutionContext context) {
+    switch (action) {
+      case RecoveryAction.Compensate compensate ->
+          compensateFrom(def, context, compensate.fromStep());
+      case RecoveryAction.Resume resume -> resumeFrom(def, context, resume.fromStep());
     }
   }
 
@@ -769,7 +787,7 @@ public class SagaEngine implements AutoCloseable {
 
   private void transition(ExecutionContext context, StatusEvent event) {
     SagaStateSnapshot newState =
-        store.recordStatusEvent(context.getCurrentState(), context.nextSequence(), event);
+        store.recordStatusEvent(context.getCurrentState(), context.nextSequence(), event, ownerId);
     context.setCurrentState(newState);
     context.advanceSequence();
   }

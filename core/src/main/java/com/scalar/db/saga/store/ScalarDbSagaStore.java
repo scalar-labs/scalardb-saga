@@ -258,7 +258,7 @@ public class ScalarDbSagaStore implements SagaStore {
 
   @Override
   public SagaStateSnapshot recordStatusEvent(
-      SagaStateSnapshot current, int sequence, StatusEvent event) {
+      SagaStateSnapshot current, int sequence, StatusEvent event, String ownerId) {
     validatePayloadSize(event.getPayload());
     String sagaId = current.getSagaId();
     SagaStatus newStatus = event.getTargetStatus();
@@ -281,7 +281,7 @@ public class ScalarDbSagaStore implements SagaStore {
 
           tx.insert(buildEventInsert(sagaId, sequence, event, now));
           tx.delete(buildStateDelete(bucket, oldStatus, current.getUpdatedAt(), sagaId));
-          SagaStateSnapshot updated = current.withTransition(newStatus, now);
+          SagaStateSnapshot updated = current.withTransition(newStatus, ownerId, now);
           tx.insert(buildStateInsert(bucket, updated));
           return updated;
         },
@@ -459,6 +459,25 @@ public class ScalarDbSagaStore implements SagaStore {
         },
         null,
         "get events for saga " + sagaId);
+  }
+
+  @Override
+  public Optional<SagaStateAndEvents> getStateWithEvents(String sagaId) {
+    return runInTransaction(
+        tx -> {
+          Optional<SagaStateSnapshot> snapshot =
+              tx.scan(buildStateIndexScan(sagaId)).stream()
+                  .findFirst()
+                  .map(this::toSagaStateSnapshot);
+          if (snapshot.isEmpty()) {
+            return Optional.<SagaStateAndEvents>empty();
+          }
+          List<SagaEvent> events =
+              tx.scan(buildEventScan(sagaId)).stream().map(this::toSagaEvent).toList();
+          return Optional.of(new SagaStateAndEvents(snapshot.get(), events));
+        },
+        null, // read-only — retry the whole transaction on UTSE
+        "get saga state with events " + sagaId);
   }
 
   @Override
@@ -1349,6 +1368,10 @@ public class ScalarDbSagaStore implements SagaStore {
             case SAGA_COMPLETED -> StatusEvent.completed();
             case SAGA_COMPENSATED -> StatusEvent.compensated();
             case SAGA_ESCALATED -> StatusEvent.escalated(payload != null ? payload : "");
+            case SAGA_FORCE_COMPLETED ->
+                StatusEvent.reconstruct(eventType, SagaStatus.COMPLETED, payload);
+            case SAGA_RECOVERING, SAGA_RESET ->
+                StatusEvent.reconstruct(eventType, AdminAuditPayload.target(payload), payload);
             default ->
                 throw SagaPersistenceException.nonRetryable(
                     "Unknown saga event type: " + eventType,

@@ -230,7 +230,7 @@ class SagaEngineTest {
       SagaDefinition def = sagaDefinitionWithRetry("s1", "s2", "s3");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
       when(store.createSaga(any(), anyString(), anyString(), any(), anyString())).thenReturn(saga);
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Act
       engine.executeSaga(def, saga, Map.of());
@@ -241,7 +241,7 @@ class SagaEngineTest {
       verify(step3).execute(any(SagaContext.class));
       // SAGA_COMPLETED transition recorded
       ArgumentCaptor<StatusEvent> eventCaptor = ArgumentCaptor.forClass(StatusEvent.class);
-      verify(store).recordStatusEvent(any(), anyInt(), eventCaptor.capture());
+      verify(store).recordStatusEvent(any(), anyInt(), eventCaptor.capture(), any());
       assertThat(eventCaptor.getValue().getEventType()).isEqualTo(EventType.SAGA_COMPLETED);
     }
 
@@ -252,7 +252,7 @@ class SagaEngineTest {
       registerStep("s1", step1);
       SagaDefinition def = sagaDefinitionWithRetry("s1");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Act
       engine.executeSaga(def, saga, Map.of());
@@ -260,7 +260,7 @@ class SagaEngineTest {
       // Assert
       verify(step1).execute(any(SagaContext.class));
       ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
-      verify(store).recordStatusEvent(any(), anyInt(), transitionCaptor.capture());
+      verify(store).recordStatusEvent(any(), anyInt(), transitionCaptor.capture(), any());
       assertThat(transitionCaptor.getValue().getEventType()).isEqualTo(EventType.SAGA_COMPLETED);
     }
 
@@ -272,7 +272,7 @@ class SagaEngineTest {
       SagaDefinition def = sagaDefinitionWithRetry("s1");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
       when(store.createSaga(any(), anyString(), anyString(), any(), anyString())).thenReturn(saga);
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Act
       String sagaId = engine.execute(def, "saga-1", Map.of("key", "val"));
@@ -292,7 +292,7 @@ class SagaEngineTest {
       registerStep("s2", step2);
       SagaDefinition def = sagaDefinitionWithRetry("s1", "s2");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Act
       engine.executeSaga(def, saga, Map.of());
@@ -326,7 +326,7 @@ class SagaEngineTest {
       assertThat(pendingCaptor.getValue().getStepName()).isEqualTo("s1");
       // step2 never reached, and no SAGA_COMPLETED transition (the saga is parked)
       verify(step2, never()).execute(any(SagaContext.class));
-      verify(store, never()).recordStatusEvent(any(), anyInt(), any(StatusEvent.class));
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any(StatusEvent.class), any());
     }
 
     @Test
@@ -391,7 +391,7 @@ class SagaEngineTest {
       SagaStateSnapshot completedSaga =
           new SagaStateSnapshot(
               "saga-1", "test-saga", SagaStatus.COMPLETED, OWNER_ID, "v1", NOW, NOW);
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(completedSaga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(completedSaga);
       ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
 
       // Act
@@ -425,7 +425,7 @@ class SagaEngineTest {
       SagaDefinition def = sagaDefinitionWithRetry("s1", "s2", "s3");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
       // recordStatusEvent returns same snapshot for simplicity
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Act
       engine.executeSaga(def, saga, Map.of());
@@ -438,7 +438,7 @@ class SagaEngineTest {
       verify(step1).compensate(any(SagaContext.class));
       // Two transitions in order: SAGA_COMPENSATING → SAGA_COMPENSATED
       ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
-      verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture());
+      verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture(), any());
       assertThat(transitionCaptor.getAllValues().get(0).getEventType())
           .isEqualTo(EventType.SAGA_COMPENSATING);
       assertThat(transitionCaptor.getAllValues().get(1).getEventType())
@@ -468,7 +468,7 @@ class SagaEngineTest {
               .add()
               .build();
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Act
       engine.executeSaga(def, saga, Map.of());
@@ -521,7 +521,7 @@ class SagaEngineTest {
               .add()
               .build();
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Act
       engine.executeSaga(def, saga, Map.of());
@@ -547,14 +547,14 @@ class SagaEngineTest {
               .add()
               .build();
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Act
       engine.executeSaga(def, saga, Map.of());
 
       // Assert — only SAGA_COMPLETED transition (no CONFIRMING status)
       ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
-      verify(store, times(1)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture());
+      verify(store, times(1)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture(), any());
       assertThat(transitionCaptor.getValue().getEventType()).isEqualTo(EventType.SAGA_COMPLETED);
     }
 
@@ -578,7 +578,7 @@ class SagaEngineTest {
               .add()
               .build();
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Act
       engine.executeSaga(def, saga, Map.of());
@@ -589,7 +589,7 @@ class SagaEngineTest {
       verify(tcc1, never()).confirm(any(SagaContext.class));
       // Transitions: SAGA_COMPENSATING → SAGA_COMPENSATED
       ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
-      verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture());
+      verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture(), any());
       assertThat(transitionCaptor.getAllValues().get(0).getEventType())
           .isEqualTo(EventType.SAGA_COMPENSATING);
       assertThat(transitionCaptor.getAllValues().get(1).getEventType())
@@ -618,7 +618,7 @@ class SagaEngineTest {
               .add()
               .build();
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Act
       engine.executeSaga(def, saga, Map.of());
@@ -662,7 +662,7 @@ class SagaEngineTest {
               .add()
               .build();
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Act
       engine.executeSaga(def, saga, Map.of());
@@ -670,7 +670,7 @@ class SagaEngineTest {
       // Assert — STEP_FAILED event appended (timeout is non-retryable failure at/before pivot)
       // Compensation triggered: SAGA_COMPENSATING → SAGA_COMPENSATED
       ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
-      verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture());
+      verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture(), any());
       assertThat(transitionCaptor.getAllValues().get(0).getEventType())
           .isEqualTo(EventType.SAGA_COMPENSATING);
       assertThat(transitionCaptor.getAllValues().get(1).getEventType())
@@ -711,7 +711,7 @@ class SagaEngineTest {
               .add()
               .build();
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Act
       clockEngine.executeSaga(def, saga, Map.of());
@@ -722,7 +722,7 @@ class SagaEngineTest {
       verify(step1, never()).execute(any(SagaContext.class));
       // Compensation triggered: SAGA_COMPENSATING → SAGA_COMPENSATED
       ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
-      verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture());
+      verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture(), any());
       assertThat(transitionCaptor.getAllValues().get(0).getEventType())
           .isEqualTo(EventType.SAGA_COMPENSATING);
       assertThat(transitionCaptor.getAllValues().get(1).getEventType())
@@ -772,7 +772,7 @@ class SagaEngineTest {
               .add()
               .build();
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Act
       clockEngine.executeSaga(def, saga, Map.of());
@@ -783,7 +783,8 @@ class SagaEngineTest {
       verify(step1).execute(any(SagaContext.class));
       verify(step2, never()).execute(any(SagaContext.class));
       // No compensation (timed out after pivot) — no SAGA_COMPENSATING transition
-      verify(store, never()).recordStatusEvent(any(), anyInt(), eq(StatusEvent.compensating()));
+      verify(store, never())
+          .recordStatusEvent(any(), anyInt(), eq(StatusEvent.compensating()), any());
     }
   }
 
@@ -811,7 +812,7 @@ class SagaEngineTest {
       registerStep("s2", step2);
       SagaDefinition def = sagaDefinitionWithRetry("s1", "s2");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Re-create engine with WAIT_CURRENT_STEP mode
       engine.close();
@@ -847,7 +848,7 @@ class SagaEngineTest {
       registerStep("s1", step1);
       SagaDefinition def = sagaDefinitionWithRetry("s1");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       Thread sagaThread = new Thread(() -> engine.executeSaga(def, saga, Map.of()));
       sagaThread.start();
@@ -883,7 +884,7 @@ class SagaEngineTest {
       registerStep("s1", step1);
       SagaDefinition def = sagaDefinitionWithRetry("s1");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       Thread sagaThread = new Thread(() -> engine.executeSaga(def, saga, Map.of()));
       sagaThread.start();
@@ -919,7 +920,7 @@ class SagaEngineTest {
       registerStep("s1", step1);
       SagaDefinition def = sagaDefinitionWithRetry("s1");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       Thread sagaThread = new Thread(() -> engine.executeSaga(def, saga, Map.of()));
       sagaThread.start();
@@ -934,7 +935,7 @@ class SagaEngineTest {
       // No compensation was triggered
       verify(step1, never()).compensate(any(SagaContext.class));
       // No status transitions recorded for the duplicate
-      verify(store, never()).recordStatusEvent(any(), anyInt(), any(StatusEvent.class));
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any(StatusEvent.class), any());
 
       // Cleanup
       stepRelease.countDown();
@@ -974,7 +975,7 @@ class SagaEngineTest {
 
       // Assert
       verify(store).markForRecovery("saga-1");
-      verify(store, never()).recordStatusEvent(any(), anyInt(), any(StatusEvent.class));
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any(StatusEvent.class), any());
     }
 
     @Test
@@ -993,7 +994,7 @@ class SagaEngineTest {
       registerStep("s1", step1);
       SagaDefinition def = sagaDefinitionWithRetry("s1");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Re-create engine with very short shutdown timeout
       engine.close();
@@ -1038,7 +1039,7 @@ class SagaEngineTest {
       registerStep("s1", step1);
       SagaDefinition def = sagaDefinitionWithRetry("s1");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Act
       engine.executeSaga(def, saga, Map.of());
@@ -1046,7 +1047,7 @@ class SagaEngineTest {
       // Assert — step executed 3 times, saga completed
       verify(step1, times(3)).execute(any(SagaContext.class));
       ArgumentCaptor<StatusEvent> eventCaptor = ArgumentCaptor.forClass(StatusEvent.class);
-      verify(store).recordStatusEvent(any(), anyInt(), eventCaptor.capture());
+      verify(store).recordStatusEvent(any(), anyInt(), eventCaptor.capture(), any());
       assertThat(eventCaptor.getValue().getEventType()).isEqualTo(EventType.SAGA_COMPLETED);
     }
 
@@ -1057,7 +1058,7 @@ class SagaEngineTest {
       registerStep("s1", step1);
       SagaDefinition def = sagaDefinitionWithRetry("s1");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Act
       engine.executeSaga(def, saga, Map.of());
@@ -1066,7 +1067,7 @@ class SagaEngineTest {
       verify(step1, times(1)).execute(any(SagaContext.class));
       // SAGA_COMPENSATING → SAGA_COMPENSATED
       ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
-      verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture());
+      verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture(), any());
       assertThat(transitionCaptor.getAllValues().get(0).getEventType())
           .isEqualTo(EventType.SAGA_COMPENSATING);
       assertThat(transitionCaptor.getAllValues().get(1).getEventType())
@@ -1083,7 +1084,7 @@ class SagaEngineTest {
       registerStep("s1", step1);
       SagaDefinition def = sagaDefinitionWithRetry("s1");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Act
       engine.executeSaga(def, saga, Map.of());
@@ -1093,7 +1094,7 @@ class SagaEngineTest {
 
       // SAGA_COMPENSATING → SAGA_COMPENSATED
       ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
-      verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture());
+      verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture(), any());
       assertThat(transitionCaptor.getAllValues().get(0).getEventType())
           .isEqualTo(EventType.SAGA_COMPENSATING);
       assertThat(transitionCaptor.getAllValues().get(1).getEventType())
@@ -1194,14 +1195,14 @@ class SagaEngineTest {
       SagaDefinition def = sagaDefinitionWithRetry("s1");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
       ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Act
       engine.compensateFrom(def, context, 0);
 
       // Assert — transition to COMPENSATING then COMPENSATED
       ArgumentCaptor<StatusEvent> eventCaptor = ArgumentCaptor.forClass(StatusEvent.class);
-      verify(store, times(2)).recordStatusEvent(any(), anyInt(), eventCaptor.capture());
+      verify(store, times(2)).recordStatusEvent(any(), anyInt(), eventCaptor.capture(), any());
       assertThat(eventCaptor.getAllValues().get(0).getEventType())
           .isEqualTo(EventType.SAGA_COMPENSATING);
       assertThat(eventCaptor.getAllValues().get(1).getEventType())
@@ -1216,7 +1217,7 @@ class SagaEngineTest {
       SagaDefinition def = sagaDefinitionWithRetry("s1");
       SagaStateSnapshot saga = compensatingSnapshot("saga-1");
       ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Act
       engine.compensateFrom(def, context, 0);
@@ -1224,7 +1225,7 @@ class SagaEngineTest {
       // Assert — only SAGA_COMPENSATED transition (no SAGA_COMPENSATING since already in that
       // state)
       ArgumentCaptor<StatusEvent> eventCaptor = ArgumentCaptor.forClass(StatusEvent.class);
-      verify(store, times(1)).recordStatusEvent(any(), anyInt(), eventCaptor.capture());
+      verify(store, times(1)).recordStatusEvent(any(), anyInt(), eventCaptor.capture(), any());
       assertThat(eventCaptor.getValue().getEventType()).isEqualTo(EventType.SAGA_COMPENSATED);
     }
 
@@ -1240,13 +1241,13 @@ class SagaEngineTest {
       SagaDefinition def = sagaDefinitionWithRetry("s1");
       SagaStateSnapshot saga = compensatingSnapshot("saga-1");
       ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Act
       engine.compensateFrom(def, context, 0);
 
       // Assert — no SAGA_COMPENSATED transition (stays COMPENSATING)
-      verify(store, never()).recordStatusEvent(any(), anyInt(), any(StatusEvent.class));
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any(StatusEvent.class), any());
     }
   }
 
@@ -1441,7 +1442,7 @@ class SagaEngineTest {
               .add()
               .build();
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Act
       engine.executeSaga(def, saga, Map.of());
@@ -1461,7 +1462,7 @@ class SagaEngineTest {
       // fastRetryPolicy() has maxAttempts=3
       SagaDefinition def = sagaDefinitionWithRetry("s1");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Act
       engine.executeSaga(def, saga, Map.of());
@@ -1480,7 +1481,7 @@ class SagaEngineTest {
       registerStep("s1", step1);
       SagaDefinition def = sagaDefinition("s1"); // no defaultRetryPolicy
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Act
       engine.executeSaga(def, saga, Map.of());
@@ -1511,7 +1512,7 @@ class SagaEngineTest {
       registerStep("s1", step1);
       SagaDefinition def = sagaDefinitionWithRetry("s0", "s1");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // recordStepCompleted for step 1 throws — step 1 executed but recording failed.
       // Compensation must include step 1 (compensate from i, not i-1).
@@ -1549,7 +1550,7 @@ class SagaEngineTest {
       // step 0 is also compensated (LIFO), and the saga transitions COMPENSATING → COMPENSATED.
       verify(step0).compensate(any(SagaContext.class));
       ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
-      verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture());
+      verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture(), any());
       assertThat(transitionCaptor.getAllValues().get(0).getEventType())
           .isEqualTo(EventType.SAGA_COMPENSATING);
       assertThat(transitionCaptor.getAllValues().get(1).getEventType())
@@ -1608,7 +1609,8 @@ class SagaEngineTest {
           .recordStatusEvent(
               any(),
               anyInt(),
-              argThat(s -> s != null && s.getEventType() == EventType.SAGA_COMPENSATING));
+              argThat(s -> s != null && s.getEventType() == EventType.SAGA_COMPENSATING),
+              any());
     }
 
     @Test
@@ -1624,7 +1626,7 @@ class SagaEngineTest {
       registerStep("s1", step1);
       SagaDefinition def = sagaDefinitionWithRetry("s0", "s1");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Act
       engine.executeSaga(def, saga, Map.of());
@@ -1648,7 +1650,7 @@ class SagaEngineTest {
       registerStep("s1", step1);
       SagaDefinition def = sagaDefinitionWithRetry("s0", "s1");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Act
       engine.executeSaga(def, saga, Map.of());
@@ -1683,7 +1685,7 @@ class SagaEngineTest {
       registerStep("s1", step1);
       SagaDefinition def = sagaDefinitionWithRetry("s0", "s1");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any())).thenReturn(saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
 
       // Act
       engine.executeSaga(def, saga, Map.of());
@@ -1737,7 +1739,7 @@ class SagaEngineTest {
       verify(step0, never()).compensate(any(SagaContext.class));
       verify(step1, never()).compensate(any(SagaContext.class));
       verify(step2, never()).compensate(any(SagaContext.class));
-      verify(store, never()).recordStatusEvent(any(), anyInt(), any());
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any(), any());
     }
 
     @Test
@@ -1754,7 +1756,7 @@ class SagaEngineTest {
       registerStep("s0", step0);
       SagaDefinition def = sagaDefinitionWithRetry("s0");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
-      when(store.recordStatusEvent(any(), anyInt(), any()))
+      when(store.recordStatusEvent(any(), anyInt(), any(), any()))
           .thenReturn(compensatingSnapshot("saga-1"));
 
       // recordStepCompleted for step 0 throws
@@ -1776,7 +1778,7 @@ class SagaEngineTest {
       verify(step0, atLeastOnce()).compensate(any(SagaContext.class));
       // Only SAGA_COMPENSATING transition (no SAGA_COMPENSATED)
       ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
-      verify(store, times(1)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture());
+      verify(store, times(1)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture(), any());
       assertThat(transitionCaptor.getValue().getEventType()).isEqualTo(EventType.SAGA_COMPENSATING);
     }
   }

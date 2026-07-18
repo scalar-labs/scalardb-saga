@@ -126,6 +126,39 @@ class EventPayloadSerializerTest {
   }
 
   @Test
+  void errorMessage_serializedErrorGiven_returnsMessage() {
+    // Arrange
+    String json = EventPayloadSerializer.serializeError(new RuntimeException("refused"), false);
+
+    // Act
+    String message = EventPayloadSerializer.errorMessage(json);
+
+    // Assert
+    assertThat(message).isEqualTo("refused");
+  }
+
+  @Test
+  void errorMessage_payloadWithoutStringMessageGiven_returnsNull() {
+    // A payload that simply recorded no message is reported as absent, not as unreadable.
+    assertThat(EventPayloadSerializer.errorMessage(null)).isNull();
+    assertThat(EventPayloadSerializer.errorMessage("")).isNull();
+    assertThat(EventPayloadSerializer.errorMessage("{\"type\":\"x\"}")).isNull();
+    assertThat(EventPayloadSerializer.errorMessage("{\"message\":42}")).isNull();
+    // A JSON null literal deserializes to a null map — must not NPE.
+    assertThat(EventPayloadSerializer.errorMessage("null")).isNull();
+  }
+
+  @Test
+  void errorMessage_unparseablePayloadGiven_returnsPlaceholderInsteadOfThrowing() {
+    // An undecodable payload must degrade so one bad step failure cannot fail a whole timeline
+    // read; the placeholder keeps it distinguishable from a payload carrying no message.
+    assertThat(EventPayloadSerializer.errorMessage("not json"))
+        .isEqualTo(EventPayloadSerializer.UNREADABLE_MESSAGE);
+    assertThat(EventPayloadSerializer.errorMessage("{\"message\":\"truncated"))
+        .isEqualTo(EventPayloadSerializer.UNREADABLE_MESSAGE);
+  }
+
+  @Test
   void roundTrip_mapSerializedAndDeserialized_equalsOriginal() {
     // Arrange
     Map<String, Object> original = Map.of("name", "test", "amount", 100, "active", true);

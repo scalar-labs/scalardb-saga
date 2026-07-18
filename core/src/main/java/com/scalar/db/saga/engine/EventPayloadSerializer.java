@@ -23,6 +23,9 @@ public final class EventPayloadSerializer {
   private static final String MESSAGE = "message";
   private static final String KNOWN_NOT_COMMITTED = "knownNotCommitted";
 
+  /** Stands in for a step failure's error text when its payload cannot be decoded. */
+  public static final String UNREADABLE_MESSAGE = "<unreadable payload>";
+
   private static final ObjectMapper MAPPER =
       new ObjectMapper()
           .enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
@@ -67,6 +70,33 @@ public final class EventPayloadSerializer {
     } catch (JsonProcessingException ex) {
       throw SagaPersistenceException.nonRetryable("Failed to serialize error payload", ex);
     }
+  }
+
+  /**
+   * The {@code message} field of a serialized error {@code payload} (see {@link #serializeError}),
+   * or {@code null} if the payload is absent or carries no string message. Used to surface a step
+   * failure's error text on the admin timeline without exposing the raw payload.
+   *
+   * <p>An unparseable payload yields {@link #UNREADABLE_MESSAGE} rather than propagating, so a
+   * single bad payload degrades one timeline entry instead of failing the whole read. The
+   * placeholder is distinct from {@code null} so an operator can tell a corrupt payload from one
+   * that simply recorded no message.
+   */
+  public static @Nullable String errorMessage(@Nullable String payload) {
+    if (payload == null || payload.isEmpty()) {
+      return null;
+    }
+    Map<String, Object> map;
+    try {
+      map = MAPPER.readValue(payload, MAP_TYPE);
+    } catch (JsonProcessingException e) {
+      return UNREADABLE_MESSAGE;
+    }
+    if (map == null) {
+      // A JSON null literal ("null") deserializes to a null map; it carries no message.
+      return null;
+    }
+    return map.get(MESSAGE) instanceof String message ? message : null;
   }
 
   /**

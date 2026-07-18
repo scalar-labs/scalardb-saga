@@ -63,6 +63,64 @@ public final class StatusEvent implements SagaEvent {
     return new StatusEvent(EventType.SAGA_ESCALATED, SagaStatus.ESCALATED, reason, null);
   }
 
+  /**
+   * Creates a {@link EventType#SAGA_FORCE_COMPLETED} event: an operator overrode an {@code
+   * ESCALATED} saga to {@code COMPLETED}. The {@code operator} and {@code reason} are recorded in
+   * the payload for audit (see {@link AdminAuditPayload}).
+   */
+  public static StatusEvent forceCompleted(String operator, String reason) {
+    Objects.requireNonNull(operator, "operator must not be null");
+    Objects.requireNonNull(reason, "reason must not be null");
+    return new StatusEvent(
+        EventType.SAGA_FORCE_COMPLETED,
+        SagaStatus.COMPLETED,
+        AdminAuditPayload.encode(operator, reason, SagaStatus.COMPLETED),
+        null);
+  }
+
+  /**
+   * Creates a {@link EventType#SAGA_RECOVERING} event: an operator forced a stuck {@code
+   * RUNNING}/{@code COMPENSATING} saga to be driven now, in the direction recovery would take it,
+   * rather than waiting for the scheduled sweep. {@code target} is the resulting status — {@code
+   * COMPENSATING} (compensate) or {@code RUNNING} (resume forward). Recorded before the drive it
+   * requests, so it names the phase the saga enters; the outcome follows in later events.
+   */
+  public static StatusEvent recovering(SagaStatus target, String operator, String reason) {
+    return intervention(EventType.SAGA_RECOVERING, target, operator, reason);
+  }
+
+  /**
+   * Creates a {@link EventType#SAGA_RESET} event: an operator un-escalated an {@code ESCALATED}
+   * saga, driving it in the direction recovery would take it. {@code target} is the resulting
+   * status — {@code COMPENSATING} (compensate) or {@code RUNNING} (resume forward).
+   */
+  public static StatusEvent reset(SagaStatus target, String operator, String reason) {
+    return intervention(EventType.SAGA_RESET, target, operator, reason);
+  }
+
+  private static StatusEvent intervention(
+      EventType eventType, SagaStatus target, String operator, String reason) {
+    Objects.requireNonNull(target, "target must not be null");
+    Objects.requireNonNull(operator, "operator must not be null");
+    Objects.requireNonNull(reason, "reason must not be null");
+    if (target != SagaStatus.COMPENSATING && target != SagaStatus.RUNNING) {
+      throw new IllegalArgumentException("target must be COMPENSATING or RUNNING, got " + target);
+    }
+    return new StatusEvent(
+        eventType, target, AdminAuditPayload.encode(operator, reason, target), null);
+  }
+
+  /**
+   * Rehydrates an operator-intervention event ({@link EventType#SAGA_FORCE_COMPLETED}, {@link
+   * EventType#SAGA_RECOVERING}, {@link EventType#SAGA_RESET}) from the stored event stream. Unlike
+   * the public factories, this takes the already-persisted target and payload directly — the store
+   * reconstructs a variable target from the payload (see {@link AdminAuditPayload#target}) — rather
+   * than re-encoding a fresh payload.
+   */
+  static StatusEvent reconstruct(EventType eventType, SagaStatus target, @Nullable String payload) {
+    return new StatusEvent(eventType, target, payload, null);
+  }
+
   // ---------------------------------------------------------------------------
   // Getters
   // ---------------------------------------------------------------------------
