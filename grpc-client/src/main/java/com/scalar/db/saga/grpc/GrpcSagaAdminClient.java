@@ -14,11 +14,14 @@ import com.scalar.db.saga.exception.SagaUnavailableException;
 import com.scalar.db.saga.rpc.AdminServiceGrpc;
 import com.scalar.db.saga.rpc.AdminServiceGrpc.AdminServiceBlockingStub;
 import com.scalar.db.saga.rpc.InterventionRequest;
+import io.grpc.CallCredentials;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
+import io.grpc.Metadata;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import java.util.Objects;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import javax.net.ssl.SSLEngine;
@@ -31,10 +34,14 @@ import org.jspecify.annotations.Nullable;
  * service, so operator tooling runs unchanged embedded or remote.
  *
  * <p>This is the <b>operator</b> client, distinct from {@link GrpcSagaOrchestratorClient} (the
- * application client): its RPCs require the {@code saga:admin} role, and the operator identity that
- * every mutation is attributed to comes from the client's authenticated credential (a JWT or API
- * key attached by a call interceptor), never from a method argument — {@code reason} is the only
- * audit input the caller supplies.
+ * application client): its RPCs require the {@code saga:admin} role. Against a daemon with a real
+ * security provider the caller must present a credential — set one with {@link
+ * Builder#callCredentials(CallCredentials)}. For the built-in providers, which read a header,
+ * {@link #staticHeaderCredentials(String, String)} builds the credential (an API key, or a bearer
+ * token as {@code Authorization}/{@code "Bearer …"}). Without a credential every RPC is rejected
+ * {@code UNAUTHENTICATED} — except against the {@code noop} provider, which grants all roles. The
+ * operator identity every mutation is attributed to is resolved server-side from that credential,
+ * never from a method argument; {@code reason} is the only audit input the caller supplies.
  *
  * <p>Thread-safe and intended to be created once and shared: a single instance holds one {@link
  * ManagedChannel} that multiplexes all calls. Call {@link #close()} to release it.
@@ -70,6 +77,32 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
 
   public static Builder newBuilder() {
     return new Builder();
+  }
+
+  /**
+   * Builds {@link CallCredentials} that attach a fixed header value to every call — the credential
+   * form the built-in security providers expect. Use it for an API key ({@code
+   * staticHeaderCredentials("X-API-Key", key)}, matching the {@code apikey} provider's configured
+   * header) or a fixed bearer token ({@code staticHeaderCredentials("Authorization", "Bearer " +
+   * jwt)}). For a token that must refresh, supply a custom {@link CallCredentials} instead.
+   *
+   * @param headerName the metadata header the daemon's provider reads
+   * @param headerValue the credential value
+   * @return call credentials that present {@code headerValue} under {@code headerName}
+   */
+  public static CallCredentials staticHeaderCredentials(String headerName, String headerValue) {
+    Objects.requireNonNull(headerName, "headerName must not be null");
+    Objects.requireNonNull(headerValue, "headerValue must not be null");
+    Metadata.Key<String> key = Metadata.Key.of(headerName, Metadata.ASCII_STRING_MARSHALLER);
+    return new CallCredentials() {
+      @Override
+      public void applyRequestMetadata(
+          RequestInfo requestInfo, Executor appExecutor, MetadataApplier applier) {
+        Metadata headers = new Metadata();
+        headers.put(key, headerValue);
+        applier.apply(headers);
+      }
+    };
   }
 
   // --------------------------------------------------------------------------
@@ -235,11 +268,23 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
     @Nullable private String target;
     private boolean useTls = false;
     private long defaultDeadlineMillis = 0L;
+    @Nullable private CallCredentials callCredentials;
 
     private Builder() {}
 
     public Builder target(String target) {
       this.target = Objects.requireNonNull(target, "target must not be null");
+      return this;
+    }
+
+    /**
+     * The credential presented on every call, resolved server-side to the operator identity.
+     * Against a daemon with a real provider this is required; {@link
+     * #staticHeaderCredentials(String, String)} builds one for the header-based built-in providers.
+     */
+    public Builder callCredentials(CallCredentials callCredentials) {
+      this.callCredentials =
+          Objects.requireNonNull(callCredentials, "callCredentials must not be null");
       return this;
     }
 
@@ -281,8 +326,11 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
         channelBuilder.usePlaintext();
       }
       ManagedChannel channel = channelBuilder.build();
-      return new GrpcSagaAdminClient(
-          AdminServiceGrpc.newBlockingStub(channel), channel, defaultDeadlineMillis);
+      AdminServiceBlockingStub stub = AdminServiceGrpc.newBlockingStub(channel);
+      if (callCredentials != null) {
+        stub = stub.withCallCredentials(callCredentials);
+      }
+      return new GrpcSagaAdminClient(stub, channel, defaultDeadlineMillis);
     }
 
     private static boolean alpnAvailable() {
