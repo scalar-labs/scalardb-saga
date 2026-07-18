@@ -3,6 +3,7 @@ package com.scalar.db.saga.engine;
 import com.scalar.db.saga.api.SagaAdminService;
 import com.scalar.db.saga.api.SagaCallback;
 import com.scalar.db.saga.api.SagaDefinitionId;
+import com.scalar.db.saga.api.SagaDetail;
 import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
@@ -59,7 +60,6 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   private final SagaDefinitionRegistry definitionRegistry;
   private final SagaRecoveryManager recoveryManager;
   private final SagaRetentionManager retentionManager;
-  private final SagaAdminService adminService;
   private final long shutdownTimeoutMillis;
   private final ExecutorService asyncExecutor;
   private volatile boolean closed;
@@ -95,8 +95,6 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     this.definitionRegistry = definitionRegistry;
     this.recoveryManager = recoveryManager;
     this.retentionManager = retentionManager;
-    this.adminService =
-        new DefaultSagaAdminService(store, engine, definitionRegistry, () -> EMBEDDED_OPERATOR);
     this.shutdownTimeoutMillis = shutdownTimeoutMillis;
     this.asyncExecutor = asyncExecutor;
   }
@@ -384,11 +382,41 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
 
   /**
    * Returns the {@link SagaAdminService} control plane backed by this orchestrator's store and
-   * engine: list and inspect sagas, and recover, force-complete, or reset the ones that need an
-   * operator. Interventions are attributed to a fixed embedded principal.
+   * engine: list sagas, and recover, force-complete, or reset the ones that need an operator. This
+   * is the embedded default of {@link #adminService(OperatorContext, long)} — interventions are
+   * attributed to a fixed embedded principal, and single-saga drives run to completion on the
+   * calling thread. A server that authenticates its callers and must not block a request thread
+   * indefinitely passes its own operator context and drive deadline to that method instead.
    */
   public SagaAdminService adminService() {
-    return adminService;
+    return adminService(() -> EMBEDDED_OPERATOR, 0L);
+  }
+
+  @Override
+  public SagaDetail getSagaDetail(String sagaId) {
+    // An application read of its own saga's state and timeline — no operator, no drive.
+    return SagaDetailReader.read(store, sagaId);
+  }
+
+  /**
+   * Builds a {@link SagaAdminService} that attributes interventions to the given operator context
+   * and bounds how long a single-saga mutation drives before returning. A daemon builds one per
+   * request whose {@code operatorContext} yields that request's authenticated principal, so the
+   * audit records who acted without the operator identity ever being a caller-supplied parameter.
+   *
+   * <p>The returned service shares this orchestrator's store and engine — it is a thin view, not a
+   * second engine — so building one per request is cheap and holds no resource of its own.
+   *
+   * @param operatorContext supplies the principal to stamp on the audit record
+   * @param driveDeadlineMillis the longest a single-saga {@code recoverSaga}/{@code resetEscalated}
+   *     drives before returning the saga's current state and leaving the rest to the recovery loop;
+   *     {@code 0} or less drives on the calling thread with no bound
+   * @return the admin service view
+   */
+  public SagaAdminService adminService(OperatorContext operatorContext, long driveDeadlineMillis) {
+    Objects.requireNonNull(operatorContext, "operatorContext must not be null");
+    return new DefaultSagaAdminService(
+        store, engine, definitionRegistry, operatorContext, driveDeadlineMillis);
   }
 
   // ---------------------------------------------------------------------------

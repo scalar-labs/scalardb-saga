@@ -6,6 +6,7 @@ import static org.mockito.Mockito.mock;
 import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.daemon.api.CallbackResource;
 import com.scalar.db.saga.daemon.api.HealthResource;
+import com.scalar.db.saga.daemon.api.SagaAdminResource;
 import com.scalar.db.saga.daemon.api.SagaResource;
 import com.scalar.db.saga.daemon.security.SagaOperation;
 import com.scalar.db.saga.daemon.security.SagaRole;
@@ -52,12 +53,17 @@ class TransportPolicyParityTest {
   /** The expected policy for every operation. Stated literally; not derived from the enum. */
   private static final Map<SagaOperation, ExpectedPolicy> EXPECTED_POLICY =
       new EnumMap<>(
-          Map.of(
-              SagaOperation.HEALTH, new ExpectedPolicy(null, false),
-              SagaOperation.CALLBACK, new ExpectedPolicy(null, false),
-              SagaOperation.START_SAGA, new ExpectedPolicy(SagaRole.WRITE, true),
-              SagaOperation.GET_SAGA, new ExpectedPolicy(SagaRole.READ, false),
-              SagaOperation.AWAIT_SAGA, new ExpectedPolicy(SagaRole.READ, false)));
+          Map.ofEntries(
+              Map.entry(SagaOperation.HEALTH, new ExpectedPolicy(null, false)),
+              Map.entry(SagaOperation.CALLBACK, new ExpectedPolicy(null, false)),
+              Map.entry(SagaOperation.START_SAGA, new ExpectedPolicy(SagaRole.WRITE, true)),
+              Map.entry(SagaOperation.GET_SAGA, new ExpectedPolicy(SagaRole.READ, false)),
+              Map.entry(SagaOperation.AWAIT_SAGA, new ExpectedPolicy(SagaRole.READ, false)),
+              Map.entry(SagaOperation.LIST_SAGAS, new ExpectedPolicy(SagaRole.ADMIN, true)),
+              Map.entry(SagaOperation.GET_SAGA_DETAIL, new ExpectedPolicy(SagaRole.READ, false)),
+              Map.entry(SagaOperation.RECOVER_SAGA, new ExpectedPolicy(SagaRole.ADMIN, true)),
+              Map.entry(SagaOperation.FORCE_COMPLETE, new ExpectedPolicy(SagaRole.ADMIN, true)),
+              Map.entry(SagaOperation.RESET_ESCALATED, new ExpectedPolicy(SagaRole.ADMIN, true))));
 
   /** The expected operation for every gRPC method, by bare method name. */
   private static final Map<String, SagaOperation> EXPECTED_GRPC_METHODS =
@@ -68,12 +74,18 @@ class TransportPolicyParityTest {
 
   /** The expected operation for every REST route, by {@code "METHOD path"}. */
   private static final Map<String, SagaOperation> EXPECTED_REST_ROUTES =
-      Map.of(
-          "GET /health", SagaOperation.HEALTH,
-          "POST /sagas/{id}/steps/{stepName}/complete", SagaOperation.CALLBACK,
-          "POST /sagas", SagaOperation.START_SAGA,
-          "PUT /sagas/{id}", SagaOperation.START_SAGA,
-          "GET /sagas/{id}", SagaOperation.GET_SAGA);
+      Map.ofEntries(
+          Map.entry("GET /health", SagaOperation.HEALTH),
+          Map.entry("POST /sagas/{id}/steps/{stepName}/complete", SagaOperation.CALLBACK),
+          Map.entry("POST /sagas", SagaOperation.START_SAGA),
+          Map.entry("PUT /sagas/{id}", SagaOperation.START_SAGA),
+          Map.entry("GET /sagas/{id}", SagaOperation.GET_SAGA),
+          Map.entry("GET /sagas", SagaOperation.LIST_SAGAS),
+          Map.entry("GET /sagas/{id}/detail", SagaOperation.GET_SAGA_DETAIL),
+          Map.entry("POST /sagas/{id}/recover", SagaOperation.RECOVER_SAGA),
+          Map.entry("POST /sagas/{id}/force-complete", SagaOperation.FORCE_COMPLETE),
+          Map.entry("POST /sagas/{id}/reset", SagaOperation.RESET_ESCALATED),
+          Map.entry("POST /admin/reset-escalated", SagaOperation.RESET_ESCALATED));
 
   private record ExpectedPolicy(@Nullable SagaRole role, boolean limited) {}
 
@@ -132,10 +144,11 @@ class TransportPolicyParityTest {
   void restRoutes_allCarryTheExpectedOperation() {
     // Arrange — register the real routes, exactly as SagaServer does
     Javalin app = Javalin.create();
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
     HealthResource.register(app);
     SagaResource.register(app, mock(SagaOrchestrator.class), 0L);
-    CallbackResource.register(
-        app, mock(DefaultSagaOrchestrator.class), "test-secret", 0L, Clock.systemUTC());
+    SagaAdminResource.register(app, orchestrator, 0L);
+    CallbackResource.register(app, orchestrator, "test-secret", 0L, Clock.systemUTC());
 
     // Act — enumerate what was actually registered, skipping the before/after handlers
     Map<String, SagaOperation> registered = new HashMap<>();

@@ -41,14 +41,10 @@ public interface SagaAdminService extends AutoCloseable {
    */
   SagaPage<SagaStateSnapshot> listSagas(SagaQuery query);
 
-  /**
-   * Returns a saga's current state plus its full, flat event timeline.
-   *
-   * @param sagaId the saga instance ID
-   * @return the saga's detail view
-   * @throws SagaNotFoundException if no such saga exists (or it was purged by retention)
-   */
-  SagaDetail getSagaDetail(String sagaId);
+  // Inspecting one saga's detail and timeline is an application self-service read (diagnosing your
+  // own saga's failure), not an operator intervention, so it lives on
+  // SagaOrchestrator#getSagaDetail
+  // rather than here. An operator holds ADMIN, which implies READ, so they reach it too.
 
   // ---------------------------------------------------------------------------
   // Mutations (operator interventions)

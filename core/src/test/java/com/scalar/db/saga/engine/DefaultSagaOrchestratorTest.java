@@ -17,6 +17,7 @@ import static org.mockito.Mockito.when;
 
 import com.scalar.db.saga.api.SagaCallback;
 import com.scalar.db.saga.api.SagaDefinitionId;
+import com.scalar.db.saga.api.SagaDetail;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.definition.SagaDefinition;
@@ -25,6 +26,7 @@ import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
+import com.scalar.db.saga.store.SagaStateAndEvents;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.StatusEvent;
 import com.scalar.db.saga.store.StepEvent;
@@ -806,6 +808,31 @@ class DefaultSagaOrchestratorTest {
 
       // Act & Assert
       assertThatThrownBy(() -> orchestrator.getStateSnapshot("unknown"))
+          .isInstanceOf(SagaNotFoundException.class);
+    }
+
+    @Test
+    void getSagaDetail_existingSaga_returnsStateAndTimeline() {
+      // Arrange — the application read of its own saga's detail, backed by the store's atomic read
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.COMPENSATED);
+      when(store.getStateWithEvents("saga-1"))
+          .thenReturn(Optional.of(new SagaStateAndEvents(saga, List.of())));
+
+      // Act
+      SagaDetail detail = orchestrator.getSagaDetail("saga-1");
+
+      // Assert — the projection itself is covered by SagaDetailReaderTest; here just the wiring
+      assertThat(detail.getSnapshot()).isSameAs(saga);
+      assertThat(detail.getTimeline()).isEmpty();
+    }
+
+    @Test
+    void getSagaDetail_unknownSaga_throwsSagaNotFound() {
+      // Arrange
+      when(store.getStateWithEvents("unknown")).thenReturn(Optional.empty());
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.getSagaDetail("unknown"))
           .isInstanceOf(SagaNotFoundException.class);
     }
   }

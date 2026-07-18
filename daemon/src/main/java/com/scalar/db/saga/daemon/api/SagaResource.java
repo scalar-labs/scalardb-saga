@@ -110,6 +110,16 @@ public final class SagaResource {
         "/sagas/{id}",
         ctx -> respond(ctx, 200, orchestrator.getStateSnapshot(ctx.pathParam("id"))),
         SagaOperation.GET_SAGA);
+
+    // A saga's detail (state + timeline). An application read of its own saga — self-service
+    // diagnosis of a failure — so it lives here with the other application reads, not on the admin
+    // surface; the timeline redacts raw step payloads.
+    app.get(
+        "/sagas/{id}/detail",
+        ctx ->
+            ctx.status(200)
+                .json(SagaDetailResponse.from(orchestrator.getSagaDetail(ctx.pathParam("id")))),
+        SagaOperation.GET_SAGA_DETAIL);
   }
 
   /**

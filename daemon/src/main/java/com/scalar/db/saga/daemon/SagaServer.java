@@ -6,6 +6,7 @@ import com.scalar.db.saga.daemon.api.HealthResource;
 import com.scalar.db.saga.daemon.api.HmacCallbackUrlProvider;
 import com.scalar.db.saga.daemon.api.RateLimitHandler;
 import com.scalar.db.saga.daemon.api.RateLimiter;
+import com.scalar.db.saga.daemon.api.SagaAdminResource;
 import com.scalar.db.saga.daemon.api.SagaResource;
 import com.scalar.db.saga.daemon.grpc.SagaRateLimitInterceptor;
 import com.scalar.db.saga.daemon.grpc.SagaSecurityInterceptor;
@@ -316,6 +317,7 @@ public final class SagaServer implements AutoCloseable {
     HealthResource.register(httpServer);
     ErrorMapper.register(httpServer);
     SagaResource.register(httpServer, orchestrator, config.syncTimeoutMillis());
+    SagaAdminResource.register(httpServer, orchestrator, adminDriveDeadlineMillis());
     // The async-callback route exists only when a callback secret is configured; without it there
     // is nothing to authenticate callbacks against, so async completion is not enabled.
     config
@@ -328,6 +330,24 @@ public final class SagaServer implements AutoCloseable {
                     secret,
                     config.callbackMaxAgeSeconds(),
                     Clock.systemUTC()));
+  }
+
+  /**
+   * The bound on a single-saga admin inline drive: {@code sync_max_wait_millis} — the daemon's
+   * standing ceiling on how long any request may hold a thread — tightened by {@code
+   * sync_timeout_millis} when that is set. This mirrors the terms {@code
+   * SagaServiceImpl.computeBoundMillis} applies on the request-thread paths, minus the per-call
+   * gRPC client deadline, which has no REST analogue. Past the bound the durable transition is
+   * already recorded and the response carries the saga's current state, so the bound only caps how
+   * long the request waits, never correctness. Reusing {@code sync_max_wait_millis} keeps the drive
+   * inside the shutdown drain window {@link #grpcDrainMillis()} derives from the same value.
+   */
+  private long adminDriveDeadlineMillis() {
+    long bound = config.syncMaxWaitMillis();
+    if (config.syncTimeoutMillis() > 0L) {
+      bound = Math.min(bound, config.syncTimeoutMillis());
+    }
+    return bound;
   }
 
   /**

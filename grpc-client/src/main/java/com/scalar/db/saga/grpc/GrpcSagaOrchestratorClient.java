@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.protobuf.ByteString;
 import com.scalar.db.saga.api.SagaCallback;
 import com.scalar.db.saga.api.SagaDefinitionId;
+import com.scalar.db.saga.api.SagaDetail;
 import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
@@ -205,6 +206,15 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
     } catch (StatusRuntimeException e) {
       throw mapSagaCall(e, sagaId);
     }
+  }
+
+  @Override
+  public SagaDetail getSagaDetail(String sagaId) {
+    // Placeholder until the gRPC SagaService gains a GetSagaDetail RPC and the mapper for it. Wired
+    // when the admin/detail surface lands on the wire; until then an embedded caller has the read
+    // and a gRPC caller does not.
+    throw new UnsupportedOperationException(
+        "getSagaDetail is not yet available over the gRPC client");
   }
 
   @Override

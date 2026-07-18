@@ -9,7 +9,7 @@ import org.jspecify.annotations.Nullable;
 
 /**
  * A single saga's current state plus its full, flat event timeline — the detail view behind {@link
- * SagaAdminService#getSagaDetail(String)}.
+ * SagaOrchestrator#getSagaDetail(String)}.
  */
 @Immutable
 public final class SagaDetail {

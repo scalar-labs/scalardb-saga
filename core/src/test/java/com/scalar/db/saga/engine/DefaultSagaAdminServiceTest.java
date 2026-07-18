@@ -13,12 +13,10 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.scalar.db.saga.api.ResetResult;
-import com.scalar.db.saga.api.SagaDetail;
 import com.scalar.db.saga.api.SagaPage;
 import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
-import com.scalar.db.saga.api.TimelineEvent;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.definition.SagaDefinition.RecoveryStrategy;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
@@ -29,7 +27,6 @@ import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import com.scalar.db.saga.store.AdminAuditPayload;
 import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
-import com.scalar.db.saga.store.SagaStateAndEvents;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.StatusEvent;
 import com.scalar.db.saga.store.StepEvent;
@@ -743,68 +740,6 @@ class DefaultSagaAdminServiceTest {
   private DefaultSagaAdminService boundedService(long deadlineMillis) {
     when(engine.executor()).thenReturn(driveExecutor);
     return new DefaultSagaAdminService(store, engine, registry, () -> OPERATOR, deadlineMillis);
-  }
-
-  // ---------------------------------------------------------------------------
-  // getSagaDetail — timeline mapping (metadata + error/reason only)
-  // ---------------------------------------------------------------------------
-
-  @Test
-  void getSagaDetail_missingSaga_throwsNotFound() {
-    // Arrange
-    when(store.getStateWithEvents(SAGA_ID)).thenReturn(Optional.empty());
-
-    // Act & Assert
-    assertThatThrownBy(() -> service.getSagaDetail(SAGA_ID))
-        .isInstanceOf(SagaNotFoundException.class);
-  }
-
-  @Test
-  void getSagaDetail_mapsEventsToTimeline_omitsRawPayloadsExposesErrorsAndReasons() {
-    // Arrange
-    SagaStateSnapshot snap = snapshot(SagaStatus.COMPENSATING);
-    List<SagaEvent> events =
-        List.of(
-            StatusEvent.started("{\"amount\":100}").withTimestamp(TS),
-            StepEvent.completed(0, "debit", "{\"balance\":900}").withTimestamp(TS),
-            StepEvent.failed(1, "credit", "{\"message\":\"gateway down\"}").withTimestamp(TS),
-            StatusEvent.escalated("retries exhausted").withTimestamp(TS),
-            StatusEvent.recovering(SagaStatus.COMPENSATING, "bob", "rolling back")
-                .withTimestamp(TS));
-    when(store.getStateWithEvents(SAGA_ID))
-        .thenReturn(Optional.of(new SagaStateAndEvents(snap, events)));
-
-    // Act
-    SagaDetail detail = service.getSagaDetail(SAGA_ID);
-
-    // Assert — the snapshot and timeline come from the one atomic read
-    assertThat(detail.getSnapshot()).isEqualTo(snap);
-    List<TimelineEvent> timeline = detail.getTimeline();
-    assertThat(timeline).hasSize(5);
-
-    // SAGA_STARTED — the saga input payload is never exposed
-    assertThat(timeline.get(0).getType()).isEqualTo("SAGA_STARTED");
-    assertThat(timeline.get(0).getDetail()).isNull();
-    assertThat(timeline.get(0).getResultingStatus()).isEqualTo(SagaStatus.RUNNING);
-
-    // STEP_COMPLETED — the step output payload is never exposed
-    assertThat(timeline.get(1).getType()).isEqualTo("STEP_COMPLETED");
-    assertThat(timeline.get(1).getStepIndex()).isEqualTo(0);
-    assertThat(timeline.get(1).getStepName()).isEqualTo("debit");
-    assertThat(timeline.get(1).getDetail()).isNull();
-
-    // STEP_FAILED — the error message is surfaced
-    assertThat(timeline.get(2).getType()).isEqualTo("STEP_FAILED");
-    assertThat(timeline.get(2).getDetail()).isEqualTo("gateway down");
-
-    // SAGA_ESCALATED — the escalation reason is surfaced
-    assertThat(timeline.get(3).getDetail()).isEqualTo("retries exhausted");
-
-    // SAGA_RECOVERING — the operator and reason are surfaced
-    assertThat(timeline.get(4).getType()).isEqualTo("SAGA_RECOVERING");
-    assertThat(timeline.get(4).getResultingStatus()).isEqualTo(SagaStatus.COMPENSATING);
-    assertThat(timeline.get(4).getDetail()).isEqualTo("rolling back");
-    assertThat(timeline.get(4).getOperator()).isEqualTo("bob");
   }
 
   // ---------------------------------------------------------------------------

@@ -47,7 +47,30 @@ public enum SagaOperation implements RouteRole {
   /**
    * Polling a saga until it reaches a terminal state. gRPC only; REST exposes no await endpoint.
    */
-  AWAIT_SAGA(SagaRole.READ, false);
+  AWAIT_SAGA(SagaRole.READ, false),
+
+  /**
+   * Listing sagas — global enumeration across application boundaries (a saga carries no application
+   * identity to scope a list to), so it is an operator investigation, not an application read;
+   * {@link SagaRole#ADMIN}. Aggregate counts belong on the observability plane (metrics), not here.
+   */
+  LIST_SAGAS(SagaRole.ADMIN, true),
+
+  /**
+   * Inspecting one saga's detail and timeline. An application diagnosing its own saga by an id it
+   * already holds, so {@link SagaRole#READ} — the same access as {@link #GET_SAGA}, plus the
+   * timeline. Exposed on the application surface, not the admin one.
+   */
+  GET_SAGA_DETAIL(SagaRole.READ, false),
+
+  /** Recovering a stuck saga (admin intervention). Destructive, so {@link SagaRole#ADMIN}. */
+  RECOVER_SAGA(SagaRole.ADMIN, true),
+
+  /** Force-completing an escalated saga (admin intervention). {@link SagaRole#ADMIN}. */
+  FORCE_COMPLETE(SagaRole.ADMIN, true),
+
+  /** Resetting escalated sagas, single or bulk (admin intervention). {@link SagaRole#ADMIN}. */
+  RESET_ESCALATED(SagaRole.ADMIN, true);
 
   private final @Nullable SagaRole requiredRole;
   private final boolean rateLimited;
