@@ -46,8 +46,7 @@ import org.jspecify.annotations.Nullable;
  * WaitForCompletionOrCreateCheckStatusResponse}, and Conductor's {@code executeWorkflow} wait
  * timeout.
  *
- * <p>Not yet wired: {@code PUT /sagas/{id}/cancel} (needs the engine's {@code cancel} method) and
- * {@code GET /sagas} listing (needs the admin query layer).
+ * <p>Not yet wired: {@code PUT /sagas/{id}/cancel} (needs the engine's {@code cancel} method).
  */
 public final class SagaResource {
 
