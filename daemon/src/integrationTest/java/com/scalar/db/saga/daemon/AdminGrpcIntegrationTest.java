@@ -11,9 +11,6 @@ import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.grpc.GrpcSagaAdminClient;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
-import java.io.UncheckedIOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -31,16 +28,6 @@ import org.junit.jupiter.api.Test;
  * saga:admin} key and a {@code saga:write}-only key.
  */
 class AdminGrpcIntegrationTest extends DaemonIntegrationTestSupport {
-
-  private static final String ADMIN_KEY = "admin-key-secret-value";
-  private static final String WRITE_KEY = "write-key-secret-value";
-  private static final String API_KEY_HEADER = "X-API-Key";
-
-  // The apikey provider's property keys (ApiKeyConfig's constants are package-private to
-  // .security).
-  private static final String APIKEY_PREFIX = "scalar.db.saga.server.security.apikey.";
-  private static final String HEADER_KEY = APIKEY_PREFIX + "header";
-  private static final String KEY_PREFIX = APIKEY_PREFIX + "key.";
 
   private static final String SAGA_NAME = "saga";
   private static final String DEFINITION =
@@ -65,28 +52,9 @@ class AdminGrpcIntegrationTest extends DaemonIntegrationTestSupport {
 
   @Override
   protected void configureProperties(Properties props) {
-    // Turn on real authentication: the apikey provider with an admin key and a write-only key. Each
-    // key's secret must be a secret reference, so write it to a file and reference it.
-    props.setProperty(SagaServerConfig.SECURITY_PROVIDER_KEY, "apikey");
-    props.setProperty(HEADER_KEY, API_KEY_HEADER);
-    configureKey(props, "admin", ADMIN_KEY, "saga:admin");
-    configureKey(props, "writer", WRITE_KEY, "saga:write");
-  }
-
-  private static void configureKey(Properties props, String name, String secret, String roles) {
-    props.setProperty(KEY_PREFIX + name + ".secret", fileSecretReference(secret));
-    props.setProperty(KEY_PREFIX + name + ".roles", roles);
-  }
-
-  private static String fileSecretReference(String secret) {
-    try {
-      Path file = Files.createTempFile("saga-admin-it-key", ".secret");
-      file.toFile().deleteOnExit();
-      Files.write(file, secret.getBytes(StandardCharsets.UTF_8));
-      return "${file:UTF-8:" + file + "}";
-    } catch (IOException e) {
-      throw new UncheckedIOException(e);
-    }
+    // Turn on real authentication: the apikey provider with a saga:admin key and a saga:write-only
+    // key (shared with the REST admin integration test).
+    enableApiKeyProvider(props);
   }
 
   @AfterEach

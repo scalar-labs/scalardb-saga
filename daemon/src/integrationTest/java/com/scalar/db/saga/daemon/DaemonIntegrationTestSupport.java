@@ -110,6 +110,49 @@ abstract class DaemonIntegrationTestSupport {
    */
   protected void configureProperties(Properties props) {}
 
+  // --- optional apikey security wiring (shared by the admin integration tests) ----------------
+
+  /** The header the {@code apikey} provider reads the credential from, once enabled. */
+  protected static final String API_KEY_HEADER = "X-API-Key";
+
+  /** The {@code saga:admin} key value {@link #enableApiKeyProvider} configures. */
+  protected static final String ADMIN_KEY = "admin-key-secret-value";
+
+  /** The {@code saga:write}-only key value {@link #enableApiKeyProvider} configures. */
+  protected static final String WRITE_KEY = "write-key-secret-value";
+
+  private static final String APIKEY_PREFIX = "scalar.db.saga.server.security.apikey.";
+
+  /**
+   * Turns on real authentication for a subclass's server: the {@code apikey} provider with a {@code
+   * saga:admin} key ({@link #ADMIN_KEY}) and a {@code saga:write}-only key ({@link #WRITE_KEY}),
+   * both presented in the {@value #API_KEY_HEADER} header. Call from {@link #configureProperties}
+   * to run a test through the daemon's real RBAC wiring.
+   */
+  protected final void enableApiKeyProvider(Properties props) {
+    props.setProperty(SagaServerConfig.SECURITY_PROVIDER_KEY, "apikey");
+    props.setProperty(APIKEY_PREFIX + "header", API_KEY_HEADER);
+    configureApiKey(props, "admin", ADMIN_KEY, "saga:admin");
+    configureApiKey(props, "writer", WRITE_KEY, "saga:write");
+  }
+
+  private static void configureApiKey(Properties props, String name, String secret, String roles) {
+    // Each key's secret must be a secret reference, so write it to a temp file and reference it.
+    props.setProperty(APIKEY_PREFIX + "key." + name + ".secret", fileSecretReference(secret));
+    props.setProperty(APIKEY_PREFIX + "key." + name + ".roles", roles);
+  }
+
+  private static String fileSecretReference(String secret) {
+    try {
+      Path file = Files.createTempFile("saga-admin-it-key", ".secret");
+      file.toFile().deleteOnExit();
+      Files.write(file, secret.getBytes(StandardCharsets.UTF_8));
+      return "${file:UTF-8:" + file + "}";
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
+    }
+  }
+
   protected final void writeDefinition(Path definitionsDir, String name, String json)
       throws IOException {
     Files.writeString(definitionsDir.resolve(name + ".json"), json);
@@ -182,11 +225,18 @@ abstract class DaemonIntegrationTestSupport {
   }
 
   protected final HttpResponse<String> post(String path, String body) throws Exception {
-    return send(
+    return post(path, body, Map.of());
+  }
+
+  /** POSTs {@code body} as JSON with the given extra request headers (e.g. an auth header). */
+  protected final HttpResponse<String> post(String path, String body, Map<String, String> headers)
+      throws Exception {
+    HttpRequest.Builder request =
         HttpRequest.newBuilder(uri(path))
             .header("Content-Type", "application/json")
-            .POST(BodyPublishers.ofString(body))
-            .build());
+            .POST(BodyPublishers.ofString(body));
+    headers.forEach(request::header);
+    return send(request.build());
   }
 
   protected final HttpResponse<String> put(String path, String body) throws Exception {
@@ -198,7 +248,15 @@ abstract class DaemonIntegrationTestSupport {
   }
 
   protected final HttpResponse<String> get(String path) throws Exception {
-    return send(HttpRequest.newBuilder(uri(path)).GET().build());
+    return get(path, Map.of());
+  }
+
+  /** GETs {@code path} with the given extra request headers (e.g. an auth header). */
+  protected final HttpResponse<String> get(String path, Map<String, String> headers)
+      throws Exception {
+    HttpRequest.Builder request = HttpRequest.newBuilder(uri(path)).GET();
+    headers.forEach(request::header);
+    return send(request.build());
   }
 
   /** Polls {@code GET /sagas/{id}} until the saga leaves a non-terminal state, then returns it. */
