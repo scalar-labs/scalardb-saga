@@ -11,6 +11,7 @@ import com.scalar.db.saga.api.TimelineEvent;
 import com.scalar.db.saga.rpc.ListSagasRequest;
 import com.scalar.db.saga.rpc.ListSagasResponse;
 import com.scalar.db.saga.rpc.ResetEscalatedBulkRequest;
+import java.time.DateTimeException;
 import java.time.Instant;
 
 /**
@@ -93,9 +94,9 @@ final class ProtoMappers {
   }
 
   /**
-   * Builds the api {@link SagaQuery} a {@code ListSagas} request selects. An out-of-range page size
-   * or an empty {@code updatedAt} window surfaces as {@link IllegalArgumentException} (mapped to
-   * {@code INVALID_ARGUMENT}) from the builder.
+   * Builds the api {@link SagaQuery} a {@code ListSagas} request selects. An out-of-range page
+   * size, an out-of-range {@code updatedAt} timestamp, or an empty {@code updatedAt} window
+   * surfaces as {@link IllegalArgumentException} (mapped to {@code INVALID_ARGUMENT}).
    */
   static SagaQuery toSagaQuery(ListSagasRequest request) {
     SagaQuery.Builder builder = SagaQuery.newBuilder();
@@ -120,7 +121,8 @@ final class ProtoMappers {
   /**
    * Builds the api {@link SagaQuery} a bulk-reset sweep selects. The status filter is not accepted
    * — the sweep is defined as escalated sagas, which the engine pins — so only the window and
-   * paging are mapped.
+   * paging are mapped. An out-of-range page size or {@code updatedAt} timestamp, or an empty
+   * window, surfaces as {@link IllegalArgumentException} (mapped to {@code INVALID_ARGUMENT}).
    */
   static SagaQuery toSagaQuery(ResetEscalatedBulkRequest request) {
     SagaQuery.Builder builder = SagaQuery.newBuilder();
@@ -187,7 +189,14 @@ final class ProtoMappers {
   }
 
   private static Instant toInstant(Timestamp timestamp) {
-    return Instant.ofEpochSecond(timestamp.getSeconds(), timestamp.getNanos());
+    try {
+      return Instant.ofEpochSecond(timestamp.getSeconds(), timestamp.getNanos());
+    } catch (DateTimeException | ArithmeticException e) {
+      // A client-supplied seconds value outside Instant's range (or one that overflows the nano
+      // carry) is bad input, not a server fault; surface it as IllegalArgumentException so the
+      // error mapper reports INVALID_ARGUMENT rather than INTERNAL.
+      throw new IllegalArgumentException("timestamp out of range", e);
+    }
   }
 
   private static Timestamp toTimestamp(Instant instant) {
