@@ -13,6 +13,7 @@ import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
+import com.scalar.db.saga.exception.SagaTimeoutException;
 import com.scalar.db.saga.exception.SagaUnavailableException;
 import com.scalar.db.saga.rpc.AdminServiceGrpc;
 import com.scalar.db.saga.rpc.InterventionRequest;
@@ -241,11 +242,24 @@ class GrpcSagaAdminClientTest {
         .isInstanceOf(SagaUnavailableException.class);
   }
 
+  @Test
+  void listSagas_perCallDeadlineElapses_throwsSagaTimeout() {
+    // Arrange — a client with a short per-call deadline, against an RPC that never responds
+    GrpcSagaAdminClient timedClient =
+        new GrpcSagaAdminClient(AdminServiceGrpc.newBlockingStub(channel), null, 100L);
+    fake.hangListSagas = true;
+
+    // Act + Assert — the deadline fires client-side; DEADLINE_EXCEEDED maps to SagaTimeoutException
+    assertThatThrownBy(() -> timedClient.listSagas(SagaQuery.newBuilder().build()))
+        .isInstanceOf(SagaTimeoutException.class);
+  }
+
   /** A fake admin service with per-method response/error fields and captured requests. */
   private static final class FakeAdminService extends AdminServiceGrpc.AdminServiceImplBase {
     @Nullable ListSagasResponse listResponse;
     @Nullable StatusRuntimeException listError;
     @Nullable ListSagasRequest lastList;
+    boolean hangListSagas;
 
     @Nullable SagaSnapshot recoverResponse;
     @Nullable StatusRuntimeException recoverError;
@@ -261,6 +275,9 @@ class GrpcSagaAdminClientTest {
     @Override
     public void listSagas(ListSagasRequest request, StreamObserver<ListSagasResponse> observer) {
       lastList = request;
+      if (hangListSagas) {
+        return; // never respond, so the client's per-call deadline fires
+      }
       respond(observer, listResponse, listError, ListSagasResponse.getDefaultInstance());
     }
 
