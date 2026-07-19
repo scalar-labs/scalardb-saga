@@ -17,7 +17,6 @@ import com.scalar.db.saga.rpc.SagaServiceGrpc;
 import com.scalar.db.saga.rpc.SagaSnapshot;
 import com.scalar.db.saga.rpc.StartSagaRequest;
 import io.grpc.Context;
-import io.grpc.Deadline;
 import io.grpc.stub.StreamObserver;
 import java.io.IOException;
 import java.util.LinkedHashMap;
@@ -50,12 +49,6 @@ import org.jspecify.annotations.Nullable;
  */
 @ThreadSafe
 public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
-
-  /**
-   * Slack subtracted from the call deadline when computing the sync wait, so the server returns the
-   * snapshot before gRPC cancels the call (which would leave the caller with no snapshot).
-   */
-  private static final long DEADLINE_SLACK_MILLIS = 100L;
 
   /**
    * Store-poll interval for {@link #awaitSaga} while waiting for an existing saga to go terminal.
@@ -203,13 +196,9 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
     if (syncTimeoutMillis > 0L) {
       bound = Math.min(bound, syncTimeoutMillis);
     }
-    Deadline deadline = Context.current().getDeadline();
-    if (deadline != null) {
-      long remaining =
-          Math.max(0L, deadline.timeRemaining(TimeUnit.MILLISECONDS) - DEADLINE_SLACK_MILLIS);
-      bound = Math.min(bound, remaining);
-    }
-    return bound;
+    // Floor at 0: here 0 means "return immediately" for the await, so a tight/expired client
+    // deadline correctly collapses the wait to nothing.
+    return GrpcDeadlines.tightenToCallDeadline(bound, 0L);
   }
 
   /**

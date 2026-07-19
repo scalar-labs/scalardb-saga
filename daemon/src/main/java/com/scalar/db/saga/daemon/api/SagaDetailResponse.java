@@ -1,7 +1,6 @@
 package com.scalar.db.saga.daemon.api;
 
 import com.scalar.db.saga.api.SagaDetail;
-import com.scalar.db.saga.api.TimelineEvent;
 import java.util.List;
 
 /**
@@ -23,11 +22,7 @@ public record SagaDetailResponse(SagaSnapshotResponse saga, List<TimelineEventRe
    */
   public static SagaDetailResponse from(SagaDetail detail) {
     List<TimelineEventResponse> timeline =
-        detail.getTimeline().stream().map(SagaDetailResponse::event).toList();
+        detail.getTimeline().stream().map(TimelineEventResponse::from).toList();
     return new SagaDetailResponse(SagaSnapshotResponse.from(detail.getSnapshot()), timeline);
-  }
-
-  private static TimelineEventResponse event(TimelineEvent event) {
-    return TimelineEventResponse.from(event);
   }
 }

@@ -1,7 +1,6 @@
 package com.scalar.db.saga.daemon.grpc;
 
 import com.scalar.db.saga.api.SagaAdminService;
-import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.daemon.security.SagaIdentity;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.engine.OperatorContext;
@@ -12,12 +11,9 @@ import com.scalar.db.saga.rpc.ListSagasResponse;
 import com.scalar.db.saga.rpc.ResetEscalatedBulkRequest;
 import com.scalar.db.saga.rpc.ResetResult;
 import com.scalar.db.saga.rpc.SagaSnapshot;
-import io.grpc.Context;
-import io.grpc.Deadline;
 import io.grpc.stub.StreamObserver;
 import java.util.Objects;
-import java.util.concurrent.TimeUnit;
-import java.util.function.Function;
+import java.util.function.Supplier;
 import net.jcip.annotations.ThreadSafe;
 
 /**
@@ -26,11 +22,12 @@ import net.jcip.annotations.ThreadSafe;
  * DefaultSagaOrchestrator} (the same instance the REST routes and the saga service use).
  *
  * <p><b>Operator identity is server-injected.</b> Every mutation is attributed to the authenticated
- * caller, read from the gRPC {@link Context} where {@link SagaSecurityInterceptor} put it — never
- * from a request field. This service is meaningful only when interceptor-wrapped: a bare {@code
- * addService} would leave every destructive RPC unauthenticated with no identity on the context, so
- * a mutation with no resolved identity is refused (a wiring bug, surfaced as {@code INTERNAL}), not
- * served anonymously. Listing needs no operator, so it uses the orchestrator's embedded admin view.
+ * caller, read from the gRPC {@link io.grpc.Context} where {@link SagaSecurityInterceptor} put it —
+ * never from a request field. This service is meaningful only when interceptor-wrapped: a bare
+ * {@code addService} would leave every destructive RPC unauthenticated with no identity on the
+ * context, so a mutation with no resolved identity is refused (a wiring bug, surfaced as {@code
+ * INTERNAL}), not served anonymously. Listing needs no operator, so it uses the orchestrator's
+ * embedded admin view.
  *
  * <p><b>Bounded drive.</b> A single-saga {@code RecoverSaga}/{@code ResetEscalated} drives the saga
  * inline. The drive is bounded by the daemon's admin drive deadline, further tightened by the
@@ -40,12 +37,6 @@ import net.jcip.annotations.ThreadSafe;
  */
 @ThreadSafe
 public final class AdminServiceImpl extends AdminServiceGrpc.AdminServiceImplBase {
-
-  /**
-   * Slack subtracted from the call deadline when bounding the drive, so the server returns the
-   * snapshot before gRPC cancels the call.
-   */
-  private static final long DEADLINE_SLACK_MILLIS = 100L;
 
   private final DefaultSagaOrchestrator orchestrator;
   private final long adminDriveDeadlineMillis;
@@ -62,55 +53,54 @@ public final class AdminServiceImpl extends AdminServiceGrpc.AdminServiceImplBas
 
   @Override
   public void listSagas(ListSagasRequest request, StreamObserver<ListSagasResponse> observer) {
-    try {
-      // A read: no operator, no drive, so the embedded admin view serves it.
-      observer.onNext(
-          ProtoMappers.toProto(
-              orchestrator.adminService().listSagas(ProtoMappers.toSagaQuery(request))));
-      observer.onCompleted();
-    } catch (RuntimeException e) {
-      observer.onError(GrpcErrorMapper.toStatusRuntimeException(e));
-    }
+    // A read: no operator, no drive, so the embedded admin view serves it.
+    respond(
+        observer,
+        () ->
+            ProtoMappers.toProto(
+                orchestrator.adminService().listSagas(ProtoMappers.toSagaQuery(request))));
   }
 
   @Override
   public void recoverSaga(InterventionRequest request, StreamObserver<SagaSnapshot> observer) {
-    respondWith(observer, admin -> admin.recoverSaga(request.getSagaId(), request.getReason()));
+    respond(
+        observer,
+        () -> ProtoMappers.toProto(admin().recoverSaga(request.getSagaId(), request.getReason())));
   }
 
   @Override
   public void forceComplete(InterventionRequest request, StreamObserver<SagaSnapshot> observer) {
-    respondWith(observer, admin -> admin.forceComplete(request.getSagaId(), request.getReason()));
+    respond(
+        observer,
+        () ->
+            ProtoMappers.toProto(admin().forceComplete(request.getSagaId(), request.getReason())));
   }
 
   @Override
   public void resetEscalated(InterventionRequest request, StreamObserver<SagaSnapshot> observer) {
-    respondWith(observer, admin -> admin.resetEscalated(request.getSagaId(), request.getReason()));
+    respond(
+        observer,
+        () ->
+            ProtoMappers.toProto(admin().resetEscalated(request.getSagaId(), request.getReason())));
   }
 
   @Override
   public void resetEscalatedBulk(
       ResetEscalatedBulkRequest request, StreamObserver<ResetResult> observer) {
-    try {
-      SagaAdminService admin = admin();
-      observer.onNext(
-          ProtoMappers.toProto(
-              admin.resetEscalated(ProtoMappers.toSagaQuery(request), request.getReason())));
-      observer.onCompleted();
-    } catch (RuntimeException e) {
-      observer.onError(GrpcErrorMapper.toStatusRuntimeException(e));
-    }
+    respond(
+        observer,
+        () ->
+            ProtoMappers.toProto(
+                admin().resetEscalated(ProtoMappers.toSagaQuery(request), request.getReason())));
   }
 
   /**
-   * Runs a single-saga admin call against the per-request admin view and responds with the snapshot
-   * it returns, mapping any failure to a gRPC status — the shared build/respond/map flow the
-   * snapshot-returning mutations share.
+   * Runs {@code body} and streams its single result, mapping any failure to a gRPC status — the
+   * unary {@code onNext}/{@code onCompleted}/{@code onError} flow every admin RPC shares.
    */
-  private void respondWith(
-      StreamObserver<SagaSnapshot> observer, Function<SagaAdminService, SagaStateSnapshot> call) {
+  private static <T> void respond(StreamObserver<T> observer, Supplier<T> body) {
     try {
-      observer.onNext(ProtoMappers.toProto(call.apply(admin())));
+      observer.onNext(body.get());
       observer.onCompleted();
     } catch (RuntimeException e) {
       observer.onError(GrpcErrorMapper.toStatusRuntimeException(e));
@@ -142,19 +132,10 @@ public final class AdminServiceImpl extends AdminServiceGrpc.AdminServiceImplBas
    * before the client's deadline fires, rather than the client seeing {@code DEADLINE_EXCEEDED}.
    */
   private long driveDeadlineMillis() {
-    long bound = adminDriveDeadlineMillis;
-    Deadline deadline = Context.current().getDeadline();
-    if (deadline != null) {
-      // Floor at 1ms, not 0. This mirrors SagaServiceImpl.computeBoundMillis, but 0 means opposite
-      // things at the two call sites: there it feeds an await where 0 is "return immediately"; here
-      // it feeds DefaultSagaAdminService where 0 or less means "unbounded, drive on the calling
-      // thread." A tight or already-expired client deadline would otherwise clamp remaining to 0,
-      // flipping the drive to unbounded on the gRPC request thread. Keeping it at least 1 keeps the
-      // drive bounded; it times out fast and returns the current state.
-      long remaining =
-          Math.max(1L, deadline.timeRemaining(TimeUnit.MILLISECONDS) - DEADLINE_SLACK_MILLIS);
-      bound = Math.min(bound, remaining);
-    }
-    return bound;
+    // Floor at 1ms, not 0: 0 or less means "unbounded, drive on the calling thread" downstream in
+    // DefaultSagaAdminService, so a tight or already-expired client deadline must still leave the
+    // drive bounded (it then times out fast and returns the current state) rather than flip it to
+    // unbounded on the gRPC request thread.
+    return GrpcDeadlines.tightenToCallDeadline(adminDriveDeadlineMillis, 1L);
   }
 }
