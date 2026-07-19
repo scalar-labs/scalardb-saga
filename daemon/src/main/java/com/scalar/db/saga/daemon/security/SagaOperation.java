@@ -16,6 +16,16 @@ import org.jspecify.annotations.Nullable;
  * policy the other does not share, which is what the previous verb-keyed and method-keyed switches
  * could not guarantee.
  *
+ * <p><b>Tradeoff.</b> Implementing {@link RouteRole} is what lets the policy travel as the REST
+ * route tag — REST reads the tag Javalin already carries rather than maintaining its own
+ * route&rarr;operation table, which the gRPC side pays for with {@code GrpcOperations}. The cost is
+ * that this shared, otherwise transport-neutral type carries a Javalin dependency, so the gRPC
+ * classes that read it ({@code GrpcOperations}, the interceptors, {@code AdminServiceImpl}) compile
+ * against Javalin too. That is harmless while both transports ship in one module, and is not to be
+ * "fixed" reflexively; if the transports are ever split into separate modules, decouple by making
+ * this a plain enum and adding a REST-side {@link RouteRole} adapter (or a route&rarr;operation map
+ * mirroring {@code GrpcOperations}).
+ *
  * <p>The policy is <b>per operation, not per HTTP verb</b>. Verb-keying cannot express the admin
  * surface at all: every admin mutation is a {@code POST}, so a verb-keyed rule would grant them all
  * to any {@code saga:write} caller.
