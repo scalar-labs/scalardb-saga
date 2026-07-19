@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import net.jcip.annotations.ThreadSafe;
@@ -349,8 +350,20 @@ public class DefaultSagaAdminService implements SagaAdminService {
       "FutureReturnValueIgnored") // the post-deadline logging handler is fire-and-forget
   private SagaStateSnapshot boundedRecover(
       String sagaId, SagaDefinition def, RecoveryAction action, ExecutionContext context) {
-    CompletableFuture<Void> drive =
-        CompletableFuture.runAsync(() -> engine.recover(action, def, context), engine.executor());
+    CompletableFuture<Void> drive;
+    try {
+      drive =
+          CompletableFuture.runAsync(() -> engine.recover(action, def, context), engine.executor());
+    } catch (RejectedExecutionException e) {
+      // The engine executor is shut down (the orchestrator is closing), so the drive never started.
+      // The transition is already durable and the saga has left ESCALATED, so return its recorded
+      // state and let the recovery loop finish it. Unlike the timeout path, the drive never touched
+      // the context, so reading it here is safe — nothing else ran.
+      logger.info(
+          "Admin drive of saga {} was rejected (engine shutting down); returning its recorded state",
+          sagaId);
+      return context.getCurrentState();
+    }
     try {
       drive.get(driveDeadlineMillis, TimeUnit.MILLISECONDS);
       return context.getCurrentState();

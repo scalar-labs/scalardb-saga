@@ -725,6 +725,41 @@ class DefaultSagaAdminServiceTest {
   }
 
   @Test
+  void recoverSaga_withDriveDeadline_executorShutDown_returnsRecordedStateWithoutDriving() {
+    // Arrange — the engine executor is shut down (the orchestrator is closing), so the bounded
+    // drive
+    // cannot be submitted. The transition still commits.
+    SagaStateSnapshot running = snapshot(SagaStatus.RUNNING);
+    List<SagaEvent> events =
+        List.of(
+            StatusEvent.started(null),
+            StepEvent.completed(0, "debit", null),
+            StepEvent.failed(1, "credit", null));
+    SagaStateSnapshot recorded = snapshot(SagaStatus.COMPENSATING);
+    ExecutionContext ctx = mock(ExecutionContext.class);
+    when(store.getStateSnapshot(SAGA_ID)).thenReturn(Optional.of(running));
+    when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(backwardDef());
+    when(store.getEvents(SAGA_ID)).thenReturn(events);
+    when(engine.replayEvents(running, events)).thenReturn(ctx);
+    when(store.recordStatusEvent(eq(running), anyInt(), any(), any())).thenReturn(recorded);
+    when(ctx.getCurrentState()).thenReturn(recorded);
+    ExecutorService shutDown = Executors.newVirtualThreadPerTaskExecutor();
+    shutDown.shutdownNow();
+    when(engine.executor()).thenReturn(shutDown);
+
+    // Act — submitting the drive is rejected; the call must degrade, not throw
+    SagaStateSnapshot result =
+        new DefaultSagaAdminService(store, engine, registry, () -> OPERATOR, 50L)
+            .recoverSaga(SAGA_ID, "why");
+
+    // Assert — the recorded (non-terminal) state comes back, the transition is durable, and the
+    // drive never ran (it was rejected at submission), so the recovery loop finishes the rest
+    assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPENSATING);
+    verify(store).recordStatusEvent(eq(running), anyInt(), any(), any());
+    verify(engine, never()).recover(any(), any(), any());
+  }
+
+  @Test
   void recoverSaga_withoutDriveDeadline_drivesOnTheCallingThread() {
     // Arrange — the embedded default: no deadline, so no executor is involved at all
     arrangeDrivableSaga();
