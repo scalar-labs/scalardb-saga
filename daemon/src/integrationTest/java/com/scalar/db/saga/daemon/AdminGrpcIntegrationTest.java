@@ -7,7 +7,8 @@ import com.scalar.db.saga.api.SagaPage;
 import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.exception.SagaNotFoundException;
-import com.scalar.db.saga.exception.SagaRuntimeException;
+import com.scalar.db.saga.exception.SagaPermissionDeniedException;
+import com.scalar.db.saga.exception.SagaUnauthenticatedException;
 import com.scalar.db.saga.grpc.GrpcSagaAdminClient;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
@@ -96,17 +97,16 @@ class AdminGrpcIntegrationTest extends DaemonIntegrationTestSupport {
 
   @Test
   void writeOnlyKey_adminMutation_isPermissionDenied() {
-    // Authenticated but lacking saga:admin: the interceptor denies before the service runs.
+    // Authenticated but lacking saga:admin: the interceptor denies before the service runs, and the
+    // client maps PERMISSION_DENIED back to the typed exception.
     assertThatThrownBy(() -> adminClient(WRITE_KEY).recoverSaga("any", "why"))
-        .isInstanceOf(SagaRuntimeException.class)
-        .hasMessageContaining("PERMISSION_DENIED");
+        .isInstanceOf(SagaPermissionDeniedException.class);
   }
 
   @Test
   void noCredential_adminRpc_isUnauthenticated() {
-    // No credential presented: rejected before authorization.
+    // No credential presented: rejected before authorization, mapped to the typed exception.
     assertThatThrownBy(() -> adminClient(null).listSagas(SagaQuery.newBuilder().build()))
-        .isInstanceOf(SagaRuntimeException.class)
-        .hasMessageContaining("UNAUTHENTICATED");
+        .isInstanceOf(SagaUnauthenticatedException.class);
   }
 }

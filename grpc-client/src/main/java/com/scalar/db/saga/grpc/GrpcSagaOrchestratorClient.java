@@ -10,8 +10,10 @@ import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.exception.SagaPermissionDeniedException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaTimeoutException;
+import com.scalar.db.saga.exception.SagaUnauthenticatedException;
 import com.scalar.db.saga.exception.SagaUnavailableException;
 import com.scalar.db.saga.rpc.AwaitSagaRequest;
 import com.scalar.db.saga.rpc.GetSagaDetailRequest;
@@ -535,6 +537,12 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
       case UNAVAILABLE:
         return new SagaUnavailableException(
             description == null ? "Saga service temporarily unavailable" : description, e);
+      case PERMISSION_DENIED:
+        return new SagaPermissionDeniedException(
+            description == null ? "Permission denied" : description, e);
+      case UNAUTHENTICATED:
+        return new SagaUnauthenticatedException(
+            description == null ? "Authentication required" : description, e);
       default:
         // NOT_FOUND is deliberately absent — the two context mappers (mapSagaCall,
         // mapStartException) handle it upstream, so it never reaches this catch-all.

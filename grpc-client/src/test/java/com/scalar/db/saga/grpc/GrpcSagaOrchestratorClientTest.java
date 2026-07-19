@@ -14,8 +14,10 @@ import com.scalar.db.saga.api.TimelineEvent;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.exception.SagaPermissionDeniedException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaTimeoutException;
+import com.scalar.db.saga.exception.SagaUnauthenticatedException;
 import com.scalar.db.saga.exception.SagaUnavailableException;
 import com.scalar.db.saga.rpc.AwaitSagaRequest;
 import com.scalar.db.saga.rpc.GetSagaDetailRequest;
@@ -231,6 +233,20 @@ class GrpcSagaOrchestratorClientTest {
     fake.getError = Status.NOT_FOUND.withDescription("no saga").asRuntimeException();
     assertThatThrownBy(() -> client.getStateSnapshot("missing"))
         .isInstanceOf(SagaNotFoundException.class);
+  }
+
+  @Test
+  void getStateSnapshot_permissionDenied_throwsSagaPermissionDenied() {
+    fake.getError = Status.PERMISSION_DENIED.withDescription("denied").asRuntimeException();
+    assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
+        .isInstanceOf(SagaPermissionDeniedException.class);
+  }
+
+  @Test
+  void getStateSnapshot_unauthenticated_throwsSagaUnauthenticated() {
+    fake.getError = Status.UNAUTHENTICATED.withDescription("no credential").asRuntimeException();
+    assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
+        .isInstanceOf(SagaUnauthenticatedException.class);
   }
 
   @Test

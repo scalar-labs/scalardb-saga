@@ -15,8 +15,10 @@ import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.exception.SagaPermissionDeniedException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import com.scalar.db.saga.exception.SagaTimeoutException;
+import com.scalar.db.saga.exception.SagaUnauthenticatedException;
 import com.scalar.db.saga.exception.SagaUnavailableException;
 import com.scalar.db.saga.rpc.AdminServiceGrpc;
 import com.scalar.db.saga.rpc.InterventionRequest;
@@ -264,6 +266,21 @@ class GrpcSagaAdminClientTest {
     fake.bulkError = Status.UNAVAILABLE.withDescription("down").asRuntimeException();
     assertThatThrownBy(() -> client.resetEscalated(SagaQuery.newBuilder().build(), "x"))
         .isInstanceOf(SagaUnavailableException.class);
+  }
+
+  @Test
+  void recoverSaga_permissionDenied_throwsSagaPermissionDenied() {
+    fake.recoverError = Status.PERMISSION_DENIED.withDescription("denied").asRuntimeException();
+    assertThatThrownBy(() -> client.recoverSaga("s-1", "x"))
+        .isInstanceOf(SagaPermissionDeniedException.class);
+  }
+
+  @Test
+  void recoverSaga_unauthenticated_throwsSagaUnauthenticated() {
+    fake.recoverError =
+        Status.UNAUTHENTICATED.withDescription("no credential").asRuntimeException();
+    assertThatThrownBy(() -> client.recoverSaga("s-1", "x"))
+        .isInstanceOf(SagaUnauthenticatedException.class);
   }
 
   @Test

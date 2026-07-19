@@ -12,9 +12,11 @@ import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.exception.SagaPermissionDeniedException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import com.scalar.db.saga.exception.SagaTimeoutException;
+import com.scalar.db.saga.exception.SagaUnauthenticatedException;
 import com.scalar.db.saga.exception.SagaUnavailableException;
 import com.scalar.db.saga.rpc.AdminServiceGrpc;
 import com.scalar.db.saga.rpc.AdminServiceGrpc.AdminServiceBlockingStub;
@@ -305,6 +307,12 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
       case UNAVAILABLE:
         return new SagaUnavailableException(
             description == null ? "Admin service temporarily unavailable" : description, e);
+      case PERMISSION_DENIED:
+        return new SagaPermissionDeniedException(
+            description == null ? "Permission denied" : description, e);
+      case UNAUTHENTICATED:
+        return new SagaUnauthenticatedException(
+            description == null ? "Authentication required" : description, e);
       default:
         return new SagaRuntimeException(
             "Admin RPC failed ("
