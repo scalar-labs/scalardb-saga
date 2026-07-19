@@ -30,6 +30,9 @@ dependencies {
 
     "integrationTestImplementation"(project(":core"))
     "integrationTestImplementation"(project(":grpc-client"))
+    "integrationTestImplementation"(platform(libs.grpc.bom))
+    "integrationTestImplementation"(libs.grpc.netty)
+    "integrationTestImplementation"(libs.mockito.core)
     "integrationTestImplementation"(libs.sqlite.jdbc)
     "integrationTestImplementation"(platform(libs.jackson.bom))
     "integrationTestImplementation"(libs.jackson.databind)
