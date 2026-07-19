@@ -1,5 +1,8 @@
 package com.scalar.db.saga.grpc;
 
+import com.google.protobuf.Any;
+import com.google.protobuf.InvalidProtocolBufferException;
+import com.google.rpc.ErrorInfo;
 import com.scalar.db.saga.api.ResetResult;
 import com.scalar.db.saga.api.SagaAdminService;
 import com.scalar.db.saga.api.SagaPage;
@@ -7,6 +10,7 @@ import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
+import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
@@ -21,6 +25,7 @@ import io.grpc.ManagedChannelBuilder;
 import io.grpc.Metadata;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
+import io.grpc.protobuf.StatusProto;
 import java.util.Objects;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
@@ -209,15 +214,17 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
   // --------------------------------------------------------------------------
 
   /**
-   * Maps a single-saga mutation failure to its api exception. The saga-scoped codes — {@code
-   * NOT_FOUND}, the wrong-state {@code FAILED_PRECONDITION}, and the lost-CAS {@code ABORTED} —
-   * reconstruct the exception with {@code sagaId}; everything else routes through {@link
-   * #mapCommon}.
+   * Maps a single-saga mutation failure to its api exception. The daemon carries a machine-readable
+   * reason in an {@link ErrorInfo} detail: a {@code NOT_FOUND} whose reason is {@code
+   * SAGA_DEFINITION_NOT_FOUND} reconstructs {@link SagaDefinitionNotFoundException} (the saga's
+   * definition is unregistered — the caller must re-register it), otherwise it is a missing saga.
+   * The wrong-state {@code FAILED_PRECONDITION} and lost-CAS {@code ABORTED} carry {@code sagaId};
+   * everything else routes through {@link #mapCommon}.
    */
   private static RuntimeException mapMutation(StatusRuntimeException e, String sagaId) {
     Status.Code code = e.getStatus().getCode();
     if (code == Status.Code.NOT_FOUND) {
-      return new SagaNotFoundException(sagaId);
+      return notFoundException(sagaId, errorInfo(e));
     }
     if (code == Status.Code.FAILED_PRECONDITION) {
       return preconditionException(sagaId, e);
@@ -229,24 +236,61 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
   }
 
   /**
+   * Distinguishes the two {@code NOT_FOUND} shapes by the {@link ErrorInfo} reason. Only {@code
+   * SAGA_DEFINITION_NOT_FOUND} (with a {@code sagaName}) reconstructs {@link
+   * SagaDefinitionNotFoundException}; a missing reason, name, or any other reason is a missing
+   * saga.
+   */
+  private static RuntimeException notFoundException(String sagaId, @Nullable ErrorInfo info) {
+    if (info != null && "SAGA_DEFINITION_NOT_FOUND".equals(info.getReason())) {
+      String sagaName = info.getMetadataMap().get("sagaName");
+      if (sagaName != null) {
+        String version = info.getMetadataMap().get("version");
+        return version == null
+            ? new SagaDefinitionNotFoundException(sagaName)
+            : new SagaDefinitionNotFoundException(sagaName, version);
+      }
+    }
+    return new SagaNotFoundException(sagaId);
+  }
+
+  /**
    * Reconstructs the wrong-state exception. The daemon sends the machine-readable code name (e.g.
-   * {@code SAGA_WRONG_STATE}) as the status description, so the client recovers the {@link
-   * SagaStatePreconditionException.Code} a caller switches on. An unrecognized description degrades
-   * to {@link SagaRuntimeException} rather than guessing a code.
+   * {@code SAGA_WRONG_STATE}) as the {@link ErrorInfo} reason, so the client recovers the {@link
+   * SagaStatePreconditionException.Code} a caller switches on. An absent or unrecognized reason
+   * degrades to {@link SagaRuntimeException} rather than guessing a code.
    */
   private static RuntimeException preconditionException(String sagaId, StatusRuntimeException e) {
-    String description = e.getStatus().getDescription();
-    if (description == null) {
+    ErrorInfo info = errorInfo(e);
+    if (info == null) {
       return mapCommon(e);
     }
     try {
       SagaStatePreconditionException.Code code =
-          SagaStatePreconditionException.Code.valueOf(description);
+          SagaStatePreconditionException.Code.valueOf(info.getReason());
       return new SagaStatePreconditionException(
           sagaId, code, "Saga '" + sagaId + "' is not in a state that allows this operation");
     } catch (IllegalArgumentException unknownCode) {
       return mapCommon(e);
     }
+  }
+
+  /** The first {@link ErrorInfo} detail the daemon attached to {@code e}, or {@code null}. */
+  private static @Nullable ErrorInfo errorInfo(StatusRuntimeException e) {
+    com.google.rpc.Status status = StatusProto.fromThrowable(e);
+    if (status == null) {
+      return null;
+    }
+    for (Any detail : status.getDetailsList()) {
+      if (detail.is(ErrorInfo.class)) {
+        try {
+          return detail.unpack(ErrorInfo.class);
+        } catch (InvalidProtocolBufferException malformed) {
+          return null;
+        }
+      }
+    }
+    return null;
   }
 
   private static RuntimeException mapCommon(StatusRuntimeException e) {

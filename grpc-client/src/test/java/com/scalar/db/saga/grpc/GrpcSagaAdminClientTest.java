@@ -4,13 +4,16 @@ import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.google.protobuf.Any;
 import com.google.protobuf.Timestamp;
+import com.google.rpc.ErrorInfo;
 import com.scalar.db.saga.api.ResetResult;
 import com.scalar.db.saga.api.SagaPage;
 import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
+import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import com.scalar.db.saga.exception.SagaTimeoutException;
@@ -27,9 +30,11 @@ import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.inprocess.InProcessChannelBuilder;
 import io.grpc.inprocess.InProcessServerBuilder;
+import io.grpc.protobuf.StatusProto;
 import io.grpc.stub.StreamObserver;
 import java.io.IOException;
 import java.time.Instant;
+import java.util.Map;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -204,16 +209,35 @@ class GrpcSagaAdminClientTest {
 
   @Test
   void recoverSaga_notFound_throwsSagaNotFound() {
-    fake.recoverError = Status.NOT_FOUND.withDescription("no saga").asRuntimeException();
+    fake.recoverError = statusWithReason(Status.Code.NOT_FOUND, "SAGA_NOT_FOUND", Map.of());
     assertThatThrownBy(() -> client.recoverSaga("gone", "x"))
         .isInstanceOf(SagaNotFoundException.class);
   }
 
   @Test
-  void recoverSaga_failedPrecondition_reconstructsPreconditionWithCode() {
-    // The daemon sends the machine-readable code name as the status description
+  void recoverSaga_definitionNotFound_throwsSagaDefinitionNotFound() {
+    // The saga exists but its definition is unregistered; the daemon distinguishes this NOT_FOUND
+    // by the reason and carries the name and version so the client can reconstruct the exception.
     fake.recoverError =
-        Status.FAILED_PRECONDITION.withDescription("SAGA_WRONG_STATE").asRuntimeException();
+        statusWithReason(
+            Status.Code.NOT_FOUND,
+            "SAGA_DEFINITION_NOT_FOUND",
+            Map.of("sagaName", "orders", "version", "v2"));
+    assertThatThrownBy(() -> client.recoverSaga("s-1", "x"))
+        .isInstanceOf(SagaDefinitionNotFoundException.class)
+        .satisfies(
+            e -> {
+              SagaDefinitionNotFoundException d = (SagaDefinitionNotFoundException) e;
+              assertThat(d.getSagaName()).isEqualTo("orders");
+              assertThat(d.getVersion()).isEqualTo("v2");
+            });
+  }
+
+  @Test
+  void recoverSaga_failedPrecondition_reconstructsPreconditionWithCode() {
+    // The daemon sends the machine-readable code name as the ErrorInfo reason
+    fake.recoverError =
+        statusWithReason(Status.Code.FAILED_PRECONDITION, "SAGA_WRONG_STATE", Map.of());
     assertThatThrownBy(() -> client.recoverSaga("s-1", "x"))
         .isInstanceOf(SagaStatePreconditionException.class)
         .extracting(e -> ((SagaStatePreconditionException) e).getCode())
@@ -252,6 +276,20 @@ class GrpcSagaAdminClientTest {
     // Act + Assert — the deadline fires client-side; DEADLINE_EXCEEDED maps to SagaTimeoutException
     assertThatThrownBy(() -> timedClient.listSagas(SagaQuery.newBuilder().build()))
         .isInstanceOf(SagaTimeoutException.class);
+  }
+
+  /**
+   * Builds a {@link StatusRuntimeException} carrying an {@link ErrorInfo} detail, as the daemon's
+   * {@code GrpcErrorMapper} does, so the client's reason-based mapping is exercised end to end.
+   */
+  private static StatusRuntimeException statusWithReason(
+      Status.Code code, String reason, Map<String, String> metadata) {
+    ErrorInfo info = ErrorInfo.newBuilder().setReason(reason).putAllMetadata(metadata).build();
+    return StatusProto.toStatusRuntimeException(
+        com.google.rpc.Status.newBuilder()
+            .setCode(code.value())
+            .addDetails(Any.pack(info))
+            .build());
   }
 
   /** A fake admin service with per-method response/error fields and captured requests. */

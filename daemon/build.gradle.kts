@@ -14,6 +14,7 @@ dependencies {
     implementation(libs.grpc.stub)
     implementation(libs.grpc.netty)
     implementation(libs.grpc.services)
+    implementation(libs.grpc.protobuf)
     implementation(libs.protobuf.java)
     implementation(libs.javalin)
     implementation(libs.nimbus.jose.jwt)
