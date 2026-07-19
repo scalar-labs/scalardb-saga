@@ -501,11 +501,18 @@ public class DefaultSagaAdminService implements SagaAdminService {
    * operator is injected by the server, so an unusable one is a server or identity-provider
    * misconfiguration rather than a defect in the caller's request.
    *
-   * @throws IllegalStateException if the operator is blank, over {@link #MAX_OPERATOR_LENGTH}
+   * @throws IllegalStateException if the operator is null, blank, over {@link #MAX_OPERATOR_LENGTH}
    *     characters, or contains a control character
    */
   private String operator() {
     String operator = operatorContext.currentOperator();
+    if (operator == null) {
+      // OperatorContext is public API; an embedded-mode implementation not compiled with NullAway
+      // could return null. Fail closed like the checks below rather than NPE on isBlank().
+      throw new IllegalStateException(
+          "OperatorContext returned a null operator; rejecting the admin operation rather than"
+              + " attributing it to an anonymous principal");
+    }
     if (operator.isBlank()) {
       throw new IllegalStateException(
           "OperatorContext returned a blank operator; rejecting the admin operation rather than"

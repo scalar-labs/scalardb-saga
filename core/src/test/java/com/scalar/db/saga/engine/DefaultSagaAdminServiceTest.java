@@ -563,6 +563,20 @@ class DefaultSagaAdminServiceTest {
   // ---------------------------------------------------------------------------
 
   @Test
+  @SuppressWarnings("NullAway") // deliberately returns null from the public-API OperatorContext
+  void recoverSaga_nullOperatorGiven_throwsIllegalStateAndWritesNothing() {
+    // Arrange — OperatorContext is public API, so an embedded implementation not compiled with
+    // NullAway could return null; the service must fail closed, not NPE on isBlank()
+    DefaultSagaAdminService service =
+        new DefaultSagaAdminService(store, engine, registry, () -> null);
+
+    // Act & Assert
+    assertThatThrownBy(() -> service.recoverSaga(SAGA_ID, "why"))
+        .isInstanceOf(IllegalStateException.class);
+    verifyNothingWritten();
+  }
+
+  @Test
   void recoverSaga_operatorWithControlCharGiven_throwsIllegalStateAndWritesNothing() {
     // Arrange — unlike a reason, a principal is never flattened to fit: a mutated principal is a
     // false audit record
