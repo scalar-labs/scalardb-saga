@@ -15,6 +15,7 @@ import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.StatusEvent;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -36,8 +37,8 @@ import org.slf4j.LoggerFactory;
  *
  * <p>The single-saga mutations drive inline and return the driven snapshot. The bulk {@link
  * #resetEscalated(SagaQuery, String)} sweep instead only un-escalates each row and hands the drive
- * to the recovery loop (via {@link SagaStore#markForRecovery}), so one call never blocks on a whole
- * page of participant round-trips.
+ * to the recovery loop (stamping the row's {@code updated_at} to {@link Instant#EPOCH} in the same
+ * transition), so one call never blocks on a whole page of participant round-trips.
  *
  * <p>A single-saga drive can also be bounded, by constructing with a positive drive deadline: past
  * it the drive is abandoned and the saga's current state returned, leaving the recovery loop to
@@ -282,13 +283,15 @@ public class DefaultSagaAdminService implements SagaAdminService {
 
   /**
    * Un-escalates {@code snapshot} durably — the same audit-carrying CAS transition as {@link
-   * #driveReset} — but hands the drive to the recovery loop via {@link SagaStore#markForRecovery}
-   * instead of running it inline. The bulk sweep uses this so a single call never blocks on a whole
-   * page of participant round-trips: the sweeper then drives each un-escalated saga through the
-   * same {@link RecoveryActionResolver}/{@link SagaEngine#recover} path the inline reset would
-   * have. The un-escalation is the durable work; the drive is only an optimization, so deferring it
-   * is safe. Takes {@code events} from the caller, which has already read them (and handled an
-   * unreadable stream per saga), so the sweep does not read the same stream twice.
+   * #driveReset} — but hands the drive to the recovery loop instead of running it inline. The
+   * un-escalation stamps the row's {@code updated_at} with {@link Instant#EPOCH} in the same
+   * transaction, so the recovery sweeper claims it on its next pass; the bulk sweep thus neither
+   * blocks on a whole page of participant round-trips nor pays a second write per saga. The sweeper
+   * then drives each un-escalated saga through the same {@link RecoveryActionResolver}/{@link
+   * SagaEngine#recover} path the inline reset would have. The un-escalation is the durable work;
+   * the drive is only an optimization, so deferring it is safe. Takes {@code events} from the
+   * caller, which has already read them (and handled an unreadable stream per saga), so the sweep
+   * does not read the same stream twice.
    */
   private void markReset(
       SagaStateSnapshot snapshot,
@@ -298,8 +301,9 @@ public class DefaultSagaAdminService implements SagaAdminService {
       String reason) {
     RecoveryAction action = RecoveryActionResolver.resolve(events, def, snapshot.getStatus());
     StatusEvent resetEvent = StatusEvent.reset(action.targetStatus(), operator, reason);
-    store.recordStatusEvent(snapshot, events.size(), resetEvent, engine.ownerId());
-    store.markForRecovery(snapshot.getSagaId());
+    // EPOCH stamps the un-escalated row as due immediately, handing the drive to the recovery
+    // sweeper (co-committed with the transition) rather than driving it inline.
+    store.recordStatusEvent(snapshot, events.size(), resetEvent, engine.ownerId(), Instant.EPOCH);
   }
 
   /**

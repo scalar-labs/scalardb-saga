@@ -393,7 +393,7 @@ class DefaultSagaAdminServiceTest {
     when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(backwardDef());
     when(registry.resolve("gone", "v9")).thenReturn(null);
     when(store.getEvents("ok")).thenReturn(events);
-    when(store.recordStatusEvent(eq(ok), anyInt(), any(), any())).thenReturn(ok);
+    when(store.recordStatusEvent(eq(ok), anyInt(), any(), any(), eq(Instant.EPOCH))).thenReturn(ok);
 
     // Act
     ResetResult result = service.resetEscalated(SagaQuery.newBuilder().build(), "sweep");
@@ -404,14 +404,16 @@ class DefaultSagaAdminServiceTest {
         .containsExactly(
             new ResetResult.SkippedSaga("nodef", ResetResult.SkipReason.DEFINITION_NOT_FOUND));
     assertThat(result.getNextPageToken()).isEqualTo("next-token");
-    // The bulk sweep hands the drive to recovery rather than driving inline.
-    verify(store).markForRecovery("ok");
+    // The bulk sweep un-escalates and stamps the row for immediate recovery in one transaction
+    // (updated_at = EPOCH), then leaves the drive to the recovery loop rather than driving inline.
+    verify(store).recordStatusEvent(eq(ok), anyInt(), any(), any(), eq(Instant.EPOCH));
+    verify(store, never()).markForRecovery(any());
     verify(engine, never()).recover(any(), any(), any());
   }
 
   @Test
   void resetEscalated_bulkLostCasRace_countsAsSkipped() {
-    // Arrange — the row changed under us; recordStatusEvent throws the CAS-lost exception
+    // Arrange — the row changed under us; the co-committed transition throws the CAS-lost exception
     SagaStateSnapshot racing =
         new SagaStateSnapshot("race", SAGA_NAME, SagaStatus.ESCALATED, "o", DEF_VERSION, TS, TS);
     when(store.listStateSnapshots(any())).thenReturn(new SagaPage<>(List.of(racing), null));
@@ -419,7 +421,7 @@ class DefaultSagaAdminServiceTest {
         List.of(StatusEvent.started(null), StepEvent.completed(0, "debit", null));
     when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(backwardDef());
     when(store.getEvents("race")).thenReturn(events);
-    when(store.recordStatusEvent(eq(racing), anyInt(), any(), any()))
+    when(store.recordStatusEvent(eq(racing), anyInt(), any(), any(), eq(Instant.EPOCH)))
         .thenThrow(new SagaConcurrentModificationException("race"));
 
     // Act
@@ -430,7 +432,7 @@ class DefaultSagaAdminServiceTest {
     assertThat(result.getSkipped())
         .containsExactly(
             new ResetResult.SkippedSaga("race", ResetResult.SkipReason.CONCURRENT_MODIFICATION));
-    // The lost CAS aborts before the hand-off, so the row is never marked for recovery.
+    // The un-escalation and the recovery mark co-commit, so a lost CAS leaves neither behind.
     verify(store, never()).markForRecovery(any());
   }
 
@@ -450,7 +452,7 @@ class DefaultSagaAdminServiceTest {
                 "Unknown event type: SAGA_FROM_THE_FUTURE", new IllegalArgumentException("boom")));
     when(store.getEvents("ok"))
         .thenReturn(List.of(StatusEvent.started(null), StepEvent.completed(0, "debit", null)));
-    when(store.recordStatusEvent(eq(ok), anyInt(), any(), any())).thenReturn(ok);
+    when(store.recordStatusEvent(eq(ok), anyInt(), any(), any(), eq(Instant.EPOCH))).thenReturn(ok);
 
     // Act
     ResetResult result = service.resetEscalated(SagaQuery.newBuilder().build(), "sweep");
@@ -463,7 +465,8 @@ class DefaultSagaAdminServiceTest {
         .containsExactly(
             new ResetResult.SkippedSaga("bad", ResetResult.SkipReason.CORRUPT_EVENT_STREAM));
     assertThat(result.getSkipped().get(0).getDetail()).isNull();
-    verify(store).markForRecovery("ok");
+    verify(store).recordStatusEvent(eq(ok), anyInt(), any(), any(), eq(Instant.EPOCH));
+    verify(store, never()).markForRecovery(any());
   }
 
   @Test
@@ -481,11 +484,12 @@ class DefaultSagaAdminServiceTest {
     // Act
     ResetResult result = service.resetEscalated(SagaQuery.newBuilder().build(), "sweep");
 
-    // Assert — skipped as unresolvable, never force-driven
+    // Assert — skipped as unresolvable, never un-escalated or force-driven
     assertThat(result.getResetCount()).isZero();
     assertThat(result.getSkipped())
         .containsExactly(
             new ResetResult.SkippedSaga("bad", ResetResult.SkipReason.DEFINITION_NOT_FOUND));
+    verify(store, never()).recordStatusEvent(any(), anyInt(), any(), any(), any());
     verify(store, never()).markForRecovery(any());
   }
 
