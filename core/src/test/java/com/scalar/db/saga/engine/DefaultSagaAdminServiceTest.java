@@ -744,8 +744,7 @@ class DefaultSagaAdminServiceTest {
   @Test
   void recoverSaga_withDriveDeadline_executorShutDown_returnsRecordedStateWithoutDriving() {
     // Arrange — the engine executor is shut down (the orchestrator is closing), so the bounded
-    // drive
-    // cannot be submitted. The transition still commits.
+    // drive cannot be submitted. The transition still commits.
     SagaStateSnapshot running = snapshot(SagaStatus.RUNNING);
     List<SagaEvent> events =
         List.of(
