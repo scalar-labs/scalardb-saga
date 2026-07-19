@@ -25,6 +25,14 @@ import com.scalar.db.saga.exception.SagaStatePreconditionException;
  * the registry no longer holds the one the saga was started with, it throws {@link
  * SagaDefinitionNotFoundException} (HTTP 404). Re-register the definition to make the saga
  * recoverable.
+ *
+ * <p><b>Retrying after a non-terminal result.</b> A deployment that bounds the drive (the daemon
+ * returns rather than block past a deadline) can hand back a non-terminal snapshot while the drive
+ * it started keeps running to completion in the background. Retrying such a call immediately starts
+ * a second, redundant drive over the same saga. That is safe, because a step's side effect must be
+ * idempotent to begin with (automatic recovery can re-drive a saga for the same reason), but it
+ * wastes work. When a mutation returns a non-terminal status, prefer to let automatic recovery
+ * finish the saga, or wait briefly before retrying.
  */
 public interface SagaAdminService extends AutoCloseable {
 
