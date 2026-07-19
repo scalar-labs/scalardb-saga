@@ -47,7 +47,14 @@ final class ProtoMappers {
    * counterpart — failing loudly rather than silently degrading to {@code UNSPECIFIED}.
    */
   static com.scalar.db.saga.rpc.SagaStatus toProtoStatus(SagaStatus status) {
-    return com.scalar.db.saga.rpc.SagaStatus.valueOf("SAGA_STATUS_" + status.name());
+    try {
+      return com.scalar.db.saga.rpc.SagaStatus.valueOf("SAGA_STATUS_" + status.name());
+    } catch (IllegalArgumentException e) {
+      // No wire counterpart for a server-internal status is api/proto version skew, a server fault.
+      // Throw IllegalStateException so the error mapper reports INTERNAL, not the client-facing
+      // INVALID_ARGUMENT (this is a response-path conversion, never client input).
+      throw new IllegalStateException("No wire SagaStatus for api status " + status.name(), e);
+    }
   }
 
   /** Maps an api detail (snapshot + redacted timeline) to the wire detail. */
@@ -183,9 +190,15 @@ final class ProtoMappers {
     return SagaStatus.valueOf(name.substring(prefix.length()));
   }
 
-  private static com.scalar.db.saga.rpc.SkipReason toProtoSkipReason(
-      ResetResult.SkipReason reason) {
-    return com.scalar.db.saga.rpc.SkipReason.valueOf("SKIP_REASON_" + reason.name());
+  static com.scalar.db.saga.rpc.SkipReason toProtoSkipReason(ResetResult.SkipReason reason) {
+    try {
+      return com.scalar.db.saga.rpc.SkipReason.valueOf("SKIP_REASON_" + reason.name());
+    } catch (IllegalArgumentException e) {
+      // As with toProtoStatus: a missing wire counterpart is api/proto version skew, a server
+      // fault,
+      // so INTERNAL rather than INVALID_ARGUMENT.
+      throw new IllegalStateException("No wire SkipReason for api reason " + reason.name(), e);
+    }
   }
 
   private static Instant toInstant(Timestamp timestamp) {

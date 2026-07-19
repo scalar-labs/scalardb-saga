@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.google.protobuf.Timestamp;
+import com.scalar.db.saga.api.ResetResult;
 import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
@@ -39,6 +40,31 @@ class ProtoMappersTest {
       }
       String apiName = wire.name().substring("SAGA_STATUS_".length());
       assertThatCode(() -> SagaStatus.valueOf(apiName)).doesNotThrowAnyException();
+    }
+  }
+
+  @Test
+  void toProtoSkipReason_everyApiReason_mapsByNameToANonUnspecifiedWireReason() {
+    // Every api skip reason must have a wire counterpart named SKIP_REASON_<name>; an unmapped one
+    // now throws IllegalStateException (mapped to INTERNAL), failing loudly rather than
+    // mislabelled.
+    for (ResetResult.SkipReason reason : ResetResult.SkipReason.values()) {
+      com.scalar.db.saga.rpc.SkipReason wire = ProtoMappers.toProtoSkipReason(reason);
+      assertThat(wire.name()).isEqualTo("SKIP_REASON_" + reason.name());
+      assertThat(wire).isNotEqualTo(com.scalar.db.saga.rpc.SkipReason.SKIP_REASON_UNSPECIFIED);
+    }
+  }
+
+  @Test
+  void toProtoSkipReason_everyWireReason_hasAnApiCounterpart() {
+    // Guards drift the other way: a wire skip reason added without an api counterpart fails here.
+    for (com.scalar.db.saga.rpc.SkipReason wire : com.scalar.db.saga.rpc.SkipReason.values()) {
+      if (wire == com.scalar.db.saga.rpc.SkipReason.SKIP_REASON_UNSPECIFIED
+          || wire == com.scalar.db.saga.rpc.SkipReason.UNRECOGNIZED) {
+        continue;
+      }
+      String apiName = wire.name().substring("SKIP_REASON_".length());
+      assertThatCode(() -> ResetResult.SkipReason.valueOf(apiName)).doesNotThrowAnyException();
     }
   }
 
