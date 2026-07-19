@@ -10,11 +10,8 @@ import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
-import com.scalar.db.saga.exception.SagaPermissionDeniedException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaTimeoutException;
-import com.scalar.db.saga.exception.SagaUnauthenticatedException;
-import com.scalar.db.saga.exception.SagaUnavailableException;
 import com.scalar.db.saga.rpc.AwaitSagaRequest;
 import com.scalar.db.saga.rpc.GetSagaDetailRequest;
 import com.scalar.db.saga.rpc.GetSagaRequest;
@@ -24,7 +21,6 @@ import com.scalar.db.saga.rpc.SagaSnapshot;
 import com.scalar.db.saga.rpc.SagaStatus;
 import com.scalar.db.saga.rpc.StartSagaRequest;
 import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import java.io.IOException;
@@ -33,7 +29,6 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import javax.net.ssl.SSLEngine;
 import net.jcip.annotations.ThreadSafe;
 import org.jspecify.annotations.Nullable;
 
@@ -54,7 +49,6 @@ import org.jspecify.annotations.Nullable;
 public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
 
   private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
-  private static final long CLOSE_TIMEOUT_SECONDS = 5L;
 
   /** Capped, jittered exponential backoff between retries of a retryable transport failure. */
   private static final long BACKOFF_BASE_MILLIS = 50L;
@@ -225,19 +219,10 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
 
   @Override
   public void close() {
-    closed.set(true);
-    if (ownedChannel == null) {
+    if (!closed.compareAndSet(false, true) || ownedChannel == null) {
       return;
     }
-    ownedChannel.shutdown();
-    try {
-      if (!ownedChannel.awaitTermination(CLOSE_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-        ownedChannel.shutdownNow();
-      }
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-      ownedChannel.shutdownNow();
-    }
+    GrpcClientSupport.shutdown(ownedChannel);
   }
 
   // --------------------------------------------------------------------------
@@ -526,33 +511,9 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
   }
 
   private static RuntimeException mapCommon(StatusRuntimeException e) {
-    Status status = e.getStatus();
-    String description = status.getDescription();
-    switch (status.getCode()) {
-      case INVALID_ARGUMENT:
-        return new IllegalArgumentException(description == null ? "Invalid request" : description);
-      case DEADLINE_EXCEEDED:
-        return new SagaTimeoutException(
-            description == null ? "Saga RPC deadline exceeded" : description, e);
-      case UNAVAILABLE:
-        return new SagaUnavailableException(
-            description == null ? "Saga service temporarily unavailable" : description, e);
-      case PERMISSION_DENIED:
-        return new SagaPermissionDeniedException(
-            description == null ? "Permission denied" : description, e);
-      case UNAUTHENTICATED:
-        return new SagaUnauthenticatedException(
-            description == null ? "Authentication required" : description, e);
-      default:
-        // NOT_FOUND is deliberately absent — the two context mappers (mapSagaCall,
-        // mapStartException) handle it upstream, so it never reaches this catch-all.
-        return new SagaRuntimeException(
-            "Saga RPC failed ("
-                + status.getCode()
-                + ")"
-                + (description == null ? "" : ": " + description),
-            e);
-    }
+    // NOT_FOUND is deliberately not handled here — the two context mappers (mapSagaCall,
+    // mapStartException) handle it upstream, so it never reaches this shared catch-all.
+    return GrpcClientSupport.mapCommon(e, "Saga");
   }
 
   /** Builder for {@link GrpcSagaOrchestratorClient}. */
@@ -599,34 +560,9 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
 
     public GrpcSagaOrchestratorClient build() {
       String resolvedTarget = Objects.requireNonNull(target, "target must be set");
-      ManagedChannelBuilder<?> channelBuilder = ManagedChannelBuilder.forTarget(resolvedTarget);
-      if (useTls) {
-        if (!alpnAvailable()) {
-          throw new IllegalStateException(
-              "TLS requested but ALPN is unavailable on this JRE. On Java 8, use 8u252+ or add "
-                  + "netty-tcnative-boringssl-static; otherwise use plaintext (in-cluster).");
-        }
-        channelBuilder.useTransportSecurity();
-      } else {
-        channelBuilder.usePlaintext();
-      }
-      ManagedChannel channel = channelBuilder.build();
+      ManagedChannel channel = GrpcClientSupport.openChannel(resolvedTarget, useTls);
       return new GrpcSagaOrchestratorClient(
           SagaServiceGrpc.newBlockingStub(channel), channel, defaultDeadlineMillis);
-    }
-
-    /**
-     * Best-effort ALPN check: {@code SSLEngine.getApplicationProtocol} exists from Java 9 and was
-     * backported to 8u252. Conservative — a bundled {@code tcnative} may provide ALPN where the JDK
-     * does not — but it gives a clear, early failure for the common pre-8u252 case.
-     */
-    private static boolean alpnAvailable() {
-      try {
-        SSLEngine.class.getMethod("getApplicationProtocol");
-        return true;
-      } catch (NoSuchMethodException e) {
-        return false;
-      }
     }
   }
 }

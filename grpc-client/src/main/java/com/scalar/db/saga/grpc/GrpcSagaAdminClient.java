@@ -12,18 +12,13 @@ import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
-import com.scalar.db.saga.exception.SagaPermissionDeniedException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
-import com.scalar.db.saga.exception.SagaTimeoutException;
-import com.scalar.db.saga.exception.SagaUnauthenticatedException;
-import com.scalar.db.saga.exception.SagaUnavailableException;
 import com.scalar.db.saga.rpc.AdminServiceGrpc;
 import com.scalar.db.saga.rpc.AdminServiceGrpc.AdminServiceBlockingStub;
 import com.scalar.db.saga.rpc.InterventionRequest;
 import io.grpc.CallCredentials;
 import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 import io.grpc.Metadata;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
@@ -32,7 +27,6 @@ import java.util.Objects;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import javax.net.ssl.SSLEngine;
 import net.jcip.annotations.ThreadSafe;
 import org.jspecify.annotations.Nullable;
 
@@ -56,8 +50,6 @@ import org.jspecify.annotations.Nullable;
  */
 @ThreadSafe
 public final class GrpcSagaAdminClient implements SagaAdminService {
-
-  private static final long CLOSE_TIMEOUT_SECONDS = 5L;
 
   private final AdminServiceBlockingStub stub;
   @Nullable private final ManagedChannel ownedChannel;
@@ -194,15 +186,7 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
     if (!closed.compareAndSet(false, true) || ownedChannel == null) {
       return;
     }
-    ownedChannel.shutdown();
-    try {
-      if (!ownedChannel.awaitTermination(CLOSE_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-        ownedChannel.shutdownNow();
-      }
-    } catch (InterruptedException e) {
-      ownedChannel.shutdownNow();
-      Thread.currentThread().interrupt();
-    }
+    GrpcClientSupport.shutdown(ownedChannel);
   }
 
   private AdminServiceBlockingStub stub() {
@@ -296,31 +280,7 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
   }
 
   private static RuntimeException mapCommon(StatusRuntimeException e) {
-    Status status = e.getStatus();
-    String description = status.getDescription();
-    switch (status.getCode()) {
-      case INVALID_ARGUMENT:
-        return new IllegalArgumentException(description == null ? "Invalid request" : description);
-      case DEADLINE_EXCEEDED:
-        return new SagaTimeoutException(
-            description == null ? "Admin RPC deadline exceeded" : description, e);
-      case UNAVAILABLE:
-        return new SagaUnavailableException(
-            description == null ? "Admin service temporarily unavailable" : description, e);
-      case PERMISSION_DENIED:
-        return new SagaPermissionDeniedException(
-            description == null ? "Permission denied" : description, e);
-      case UNAUTHENTICATED:
-        return new SagaUnauthenticatedException(
-            description == null ? "Authentication required" : description, e);
-      default:
-        return new SagaRuntimeException(
-            "Admin RPC failed ("
-                + status.getCode()
-                + ")"
-                + (description == null ? "" : ": " + description),
-            e);
-    }
+    return GrpcClientSupport.mapCommon(e, "Admin");
   }
 
   /** Builder for {@link GrpcSagaAdminClient}, mirroring the application client's builder. */
@@ -375,32 +335,12 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
 
     public GrpcSagaAdminClient build() {
       String resolvedTarget = Objects.requireNonNull(target, "target must be set");
-      ManagedChannelBuilder<?> channelBuilder = ManagedChannelBuilder.forTarget(resolvedTarget);
-      if (useTls) {
-        if (!alpnAvailable()) {
-          throw new IllegalStateException(
-              "TLS requested but ALPN is unavailable on this JRE. On Java 8, use 8u252+ or add "
-                  + "netty-tcnative-boringssl-static; otherwise use plaintext (in-cluster).");
-        }
-        channelBuilder.useTransportSecurity();
-      } else {
-        channelBuilder.usePlaintext();
-      }
-      ManagedChannel channel = channelBuilder.build();
+      ManagedChannel channel = GrpcClientSupport.openChannel(resolvedTarget, useTls);
       AdminServiceBlockingStub stub = AdminServiceGrpc.newBlockingStub(channel);
       if (callCredentials != null) {
         stub = stub.withCallCredentials(callCredentials);
       }
       return new GrpcSagaAdminClient(stub, channel, defaultDeadlineMillis);
-    }
-
-    private static boolean alpnAvailable() {
-      try {
-        SSLEngine.class.getMethod("getApplicationProtocol");
-        return true;
-      } catch (NoSuchMethodException e) {
-        return false;
-      }
     }
   }
 }
