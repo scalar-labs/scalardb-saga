@@ -174,6 +174,31 @@ class GrpcSagaAdminClientTest {
     assertThat(result.getNextPageToken()).isEqualTo("more");
   }
 
+  @Test
+  void resetEscalated_bulk_conflictingStatusGiven_throwsIllegalArgumentBeforeRpc() {
+    // Arrange
+    SagaQuery query = SagaQuery.newBuilder().status(SagaStatus.COMPLETED).build();
+
+    // Act + Assert — rejected client-side, before the wire request is ever built or sent
+    assertThatThrownBy(() -> client.resetEscalated(query, "sweep"))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThat(fake.lastBulk).isNull();
+  }
+
+  @Test
+  void resetEscalated_bulk_escalatedStatusGiven_isAccepted() {
+    // Arrange
+    fake.bulkResponse = com.scalar.db.saga.rpc.ResetResult.newBuilder().setResetCount(1).build();
+    SagaQuery query = SagaQuery.newBuilder().status(SagaStatus.ESCALATED).build();
+
+    // Act
+    ResetResult result = client.resetEscalated(query, "sweep");
+
+    // Assert — an explicit ESCALATED filter is not a conflict; the sweep goes through
+    assertThat(result.getResetCount()).isEqualTo(1);
+    assertThat(fake.lastBulk).isNotNull();
+  }
+
   // --- error mapping (inverse of GrpcErrorMapper) ----------------------------
 
   @Test

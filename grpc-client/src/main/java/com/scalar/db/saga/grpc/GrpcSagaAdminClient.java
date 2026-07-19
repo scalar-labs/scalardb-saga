@@ -5,6 +5,7 @@ import com.scalar.db.saga.api.SagaAdminService;
 import com.scalar.db.saga.api.SagaPage;
 import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
+import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
@@ -143,6 +144,14 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
   public ResetResult resetEscalated(SagaQuery query, String reason) {
     Objects.requireNonNull(query, "query must not be null");
     Objects.requireNonNull(reason, "reason must not be null");
+    // The bulk wire request has no status field — the server pins the sweep to ESCALATED. Reject a
+    // conflicting filter here so the same call that throws embedded does not turn into a valid
+    // ESCALATED sweep remote (matching SagaAdminService's contract).
+    SagaStatus status = query.getStatus();
+    if (status != null && status != SagaStatus.ESCALATED) {
+      throw new IllegalArgumentException(
+          "resetEscalated only sweeps ESCALATED sagas; conflicting status filter: " + status);
+    }
     try {
       return ClientProtoMappers.fromProto(
           stub().resetEscalatedBulk(ClientProtoMappers.toResetEscalatedBulkRequest(query, reason)));
