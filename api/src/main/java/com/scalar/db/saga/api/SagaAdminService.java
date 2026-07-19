@@ -7,8 +7,9 @@ import com.scalar.db.saga.exception.SagaStatePreconditionException;
 
 /**
  * Operational control plane for a saga engine: list and inspect sagas, and un-stick or resolve the
- * ones that need an operator. Implemented both embedded (in-process) and by the daemon's remote
- * admin client, so the same surface works either way.
+ * ones that need an operator. Implemented in-process by {@code DefaultSagaAdminService} and, in the
+ * future, by a remote admin client, so the same surface works embedded or against a saga server.
+ * (No remote client is provided yet; a remote caller uses the generated gRPC admin stub directly.)
  *
  * <p><b>Direction-agnostic mutations.</b> The operator never chooses "compensate" vs. "resume
  * forward" — the engine decides from the saga's pivot, exactly as automatic recovery does. The

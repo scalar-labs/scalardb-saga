@@ -258,7 +258,11 @@ public class ScalarDbSagaStore implements SagaStore {
 
   @Override
   public SagaStateSnapshot recordStatusEvent(
-      SagaStateSnapshot current, int sequence, StatusEvent event, String ownerId) {
+      SagaStateSnapshot current,
+      int sequence,
+      StatusEvent event,
+      String ownerId,
+      @Nullable Instant stateUpdatedAt) {
     validatePayloadSize(event.getPayload());
     String sagaId = current.getSagaId();
     SagaStatus newStatus = event.getTargetStatus();
@@ -281,7 +285,11 @@ public class ScalarDbSagaStore implements SagaStore {
 
           tx.insert(buildEventInsert(sagaId, sequence, event, now));
           tx.delete(buildStateDelete(bucket, oldStatus, current.getUpdatedAt(), sagaId));
-          SagaStateSnapshot updated = current.withTransition(newStatus, ownerId, now);
+          // The event's audit timestamp is always the real time; the state row's updated_at is the
+          // recovery-scan key, so a caller passes EPOCH to hand the saga to the sweeper immediately
+          // (null = the transition time).
+          Instant rowUpdatedAt = stateUpdatedAt != null ? stateUpdatedAt : now;
+          SagaStateSnapshot updated = current.withTransition(newStatus, ownerId, rowUpdatedAt);
           tx.insert(buildStateInsert(bucket, updated));
           return updated;
         },

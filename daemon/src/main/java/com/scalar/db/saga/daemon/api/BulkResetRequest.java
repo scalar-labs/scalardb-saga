@@ -1,8 +1,6 @@
 package com.scalar.db.saga.daemon.api;
 
 import com.scalar.db.saga.api.SagaQuery;
-import java.time.Instant;
-import java.time.format.DateTimeParseException;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -41,10 +39,10 @@ public record BulkResetRequest(
   public SagaQuery toQuery() {
     SagaQuery.Builder builder = SagaQuery.newBuilder();
     if (updatedAfter != null) {
-      builder.updatedAfter(parseInstant(updatedAfter, "updatedAfter"));
+      builder.updatedAfter(RequestParsing.parseInstant(updatedAfter, "updatedAfter"));
     }
     if (updatedBefore != null) {
-      builder.updatedBefore(parseInstant(updatedBefore, "updatedBefore"));
+      builder.updatedBefore(RequestParsing.parseInstant(updatedBefore, "updatedBefore"));
     }
     if (pageSize != null) {
       builder.pageSize(pageSize); // out-of-range -> IllegalArgumentException -> 400
@@ -53,13 +51,5 @@ public record BulkResetRequest(
       builder.pageToken(pageToken);
     }
     return builder.build(); // an empty window -> IllegalArgumentException -> 400
-  }
-
-  private static Instant parseInstant(String value, String field) {
-    try {
-      return Instant.parse(value);
-    } catch (DateTimeParseException e) {
-      throw new InvalidRequestException("'" + field + "' is not a valid ISO-8601 instant");
-    }
   }
 }

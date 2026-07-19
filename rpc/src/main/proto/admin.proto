@@ -46,7 +46,9 @@ message ListSagasRequest {
   optional SagaStatus status = 1;                      // status filter; absent = all statuses
   optional google.protobuf.Timestamp updated_after = 2;   // inclusive lower bound on updated_at
   optional google.protobuf.Timestamp updated_before = 3;  // inclusive upper bound on updated_at
-  optional int32 page_size = 4;                        // target page size; server clamps the range
+  // Target results per page; must be in [1, 1000], else INVALID_ARGUMENT (not clamped). It is a
+  // target, not an exact cap: a returned page may exceed it by a cohort. Absent = server default.
+  optional int32 page_size = 4;
   optional string page_token = 5;                      // opaque continuation token
 }
 
@@ -59,6 +61,8 @@ message ResetEscalatedBulkRequest {
   string reason = 1;                                   // operator reason (recorded per row)
   optional google.protobuf.Timestamp updated_after = 2;
   optional google.protobuf.Timestamp updated_before = 3;
+  // Target rows per page; must be in [1, 1000], else INVALID_ARGUMENT (not clamped). It is a
+  // target, not an exact cap: a swept page may exceed it by a cohort. Absent = server default.
   optional int32 page_size = 4;
   optional string page_token = 5;
   // No status filter: the sweep is defined as ESCALATED sagas, which the engine pins.

@@ -9,8 +9,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.scalar.db.saga.api.ResetResult;
 import com.scalar.db.saga.api.SagaAdminService;
 import com.scalar.db.saga.api.SagaPage;
+import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.daemon.security.SagaAuthRequest;
@@ -41,6 +43,7 @@ import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -161,6 +164,24 @@ class AdminServiceImplTest {
   }
 
   @Test
+  void recoverSaga_tightClientDeadline_boundsDriveInsteadOfGoingUnbounded() {
+    // Arrange
+    when(adminService.recoverSaga(eq("s-1"), any())).thenReturn(snapshot(SagaStatus.COMPENSATED));
+
+    // Act — a client deadline at or under the slack (100ms). timeRemaining - slack is <= 0, which
+    // must floor to a bounded 1ms rather than 0; 0 or less means "unbounded, drive on the calling
+    // thread" downstream, so this is the case that would block the gRPC request thread.
+    stub("admin")
+        .withDeadlineAfter(100, TimeUnit.MILLISECONDS)
+        .recoverSaga(InterventionRequest.newBuilder().setSagaId("s-1").setReason("stuck").build());
+
+    // Assert — the drive bound handed to the factory is the floored 1ms (bounded), never 0
+    ArgumentCaptor<Long> bound = ArgumentCaptor.forClass(Long.class);
+    verify(orchestrator).adminService(any(OperatorContext.class), bound.capture());
+    assertThat(bound.getValue()).isEqualTo(1L);
+  }
+
+  @Test
   void listSagas_adminRoleGiven_mapsPage() {
     // Arrange
     when(adminService.listSagas(any()))
@@ -192,6 +213,47 @@ class AdminServiceImplTest {
   }
 
   @Test
+  void resetEscalated_writeRoleGiven_permissionDenied() {
+    assertCode(
+        () ->
+            stub("write")
+                .resetEscalated(
+                    InterventionRequest.newBuilder().setSagaId("s-1").setReason("x").build()),
+        Status.Code.PERMISSION_DENIED);
+  }
+
+  @Test
+  void resetEscalated_adminRoleGiven_drivesAndReturnsSnapshot() {
+    // Arrange
+    when(adminService.resetEscalated(eq("s-1"), any()))
+        .thenReturn(snapshot(SagaStatus.COMPENSATED));
+
+    // Act
+    var response =
+        stub("admin")
+            .resetEscalated(
+                InterventionRequest.newBuilder().setSagaId("s-1").setReason("x").build());
+
+    // Assert — the RPC drives the single-saga reset and returns its snapshot
+    assertThat(response.getSagaId()).isEqualTo("s-1");
+    verify(adminService).resetEscalated("s-1", "x");
+  }
+
+  @Test
+  void resetEscalated_wrongState_failedPrecondition() {
+    when(adminService.resetEscalated(eq("s-1"), any()))
+        .thenThrow(
+            new SagaStatePreconditionException(
+                "s-1", SagaStatePreconditionException.Code.SAGA_WRONG_STATE, "not escalated"));
+    assertCode(
+        () ->
+            stub("admin")
+                .resetEscalated(
+                    InterventionRequest.newBuilder().setSagaId("s-1").setReason("x").build()),
+        Status.Code.FAILED_PRECONDITION);
+  }
+
+  @Test
   void forceComplete_lostCas_aborted() {
     when(adminService.forceComplete(eq("s-1"), any()))
         .thenThrow(new SagaConcurrentModificationException("s-1"));
@@ -201,6 +263,46 @@ class AdminServiceImplTest {
                 .forceComplete(
                     InterventionRequest.newBuilder().setSagaId("s-1").setReason("x").build()),
         Status.Code.ABORTED);
+  }
+
+  @Test
+  void forceComplete_adminRoleGiven_returnsSettledSnapshot() {
+    // Arrange
+    when(adminService.forceComplete(eq("s-1"), any())).thenReturn(snapshot(SagaStatus.COMPLETED));
+
+    // Act
+    var response =
+        stub("admin")
+            .forceComplete(
+                InterventionRequest.newBuilder().setSagaId("s-1").setReason("x").build());
+
+    // Assert
+    assertThat(response.getStatus())
+        .isEqualTo(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_COMPLETED);
+    verify(adminService).forceComplete("s-1", "x");
+  }
+
+  @Test
+  void resetEscalatedBulk_adminRoleGiven_mapsItemizedResult() {
+    // Arrange
+    when(adminService.resetEscalated(any(SagaQuery.class), any()))
+        .thenReturn(
+            new ResetResult(
+                2,
+                List.of(
+                    new ResetResult.SkippedSaga("s2", ResetResult.SkipReason.DEFINITION_NOT_FOUND)),
+                "next-token"));
+
+    // Act
+    var response = stub("admin").resetEscalatedBulk(bulkRequest());
+
+    // Assert
+    assertThat(response.getResetCount()).isEqualTo(2);
+    assertThat(response.getSkippedCount()).isEqualTo(1);
+    assertThat(response.getSkipped(0).getSagaId()).isEqualTo("s2");
+    assertThat(response.getSkipped(0).getReason())
+        .isEqualTo(com.scalar.db.saga.rpc.SkipReason.SKIP_REASON_DEFINITION_NOT_FOUND);
+    assertThat(response.getNextPageToken()).isEqualTo("next-token");
   }
 
   @Test

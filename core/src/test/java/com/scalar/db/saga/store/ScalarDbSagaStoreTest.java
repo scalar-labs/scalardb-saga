@@ -509,6 +509,31 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
+  void recordStatusEvent_epochUpdatedAtGiven_stampsStateRowForImmediateRecovery() throws Exception {
+    // Arrange
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.ESCALATED, "engine-1", "v1", now, now);
+    StatusEvent event = StatusEvent.reset(SagaStatus.COMPENSATING, "op", "sweep");
+    Result existingRow = mock(Result.class);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(existingRow));
+
+    // Act — pass EPOCH so the transition and the recovery mark co-commit in one transaction
+    SagaStateSnapshot result =
+        store.recordStatusEvent(current, 5, event, "engine-2", Instant.EPOCH);
+
+    // Assert — the transition applies, and the state row's recovery-scan key is EPOCH (immediate
+    // pickup by the sweeper), all within a single transaction: event insert + state insert + commit
+    assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPENSATING);
+    assertThat(result.getOwnerId()).isEqualTo("engine-2");
+    assertThat(result.getUpdatedAt()).isEqualTo(Instant.EPOCH);
+    verify(tx, times(2)).insert(any(Insert.class));
+    verify(tx).delete(any(Delete.class));
+    verify(tx).commit();
+  }
+
+  @Test
   void recordStatusEvent_rowNotFound_throwsSagaConcurrentModificationException() throws Exception {
     // Arrange
     Instant now = Instant.now();

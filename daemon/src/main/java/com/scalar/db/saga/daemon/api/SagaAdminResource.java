@@ -11,8 +11,6 @@ import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.engine.OperatorContext;
 import io.javalin.Javalin;
 import io.javalin.http.Context;
-import java.time.Instant;
-import java.time.format.DateTimeParseException;
 
 /**
  * Registers the Admin API REST endpoints — the operational control plane over the daemon's saga
@@ -175,11 +173,11 @@ public final class SagaAdminResource {
     }
     String updatedAfter = ctx.queryParam("updatedAfter");
     if (updatedAfter != null) {
-      builder.updatedAfter(parseInstant(updatedAfter, "updatedAfter"));
+      builder.updatedAfter(RequestParsing.parseInstant(updatedAfter, "updatedAfter"));
     }
     String updatedBefore = ctx.queryParam("updatedBefore");
     if (updatedBefore != null) {
-      builder.updatedBefore(parseInstant(updatedBefore, "updatedBefore"));
+      builder.updatedBefore(RequestParsing.parseInstant(updatedBefore, "updatedBefore"));
     }
     String pageSize = ctx.queryParam("pageSize");
     if (pageSize != null) {
@@ -197,14 +195,6 @@ public final class SagaAdminResource {
       return SagaStatus.valueOf(value);
     } catch (IllegalArgumentException e) {
       throw new InvalidRequestException("'status' is not a valid saga status");
-    }
-  }
-
-  private static Instant parseInstant(String value, String field) {
-    try {
-      return Instant.parse(value);
-    } catch (DateTimeParseException e) {
-      throw new InvalidRequestException("'" + field + "' is not a valid ISO-8601 instant");
     }
   }
 

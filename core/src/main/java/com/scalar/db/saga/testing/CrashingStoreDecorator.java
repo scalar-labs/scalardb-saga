@@ -95,8 +95,12 @@ public final class CrashingStoreDecorator implements SagaStore {
 
   @Override
   public SagaStateSnapshot recordStatusEvent(
-      SagaStateSnapshot current, int sequence, StatusEvent event, String ownerId) {
-    return delegate.recordStatusEvent(current, sequence, event, ownerId);
+      SagaStateSnapshot current,
+      int sequence,
+      StatusEvent event,
+      String ownerId,
+      @Nullable Instant stateUpdatedAt) {
+    return delegate.recordStatusEvent(current, sequence, event, ownerId, stateUpdatedAt);
   }
 
   @Override

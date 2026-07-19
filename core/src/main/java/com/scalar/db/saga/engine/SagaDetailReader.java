@@ -33,7 +33,6 @@ final class SagaDetailReader {
    * @throws SagaNotFoundException if no saga has that id
    */
   static SagaDetail read(SagaStore store, String sagaId) {
-    Objects.requireNonNull(sagaId, "sagaId must not be null");
     // One atomic read pairs the snapshot with its event stream, so the status is always coherent
     // with the timeline (a concurrent transition can't wedge a newer event past a stale snapshot).
     SagaStateAndEvents data =

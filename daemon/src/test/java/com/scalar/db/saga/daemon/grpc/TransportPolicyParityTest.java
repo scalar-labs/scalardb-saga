@@ -60,11 +60,11 @@ class TransportPolicyParityTest {
               Map.entry(SagaOperation.START_SAGA, new ExpectedPolicy(SagaRole.WRITE, true)),
               Map.entry(SagaOperation.GET_SAGA, new ExpectedPolicy(SagaRole.READ, false)),
               Map.entry(SagaOperation.AWAIT_SAGA, new ExpectedPolicy(SagaRole.READ, false)),
-              Map.entry(SagaOperation.LIST_SAGAS, new ExpectedPolicy(SagaRole.ADMIN, true)),
+              Map.entry(SagaOperation.LIST_SAGAS, new ExpectedPolicy(SagaRole.ADMIN, false)),
               Map.entry(SagaOperation.GET_SAGA_DETAIL, new ExpectedPolicy(SagaRole.READ, false)),
-              Map.entry(SagaOperation.RECOVER_SAGA, new ExpectedPolicy(SagaRole.ADMIN, true)),
-              Map.entry(SagaOperation.FORCE_COMPLETE, new ExpectedPolicy(SagaRole.ADMIN, true)),
-              Map.entry(SagaOperation.RESET_ESCALATED, new ExpectedPolicy(SagaRole.ADMIN, true))));
+              Map.entry(SagaOperation.RECOVER_SAGA, new ExpectedPolicy(SagaRole.ADMIN, false)),
+              Map.entry(SagaOperation.FORCE_COMPLETE, new ExpectedPolicy(SagaRole.ADMIN, false)),
+              Map.entry(SagaOperation.RESET_ESCALATED, new ExpectedPolicy(SagaRole.ADMIN, false))));
 
   /** The expected operation for every gRPC method (across both services), by bare method name. */
   private static final Map<String, SagaOperation> EXPECTED_GRPC_METHODS =
