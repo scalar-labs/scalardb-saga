@@ -195,8 +195,7 @@ final class ProtoMappers {
       return com.scalar.db.saga.rpc.SkipReason.valueOf("SKIP_REASON_" + reason.name());
     } catch (IllegalArgumentException e) {
       // As with toProtoStatus: a missing wire counterpart is api/proto version skew, a server
-      // fault,
-      // so INTERNAL rather than INVALID_ARGUMENT.
+      // fault, so INTERNAL rather than INVALID_ARGUMENT.
       throw new IllegalStateException("No wire SkipReason for api reason " + reason.name(), e);
     }
   }
