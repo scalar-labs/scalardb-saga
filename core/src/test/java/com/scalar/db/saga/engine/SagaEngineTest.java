@@ -410,10 +410,10 @@ class SagaEngineTest {
   // =========================================================================
 
   /**
-   * {@link SagaEngine#recover} is the single seam every recovery path funnels through — automatic
-   * recovery and the Admin API both resolve a {@link RecoveryAction} and hand it here. Their own
-   * tests mock the engine, so these pin the dispatch itself against a real engine: the action's
-   * variant, not the caller, decides whether the saga is driven forward or unwound.
+   * {@link SagaEngine#recover} is the shared seam for recovery paths that first resolve a {@link
+   * RecoveryAction}, including standard automatic recovery and the Admin API. Their tests mock the
+   * engine, so these tests exercise dispatch against a real engine: the action variant determines
+   * whether the saga is driven forward or unwound.
    */
   @Nested
   class Recover {
