@@ -3,9 +3,10 @@ package com.scalar.db.saga.exception;
 import java.util.Objects;
 
 /**
- * Thrown when an admin mutation is rejected because the saga is in a state the operation does not
+ * Thrown when an operation is rejected because the saga is in a state that operation does not
  * accept — a <b>static wrong-state</b> rejection, as opposed to a lost optimistic-concurrency race
- * (which is a {@link SagaConcurrentModificationException}).
+ * (which is a {@link SagaConcurrentModificationException}). The concept is general and not limited
+ * to the Admin API; that is simply where every current thrower happens to live.
  *
  * <p>Examples: {@code forceComplete} on a saga that is not {@code ESCALATED}; {@code recoverSaga}
  * on an {@code ESCALATED} saga; any mutation on a {@code WAITING} (async-parked) or terminal saga.
