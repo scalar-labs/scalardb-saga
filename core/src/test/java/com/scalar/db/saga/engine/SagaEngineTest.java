@@ -406,6 +406,60 @@ class SagaEngineTest {
   }
 
   // =========================================================================
+  // recover — RecoveryAction dispatch
+  // =========================================================================
+
+  /**
+   * {@link SagaEngine#recover} is the single seam every recovery path funnels through — automatic
+   * recovery and the Admin API both resolve a {@link RecoveryAction} and hand it here. Their own
+   * tests mock the engine, so these pin the dispatch itself against a real engine: the action's
+   * variant, not the caller, decides whether the saga is driven forward or unwound.
+   */
+  @Nested
+  class Recover {
+
+    @Test
+    void recover_resumeActionGiven_executesForwardFromThatStep() throws Exception {
+      // Arrange — 2 steps; Resume(1) must drive step 1 forward and leave step 0 untouched.
+      Step step0 = successStep("s0");
+      Step step1 = successStep("s1");
+      registerStep("s0", step0);
+      registerStep("s1", step1);
+      SagaDefinition def = sagaDefinitionWithRetry("s0", "s1");
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
+
+      // Act
+      engine.recover(new RecoveryAction.Resume(1), def, context);
+
+      // Assert — dispatched to the forward path, not to compensation.
+      verify(step1).execute(any(SagaContext.class));
+      verify(step0, never()).execute(any(SagaContext.class));
+      verify(step1, never()).compensate(any(SagaContext.class));
+    }
+
+    @Test
+    void recover_compensateActionGiven_compensatesFromThatStep() throws Exception {
+      // Arrange — already COMPENSATING, so the drive skips its own transition; Compensate(0) must
+      // undo step 0 rather than execute it.
+      Step step0 = successStep("s0");
+      registerStep("s0", step0);
+      SagaDefinition def = sagaDefinitionWithRetry("s0");
+      SagaStateSnapshot saga = compensatingSnapshot("saga-1");
+      ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
+
+      // Act
+      engine.recover(new RecoveryAction.Compensate(0), def, context);
+
+      // Assert — dispatched to the compensation path, not the forward one.
+      verify(step0).compensate(any(SagaContext.class));
+      verify(step0, never()).execute(any(SagaContext.class));
+    }
+  }
+
+  // =========================================================================
   // Pivot boundary behavior
   // =========================================================================
 

@@ -147,6 +147,27 @@ class RecoveryActionResolverTest {
     assertThat(action).isEqualTo(new RecoveryAction.Compensate(1));
   }
 
+  @Test
+  public void
+      resolve_compensatingNoneCompensatedFailedAboveCompletedGiven_compensatesFromFailedStep() {
+    // Arrange — crashed after the COMPENSATING transition, nothing compensated; a
+    // possibly-committed
+    // pre-pivot failure (step 1, null payload => not knownNotCommitted) sits above the highest
+    // completed step (0). The failedIndicesToCompensate term must dominate the highest-completed
+    // one
+    // — the exact case the old inline DefaultSagaOrchestrator.compensate copy dropped.
+    List<SagaEvent> events =
+        List.of(StepEvent.completed(0, "debit", null), StepEvent.failed(1, "credit", null));
+
+    // Act
+    RecoveryAction action =
+        RecoveryActionResolver.resolve(events, backwardDef(), SagaStatus.COMPENSATING);
+
+    // Assert — compensate from the possibly-committed failed step (1), not the highest completed
+    // (0).
+    assertThat(action).isEqualTo(new RecoveryAction.Compensate(1));
+  }
+
   // --- ESCALATED: direction reconstructed from the stream (Admin API un-escalation) ---
 
   @Test
