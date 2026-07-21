@@ -3,7 +3,7 @@ package com.scalar.db.saga.exception;
 import java.util.Objects;
 
 /**
- * Thrown when an operation is rejected because the saga is in a state that operation does not
+ * Thrown when an operation is rejected because the saga is in a state that the operation does not
  * accept — a <b>static wrong-state</b> rejection, as opposed to a lost optimistic-concurrency race
  * (which is a {@link SagaConcurrentModificationException}). The concept is general and not limited
  * to the Admin API; that is simply where every current thrower happens to live.
