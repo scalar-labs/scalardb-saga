@@ -189,7 +189,16 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
     GrpcClientSupport.shutdown(ownedChannel);
   }
 
+  /**
+   * The stub for one call, with the default per-call deadline applied if configured. Rejects a call
+   * on a closed client with a terminal {@link IllegalStateException} so a caller that retries on
+   * the transient {@link com.scalar.db.saga.exception.SagaUnavailableException} does not loop on
+   * channel-shutdown errors that will never recover.
+   */
   private AdminServiceBlockingStub stub() {
+    if (closed.get()) {
+      throw new IllegalStateException("admin client has been closed");
+    }
     return defaultDeadlineMillis > 0L
         ? stub.withDeadlineAfter(defaultDeadlineMillis, TimeUnit.MILLISECONDS)
         : stub;

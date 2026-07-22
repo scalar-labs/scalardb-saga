@@ -284,6 +284,17 @@ class GrpcSagaAdminClientTest {
   }
 
   @Test
+  void recoverSaga_afterClose_throwsIllegalStateException() {
+    // Arrange
+    client.close();
+
+    // Act + Assert — a closed client rejects further calls terminally rather than surfacing the
+    // channel-shutdown failure as a (retryable) SagaUnavailableException.
+    assertThatThrownBy(() -> client.recoverSaga("s-1", "x"))
+        .isInstanceOf(IllegalStateException.class);
+  }
+
+  @Test
   void listSagas_perCallDeadlineElapses_throwsSagaTimeout() {
     // Arrange — a client with a short per-call deadline, against an RPC that never responds
     GrpcSagaAdminClient timedClient =
