@@ -144,9 +144,18 @@ final class ClientProtoMappers {
     return builder.build();
   }
 
-  /** Maps the api status to the wire status by name (inverse of {@link #fromProtoStatus}). */
+  /**
+   * Maps the api status to the wire status by name (inverse of {@link #fromProtoStatus}). A missing
+   * wire counterpart is api/proto version skew — an internal bug, since {@link SagaStatus} is a
+   * Java enum the caller cannot fabricate — so it throws {@link IllegalStateException} rather than
+   * degrading silently.
+   */
   static com.scalar.db.saga.rpc.SagaStatus toProtoStatus(SagaStatus status) {
-    return com.scalar.db.saga.rpc.SagaStatus.valueOf(STATUS_PREFIX + status.name());
+    try {
+      return com.scalar.db.saga.rpc.SagaStatus.valueOf(STATUS_PREFIX + status.name());
+    } catch (IllegalArgumentException e) {
+      throw new IllegalStateException("No wire SagaStatus for api status " + status.name(), e);
+    }
   }
 
   /** Maps a wire list response back to an api page of snapshots. */
