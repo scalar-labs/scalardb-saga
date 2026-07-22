@@ -15,7 +15,10 @@ import com.scalar.db.saga.exception.SagaStatePreconditionException;
  * forward" — the engine decides from the saga's pivot, exactly as automatic recovery does. The
  * operator only chooses <em>whether</em> to let the engine continue ({@link #recoverSaga}, {@link
  * #resetEscalated}) or to override a stuck saga to done ({@link #forceComplete}). A caller supplies
- * a {@code reason} for audit; the operator identity is injected by the server, never passed in.
+ * a {@code reason} for audit; the operator identity is injected by the server, never passed in. The
+ * {@code reason} is recorded on the saga's timeline and returned by {@link
+ * SagaOrchestrator#getSagaDetail} (an application-facing read, not an operator-only view), so treat
+ * it as visible to any caller that can read the saga and keep sensitive internal detail out of it.
  *
  * <p><b>Rejections.</b> A mutation on a saga in a state the operation does not accept throws {@link
  * SagaStatePreconditionException} (wrong state — HTTP 422). Losing an optimistic-concurrency race
@@ -42,10 +45,9 @@ public interface SagaAdminService extends AutoCloseable {
    */
   SagaPage<SagaStateSnapshot> listSagas(SagaQuery query);
 
-  // Inspecting one saga's detail and timeline is an application self-service read (diagnosing your
-  // own saga's failure), not an operator intervention, so it lives on
-  // SagaOrchestrator#getSagaDetail
-  // rather than here. An operator holds ADMIN, which implies READ, so they reach it too.
+  // Inspecting one saga's detail and timeline is an application-facing read (self-service failure
+  // diagnosis), not an operator intervention, so it lives on SagaOrchestrator#getSagaDetail rather
+  // than here. An operator holds ADMIN, which implies READ, so they reach it too.
 
   // ---------------------------------------------------------------------------
   // Mutations (operator interventions)

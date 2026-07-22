@@ -73,9 +73,13 @@ public enum SagaOperation implements RouteRole {
   LIST_SAGAS(SagaRole.ADMIN, false),
 
   /**
-   * Inspecting one saga's detail and timeline. An application diagnosing its own saga by an id it
-   * already holds, so {@link SagaRole#READ} — the same access as {@link #GET_SAGA}, plus the
-   * timeline. Exposed on the application surface, not the admin one.
+   * Inspecting one saga's detail and timeline. {@link SagaRole#READ}, the same access as {@link
+   * #GET_SAGA} plus the timeline, on the application surface rather than the admin one. READ is
+   * by-id and unscoped: the RBAC model carries no tenant identity, so a READ caller can read any
+   * saga it can name, as {@link #GET_SAGA} already allows. The timeline additionally exposes
+   * operator-intervention audit metadata: who intervened and the reason they gave. That disclosure
+   * to any READ caller is deliberate; the timeline is application-facing, so an operator's
+   * intervention reason is application-visible rather than an operator-only audit note.
    */
   GET_SAGA_DETAIL(SagaRole.READ, false),
 
