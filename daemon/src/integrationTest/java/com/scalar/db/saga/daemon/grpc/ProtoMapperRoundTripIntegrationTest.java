@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.scalar.db.saga.api.ResetResult;
@@ -35,6 +36,7 @@ import java.util.Set;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 /**
  * Guards that the daemon's server-side {@link ProtoMappers} and the client's {@code
@@ -122,18 +124,45 @@ class ProtoMapperRoundTripIntegrationTest {
 
   @Test
   void listSagas_roundTrip_preservesPageAndSnapshotFields() {
+    // Arrange — a fully populated query so a dropped field on either mapper direction fails
+    // equals() on the captured server-received query.
+    SagaQuery sent =
+        SagaQuery.newBuilder()
+            .status(SagaStatus.ESCALATED)
+            .updatedAfter(Instant.ofEpochSecond(1_700_000_000L, 111))
+            .updatedBefore(Instant.ofEpochSecond(1_700_000_500L, 222))
+            .pageSize(250)
+            .pageToken("opaque-token-42")
+            .build();
     SagaPage<SagaStateSnapshot> expected =
         new SagaPage<>(List.of(snapshot(SagaStatus.RUNNING)), "next-token");
     when(adminService.listSagas(any())).thenReturn(expected);
 
-    SagaPage<SagaStateSnapshot> actual = adminClient.listSagas(SagaQuery.newBuilder().build());
+    // Act
+    SagaPage<SagaStateSnapshot> actual = adminClient.listSagas(sent);
 
+    // Assert — request direction: the captured server-side SagaQuery mirrors the client-side one.
+    ArgumentCaptor<SagaQuery> queryCaptor = ArgumentCaptor.forClass(SagaQuery.class);
+    verify(adminService).listSagas(queryCaptor.capture());
+    assertThat(queryCaptor.getValue()).isEqualTo(sent);
+
+    // Assert — response direction.
     assertThat(actual.getItems()).isEqualTo(expected.getItems());
     assertThat(actual.getNextPageToken()).isEqualTo("next-token");
   }
 
   @Test
   void resetEscalatedBulk_roundTrip_preservesResultAndSkipFields() {
+    // Arrange — the client deliberately drops the status filter on the bulk path (the sweep is
+    // pinned to ESCALATED server-side), so it is not set here; every other query field, plus the
+    // reason, must round-trip through both mappers.
+    SagaQuery sent =
+        SagaQuery.newBuilder()
+            .updatedAfter(Instant.ofEpochSecond(1_700_000_000L, 111))
+            .updatedBefore(Instant.ofEpochSecond(1_700_000_500L, 222))
+            .pageSize(250)
+            .pageToken("opaque-token-42")
+            .build();
     ResetResult expected =
         new ResetResult(
             3,
@@ -145,8 +174,18 @@ class ProtoMapperRoundTripIntegrationTest {
             "more");
     when(adminService.resetEscalated(any(SagaQuery.class), any())).thenReturn(expected);
 
-    assertThat(adminClient.resetEscalated(SagaQuery.newBuilder().build(), "operator sweep"))
-        .isEqualTo(expected);
+    // Act
+    ResetResult actual = adminClient.resetEscalated(sent, "operator sweep");
+
+    // Assert — request direction: SagaQuery + reason both arrive intact.
+    ArgumentCaptor<SagaQuery> queryCaptor = ArgumentCaptor.forClass(SagaQuery.class);
+    ArgumentCaptor<String> reasonCaptor = ArgumentCaptor.forClass(String.class);
+    verify(adminService).resetEscalated(queryCaptor.capture(), reasonCaptor.capture());
+    assertThat(queryCaptor.getValue()).isEqualTo(sent);
+    assertThat(reasonCaptor.getValue()).isEqualTo("operator sweep");
+
+    // Assert — response direction.
+    assertThat(actual).isEqualTo(expected);
   }
 
   /**
