@@ -254,6 +254,16 @@ class AdminServiceImplTest {
   }
 
   @Test
+  void forceComplete_writeRoleGiven_permissionDenied() {
+    assertCode(
+        () ->
+            stub("write")
+                .forceComplete(
+                    InterventionRequest.newBuilder().setSagaId("s-1").setReason("x").build()),
+        Status.Code.PERMISSION_DENIED);
+  }
+
+  @Test
   void forceComplete_lostCas_aborted() {
     when(adminService.forceComplete(eq("s-1"), any()))
         .thenThrow(new SagaConcurrentModificationException("s-1"));
