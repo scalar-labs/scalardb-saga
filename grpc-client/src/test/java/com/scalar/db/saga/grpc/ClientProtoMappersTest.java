@@ -10,27 +10,28 @@ import org.junit.jupiter.api.Test;
 class ClientProtoMappersTest {
 
   @Test
-  void toApiStatus_everyApiStatusRoundTripsByName() {
+  void fromProtoStatus_everyApiStatusRoundTripsByName() {
     for (SagaStatus apiStatus : SagaStatus.values()) {
       com.scalar.db.saga.rpc.SagaStatus wire =
           com.scalar.db.saga.rpc.SagaStatus.valueOf("SAGA_STATUS_" + apiStatus.name());
-      assertThat(ClientProtoMappers.toApiStatus(wire)).isEqualTo(apiStatus);
+      assertThat(ClientProtoMappers.fromProtoStatus(wire)).isEqualTo(apiStatus);
     }
   }
 
   @Test
-  void toApiStatus_unspecified_throws() {
+  void fromProtoStatus_unspecified_throws() {
     assertThatThrownBy(
             () ->
-                ClientProtoMappers.toApiStatus(
+                ClientProtoMappers.fromProtoStatus(
                     com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_UNSPECIFIED))
         .isInstanceOf(SagaRuntimeException.class);
   }
 
   @Test
-  void toApiStatus_unrecognized_throws() {
+  void fromProtoStatus_unrecognized_throws() {
     assertThatThrownBy(
-            () -> ClientProtoMappers.toApiStatus(com.scalar.db.saga.rpc.SagaStatus.UNRECOGNIZED))
+            () ->
+                ClientProtoMappers.fromProtoStatus(com.scalar.db.saga.rpc.SagaStatus.UNRECOGNIZED))
         .isInstanceOf(SagaRuntimeException.class);
   }
 }

@@ -133,19 +133,6 @@ class SagaSecurityInterceptorTest {
   }
 
   @Test
-  void requiredRoleFor_readMethods_returnRead() {
-    assertThat(SagaSecurityInterceptor.requiredRoleFor("GetSaga")).isEqualTo(SagaRole.READ);
-    assertThat(SagaSecurityInterceptor.requiredRoleFor("AwaitSaga")).isEqualTo(SagaRole.READ);
-  }
-
-  @Test
-  void requiredRoleFor_writeOrUnknownMethods_returnWrite() {
-    assertThat(SagaSecurityInterceptor.requiredRoleFor("StartSaga")).isEqualTo(SagaRole.WRITE);
-    assertThat(SagaSecurityInterceptor.requiredRoleFor("FutureMethod")).isEqualTo(SagaRole.WRITE);
-    assertThat(SagaSecurityInterceptor.requiredRoleFor(null)).isEqualTo(SagaRole.WRITE);
-  }
-
-  @Test
   void getSaga_providerThrowsUnexpectedly_isInternal() throws IOException {
     // Arrange — a provider that fails with a non-authentication RuntimeException (a bug or an
     // unwrapped transient error), not a rejected credential.

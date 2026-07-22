@@ -22,6 +22,9 @@ import org.junit.jupiter.api.Test;
  * absent → not authenticated ({@code 401}); {@code read}/{@code write}/{@code admin} → an identity
  * holding that role. {@link ErrorMapper} renders the thrown auth exceptions, so this also locks in
  * the exception→status wiring (401/403).
+ *
+ * <p>Routes are tagged with real {@link SagaOperation}s, since the handler resolves its policy from
+ * the matched route's roles rather than from the HTTP verb.
  */
 class SagaSecurityHandlerTest {
 
@@ -31,20 +34,23 @@ class SagaSecurityHandlerTest {
   @BeforeEach
   void setUp() {
     app = Javalin.create();
-    SagaSecurityHandler.register(app, new RoleHeaderProvider(), AuthExemptions.of("/exempt"));
+    SagaSecurityHandler.register(app, new RoleHeaderProvider());
     ErrorMapper.register(app);
-    // A read-gated route (GET) that echoes the resolved principal, so a test can assert the
-    // identity was stored on the request.
+    // A read-gated route that echoes the resolved principal, so a test can assert the identity was
+    // stored on the request.
     app.get(
         "/read",
         ctx -> {
           SagaIdentity identity = ctx.attribute(SagaSecurityHandler.IDENTITY_ATTRIBUTE);
           ctx.result("read:" + (identity == null ? "none" : identity.principal()));
-        });
-    // A write-gated route (POST).
-    app.post("/write", ctx -> ctx.result("written"));
-    // An exempt route reachable with no credential.
-    app.get("/exempt", ctx -> ctx.result("open"));
+        },
+        SagaOperation.GET_SAGA);
+    // A write-gated route.
+    app.post("/write", ctx -> ctx.result("written"), SagaOperation.START_SAGA);
+    // An auth-exempt route reachable with no credential.
+    app.get("/exempt", ctx -> ctx.result("open"), SagaOperation.HEALTH);
+    // A route registered with no operation — the "someone forgot to tag it" case.
+    app.get("/untagged", ctx -> ctx.result("should never be served"));
     app.start(0);
   }
 
@@ -56,7 +62,7 @@ class SagaSecurityHandlerTest {
   }
 
   @Test
-  void exemptPath_noCredential_bypassesAuth() throws Exception {
+  void exemptRoute_noCredentialGiven_bypassesAuth() throws Exception {
     // Act — no X-Test-Role header at all
     HttpResponse<String> response = send("GET", "/exempt", null);
 
@@ -66,7 +72,7 @@ class SagaSecurityHandlerTest {
   }
 
   @Test
-  void gatedRoute_noCredential_returns401() throws Exception {
+  void gatedRoute_noCredentialGiven_returns401() throws Exception {
     // Act
     HttpResponse<String> response = send("GET", "/read", null);
 
@@ -115,18 +121,25 @@ class SagaSecurityHandlerTest {
   }
 
   @Test
-  void requiredRoleFor_readMethods_returnRead() {
-    // Assert
-    assertThat(SagaSecurityHandler.requiredRoleFor("GET")).isEqualTo(SagaRole.READ);
-    assertThat(SagaSecurityHandler.requiredRoleFor("HEAD")).isEqualTo(SagaRole.READ);
+  void untaggedRoute_adminRoleGiven_isRefusedRatherThanServed() throws Exception {
+    // Act — the most privileged caller there is, on a route carrying no operation
+    HttpResponse<String> response = send("GET", "/untagged", "admin");
+
+    // Assert — fails closed: a route with no declared policy is never served, even to an admin. A
+    // 500 (not a 403) is the honest answer, since an untagged route is a server-side bug.
+    assertThat(response.statusCode()).isEqualTo(500);
+    assertThat(response.body()).doesNotContain("should never be served");
   }
 
   @Test
-  void requiredRoleFor_writeMethods_returnWrite() {
-    // Assert
-    assertThat(SagaSecurityHandler.requiredRoleFor("POST")).isEqualTo(SagaRole.WRITE);
-    assertThat(SagaSecurityHandler.requiredRoleFor("PUT")).isEqualTo(SagaRole.WRITE);
-    assertThat(SagaSecurityHandler.requiredRoleFor("DELETE")).isEqualTo(SagaRole.WRITE);
+  void unmatchedPath_noCredentialGiven_returns404NotUnauthenticated() throws Exception {
+    // Act
+    HttpResponse<String> response = send("GET", "/no-such-route", null);
+
+    // Assert — a deliberate consequence of enforcing on beforeMatched. An unmatched path never
+    // reaches the handler, so route existence is probeable without a credential. The route set is
+    // public API, not a secret. Pinned so the change reads as a decision.
+    assertThat(response.statusCode()).isEqualTo(404);
   }
 
   private HttpResponse<String> send(String method, String path, @Nullable String role)

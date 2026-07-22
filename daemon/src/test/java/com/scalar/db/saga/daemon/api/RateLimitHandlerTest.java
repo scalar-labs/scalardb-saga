@@ -2,9 +2,12 @@ package com.scalar.db.saga.daemon.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.scalar.db.saga.daemon.security.SagaAuthRequest;
 import com.scalar.db.saga.daemon.security.SagaIdentity;
+import com.scalar.db.saga.daemon.security.SagaOperation;
 import com.scalar.db.saga.daemon.security.SagaRole;
 import com.scalar.db.saga.daemon.security.SagaSecurityHandler;
+import com.scalar.db.saga.daemon.security.SagaSecurityProvider;
 import io.javalin.Javalin;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -18,29 +21,44 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Exercises {@link RateLimitHandler} end-to-end against a real Javalin dispatch. A stub before
- * handler stands in for {@link SagaSecurityHandler} by planting an identity on the request; {@code
- * null} identity models an auth-exempt route.
+ * Exercises {@link RateLimitHandler} end-to-end against a real Javalin dispatch, wired behind the
+ * <b>real</b> {@link SagaSecurityHandler} rather than a stand-in that plants an identity.
+ *
+ * <p>That wiring is the point of the test, not incidental setup. The limiter is only reachable
+ * because it reads the identity the security handler resolved, and both must therefore sit on the
+ * same Javalin stage: Javalin runs every {@code before} handler ahead of any {@code beforeMatched}
+ * one, so a limiter left on {@code before} while the authenticator moved to {@code beforeMatched}
+ * would read a null identity on every request and skip silently — rate limiting disabled
+ * daemon-wide, with a policy unit test still green. Only a test that drives both handlers through a
+ * real request catches that.
  */
 class RateLimitHandlerTest {
 
   private final HttpClient http = HttpClient.newHttpClient();
   private @Nullable Javalin app;
 
-  private Javalin start(int limit, @Nullable SagaIdentity identity) {
+  /** Registers the real security handler and the limiter, in the order {@code SagaServer} uses. */
+  private Javalin startAuthenticated(int limit, SagaIdentity identity) {
     app = Javalin.create();
-    // Stand in for SagaSecurityHandler: plant (or omit) the resolved identity.
-    app.before(
-        ctx -> {
-          if (identity != null) {
-            ctx.attribute(SagaSecurityHandler.IDENTITY_ATTRIBUTE, identity);
-          }
-        });
+    SagaSecurityHandler.register(app, new FixedIdentityProvider(identity));
     RateLimitHandler.register(app, new RateLimiter(limit, 60_000L));
     ErrorMapper.register(app);
-    app.post("/sagas", ctx -> ctx.result("created"));
-    app.get("/sagas/x", ctx -> ctx.result("read"));
+    registerRoutes(app);
     return app.start(0);
+  }
+
+  /** Registers the limiter with no upstream authenticator, so no identity is ever resolved. */
+  private Javalin startWithoutAuth(int limit) {
+    app = Javalin.create();
+    RateLimitHandler.register(app, new RateLimiter(limit, 60_000L));
+    ErrorMapper.register(app);
+    registerRoutes(app);
+    return app.start(0);
+  }
+
+  private static void registerRoutes(Javalin app) {
+    app.post("/sagas", ctx -> ctx.result("created"), SagaOperation.START_SAGA);
+    app.get("/sagas/x", ctx -> ctx.result("read"), SagaOperation.GET_SAGA);
   }
 
   @AfterEach
@@ -51,9 +69,9 @@ class RateLimitHandlerTest {
   }
 
   @Test
-  void post_overLimit_returns429() throws Exception {
+  void rateLimitedOperation_overLimit_returns429() throws Exception {
     // Arrange — limit 2/min for the authenticated principal
-    start(2, SagaIdentity.of("alice", Set.of(SagaRole.WRITE)));
+    startAuthenticated(2, SagaIdentity.of("alice", Set.of(SagaRole.WRITE)));
 
     // Act / Assert — first two allowed, third throttled
     assertThat(send("POST", "/sagas").statusCode()).isEqualTo(200);
@@ -64,9 +82,9 @@ class RateLimitHandlerTest {
   }
 
   @Test
-  void get_notLimited_evenBeyondLimit() throws Exception {
+  void unlimitedOperation_notLimited_evenBeyondLimit() throws Exception {
     // Arrange
-    start(1, SagaIdentity.of("alice", Set.of(SagaRole.WRITE)));
+    startAuthenticated(1, SagaIdentity.of("alice", Set.of(SagaRole.WRITE)));
 
     // Act / Assert — reads are never throttled
     for (int i = 0; i < 5; i++) {
@@ -75,11 +93,12 @@ class RateLimitHandlerTest {
   }
 
   @Test
-  void post_noIdentity_notLimited() throws Exception {
-    // Arrange — an auth-exempt route has no resolved identity
-    start(1, null);
+  void rateLimitedOperation_withNoUpstreamAuthenticator_notLimited() throws Exception {
+    // Arrange — the limiter alone, so no identity is ever resolved
+    startWithoutAuth(1);
 
-    // Act / Assert — not throttled (e.g. so an HMAC callback is never blocked by a user's budget)
+    // Act / Assert — a limit that cannot be attributed to a principal is not enforced, rather than
+    // blocking the call (this is what keeps an HMAC callback off a user's budget)
     assertThat(send("POST", "/sagas").statusCode()).isEqualTo(200);
     assertThat(send("POST", "/sagas").statusCode()).isEqualTo(200);
   }
@@ -91,5 +110,18 @@ class RateLimitHandlerTest {
             .method(method, HttpRequest.BodyPublishers.noBody())
             .build();
     return http.send(request, BodyHandlers.ofString());
+  }
+
+  /** A provider that authenticates every request as one fixed identity. */
+  private record FixedIdentityProvider(SagaIdentity identity) implements SagaSecurityProvider {
+    @Override
+    public SagaIdentity authenticate(SagaAuthRequest request) {
+      return identity;
+    }
+
+    @Override
+    public String name() {
+      return "fixed-identity-stub";
+    }
   }
 }

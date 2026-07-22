@@ -1,6 +1,8 @@
 package com.scalar.db.saga.daemon.api;
 
+import com.scalar.db.saga.daemon.security.SagaOperation;
 import io.javalin.Javalin;
+import io.javalin.http.Handler;
 import java.util.Map;
 
 /**
@@ -11,20 +13,24 @@ import java.util.Map;
  */
 public final class HealthResource {
 
-  /**
-   * The liveness route path. Exposed as a constant so the security layer can exempt this
-   * infrastructure probe — which carries no user credential — from caller-facing auth.
-   */
+  /** The liveness route path. */
   public static final String PATH = "/health";
 
   private HealthResource() {}
 
   /**
-   * Registers the liveness route on the given app.
+   * Registers the liveness route on the given app, tagged {@link SagaOperation#HEALTH} so the
+   * security layer exempts this infrastructure probe — which carries no user credential — from
+   * caller-facing auth. Both {@code GET} and {@code HEAD} are served, since load balancers and
+   * uptime monitors commonly probe with {@code HEAD}; the {@code HEAD} handler carries the route's
+   * roles, so it is exempted the same way (rather than falling to the {@code 405} the security
+   * layer returns for HEAD on a GET-only route).
    *
    * @param app the Javalin app
    */
   public static void register(Javalin app) {
-    app.get(PATH, ctx -> ctx.json(Map.of("status", "UP")));
+    Handler handler = ctx -> ctx.json(Map.of("status", "UP"));
+    app.get(PATH, handler, SagaOperation.HEALTH);
+    app.head(PATH, handler, SagaOperation.HEALTH);
   }
 }

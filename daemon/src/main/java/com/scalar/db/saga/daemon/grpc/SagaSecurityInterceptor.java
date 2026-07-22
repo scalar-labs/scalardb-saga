@@ -4,6 +4,7 @@ import com.scalar.db.saga.daemon.security.SagaAuthRequest;
 import com.scalar.db.saga.daemon.security.SagaAuthUnavailableException;
 import com.scalar.db.saga.daemon.security.SagaAuthenticationException;
 import com.scalar.db.saga.daemon.security.SagaIdentity;
+import com.scalar.db.saga.daemon.security.SagaOperation;
 import com.scalar.db.saga.daemon.security.SagaRole;
 import com.scalar.db.saga.daemon.security.SagaSecurityProvider;
 import io.grpc.Context;
@@ -16,26 +17,27 @@ import io.grpc.ServerInterceptor;
 import io.grpc.Status;
 import java.net.SocketAddress;
 import java.util.Locale;
-import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  * The gRPC enforcement point, the transport-parallel of {@link
  * com.scalar.db.saga.daemon.security.SagaSecurityHandler} (REST): authenticates each call through
- * the same {@link SagaSecurityProvider} and checks the caller holds the role the method requires
- * (RBAC).
+ * the same {@link SagaSecurityProvider} and checks the caller holds the role the call's {@link
+ * SagaOperation} requires (RBAC). The method is mapped to its operation by {@link GrpcOperations},
+ * so both transports enforce one shared policy rather than two per-transport encodings of it.
  *
- * <p>Applied only to the saga service (via {@code ServerInterceptors.intercept}); the standard
- * health service is left unintercepted so K8s-native gRPC probes need no credential. Credentials
- * are read from the call's request {@link Metadata} — every ASCII header is passed to the provider,
- * so it reads whichever one carries its credential ({@code authorization} for JWT, a configured
- * header for API keys), exactly as the REST handler does. An authentication failure closes the call
- * with {@code UNAUTHENTICATED}; a role shortfall with {@code PERMISSION_DENIED} — the gRPC
- * analogues of {@code 401}/{@code 403}. A provider that is unavailable (e.g. an unreachable JWKS
- * endpoint) closes the call with {@code UNAVAILABLE} — a retryable outage, not a bad credential.
- * The resolved identity is attached to the gRPC {@link Context} under {@link #IDENTITY} for
- * downstream audit.
+ * <p>Applied to every privileged gRPC service — the saga service and the admin service, each
+ * wrapped in {@code SagaServer} via {@code ServerInterceptors} — so a new service carrying
+ * privileged RPCs must be wrapped here too; the standard health service is deliberately left
+ * unintercepted so K8s-native gRPC probes need no credential. Credentials are read from the call's
+ * request {@link Metadata} — every ASCII header is passed to the provider, so it reads whichever
+ * one carries its credential ({@code authorization} for JWT, a configured header for API keys),
+ * exactly as the REST handler does. An authentication failure closes the call with {@code
+ * UNAUTHENTICATED}; a role shortfall with {@code PERMISSION_DENIED} — the gRPC analogues of {@code
+ * 401}/{@code 403}. A provider that is unavailable (e.g. an unreachable JWKS endpoint) closes the
+ * call with {@code UNAVAILABLE} — a retryable outage, not a bad credential. The resolved identity
+ * is attached to the gRPC {@link Context} under {@link #IDENTITY} for downstream audit.
  */
 public final class SagaSecurityInterceptor implements ServerInterceptor {
 
@@ -53,6 +55,24 @@ public final class SagaSecurityInterceptor implements ServerInterceptor {
   @Override
   public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
       ServerCall<ReqT, RespT> call, Metadata headers, ServerCallHandler<ReqT, RespT> next) {
+    SagaOperation operation =
+        GrpcOperations.fromBareMethodName(call.getMethodDescriptor().getBareMethodName());
+    if (operation == null) {
+      // The method carries no policy — an RPC was registered without being added to GrpcOperations.
+      // Refuse rather than default to a role: INTERNAL, because this is a server bug and not a bad
+      // credential, mirroring the REST path's 500 on an untagged route.
+      logger.error(
+          "gRPC method '{}' has no mapped SagaOperation; refusing the call",
+          call.getMethodDescriptor().getFullMethodName());
+      return deny(call, Status.INTERNAL.withDescription("Internal server error"));
+    }
+    SagaRole required = operation.requiredRole();
+    if (required == null) {
+      // An auth-exempt operation. No gRPC method maps to one today — the health service is left
+      // unintercepted entirely rather than exempted here — but the two transports resolve exemption
+      // from the same place, so honour it symmetrically.
+      return next.startCall(call, headers);
+    }
     SagaIdentity identity;
     try {
       identity = provider.authenticate(toAuthRequest(call, headers));
@@ -72,7 +92,6 @@ public final class SagaSecurityInterceptor implements ServerInterceptor {
       logger.error("Unexpected error authenticating a gRPC call", e);
       return deny(call, Status.INTERNAL.withDescription("Authentication error"));
     }
-    SagaRole required = requiredRoleFor(call.getMethodDescriptor().getBareMethodName());
     if (!identity.hasRole(required)) {
       return deny(call, Status.PERMISSION_DENIED.withDescription("Insufficient permissions"));
     }
@@ -84,29 +103,6 @@ public final class SagaSecurityInterceptor implements ServerInterceptor {
       ServerCall<ReqT, RespT> call, Status status) {
     call.close(status, new Metadata());
     return new ServerCall.Listener<ReqT>() {};
-  }
-
-  /**
-   * Resolves the minimum role a gRPC method requires: the read/poll methods need {@link
-   * SagaRole#READ}; everything else (starting a saga, and any future state-changing method) needs
-   * {@link SagaRole#WRITE}.
-   *
-   * <p><b>Keep in sync</b> with the REST mapping in {@code SagaSecurityHandler.requiredRoleFor}:
-   * the two transports encode the same operation&rarr;role policy in different vocabularies (gRPC
-   * method name vs HTTP verb), so an operation added to one must be mirrored in the other. When
-   * ADMIN-gated operations land, replace both switches with a shared operation&rarr;role policy so
-   * the decision lives in one place.
-   *
-   * <p>Package-private for unit testing.
-   */
-  static SagaRole requiredRoleFor(@Nullable String bareMethodName) {
-    if (bareMethodName == null) {
-      return SagaRole.WRITE;
-    }
-    return switch (bareMethodName) {
-      case "GetSaga", "AwaitSaga" -> SagaRole.READ;
-      default -> SagaRole.WRITE;
-    };
   }
 
   private static SagaAuthRequest toAuthRequest(ServerCall<?, ?> call, Metadata headers) {

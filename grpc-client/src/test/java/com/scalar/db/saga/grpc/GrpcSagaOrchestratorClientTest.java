@@ -7,8 +7,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.protobuf.Timestamp;
 import com.scalar.db.saga.api.SagaCallback;
 import com.scalar.db.saga.api.SagaDefinitionId;
+import com.scalar.db.saga.api.SagaDetail;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.api.TimelineEvent;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
@@ -16,6 +18,7 @@ import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaTimeoutException;
 import com.scalar.db.saga.exception.SagaUnavailableException;
 import com.scalar.db.saga.rpc.AwaitSagaRequest;
+import com.scalar.db.saga.rpc.GetSagaDetailRequest;
 import com.scalar.db.saga.rpc.GetSagaRequest;
 import com.scalar.db.saga.rpc.SagaServiceGrpc;
 import com.scalar.db.saga.rpc.SagaSnapshot;
@@ -167,6 +170,56 @@ class GrpcSagaOrchestratorClientTest {
     assertThat(snapshot.getStatus()).isEqualTo(SagaStatus.COMPENSATED);
     assertThat(snapshot.getOwnerId()).isEmpty();
     assertThat(snapshot.getCreatedAt().getEpochSecond()).isEqualTo(1000L);
+  }
+
+  @Test
+  void getSagaDetail_mapsSnapshotAndTimelineOptionals() {
+    // Arrange — a step event (index/name set, status/operator unset) and a status event (the
+    // inverse), so both the set and unset sides of every optional field are exercised
+    fake.detailResponse =
+        com.scalar.db.saga.rpc.SagaDetail.newBuilder()
+            .setSaga(snapshot("s-9", SagaStatus.COMPENSATED))
+            .addTimeline(
+                com.scalar.db.saga.rpc.TimelineEvent.newBuilder()
+                    .setTimestamp(com.google.protobuf.Timestamp.newBuilder().setSeconds(1000L))
+                    .setType("STEP_FAILED")
+                    .setStepIndex(1)
+                    .setStepName("credit")
+                    .setDetail("gateway down"))
+            .addTimeline(
+                com.scalar.db.saga.rpc.TimelineEvent.newBuilder()
+                    .setTimestamp(com.google.protobuf.Timestamp.newBuilder().setSeconds(1000L))
+                    .setType("SAGA_RECOVERING")
+                    .setResultingStatus(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_COMPENSATING)
+                    .setDetail("rolling back")
+                    .setOperator("bob"))
+            .build();
+
+    // Act
+    SagaDetail detail = client.getSagaDetail("s-9");
+
+    // Assert — snapshot maps, and set/unset optionals round-trip to value/null
+    assertThat(detail.getSnapshot().getStatus()).isEqualTo(SagaStatus.COMPENSATED);
+    assertThat(detail.getTimeline()).hasSize(2);
+
+    TimelineEvent step = detail.getTimeline().get(0);
+    assertThat(step.getStepIndex()).isEqualTo(1);
+    assertThat(step.getStepName()).isEqualTo("credit");
+    assertThat(step.getDetail()).isEqualTo("gateway down");
+    assertThat(step.getResultingStatus()).isNull();
+    assertThat(step.getOperator()).isNull();
+
+    TimelineEvent status = detail.getTimeline().get(1);
+    assertThat(status.getStepIndex()).isNull();
+    assertThat(status.getResultingStatus()).isEqualTo(SagaStatus.COMPENSATING);
+    assertThat(status.getOperator()).isEqualTo("bob");
+  }
+
+  @Test
+  void getSagaDetail_notFound_throwsSagaNotFound() {
+    fake.detailError = Status.NOT_FOUND.withDescription("no saga").asRuntimeException();
+    assertThatThrownBy(() -> client.getSagaDetail("missing"))
+        .isInstanceOf(SagaNotFoundException.class);
   }
 
   // ---------------------------------------------------------------------------
@@ -522,6 +575,22 @@ class GrpcSagaOrchestratorClientTest {
         return;
       }
       respondWith(responseObserver, getResponse);
+    }
+
+    @Nullable StatusRuntimeException detailError;
+    com.scalar.db.saga.rpc.SagaDetail detailResponse =
+        com.scalar.db.saga.rpc.SagaDetail.getDefaultInstance();
+
+    @Override
+    public void getSagaDetail(
+        GetSagaDetailRequest request,
+        StreamObserver<com.scalar.db.saga.rpc.SagaDetail> responseObserver) {
+      if (detailError != null) {
+        responseObserver.onError(detailError);
+        return;
+      }
+      responseObserver.onNext(detailResponse);
+      responseObserver.onCompleted();
     }
   }
 }

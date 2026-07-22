@@ -1,6 +1,7 @@
 package com.scalar.db.saga.daemon.api;
 
 import com.scalar.db.saga.api.SagaStateSnapshot;
+import com.scalar.db.saga.daemon.security.SagaOperation;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import io.javalin.Javalin;
@@ -21,8 +22,8 @@ import java.util.regex.Pattern;
  *
  * <p><b>Auth.</b> This route is authenticated by the HMAC callback token, <em>not</em> by the
  * caller-facing auth (e.g. JWT) that guards the other endpoints — a participant service holds a
- * signed callback URL, not a user credential. {@link #PATH} is exposed as the single contract by
- * which a future auth layer exempts this route from that auth. An optional {@code iat} TTL
+ * signed callback URL, not a user credential. The route is therefore tagged {@link
+ * SagaOperation#CALLBACK}, which the security layer treats as exempt. An optional {@code iat} TTL
  * (configured via {@code register}) additionally rejects a token older than a maximum age, so a
  * leaked callback URL is not a non-expiring credential.
  *
@@ -33,10 +34,7 @@ import java.util.regex.Pattern;
  */
 public final class CallbackResource {
 
-  /**
-   * The callback route path (a Javalin path-parameter pattern). Exposed as a constant so a future
-   * auth layer can exempt this HMAC-authenticated route from caller-facing auth.
-   */
+  /** The callback route path (a Javalin path-parameter pattern). */
   public static final String PATH = "/sagas/{id}/steps/{stepName}/complete";
 
   /**
@@ -72,7 +70,11 @@ public final class CallbackResource {
           Map<String, Object> output = parseOutput(ctx);
           SagaStateSnapshot snapshot = complete(orchestrator, sagaId, stepName, output);
           ctx.status(200).json(SagaSnapshotResponse.from(snapshot));
-        });
+        },
+        // Exempt from caller-facing auth: verifyToken above is this route's authentication. A
+        // provider credential check here would reject a participant's callback with 401 before the
+        // HMAC check ran, breaking async completion.
+        SagaOperation.CALLBACK);
   }
 
   /**

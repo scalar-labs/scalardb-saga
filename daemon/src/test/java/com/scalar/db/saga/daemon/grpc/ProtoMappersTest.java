@@ -2,10 +2,17 @@ package com.scalar.db.saga.daemon.grpc;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.google.protobuf.Timestamp;
+import com.scalar.db.saga.api.ResetResult;
+import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.rpc.ListSagasRequest;
+import com.scalar.db.saga.rpc.ResetEscalatedBulkRequest;
 import java.time.Instant;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -66,5 +73,123 @@ class ProtoMappersTest {
     // owner_id is a server-internal recovery field, deliberately absent from the wire contract.
     assertThat(com.scalar.db.saga.rpc.SagaSnapshot.getDescriptor().findFieldByName("owner_id"))
         .isNull();
+  }
+
+  @Test
+  void fromProtoStatus_inverseOfToProtoStatus_forEveryApiStatus() {
+    for (SagaStatus status : SagaStatus.values()) {
+      assertThat(ProtoMappers.fromProtoStatus(ProtoMappers.toProtoStatus(status)))
+          .isEqualTo(status);
+    }
+  }
+
+  @Test
+  void fromProtoStatus_unspecifiedGiven_throwsIllegalArgument() {
+    assertThatThrownBy(
+            () ->
+                ProtoMappers.fromProtoStatus(
+                    com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_UNSPECIFIED))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void fromProtoStatus_unrecognizedGiven_throwsIllegalArgument() {
+    assertThatThrownBy(
+            () -> ProtoMappers.fromProtoStatus(com.scalar.db.saga.rpc.SagaStatus.UNRECOGNIZED))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void toSagaQuery_listRequestAllFieldsGiven_mapsEachField() {
+    // Arrange
+    Instant after = Instant.ofEpochSecond(1_700_000_000L, 0);
+    Instant before = Instant.ofEpochSecond(1_700_100_000L, 0);
+    ListSagasRequest request =
+        ListSagasRequest.newBuilder()
+            .setStatus(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_ESCALATED)
+            .setUpdatedAfter(Timestamp.newBuilder().setSeconds(after.getEpochSecond()).build())
+            .setUpdatedBefore(Timestamp.newBuilder().setSeconds(before.getEpochSecond()).build())
+            .setPageSize(50)
+            .setPageToken("tok")
+            .build();
+
+    // Act
+    SagaQuery query = ProtoMappers.toSagaQuery(request);
+
+    // Assert
+    assertThat(query.getStatus()).isEqualTo(SagaStatus.ESCALATED);
+    assertThat(query.getUpdatedAfter()).isEqualTo(after);
+    assertThat(query.getUpdatedBefore()).isEqualTo(before);
+    assertThat(query.getPageSize()).isEqualTo(50);
+    assertThat(query.getPageToken()).isEqualTo("tok");
+  }
+
+  @Test
+  void toSagaQuery_listRequestNoFieldsGiven_mapsToAnEmptyQuery() {
+    // Act
+    SagaQuery query = ProtoMappers.toSagaQuery(ListSagasRequest.getDefaultInstance());
+
+    // Assert — every optional field absent maps to an unset api field
+    assertThat(query.getStatus()).isNull();
+    assertThat(query.getUpdatedAfter()).isNull();
+    assertThat(query.getUpdatedBefore()).isNull();
+    assertThat(query.getPageToken()).isNull();
+  }
+
+  @Test
+  void toSagaQuery_bulkRequestGiven_ignoresStatusAndMapsWindowAndPaging() {
+    // Arrange
+    Instant after = Instant.ofEpochSecond(1_700_000_000L, 0);
+    ResetEscalatedBulkRequest request =
+        ResetEscalatedBulkRequest.newBuilder()
+            .setReason("sweep")
+            .setUpdatedAfter(Timestamp.newBuilder().setSeconds(after.getEpochSecond()).build())
+            .setPageSize(25)
+            .setPageToken("tok")
+            .build();
+
+    // Act
+    SagaQuery query = ProtoMappers.toSagaQuery(request);
+
+    // Assert — the bulk sweep does not accept a status filter; the engine pins it to ESCALATED
+    assertThat(query.getStatus()).isNull();
+    assertThat(query.getUpdatedAfter()).isEqualTo(after);
+    assertThat(query.getPageSize()).isEqualTo(25);
+    assertThat(query.getPageToken()).isEqualTo("tok");
+  }
+
+  @Test
+  void toProto_resetResultWithSkipAndToken_mapsCountReasonAndToken() {
+    // Arrange
+    ResetResult result =
+        new ResetResult(
+            3,
+            List.of(new ResetResult.SkippedSaga("s2", ResetResult.SkipReason.CORRUPT_EVENT_STREAM)),
+            "next-token");
+
+    // Act
+    com.scalar.db.saga.rpc.ResetResult proto = ProtoMappers.toProto(result);
+
+    // Assert
+    assertThat(proto.getResetCount()).isEqualTo(3);
+    assertThat(proto.getSkippedCount()).isEqualTo(1);
+    assertThat(proto.getSkipped(0).getSagaId()).isEqualTo("s2");
+    assertThat(proto.getSkipped(0).getReason())
+        .isEqualTo(com.scalar.db.saga.rpc.SkipReason.SKIP_REASON_CORRUPT_EVENT_STREAM);
+    // detail is unset when the api detail is null (matches the 016 fix — no message leaked)
+    assertThat(proto.getSkipped(0).hasDetail()).isFalse();
+    assertThat(proto.getNextPageToken()).isEqualTo("next-token");
+  }
+
+  @Test
+  void toProto_resetResultNoSkipsNoToken_omitsToken() {
+    // Act
+    com.scalar.db.saga.rpc.ResetResult proto =
+        ProtoMappers.toProto(new ResetResult(5, List.of(), null));
+
+    // Assert
+    assertThat(proto.getResetCount()).isEqualTo(5);
+    assertThat(proto.getSkippedList()).isEmpty();
+    assertThat(proto.hasNextPageToken()).isFalse();
   }
 }

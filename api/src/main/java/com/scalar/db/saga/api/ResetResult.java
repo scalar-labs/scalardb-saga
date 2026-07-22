@@ -36,8 +36,9 @@ public final class ResetResult {
     /**
      * The saga's stored event stream could not be decoded, and a retry would fail identically — its
      * data is damaged, or was written by an incompatible version. Those two are indistinguishable
-     * from here (decoding fails the same way either way); the specific failure is in {@link
-     * SkippedSaga#getDetail()}. Needs manual inspection; the rest of the sweep is unaffected.
+     * from here (decoding fails the same way either way). Needs manual inspection; the specific
+     * decode failure is logged server-side keyed by saga id rather than returned, because it can
+     * echo raw stored bytes (business data or PII). The rest of the sweep is unaffected.
      */
     CORRUPT_EVENT_STREAM
   }

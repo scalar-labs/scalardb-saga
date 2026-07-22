@@ -210,6 +210,17 @@ public interface SagaOrchestrator extends AutoCloseable {
   SagaStateSnapshot getStateSnapshot(String sagaId);
 
   /**
+   * Returns a saga's current state together with its timeline — the metadata and failure error or
+   * intervention reason of each recorded event, never a raw step input/output payload. The
+   * application that ran the saga uses this to diagnose why it failed, without an operator's
+   * involvement; it is a read, so it needs no elevated privilege.
+   *
+   * @param sagaId the saga instance ID
+   * @return the saga's state and timeline
+   */
+  SagaDetail getSagaDetail(String sagaId);
+
+  /**
    * Shuts down the orchestrator, stopping background tasks and waiting for in-flight sagas to
    * complete.
    */

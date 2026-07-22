@@ -6,11 +6,12 @@ import com.scalar.db.saga.daemon.api.HealthResource;
 import com.scalar.db.saga.daemon.api.HmacCallbackUrlProvider;
 import com.scalar.db.saga.daemon.api.RateLimitHandler;
 import com.scalar.db.saga.daemon.api.RateLimiter;
+import com.scalar.db.saga.daemon.api.SagaAdminResource;
 import com.scalar.db.saga.daemon.api.SagaResource;
+import com.scalar.db.saga.daemon.grpc.AdminServiceImpl;
 import com.scalar.db.saga.daemon.grpc.SagaRateLimitInterceptor;
 import com.scalar.db.saga.daemon.grpc.SagaSecurityInterceptor;
 import com.scalar.db.saga.daemon.grpc.SagaServiceImpl;
-import com.scalar.db.saga.daemon.security.AuthExemptions;
 import com.scalar.db.saga.daemon.security.SagaSecurityHandler;
 import com.scalar.db.saga.daemon.security.SagaSecurityProvider;
 import com.scalar.db.saga.definition.SagaDefinition;
@@ -18,7 +19,9 @@ import com.scalar.db.saga.definition.SagaDefinitionParser;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.store.ScalarDbSagaStoreFactory;
+import io.grpc.BindableService;
 import io.grpc.Server;
+import io.grpc.ServerInterceptor;
 import io.grpc.ServerInterceptors;
 import io.grpc.ServerServiceDefinition;
 import io.grpc.netty.NettyServerBuilder;
@@ -31,6 +34,7 @@ import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
@@ -162,23 +166,37 @@ public final class SagaServer implements AutoCloseable {
   private Server buildGrpcServer(ExecutorService executor, HealthStatusManager health) {
     SagaServiceImpl service =
         new SagaServiceImpl(orchestrator, config.syncTimeoutMillis(), config.syncMaxWaitMillis());
+    AdminServiceImpl adminService = new AdminServiceImpl(orchestrator, adminDriveDeadlineMillis());
     SagaSecurityInterceptor security = new SagaSecurityInterceptor(securityProvider);
-    // interceptForward runs interceptors in listed order: authenticate first so the identity is on
-    // the Context, then (when enabled) rate-limit reads it — the gRPC analogue of the REST
-    // before-handler order.
-    ServerServiceDefinition sagaService =
-        rateLimiter == null
-            ? ServerInterceptors.intercept(service, security)
-            : ServerInterceptors.interceptForward(
-                service, security, new SagaRateLimitInterceptor(rateLimiter));
     return NettyServerBuilder.forAddress(new InetSocketAddress(config.host(), config.grpcPort()))
-        .addService(sagaService)
+        .addService(intercepted(service, security))
+        .addService(intercepted(adminService, security))
         .addService(health.getHealthService())
         .maxInboundMessageSize(config.grpcMaxInboundMessageBytes())
         .maxInboundMetadataSize(8 * 1024)
         .executor(executor)
         .permitKeepAliveTime(1, TimeUnit.MINUTES)
         .build();
+  }
+
+  /**
+   * Wraps a service with the security interceptor and, when rate limiting is enabled, the
+   * rate-limit interceptor. This is <b>load-bearing for every service that carries privileged RPCs,
+   * the admin service above all</b>: a bare {@code addService(adminService)} would ship every
+   * destructive admin RPC unauthenticated (identical to the deliberately-exempt health service).
+   * The interceptors are applied per service, so each intercepted service must be wrapped here — a
+   * missed wrap does not fail to compile, it silently exposes the service. {@code interceptForward}
+   * runs the interceptors in list order, so authentication runs first — putting the identity on the
+   * {@code Context} — before rate limiting reads it (the gRPC analogue of the REST handler order).
+   */
+  private ServerServiceDefinition intercepted(
+      BindableService service, SagaSecurityInterceptor security) {
+    List<ServerInterceptor> interceptors = new ArrayList<>();
+    interceptors.add(security);
+    if (rateLimiter != null) {
+      interceptors.add(new SagaRateLimitInterceptor(rateLimiter));
+    }
+    return ServerInterceptors.interceptForward(service, interceptors);
   }
 
   private static DefaultSagaOrchestrator buildDefaultSagaOrchestrator(SagaServerConfig config) {
@@ -299,24 +317,25 @@ public final class SagaServer implements AutoCloseable {
   }
 
   private void registerRoutes(Javalin httpServer) {
-    // The RBAC before-handler authenticates every request except the exempt paths. Two routes carry
-    // no caller credential and so bypass it: the liveness probe (unauthenticated by design) and the
-    // async-callback route, which authenticates with its own per-step HMAC token rather than a JWT
-    // or API key. Without the callback exemption, a real provider would reject a participant's
-    // callback with 401 before its HMAC check ran, breaking async completion.
-    SagaSecurityHandler.register(
-        httpServer,
-        securityProvider,
-        AuthExemptions.of(HealthResource.PATH, CallbackResource.PATH));
-    // Rate limiting runs after auth (it keys off the resolved principal) and only when enabled;
-    // registered before the routes so it gates saga-start requests. The same limiter also gates the
-    // gRPC transport (see buildGrpcServer), so the budget is per caller, not per port.
+    // The RBAC handler authenticates every matched route according to the SagaOperation the route
+    // declares; the two routes that carry no caller credential (the liveness probe, and the
+    // async-callback route with its own per-step HMAC) are tagged with an auth-exempt operation
+    // rather than listed here, so a route's policy travels with its registration.
+    SagaSecurityHandler.register(httpServer, securityProvider);
+    // Rate limiting runs after auth (it keys off the resolved principal) and only when enabled.
+    // Both
+    // are beforeMatched handlers, and this registration order is what puts the limiter after the
+    // authenticator; Javalin would run either ahead of the other only if they were on different
+    // stages. The same limiter also gates the gRPC transport (see buildGrpcServer), so the budget
+    // is
+    // per caller, not per port.
     if (rateLimiter != null) {
       RateLimitHandler.register(httpServer, rateLimiter);
     }
     HealthResource.register(httpServer);
     ErrorMapper.register(httpServer);
     SagaResource.register(httpServer, orchestrator, config.syncTimeoutMillis());
+    SagaAdminResource.register(httpServer, orchestrator, adminDriveDeadlineMillis());
     // The async-callback route exists only when a callback secret is configured; without it there
     // is nothing to authenticate callbacks against, so async completion is not enabled.
     config
@@ -329,6 +348,24 @@ public final class SagaServer implements AutoCloseable {
                     secret,
                     config.callbackMaxAgeSeconds(),
                     Clock.systemUTC()));
+  }
+
+  /**
+   * The bound on a single-saga admin inline drive: {@code sync_max_wait_millis} — the daemon's
+   * standing ceiling on how long any request may hold a thread — tightened by {@code
+   * sync_timeout_millis} when that is set. This mirrors the terms {@code
+   * SagaServiceImpl.computeBoundMillis} applies on the request-thread paths, minus the per-call
+   * gRPC client deadline, which has no REST analogue. Past the bound the durable transition is
+   * already recorded and the response carries the saga's current state, so the bound only caps how
+   * long the request waits, never correctness. Reusing {@code sync_max_wait_millis} keeps the drive
+   * inside the shutdown drain window {@link #grpcDrainMillis()} derives from the same value.
+   */
+  private long adminDriveDeadlineMillis() {
+    long bound = config.syncMaxWaitMillis();
+    if (config.syncTimeoutMillis() > 0L) {
+      bound = Math.min(bound, config.syncTimeoutMillis());
+    }
+    return bound;
   }
 
   /**

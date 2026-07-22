@@ -4,9 +4,11 @@ import com.scalar.db.saga.daemon.security.SagaAuthUnavailableException;
 import com.scalar.db.saga.daemon.security.SagaAuthenticationException;
 import com.scalar.db.saga.daemon.security.SagaAuthorizationException;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
+import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
+import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import io.javalin.Javalin;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -109,6 +111,30 @@ public final class ErrorMapper {
           body.put("existing", SagaSnapshotResponse.from(e.getExisting()));
           ctx.status(409).json(body);
         });
+    // An admin mutation on a saga in the wrong state (e.g. recovering an escalated saga, resetting
+    // a
+    // non-escalated one, or acting on a parked one). A precondition failure, not a transient one,
+    // so
+    // 422 rather than 409 — retrying the identical request will fail identically. The machine-
+    // readable code distinguishes the reason without parsing the message.
+    app.exception(
+        SagaStatePreconditionException.class,
+        (e, ctx) -> {
+          // The machine-readable code (SAGA_WRONG_STATE / SAGA_PARKED) is the contract; the message
+          // is daemon-owned rather than the core exception's, and the caller can GET the saga for
+          // its actual state.
+          Map<String, Object> body =
+              error(e.getCode().name(), "The saga is not in a state that allows this operation");
+          body.put("sagaId", e.getSagaId());
+          ctx.status(422).json(body);
+        });
+    // An admin mutation (or a concurrent recovery) lost the compare-and-set on the saga's state — a
+    // transient race, so 409, and a retry may now succeed against the new state.
+    app.exception(
+        SagaConcurrentModificationException.class,
+        (e, ctx) ->
+            ctx.status(409)
+                .json(error("SAGA_CONFLICT", "The saga was concurrently modified; retry")));
     // A transient store failure is retryable (503); a permanent one (e.g. a serialization or parse
     // error) is not — surface it as 500 so the client does not retry it futilely.
     app.exception(

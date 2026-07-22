@@ -72,12 +72,10 @@ public interface SagaStore extends AutoCloseable {
   void recordStepEvent(String sagaId, int sequence, StepEvent event);
 
   /**
-   * Records a saga-level status event and transitions the saga state atomically in one transaction.
-   *
-   * <p>The new status is derived from {@link StatusEvent#getTargetStatus()}. The transitioned row
-   * is stamped with {@code ownerId} as the replica now processing this saga (an observability
-   * field), so the driver reflected in {@code owner_id} stays current across engine, recovery, and
-   * admin transitions.
+   * Records a saga-level status event and transitions the saga state atomically in one transaction,
+   * stamping the transitioned row's {@code updated_at} with the transition time. A convenience for
+   * {@link #recordStatusEvent(SagaStateSnapshot, int, StatusEvent, String, Instant)} with a {@code
+   * null} timestamp.
    *
    * @param current the current state snapshot (used for optimistic concurrency)
    * @param sequence the event sequence number
@@ -85,8 +83,41 @@ public interface SagaStore extends AutoCloseable {
    * @param ownerId the replica recording this transition (stamped as the saga's owner)
    * @return the post-transition state snapshot
    */
+  default SagaStateSnapshot recordStatusEvent(
+      SagaStateSnapshot current, int sequence, StatusEvent event, String ownerId) {
+    return recordStatusEvent(current, sequence, event, ownerId, null);
+  }
+
+  /**
+   * Records a saga-level status event and transitions the saga state atomically in one transaction.
+   *
+   * <p>The new status is derived from {@link StatusEvent#getTargetStatus()}. The transitioned row
+   * is stamped with {@code ownerId} as the replica now processing this saga (an observability
+   * field), so the driver reflected in {@code owner_id} stays current across engine, recovery, and
+   * admin transitions.
+   *
+   * <p>{@code stateUpdatedAt} sets the transitioned row's {@code updated_at}. That column is also
+   * the recovery sweeper's scan key (it scans oldest-first), so passing {@link Instant#EPOCH} hands
+   * the saga to the sweeper for immediate pickup — the co-committed equivalent of a following
+   * {@link #markForRecovery}, without the second transaction. Pass {@code null} to stamp the
+   * current transition time; that is the normal case, for which the four-argument overload reads
+   * better. The event's own audit timestamp is always the real time regardless.
+   *
+   * @param current the current state snapshot (used for optimistic concurrency)
+   * @param sequence the event sequence number
+   * @param event the status event to record
+   * @param ownerId the replica recording this transition (stamped as the saga's owner)
+   * @param stateUpdatedAt the {@code updated_at} to stamp on the transitioned row, or {@code null}
+   *     for the current transition time; {@link Instant#EPOCH} schedules the saga for immediate
+   *     recovery
+   * @return the post-transition state snapshot
+   */
   SagaStateSnapshot recordStatusEvent(
-      SagaStateSnapshot current, int sequence, StatusEvent event, String ownerId);
+      SagaStateSnapshot current,
+      int sequence,
+      StatusEvent event,
+      String ownerId,
+      @Nullable Instant stateUpdatedAt);
 
   /**
    * Parks a forward step on an async callback, in one transaction: appends {@code pendingEvent},

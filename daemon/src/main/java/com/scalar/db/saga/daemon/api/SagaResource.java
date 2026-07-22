@@ -3,6 +3,7 @@ package com.scalar.db.saga.daemon.api;
 import com.scalar.db.saga.api.SagaCallback;
 import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
+import com.scalar.db.saga.daemon.security.SagaOperation;
 import io.javalin.Javalin;
 import io.javalin.http.Context;
 import java.util.Map;
@@ -45,8 +46,7 @@ import org.jspecify.annotations.Nullable;
  * WaitForCompletionOrCreateCheckStatusResponse}, and Conductor's {@code executeWorkflow} wait
  * timeout.
  *
- * <p>Not yet wired: {@code PUT /sagas/{id}/cancel} (needs the engine's {@code cancel} method) and
- * {@code GET /sagas} listing (needs the admin query layer).
+ * <p>Not yet wired: {@code PUT /sagas/{id}/cancel} (needs the engine's {@code cancel} method).
  */
 public final class SagaResource {
 
@@ -80,7 +80,8 @@ public final class SagaResource {
             String sagaId = orchestrator.start(request.requireSagaName(), input);
             respondSync(ctx, orchestrator, sagaId);
           }
-        });
+        },
+        SagaOperation.START_SAGA);
 
     app.put(
         "/sagas/{id}",
@@ -101,11 +102,23 @@ public final class SagaResource {
             orchestrator.start(sagaId, request.requireSagaName(), input);
             respondSync(ctx, orchestrator, sagaId);
           }
-        });
+        },
+        SagaOperation.START_SAGA);
 
     app.get(
         "/sagas/{id}",
-        ctx -> respond(ctx, 200, orchestrator.getStateSnapshot(ctx.pathParam("id"))));
+        ctx -> respond(ctx, 200, orchestrator.getStateSnapshot(ctx.pathParam("id"))),
+        SagaOperation.GET_SAGA);
+
+    // A saga's detail (state + timeline). An application read of its own saga — self-service
+    // diagnosis of a failure — so it lives here with the other application reads, not on the admin
+    // surface; the timeline redacts raw step payloads.
+    app.get(
+        "/sagas/{id}/detail",
+        ctx ->
+            ctx.status(200)
+                .json(SagaDetailResponse.from(orchestrator.getSagaDetail(ctx.pathParam("id")))),
+        SagaOperation.GET_SAGA_DETAIL);
   }
 
   /**

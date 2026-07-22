@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.protobuf.ByteString;
 import com.scalar.db.saga.api.SagaCallback;
 import com.scalar.db.saga.api.SagaDefinitionId;
+import com.scalar.db.saga.api.SagaDetail;
 import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
@@ -13,6 +14,7 @@ import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaTimeoutException;
 import com.scalar.db.saga.exception.SagaUnavailableException;
 import com.scalar.db.saga.rpc.AwaitSagaRequest;
+import com.scalar.db.saga.rpc.GetSagaDetailRequest;
 import com.scalar.db.saga.rpc.GetSagaRequest;
 import com.scalar.db.saga.rpc.SagaServiceGrpc;
 import com.scalar.db.saga.rpc.SagaServiceGrpc.SagaServiceBlockingStub;
@@ -201,7 +203,19 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
     Objects.requireNonNull(sagaId, "sagaId must not be null");
     try {
       SagaSnapshot snapshot = stub().getSaga(GetSagaRequest.newBuilder().setSagaId(sagaId).build());
-      return ClientProtoMappers.toApi(snapshot);
+      return ClientProtoMappers.fromProto(snapshot);
+    } catch (StatusRuntimeException e) {
+      throw mapSagaCall(e, sagaId);
+    }
+  }
+
+  @Override
+  public SagaDetail getSagaDetail(String sagaId) {
+    Objects.requireNonNull(sagaId, "sagaId must not be null");
+    try {
+      com.scalar.db.saga.rpc.SagaDetail detail =
+          stub().getSagaDetail(GetSagaDetailRequest.newBuilder().setSagaId(sagaId).build());
+      return ClientProtoMappers.fromProto(detail);
     } catch (StatusRuntimeException e) {
       throw mapSagaCall(e, sagaId);
     }

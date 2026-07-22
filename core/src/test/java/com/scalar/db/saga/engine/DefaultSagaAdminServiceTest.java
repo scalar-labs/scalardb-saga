@@ -5,18 +5,18 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.scalar.db.saga.api.ResetResult;
-import com.scalar.db.saga.api.SagaDetail;
 import com.scalar.db.saga.api.SagaPage;
 import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
-import com.scalar.db.saga.api.TimelineEvent;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.definition.SagaDefinition.RecoveryStrategy;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
@@ -27,13 +27,16 @@ import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import com.scalar.db.saga.store.AdminAuditPayload;
 import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
-import com.scalar.db.saga.store.SagaStateAndEvents;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.StatusEvent;
 import com.scalar.db.saga.store.StepEvent;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -56,6 +59,7 @@ class DefaultSagaAdminServiceTest {
   private SagaEngine engine;
   private SagaDefinitionRegistry registry;
   private DefaultSagaAdminService service;
+  private ExecutorService driveExecutor;
 
   @BeforeEach
   void setUp() {
@@ -63,6 +67,12 @@ class DefaultSagaAdminServiceTest {
     engine = mock(SagaEngine.class);
     registry = mock(SagaDefinitionRegistry.class);
     service = new DefaultSagaAdminService(store, engine, registry, () -> OPERATOR);
+    driveExecutor = Executors.newVirtualThreadPerTaskExecutor();
+  }
+
+  @AfterEach
+  void tearDown() {
+    driveExecutor.shutdownNow();
   }
 
   // A 2-step BACKWARD saga: pivot = the last step (index 1).
@@ -383,7 +393,7 @@ class DefaultSagaAdminServiceTest {
     when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(backwardDef());
     when(registry.resolve("gone", "v9")).thenReturn(null);
     when(store.getEvents("ok")).thenReturn(events);
-    when(store.recordStatusEvent(eq(ok), anyInt(), any(), any())).thenReturn(ok);
+    when(store.recordStatusEvent(eq(ok), anyInt(), any(), any(), eq(Instant.EPOCH))).thenReturn(ok);
 
     // Act
     ResetResult result = service.resetEscalated(SagaQuery.newBuilder().build(), "sweep");
@@ -394,14 +404,16 @@ class DefaultSagaAdminServiceTest {
         .containsExactly(
             new ResetResult.SkippedSaga("nodef", ResetResult.SkipReason.DEFINITION_NOT_FOUND));
     assertThat(result.getNextPageToken()).isEqualTo("next-token");
-    // The bulk sweep hands the drive to recovery rather than driving inline.
-    verify(store).markForRecovery("ok");
+    // The bulk sweep un-escalates and stamps the row for immediate recovery in one transaction
+    // (updated_at = EPOCH), then leaves the drive to the recovery loop rather than driving inline.
+    verify(store).recordStatusEvent(eq(ok), anyInt(), any(), any(), eq(Instant.EPOCH));
+    verify(store, never()).markForRecovery(any());
     verify(engine, never()).recover(any(), any(), any());
   }
 
   @Test
   void resetEscalated_bulkLostCasRace_countsAsSkipped() {
-    // Arrange — the row changed under us; recordStatusEvent throws the CAS-lost exception
+    // Arrange — the row changed under us; the co-committed transition throws the CAS-lost exception
     SagaStateSnapshot racing =
         new SagaStateSnapshot("race", SAGA_NAME, SagaStatus.ESCALATED, "o", DEF_VERSION, TS, TS);
     when(store.listStateSnapshots(any())).thenReturn(new SagaPage<>(List.of(racing), null));
@@ -409,7 +421,7 @@ class DefaultSagaAdminServiceTest {
         List.of(StatusEvent.started(null), StepEvent.completed(0, "debit", null));
     when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(backwardDef());
     when(store.getEvents("race")).thenReturn(events);
-    when(store.recordStatusEvent(eq(racing), anyInt(), any(), any()))
+    when(store.recordStatusEvent(eq(racing), anyInt(), any(), any(), eq(Instant.EPOCH)))
         .thenThrow(new SagaConcurrentModificationException("race"));
 
     // Act
@@ -420,7 +432,7 @@ class DefaultSagaAdminServiceTest {
     assertThat(result.getSkipped())
         .containsExactly(
             new ResetResult.SkippedSaga("race", ResetResult.SkipReason.CONCURRENT_MODIFICATION));
-    // The lost CAS aborts before the hand-off, so the row is never marked for recovery.
+    // The un-escalation and the recovery mark co-commit, so a lost CAS leaves neither behind.
     verify(store, never()).markForRecovery(any());
   }
 
@@ -440,21 +452,21 @@ class DefaultSagaAdminServiceTest {
                 "Unknown event type: SAGA_FROM_THE_FUTURE", new IllegalArgumentException("boom")));
     when(store.getEvents("ok"))
         .thenReturn(List.of(StatusEvent.started(null), StepEvent.completed(0, "debit", null)));
-    when(store.recordStatusEvent(eq(ok), anyInt(), any(), any())).thenReturn(ok);
+    when(store.recordStatusEvent(eq(ok), anyInt(), any(), any(), eq(Instant.EPOCH))).thenReturn(ok);
 
     // Act
     ResetResult result = service.resetEscalated(SagaQuery.newBuilder().build(), "sweep");
 
-    // Assert — the corrupt saga is reported, with the decode failure as detail, and the healthy
-    // one behind it is still reset
+    // Assert — the corrupt saga is reported by its reason code, and the healthy one behind it is
+    // still reset. The raw decode message is never returned (it can echo stored bytes); it is
+    // logged server-side instead.
     assertThat(result.getResetCount()).isEqualTo(1);
     assertThat(result.getSkipped())
         .containsExactly(
-            new ResetResult.SkippedSaga(
-                "bad",
-                ResetResult.SkipReason.CORRUPT_EVENT_STREAM,
-                "Unknown event type: SAGA_FROM_THE_FUTURE"));
-    verify(store).markForRecovery("ok");
+            new ResetResult.SkippedSaga("bad", ResetResult.SkipReason.CORRUPT_EVENT_STREAM));
+    assertThat(result.getSkipped().get(0).getDetail()).isNull();
+    verify(store).recordStatusEvent(eq(ok), anyInt(), any(), any(), eq(Instant.EPOCH));
+    verify(store, never()).markForRecovery(any());
   }
 
   @Test
@@ -472,11 +484,12 @@ class DefaultSagaAdminServiceTest {
     // Act
     ResetResult result = service.resetEscalated(SagaQuery.newBuilder().build(), "sweep");
 
-    // Assert — skipped as unresolvable, never force-driven
+    // Assert — skipped as unresolvable, never un-escalated or force-driven
     assertThat(result.getResetCount()).isZero();
     assertThat(result.getSkipped())
         .containsExactly(
             new ResetResult.SkippedSaga("bad", ResetResult.SkipReason.DEFINITION_NOT_FOUND));
+    verify(store, never()).recordStatusEvent(any(), anyInt(), any(), any(), any());
     verify(store, never()).markForRecovery(any());
   }
 
@@ -549,65 +562,187 @@ class DefaultSagaAdminServiceTest {
   }
 
   // ---------------------------------------------------------------------------
-  // getSagaDetail — timeline mapping (metadata + error/reason only)
+  // operator — rejected rather than sanitized, and rejected before anything is written
   // ---------------------------------------------------------------------------
 
   @Test
-  void getSagaDetail_missingSaga_throwsNotFound() {
-    // Arrange
-    when(store.getStateWithEvents(SAGA_ID)).thenReturn(Optional.empty());
+  void recoverSaga_operatorWithControlCharGiven_throwsIllegalStateAndWritesNothing() {
+    // Arrange — unlike a reason, a principal is never flattened to fit: a mutated principal is a
+    // false audit record
+    DefaultSagaAdminService service = serviceWithOperator("op\nalice");
 
     // Act & Assert
-    assertThatThrownBy(() -> service.getSagaDetail(SAGA_ID))
-        .isInstanceOf(SagaNotFoundException.class);
+    assertThatThrownBy(() -> service.recoverSaga(SAGA_ID, "why"))
+        .isInstanceOf(IllegalStateException.class);
+    verifyNothingWritten();
   }
 
   @Test
-  void getSagaDetail_mapsEventsToTimeline_omitsRawPayloadsExposesErrorsAndReasons() {
-    // Arrange
-    SagaStateSnapshot snap = snapshot(SagaStatus.COMPENSATING);
-    List<SagaEvent> events =
-        List.of(
-            StatusEvent.started("{\"amount\":100}").withTimestamp(TS),
-            StepEvent.completed(0, "debit", "{\"balance\":900}").withTimestamp(TS),
-            StepEvent.failed(1, "credit", "{\"message\":\"gateway down\"}").withTimestamp(TS),
-            StatusEvent.escalated("retries exhausted").withTimestamp(TS),
-            StatusEvent.recovering(SagaStatus.COMPENSATING, "bob", "rolling back")
-                .withTimestamp(TS));
-    when(store.getStateWithEvents(SAGA_ID))
-        .thenReturn(Optional.of(new SagaStateAndEvents(snap, events)));
+  void recoverSaga_operatorOverMaxLengthGiven_throwsIllegalStateAndWritesNothing() {
+    // Arrange — 257 chars, one over the bound
+    DefaultSagaAdminService service = serviceWithOperator("a".repeat(257));
+
+    // Act & Assert
+    assertThatThrownBy(() -> service.recoverSaga(SAGA_ID, "why"))
+        .isInstanceOf(IllegalStateException.class);
+    verifyNothingWritten();
+  }
+
+  @Test
+  void recoverSaga_operatorAtMaxLengthGiven_isAccepted() {
+    // Arrange — exactly at the bound; an email is capped at 254 octets, so this must still pass
+    String operator = "a".repeat(256);
+    ArgumentCaptor<StatusEvent> audit = arrangeDrivableSaga();
 
     // Act
-    SagaDetail detail = service.getSagaDetail(SAGA_ID);
+    serviceWithOperator(operator).recoverSaga(SAGA_ID, "why");
 
-    // Assert — the snapshot and timeline come from the one atomic read
-    assertThat(detail.getSnapshot()).isEqualTo(snap);
-    List<TimelineEvent> timeline = detail.getTimeline();
-    assertThat(timeline).hasSize(5);
+    // Assert
+    assertThat(AdminAuditPayload.operator(audit.getValue().getPayload())).isEqualTo(operator);
+  }
 
-    // SAGA_STARTED — the saga input payload is never exposed
-    assertThat(timeline.get(0).getType()).isEqualTo("SAGA_STARTED");
-    assertThat(timeline.get(0).getDetail()).isNull();
-    assertThat(timeline.get(0).getResultingStatus()).isEqualTo(SagaStatus.RUNNING);
+  @Test
+  void recoverSaga_operatorWithSurroundingSpacesGiven_isRecordedUntrimmed() {
+    // Arrange — a principal with edge whitespace is a different principal, not a formatting
+    // artifact, so it is recorded exactly as the server injected it
+    String operator = " op-alice ";
+    ArgumentCaptor<StatusEvent> audit = arrangeDrivableSaga();
 
-    // STEP_COMPLETED — the step output payload is never exposed
-    assertThat(timeline.get(1).getType()).isEqualTo("STEP_COMPLETED");
-    assertThat(timeline.get(1).getStepIndex()).isEqualTo(0);
-    assertThat(timeline.get(1).getStepName()).isEqualTo("debit");
-    assertThat(timeline.get(1).getDetail()).isNull();
+    // Act
+    serviceWithOperator(operator).recoverSaga(SAGA_ID, "why");
 
-    // STEP_FAILED — the error message is surfaced
-    assertThat(timeline.get(2).getType()).isEqualTo("STEP_FAILED");
-    assertThat(timeline.get(2).getDetail()).isEqualTo("gateway down");
+    // Assert
+    assertThat(AdminAuditPayload.operator(audit.getValue().getPayload())).isEqualTo(operator);
+  }
 
-    // SAGA_ESCALATED — the escalation reason is surfaced
-    assertThat(timeline.get(3).getDetail()).isEqualTo("retries exhausted");
+  private DefaultSagaAdminService serviceWithOperator(String operator) {
+    return new DefaultSagaAdminService(store, engine, registry, () -> operator);
+  }
 
-    // SAGA_RECOVERING — the operator and reason are surfaced
-    assertThat(timeline.get(4).getType()).isEqualTo("SAGA_RECOVERING");
-    assertThat(timeline.get(4).getResultingStatus()).isEqualTo(SagaStatus.COMPENSATING);
-    assertThat(timeline.get(4).getDetail()).isEqualTo("rolling back");
-    assertThat(timeline.get(4).getOperator()).isEqualTo("bob");
+  /** Asserts the mutation aborted before persisting anything or touching the saga. */
+  private void verifyNothingWritten() {
+    verify(store, never()).recordStatusEvent(any(), anyInt(), any(), any());
+    verify(engine, never()).recover(any(), any(), any());
+  }
+
+  /** Arranges a RUNNING saga that resolves to a drive, and returns the audit-event captor. */
+  private ArgumentCaptor<StatusEvent> arrangeDrivableSaga() {
+    SagaStateSnapshot running = snapshot(SagaStatus.RUNNING);
+    List<SagaEvent> events =
+        List.of(
+            StatusEvent.started(null),
+            StepEvent.completed(0, "debit", null),
+            StepEvent.failed(1, "credit", null));
+    when(store.getStateSnapshot(SAGA_ID)).thenReturn(Optional.of(running));
+    when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(backwardDef());
+    when(store.getEvents(SAGA_ID)).thenReturn(events);
+    return stubDrive(running, events);
+  }
+
+  // ---------------------------------------------------------------------------
+  // drive deadline — bounds the drive only, never the durable transition
+  // ---------------------------------------------------------------------------
+
+  @Test
+  void recoverSaga_withDriveDeadline_driveSettlesInTime_returnsDrivenState() {
+    // Arrange
+    arrangeDrivableSaga();
+
+    // Act
+    SagaStateSnapshot result = boundedService(5_000L).recoverSaga(SAGA_ID, "why");
+
+    // Assert — the drive ran to completion, so the caller sees the terminal state it produced
+    assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPENSATED);
+    verify(engine).recover(any(), any(), any());
+  }
+
+  @Test
+  void recoverSaga_withDriveDeadline_driveOverruns_returnsStoredStateWithTransitionDurable()
+      throws Exception {
+    // Arrange — a drive that outlives the deadline. The second getStateSnapshot is the post-expiry
+    // re-read: the abandoned drive still owns the ExecutionContext, so its state cannot be read.
+    SagaStateSnapshot running = snapshot(SagaStatus.RUNNING);
+    List<SagaEvent> events =
+        List.of(
+            StatusEvent.started(null),
+            StepEvent.completed(0, "debit", null),
+            StepEvent.failed(1, "credit", null));
+    when(store.getStateSnapshot(SAGA_ID))
+        .thenReturn(Optional.of(running), Optional.of(snapshot(SagaStatus.COMPENSATING)));
+    when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(backwardDef());
+    when(store.getEvents(SAGA_ID)).thenReturn(events);
+    stubDrive(running, events);
+    CountDownLatch release = new CountDownLatch(1);
+    doAnswer(
+            invocation -> {
+              release.await();
+              return null;
+            })
+        .when(engine)
+        .recover(any(), any(), any());
+
+    try {
+      // Act
+      SagaStateSnapshot result = boundedService(50L).recoverSaga(SAGA_ID, "why");
+
+      // Assert — a non-terminal state, which is how the caller tells "still running" from "settled"
+      assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPENSATING);
+      // The transition is durable even though the drive was abandoned — that is what makes leaving
+      // the rest to the recovery loop safe, rather than losing the intervention.
+      verify(store).recordStatusEvent(eq(running), anyInt(), any(), any());
+    } finally {
+      release.countDown();
+    }
+  }
+
+  @Test
+  void recoverSaga_withDriveDeadline_lostCas_throwsRatherThanReportingAcceptance() {
+    // Arrange — the CAS that co-commits the audit loses to a concurrent admin/recovery
+    when(store.getStateSnapshot(SAGA_ID)).thenReturn(Optional.of(snapshot(SagaStatus.RUNNING)));
+    when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(backwardDef());
+    when(store.getEvents(SAGA_ID)).thenReturn(List.of(StatusEvent.started(null)));
+    when(store.recordStatusEvent(any(), anyInt(), any(), any()))
+        .thenThrow(new SagaConcurrentModificationException(SAGA_ID));
+
+    // Act & Assert — the deadline bounds the drive, never the transition. Were the bound wrapped
+    // around the whole call instead, this failure could land after a timeout had already reported
+    // the intervention as accepted.
+    assertThatThrownBy(() -> boundedService(50L).recoverSaga(SAGA_ID, "why"))
+        .isInstanceOf(SagaConcurrentModificationException.class);
+    verify(engine, never()).recover(any(), any(), any());
+  }
+
+  @Test
+  void recoverSaga_withDriveDeadline_driveThrows_surfacesTheDrivesOwnException() {
+    // Arrange
+    arrangeDrivableSaga();
+    doThrow(SagaPersistenceException.retryable("store died", new RuntimeException("io")))
+        .when(engine)
+        .recover(any(), any(), any());
+
+    // Act & Assert — bounding the drive must not change which exception a caller sees, so the
+    // cause is unwrapped from the ExecutionException the executor wraps it in
+    assertThatThrownBy(() -> boundedService(5_000L).recoverSaga(SAGA_ID, "why"))
+        .isInstanceOf(SagaPersistenceException.class)
+        .hasMessage("store died");
+  }
+
+  @Test
+  void recoverSaga_withoutDriveDeadline_drivesOnTheCallingThread() {
+    // Arrange — the embedded default: no deadline, so no executor is involved at all
+    arrangeDrivableSaga();
+
+    // Act
+    SagaStateSnapshot result = service.recoverSaga(SAGA_ID, "why");
+
+    // Assert — unchanged from before the deadline existed
+    assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPENSATED);
+    verify(engine, never()).executor();
+  }
+
+  private DefaultSagaAdminService boundedService(long deadlineMillis) {
+    when(engine.executor()).thenReturn(driveExecutor);
+    return new DefaultSagaAdminService(store, engine, registry, () -> OPERATOR, deadlineMillis);
   }
 
   // ---------------------------------------------------------------------------

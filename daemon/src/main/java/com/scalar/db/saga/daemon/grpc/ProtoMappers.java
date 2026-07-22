@@ -1,8 +1,16 @@
 package com.scalar.db.saga.daemon.grpc;
 
 import com.google.protobuf.Timestamp;
+import com.scalar.db.saga.api.ResetResult;
+import com.scalar.db.saga.api.SagaDetail;
+import com.scalar.db.saga.api.SagaPage;
+import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.api.TimelineEvent;
+import com.scalar.db.saga.rpc.ListSagasRequest;
+import com.scalar.db.saga.rpc.ListSagasResponse;
+import com.scalar.db.saga.rpc.ResetEscalatedBulkRequest;
 import java.time.Instant;
 
 /**
@@ -39,6 +47,147 @@ final class ProtoMappers {
    */
   static com.scalar.db.saga.rpc.SagaStatus toProtoStatus(SagaStatus status) {
     return com.scalar.db.saga.rpc.SagaStatus.valueOf("SAGA_STATUS_" + status.name());
+  }
+
+  /** Maps an api detail (snapshot + redacted timeline) to the wire detail. */
+  static com.scalar.db.saga.rpc.SagaDetail toProto(SagaDetail detail) {
+    com.scalar.db.saga.rpc.SagaDetail.Builder builder =
+        com.scalar.db.saga.rpc.SagaDetail.newBuilder().setSaga(toProto(detail.getSnapshot()));
+    for (TimelineEvent event : detail.getTimeline()) {
+      builder.addTimeline(toProto(event));
+    }
+    return builder.build();
+  }
+
+  /**
+   * Maps one api timeline event to the wire event. The nullable fields are set only when present,
+   * so a {@code null} api field round-trips as an unset proto3 {@code optional} rather than a
+   * defaulted value.
+   */
+  static com.scalar.db.saga.rpc.TimelineEvent toProto(TimelineEvent event) {
+    com.scalar.db.saga.rpc.TimelineEvent.Builder builder =
+        com.scalar.db.saga.rpc.TimelineEvent.newBuilder()
+            .setTimestamp(toTimestamp(event.getTimestamp()))
+            .setType(event.getType());
+    Integer stepIndex = event.getStepIndex();
+    if (stepIndex != null) {
+      builder.setStepIndex(stepIndex);
+    }
+    String stepName = event.getStepName();
+    if (stepName != null) {
+      builder.setStepName(stepName);
+    }
+    SagaStatus resultingStatus = event.getResultingStatus();
+    if (resultingStatus != null) {
+      builder.setResultingStatus(toProtoStatus(resultingStatus));
+    }
+    String detail = event.getDetail();
+    if (detail != null) {
+      builder.setDetail(detail);
+    }
+    String operator = event.getOperator();
+    if (operator != null) {
+      builder.setOperator(operator);
+    }
+    return builder.build();
+  }
+
+  /**
+   * Builds the api {@link SagaQuery} a {@code ListSagas} request selects. An out-of-range page size
+   * or an empty {@code updatedAt} window surfaces as {@link IllegalArgumentException} (mapped to
+   * {@code INVALID_ARGUMENT}) from the builder.
+   */
+  static SagaQuery toSagaQuery(ListSagasRequest request) {
+    SagaQuery.Builder builder = SagaQuery.newBuilder();
+    if (request.hasStatus()) {
+      builder.status(fromProtoStatus(request.getStatus()));
+    }
+    if (request.hasUpdatedAfter()) {
+      builder.updatedAfter(toInstant(request.getUpdatedAfter()));
+    }
+    if (request.hasUpdatedBefore()) {
+      builder.updatedBefore(toInstant(request.getUpdatedBefore()));
+    }
+    if (request.hasPageSize()) {
+      builder.pageSize(request.getPageSize());
+    }
+    if (request.hasPageToken()) {
+      builder.pageToken(request.getPageToken());
+    }
+    return builder.build();
+  }
+
+  /**
+   * Builds the api {@link SagaQuery} a bulk-reset sweep selects. The status filter is not accepted
+   * — the sweep is defined as escalated sagas, which the engine pins — so only the window and
+   * paging are mapped.
+   */
+  static SagaQuery toSagaQuery(ResetEscalatedBulkRequest request) {
+    SagaQuery.Builder builder = SagaQuery.newBuilder();
+    if (request.hasUpdatedAfter()) {
+      builder.updatedAfter(toInstant(request.getUpdatedAfter()));
+    }
+    if (request.hasUpdatedBefore()) {
+      builder.updatedBefore(toInstant(request.getUpdatedBefore()));
+    }
+    if (request.hasPageSize()) {
+      builder.pageSize(request.getPageSize());
+    }
+    if (request.hasPageToken()) {
+      builder.pageToken(request.getPageToken());
+    }
+    return builder.build();
+  }
+
+  /** Maps a page of snapshots to the wire list response. */
+  static ListSagasResponse toProto(SagaPage<SagaStateSnapshot> page) {
+    ListSagasResponse.Builder builder = ListSagasResponse.newBuilder();
+    for (SagaStateSnapshot snapshot : page.getItems()) {
+      builder.addSagas(toProto(snapshot));
+    }
+    if (page.getNextPageToken() != null) {
+      builder.setNextPageToken(page.getNextPageToken());
+    }
+    return builder.build();
+  }
+
+  /** Maps a bulk-reset result (count + itemized skips + continuation token) to the wire result. */
+  static com.scalar.db.saga.rpc.ResetResult toProto(ResetResult result) {
+    com.scalar.db.saga.rpc.ResetResult.Builder builder =
+        com.scalar.db.saga.rpc.ResetResult.newBuilder().setResetCount(result.getResetCount());
+    for (ResetResult.SkippedSaga skipped : result.getSkipped()) {
+      com.scalar.db.saga.rpc.SkippedSaga.Builder skippedBuilder =
+          com.scalar.db.saga.rpc.SkippedSaga.newBuilder()
+              .setSagaId(skipped.getSagaId())
+              .setReason(toProtoSkipReason(skipped.getReason()));
+      if (skipped.getDetail() != null) {
+        skippedBuilder.setDetail(skipped.getDetail());
+      }
+      builder.addSkipped(skippedBuilder);
+    }
+    if (result.getNextPageToken() != null) {
+      builder.setNextPageToken(result.getNextPageToken());
+    }
+    return builder.build();
+  }
+
+  /** Maps the wire status to the api status by name (inverse of {@link #toProtoStatus}). */
+  static SagaStatus fromProtoStatus(com.scalar.db.saga.rpc.SagaStatus status) {
+    String name = status.name();
+    String prefix = "SAGA_STATUS_";
+    if (!name.startsWith(prefix) || name.equals(prefix + "UNSPECIFIED")) {
+      throw new IllegalArgumentException("unrecognized saga status filter");
+    }
+    return SagaStatus.valueOf(name.substring(prefix.length()));
+  }
+
+  private static com.scalar.db.saga.rpc.SkipReason toProtoSkipReason(
+      ResetResult.SkipReason reason) {
+    return com.scalar.db.saga.rpc.SkipReason.valueOf("SKIP_REASON_" + reason.name());
+  }
+
+  private static Instant toInstant(Timestamp timestamp) {
+    return Instant.ofEpochSecond(timestamp.getSeconds(), timestamp.getNanos());
   }
 
   private static Timestamp toTimestamp(Instant instant) {

@@ -7,14 +7,18 @@ import com.scalar.db.saga.exception.SagaStatePreconditionException;
 
 /**
  * Operational control plane for a saga engine: list and inspect sagas, and un-stick or resolve the
- * ones that need an operator. Implemented both embedded (in-process) and by the daemon's remote
- * admin client, so the same surface works either way.
+ * ones that need an operator. Implemented in-process by {@code DefaultSagaAdminService} and, in the
+ * future, by a remote admin client, so the same surface works embedded or against a saga server.
+ * (No remote client is provided yet; a remote caller uses the generated gRPC admin stub directly.)
  *
  * <p><b>Direction-agnostic mutations.</b> The operator never chooses "compensate" vs. "resume
  * forward" — the engine decides from the saga's pivot, exactly as automatic recovery does. The
  * operator only chooses <em>whether</em> to let the engine continue ({@link #recoverSaga}, {@link
  * #resetEscalated}) or to override a stuck saga to done ({@link #forceComplete}). A caller supplies
- * a {@code reason} for audit; the operator identity is injected by the server, never passed in.
+ * a {@code reason} for audit; the operator identity is injected by the server, never passed in. The
+ * {@code reason} is recorded on the saga's timeline and returned by {@link
+ * SagaOrchestrator#getSagaDetail} (an application-facing read, not an operator-only view), so treat
+ * it as visible to any caller that can read the saga and keep sensitive internal detail out of it.
  *
  * <p><b>Rejections.</b> A mutation on a saga in a state the operation does not accept throws {@link
  * SagaStatePreconditionException} (wrong state — HTTP 422). Losing an optimistic-concurrency race
@@ -41,14 +45,9 @@ public interface SagaAdminService extends AutoCloseable {
    */
   SagaPage<SagaStateSnapshot> listSagas(SagaQuery query);
 
-  /**
-   * Returns a saga's current state plus its full, flat event timeline.
-   *
-   * @param sagaId the saga instance ID
-   * @return the saga's detail view
-   * @throws SagaNotFoundException if no such saga exists (or it was purged by retention)
-   */
-  SagaDetail getSagaDetail(String sagaId);
+  // Inspecting one saga's detail and timeline is an application-facing read (self-service failure
+  // diagnosis), not an operator intervention, so it lives on SagaOrchestrator#getSagaDetail rather
+  // than here. An operator holds ADMIN, which implies READ, so they reach it too.
 
   // ---------------------------------------------------------------------------
   // Mutations (operator interventions)

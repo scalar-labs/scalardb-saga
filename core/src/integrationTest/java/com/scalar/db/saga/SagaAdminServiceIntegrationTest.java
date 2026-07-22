@@ -81,7 +81,7 @@ class SagaAdminServiceIntegrationTest {
 
     // Assert — COMPLETED, and the timeline shows the forced override attributed to the operator
     assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPLETED);
-    SagaDetail detail = admin.getSagaDetail("saga-1");
+    SagaDetail detail = orchestrator.getSagaDetail("saga-1");
     assertThat(detail.getSnapshot().getStatus()).isEqualTo(SagaStatus.COMPLETED);
     TimelineEvent forced =
         detail.getTimeline().stream()
@@ -99,7 +99,7 @@ class SagaAdminServiceIntegrationTest {
     seedEscalated("saga-2");
 
     // Act
-    SagaDetail detail = admin.getSagaDetail("saga-2");
+    SagaDetail detail = orchestrator.getSagaDetail("saga-2");
 
     // Assert — the SAGA_STARTED input payload is never surfaced; the escalation reason is
     TimelineEvent started =
