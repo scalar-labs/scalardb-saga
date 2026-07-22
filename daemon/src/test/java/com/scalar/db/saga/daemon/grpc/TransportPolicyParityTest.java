@@ -83,6 +83,7 @@ class TransportPolicyParityTest {
   private static final Map<String, SagaOperation> EXPECTED_REST_ROUTES =
       Map.ofEntries(
           Map.entry("GET /health", SagaOperation.HEALTH),
+          Map.entry("HEAD /health", SagaOperation.HEALTH),
           Map.entry("POST /sagas/{id}/steps/{stepName}/complete", SagaOperation.CALLBACK),
           Map.entry("POST /sagas", SagaOperation.START_SAGA),
           Map.entry("PUT /sagas/{id}", SagaOperation.START_SAGA),
