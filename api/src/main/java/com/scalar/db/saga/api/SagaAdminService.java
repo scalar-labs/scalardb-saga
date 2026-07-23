@@ -34,12 +34,13 @@ import com.scalar.db.saga.exception.SagaUnauthenticatedException;
  * credential or the required role; the embedded implementation never does.
  *
  * <p><b>Retrying after a non-terminal result.</b> A deployment that bounds the drive (the daemon
- * returns rather than block past a deadline) can hand back a non-terminal snapshot while the drive
- * it started keeps running to completion in the background. Retrying such a call immediately starts
- * a second, redundant drive over the same saga. That is safe, because a step's side effect must be
- * idempotent to begin with (automatic recovery can re-drive a saga for the same reason), but it
- * wastes work. When a mutation returns a non-terminal status, prefer to let automatic recovery
- * finish the saga, or wait briefly before retrying.
+ * returns rather than block past a deadline) can hand back a non-terminal snapshot in two shapes:
+ * the drive it started keeps running to completion in the background, or — if the engine was
+ * shutting down when the mutation arrived — the drive never started at all, leaving the saga for
+ * recovery on restart or another node. Either way the audit-carrying transition is already durable.
+ * Retrying such a call is safe (a step's side effect must be idempotent to begin with — automatic
+ * recovery can re-drive a saga for the same reason) but wastes work if a drive is already running.
+ * Prefer to let automatic recovery finish the saga, or wait briefly before retrying.
  */
 public interface SagaAdminService extends AutoCloseable {
 
