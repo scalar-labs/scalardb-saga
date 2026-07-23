@@ -396,6 +396,16 @@ public class DefaultSagaAdminService implements SagaAdminService {
       Thread.currentThread().interrupt();
       return requireSnapshot(sagaId);
     } catch (ExecutionException e) {
+      if (e.getCause() instanceof RejectedExecutionException) {
+        // Same shape as the submit-time reject above, but surfaced from inside the drive: the
+        // engine submits step tasks to the same executor, so a nested submit during shutdown lands
+        // here. Degrade symmetrically — the transition is durable and the recovery loop finishes
+        // the rest — rather than rethrowing, which the daemon would map to INTERNAL.
+        logger.info(
+            "Admin drive of saga {} was rejected mid-drive (engine shutting down); returning its current state",
+            sagaId);
+        return requireSnapshot(sagaId);
+      }
       throw rethrow(e.getCause());
     }
   }

@@ -36,6 +36,7 @@ import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -773,6 +774,35 @@ class DefaultSagaAdminServiceTest {
     assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPENSATING);
     verify(store).recordStatusEvent(eq(running), anyInt(), any(), any());
     verify(engine, never()).recover(any(), any(), any());
+  }
+
+  @Test
+  void recoverSaga_withDriveDeadline_driveRejectedMidRun_returnsRereadStateWithoutRethrowing() {
+    // Arrange — the outer submit is accepted (executor still up), but the drive itself throws
+    // RejectedExecutionException from a nested submit as the executor shuts down mid-drive. The
+    // wrapped exception must degrade like the submit-time reject, not surface as an INTERNAL.
+    SagaStateSnapshot running = snapshot(SagaStatus.RUNNING);
+    List<SagaEvent> events =
+        List.of(
+            StatusEvent.started(null),
+            StepEvent.completed(0, "debit", null),
+            StepEvent.failed(1, "credit", null));
+    when(store.getStateSnapshot(SAGA_ID))
+        .thenReturn(Optional.of(running), Optional.of(snapshot(SagaStatus.COMPENSATING)));
+    when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(backwardDef());
+    when(store.getEvents(SAGA_ID)).thenReturn(events);
+    stubDrive(running, events);
+    doThrow(new RejectedExecutionException("executor shutting down"))
+        .when(engine)
+        .recover(any(), any(), any());
+
+    // Act — the drive fails mid-run; the call must degrade rather than throw
+    SagaStateSnapshot result = boundedService(5_000L).recoverSaga(SAGA_ID, "why");
+
+    // Assert — the post-transition re-read state (COMPENSATING) comes back, the transition is
+    // durable, and the recovery loop finishes the rest
+    assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPENSATING);
+    verify(store).recordStatusEvent(eq(running), anyInt(), any(), any());
   }
 
   @Test
