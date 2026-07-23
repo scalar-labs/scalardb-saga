@@ -14,6 +14,7 @@ dependencies {
     implementation(libs.grpc.stub)
     implementation(libs.grpc.netty)
     implementation(libs.grpc.services)
+    implementation(libs.grpc.protobuf)
     implementation(libs.protobuf.java)
     implementation(libs.javalin)
     implementation(libs.nimbus.jose.jwt)
@@ -29,6 +30,9 @@ dependencies {
 
     "integrationTestImplementation"(project(":core"))
     "integrationTestImplementation"(project(":grpc-client"))
+    "integrationTestImplementation"(platform(libs.grpc.bom))
+    "integrationTestImplementation"(libs.grpc.netty)
+    "integrationTestImplementation"(libs.mockito.core)
     "integrationTestImplementation"(libs.sqlite.jdbc)
     "integrationTestImplementation"(platform(libs.jackson.bom))
     "integrationTestImplementation"(libs.jackson.databind)

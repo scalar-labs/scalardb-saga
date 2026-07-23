@@ -13,8 +13,8 @@ import java.util.Optional;
  * <ul>
  *   <li>{@link #READ} ({@code saga:read}) — read saga state ({@code GET /sagas/{id}}).
  *   <li>{@link #WRITE} ({@code saga:write}) — start/drive sagas ({@code POST}/{@code PUT /sagas}).
- *   <li>{@link #ADMIN} ({@code saga:admin}) — operator actions (cancel, list, and future admin
- *       endpoints).
+ *   <li>{@link #ADMIN} ({@code saga:admin}) — operator actions (list, recover, force-complete,
+ *       reset, and future admin endpoints).
  * </ul>
  *
  * <p>A {@link SagaSecurityProvider} maps its own credential claims (JWT scopes/roles, an API key's

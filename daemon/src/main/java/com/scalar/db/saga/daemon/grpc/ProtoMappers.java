@@ -11,6 +11,7 @@ import com.scalar.db.saga.api.TimelineEvent;
 import com.scalar.db.saga.rpc.ListSagasRequest;
 import com.scalar.db.saga.rpc.ListSagasResponse;
 import com.scalar.db.saga.rpc.ResetEscalatedBulkRequest;
+import java.time.DateTimeException;
 import java.time.Instant;
 
 /**
@@ -46,7 +47,14 @@ final class ProtoMappers {
    * counterpart — failing loudly rather than silently degrading to {@code UNSPECIFIED}.
    */
   static com.scalar.db.saga.rpc.SagaStatus toProtoStatus(SagaStatus status) {
-    return com.scalar.db.saga.rpc.SagaStatus.valueOf("SAGA_STATUS_" + status.name());
+    try {
+      return com.scalar.db.saga.rpc.SagaStatus.valueOf("SAGA_STATUS_" + status.name());
+    } catch (IllegalArgumentException e) {
+      // No wire counterpart for a server-internal status is api/proto version skew, a server fault.
+      // Throw IllegalStateException so the error mapper reports INTERNAL, not the client-facing
+      // INVALID_ARGUMENT (this is a response-path conversion, never client input).
+      throw new IllegalStateException("No wire SagaStatus for api status " + status.name(), e);
+    }
   }
 
   /** Maps an api detail (snapshot + redacted timeline) to the wire detail. */
@@ -93,9 +101,9 @@ final class ProtoMappers {
   }
 
   /**
-   * Builds the api {@link SagaQuery} a {@code ListSagas} request selects. An out-of-range page size
-   * or an empty {@code updatedAt} window surfaces as {@link IllegalArgumentException} (mapped to
-   * {@code INVALID_ARGUMENT}) from the builder.
+   * Builds the api {@link SagaQuery} a {@code ListSagas} request selects. An out-of-range page
+   * size, an out-of-range {@code updatedAt} timestamp, or an empty {@code updatedAt} window
+   * surfaces as {@link IllegalArgumentException} (mapped to {@code INVALID_ARGUMENT}).
    */
   static SagaQuery toSagaQuery(ListSagasRequest request) {
     SagaQuery.Builder builder = SagaQuery.newBuilder();
@@ -120,7 +128,8 @@ final class ProtoMappers {
   /**
    * Builds the api {@link SagaQuery} a bulk-reset sweep selects. The status filter is not accepted
    * — the sweep is defined as escalated sagas, which the engine pins — so only the window and
-   * paging are mapped.
+   * paging are mapped. An out-of-range page size or {@code updatedAt} timestamp, or an empty
+   * window, surfaces as {@link IllegalArgumentException} (mapped to {@code INVALID_ARGUMENT}).
    */
   static SagaQuery toSagaQuery(ResetEscalatedBulkRequest request) {
     SagaQuery.Builder builder = SagaQuery.newBuilder();
@@ -181,13 +190,25 @@ final class ProtoMappers {
     return SagaStatus.valueOf(name.substring(prefix.length()));
   }
 
-  private static com.scalar.db.saga.rpc.SkipReason toProtoSkipReason(
-      ResetResult.SkipReason reason) {
-    return com.scalar.db.saga.rpc.SkipReason.valueOf("SKIP_REASON_" + reason.name());
+  static com.scalar.db.saga.rpc.SkipReason toProtoSkipReason(ResetResult.SkipReason reason) {
+    try {
+      return com.scalar.db.saga.rpc.SkipReason.valueOf("SKIP_REASON_" + reason.name());
+    } catch (IllegalArgumentException e) {
+      // As with toProtoStatus: a missing wire counterpart is api/proto version skew, a server
+      // fault, so INTERNAL rather than INVALID_ARGUMENT.
+      throw new IllegalStateException("No wire SkipReason for api reason " + reason.name(), e);
+    }
   }
 
   private static Instant toInstant(Timestamp timestamp) {
-    return Instant.ofEpochSecond(timestamp.getSeconds(), timestamp.getNanos());
+    try {
+      return Instant.ofEpochSecond(timestamp.getSeconds(), timestamp.getNanos());
+    } catch (DateTimeException | ArithmeticException e) {
+      // A client-supplied seconds value outside Instant's range (or one that overflows the nano
+      // carry) is bad input, not a server fault; surface it as IllegalArgumentException so the
+      // error mapper reports INVALID_ARGUMENT rather than INTERNAL.
+      throw new IllegalArgumentException("timestamp out of range", e);
+    }
   }
 
   private static Timestamp toTimestamp(Instant instant) {

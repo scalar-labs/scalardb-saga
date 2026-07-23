@@ -45,6 +45,31 @@ class ProtoMappersTest {
   }
 
   @Test
+  void toProtoSkipReason_everyApiReason_mapsByNameToANonUnspecifiedWireReason() {
+    // Every api skip reason must have a wire counterpart named SKIP_REASON_<name>; an unmapped one
+    // now throws IllegalStateException (mapped to INTERNAL), failing loudly rather than
+    // mislabelled.
+    for (ResetResult.SkipReason reason : ResetResult.SkipReason.values()) {
+      com.scalar.db.saga.rpc.SkipReason wire = ProtoMappers.toProtoSkipReason(reason);
+      assertThat(wire.name()).isEqualTo("SKIP_REASON_" + reason.name());
+      assertThat(wire).isNotEqualTo(com.scalar.db.saga.rpc.SkipReason.SKIP_REASON_UNSPECIFIED);
+    }
+  }
+
+  @Test
+  void toProtoSkipReason_everyWireReason_hasAnApiCounterpart() {
+    // Guards drift the other way: a wire skip reason added without an api counterpart fails here.
+    for (com.scalar.db.saga.rpc.SkipReason wire : com.scalar.db.saga.rpc.SkipReason.values()) {
+      if (wire == com.scalar.db.saga.rpc.SkipReason.SKIP_REASON_UNSPECIFIED
+          || wire == com.scalar.db.saga.rpc.SkipReason.UNRECOGNIZED) {
+        continue;
+      }
+      String apiName = wire.name().substring("SKIP_REASON_".length());
+      assertThatCode(() -> ResetResult.SkipReason.valueOf(apiName)).doesNotThrowAnyException();
+    }
+  }
+
+  @Test
   void toProto_mapsAllClientFacingFields() {
     // Arrange
     Instant created = Instant.ofEpochSecond(1_700_000_000L, 250);
@@ -66,6 +91,45 @@ class ProtoMappersTest {
     assertThat(proto.getCreatedAt().getNanos()).isEqualTo(250);
     assertThat(proto.getUpdatedAt().getSeconds()).isEqualTo(1_700_000_500L);
     assertThat(proto.getUpdatedAt().getNanos()).isZero();
+  }
+
+  @Test
+  void toSagaQuery_listSagasWithInRangeTimestamp_mapsTheWindow() {
+    // A well-formed updated_after within Instant's range maps straight through.
+    ListSagasRequest request =
+        ListSagasRequest.newBuilder()
+            .setUpdatedAfter(Timestamp.newBuilder().setSeconds(1_700_000_000L).setNanos(250))
+            .build();
+
+    SagaQuery query = ProtoMappers.toSagaQuery(request);
+
+    assertThat(query.getUpdatedAfter()).isEqualTo(Instant.ofEpochSecond(1_700_000_000L, 250));
+  }
+
+  @Test
+  void toSagaQuery_listSagasWithOutOfRangeTimestampGiven_throwsIllegalArgument() {
+    // A seconds value past Instant's range is bad client input; it must surface as
+    // IllegalArgumentException (mapped to INVALID_ARGUMENT) rather than a DateTimeException that
+    // would fall through to INTERNAL.
+    ListSagasRequest request =
+        ListSagasRequest.newBuilder()
+            .setUpdatedAfter(Timestamp.newBuilder().setSeconds(Long.MAX_VALUE).build())
+            .build();
+
+    assertThatThrownBy(() -> ProtoMappers.toSagaQuery(request))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void toSagaQuery_bulkResetWithOutOfRangeTimestampGiven_throwsIllegalArgument() {
+    // Same guard on the bulk-reset overload, which shares the timestamp conversion.
+    ResetEscalatedBulkRequest request =
+        ResetEscalatedBulkRequest.newBuilder()
+            .setUpdatedBefore(Timestamp.newBuilder().setSeconds(Long.MIN_VALUE).build())
+            .build();
+
+    assertThatThrownBy(() -> ProtoMappers.toSagaQuery(request))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test

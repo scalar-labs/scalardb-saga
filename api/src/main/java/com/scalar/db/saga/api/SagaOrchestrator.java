@@ -7,8 +7,8 @@ import java.util.Map;
 /**
  * The application-facing surface for orchestrating sagas: starting instances (synchronous or
  * asynchronous, by name or by versioned id) and querying their state. Shared by the in-process
- * {@code DefaultSagaOrchestrator} and (in the future) a remote client, so the same application code
- * runs embedded or against a saga server.
+ * {@code DefaultSagaOrchestrator} and by {@code GrpcSagaOrchestratorClient} (the Java 8 client
+ * SDK), so the same application code runs embedded or against a saga server.
  *
  * <p>Implementations must be thread-safe — multiple sagas execute concurrently.
  *

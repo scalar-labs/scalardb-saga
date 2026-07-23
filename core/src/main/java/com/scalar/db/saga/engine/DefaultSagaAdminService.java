@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import net.jcip.annotations.ThreadSafe;
@@ -358,8 +359,20 @@ public class DefaultSagaAdminService implements SagaAdminService {
       "FutureReturnValueIgnored") // the post-deadline logging handler is fire-and-forget
   private SagaStateSnapshot boundedRecover(
       String sagaId, SagaDefinition def, RecoveryAction action, ExecutionContext context) {
-    CompletableFuture<Void> drive =
-        CompletableFuture.runAsync(() -> engine.recover(action, def, context), engine.executor());
+    CompletableFuture<Void> drive;
+    try {
+      drive =
+          CompletableFuture.runAsync(() -> engine.recover(action, def, context), engine.executor());
+    } catch (RejectedExecutionException e) {
+      // The engine executor is shut down (the orchestrator is closing), so the drive never started.
+      // The transition is already durable and the saga has left ESCALATED, so return its recorded
+      // state and let the recovery loop finish it. Unlike the timeout path, the drive never touched
+      // the context, so reading it here is safe — nothing else ran.
+      logger.info(
+          "Admin drive of saga {} was rejected (engine shutting down); returning its recorded state",
+          sagaId);
+      return context.getCurrentState();
+    }
     try {
       drive.get(driveDeadlineMillis, TimeUnit.MILLISECONDS);
       return context.getCurrentState();
@@ -383,6 +396,16 @@ public class DefaultSagaAdminService implements SagaAdminService {
       Thread.currentThread().interrupt();
       return requireSnapshot(sagaId);
     } catch (ExecutionException e) {
+      if (e.getCause() instanceof RejectedExecutionException) {
+        // Same shape as the submit-time reject above, but surfaced from inside the drive: the
+        // engine submits step tasks to the same executor, so a nested submit during shutdown lands
+        // here. Degrade symmetrically — the transition is durable and the recovery loop finishes
+        // the rest — rather than rethrowing, which the daemon would map to INTERNAL.
+        logger.info(
+            "Admin drive of saga {} was rejected mid-drive (engine shutting down); returning its current state",
+            sagaId);
+        return requireSnapshot(sagaId);
+      }
       throw rethrow(e.getCause());
     }
   }
@@ -497,11 +520,18 @@ public class DefaultSagaAdminService implements SagaAdminService {
    * operator is injected by the server, so an unusable one is a server or identity-provider
    * misconfiguration rather than a defect in the caller's request.
    *
-   * @throws IllegalStateException if the operator is blank, over {@link #MAX_OPERATOR_LENGTH}
+   * @throws IllegalStateException if the operator is null, blank, over {@link #MAX_OPERATOR_LENGTH}
    *     characters, or contains a control character
    */
   private String operator() {
     String operator = operatorContext.currentOperator();
+    if (operator == null) {
+      // OperatorContext is public API; an embedded-mode implementation not compiled with NullAway
+      // could return null. Fail closed like the checks below rather than NPE on isBlank().
+      throw new IllegalStateException(
+          "OperatorContext returned a null operator; rejecting the admin operation rather than"
+              + " attributing it to an anonymous principal");
+    }
     if (operator.isBlank()) {
       throw new IllegalStateException(
           "OperatorContext returned a blank operator; rejecting the admin operation rather than"

@@ -3,13 +3,15 @@ package com.scalar.db.saga.api;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.exception.SagaPermissionDeniedException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
+import com.scalar.db.saga.exception.SagaUnauthenticatedException;
 
 /**
  * Operational control plane for a saga engine: list and inspect sagas, and un-stick or resolve the
- * ones that need an operator. Implemented in-process by {@code DefaultSagaAdminService} and, in the
- * future, by a remote admin client, so the same surface works embedded or against a saga server.
- * (No remote client is provided yet; a remote caller uses the generated gRPC admin stub directly.)
+ * ones that need an operator. Implemented in-process by {@code DefaultSagaAdminService} and
+ * remotely by {@code GrpcSagaAdminClient} (the Java 8 client SDK), so the same surface works
+ * embedded or against a saga server.
  *
  * <p><b>Direction-agnostic mutations.</b> The operator never chooses "compensate" vs. "resume
  * forward" — the engine decides from the saga's pivot, exactly as automatic recovery does. The
@@ -27,7 +29,18 @@ import com.scalar.db.saga.exception.SagaStatePreconditionException;
  * SagaNotFoundException} (HTTP 404). A mutation that must drive the saga needs its definition; if
  * the registry no longer holds the one the saga was started with, it throws {@link
  * SagaDefinitionNotFoundException} (HTTP 404). Re-register the definition to make the saga
- * recoverable.
+ * recoverable. A remote implementation can additionally throw {@link SagaUnauthenticatedException}
+ * (HTTP 401) or {@link SagaPermissionDeniedException} (HTTP 403) when the caller lacks a valid
+ * credential or the required role; the embedded implementation never does.
+ *
+ * <p><b>Retrying after a non-terminal result.</b> A deployment that bounds the drive (the daemon
+ * returns rather than block past a deadline) can hand back a non-terminal snapshot in two shapes:
+ * the drive it started keeps running to completion in the background, or — if the engine was
+ * shutting down when the mutation arrived — the drive never started at all, leaving the saga for
+ * recovery on restart or another node. Either way the audit-carrying transition is already durable.
+ * Retrying such a call is safe (a step's side effect must be idempotent to begin with — automatic
+ * recovery can re-drive a saga for the same reason) but wastes work if a drive is already running.
+ * Prefer to let automatic recovery finish the saga, or wait briefly before retrying.
  */
 public interface SagaAdminService extends AutoCloseable {
 
