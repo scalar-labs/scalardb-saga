@@ -33,7 +33,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.stream.IntStream;
 import net.jcip.annotations.ThreadSafe;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -320,53 +319,6 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   }
 
   // ---------------------------------------------------------------------------
-  // Resume / Compensate
-  // ---------------------------------------------------------------------------
-
-  public SagaStateSnapshot resume(String sagaId) {
-    Objects.requireNonNull(sagaId, "sagaId must not be null");
-    SagaStateSnapshot saga = getStateSnapshot(sagaId);
-    if (saga.getStatus() != SagaStatus.RUNNING) {
-      throw new IllegalStateException(
-          "Cannot resume saga " + sagaId + " in status " + saga.getStatus());
-    }
-    SagaDefinition def = resolveDefinition(saga);
-    List<SagaEvent> events = store.getEvents(sagaId);
-    ExecutionContext context = engine.replayEvents(saga, events);
-
-    int lastCompleted = stepIndices(events, EventType.STEP_COMPLETED).max().orElse(-1);
-
-    return engine.resumeFrom(def, context, lastCompleted + 1);
-  }
-
-  public SagaStateSnapshot compensate(String sagaId) {
-    Objects.requireNonNull(sagaId, "sagaId must not be null");
-    SagaStateSnapshot saga = getStateSnapshot(sagaId);
-    if (saga.getStatus() != SagaStatus.COMPENSATING) {
-      throw new IllegalStateException(
-          "Cannot compensate saga " + sagaId + " in status " + saga.getStatus());
-    }
-    SagaDefinition def = resolveDefinition(saga);
-    List<SagaEvent> events = store.getEvents(sagaId);
-    ExecutionContext context = engine.replayEvents(saga, events);
-
-    int lastCompensated =
-        stepIndices(events, EventType.STEP_COMPENSATED).min().orElse(Integer.MAX_VALUE);
-
-    // Compensate from the step before the last compensated one (or from last completed if none)
-    int fromStep;
-    if (lastCompensated < Integer.MAX_VALUE) {
-      fromStep = lastCompensated - 1;
-    } else {
-      // No compensation started yet — find the last completed step
-      fromStep = stepIndices(events, EventType.STEP_COMPLETED).max().orElse(-1);
-    }
-
-    engine.compensateFrom(def, context, fromStep);
-    return context.getCurrentState();
-  }
-
-  // ---------------------------------------------------------------------------
   // Query
   // ---------------------------------------------------------------------------
 
@@ -641,14 +593,6 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       throw new SagaDefinitionNotFoundException(saga.getSagaName(), saga.getDefinitionVersion());
     }
     return def;
-  }
-
-  private static IntStream stepIndices(List<SagaEvent> events, EventType eventType) {
-    return events.stream()
-        .filter(e -> e instanceof StepEvent)
-        .map(e -> (StepEvent) e)
-        .filter(e -> e.getEventType() == eventType)
-        .mapToInt(StepEvent::getStepIndex);
   }
 
   // ---------------------------------------------------------------------------
