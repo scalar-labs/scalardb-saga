@@ -101,6 +101,7 @@ class SagaSchemaTest {
             "saga_id",
             "sequence",
             "event_type",
+            "append_id",
             "step_index",
             "step_name",
             "payload",
