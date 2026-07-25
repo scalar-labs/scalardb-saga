@@ -85,6 +85,8 @@ public interface SagaStore extends AutoCloseable {
    * @param event the status event to record
    * @param ownerId the replica recording this transition (stamped as the saga's owner)
    * @return the post-transition state snapshot
+   * @throws com.scalar.db.saga.exception.SagaConcurrentModificationException if another writer
+   *     transitioned the saga first, so this call loses the optimistic concurrency check
    */
   default SagaStateSnapshot recordStatusEvent(
       SagaStateSnapshot current, int sequence, StatusEvent event, String ownerId) {
@@ -114,6 +116,8 @@ public interface SagaStore extends AutoCloseable {
    *     for the current transition time; {@link Instant#EPOCH} schedules the saga for immediate
    *     recovery
    * @return the post-transition state snapshot
+   * @throws com.scalar.db.saga.exception.SagaConcurrentModificationException if another writer
+   *     transitioned the saga first, so this call loses the optimistic concurrency check
    */
   SagaStateSnapshot recordStatusEvent(
       SagaStateSnapshot current,
@@ -133,6 +137,8 @@ public interface SagaStore extends AutoCloseable {
    * @param pendingEvent the {@link EventType#STEP_PENDING} event marking which step parked
    * @param parkedDeadline the absolute timeout deadline, or {@code null} for an unbounded wait
    * @return the post-transition ({@code WAITING}) snapshot
+   * @throws com.scalar.db.saga.exception.SagaConcurrentModificationException if another writer
+   *     transitioned the saga first, so this call loses the optimistic concurrency check
    */
   SagaStateSnapshot park(
       SagaStateSnapshot current,
@@ -150,6 +156,8 @@ public interface SagaStore extends AutoCloseable {
    * @param sequence the event sequence number
    * @param completedEvent the {@link EventType#STEP_COMPLETED} event carrying the callback output
    * @return the post-transition ({@code RUNNING}) snapshot
+   * @throws com.scalar.db.saga.exception.SagaConcurrentModificationException if another writer
+   *     transitioned the saga first, so this call loses the optimistic concurrency check
    */
   SagaStateSnapshot resumeParkedStep(
       SagaStateSnapshot current, int sequence, StepEvent completedEvent);
@@ -168,6 +176,8 @@ public interface SagaStore extends AutoCloseable {
    * @param targetStatus {@code COMPENSATING} (pre-pivot, will compensate) or {@code ESCALATED}
    *     (post-pivot, needs manual resolution)
    * @return the post-transition snapshot
+   * @throws com.scalar.db.saga.exception.SagaConcurrentModificationException if another writer
+   *     transitioned the saga first, so this call loses the optimistic concurrency check
    * @throws IllegalArgumentException if {@code targetStatus} is not {@code COMPENSATING} or {@code
    *     ESCALATED}
    */
@@ -186,6 +196,8 @@ public interface SagaStore extends AutoCloseable {
    * @param sequence the event sequence number
    * @param redriveEvent the {@link EventType#STEP_REISSUING} event for the un-parked step
    * @return the post-transition ({@code RUNNING}) snapshot
+   * @throws com.scalar.db.saga.exception.SagaConcurrentModificationException if another writer
+   *     transitioned the saga first, so this call loses the optimistic concurrency check
    */
   SagaStateSnapshot redriveParkedStep(
       SagaStateSnapshot current, int sequence, StepEvent redriveEvent);
