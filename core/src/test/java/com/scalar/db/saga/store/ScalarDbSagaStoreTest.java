@@ -597,9 +597,8 @@ class ScalarDbSagaStoreTest {
   void recordStatusEvent_commitConflictExhausted_throwsSagaConcurrentModification()
       throws Exception {
     // Arrange — insert succeeds (OCC buffers locally), but every commit throws CommitConflict.
-    // Reclassified as 409 by the append-family path, not the retryable 503 the caller would
-    // futilely
-    // retry.
+    // Reclassified as 409 by the append-family path, not a retryable 503, which would only send
+    // the caller back to retry the same taken sequence.
     Instant now = Instant.now();
     SagaStateSnapshot current =
         new SagaStateSnapshot(
