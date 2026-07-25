@@ -449,12 +449,14 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
-  void recordStepEvent_unknownStatusAndVerifierFindsAnotherWritersEvent_doesNotReportSuccess()
-      throws Exception {
+  void
+      recordStepEvent_unknownStatusAndVerifierFindsAnotherWritersEvent_throwsSagaConcurrentModification()
+          throws Exception {
     // Arrange — the append's commit is ambiguous (unknown status) and a DIFFERENT writer's event
-    // sits at the same sequence. The append-id-aware verifier must NOT mistake it for ours: it
-    // reports "not committed", and with one attempt the op exhausts and throws rather than falsely
-    // succeeding (the old presence-only check would have returned success here).
+    // sits at the same sequence. That is a proven collision, not an unresolved commit: the verifier
+    // throws SagaConcurrentModificationException (409) at once rather than reporting a retryable
+    // failure. Even with a single attempt the op surfaces the conflict, since retrying would only
+    // reuse the same taken sequence.
     ScalarDbSagaStore singleAttemptStore =
         new ScalarDbSagaStore(
             txManager,
@@ -468,6 +470,33 @@ class ScalarDbSagaStoreTest {
     Result otherWritersEvent = mock(Result.class);
     when(otherWritersEvent.getText("append_id")).thenReturn(OTHER_APPEND_ID);
     when(verifyTx.get(any(Get.class))).thenReturn(Optional.of(otherWritersEvent));
+
+    // Act & Assert
+    assertThatThrownBy(
+            () ->
+                singleAttemptStore.recordStepEvent(
+                    "saga-1", 3, StepEvent.completed(1, "charge", null)))
+        .isInstanceOf(SagaConcurrentModificationException.class);
+  }
+
+  @Test
+  void recordStepEvent_unknownStatusAndVerifierFindsNoEvent_throwsRetryablePersistenceException()
+      throws Exception {
+    // Arrange — the append's commit is ambiguous (unknown status) and NO event is present at the
+    // sequence, so our write did not land. This is the retry case, not a proven collision: the
+    // verifier reports "not committed", the single attempt exhausts, and the op surfaces a 503,
+    // not a 409 conflict.
+    ScalarDbSagaStore singleAttemptStore =
+        new ScalarDbSagaStore(
+            txManager,
+            objectMapper,
+            schema,
+            ScalarDbSagaStoreConfig.builder().transactionRetryCount(1).build(),
+            () -> OWN_APPEND_ID);
+    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    when(verifyTx.get(any(Get.class))).thenReturn(Optional.empty());
 
     // Act & Assert
     assertThatThrownBy(
@@ -591,14 +620,14 @@ class ScalarDbSagaStoreTest {
           throws Exception {
     // Arrange — the transition's commit is ambiguous and a DIFFERENT writer won the CK and wrote a
     // status event at the same sequence. The append-id-aware verifier must NOT mistake it for ours:
-    // it reports "not committed", the op retries, re-reads the now-moved CK, and throws.
+    // it reads back another writer's append_id, a proven collision, so it throws
+    // SagaConcurrentModificationException at once rather than reporting a retryable failure.
     Instant now = Instant.now();
     SagaStateSnapshot current =
         new SagaStateSnapshot(
             "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
-    DistributedTransaction retryTx = mock(DistributedTransaction.class);
-    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx).thenReturn(retryTx);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
     // Attempt 1: the optimistic CK check passes, then commit is ambiguous.
     when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
     doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
@@ -606,8 +635,6 @@ class ScalarDbSagaStoreTest {
     Result otherWritersEvent = mock(Result.class);
     when(otherWritersEvent.getText("append_id")).thenReturn(OTHER_APPEND_ID);
     when(verifyTx.get(any(Get.class))).thenReturn(Optional.of(otherWritersEvent));
-    // Retry: the row has moved off the old CK.
-    when(retryTx.get(any(Get.class))).thenReturn(Optional.empty());
 
     // Act & Assert
     assertThatThrownBy(
@@ -773,15 +800,14 @@ class ScalarDbSagaStoreTest {
           throws Exception {
     // Arrange — the callback's commit returns an unknown status, and a concurrent timeout sweep won
     // the WAITING CK and wrote its own event at the same sequence. The verifier must NOT mistake
-    // that other writer's row for ours: append_id differs, it reports "not committed", the resume
-    // retries, re-reads the now-non-WAITING CK, and throws.
+    // that other writer's row for ours: append_id differs, a proven collision, so it throws
+    // SagaConcurrentModificationException at once rather than reporting a retryable failure.
     Instant now = Instant.now();
     SagaStateSnapshot current =
         new SagaStateSnapshot(
             "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
-    DistributedTransaction retryTx = mock(DistributedTransaction.class);
-    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx).thenReturn(retryTx);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
     // Attempt 1: the optimistic WAITING-CK check passes, then commit is ambiguous.
     when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
     when(tx.scan(any(Scan.class))).thenReturn(List.of());
@@ -790,8 +816,6 @@ class ScalarDbSagaStoreTest {
     Result otherWritersEvent = mock(Result.class);
     when(otherWritersEvent.getText("append_id")).thenReturn(OTHER_APPEND_ID);
     when(verifyTx.get(any(Get.class))).thenReturn(Optional.of(otherWritersEvent));
-    // Retry: the sweep already moved the row off the WAITING CK.
-    when(retryTx.get(any(Get.class))).thenReturn(Optional.empty());
 
     // Act & Assert
     assertThatThrownBy(
@@ -920,22 +944,20 @@ class ScalarDbSagaStoreTest {
           throws Exception {
     // Symmetric to the resume case: the sweep's commit is ambiguous and a concurrent callback won
     // the WAITING CK, writing its own event at the sequence. The verifier must not accept that
-    // other writer's row (different append_id) as its own — it reports "not committed", retries,
-    // and throws on the moved CK.
+    // other writer's row (different append_id) as its own — a proven collision, so it throws
+    // SagaConcurrentModificationException at once.
     Instant now = Instant.now();
     SagaStateSnapshot current =
         new SagaStateSnapshot(
             "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
-    DistributedTransaction retryTx = mock(DistributedTransaction.class);
-    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx).thenReturn(retryTx);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
     when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
     when(tx.scan(any(Scan.class))).thenReturn(List.of());
     doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
     Result otherWritersEvent = mock(Result.class);
     when(otherWritersEvent.getText("append_id")).thenReturn(OTHER_APPEND_ID);
     when(verifyTx.get(any(Get.class))).thenReturn(Optional.of(otherWritersEvent));
-    when(retryTx.get(any(Get.class))).thenReturn(Optional.empty());
 
     // Act & Assert
     assertThatThrownBy(
@@ -996,15 +1018,14 @@ class ScalarDbSagaStoreTest {
           throws Exception {
     // Arrange — the re-drive's commit returns an unknown status, and a concurrent callback won the
     // WAITING CK and wrote its own event at the same sequence. The verifier must NOT mistake that
-    // other writer's row (different append_id) for our STEP_REISSUING: it reports "not committed",
-    // the re-drive retries, re-reads the now-non-WAITING CK, and throws.
+    // other writer's row (different append_id) for our STEP_REISSUING: a proven collision, so it
+    // throws SagaConcurrentModificationException at once rather than reporting a retryable failure.
     Instant now = Instant.now();
     SagaStateSnapshot current =
         new SagaStateSnapshot(
             "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
-    DistributedTransaction retryTx = mock(DistributedTransaction.class);
-    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx).thenReturn(retryTx);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
     // Attempt 1: the optimistic WAITING-CK check passes, then commit is ambiguous.
     when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
     when(tx.scan(any(Scan.class))).thenReturn(List.of());
@@ -1013,8 +1034,6 @@ class ScalarDbSagaStoreTest {
     Result otherWritersEvent = mock(Result.class);
     when(otherWritersEvent.getText("append_id")).thenReturn(OTHER_APPEND_ID);
     when(verifyTx.get(any(Get.class))).thenReturn(Optional.of(otherWritersEvent));
-    // Retry: the callback already moved the row off the WAITING CK.
-    when(retryTx.get(any(Get.class))).thenReturn(Optional.empty());
 
     // Act & Assert
     assertThatThrownBy(() -> store.redriveParkedStep(current, 4, StepEvent.reissuing(1, "charge")))

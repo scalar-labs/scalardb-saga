@@ -270,7 +270,7 @@ public class ScalarDbSagaStore implements SagaStore {
           return Boolean.TRUE;
         },
         () ->
-            eventCommittedByAppendId(sagaId, sequence, appendId)
+            verifyOwnEventCommitted(sagaId, sequence, appendId)
                 ? Optional.of(Boolean.TRUE)
                 : Optional.empty(),
         "append event for saga " + sagaId,
@@ -436,23 +436,36 @@ public class ScalarDbSagaStore implements SagaStore {
   }
 
   /**
-   * Whether the event at {@code sequence} is present <em>and</em> was written by us — identified by
-   * the caller's {@code appendId}, a UUID minted once per logical append and persisted with the
-   * row. This is the post-{@code UnknownTransactionStatus} verification check the event-append and
-   * transition paths share.
+   * Post-{@code UnknownTransactionStatus} verification shared by the event-append and transition
+   * paths: identifies the event at {@code sequence} by the caller's {@code appendId}, a UUID minted
+   * once per logical append and persisted with the row, and distinguishes three outcomes.
    *
-   * <p>Presence alone answers "did some event land at this sequence?", but a same-type racer (e.g.
-   * two at-least-once callbacks appending {@code STEP_COMPLETED} at the same sequence, or a
-   * callback racing a deadline timeout's re-drive) is indistinguishable from us on type. The append
-   * id is the only value the racers do not agree on: two writers mint independent UUIDs, so the one
-   * that reads back the winner's {@code append_id} sees a mismatch and correctly reports its own
-   * commit as unresolved.
+   * <ul>
+   *   <li>Present with our {@code append_id}: our commit landed; returns {@code true}.
+   *   <li>Absent: our commit did not land; returns {@code false} so the caller retries.
+   *   <li>Present with another {@code append_id}: a same-type racer won this sequence (e.g. two
+   *       at-least-once callbacks appending {@code STEP_COMPLETED} at the same sequence, or a
+   *       callback racing a deadline timeout's re-drive). That is a proven collision, not an
+   *       unresolved commit: retrying only reuses the same taken sequence, so this throws {@link
+   *       SagaConcurrentModificationException} at once instead of reporting "not committed".
+   * </ul>
+   *
+   * <p>The append id is the only value the racers do not agree on: two writers mint independent
+   * UUIDs, so the one that reads back the winner's {@code append_id} sees the mismatch.
    */
-  private boolean eventCommittedByAppendId(String sagaId, int sequence, String appendId) {
+  private boolean verifyOwnEventCommitted(String sagaId, int sequence, String appendId) {
     return runInTransaction(
         tx -> {
           Optional<Result> event = tx.get(buildEventGet(sagaId, sequence));
-          return event.isPresent() && appendId.equals(event.get().getText("append_id"));
+          if (event.isEmpty()) {
+            return false;
+          }
+          if (appendId.equals(event.get().getText("append_id"))) {
+            return true;
+          }
+          // Another writer's row sits at our sequence: a proven collision, not an unresolved
+          // commit. Retrying would only reuse the same taken sequence, so surface the conflict now.
+          throw new SagaConcurrentModificationException(sagaId);
         },
         null,
         "verify event " + sagaId + " seq " + sequence);
@@ -460,15 +473,15 @@ public class ScalarDbSagaStore implements SagaStore {
 
   /**
    * Verifier for a state transition (park, resume, timeout, {@code recordStatusEvent}): treats the
-   * tx as committed when the event at {@code sequence} is present and its {@code append_id} matches
-   * our {@code appendId} (see {@link #eventCommittedByAppendId}). On a match it returns the
-   * resulting state snapshot; a mismatch (a racer won) returns empty, so the caller retries,
-   * re-reads the now-moved CK, and throws {@link SagaConcurrentModificationException}.
+   * tx as committed when the event at {@code sequence} was written by us (see {@link
+   * #verifyOwnEventCommitted}). On a match it returns the resulting state snapshot; when the event
+   * is absent it returns empty so the caller retries; when another writer won the sequence, {@link
+   * #verifyOwnEventCommitted} throws {@link SagaConcurrentModificationException} directly.
    */
   private CommitVerifier<SagaStateSnapshot> verifyTransitionCommitted(
       String sagaId, int sequence, String appendId) {
     return () ->
-        eventCommittedByAppendId(sagaId, sequence, appendId)
+        verifyOwnEventCommitted(sagaId, sequence, appendId)
             ? loadStateSnapshot(sagaId)
             : Optional.empty();
   }
