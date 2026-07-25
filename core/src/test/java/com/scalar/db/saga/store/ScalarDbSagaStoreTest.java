@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
@@ -49,10 +50,13 @@ import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.stubbing.OngoingStubbing;
@@ -1067,6 +1071,109 @@ class ScalarDbSagaStoreTest {
 
     // Assert
     assertThat(result.getStatus()).isEqualTo(SagaStatus.RUNNING);
+  }
+
+  // ---------------------------------------------------------------------------
+  // append_id invariants — safety net for the per-append verifier fix
+  // ---------------------------------------------------------------------------
+
+  @Test
+  void recordStepEvent_writesAppendIdOnTheEventInsert() throws Exception {
+    // Act
+    store.recordStepEvent("saga-1", 3, StepEvent.completed(1, "charge", null));
+
+    // Assert — the persisted event insert carries our injected append_id. Without this test, a
+    // refactor that drops the .textValue call from buildEventInsert would leave every verifier-
+    // stubbing test green while every real write silently lost the id (verifier would always
+    // read NULL and report "not us").
+    assertEventInsertCarriesAppendId(tx, OWN_APPEND_ID);
+  }
+
+  @Test
+  void recordStatusEvent_writesAppendIdOnTheEventInsert() throws Exception {
+    // Arrange
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+
+    // Act
+    store.recordStatusEvent(current, 5, StatusEvent.compensating(), "engine-1");
+
+    // Assert — of the two inserts (event + state), the event insert carries our append_id.
+    assertEventInsertCarriesAppendId(tx, OWN_APPEND_ID);
+  }
+
+  @Test
+  void park_writesAppendIdOnTheEventInsert() throws Exception {
+    // Arrange
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+
+    // Act
+    store.park(current, 3, StepEvent.pending(1, "charge"), null);
+
+    // Assert
+    assertEventInsertCarriesAppendId(tx, OWN_APPEND_ID);
+  }
+
+  @Test
+  void resumeParkedStep_writesAppendIdOnTheEventInsert() throws Exception {
+    // Arrange
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+
+    // Act
+    store.resumeParkedStep(current, 4, StepEvent.completed(1, "charge", null));
+
+    // Assert
+    assertEventInsertCarriesAppendId(tx, OWN_APPEND_ID);
+  }
+
+  @Test
+  void recordStepEvent_retriesAcrossAttempts_useSameAppendIdAndCallSupplierOnce() throws Exception {
+    // Arrange — a supplier that returns a distinct id per call. A per-attempt regression (mint
+    // inside the retry loop instead of before it) would surface as diverging append_ids across the
+    // captured inserts and a bumped call count.
+    AtomicInteger supplierCalls = new AtomicInteger();
+    ScalarDbSagaStore countingStore =
+        new ScalarDbSagaStore(
+            txManager,
+            objectMapper,
+            schema,
+            ScalarDbSagaStoreConfig.builder().transactionRetryCount(2).build(),
+            () -> "test-append-id-" + supplierCalls.incrementAndGet());
+    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
+    DistributedTransaction retryTx = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx).thenReturn(retryTx);
+    // Attempt 1: commit is unknown; verifier says "not us" — outer loop retries.
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    when(verifyTx.get(any(Get.class))).thenReturn(Optional.empty());
+    // Attempt 2: commit-conflict, exhaust; the append-family path reclassifies as CME.
+    doThrow(mock(CommitConflictException.class)).when(retryTx).commit();
+
+    // Act
+    assertThatThrownBy(
+            () ->
+                countingStore.recordStepEvent("saga-1", 3, StepEvent.completed(1, "charge", null)))
+        .isInstanceOf(SagaConcurrentModificationException.class);
+
+    // Assert — supplier invoked exactly once, and both attempts' event inserts carried that id.
+    assertThat(supplierCalls.get()).isEqualTo(1);
+    ArgumentCaptor<Insert> attempt1 = ArgumentCaptor.forClass(Insert.class);
+    ArgumentCaptor<Insert> attempt2 = ArgumentCaptor.forClass(Insert.class);
+    verify(tx).insert(attempt1.capture());
+    verify(retryTx).insert(attempt2.capture());
+    assertThat(requireAppendId(attempt1.getValue())).isEqualTo("test-append-id-1");
+    assertThat(requireAppendId(attempt2.getValue())).isEqualTo("test-append-id-1");
   }
 
   // ---------------------------------------------------------------------------
@@ -2492,6 +2599,30 @@ class ScalarDbSagaStoreTest {
    */
   private static Scan scanForTable(String table) {
     return argThat(scan -> scan != null && scan.forTable().filter(table::equals).isPresent());
+  }
+
+  /**
+   * Captures every {@code tx.insert(...)} on the given transaction, finds the one that carries an
+   * {@code append_id} column (the event insert; only event rows have it, so this reliably picks the
+   * event insert out of methods that also write state or parked rows), and asserts its value.
+   */
+  private static void assertEventInsertCarriesAppendId(
+      DistributedTransaction tx, String expectedAppendId) throws Exception {
+    ArgumentCaptor<Insert> captor = ArgumentCaptor.forClass(Insert.class);
+    verify(tx, atLeastOnce()).insert(captor.capture());
+    Insert eventInsert =
+        captor.getAllValues().stream()
+            .filter(i -> i.getColumns().containsKey("append_id"))
+            .findFirst()
+            .orElseThrow(
+                () -> new AssertionError("no event insert with append_id column was captured"));
+    assertThat(requireAppendId(eventInsert)).isEqualTo(expectedAppendId);
+  }
+
+  /** Reads {@code append_id} from an {@link Insert}, failing loudly if the column is absent. */
+  private static String requireAppendId(Insert insert) {
+    return Objects.requireNonNull(insert.getColumns().get("append_id"), "append_id column missing")
+        .getTextValue();
   }
 
   /** Creates a mock event row with only the sequence field (for deleteSaga). */
