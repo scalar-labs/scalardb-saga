@@ -261,8 +261,6 @@ public class ScalarDbSagaStore implements SagaStore {
   @Override
   public void recordStepEvent(String sagaId, int sequence, StepEvent event) {
     validatePayloadSize(event.getPayload());
-    // Minted once outside runInTransaction so retries reuse the same id and the verifier can
-    // identify our write; a same-type racer's independent UUID lets us tell the two apart.
     String appendId = appendIdSupplier.get();
     runInTransaction(
         tx -> {
@@ -1168,9 +1166,10 @@ public class ScalarDbSagaStore implements SagaStore {
     logger.warn("All {} attempts exhausted for {}", maxAttempts, operationName, lastException);
     Exception cause = Objects.requireNonNull(lastException);
     if (sagaId != null && cause instanceof CommitConflictException) {
-      // The commit-conflict path is another writer taking our sequence, not a store failure. Under
+      // The commit-conflict path is another writer contending on a row we're writing (typically
+      // our sequence in saga_events, or the transition ops' state CK), not a store failure. Under
       // snapshot isolation the collision only surfaces at commit, so retries reuse the same stale
-      // sequence and exhaust with no progress; classify it truthfully as 409, not 503.
+      // writes and exhaust with no progress; classify it truthfully as 409, not 503.
       throw new SagaConcurrentModificationException(sagaId, cause);
     }
     throw SagaPersistenceException.retryable(

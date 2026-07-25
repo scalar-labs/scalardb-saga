@@ -68,6 +68,9 @@ public interface SagaStore extends AutoCloseable {
    * @param sagaId the saga instance ID
    * @param sequence the event sequence number (tracked by the caller)
    * @param event the step event to record
+   * @throws com.scalar.db.saga.exception.SagaConcurrentModificationException if another writer took
+   *     the same {@code sequence} for this saga — an in-doubt commit's verifier reads a row with
+   *     someone else's writer id, or a commit conflict exhausts the retries on a stale sequence
    */
   void recordStepEvent(String sagaId, int sequence, StepEvent event);
 
