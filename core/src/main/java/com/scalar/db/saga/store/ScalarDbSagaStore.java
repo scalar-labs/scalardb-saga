@@ -441,15 +441,19 @@ public class ScalarDbSagaStore implements SagaStore {
    * <ul>
    *   <li>Present with our {@code append_id}: our commit landed; returns {@code true}.
    *   <li>Absent: our commit did not land; returns {@code false} so the caller retries.
-   *   <li>Present with another {@code append_id}: a same-type racer won this sequence (e.g. two
-   *       at-least-once callbacks appending {@code STEP_COMPLETED} at the same sequence, or a
-   *       callback racing a deadline timeout's re-drive). That is a proven collision, not an
-   *       unresolved commit: retrying only reuses the same taken sequence, so this throws {@link
-   *       SagaConcurrentModificationException} at once instead of reporting "not committed".
+   *   <li>Present with another {@code append_id}: another writer won this sequence. A mismatch
+   *       proves only that the row is not ours, not what type it is; the winner may be a same-type
+   *       racer (two at-least-once callbacks both appending {@code STEP_COMPLETED}) or a cross-type
+   *       one (a callback racing a deadline timeout's re-drive). Either way it is a proven
+   *       collision, not an unresolved commit, so this throws {@link
+   *       SagaConcurrentModificationException} at once instead of reporting "not committed";
+   *       retrying would only reuse the same taken sequence.
    * </ul>
    *
-   * <p>The append id is the only value the racers do not agree on: two writers mint independent
-   * UUIDs, so the one that reads back the winner's {@code append_id} sees the mismatch.
+   * <p>Comparing {@code append_id} rather than {@code event_type} is what makes this exact: every
+   * logical append mints its own UUID, so a same-type racer (which type alone cannot distinguish
+   * from us) is caught, and a cross-type racer differs as well. The reader that sees the winner's
+   * {@code append_id} knows the row is not its own.
    */
   private boolean verifyOwnEventCommitted(String sagaId, int sequence, String appendId) {
     return runInTransaction(
