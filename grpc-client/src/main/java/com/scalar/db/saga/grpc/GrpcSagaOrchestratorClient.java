@@ -342,7 +342,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
   /** Throws {@link SagaTimeoutException} when the overall client deadline (if any) has elapsed. */
   private void guardDeadline(long loopDeadlineNanos) {
     if (loopDeadlineNanos != 0L && System.nanoTime() >= loopDeadlineNanos) {
-      throw new SagaTimeoutException("Saga did not reach a terminal state within the deadline");
+      throw new SagaTimeoutException();
     }
   }
 

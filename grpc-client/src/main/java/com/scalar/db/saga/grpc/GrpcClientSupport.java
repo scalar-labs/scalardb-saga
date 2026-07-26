@@ -76,8 +76,9 @@ final class GrpcClientSupport {
       case INVALID_ARGUMENT:
         return new IllegalArgumentException(description == null ? "Invalid request" : description);
       case DEADLINE_EXCEEDED:
-        return new SagaTimeoutException(
-            description == null ? rpcLabel + " RPC deadline exceeded" : description, e);
+        // The gRPC status (with its description) is preserved as the cause; the fixed message
+        // comes from SagaErrorCode.REQUEST_TIMEOUT.
+        return new SagaTimeoutException(e);
       case UNAVAILABLE:
         return new SagaUnavailableException(
             description == null ? rpcLabel + " service temporarily unavailable" : description, e);

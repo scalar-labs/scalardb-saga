@@ -8,32 +8,29 @@ import org.junit.jupiter.api.Test;
 class SagaTimeoutExceptionTest {
 
   @Test
-  void constructor_messageGiven_setsMessage() {
+  void constructor_noArgsGiven_setsCodeAndFixedMessage() {
     // Arrange & Act
-    SagaTimeoutException e = new SagaTimeoutException("saga deadline exceeded");
+    SagaTimeoutException e = new SagaTimeoutException();
 
     // Assert
-    assertThat(e.getMessage()).isEqualTo("saga deadline exceeded");
-  }
-
-  @SuppressWarnings("NullAway")
-  @Test
-  void constructor_nullMessageGiven_throwsNullPointerException() {
-    // Arrange & Act & Assert
-    assertThatThrownBy(() -> new SagaTimeoutException(null))
-        .isInstanceOf(NullPointerException.class);
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.REQUEST_TIMEOUT);
+    assertThat(e.getMetadata()).isEmpty();
+    assertThat(e.getMessage()).isEqualTo("DB-SAGA-40002: The request to the saga server timed out");
+    assertThat(e.getCause()).isNull();
   }
 
   @Test
-  void constructor_messageAndCauseGiven_setsBoth() {
+  void constructor_causeGiven_setsCauseAndFixedMessage() {
     // Arrange
     RuntimeException cause = new RuntimeException("interrupted");
 
     // Act
-    SagaTimeoutException e = new SagaTimeoutException("saga deadline exceeded", cause);
+    SagaTimeoutException e = new SagaTimeoutException(cause);
 
     // Assert
-    assertThat(e.getMessage()).isEqualTo("saga deadline exceeded");
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.REQUEST_TIMEOUT);
+    assertThat(e.getMetadata()).isEmpty();
+    assertThat(e.getMessage()).isEqualTo("DB-SAGA-40002: The request to the saga server timed out");
     assertThat(e.getCause()).isSameAs(cause);
   }
 
@@ -41,7 +38,7 @@ class SagaTimeoutExceptionTest {
   @Test
   void constructor_nullCauseGiven_throwsNullPointerException() {
     // Arrange & Act & Assert
-    assertThatThrownBy(() -> new SagaTimeoutException("timeout", null))
+    assertThatThrownBy(() -> new SagaTimeoutException((Throwable) null))
         .isInstanceOf(NullPointerException.class);
   }
 
