@@ -443,33 +443,16 @@ public class DefaultSagaAdminService implements SagaAdminService {
   }
 
   private static SagaStatePreconditionException parked(String sagaId) {
-    return new SagaStatePreconditionException(
-        sagaId,
-        SagaStatePreconditionException.Code.SAGA_PARKED,
-        "Saga " + sagaId + " is WAITING on an async callback; it resolves via callback or timeout");
+    return SagaStatePreconditionException.parked(sagaId);
   }
 
   private static SagaStatePreconditionException notEscalated(
       String sagaId, SagaStatus status, String action) {
-    return wrongState(
-        sagaId,
-        "Cannot " + action + " saga " + sagaId + " in status " + status + " (expected ESCALATED)");
+    return SagaStatePreconditionException.wrongState(sagaId, status.name(), action);
   }
 
   private static SagaStatePreconditionException notRecoverable(String sagaId, SagaStatus status) {
-    return wrongState(
-        sagaId,
-        "Cannot recover saga "
-            + sagaId
-            + " in status "
-            + status
-            + " (recover accepts RUNNING or COMPENSATING; for ESCALATED use resetEscalated or"
-            + " forceComplete)");
-  }
-
-  private static SagaStatePreconditionException wrongState(String sagaId, String message) {
-    return new SagaStatePreconditionException(
-        sagaId, SagaStatePreconditionException.Code.SAGA_WRONG_STATE, message);
+    return SagaStatePreconditionException.wrongState(sagaId, status.name(), "recover");
   }
 
   private static String validateReason(String reason) {

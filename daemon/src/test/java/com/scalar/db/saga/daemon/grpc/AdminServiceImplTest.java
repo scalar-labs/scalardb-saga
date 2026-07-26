@@ -201,9 +201,7 @@ class AdminServiceImplTest {
   @Test
   void recoverSaga_wrongState_failedPrecondition() {
     when(adminService.recoverSaga(eq("s-1"), any()))
-        .thenThrow(
-            new SagaStatePreconditionException(
-                "s-1", SagaStatePreconditionException.Code.SAGA_WRONG_STATE, "wrong state"));
+        .thenThrow(SagaStatePreconditionException.wrongState("s-1", "RUNNING", "recover"));
     assertCode(
         () ->
             stub("admin")
@@ -242,9 +240,7 @@ class AdminServiceImplTest {
   @Test
   void resetEscalated_wrongState_failedPrecondition() {
     when(adminService.resetEscalated(eq("s-1"), any()))
-        .thenThrow(
-            new SagaStatePreconditionException(
-                "s-1", SagaStatePreconditionException.Code.SAGA_WRONG_STATE, "not escalated"));
+        .thenThrow(SagaStatePreconditionException.wrongState("s-1", "RUNNING", "reset"));
     assertCode(
         () ->
             stub("admin")

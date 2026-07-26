@@ -11,8 +11,8 @@ import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaNotFoundException;
-import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import com.scalar.db.saga.rpc.AdminServiceGrpc;
 import com.scalar.db.saga.rpc.AdminServiceGrpc.AdminServiceBlockingStub;
@@ -222,7 +222,7 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
       return notFoundException(sagaId, errorInfo(e));
     }
     if (code == Status.Code.FAILED_PRECONDITION) {
-      return preconditionException(sagaId, e);
+      return preconditionException(e);
     }
     if (code == Status.Code.ABORTED) {
       return new SagaConcurrentModificationException(sagaId, e);
@@ -250,22 +250,35 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
   }
 
   /**
-   * Reconstructs the wrong-state exception. The daemon sends the machine-readable code name (e.g.
-   * {@code SAGA_WRONG_STATE}) as the {@link ErrorInfo} reason, so the client recovers the {@link
-   * SagaStatePreconditionException.Code} a caller switches on. An absent or unrecognized reason
-   * degrades to {@link SagaRuntimeException} rather than guessing a code.
+   * Reconstructs the wrong-state exception. The daemon sends the machine-readable {@link
+   * SagaErrorCode} name (e.g. {@code SAGA_WRONG_STATE}) as the {@link ErrorInfo} reason, and the
+   * exception's metadata rides in {@link ErrorInfo#getMetadataMap()}, so the client recovers the
+   * same code and metadata a server-side thrower produced. An absent, unrecognized, or unrelated
+   * code degrades to the common mapping rather than guessing.
    */
-  private static RuntimeException preconditionException(String sagaId, StatusRuntimeException e) {
+  private static RuntimeException preconditionException(StatusRuntimeException e) {
     ErrorInfo info = errorInfo(e);
     if (info == null) {
       return mapCommon(e);
     }
+    SagaErrorCode code = SagaErrorCode.fromCode(info.getReason()).orElse(null);
+    if (code == null) {
+      // The reason token is a SagaErrorCode.name() (e.g. "SAGA_WRONG_STATE"), not the full
+      // DB-SAGA-NNNNN code; try both encodings the daemon may use for forward compatibility.
+      try {
+        code = SagaErrorCode.valueOf(info.getReason());
+      } catch (IllegalArgumentException unknown) {
+        return mapCommon(e);
+      }
+    }
+    if (code != SagaErrorCode.SAGA_WRONG_STATE && code != SagaErrorCode.SAGA_PARKED) {
+      return mapCommon(e);
+    }
     try {
-      SagaStatePreconditionException.Code code =
-          SagaStatePreconditionException.Code.valueOf(info.getReason());
-      return new SagaStatePreconditionException(
-          sagaId, code, "Saga '" + sagaId + "' is not in a state that allows this operation");
-    } catch (IllegalArgumentException unknownCode) {
+      return SagaStatePreconditionException.fromWire(code, info.getMetadataMap());
+    } catch (IllegalArgumentException schemaMismatch) {
+      // Wire metadata doesn't satisfy the code's schema — protocol drift; degrade rather than
+      // shim the exception into a partial state.
       return mapCommon(e);
     }
   }

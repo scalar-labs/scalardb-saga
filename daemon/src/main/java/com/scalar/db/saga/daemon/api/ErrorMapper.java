@@ -122,9 +122,13 @@ public final class ErrorMapper {
         (e, ctx) -> {
           // The machine-readable code (SAGA_WRONG_STATE / SAGA_PARKED) is the contract; the message
           // is daemon-owned rather than the core exception's, and the caller can GET the saga for
-          // its actual state.
+          // its actual state. getErrorCode() is @Nullable on the base but always set for this
+          // subclass — every SagaStatePreconditionException goes through the code-carrying
+          // factories.
           Map<String, Object> body =
-              error(e.getCode().name(), "The saga is not in a state that allows this operation");
+              error(
+                  java.util.Objects.requireNonNull(e.getErrorCode(), "errorCode").name(),
+                  "The saga is not in a state that allows this operation");
           body.put("sagaId", e.getSagaId());
           ctx.status(422).json(body);
         });

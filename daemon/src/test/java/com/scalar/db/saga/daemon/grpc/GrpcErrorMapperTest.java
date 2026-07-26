@@ -82,8 +82,7 @@ class GrpcErrorMapperTest {
   void toStatusRuntimeException_preconditionGiven_carriesCodeAsReasonNotDescription() {
     StatusRuntimeException e =
         GrpcErrorMapper.toStatusRuntimeException(
-            new SagaStatePreconditionException(
-                "s-1", SagaStatePreconditionException.Code.SAGA_WRONG_STATE, "wrong state"));
+            SagaStatePreconditionException.wrongState("s-1", "RUNNING", "recover"));
 
     assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.FAILED_PRECONDITION);
     // The code moved off the description onto the reason; the description is a daemon-owned

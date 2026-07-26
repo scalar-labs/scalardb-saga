@@ -13,6 +13,7 @@ import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.protobuf.StatusProto;
 import java.util.Map;
+import java.util.Objects;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -86,13 +87,17 @@ final class GrpcErrorMapper {
     if (t instanceof SagaStatePreconditionException e) {
       // An admin mutation on a saga in the wrong state — a precondition failure, not transient, so
       // FAILED_PRECONDITION (the gRPC analogue of REST 422). The machine-readable code is the
-      // contract and rides an ErrorInfo detail (its name matches the REST error code); the
-      // description is a daemon-owned literal and the exception's message is not surfaced.
+      // contract and rides an ErrorInfo detail; the exception's metadata (saga_id, current_state,
+      // requested_operation) rides alongside so the client SDK can reconstruct the exception with
+      // full context. The description is a daemon-owned literal; the exception's message is not
+      // surfaced.
       return statusWithReason(
           Status.Code.FAILED_PRECONDITION,
           "The saga is not in a state that allows this operation",
-          e.getCode().name(),
-          Map.of());
+          // getErrorCode() is @Nullable on the base but is always set for this subclass — every
+          // SagaStatePreconditionException goes through the code-carrying factories.
+          Objects.requireNonNull(e.getErrorCode(), "errorCode").name(),
+          e.getMetadata());
     }
     if (t instanceof SagaConcurrentModificationException) {
       // A lost compare-and-set — a transient race, so ABORTED (the gRPC analogue of REST 409); a

@@ -21,6 +21,7 @@ import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.definition.SagaDefinition.RecoveryStrategy;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
@@ -126,8 +127,8 @@ class DefaultSagaAdminServiceTest {
     // Act & Assert
     assertThatThrownBy(() -> service.recoverSaga(SAGA_ID, "why"))
         .isInstanceOf(SagaStatePreconditionException.class)
-        .extracting(e -> ((SagaStatePreconditionException) e).getCode())
-        .isEqualTo(SagaStatePreconditionException.Code.SAGA_WRONG_STATE);
+        .extracting(e -> ((SagaStatePreconditionException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.SAGA_WRONG_STATE);
     verify(engine, never()).recover(any(), any(), any());
   }
 
@@ -139,8 +140,8 @@ class DefaultSagaAdminServiceTest {
     // Act & Assert
     assertThatThrownBy(() -> service.recoverSaga(SAGA_ID, "why"))
         .isInstanceOf(SagaStatePreconditionException.class)
-        .extracting(e -> ((SagaStatePreconditionException) e).getCode())
-        .isEqualTo(SagaStatePreconditionException.Code.SAGA_PARKED);
+        .extracting(e -> ((SagaStatePreconditionException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.SAGA_PARKED);
   }
 
   @Test
@@ -293,8 +294,8 @@ class DefaultSagaAdminServiceTest {
     // Act & Assert
     assertThatThrownBy(() -> service.forceComplete(SAGA_ID, "why"))
         .isInstanceOf(SagaStatePreconditionException.class)
-        .extracting(e -> ((SagaStatePreconditionException) e).getCode())
-        .isEqualTo(SagaStatePreconditionException.Code.SAGA_WRONG_STATE);
+        .extracting(e -> ((SagaStatePreconditionException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.SAGA_WRONG_STATE);
   }
 
   // ---------------------------------------------------------------------------

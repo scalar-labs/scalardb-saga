@@ -14,6 +14,7 @@ import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaPermissionDeniedException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
@@ -237,13 +238,19 @@ class GrpcSagaAdminClientTest {
 
   @Test
   void recoverSaga_failedPrecondition_reconstructsPreconditionWithCode() {
-    // The daemon sends the machine-readable code name as the ErrorInfo reason
+    // The daemon sends the machine-readable code name as the ErrorInfo reason and the exception's
+    // metadata (saga_id, current_state, requested_operation) as ErrorInfo.metadata; the client
+    // reconstructs the exception with the same code and metadata.
+    Map<String, String> metadata = new java.util.LinkedHashMap<>();
+    metadata.put("saga_id", "s-1");
+    metadata.put("current_state", "RUNNING");
+    metadata.put("requested_operation", "recover");
     fake.recoverError =
-        statusWithReason(Status.Code.FAILED_PRECONDITION, "SAGA_WRONG_STATE", Map.of());
+        statusWithReason(Status.Code.FAILED_PRECONDITION, "SAGA_WRONG_STATE", metadata);
     assertThatThrownBy(() -> client.recoverSaga("s-1", "x"))
         .isInstanceOf(SagaStatePreconditionException.class)
-        .extracting(e -> ((SagaStatePreconditionException) e).getCode())
-        .isEqualTo(SagaStatePreconditionException.Code.SAGA_WRONG_STATE);
+        .extracting(e -> ((SagaStatePreconditionException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.SAGA_WRONG_STATE);
   }
 
   @Test
