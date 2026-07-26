@@ -3,58 +3,62 @@ package com.scalar.db.saga.exception;
 import java.util.Objects;
 
 /**
- * Thrown when the saga store layer encounters a failure (e.g., a database write error).
+ * Thrown when the saga store layer encounters a failure (e.g., a database write error, a
+ * serialization or parse failure).
  *
- * <p>Carries a {@link #isRetryable()} flag that separates a <em>transient</em> failure — a store
- * outage or a retry-exhausted transaction, where retrying the operation may succeed — from a
- * <em>permanent</em> one — a serialization or parse failure, where retrying always fails the same
- * way. The daemon's error mappers use it to choose a retryable ({@code UNAVAILABLE} / {@code 503})
- * versus a non-retryable ({@code INTERNAL} / {@code 500}) wire code, so a permanent failure is not
- * retried futilely and is not misreported to the caller as a transient outage.
+ * <p>Carries one of three codes chosen by the static factory used:
  *
- * <p>Construct via {@link #retryable(String, Throwable)} or {@link #nonRetryable(String,
- * Throwable)}.
+ * <ul>
+ *   <li>{@link SagaErrorCode#PERSISTENCE_STORE_UNAVAILABLE} — a transient store failure or a
+ *       retry-exhausted transaction; construct via {@link #storeUnavailable(Throwable)}.
+ *   <li>{@link SagaErrorCode#PERSISTENCE_SERIALIZATION_FAILED} — a permanent JSON serialization
+ *       failure; construct via {@link #serializationFailed(Throwable)}.
+ *   <li>{@link SagaErrorCode#PERSISTENCE_DESERIALIZATION_FAILED} — a permanent JSON or event-stream
+ *       parse failure; construct via {@link #deserializationFailed(Throwable)}.
+ * </ul>
+ *
+ * <p>{@link #isRetryable()} derives from the code's {@link SagaErrorCode.Category}: {@code true}
+ * for {@link SagaErrorCode.Category#RETRYABLE_SERVER_ERROR}, {@code false} otherwise. The daemon's
+ * error mappers read the flag to pick a retryable ({@code UNAVAILABLE} / {@code 503}) versus a
+ * non-retryable ({@code INTERNAL} / {@code 500}) wire code, so a permanent failure is not retried
+ * futilely and is not misreported to the caller as a transient outage.
  */
 public class SagaPersistenceException extends SagaRuntimeException {
 
   private final boolean retryable;
 
-  private SagaPersistenceException(String message, Throwable cause, boolean retryable) {
-    super(
-        Objects.requireNonNull(message, "message must not be null"),
-        Objects.requireNonNull(cause, "cause must not be null"));
-    this.retryable = retryable;
+  private SagaPersistenceException(SagaErrorCode code, Throwable cause) {
+    super(code, ErrorMetadata.of(), Objects.requireNonNull(cause, "cause must not be null"));
+    this.retryable = code.category() == SagaErrorCode.Category.RETRYABLE_SERVER_ERROR;
   }
 
   /**
-   * Creates an exception for a <em>transient</em> failure — a store outage or a retry-exhausted
-   * transaction — that may succeed if the operation is retried.
-   *
-   * @param message the detail message
-   * @param cause the underlying cause
-   * @return a retryable persistence exception
+   * A transient store failure — a store outage, an unresolvable transaction commit, or a
+   * retry-exhausted operation — that may succeed if the operation is retried.
    */
-  public static SagaPersistenceException retryable(String message, Throwable cause) {
-    return new SagaPersistenceException(message, cause, true);
+  public static SagaPersistenceException storeUnavailable(Throwable cause) {
+    return new SagaPersistenceException(SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE, cause);
   }
 
   /**
-   * Creates an exception for a <em>permanent</em> failure — a serialization or parse error — that
-   * always fails the same way, so the operation must not be retried.
-   *
-   * @param message the detail message
-   * @param cause the underlying cause
-   * @return a non-retryable persistence exception
+   * A permanent JSON-serialization failure — the payload cannot be encoded, so retrying always
+   * fails the same way.
    */
-  public static SagaPersistenceException nonRetryable(String message, Throwable cause) {
-    return new SagaPersistenceException(message, cause, false);
+  public static SagaPersistenceException serializationFailed(Throwable cause) {
+    return new SagaPersistenceException(SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED, cause);
+  }
+
+  /**
+   * A permanent JSON-deserialization or event-stream parse failure — the stored data cannot be
+   * decoded, so retrying always fails the same way.
+   */
+  public static SagaPersistenceException deserializationFailed(Throwable cause) {
+    return new SagaPersistenceException(SagaErrorCode.PERSISTENCE_DESERIALIZATION_FAILED, cause);
   }
 
   /**
    * Whether retrying the failed operation may succeed (a transient failure) rather than fail
-   * identically (a permanent failure).
-   *
-   * @return {@code true} for a transient failure, {@code false} for a permanent one
+   * identically (a permanent failure). Derived from the code's {@link SagaErrorCode.Category}.
    */
   public boolean isRetryable() {
     return retryable;

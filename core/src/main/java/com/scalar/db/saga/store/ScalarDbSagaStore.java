@@ -128,7 +128,7 @@ public class ScalarDbSagaStore implements SagaStore {
     try {
       txManager.close();
     } catch (Exception e) {
-      throw SagaPersistenceException.retryable("Failed to close transaction manager", e);
+      throw SagaPersistenceException.storeUnavailable(e);
     }
   }
 
@@ -1131,9 +1131,7 @@ public class ScalarDbSagaStore implements SagaStore {
               sleepForRetry(v);
               continue;
             }
-            throw SagaPersistenceException.retryable(
-                "Failed to " + operationName + ": commit status unknown and verification failed",
-                e);
+            throw SagaPersistenceException.storeUnavailable(e);
           }
         }
         lastException = e;
@@ -1144,7 +1142,7 @@ public class ScalarDbSagaStore implements SagaStore {
               "Commit conflict for {} (txId={})",
               operationName,
               e.getTransactionId().orElse("unknown"));
-          throw SagaPersistenceException.retryable("Failed to " + operationName, e);
+          throw SagaPersistenceException.storeUnavailable(e);
         }
         logger.debug(
             "Commit conflict for {} (txId={}), retrying",
@@ -1164,7 +1162,7 @@ public class ScalarDbSagaStore implements SagaStore {
         if (e instanceof RuntimeException re) {
           throw re;
         }
-        throw SagaPersistenceException.retryable("Failed to " + operationName, e);
+        throw SagaPersistenceException.storeUnavailable(e);
       }
     }
     logger.warn("All {} attempts exhausted for {}", maxAttempts, operationName, lastException);
@@ -1176,8 +1174,7 @@ public class ScalarDbSagaStore implements SagaStore {
       // writes and exhaust with no progress; classify it truthfully as 409, not 503.
       throw new SagaConcurrentModificationException(sagaId, cause);
     }
-    throw SagaPersistenceException.retryable(
-        "Failed to " + operationName + " after " + maxAttempts + " attempts", cause);
+    throw SagaPersistenceException.storeUnavailable(cause);
   }
 
   private void sleepForRetry(int retryIndex) {
@@ -1186,7 +1183,7 @@ public class ScalarDbSagaStore implements SagaStore {
       Thread.sleep(delay);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
-      throw SagaPersistenceException.retryable("Interrupted during retry backoff", e);
+      throw SagaPersistenceException.storeUnavailable(e);
     }
   }
 
@@ -1418,7 +1415,7 @@ public class ScalarDbSagaStore implements SagaStore {
     try {
       eventType = EventType.valueOf(eventTypeStr);
     } catch (IllegalArgumentException e) {
-      throw SagaPersistenceException.nonRetryable("Unknown event type: " + eventTypeStr, e);
+      throw SagaPersistenceException.deserializationFailed(e);
     }
 
     if (stepIndex >= 0) {
@@ -1432,9 +1429,8 @@ public class ScalarDbSagaStore implements SagaStore {
             case STEP_COMPENSATED -> StepEvent.compensated(stepIndex, name);
             case STEP_COMPENSATION_FAILED -> StepEvent.compensationFailed(stepIndex, name, payload);
             default ->
-                throw SagaPersistenceException.nonRetryable(
-                    "Unknown step event type: " + eventType,
-                    new IllegalStateException(eventTypeStr));
+                throw SagaPersistenceException.deserializationFailed(
+                    new IllegalStateException("Unknown step event type: " + eventType));
           };
       return event.withTimestamp(createdAt);
     } else {
@@ -1450,9 +1446,8 @@ public class ScalarDbSagaStore implements SagaStore {
             case SAGA_RECOVERING, SAGA_RESET ->
                 StatusEvent.reconstruct(eventType, AdminAuditPayload.target(payload), payload);
             default ->
-                throw SagaPersistenceException.nonRetryable(
-                    "Unknown saga event type: " + eventType,
-                    new IllegalStateException(eventTypeStr));
+                throw SagaPersistenceException.deserializationFailed(
+                    new IllegalStateException("Unknown saga event type: " + eventType));
           };
       return event.withTimestamp(createdAt);
     }
@@ -1501,7 +1496,7 @@ public class ScalarDbSagaStore implements SagaStore {
     try {
       return objectMapper.writeValueAsString(obj);
     } catch (JsonProcessingException e) {
-      throw SagaPersistenceException.nonRetryable("Failed to serialize JSON", e);
+      throw SagaPersistenceException.serializationFailed(e);
     }
   }
 

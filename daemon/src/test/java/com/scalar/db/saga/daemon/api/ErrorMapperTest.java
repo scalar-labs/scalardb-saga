@@ -55,14 +55,14 @@ class ErrorMapperTest {
     app.get(
         "/persist-transient",
         ctx -> {
-          throw SagaPersistenceException.retryable(
-              "db down on secret_table", new RuntimeException("io"));
+          throw SagaPersistenceException.storeUnavailable(
+              new RuntimeException("db down on secret_table"));
         });
     app.get(
         "/persist-permanent",
         ctx -> {
-          throw SagaPersistenceException.nonRetryable(
-              "bad json for secret_table", new RuntimeException("parse"));
+          throw SagaPersistenceException.serializationFailed(
+              new RuntimeException("bad json for secret_table"));
         });
     app.start(0);
   }

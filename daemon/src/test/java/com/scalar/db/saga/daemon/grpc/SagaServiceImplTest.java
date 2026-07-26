@@ -294,8 +294,8 @@ class SagaServiceImplTest {
   void startSaga_retryablePersistenceError_returnsUnavailableWithoutLeakingMessage() {
     when(orchestrator.startAsync("transfer", Map.of()))
         .thenThrow(
-            SagaPersistenceException.retryable(
-                "DB write failed on secret_table host=10.0.0.5", new RuntimeException("io")));
+            SagaPersistenceException.storeUnavailable(
+                new RuntimeException("DB write failed on secret_table host=10.0.0.5")));
 
     assertThatThrownBy(() -> stub(0).startSaga(startByName("transfer", true)))
         .isInstanceOfSatisfying(
@@ -314,8 +314,8 @@ class SagaServiceImplTest {
     // UNAVAILABLE — the client would retry it futilely. It maps to INTERNAL instead.
     when(orchestrator.startAsync("transfer", Map.of()))
         .thenThrow(
-            SagaPersistenceException.nonRetryable(
-                "Failed to serialize payload for secret_table", new RuntimeException("bad json")));
+            SagaPersistenceException.serializationFailed(
+                new RuntimeException("Failed to serialize payload for secret_table")));
 
     assertThatThrownBy(() -> stub(0).startSaga(startByName("transfer", true)))
         .isInstanceOfSatisfying(

@@ -1943,11 +1943,14 @@ class ScalarDbSagaStoreTest {
     when(tx2.scan(any(Scan.class))).thenThrow(mock(CrudException.class));
     when(tx3.scan(any(Scan.class))).thenThrow(mock(CrudException.class));
 
-    // Act & Assert
+    // Act & Assert — the exhaustion path throws a retryable (store-unavailable) exception with
+    // the code's fixed message; the per-attempt cause chain carries the underlying UTSE and any
+    // suppressed verifier failures for debugging.
     assertThatThrownBy(
             () -> retryStore.createSaga("saga-1", "order-saga", "engine-1", Map.of(), "v1"))
         .isInstanceOf(SagaPersistenceException.class)
-        .hasMessageContaining("commit status unknown and verification failed");
+        .extracting(e -> ((SagaPersistenceException) e).isRetryable())
+        .isEqualTo(true);
   }
 
   @Test
@@ -1983,7 +1986,7 @@ class ScalarDbSagaStoreTest {
     // failure. It must propagate as-is, not be retried and masked as a retryable failure.
     doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
     SagaPersistenceException verifierError =
-        SagaPersistenceException.nonRetryable("bad payload", new RuntimeException("parse"));
+        SagaPersistenceException.deserializationFailed(new RuntimeException("parse"));
     ScalarDbSagaStore store2 =
         new ScalarDbSagaStore(
             txManager, objectMapper, schema, ScalarDbSagaStoreConfig.builder().build());
