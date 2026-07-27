@@ -9,11 +9,10 @@ import com.scalar.db.saga.api.SagaPage;
 import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.exception.ExceptionRegistry;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
-import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
-import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaNotFoundException;
-import com.scalar.db.saga.exception.SagaStatePreconditionException;
+import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.rpc.AdminServiceGrpc;
 import com.scalar.db.saga.rpc.AdminServiceGrpc.AdminServiceBlockingStub;
 import com.scalar.db.saga.rpc.InterventionRequest;
@@ -209,20 +208,21 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
   // --------------------------------------------------------------------------
 
   /**
-   * Maps a single-saga mutation failure to its api exception. The daemon carries a machine-readable
-   * reason in an {@link ErrorInfo} detail: a {@code NOT_FOUND} whose reason is {@code
-   * SAGA_DEFINITION_NOT_FOUND} reconstructs {@link SagaDefinitionNotFoundException} (the saga's
-   * definition is unregistered — the caller must re-register it), otherwise it is a missing saga.
-   * The wrong-state {@code FAILED_PRECONDITION} and lost-CAS {@code ABORTED} carry {@code sagaId};
-   * everything else routes through {@link #mapCommon}.
+   * Maps a single-saga mutation failure to its api exception. When the daemon attached an {@link
+   * ErrorInfo}, {@link ExceptionRegistry} reconstructs the typed exception from its wire code +
+   * metadata (inverting what {@code GrpcErrorMapper} put on the wire). Statuses without an {@code
+   * ErrorInfo} fall through to transport-level dispatch: {@code NOT_FOUND} → {@code
+   * SagaNotFoundException} using the caller-supplied id; {@code ABORTED} → {@code
+   * SagaConcurrentModificationException}; everything else via {@link #mapCommon}.
    */
   private static RuntimeException mapMutation(StatusRuntimeException e, String sagaId) {
+    SagaRuntimeException reconstructed = reconstructFromErrorInfo(e);
+    if (reconstructed != null) {
+      return reconstructed;
+    }
     Status.Code code = e.getStatus().getCode();
     if (code == Status.Code.NOT_FOUND) {
-      return notFoundException(sagaId, errorInfo(e));
-    }
-    if (code == Status.Code.FAILED_PRECONDITION) {
-      return preconditionException(e);
+      return new SagaNotFoundException(sagaId);
     }
     if (code == Status.Code.ABORTED) {
       return new SagaConcurrentModificationException(sagaId, e);
@@ -231,52 +231,16 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
   }
 
   /**
-   * Distinguishes the two {@code NOT_FOUND} shapes by the {@link ErrorInfo} reason. A reason of
-   * {@link SagaErrorCode#SAGA_DEFINITION_NOT_FOUND} or {@link
-   * SagaErrorCode#SAGA_DEFINITION_VERSION_NOT_FOUND} reconstructs {@link
-   * SagaDefinitionNotFoundException} from its schema-keyed metadata; anything else is a missing
-   * saga.
+   * Reconstructs a typed exception from the daemon's {@link ErrorInfo}, or returns {@code null} if
+   * the response has no {@link ErrorInfo} (older daemon, intermediary stripped it, or a
+   * transport-level failure that never reached the mapper).
    */
-  private static RuntimeException notFoundException(String sagaId, @Nullable ErrorInfo info) {
-    if (info != null) {
-      SagaErrorCode code = SagaErrorCode.fromCode(info.getReason()).orElse(null);
-      if (code == SagaErrorCode.SAGA_DEFINITION_NOT_FOUND
-          || code == SagaErrorCode.SAGA_DEFINITION_VERSION_NOT_FOUND) {
-        String sagaName = info.getMetadataMap().get("saga_name");
-        if (sagaName != null) {
-          String version = info.getMetadataMap().get("version");
-          return version == null
-              ? new SagaDefinitionNotFoundException(sagaName)
-              : new SagaDefinitionNotFoundException(sagaName, version);
-        }
-      }
-    }
-    return new SagaNotFoundException(sagaId);
-  }
-
-  /**
-   * Reconstructs the wrong-state exception. The daemon sends the {@link SagaErrorCode#code()} as
-   * the {@link ErrorInfo} reason, and the exception's metadata rides in {@link
-   * ErrorInfo#getMetadataMap()} keyed by the code's schema keys — so the client recovers the same
-   * code and metadata a server-side thrower produced. An absent, unrecognized, or unrelated code
-   * degrades to the common mapping rather than guessing.
-   */
-  private static RuntimeException preconditionException(StatusRuntimeException e) {
+  private static @Nullable SagaRuntimeException reconstructFromErrorInfo(StatusRuntimeException e) {
     ErrorInfo info = errorInfo(e);
     if (info == null) {
-      return mapCommon(e);
+      return null;
     }
-    SagaErrorCode code = SagaErrorCode.fromCode(info.getReason()).orElse(null);
-    if (code != SagaErrorCode.SAGA_WRONG_STATE && code != SagaErrorCode.SAGA_PARKED) {
-      return mapCommon(e);
-    }
-    try {
-      return SagaStatePreconditionException.fromWire(code, info.getMetadataMap());
-    } catch (IllegalArgumentException schemaMismatch) {
-      // Wire metadata doesn't satisfy the code's schema — protocol drift; degrade rather than
-      // shim the exception into a partial state.
-      return mapCommon(e);
-    }
+    return ExceptionRegistry.reconstruct(info.getReason(), info.getMetadataMap());
   }
 
   /** The first {@link ErrorInfo} detail the daemon attached to {@code e}, or {@code null}. */

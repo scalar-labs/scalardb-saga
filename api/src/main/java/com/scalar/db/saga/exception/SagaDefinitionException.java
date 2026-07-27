@@ -90,4 +90,26 @@ public class SagaDefinitionException extends SagaRuntimeException {
     return new SagaDefinitionException(
         SagaErrorCode.HTTP_ENDPOINT_LOOKUP_FAILED, ErrorMetadata.of("detail", detail));
   }
+
+  /**
+   * Reconstructs the exception from a wire-received {@link SagaErrorCode} and metadata, for use by
+   * the client SDK when it decodes an {@code ErrorInfo} from the daemon. The code must be one this
+   * exception represents (any of the definition/step/endpoint codes routed here); other codes throw
+   * {@link IllegalArgumentException}.
+   */
+  public static SagaDefinitionException fromWire(SagaErrorCode code, Map<String, String> metadata) {
+    Objects.requireNonNull(code, "code must not be null");
+    switch (code) {
+      case INVALID_DEFINITION:
+      case MALFORMED_DEFINITION:
+      case UNREADABLE_DEFINITION_SOURCE:
+      case DEFINITION_VERSION_CONTENT_CONFLICT:
+      case INVALID_STEP_CLASS:
+      case STEP_CLASS_NOT_SUPPORTED_ON_DAEMON:
+      case HTTP_ENDPOINT_LOOKUP_FAILED:
+        return new SagaDefinitionException(code, metadata);
+      default:
+        throw new IllegalArgumentException("SagaDefinitionException does not carry code " + code);
+    }
+  }
 }
