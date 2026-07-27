@@ -33,3 +33,156 @@ jobs:
 
       - name: Check compiler warnings
         run: ./gradlew clean compileTestJava --no-build-cache
+
+  dockerfile-lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Lint the daemon Dockerfile
+        uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5 # v3.3.0
+        with:
+          dockerfile: daemon/docker/Dockerfile
+
+  # The unit and integration suites exercise the daemon in-process; nothing there would catch a
+  # packaging fault — a wrong path in the Dockerfile, a start script that cannot find its jars, a file
+  # unreadable by uid 201. Those only appear when the built image is actually run, and they would
+  # otherwise be found by whoever pulled the release.
+  image-smoke-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Java 21
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6.1.0
+
+      - name: Assemble the Docker build context
+        run: ./gradlew :daemon:dockerContext
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      # Host architecture only, and loaded rather than pushed: this checks that the image runs, which
+      # is architecture-independent here. The release workflow is what builds both architectures.
+      - name: Build the image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: daemon/build/docker
+          load: true
+          tags: scalardb-saga-daemon:ci
+          build-args: |
+            IMAGE_VERSION=ci
+            IMAGE_REVISION=${{ github.sha }}
+
+      # A SQLite store and one definition, so the daemon has everything it needs to reach a serving
+      # state with no external dependencies. The service base URL is deliberately unreachable — the
+      # saga is never started, and registration only has to resolve the name.
+      - name: Write a minimal configuration
+        run: |
+          mkdir -p smoke/definitions
+          cat > smoke/definitions/smoke-saga.json <<'JSON'
+          {
+            "name": "smoke-saga",
+            "mode": "SAGA",
+            "steps": [
+              {
+                "name": "charge",
+                "service": "payment",
+                "execution": { "method": "POST", "path": "/charge" },
+                "compensation": { "method": "POST", "path": "/refund" }
+              }
+            ]
+          }
+          JSON
+          cat > smoke/server.properties <<'PROPS'
+          scalar.db.storage=jdbc
+          scalar.db.contact_points=jdbc:sqlite:/tmp/smoke.db?busy_timeout=10000
+          scalar.db.saga.store.num_buckets=1
+          scalar.db.saga.server.definitions_path=/smoke/definitions
+          scalar.db.saga.server.service.payment.base_url=http://127.0.0.1:1
+          scalar.db.saga.server.security.insecure_mode.enabled=true
+          PROPS
+
+      - name: Check the image runs as a non-root user
+        run: |
+          set -euo pipefail
+          user=$(docker image inspect --format '{{.Config.User}}' scalardb-saga-daemon:ci)
+          if [ "${user}" != "201:201" ]; then
+            echo "::error::image runs as '${user}', expected 201:201"
+            exit 1
+          fi
+
+      - name: Start the container
+        run: |
+          docker run --detach --name saga \
+            --publish 8080:8080 --publish 50051:50051 \
+            --volume "$PWD/smoke:/smoke:ro" \
+            scalardb-saga-daemon:ci /smoke/server.properties
+
+      - name: Wait for the REST health endpoint
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/health)" = "200" ]; then
+              echo "GET /health returned 200"
+              exit 0
+            fi
+            if [ "$(docker inspect --format '{{.State.Running}}' saga)" != "true" ]; then
+              echo "::error::container exited before becoming healthy"
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "::error::/health did not return 200 within 120s"
+          exit 1
+
+      # A TCP connect, not a gRPC call: this asserts the transport is bound and reachable in the
+      # packaged image. The health service's actual semantics are covered by the daemon's
+      # integrationTest suite, which needs no container.
+      #
+      # The redirect is `<`, not `>`: writing to the socket sends a byte that is not an HTTP/2 client
+      # preface, and gRPC answers with an Http2Exception stack trace in the container logs — alarming
+      # noise in CI output caused entirely by the probe. Opening for read establishes and closes the
+      # connection without sending anything.
+      - name: Check the gRPC port is bound
+        # Block scalar because the command contains ": ", which YAML would otherwise read as a mapping.
+        run: |
+          timeout 30 bash -c 'until : < /dev/tcp/127.0.0.1/50051; do sleep 1; done'
+
+      # Guards against a regression in the shipped logback.xml: with no configuration on the classpath
+      # Logback would default to DEBUG, flooding an operator's log pipeline.
+      - name: Check startup logging
+        run: |
+          set -euo pipefail
+          logs=$(docker logs saga 2>&1)
+          if ! grep -q "SagaServer started" <<<"${logs}"; then
+            echo "::error::startup line missing from the container logs"
+            exit 1
+          fi
+          if grep -q " DEBUG " <<<"${logs}"; then
+            echo "::error::container logged at DEBUG; the default logback.xml is not being picked up"
+            exit 1
+          fi
+
+      # SIGTERM must reach the JVM so SagaServer's shutdown hook drains in-flight sagas. If a wrapper
+      # script swallowed the signal, the daemon would be SIGKILLed after the timeout instead.
+      - name: Check graceful shutdown
+        run: |
+          set -euo pipefail
+          docker stop --timeout 60 saga
+          if ! docker logs saga 2>&1 | grep -q "SagaServer stopped"; then
+            echo "::error::no clean shutdown line; SIGTERM did not reach the JVM"
+            exit 1
+          fi
+
+      - name: Container logs
+        if: failure()
+        run: docker logs saga 2>&1 || true

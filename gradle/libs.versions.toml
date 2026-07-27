@@ -25,6 +25,12 @@ grpc = "1.82.1"
 protobuf-java = "4.35.1"
 protobuf-plugin = "0.10.0"
 maven-publish-plugin = "0.37.0"
+# Netty is never a direct dependency — it arrives transitively via gRPC and via ScalarDB's Azure and
+# AWS SDKs, which pull different 4.1.x lines. Netty requires every one of its modules to be on the
+# same version (the native transports resolve version-matched .so files), so the daemon imports the
+# BOM to align them. Bump this to the highest 4.1.x that any dependency requests.
+netty = "4.1.133.Final"
+license-report = "3.1.4"
 
 [libraries]
 scalardb = { module = "com.scalar-labs:scalardb", version.ref = "scalardb" }
@@ -55,3 +61,7 @@ grpc-services = { module = "io.grpc:grpc-services" }
 grpc-netty-shaded = { module = "io.grpc:grpc-netty-shaded" }
 grpc-inprocess = { module = "io.grpc:grpc-inprocess" }
 protobuf-java = { module = "com.google.protobuf:protobuf-java", version.ref = "protobuf-java" }
+netty-bom = { module = "io.netty:netty-bom", version.ref = "netty" }
+# Version deliberately omitted: it comes from netty-bom, so the native artifact can never drift from
+# the netty classes that load it.
+netty-transport-native-epoll = { module = "io.netty:netty-transport-native-epoll" }
