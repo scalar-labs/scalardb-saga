@@ -254,10 +254,18 @@ public enum SagaErrorCode {
   UNRECOGNIZED_SERVER_ERROR(
       "DB-SAGA-40003",
       Category.CLIENT_ERROR,
-      "The server returned an error code this client does not recognize",
-      Schema.of("server_error_code"),
-      "The server is likely newer than this client SDK.",
+      "The server returned a value this client does not recognize",
+      Schema.of("server_value"),
+      "The server sent an error-code token or wire enum value the client SDK has no mapping for. Usually a version skew: the server is newer than this client SDK.",
       "Upgrade the client SDK to a version compatible with the server."),
+
+  REQUEST_ABORTED(
+      "DB-SAGA-40004",
+      Category.CLIENT_ERROR,
+      "The request was aborted before it could complete",
+      Schema.none(),
+      "The caller cancelled the operation (thread interrupt, future cancellation, or client shutdown) before the RPC completed.",
+      "If the abort was unintentional, avoid interrupting or cancelling the calling thread and retry."),
   ;
 
   private final String code;

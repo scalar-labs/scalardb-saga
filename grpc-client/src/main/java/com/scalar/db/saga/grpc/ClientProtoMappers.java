@@ -8,6 +8,8 @@ import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.api.TimelineEvent;
+import com.scalar.db.saga.exception.ErrorMetadata;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.rpc.ListSagasRequest;
 import com.scalar.db.saga.rpc.ListSagasResponse;
@@ -57,12 +59,14 @@ final class ClientProtoMappers {
   static SagaStatus fromProtoStatus(com.scalar.db.saga.rpc.SagaStatus status) {
     String name = status.name();
     if (!name.startsWith(STATUS_PREFIX) || name.equals(STATUS_PREFIX + "UNSPECIFIED")) {
-      throw new SagaRuntimeException("Unexpected wire saga status: " + name);
+      throw new SagaRuntimeException(
+          SagaErrorCode.UNRECOGNIZED_SERVER_ERROR, ErrorMetadata.of("server_value", name));
     }
     try {
       return SagaStatus.valueOf(name.substring(STATUS_PREFIX.length()));
     } catch (IllegalArgumentException e) {
-      throw new SagaRuntimeException("Unexpected wire saga status: " + name, e);
+      throw new SagaRuntimeException(
+          SagaErrorCode.UNRECOGNIZED_SERVER_ERROR, ErrorMetadata.of("server_value", name), e);
     }
   }
 
@@ -189,12 +193,14 @@ final class ClientProtoMappers {
   static ResetResult.SkipReason fromProtoSkipReason(com.scalar.db.saga.rpc.SkipReason reason) {
     String name = reason.name();
     if (!name.startsWith(SKIP_REASON_PREFIX) || name.equals(SKIP_REASON_PREFIX + "UNSPECIFIED")) {
-      throw new SagaRuntimeException("Unexpected wire skip reason: " + name);
+      throw new SagaRuntimeException(
+          SagaErrorCode.UNRECOGNIZED_SERVER_ERROR, ErrorMetadata.of("server_value", name));
     }
     try {
       return ResetResult.SkipReason.valueOf(name.substring(SKIP_REASON_PREFIX.length()));
     } catch (IllegalArgumentException e) {
-      throw new SagaRuntimeException("Unexpected wire skip reason: " + name, e);
+      throw new SagaRuntimeException(
+          SagaErrorCode.UNRECOGNIZED_SERVER_ERROR, ErrorMetadata.of("server_value", name), e);
     }
   }
 

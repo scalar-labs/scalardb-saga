@@ -14,13 +14,14 @@ import java.util.Objects;
  */
 public class SagaUnavailableException extends SagaRuntimeException {
 
-  public SagaUnavailableException(String message) {
-    super(Objects.requireNonNull(message, "message must not be null"));
+  public SagaUnavailableException() {
+    super(SagaErrorCode.SERVICE_UNAVAILABLE, ErrorMetadata.of());
   }
 
-  public SagaUnavailableException(String message, Throwable cause) {
+  public SagaUnavailableException(Throwable cause) {
     super(
-        Objects.requireNonNull(message, "message must not be null"),
+        SagaErrorCode.SERVICE_UNAVAILABLE,
+        ErrorMetadata.of(),
         Objects.requireNonNull(cause, "cause must not be null"));
   }
 }

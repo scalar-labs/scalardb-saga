@@ -12,13 +12,14 @@ import java.util.Objects;
  */
 public class SagaUnauthenticatedException extends SagaRuntimeException {
 
-  public SagaUnauthenticatedException(String message) {
-    super(Objects.requireNonNull(message, "message must not be null"));
+  public SagaUnauthenticatedException() {
+    super(SagaErrorCode.AUTH_UNAUTHENTICATED, ErrorMetadata.of());
   }
 
-  public SagaUnauthenticatedException(String message, Throwable cause) {
+  public SagaUnauthenticatedException(Throwable cause) {
     super(
-        Objects.requireNonNull(message, "message must not be null"),
+        SagaErrorCode.AUTH_UNAUTHENTICATED,
+        ErrorMetadata.of(),
         Objects.requireNonNull(cause, "cause must not be null"));
   }
 }

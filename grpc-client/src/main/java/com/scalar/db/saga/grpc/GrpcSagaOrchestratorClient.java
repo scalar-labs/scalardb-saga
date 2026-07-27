@@ -7,8 +7,10 @@ import com.scalar.db.saga.api.SagaDefinitionId;
 import com.scalar.db.saga.api.SagaDetail;
 import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
+import com.scalar.db.saga.exception.ErrorMetadata;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaTimeoutException;
@@ -382,7 +384,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
       Thread.sleep(half + jitter);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
-      throw new SagaRuntimeException("Interrupted while waiting to retry a saga RPC", e);
+      throw new SagaRuntimeException(SagaErrorCode.REQUEST_ABORTED, ErrorMetadata.of(), e);
     }
   }
 
@@ -475,9 +477,9 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
 
   private RuntimeException alreadyExists(@Nullable String clientSagaId, StatusRuntimeException e) {
     if (clientSagaId == null) {
-      // Server-generated ids do not collide; an ALREADY_EXISTS without a client id is unexpected.
-      return new SagaRuntimeException(
-          "Unexpected ALREADY_EXISTS for a server-generated saga id", e);
+      // Server-generated ids do not collide; an ALREADY_EXISTS without a client id is a protocol
+      // invariant violation.
+      return new SagaRuntimeException(SagaErrorCode.INTERNAL_ERROR, ErrorMetadata.of(), e);
     }
     SagaStateSnapshot existing;
     try {
@@ -485,12 +487,12 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
       // only on the rare conflict) so the exception faithfully carries the existing state.
       existing = getStateSnapshot(clientSagaId);
     } catch (RuntimeException refetchFailure) {
-      // Cannot build a SagaAlreadyExistsException without the snapshot; surface the conflict as the
-      // primary cause and attach the refetch failure as suppressed for debugging context.
+      // Cannot build a SagaAlreadyExistsException without the snapshot (its schema requires one).
+      // Surface the conflict via the raw SAGA_ALREADY_EXISTS code so callers keying on
+      // getErrorCode() still see it, and attach the refetch failure as suppressed for debugging.
       SagaRuntimeException conflict =
           new SagaRuntimeException(
-              "Saga '" + clientSagaId + "' already exists, but fetching its current state failed",
-              e);
+              SagaErrorCode.SAGA_ALREADY_EXISTS, ErrorMetadata.of("saga_id", clientSagaId), e);
       conflict.addSuppressed(refetchFailure);
       return conflict;
     }

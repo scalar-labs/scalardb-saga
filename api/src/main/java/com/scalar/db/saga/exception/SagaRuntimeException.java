@@ -4,7 +4,6 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
-import org.jspecify.annotations.Nullable;
 
 /**
  * Base type for the unchecked saga exceptions.
@@ -12,44 +11,26 @@ import org.jspecify.annotations.Nullable;
  * <p>The saga-level exceptions ({@link SagaNotFoundException}, {@link SagaAlreadyExistsException},
  * {@link SagaPersistenceException}, {@link SagaTimeoutException}, etc.) all extend {@code
  * SagaRuntimeException}, so callers can {@code catch (SagaRuntimeException e)} to handle any saga
- * failure uniformly. It is also thrown directly for failures that have no more specific type — e.g.
- * a remote client receiving an {@code INTERNAL}/unknown gRPC status.
+ * failure uniformly. It is also thrown directly for failures that have no natural typed home,
+ * notably the client SDK's {@link SagaErrorCode#UNRECOGNIZED_SERVER_ERROR} fallback.
  *
  * <p>The api may declare exceptions that only a remote implementation throws (e.g. {@link
  * SagaUnavailableException}); the {@code SagaOrchestrator} contract spans both the embedded and
  * remote implementations. (The step-level exceptions are a separate, partly-checked hierarchy and
  * do not extend this type.)
  *
- * <p><b>Error codes (migration in progress).</b> This class carries an optional {@link
- * SagaErrorCode} and its {@link Map} of validated metadata. Subclasses migrated to the
- * code-carrying constructors expose a non-null code via {@link #getErrorCode()}; subclasses still
- * on the bare-message constructors return {@code null} from {@link #getErrorCode()} and an empty
- * {@link #getMetadata()}. The bare-message constructors will be removed once every subclass has
- * been migrated; see {@code docs/plans/error-code-design.md}.
+ * <p>Every instance carries a non-null {@link SagaErrorCode} and its schema-validated metadata map.
+ * {@link Schema#validate} runs at construction, so a missing/extra/null-valued key fails fast
+ * rather than shipping to logs and the wire.
  */
 public class SagaRuntimeException extends RuntimeException {
 
-  private final @Nullable SagaErrorCode errorCode;
+  private final SagaErrorCode errorCode;
   private final Map<String, String> metadata;
-
-  public SagaRuntimeException(String message) {
-    super(Objects.requireNonNull(message, "message must not be null"));
-    this.errorCode = null;
-    this.metadata = Collections.emptyMap();
-  }
-
-  public SagaRuntimeException(String message, Throwable cause) {
-    super(
-        Objects.requireNonNull(message, "message must not be null"),
-        Objects.requireNonNull(cause, "cause must not be null"));
-    this.errorCode = null;
-    this.metadata = Collections.emptyMap();
-  }
 
   /**
    * Constructs an exception carrying a {@link SagaErrorCode} and the metadata that renders in its
-   * message. {@link Schema#validate} runs at construction, so a missing/extra/null-valued key fails
-   * fast rather than shipping to logs and the wire.
+   * message.
    *
    * <p>Typed subclasses (e.g. {@link SagaNotFoundException}) are the usual construction path; raw
    * {@code SagaRuntimeException} with a code is reserved for cases with no natural typed home,
@@ -79,18 +60,14 @@ public class SagaRuntimeException extends RuntimeException {
     this.metadata = Collections.unmodifiableMap(new LinkedHashMap<>(metadata));
   }
 
-  /**
-   * The exception's error code, or {@code null} for subclasses still constructed via the
-   * bare-message constructors. Migration removes those constructors; once every subclass has been
-   * migrated, this return will be non-null unconditionally.
-   */
-  public @Nullable SagaErrorCode getErrorCode() {
+  /** The exception's error code — always non-null. */
+  public SagaErrorCode getErrorCode() {
     return errorCode;
   }
 
   /**
    * The metadata attached to the error code, in schema-declared order. Always non-null; empty when
-   * the exception was constructed via a bare-message constructor or has a schemaless code.
+   * the code has a schemaless (no-key) shape.
    */
   public Map<String, String> getMetadata() {
     return metadata;

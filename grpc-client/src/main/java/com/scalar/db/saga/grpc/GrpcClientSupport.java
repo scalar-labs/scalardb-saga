@@ -1,5 +1,7 @@
 package com.scalar.db.saga.grpc;
 
+import com.scalar.db.saga.exception.ErrorMetadata;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaPermissionDeniedException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaTimeoutException;
@@ -80,21 +82,15 @@ final class GrpcClientSupport {
         // comes from SagaErrorCode.REQUEST_TIMEOUT.
         return new SagaTimeoutException(e);
       case UNAVAILABLE:
-        return new SagaUnavailableException(
-            description == null ? rpcLabel + " service temporarily unavailable" : description, e);
+        return new SagaUnavailableException(e);
       case PERMISSION_DENIED:
-        return new SagaPermissionDeniedException(
-            description == null ? "Permission denied" : description, e);
+        return new SagaPermissionDeniedException(e);
       case UNAUTHENTICATED:
-        return new SagaUnauthenticatedException(
-            description == null ? "Authentication required" : description, e);
+        return new SagaUnauthenticatedException(e);
       default:
         return new SagaRuntimeException(
-            rpcLabel
-                + " RPC failed ("
-                + status.getCode()
-                + ")"
-                + (description == null ? "" : ": " + description),
+            SagaErrorCode.UNRECOGNIZED_SERVER_ERROR,
+            ErrorMetadata.of("server_value", status.getCode().name()),
             e);
     }
   }

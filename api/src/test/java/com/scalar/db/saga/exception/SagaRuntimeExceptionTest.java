@@ -11,58 +11,6 @@ import org.junit.jupiter.api.Test;
 
 class SagaRuntimeExceptionTest {
 
-  // --- Bare-message constructors (kept during migration) ---------------
-
-  @Test
-  void constructor_messageGiven_setsMessage() {
-    // Arrange & Act
-    SagaRuntimeException e = new SagaRuntimeException("boom");
-
-    // Assert
-    assertThat(e.getMessage()).isEqualTo("boom");
-  }
-
-  @SuppressWarnings("NullAway")
-  @Test
-  void constructor_nullMessageGiven_throwsNullPointerException() {
-    // Arrange & Act & Assert
-    assertThatThrownBy(() -> new SagaRuntimeException((String) null))
-        .isInstanceOf(NullPointerException.class);
-  }
-
-  @Test
-  void constructor_messageAndCauseGiven_setsBoth() {
-    // Arrange
-    RuntimeException cause = new RuntimeException("inner");
-
-    // Act
-    SagaRuntimeException e = new SagaRuntimeException("boom", cause);
-
-    // Assert
-    assertThat(e.getMessage()).isEqualTo("boom");
-    assertThat(e.getCause()).isSameAs(cause);
-  }
-
-  @SuppressWarnings("NullAway")
-  @Test
-  void constructor_nullCauseGiven_throwsNullPointerException() {
-    // Arrange & Act & Assert
-    assertThatThrownBy(() -> new SagaRuntimeException("boom", (Throwable) null))
-        .isInstanceOf(NullPointerException.class);
-  }
-
-  @Test
-  void constructor_messageOnlyGiven_hasNullErrorCodeAndEmptyMetadata() {
-    // Arrange & Act
-    SagaRuntimeException e = new SagaRuntimeException("boom");
-
-    // Assert — subclasses still on bare-message ctors return null/empty during migration
-    assertThat(e.getErrorCode()).isNull();
-    assertThat(e.getMetadata()).isEmpty();
-  }
-
-  // --- Code-carrying constructors (Step 2) -----------------------------
-
   @Test
   void constructor_codeAndMetadataGiven_setsFieldsAndBuildsMessage() {
     // Arrange
@@ -185,8 +133,6 @@ class SagaRuntimeExceptionTest {
     assertThatThrownBy(() -> new SagaRuntimeException(SagaErrorCode.SAGA_NOT_FOUND, metadata))
         .isInstanceOf(IllegalArgumentException.class);
   }
-
-  // --- Class hierarchy -------------------------------------------------
 
   @Test
   void classHierarchy_always_isRuntimeException() {
