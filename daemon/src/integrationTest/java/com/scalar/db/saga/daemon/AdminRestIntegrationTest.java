@@ -3,6 +3,7 @@ package com.scalar.db.saga.daemon;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.net.http.HttpResponse;
@@ -88,8 +89,8 @@ class AdminRestIntegrationTest extends DaemonIntegrationTestSupport {
         post("/sagas/" + sagaId + "/reset", "{\"reason\":\"why\"}", auth(ADMIN_KEY));
 
     assertThat(response.statusCode()).isEqualTo(422);
-    assertThat(MAPPER.readTree(response.body()).get("error").asText())
-        .isEqualTo("SAGA_WRONG_STATE");
+    assertThat(MAPPER.readTree(response.body()).get("errorCode").asText())
+        .isEqualTo(SagaErrorCode.SAGA_WRONG_STATE.code());
   }
 
   @Test

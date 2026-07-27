@@ -14,7 +14,7 @@ class SagaDefinitionExceptionTest {
         SagaDefinitionException.definitionInvalid("transfer", "duplicate step name 'debit'");
 
     // Assert
-    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.DEFINITION_INVALID);
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.INVALID_DEFINITION);
     assertThat(e.getMetadata())
         .containsEntry("saga_name", "transfer")
         .containsEntry("detail", "duplicate step name 'debit'")
@@ -28,8 +28,8 @@ class SagaDefinitionExceptionTest {
     SagaDefinitionException e =
         SagaDefinitionException.declarativeStepInvalid("debit", "missing 'path'");
 
-    // Assert — routes through DEFINITION_INVALID with the step prefix baked into detail
-    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.DEFINITION_INVALID);
+    // Assert — routes through INVALID_DEFINITION with the step prefix baked into detail
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.INVALID_DEFINITION);
     assertThat(e.getMetadata()).containsEntry("saga_name", "");
     assertThat(e.getMetadata().get("detail"))
         .isEqualTo("declarative service step 'debit': missing 'path'");
@@ -44,7 +44,7 @@ class SagaDefinitionExceptionTest {
     SagaDefinitionException e = SagaDefinitionException.definitionMalformed("JSON", cause);
 
     // Assert
-    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.DEFINITION_MALFORMED);
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.MALFORMED_DEFINITION);
     assertThat(e.getMetadata())
         .containsEntry("source", "inline JSON")
         .containsEntry("detail", "failed to parse JSON definition")
@@ -58,7 +58,7 @@ class SagaDefinitionExceptionTest {
     SagaDefinitionException e = SagaDefinitionException.sourceUnreadable("missing.json");
 
     // Assert
-    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.DEFINITION_SOURCE_UNREADABLE);
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.UNREADABLE_DEFINITION_SOURCE);
     assertThat(e.getMetadata()).containsEntry("source", "missing.json").hasSize(1);
     assertThat(e.getCause()).isNull();
   }
@@ -72,7 +72,7 @@ class SagaDefinitionExceptionTest {
     SagaDefinitionException e = SagaDefinitionException.sourceUnreadable("f.json", cause);
 
     // Assert
-    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.DEFINITION_SOURCE_UNREADABLE);
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.UNREADABLE_DEFINITION_SOURCE);
     assertThat(e.getMetadata()).containsEntry("source", "f.json").hasSize(1);
     assertThat(e.getCause()).isSameAs(cause);
   }
@@ -97,7 +97,7 @@ class SagaDefinitionExceptionTest {
         SagaDefinitionException.stepClassInvalid("com.example.Foo", "is abstract");
 
     // Assert
-    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.STEP_CLASS_INVALID);
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.INVALID_STEP_CLASS);
     assertThat(e.getMetadata())
         .containsEntry("step_class", "com.example.Foo")
         .containsEntry("detail", "is abstract")
@@ -116,7 +116,7 @@ class SagaDefinitionExceptionTest {
             "com.example.Foo", "not found on classpath", cause);
 
     // Assert
-    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.STEP_CLASS_INVALID);
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.INVALID_STEP_CLASS);
     assertThat(e.getMetadata())
         .containsEntry("step_class", "com.example.Foo")
         .containsEntry("detail", "not found on classpath")

@@ -23,6 +23,7 @@ import com.scalar.db.saga.daemon.security.SagaSecurityProvider;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.engine.OperatorContext;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import io.javalin.Javalin;
 import java.net.URI;
@@ -188,7 +189,7 @@ class SagaAdminResourceTest {
     HttpResponse<String> response =
         send("POST", "/sagas/s1/recover", "admin", "{\"reason\":\"x\"}");
     assertThat(response.statusCode()).isEqualTo(422);
-    assertThat(response.body()).contains("SAGA_WRONG_STATE");
+    assertThat(response.body()).contains(SagaErrorCode.SAGA_WRONG_STATE.code());
   }
 
   @Test
@@ -224,7 +225,7 @@ class SagaAdminResourceTest {
         .thenThrow(SagaStatePreconditionException.wrongState(SAGA_ID, "RUNNING", "reset"));
     HttpResponse<String> response = send("POST", "/sagas/s1/reset", "admin", "{\"reason\":\"x\"}");
     assertThat(response.statusCode()).isEqualTo(422);
-    assertThat(response.body()).contains("SAGA_WRONG_STATE");
+    assertThat(response.body()).contains(SagaErrorCode.SAGA_WRONG_STATE.code());
   }
 
   @Test

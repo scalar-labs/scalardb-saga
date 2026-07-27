@@ -13,7 +13,7 @@ class SagaPermissionDeniedExceptionTest {
     SagaPermissionDeniedException e = new SagaPermissionDeniedException();
 
     // Assert
-    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.AUTH_PERMISSION_DENIED);
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.PERMISSION_DENIED);
     assertThat(e.getMetadata()).isEmpty();
     assertThat(e.getCause()).isNull();
   }
@@ -27,7 +27,7 @@ class SagaPermissionDeniedExceptionTest {
     SagaPermissionDeniedException e = new SagaPermissionDeniedException(cause);
 
     // Assert
-    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.AUTH_PERMISSION_DENIED);
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.PERMISSION_DENIED);
     assertThat(e.getMetadata()).isEmpty();
     assertThat(e.getCause()).isSameAs(cause);
   }

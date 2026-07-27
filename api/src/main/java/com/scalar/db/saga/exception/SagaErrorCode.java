@@ -13,13 +13,24 @@ import java.util.Optional;
  * this enum as their single source of truth; exception constructors are typed adapters that
  * populate the metadata map once.
  *
- * <p>Format: {@code DB-SAGA-<CATEGORY><4-DIGIT-ID>}, e.g. {@code DB-SAGA-11000}. See {@link
- * Category}.
+ * <p>Format: {@code DB-SAGA-<CATEGORY><4-DIGIT-ID>}, e.g. {@code DB-SAGA-10201}. The category-digit
+ * is the {@link Category}'s id (1=USER_ERROR, 2=RETRYABLE_SERVER_ERROR,
+ * 3=NON_RETRYABLE_SERVER_ERROR, 4=CLIENT_ERROR).
+ *
+ * <p><b>Numbering.</b> Within USER_ERROR, codes cluster into 100-slot sub-ranges by client-facing
+ * consequence (HTTP-status family): {@code 100xx}=bad-input (400), {@code 101xx}=auth (401/403),
+ * {@code 102xx}=not-found (404), {@code 103xx}=conflict (409), {@code 104xx}=precondition (422).
+ * Other categories are single flat blocks — codes number contiguously from {@code XX001}. {@code
+ * X9999} is reserved as an always-last sentinel only for categories with a real catch-all code
+ * path: {@code 39999} for {@link #INTERNAL_ERROR} (unmapped server fault) and {@code 49999} for
+ * {@link #UNRECOGNIZED_SERVER_ERROR} (unknown-code fallback in the client SDK).
  *
  * <p>Codes stay coarse: one per distinct failure class the client meaningfully differentiates, not
  * one per rule violation. A code owns the shape (schema + fixed template + docs page); per-case
  * specifics ride in the {@code detail} metadata field, following the K8s {@code Status.Reason} +
  * {@code Details.Causes[].message} and AWS {@code ValidationException} pattern.
+ *
+ * <p><b>Once a code is released, its number is frozen.</b>
  */
 // Suppress Error Prone's ImmutableEnumChecker: Schema is effectively immutable (its List field is
 // Collections.unmodifiableList of a defensive copy), but Error Prone only trusts its own
@@ -27,41 +38,43 @@ import java.util.Optional;
 @SuppressWarnings("ImmutableEnumChecker")
 public enum SagaErrorCode {
 
-  // ── USER_ERROR — Saga definition (100xx) ────────────────────────────
-  DEFINITION_INVALID(
-      "DB-SAGA-10003",
+  // ── USER_ERROR (1xxxx) ────────────────────────────────────────────────
+
+  // ── Bad request (100xx) ──────────────────────────────────────────────
+  INVALID_REQUEST(
+      "DB-SAGA-10001",
+      Category.USER_ERROR,
+      "Request is invalid",
+      Schema.of("detail"),
+      "The request failed validation at the daemon edge — a missing or malformed field, an unrecognized query parameter, or a value the engine rejected.",
+      "Fix the request per the detail and retry."),
+
+  INVALID_DEFINITION(
+      "DB-SAGA-10002",
       Category.USER_ERROR,
       "Saga definition is invalid",
       Schema.of("saga_name", "detail"),
       "The definition violates a validation rule (e.g. duplicate step name, bad pivot placement, malformed field value). The detail identifies the specific violation.",
       "Fix the definition per the detail and re-register."),
 
-  DEFINITION_MALFORMED(
-      "DB-SAGA-10004",
+  MALFORMED_DEFINITION(
+      "DB-SAGA-10003",
       Category.USER_ERROR,
       "Saga definition source is not parseable",
       Schema.of("source", "detail"),
       "The definition source (JSON or YAML) has a syntactic error. The cause carries the parser's diagnostic.",
       "Fix the JSON/YAML syntax error indicated by the parser cause."),
 
-  DEFINITION_SOURCE_UNREADABLE(
-      "DB-SAGA-10005",
+  UNREADABLE_DEFINITION_SOURCE(
+      "DB-SAGA-10004",
       Category.USER_ERROR,
       "Saga definition source cannot be read",
       Schema.of("source"),
       "The file, classpath resource, or extension could not be resolved to a readable definition source.",
       "Verify the path/resource exists, is readable, and has a supported extension (.json, .yaml, .yml)."),
 
-  DEFINITION_VERSION_CONTENT_CONFLICT(
-      "DB-SAGA-10006",
-      Category.USER_ERROR,
-      "Definition version is already registered with different content",
-      Schema.of("name", "version"),
-      "A definition with this (name, version) already exists but its content differs from what was submitted.",
-      "Bump the version instead of re-registering under the same one."),
-
-  STEP_CLASS_INVALID(
-      "DB-SAGA-10007",
+  INVALID_STEP_CLASS(
+      "DB-SAGA-10005",
       Category.USER_ERROR,
       "Step class cannot be resolved or instantiated",
       Schema.of("step_class", "detail"),
@@ -69,7 +82,7 @@ public enum SagaErrorCode {
       "Fix the step class per the detail and ensure it is on the runtime classpath."),
 
   STEP_CLASS_NOT_SUPPORTED_ON_DAEMON(
-      "DB-SAGA-10008",
+      "DB-SAGA-10006",
       Category.USER_ERROR,
       "Class-based step is not supported on the daemon",
       Schema.of("saga_name", "step_name"),
@@ -77,82 +90,90 @@ public enum SagaErrorCode {
       "Convert the step to a declarative service step or embed the engine instead."),
 
   HTTP_ENDPOINT_LOOKUP_FAILED(
-      "DB-SAGA-10009",
+      "DB-SAGA-10007",
       Category.USER_ERROR,
       "HTTP endpoint lookup failed",
       Schema.of("detail"),
       "A step needed an HTTP endpoint, but the orchestrator has no matching registration (none registered, name not found, or multiple registered without a qualifier).",
       "Register the endpoint on the orchestrator's builder, fix the lookup name, or annotate the SagaHttpClient parameter with @Named to select one."),
 
-  // ── USER_ERROR — Auth (104xx) ───────────────────────────────────────
-  AUTH_UNAUTHENTICATED(
-      "DB-SAGA-10400",
+  // ── Auth (101xx) ─────────────────────────────────────────────────────
+  UNAUTHENTICATED(
+      "DB-SAGA-10101",
       Category.USER_ERROR,
       "Authentication required",
       Schema.none(),
       "The request did not present a valid credential.",
       "Attach a valid credential (API key, bearer token) and retry."),
 
-  AUTH_PERMISSION_DENIED(
-      "DB-SAGA-10401",
+  PERMISSION_DENIED(
+      "DB-SAGA-10102",
       Category.USER_ERROR,
       "Permission denied",
       Schema.none(),
       "The authenticated principal lacks the role required for this operation.",
       "Request the appropriate role from an administrator."),
 
-  // ── USER_ERROR — Not-found (110xx) ──────────────────────────────────
+  // ── Not-found (102xx) ────────────────────────────────────────────────
   SAGA_NOT_FOUND(
-      "DB-SAGA-11000",
+      "DB-SAGA-10201",
       Category.USER_ERROR,
       "Saga not found",
       Schema.of("saga_id"),
       "No saga instance exists with the given ID.",
-      "Verify the saga ID and that the saga has been started."),
+      "Verify the saga ID; the saga may have been purged or never existed."),
 
   SAGA_DEFINITION_NOT_FOUND(
-      "DB-SAGA-11001",
+      "DB-SAGA-10202",
       Category.USER_ERROR,
       "Saga definition not found",
       Schema.of("saga_name"),
-      "No saga definition is registered with the given name.",
-      "Register the definition before starting a saga."),
+      "No saga definition is registered under the given name.",
+      "Register the saga definition or fix the name."),
 
   SAGA_DEFINITION_VERSION_NOT_FOUND(
-      "DB-SAGA-11002",
+      "DB-SAGA-10203",
       Category.USER_ERROR,
       "Saga definition version not found",
       Schema.of("saga_name", "version"),
-      "The specified version of the saga definition is not registered.",
-      "Check available versions or register this version."),
+      "The saga definition exists but not at the requested version.",
+      "Register that version or start the saga at an existing version."),
 
-  // ── USER_ERROR — Already-exists (111xx) ─────────────────────────────
+  // ── Conflict (103xx) ─────────────────────────────────────────────────
   SAGA_ALREADY_EXISTS(
-      "DB-SAGA-11100",
+      "DB-SAGA-10301",
       Category.USER_ERROR,
       "Saga already exists",
       Schema.of("saga_id"),
-      "A saga with the caller-supplied ID has already been started.",
-      "Use a different saga ID, or omit the ID to let the engine generate one."),
+      "A saga with the given client-supplied ID already exists.",
+      "Use a different ID, or fetch the existing saga's state."),
 
-  // ── USER_ERROR — Wrong-state (112xx) ────────────────────────────────
+  DEFINITION_VERSION_CONTENT_CONFLICT(
+      "DB-SAGA-10302",
+      Category.USER_ERROR,
+      "Definition version is already registered with different content",
+      Schema.of("name", "version"),
+      "A definition with this (name, version) already exists but its content differs from what was submitted.",
+      "Bump the version instead of re-registering under the same one."),
+
+  // ── Precondition failed (104xx) ──────────────────────────────────────
   SAGA_WRONG_STATE(
-      "DB-SAGA-11200",
+      "DB-SAGA-10401",
       Category.USER_ERROR,
       "Operation not allowed in the saga's current state",
       Schema.of("saga_id", "current_state", "requested_operation"),
-      "The requested operation is not valid for a saga in this state.",
-      "Wait for the saga to reach a compatible state, or issue a different operation."),
+      "The saga is in a status the operation does not accept (e.g. force-completing a non-escalated saga, resuming an escalated one).",
+      "GET the saga for its current state; only certain transitions are allowed per status."),
 
   SAGA_PARKED(
-      "DB-SAGA-11201",
+      "DB-SAGA-10402",
       Category.USER_ERROR,
       "Saga is parked and cannot be resumed automatically",
       Schema.of("saga_id"),
-      "The saga has been parked (typically after repeated compensation failures) and requires manual intervention.",
-      "Investigate the parked saga, then unpark or terminate it explicitly."),
+      "The saga is WAITING on an async callback and resolves via the callback or its timeout — not via admin action.",
+      "Wait for the callback or the timeout; do not attempt to drive the saga manually."),
 
-  // ── RETRYABLE_SERVER_ERROR (2xxxx) ──────────────────────────────────
+  // ── RETRYABLE_SERVER_ERROR (2xxxx) ───────────────────────────────────
   SAGA_CONCURRENT_MODIFICATION(
       "DB-SAGA-20001",
       Category.RETRYABLE_SERVER_ERROR,
@@ -162,7 +183,7 @@ public enum SagaErrorCode {
       "Retry the operation from a fresh snapshot. This is typically transient."),
 
   PERSISTENCE_STORE_UNAVAILABLE(
-      "DB-SAGA-20010",
+      "DB-SAGA-20002",
       Category.RETRYABLE_SERVER_ERROR,
       "Underlying store is temporarily unavailable",
       Schema.none(),
@@ -170,7 +191,7 @@ public enum SagaErrorCode {
       "Retry the operation. If failures persist, check the store's health."),
 
   SERVICE_UNAVAILABLE(
-      "DB-SAGA-20020",
+      "DB-SAGA-20003",
       Category.RETRYABLE_SERVER_ERROR,
       "Saga service temporarily unavailable",
       Schema.none(),
@@ -178,14 +199,14 @@ public enum SagaErrorCode {
       "Retry the operation with backoff."),
 
   RATE_LIMIT_EXCEEDED(
-      "DB-SAGA-20030",
+      "DB-SAGA-20004",
       Category.RETRYABLE_SERVER_ERROR,
       "Rate limit exceeded",
       Schema.none(),
       "The request exceeded the server's configured rate limit for this operation.",
       "Back off and retry after a short delay."),
 
-  // ── NON_RETRYABLE_SERVER_ERROR (3xxxx) ──────────────────────────────
+  // ── NON_RETRYABLE_SERVER_ERROR (3xxxx) ───────────────────────────────
   PERSISTENCE_SERIALIZATION_FAILED(
       "DB-SAGA-30001",
       Category.NON_RETRYABLE_SERVER_ERROR,
@@ -203,23 +224,23 @@ public enum SagaErrorCode {
       "Check for schema-version mismatch between the writer and reader."),
 
   STEP_TIMEOUT(
-      "DB-SAGA-30010",
+      "DB-SAGA-30003",
       Category.NON_RETRYABLE_SERVER_ERROR,
       "Step timed out",
       Schema.of("step_name", "step_index"),
-      "The step did not complete before its configured deadline; the engine's retry policy is exhausted.",
-      "Investigate the step for hangs, or raise its deadline / retry budget."),
+      "The step exceeded its configured timeout before returning a result.",
+      "Increase the step's timeout or optimize the step; the saga is escalated pending intervention."),
 
   STEP_USER_FAILURE(
-      "DB-SAGA-30011",
+      "DB-SAGA-30004",
       Category.NON_RETRYABLE_SERVER_ERROR,
-      "Step failed with a user-thrown exception",
-      Schema.none(),
-      "A saga step threw an exception the engine did not classify further; the wrapped cause carries the details.",
-      "Inspect the step implementation and the exception cause chain."),
+      "Step reported a user failure",
+      Schema.of("step_name", "step_index"),
+      "The step returned a non-retryable failure result — a business-rule rejection.",
+      "Inspect the step's failure detail; the saga compensates and settles."),
 
   COMPENSATION_FAILED(
-      "DB-SAGA-30020",
+      "DB-SAGA-30005",
       Category.NON_RETRYABLE_SERVER_ERROR,
       "Compensation of step failed",
       Schema.of("step_name", "step_index"),
@@ -227,14 +248,14 @@ public enum SagaErrorCode {
       "Investigate the compensation implementation; the saga may be parked pending manual intervention."),
 
   INTERNAL_ERROR(
-      "DB-SAGA-30099",
+      "DB-SAGA-39999",
       Category.NON_RETRYABLE_SERVER_ERROR,
       "Internal error",
       Schema.none(),
       "The engine encountered an unexpected internal error.",
       "Contact your administrator with the error details."),
 
-  // ── CLIENT_ERROR — produced only by the client SDK (4xxxx) ──────────
+  // ── CLIENT_ERROR (4xxxx — client SDK only) ────────────────────────────
   SERVER_UNREACHABLE(
       "DB-SAGA-40001",
       Category.CLIENT_ERROR,
@@ -251,21 +272,21 @@ public enum SagaErrorCode {
       "The request did not complete before its deadline.",
       "Retry the request or increase the deadline."),
 
-  UNRECOGNIZED_SERVER_ERROR(
-      "DB-SAGA-40003",
-      Category.CLIENT_ERROR,
-      "The server returned a value this client does not recognize",
-      Schema.of("server_value"),
-      "The server sent an error-code token or wire enum value the client SDK has no mapping for. Usually a version skew: the server is newer than this client SDK.",
-      "Upgrade the client SDK to a version compatible with the server."),
-
   REQUEST_ABORTED(
-      "DB-SAGA-40004",
+      "DB-SAGA-40003",
       Category.CLIENT_ERROR,
       "The request was aborted before it could complete",
       Schema.none(),
       "The caller cancelled the operation (thread interrupt, future cancellation, or client shutdown) before the RPC completed.",
       "If the abort was unintentional, avoid interrupting or cancelling the calling thread and retry."),
+
+  UNRECOGNIZED_SERVER_ERROR(
+      "DB-SAGA-49999",
+      Category.CLIENT_ERROR,
+      "The server returned a value this client does not recognize",
+      Schema.of("server_value"),
+      "The server sent an error-code token or wire enum value the client SDK has no mapping for. Usually a version skew: the server is newer than this client SDK.",
+      "Upgrade the client SDK to a version compatible with the server."),
   ;
 
   private final String code;

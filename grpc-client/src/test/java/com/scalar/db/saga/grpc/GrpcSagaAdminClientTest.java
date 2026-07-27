@@ -212,7 +212,9 @@ class GrpcSagaAdminClientTest {
 
   @Test
   void recoverSaga_notFound_throwsSagaNotFound() {
-    fake.recoverError = statusWithReason(Status.Code.NOT_FOUND, "SAGA_NOT_FOUND", Map.of());
+    fake.recoverError =
+        statusWithReason(
+            Status.Code.NOT_FOUND, SagaErrorCode.SAGA_NOT_FOUND.code(), Map.of("saga_id", "gone"));
     assertThatThrownBy(() -> client.recoverSaga("gone", "x"))
         .isInstanceOf(SagaNotFoundException.class);
   }
@@ -224,8 +226,8 @@ class GrpcSagaAdminClientTest {
     fake.recoverError =
         statusWithReason(
             Status.Code.NOT_FOUND,
-            "SAGA_DEFINITION_NOT_FOUND",
-            Map.of("sagaName", "orders", "version", "v2"));
+            SagaErrorCode.SAGA_DEFINITION_VERSION_NOT_FOUND.code(),
+            Map.of("saga_name", "orders", "version", "v2"));
     assertThatThrownBy(() -> client.recoverSaga("s-1", "x"))
         .isInstanceOf(SagaDefinitionNotFoundException.class)
         .satisfies(
@@ -238,7 +240,7 @@ class GrpcSagaAdminClientTest {
 
   @Test
   void recoverSaga_failedPrecondition_reconstructsPreconditionWithCode() {
-    // The daemon sends the machine-readable code name as the ErrorInfo reason and the exception's
+    // The daemon sends the SagaErrorCode.code() as the ErrorInfo reason and the exception's
     // metadata (saga_id, current_state, requested_operation) as ErrorInfo.metadata; the client
     // reconstructs the exception with the same code and metadata.
     Map<String, String> metadata = new java.util.LinkedHashMap<>();
@@ -246,7 +248,8 @@ class GrpcSagaAdminClientTest {
     metadata.put("current_state", "RUNNING");
     metadata.put("requested_operation", "recover");
     fake.recoverError =
-        statusWithReason(Status.Code.FAILED_PRECONDITION, "SAGA_WRONG_STATE", metadata);
+        statusWithReason(
+            Status.Code.FAILED_PRECONDITION, SagaErrorCode.SAGA_WRONG_STATE.code(), metadata);
     assertThatThrownBy(() -> client.recoverSaga("s-1", "x"))
         .isInstanceOf(SagaStatePreconditionException.class)
         .extracting(e -> ((SagaStatePreconditionException) e).getErrorCode())

@@ -8,6 +8,7 @@ import com.scalar.db.saga.daemon.security.SagaOperation;
 import com.scalar.db.saga.daemon.security.SagaRole;
 import com.scalar.db.saga.daemon.security.SagaSecurityHandler;
 import com.scalar.db.saga.daemon.security.SagaSecurityProvider;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import io.javalin.Javalin;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -78,7 +79,7 @@ class RateLimitHandlerTest {
     assertThat(send("POST", "/sagas").statusCode()).isEqualTo(200);
     HttpResponse<String> third = send("POST", "/sagas");
     assertThat(third.statusCode()).isEqualTo(429);
-    assertThat(third.body()).contains("TOO_MANY_REQUESTS");
+    assertThat(third.body()).contains(SagaErrorCode.RATE_LIMIT_EXCEEDED.code());
   }
 
   @Test

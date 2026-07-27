@@ -26,7 +26,7 @@ class SagaStatePreconditionExceptionTest {
         .hasSize(3);
     assertThat(e.getMessage())
         .isEqualTo(
-            "DB-SAGA-11200: Operation not allowed in the saga's current state"
+            "DB-SAGA-10401: Operation not allowed in the saga's current state"
                 + " [saga_id=saga-1, current_state=RUNNING, requested_operation=force-complete]");
   }
 
@@ -41,7 +41,7 @@ class SagaStatePreconditionExceptionTest {
     assertThat(e.getMetadata()).containsEntry("saga_id", "saga-2").hasSize(1);
     assertThat(e.getMessage())
         .isEqualTo(
-            "DB-SAGA-11201: Saga is parked and cannot be resumed automatically [saga_id=saga-2]");
+            "DB-SAGA-10402: Saga is parked and cannot be resumed automatically [saga_id=saga-2]");
   }
 
   @Test

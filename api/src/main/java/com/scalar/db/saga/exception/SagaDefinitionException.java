@@ -27,7 +27,7 @@ public class SagaDefinitionException extends SagaRuntimeException {
 
   public static SagaDefinitionException definitionInvalid(String sagaName, String detail) {
     return new SagaDefinitionException(
-        SagaErrorCode.DEFINITION_INVALID,
+        SagaErrorCode.INVALID_DEFINITION,
         ErrorMetadata.of("saga_name", sagaName, "detail", detail));
   }
 
@@ -41,7 +41,7 @@ public class SagaDefinitionException extends SagaRuntimeException {
 
   public static SagaDefinitionException definitionMalformed(String format, Throwable cause) {
     return new SagaDefinitionException(
-        SagaErrorCode.DEFINITION_MALFORMED,
+        SagaErrorCode.MALFORMED_DEFINITION,
         ErrorMetadata.of(
             "source", "inline " + format, "detail", "failed to parse " + format + " definition"),
         Objects.requireNonNull(cause, "cause must not be null"));
@@ -49,12 +49,12 @@ public class SagaDefinitionException extends SagaRuntimeException {
 
   public static SagaDefinitionException sourceUnreadable(String source) {
     return new SagaDefinitionException(
-        SagaErrorCode.DEFINITION_SOURCE_UNREADABLE, ErrorMetadata.of("source", source));
+        SagaErrorCode.UNREADABLE_DEFINITION_SOURCE, ErrorMetadata.of("source", source));
   }
 
   public static SagaDefinitionException sourceUnreadable(String source, Throwable cause) {
     return new SagaDefinitionException(
-        SagaErrorCode.DEFINITION_SOURCE_UNREADABLE,
+        SagaErrorCode.UNREADABLE_DEFINITION_SOURCE,
         ErrorMetadata.of("source", source),
         Objects.requireNonNull(cause, "cause must not be null"));
   }
@@ -67,14 +67,14 @@ public class SagaDefinitionException extends SagaRuntimeException {
 
   public static SagaDefinitionException stepClassInvalid(String stepClass, String detail) {
     return new SagaDefinitionException(
-        SagaErrorCode.STEP_CLASS_INVALID,
+        SagaErrorCode.INVALID_STEP_CLASS,
         ErrorMetadata.of("step_class", stepClass, "detail", detail));
   }
 
   public static SagaDefinitionException stepClassInvalid(
       String stepClass, String detail, Throwable cause) {
     return new SagaDefinitionException(
-        SagaErrorCode.STEP_CLASS_INVALID,
+        SagaErrorCode.INVALID_STEP_CLASS,
         ErrorMetadata.of("step_class", stepClass, "detail", detail),
         Objects.requireNonNull(cause, "cause must not be null"));
   }

@@ -19,7 +19,7 @@ class SagaPersistenceExceptionTest {
     assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE);
     assertThat(e.getMetadata()).isEmpty();
     assertThat(e.getMessage())
-        .isEqualTo("DB-SAGA-20010: Underlying store is temporarily unavailable");
+        .isEqualTo("DB-SAGA-20002: Underlying store is temporarily unavailable");
     assertThat(e.getCause()).isSameAs(cause);
     assertThat(e.isRetryable()).isTrue();
   }

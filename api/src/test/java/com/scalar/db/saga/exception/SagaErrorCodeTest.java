@@ -82,7 +82,7 @@ class SagaErrorCodeTest {
     String rendered = code.buildMessage(Collections.emptyMap());
 
     // Assert
-    assertThat(rendered).isEqualTo("DB-SAGA-30099: Internal error");
+    assertThat(rendered).isEqualTo("DB-SAGA-39999: Internal error");
   }
 
   @Test
@@ -94,14 +94,14 @@ class SagaErrorCodeTest {
     String rendered = code.buildMessage(Collections.singletonMap("saga_id", "s-1"));
 
     // Assert
-    assertThat(rendered).isEqualTo("DB-SAGA-11000: Saga not found [saga_id=s-1]");
+    assertThat(rendered).isEqualTo("DB-SAGA-10201: Saga not found [saga_id=s-1]");
   }
 
   @Test
   void buildMessage_multiKeyMetadataGiven_rendersInSchemaOrderNotMapOrder() {
     // Arrange — insertion order deliberately reverses schema order to prove ordering isn't from
     // the map. The schema declares (saga_name, detail); the map here inserts detail first.
-    SagaErrorCode code = SagaErrorCode.DEFINITION_INVALID;
+    SagaErrorCode code = SagaErrorCode.INVALID_DEFINITION;
     Map<String, String> metadata = new LinkedHashMap<>();
     metadata.put("detail", "duplicate step name 'debit'");
     metadata.put("saga_name", "orders");
@@ -112,7 +112,7 @@ class SagaErrorCodeTest {
     // Assert — saga_name comes first because that's the declared schema order
     assertThat(rendered)
         .isEqualTo(
-            "DB-SAGA-10003: Saga definition is invalid [saga_name=orders,"
+            "DB-SAGA-10002: Saga definition is invalid [saga_name=orders,"
                 + " detail=duplicate step name 'debit']");
   }
 
@@ -131,7 +131,7 @@ class SagaErrorCodeTest {
     // Assert
     assertThat(rendered)
         .isEqualTo(
-            "DB-SAGA-11200: Operation not allowed in the saga's current state "
+            "DB-SAGA-10401: Operation not allowed in the saga's current state "
                 + "[saga_id=s-1, current_state=COMPENSATING, requested_operation=resume]");
   }
 

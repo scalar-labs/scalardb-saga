@@ -13,7 +13,7 @@ class SagaUnauthenticatedExceptionTest {
     SagaUnauthenticatedException e = new SagaUnauthenticatedException();
 
     // Assert
-    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.AUTH_UNAUTHENTICATED);
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.UNAUTHENTICATED);
     assertThat(e.getMetadata()).isEmpty();
     assertThat(e.getCause()).isNull();
   }
@@ -27,7 +27,7 @@ class SagaUnauthenticatedExceptionTest {
     SagaUnauthenticatedException e = new SagaUnauthenticatedException(cause);
 
     // Assert
-    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.AUTH_UNAUTHENTICATED);
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.UNAUTHENTICATED);
     assertThat(e.getMetadata()).isEmpty();
     assertThat(e.getCause()).isSameAs(cause);
   }

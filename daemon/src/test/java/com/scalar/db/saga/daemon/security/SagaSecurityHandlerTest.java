@@ -3,6 +3,7 @@ package com.scalar.db.saga.daemon.security;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.scalar.db.saga.daemon.api.ErrorMapper;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import io.javalin.Javalin;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -78,7 +79,7 @@ class SagaSecurityHandlerTest {
 
     // Assert
     assertThat(response.statusCode()).isEqualTo(401);
-    assertThat(response.body()).contains("UNAUTHENTICATED");
+    assertThat(response.body()).contains(SagaErrorCode.UNAUTHENTICATED.code());
   }
 
   @Test
@@ -98,7 +99,7 @@ class SagaSecurityHandlerTest {
 
     // Assert
     assertThat(response.statusCode()).isEqualTo(403);
-    assertThat(response.body()).contains("FORBIDDEN");
+    assertThat(response.body()).contains(SagaErrorCode.PERMISSION_DENIED.code());
   }
 
   @Test

@@ -3,6 +3,7 @@ package com.scalar.db.saga.daemon.api;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.scalar.db.saga.daemon.security.SagaAuthUnavailableException;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import io.javalin.Javalin;
 import io.javalin.http.BadRequestResponse;
@@ -84,7 +85,9 @@ class ErrorMapperTest {
   void uncaughtException_mapsToGeneric500_withoutLeakingMessage() throws Exception {
     HttpResponse<String> response = get("/boom");
     assertThat(response.statusCode()).isEqualTo(500);
-    assertThat(response.body()).contains("Internal server error").doesNotContain("internal detail");
+    assertThat(response.body())
+        .contains(SagaErrorCode.INTERNAL_ERROR.code())
+        .doesNotContain("internal detail");
   }
 
   @Test
@@ -92,7 +95,7 @@ class ErrorMapperTest {
     HttpResponse<String> response = get("/auth-unavailable");
     assertThat(response.statusCode()).isEqualTo(503);
     assertThat(response.body())
-        .contains("Service temporarily unavailable")
+        .contains(SagaErrorCode.SERVICE_UNAVAILABLE.code())
         .doesNotContain("jwks unreachable");
   }
 
@@ -101,7 +104,7 @@ class ErrorMapperTest {
     HttpResponse<String> response = get("/persist-transient");
     assertThat(response.statusCode()).isEqualTo(503);
     assertThat(response.body())
-        .contains("Service temporarily unavailable")
+        .contains(SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE.code())
         .doesNotContain("secret_table");
   }
 
@@ -111,7 +114,9 @@ class ErrorMapperTest {
     // futilely. It maps to a generic 500 instead, still without leaking the internal message.
     HttpResponse<String> response = get("/persist-permanent");
     assertThat(response.statusCode()).isEqualTo(500);
-    assertThat(response.body()).contains("Internal server error").doesNotContain("secret_table");
+    assertThat(response.body())
+        .contains(SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED.code())
+        .doesNotContain("secret_table");
   }
 
   private HttpResponse<String> get(String path) throws Exception {

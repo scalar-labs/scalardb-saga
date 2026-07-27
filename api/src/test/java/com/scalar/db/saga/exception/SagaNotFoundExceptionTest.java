@@ -16,7 +16,7 @@ class SagaNotFoundExceptionTest {
     assertThat(e.getSagaId()).isEqualTo("saga-123");
     assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.SAGA_NOT_FOUND);
     assertThat(e.getMetadata()).containsEntry("saga_id", "saga-123").hasSize(1);
-    assertThat(e.getMessage()).isEqualTo("DB-SAGA-11000: Saga not found [saga_id=saga-123]");
+    assertThat(e.getMessage()).isEqualTo("DB-SAGA-10201: Saga not found [saga_id=saga-123]");
   }
 
   @SuppressWarnings("NullAway")

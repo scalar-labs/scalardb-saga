@@ -19,7 +19,7 @@ class SagaDefinitionNotFoundExceptionTest {
     assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.SAGA_DEFINITION_NOT_FOUND);
     assertThat(e.getMetadata()).containsEntry("saga_name", "order-saga").hasSize(1);
     assertThat(e.getMessage())
-        .isEqualTo("DB-SAGA-11001: Saga definition not found [saga_name=order-saga]");
+        .isEqualTo("DB-SAGA-10202: Saga definition not found [saga_name=order-saga]");
   }
 
   @Test
@@ -37,7 +37,7 @@ class SagaDefinitionNotFoundExceptionTest {
         .hasSize(2);
     assertThat(e.getMessage())
         .isEqualTo(
-            "DB-SAGA-11002: Saga definition version not found"
+            "DB-SAGA-10203: Saga definition version not found"
                 + " [saga_name=order-saga, version=2.0]");
   }
 
@@ -54,7 +54,7 @@ class SagaDefinitionNotFoundExceptionTest {
     assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.SAGA_DEFINITION_VERSION_NOT_FOUND);
     assertThat(e.getMessage())
         .isEqualTo(
-            "DB-SAGA-11002: Saga definition version not found"
+            "DB-SAGA-10203: Saga definition version not found"
                 + " [saga_name=order-saga, version=2.0]");
   }
 

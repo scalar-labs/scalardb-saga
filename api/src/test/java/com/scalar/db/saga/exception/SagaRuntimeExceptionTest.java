@@ -22,7 +22,7 @@ class SagaRuntimeExceptionTest {
     // Assert
     assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.SAGA_NOT_FOUND);
     assertThat(e.getMetadata()).containsExactly(entry("saga_id", "s-1"));
-    assertThat(e.getMessage()).isEqualTo("DB-SAGA-11000: Saga not found [saga_id=s-1]");
+    assertThat(e.getMessage()).isEqualTo("DB-SAGA-10201: Saga not found [saga_id=s-1]");
   }
 
   @Test
@@ -39,7 +39,7 @@ class SagaRuntimeExceptionTest {
     assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.INTERNAL_ERROR);
     assertThat(e.getMetadata()).isEmpty();
     assertThat(e.getCause()).isSameAs(cause);
-    assertThat(e.getMessage()).isEqualTo("DB-SAGA-30099: Internal error");
+    assertThat(e.getMessage()).isEqualTo("DB-SAGA-39999: Internal error");
   }
 
   @Test
@@ -77,12 +77,12 @@ class SagaRuntimeExceptionTest {
     metadata.put("saga_name", "orders");
 
     // Act
-    SagaRuntimeException e = new SagaRuntimeException(SagaErrorCode.DEFINITION_INVALID, metadata);
+    SagaRuntimeException e = new SagaRuntimeException(SagaErrorCode.INVALID_DEFINITION, metadata);
 
     // Assert — saga_name comes first because that's the declared schema order
     assertThat(e.getMessage())
         .isEqualTo(
-            "DB-SAGA-10003: Saga definition is invalid [saga_name=orders,"
+            "DB-SAGA-10002: Saga definition is invalid [saga_name=orders,"
                 + " detail=duplicate step name 'debit']");
   }
 

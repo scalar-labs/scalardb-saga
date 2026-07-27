@@ -20,6 +20,7 @@ import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.api.TimelineEvent;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.rpc.AwaitSagaRequest;
@@ -256,7 +257,11 @@ class SagaServiceImplTest {
             StatusRuntimeException.class,
             e -> {
               assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
-              assertThat(e.getStatus().getDescription()).isEqualTo("'name' is required");
+              // INVALID_REQUEST wraps the daemon-authored detail; the exact message the daemon
+              // authored ("'name' is required") rides in the metadata detail.
+              assertThat(e.getStatus().getDescription())
+                  .contains(SagaErrorCode.INVALID_REQUEST.code())
+                  .contains("'name' is required");
             });
   }
 
@@ -270,8 +275,9 @@ class SagaServiceImplTest {
             StatusRuntimeException.class,
             e -> {
               assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
-              assertThat(e.getStatus().getDescription()).isEqualTo("Invalid request parameter");
-              assertThat(e.getStatus().getDescription()).doesNotContain("engine-internal");
+              assertThat(e.getStatus().getDescription())
+                  .contains(SagaErrorCode.INVALID_REQUEST.code())
+                  .doesNotContain("engine-internal");
             });
   }
 
@@ -303,8 +309,8 @@ class SagaServiceImplTest {
             e -> {
               assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.UNAVAILABLE);
               assertThat(e.getStatus().getDescription())
-                  .isEqualTo("Service temporarily unavailable");
-              assertThat(e.getStatus().getDescription()).doesNotContain("secret_table", "10.0.0.5");
+                  .contains(SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE.code())
+                  .doesNotContain("secret_table", "10.0.0.5");
             });
   }
 
@@ -322,8 +328,9 @@ class SagaServiceImplTest {
             StatusRuntimeException.class,
             e -> {
               assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INTERNAL);
-              assertThat(e.getStatus().getDescription()).isEqualTo("Internal server error");
-              assertThat(e.getStatus().getDescription()).doesNotContain("secret_table");
+              assertThat(e.getStatus().getDescription())
+                  .contains(SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED.code())
+                  .doesNotContain("secret_table");
             });
   }
 
@@ -337,8 +344,9 @@ class SagaServiceImplTest {
             StatusRuntimeException.class,
             e -> {
               assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INTERNAL);
-              assertThat(e.getStatus().getDescription()).isEqualTo("Internal server error");
-              assertThat(e.getStatus().getDescription()).doesNotContain("SECRET", "Engine.java");
+              assertThat(e.getStatus().getDescription())
+                  .contains(SagaErrorCode.INTERNAL_ERROR.code())
+                  .doesNotContain("SECRET", "Engine.java");
             });
   }
 

@@ -231,30 +231,35 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
   }
 
   /**
-   * Distinguishes the two {@code NOT_FOUND} shapes by the {@link ErrorInfo} reason. Only {@code
-   * SAGA_DEFINITION_NOT_FOUND} (with a {@code sagaName}) reconstructs {@link
-   * SagaDefinitionNotFoundException}; a missing reason, name, or any other reason is a missing
+   * Distinguishes the two {@code NOT_FOUND} shapes by the {@link ErrorInfo} reason. A reason of
+   * {@link SagaErrorCode#SAGA_DEFINITION_NOT_FOUND} or {@link
+   * SagaErrorCode#SAGA_DEFINITION_VERSION_NOT_FOUND} reconstructs {@link
+   * SagaDefinitionNotFoundException} from its schema-keyed metadata; anything else is a missing
    * saga.
    */
   private static RuntimeException notFoundException(String sagaId, @Nullable ErrorInfo info) {
-    if (info != null && "SAGA_DEFINITION_NOT_FOUND".equals(info.getReason())) {
-      String sagaName = info.getMetadataMap().get("sagaName");
-      if (sagaName != null) {
-        String version = info.getMetadataMap().get("version");
-        return version == null
-            ? new SagaDefinitionNotFoundException(sagaName)
-            : new SagaDefinitionNotFoundException(sagaName, version);
+    if (info != null) {
+      SagaErrorCode code = SagaErrorCode.fromCode(info.getReason()).orElse(null);
+      if (code == SagaErrorCode.SAGA_DEFINITION_NOT_FOUND
+          || code == SagaErrorCode.SAGA_DEFINITION_VERSION_NOT_FOUND) {
+        String sagaName = info.getMetadataMap().get("saga_name");
+        if (sagaName != null) {
+          String version = info.getMetadataMap().get("version");
+          return version == null
+              ? new SagaDefinitionNotFoundException(sagaName)
+              : new SagaDefinitionNotFoundException(sagaName, version);
+        }
       }
     }
     return new SagaNotFoundException(sagaId);
   }
 
   /**
-   * Reconstructs the wrong-state exception. The daemon sends the machine-readable {@link
-   * SagaErrorCode} name (e.g. {@code SAGA_WRONG_STATE}) as the {@link ErrorInfo} reason, and the
-   * exception's metadata rides in {@link ErrorInfo#getMetadataMap()}, so the client recovers the
-   * same code and metadata a server-side thrower produced. An absent, unrecognized, or unrelated
-   * code degrades to the common mapping rather than guessing.
+   * Reconstructs the wrong-state exception. The daemon sends the {@link SagaErrorCode#code()} as
+   * the {@link ErrorInfo} reason, and the exception's metadata rides in {@link
+   * ErrorInfo#getMetadataMap()} keyed by the code's schema keys — so the client recovers the same
+   * code and metadata a server-side thrower produced. An absent, unrecognized, or unrelated code
+   * degrades to the common mapping rather than guessing.
    */
   private static RuntimeException preconditionException(StatusRuntimeException e) {
     ErrorInfo info = errorInfo(e);
@@ -262,15 +267,6 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
       return mapCommon(e);
     }
     SagaErrorCode code = SagaErrorCode.fromCode(info.getReason()).orElse(null);
-    if (code == null) {
-      // The reason token is a SagaErrorCode.name() (e.g. "SAGA_WRONG_STATE"), not the full
-      // DB-SAGA-NNNNN code; try both encodings the daemon may use for forward compatibility.
-      try {
-        code = SagaErrorCode.valueOf(info.getReason());
-      } catch (IllegalArgumentException unknown) {
-        return mapCommon(e);
-      }
-    }
     if (code != SagaErrorCode.SAGA_WRONG_STATE && code != SagaErrorCode.SAGA_PARKED) {
       return mapCommon(e);
     }

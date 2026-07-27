@@ -54,7 +54,7 @@ class StepCompensationExceptionTest {
         .containsEntry("step_index", "2")
         .hasSize(2);
     assertThat(e.getMessage())
-        .isEqualTo("DB-SAGA-30020: Compensation of step failed [step_name=refund, step_index=2]");
+        .isEqualTo("DB-SAGA-30005: Compensation of step failed [step_name=refund, step_index=2]");
   }
 
   @SuppressWarnings("NullAway")

@@ -13,12 +13,12 @@ import java.util.Objects;
 public class SagaPermissionDeniedException extends SagaRuntimeException {
 
   public SagaPermissionDeniedException() {
-    super(SagaErrorCode.AUTH_PERMISSION_DENIED, ErrorMetadata.of());
+    super(SagaErrorCode.PERMISSION_DENIED, ErrorMetadata.of());
   }
 
   public SagaPermissionDeniedException(Throwable cause) {
     super(
-        SagaErrorCode.AUTH_PERMISSION_DENIED,
+        SagaErrorCode.PERMISSION_DENIED,
         ErrorMetadata.of(),
         Objects.requireNonNull(cause, "cause must not be null"));
   }

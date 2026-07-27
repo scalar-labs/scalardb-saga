@@ -3,28 +3,44 @@ package com.scalar.db.saga.daemon.api;
 import com.scalar.db.saga.daemon.security.SagaAuthUnavailableException;
 import com.scalar.db.saga.daemon.security.SagaAuthenticationException;
 import com.scalar.db.saga.daemon.security.SagaAuthorizationException;
+import com.scalar.db.saga.exception.ErrorMetadata;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
+import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.exception.SagaPermissionDeniedException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
+import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
+import com.scalar.db.saga.exception.SagaTimeoutException;
+import com.scalar.db.saga.exception.SagaUnauthenticatedException;
+import com.scalar.db.saga.exception.SagaUnavailableException;
 import io.javalin.Javalin;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  * Maps exceptions to HTTP responses with a consistent JSON error body.
  *
- * <p>Client-facing exceptions (not-found, already-exists, invalid request) are mapped to specific
- * 4xx codes with daemon-owned messages. A transient persistence failure or an unavailable auth
- * provider maps to {@code 503}; a permanent persistence failure maps to {@code 500}, like the
- * catch-all. Everything else falls through to a generic {@code 500}: the real exception is logged
- * server-side and the response carries no internal detail — only the daemon's own messages are ever
- * returned to a caller.
+ * <p>Body shape:
+ *
+ * <pre>{@code
+ * { "errorCode": "DB-SAGA-10201",
+ *   "message":   "DB-SAGA-10201: Saga not found [saga_id=abc-123]",
+ *   "metadata":  { "saga_id": "abc-123" } }
+ * }</pre>
+ *
+ * <p><b>{@link SagaErrorCode} is the sole wire-facing source of truth.</b> Every response — engine
+ * exceptions, daemon-only exceptions, catch-all — is composed from a {@link SagaErrorCode} + its
+ * schema-validated metadata via one path. The mapper carries no hand-authored code tokens or
+ * message strings; changing a wire message is a single-line edit on the enum.
+ *
+ * <p>The per-type handlers exist only to (a) pick the HTTP status per exception type and (b) log at
+ * the right severity with the right per-type context; the body composition is uniform.
  */
 public final class ErrorMapper {
 
@@ -38,30 +54,36 @@ public final class ErrorMapper {
    * @param app the Javalin app
    */
   public static void register(Javalin app) {
-    app.exception(
-        SagaNotFoundException.class,
-        (e, ctx) ->
-            ctx.status(404)
-                .json(error("SAGA_NOT_FOUND", "No saga found with id '" + e.getSagaId() + "'")));
-    app.exception(
-        SagaDefinitionNotFoundException.class,
-        (e, ctx) ->
-            ctx.status(404).json(error("SAGA_DEFINITION_NOT_FOUND", definitionNotFoundMessage(e))));
+    // The daemon's own edge validation — its message is daemon-authored, so it rides in `detail`.
     app.exception(
         InvalidRequestException.class,
-        (e, ctx) -> ctx.status(400).json(error("BAD_REQUEST", e.getMessage())));
-    // Authentication failure: the credential is missing/invalid. Log at debug — probing traffic can
-    // make this frequent — and return a generic 401 without echoing why the credential was
-    // rejected.
+        (e, ctx) ->
+            ctx.status(400)
+                .json(
+                    body(
+                        SagaErrorCode.INVALID_REQUEST,
+                        ErrorMetadata.of("detail", nullToEmpty(e.getMessage())))));
+    // A client-supplied value the engine rejects. Do not echo the engine's wording (may contain
+    // internal detail); use a fixed daemon-owned literal in `detail`.
+    app.exception(
+        IllegalArgumentException.class,
+        (e, ctx) ->
+            ctx.status(400)
+                .json(
+                    body(
+                        SagaErrorCode.INVALID_REQUEST,
+                        ErrorMetadata.of("detail", "invalid request parameter"))));
+    // Authentication failure: log at debug (probing traffic can be frequent); the response never
+    // echoes why the credential was rejected — the enum's fixed message conveys "authenticate."
     app.exception(
         SagaAuthenticationException.class,
         (e, ctx) -> {
           logger.debug(
               "Authentication failed on {} {}: {}", ctx.method(), ctx.path(), e.getMessage());
-          ctx.status(401).json(error("UNAUTHENTICATED", "Authentication required"));
+          ctx.status(401).json(body(SagaErrorCode.UNAUTHENTICATED, ErrorMetadata.of()));
         });
-    // Authorization failure: a known caller lacks the required role. Log the principal + required
-    // role for the audit trail, and return a generic 403.
+    // Authorization failure: log the principal + required role for the audit trail; the response is
+    // the enum's generic "permission denied."
     app.exception(
         SagaAuthorizationException.class,
         (e, ctx) -> {
@@ -71,106 +93,102 @@ public final class ErrorMapper {
               ctx.path(),
               e.getPrincipal(),
               e.getRequiredRole().wireName());
-          ctx.status(403).json(error("FORBIDDEN", "Insufficient permissions"));
+          ctx.status(403).json(body(SagaErrorCode.PERMISSION_DENIED, ErrorMetadata.of()));
         });
-    // Authentication could not be completed because the provider is unavailable (e.g. the JWKS
-    // endpoint is unreachable) — a transient upstream outage, not a bad credential. Log it and
-    // return a retryable 503, mirroring a persistence failure.
+    // Authentication could not be completed because the provider is unavailable — a transient
+    // upstream outage. Log it and return the enum's retryable "service unavailable."
     app.exception(
         SagaAuthUnavailableException.class,
         (e, ctx) -> {
           logger.error("Authentication provider unavailable on {} {}", ctx.method(), ctx.path(), e);
-          ctx.status(503).json(error("UNAVAILABLE", "Service temporarily unavailable"));
+          ctx.status(503).json(body(SagaErrorCode.SERVICE_UNAVAILABLE, ErrorMetadata.of()));
         });
     app.exception(
         RateLimitExceededException.class,
         (e, ctx) -> {
           logger.debug(
               "Rate limit exceeded on {} {}: {}", ctx.method(), ctx.path(), e.getMessage());
-          ctx.status(429).json(error("TOO_MANY_REQUESTS", "Rate limit exceeded"));
+          ctx.status(429).json(body(SagaErrorCode.RATE_LIMIT_EXCEEDED, ErrorMetadata.of()));
         });
-    // A client-supplied value the engine rejects (e.g. an invalid saga id or an unsupported input
-    // value type) surfaces as IllegalArgumentException — a client error. Map it to 400 with a
-    // generic, daemon-owned message rather than echoing the engine's wording.
-    app.exception(
-        IllegalArgumentException.class,
-        (e, ctx) -> ctx.status(400).json(error("BAD_REQUEST", "Invalid request parameter")));
-    // An async-callback request with a missing or invalid HMAC token. The response is deliberately
-    // generic (does not distinguish missing from invalid) so it is not an oracle.
+    // Async-callback token missing/invalid. Semantically an auth failure; the response is
+    // deliberately generic (does not distinguish missing from invalid) so it is not an oracle.
     app.exception(
         CallbackAuthException.class,
-        (e, ctx) ->
-            ctx.status(401).json(error("UNAUTHORIZED", "Invalid or missing callback token")));
+        (e, ctx) -> ctx.status(401).json(body(SagaErrorCode.UNAUTHENTICATED, ErrorMetadata.of())));
+
+    // Every SagaRuntimeException — generic path. Javalin resolves the closest handler up the
+    // hierarchy, so subclasses fall here unless they need a special-case handler (they don't).
     app.exception(
-        SagaAlreadyExistsException.class,
+        SagaRuntimeException.class,
         (e, ctx) -> {
-          Map<String, Object> body = new LinkedHashMap<>();
-          body.put("error", "SAGA_ALREADY_EXISTS");
-          body.put("message", "A saga already exists with id '" + e.getSagaId() + "'");
-          body.put("sagaId", e.getSagaId());
-          body.put("existing", SagaSnapshotResponse.from(e.getExisting()));
-          ctx.status(409).json(body);
-        });
-    // An admin mutation on a saga in the wrong state (e.g. recovering an escalated saga, resetting
-    // a
-    // non-escalated one, or acting on a parked one). A precondition failure, not a transient one,
-    // so
-    // 422 rather than 409 — retrying the identical request will fail identically. The machine-
-    // readable code distinguishes the reason without parsing the message.
-    app.exception(
-        SagaStatePreconditionException.class,
-        (e, ctx) -> {
-          // The machine-readable code (SAGA_WRONG_STATE / SAGA_PARKED) is the contract; the message
-          // is daemon-owned rather than the core exception's, and the caller can GET the saga for
-          // its actual state. getErrorCode() is @Nullable on the base but always set for this
-          // subclass — every SagaStatePreconditionException goes through the code-carrying
-          // factories.
-          Map<String, Object> body =
-              error(
-                  java.util.Objects.requireNonNull(e.getErrorCode(), "errorCode").name(),
-                  "The saga is not in a state that allows this operation");
-          body.put("sagaId", e.getSagaId());
-          ctx.status(422).json(body);
-        });
-    // An admin mutation (or a concurrent recovery) lost the compare-and-set on the saga's state — a
-    // transient race, so 409, and a retry may now succeed against the new state.
-    app.exception(
-        SagaConcurrentModificationException.class,
-        (e, ctx) ->
-            ctx.status(409)
-                .json(error("SAGA_CONFLICT", "The saga was concurrently modified; retry")));
-    // A transient store failure is retryable (503); a permanent one (e.g. a serialization or parse
-    // error) is not — surface it as 500 so the client does not retry it futilely.
-    app.exception(
-        SagaPersistenceException.class,
-        (e, ctx) -> {
-          if (e.isRetryable()) {
-            logger.error("Transient persistence error on {} {}", ctx.method(), ctx.path(), e);
-            ctx.status(503).json(error("UNAVAILABLE", "Service temporarily unavailable"));
-          } else {
-            logger.error("Permanent persistence error on {} {}", ctx.method(), ctx.path(), e);
-            ctx.status(500).json(error("INTERNAL", "Internal server error"));
+          int status = httpStatusForType(e);
+          if (status >= 500) {
+            logger.error("Server-side error on {} {}", ctx.method(), ctx.path(), e);
           }
+          ctx.status(status).json(body(e.getErrorCode(), e.getMetadata()));
         });
-    // Catch-all: never leak an unmapped exception's message; log it and return a generic 500.
+
+    // Catch-all: never leak an unmapped exception; log it and surface the enum's generic INTERNAL.
     app.exception(
         Exception.class,
         (e, ctx) -> {
           logger.error("Unhandled error on {} {}", ctx.method(), ctx.path(), e);
-          ctx.status(500).json(error("INTERNAL", "Internal server error"));
+          ctx.status(500).json(body(SagaErrorCode.INTERNAL_ERROR, ErrorMetadata.of()));
         });
   }
 
-  private static String definitionNotFoundMessage(SagaDefinitionNotFoundException e) {
-    String message = "No saga definition registered with name '" + e.getSagaName() + "'";
-    String version = e.getVersion();
-    return version == null ? message : message + " (version '" + version + "')";
+  /**
+   * The per-type HTTP status. Types not listed fall back to the {@link SagaErrorCode.Category}
+   * mapping so a newly-added subclass with a code still lands in a sensible bucket.
+   */
+  private static int httpStatusForType(SagaRuntimeException e) {
+    if (e instanceof SagaNotFoundException || e instanceof SagaDefinitionNotFoundException) {
+      return 404;
+    }
+    if (e instanceof SagaAlreadyExistsException) {
+      return 409;
+    }
+    if (e instanceof SagaConcurrentModificationException) {
+      return 409;
+    }
+    if (e instanceof SagaStatePreconditionException) {
+      return 422;
+    }
+    if (e instanceof SagaDefinitionException) {
+      return 400;
+    }
+    if (e instanceof SagaTimeoutException) {
+      return 504;
+    }
+    if (e instanceof SagaUnauthenticatedException) {
+      return 401;
+    }
+    if (e instanceof SagaPermissionDeniedException) {
+      return 403;
+    }
+    if (e instanceof SagaUnavailableException) {
+      return 503;
+    }
+    if (e instanceof SagaPersistenceException pe) {
+      return pe.isRetryable() ? 503 : 500;
+    }
+    return switch (e.getErrorCode().category()) {
+      case USER_ERROR -> 400;
+      case RETRYABLE_SERVER_ERROR -> 503;
+      case NON_RETRYABLE_SERVER_ERROR, CLIENT_ERROR -> 500;
+    };
   }
 
-  private static Map<String, Object> error(String code, @Nullable String message) {
+  /** The one body-composition path: everything wire-facing goes through the enum. */
+  private static Map<String, Object> body(SagaErrorCode code, Map<String, String> metadata) {
     Map<String, Object> body = new LinkedHashMap<>();
-    body.put("error", code);
-    body.put("message", message == null ? "" : message);
+    body.put("errorCode", code.code());
+    body.put("message", code.buildMessage(metadata));
+    body.put("metadata", metadata);
     return body;
+  }
+
+  private static String nullToEmpty(@org.jspecify.annotations.Nullable String s) {
+    return s == null ? "" : s;
   }
 }
