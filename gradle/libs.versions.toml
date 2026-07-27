@@ -24,6 +24,7 @@ nimbus-jose-jwt = "10.3"
 grpc = "1.82.1"
 protobuf-java = "4.35.1"
 protobuf-plugin = "0.10.0"
+maven-publish-plugin = "0.37.0"
 
 [libraries]
 scalardb = { module = "com.scalar-labs:scalardb", version.ref = "scalardb" }

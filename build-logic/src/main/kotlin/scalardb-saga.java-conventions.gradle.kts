@@ -6,6 +6,7 @@ import org.gradle.accessors.dm.LibrariesForLibs
 
 plugins {
     `java-library`
+    id("scalardb-saga.base-conventions")
     id("com.diffplug.spotless")
     id("com.github.spotbugs")
     id("net.ltgt.errorprone")
@@ -13,8 +14,6 @@ plugins {
 }
 
 val libs = the<LibrariesForLibs>()
-
-group = "com.scalar.db.saga"
 
 base.archivesName = "scalardb-saga-${project.name}"
 
@@ -26,6 +25,19 @@ java {
 
 repositories {
     mavenCentral()
+}
+
+// ---------------------------------------------------------------------------
+// Reproducible archives
+// ---------------------------------------------------------------------------
+
+// Build timestamps and filesystem ordering would otherwise make every jar, distribution tar, and
+// zip byte-different across builds of the same source. Pinning both makes a published artifact
+// verifiable against a rebuild, and keeps the Docker layer holding the daemon distribution stable
+// when nothing changed.
+tasks.withType<AbstractArchiveTask>().configureEach {
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
 }
 
 // ---------------------------------------------------------------------------
