@@ -91,6 +91,8 @@ Subproject directories use short names; artifacts are prefixed with `scalardb-sa
 
 ## Publishing
 
+See [RELEASING.md](RELEASING.md) for the release process.
+
 - **Maven group is `com.scalar-labs`**, not the Java package — set in `scalardb-saga.base-conventions`. Matches the other Scalar artifacts on Central; cannot change after the first release.
 - Published modules apply `id("scalardb-saga.publishing-conventions")` and **must set `description`** (Maven Central rejects a POM without one). The convention sets the `artifactId` explicitly — `base.archivesName` does not affect it.
 - The daemon is deliberately unpublished: it ships as a container image, so a jar on Central would be an artifact nobody consumes and everyone has to keep patched.
@@ -110,6 +112,8 @@ See [daemon/docker/README.md](daemon/docker/README.md) for running it.
   - `check` — `./gradlew check` (`test` + `integrationTest` + `javadoc` + `spotlessCheck` + `spotbugsMain` + Error Prone), then a no-build-cache compile to surface warnings
   - `dockerfile-lint` — hadolint over `daemon/docker/Dockerfile`
   - `image-smoke-test` — builds the image and runs it against SQLite, asserting health on both transports, non-root uid, `INFO` logging, and a clean `SIGTERM` drain
+- **Release** (`release.yml`, on `v*` tags) — asserts the tag matches `gradle.properties`, then publishes to Maven Central, pushes the multi-arch image, signs it, and creates the GitHub release
+- **Dependabot** (`.github/dependabot.yml`) — gradle (incl. the version catalog), github-actions, and the Dockerfile base-image digest
 
 ## Git
 
@@ -118,4 +122,5 @@ See [daemon/docker/README.md](daemon/docker/README.md) for running it.
 
 ## TODO
 
-- [ ] Add CI workflow details once GitHub Actions are verified in CI
+- [ ] Verify the release workflow end to end on the first tag (Maven Central credentials and the ghcr push are untested)
+- [ ] Add the UBI variant of the daemon image if Red Hat Marketplace / OpenShift certification is needed

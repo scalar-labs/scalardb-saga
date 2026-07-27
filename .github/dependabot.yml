@@ -1,0 +1,47 @@
+version: 2
+
+updates:
+  # The version catalog (gradle/libs.versions.toml) and the convention-plugin dependencies in
+  # build-logic. Dependabot understands the catalog format, so a bump lands in one place.
+  - package-ecosystem: gradle
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # These move together and are only ever exercised by the build itself, so reviewing them as one
+      # PR is both safer and less noise than five.
+      build-tooling:
+        patterns:
+          - "com.diffplug.spotless*"
+          - "com.github.spotbugs*"
+          - "com.google.errorprone*"
+          - "com.h3xstream.findsecbugs*"
+          - "com.uber.nullaway*"
+          - "com.vanniktech*"
+          - "net.ltgt.gradle*"
+      # gRPC ships its modules as a set and the BOM must match the stubs.
+      grpc:
+        patterns:
+          - "io.grpc*"
+      # Netty must stay on a single version across every module — see the netty entry in
+      # libs.versions.toml — so its BOM can only be bumped as a unit.
+      netty:
+        patterns:
+          - "io.netty*"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  # Keeps the digest-pinned base image in the daemon Dockerfile current. Without this the pin would
+  # quietly rot, and the image would ship an ever-older Ubuntu and JRE.
+  - package-ecosystem: docker
+    directory: /daemon/docker
+    schedule:
+      interval: weekly
