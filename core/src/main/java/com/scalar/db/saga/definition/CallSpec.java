@@ -1,5 +1,9 @@
 package com.scalar.db.saga.definition;
 
+// Step and TccStep are imported for the Javadoc reference on referencedContextKeys() below; neither
+// appears in a signature here, since a call spec is pure data.
+import com.scalar.db.saga.api.Step;
+import com.scalar.db.saga.api.TccStep;
 import java.util.Set;
 import net.jcip.annotations.Immutable;
 

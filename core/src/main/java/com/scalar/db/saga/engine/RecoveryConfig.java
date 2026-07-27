@@ -1,5 +1,8 @@
 package com.scalar.db.saga.engine;
 
+// Imported for the Javadoc reference to SagaStatus.ESCALATED below; the record itself holds no
+// status field.
+import com.scalar.db.saga.api.SagaStatus;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Objects;
