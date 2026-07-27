@@ -113,7 +113,9 @@ class DefaultSagaOrchestratorTest {
     void register_unresolvableStep_throwsSagaDefinitionException() {
       // Arrange
       SagaDefinition def = definition("transfer");
-      org.mockito.Mockito.doThrow(new SagaDefinitionException("Step class not found"))
+      org.mockito.Mockito.doThrow(
+              SagaDefinitionException.stepClassInvalid(
+                  "com.example.Foo", "not found on classpath", new ClassNotFoundException()))
           .when(engine)
           .getOrBuildPlan(def);
 

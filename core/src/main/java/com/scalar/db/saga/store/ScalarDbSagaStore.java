@@ -201,12 +201,7 @@ public class ScalarDbSagaStore implements SagaStore {
             if (definition.equals(existingDef)) {
               return Boolean.TRUE; // idempotent no-op
             }
-            throw new SagaDefinitionException(
-                "Definition '"
-                    + name
-                    + "' version '"
-                    + version
-                    + "' is already registered with different content. Bump the version instead.");
+            throw SagaDefinitionException.versionContentConflict(name, version);
           }
 
           tx.insert(buildDefinitionInsert(name, version, json));

@@ -61,26 +61,18 @@ class ReflectiveStepResolver implements StepResolver {
     try {
       return Class.forName(stepClass);
     } catch (ClassNotFoundException e) {
-      throw new SagaDefinitionException("Step class not found on classpath: " + stepClass, e);
+      throw SagaDefinitionException.stepClassInvalid(stepClass, "not found on classpath", e);
     }
   }
 
   private static void validateStepClass(Class<?> clazz, String stepClass) {
     if (clazz.isInterface() || Modifier.isAbstract(clazz.getModifiers())) {
-      throw new SagaDefinitionException(
-          "Step class must be a concrete class, but "
-              + stepClass
-              + " is "
-              + (clazz.isInterface() ? "an interface" : "abstract"));
+      throw SagaDefinitionException.stepClassInvalid(
+          stepClass, clazz.isInterface() ? "is an interface" : "is abstract");
     }
     if (!Step.class.isAssignableFrom(clazz) && !TccStep.class.isAssignableFrom(clazz)) {
-      throw new SagaDefinitionException(
-          "Step class "
-              + stepClass
-              + " must implement "
-              + Step.class.getName()
-              + " or "
-              + TccStep.class.getName());
+      throw SagaDefinitionException.stepClassInvalid(
+          stepClass, "must implement " + Step.class.getName() + " or " + TccStep.class.getName());
     }
   }
 
@@ -91,15 +83,12 @@ class ReflectiveStepResolver implements StepResolver {
   private static Constructor<?> selectConstructor(Class<?> clazz, String stepClass) {
     Constructor<?>[] publicConstructors = clazz.getConstructors();
     if (publicConstructors.length == 0) {
-      throw new SagaDefinitionException("Step class " + stepClass + " has no public constructors");
+      throw SagaDefinitionException.stepClassInvalid(stepClass, "has no public constructors");
     }
     if (publicConstructors.length > 1) {
-      throw new SagaDefinitionException(
-          "Step class "
-              + stepClass
-              + " has "
-              + publicConstructors.length
-              + " public constructors, but exactly one is required");
+      throw SagaDefinitionException.stepClassInvalid(
+          stepClass,
+          "has " + publicConstructors.length + " public constructors, but exactly one is required");
     }
     return publicConstructors[0];
   }
@@ -118,14 +107,13 @@ class ReflectiveStepResolver implements StepResolver {
       try {
         args[i] = resourceRegistry.get(params[i].getType(), qualifier);
       } catch (IllegalArgumentException | IllegalStateException e) {
-        throw new SagaDefinitionException(
-            "Cannot resolve parameter "
+        throw SagaDefinitionException.stepClassInvalid(
+            stepClass,
+            "constructor parameter "
                 + i
-                + " ("
+                + " unresolvable: "
                 + params[i].getType().getName()
-                + (qualifier != null ? " @Named(\"" + qualifier + "\")" : "")
-                + ") of constructor for step class "
-                + stepClass,
+                + (qualifier != null ? " @Named(\"" + qualifier + "\")" : ""),
             e);
       }
     }
@@ -148,16 +136,15 @@ class ReflectiveStepResolver implements StepResolver {
     try {
       return qualifier == null ? context.httpClient() : context.httpClient(qualifier);
     } catch (SagaDefinitionException e) {
-      throw new SagaDefinitionException(
-          "Cannot resolve "
-              + SagaHttpClient.class.getSimpleName()
-              + " parameter "
+      throw SagaDefinitionException.stepClassInvalid(
+          stepClass,
+          "constructor parameter "
               + index
-              + " of step '"
+              + " unresolvable: "
+              + SagaHttpClient.class.getSimpleName()
+              + " for step '"
               + stepName
-              + "' (class "
-              + stepClass
-              + "): "
+              + "': "
               + e.getMessage(),
           e);
     }
@@ -167,11 +154,10 @@ class ReflectiveStepResolver implements StepResolver {
     try {
       return ctor.newInstance(args);
     } catch (InvocationTargetException e) {
-      throw new SagaDefinitionException(
-          "Constructor of step class " + stepClass + " threw an exception",
-          e.getCause() != null ? e.getCause() : e);
+      throw SagaDefinitionException.stepClassInvalid(
+          stepClass, "constructor threw an exception", e.getCause() != null ? e.getCause() : e);
     } catch (InstantiationException | IllegalAccessException e) {
-      throw new SagaDefinitionException("Failed to instantiate step class " + stepClass, e);
+      throw SagaDefinitionException.stepClassInvalid(stepClass, "failed to instantiate", e);
     }
   }
 }

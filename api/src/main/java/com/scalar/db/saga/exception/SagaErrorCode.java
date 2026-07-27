@@ -16,9 +16,10 @@ import java.util.Optional;
  * <p>Format: {@code DB-SAGA-<CATEGORY><4-DIGIT-ID>}, e.g. {@code DB-SAGA-11000}. See {@link
  * Category}.
  *
- * <p>This is the Step 1 seed inventory (~22 codes covering every current exception type at least
- * once). Later migration PRs extend it as each exception type is retrofitted — the definition
- * parser alone will add many more validation codes when {@code SagaDefinitionException} migrates.
+ * <p>Codes stay coarse: one per distinct failure class the client meaningfully differentiates, not
+ * one per rule violation. A code owns the shape (schema + fixed template + docs page); per-case
+ * specifics ride in the {@code detail} metadata field, following the K8s {@code Status.Reason} +
+ * {@code Details.Causes[].message} and AWS {@code ValidationException} pattern.
  */
 // Suppress Error Prone's ImmutableEnumChecker: Schema is effectively immutable (its List field is
 // Collections.unmodifiableList of a defensive copy), but Error Prone only trusts its own
@@ -26,22 +27,62 @@ import java.util.Optional;
 @SuppressWarnings("ImmutableEnumChecker")
 public enum SagaErrorCode {
 
-  // ── USER_ERROR — Definition validation (100xx) ──────────────────────
-  DEFINITION_NO_STEPS(
+  // ── USER_ERROR — Saga definition (100xx) ────────────────────────────
+  DEFINITION_INVALID(
       "DB-SAGA-10003",
       Category.USER_ERROR,
-      "Saga definition has no steps",
-      Schema.of("saga_name"),
-      "A saga requires at least one step to execute.",
-      "Add one or more steps to the saga definition."),
+      "Saga definition is invalid",
+      Schema.of("saga_name", "detail"),
+      "The definition violates a validation rule (e.g. duplicate step name, bad pivot placement, malformed field value). The detail identifies the specific violation.",
+      "Fix the definition per the detail and re-register."),
 
-  DEFINITION_DUPLICATE_STEP_NAME(
+  DEFINITION_MALFORMED(
+      "DB-SAGA-10004",
+      Category.USER_ERROR,
+      "Saga definition source is not parseable",
+      Schema.of("source", "detail"),
+      "The definition source (JSON or YAML) has a syntactic error. The cause carries the parser's diagnostic.",
+      "Fix the JSON/YAML syntax error indicated by the parser cause."),
+
+  DEFINITION_SOURCE_UNREADABLE(
       "DB-SAGA-10005",
       Category.USER_ERROR,
-      "Duplicate step name",
+      "Saga definition source cannot be read",
+      Schema.of("source"),
+      "The file, classpath resource, or extension could not be resolved to a readable definition source.",
+      "Verify the path/resource exists, is readable, and has a supported extension (.json, .yaml, .yml)."),
+
+  DEFINITION_VERSION_CONTENT_CONFLICT(
+      "DB-SAGA-10006",
+      Category.USER_ERROR,
+      "Definition version is already registered with different content",
+      Schema.of("name", "version"),
+      "A definition with this (name, version) already exists but its content differs from what was submitted.",
+      "Bump the version instead of re-registering under the same one."),
+
+  STEP_CLASS_INVALID(
+      "DB-SAGA-10007",
+      Category.USER_ERROR,
+      "Step class cannot be resolved or instantiated",
+      Schema.of("step_class", "detail"),
+      "Reflective resolution of the class-based step failed (not found, not a Step/TccStep, wrong constructor shape, unresolvable parameter, or constructor threw). The detail identifies the specific failure.",
+      "Fix the step class per the detail and ensure it is on the runtime classpath."),
+
+  STEP_CLASS_NOT_SUPPORTED_ON_DAEMON(
+      "DB-SAGA-10008",
+      Category.USER_ERROR,
+      "Class-based step is not supported on the daemon",
       Schema.of("saga_name", "step_name"),
-      "Step names must be unique within a saga definition.",
-      "Rename the duplicate step to a unique name."),
+      "The daemon runs declarative definitions only; class steps cannot be executed remotely.",
+      "Convert the step to a declarative service step or embed the engine instead."),
+
+  HTTP_ENDPOINT_LOOKUP_FAILED(
+      "DB-SAGA-10009",
+      Category.USER_ERROR,
+      "HTTP endpoint lookup failed",
+      Schema.of("detail"),
+      "A step needed an HTTP endpoint, but the orchestrator has no matching registration (none registered, name not found, or multiple registered without a qualifier).",
+      "Register the endpoint on the orchestrator's builder, fix the lookup name, or annotate the SagaHttpClient parameter with @Named to select one."),
 
   // ── USER_ERROR — Auth (104xx) ───────────────────────────────────────
   AUTH_UNAUTHENTICATED(

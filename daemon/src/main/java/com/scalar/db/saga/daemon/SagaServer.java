@@ -260,13 +260,8 @@ public final class SagaServer implements AutoCloseable {
     SagaDefinition definition = SagaDefinitionParser.parseFile(path);
     for (SagaDefinition.StepDefinition step : definition.getSteps()) {
       if (step instanceof SagaDefinition.ClassStep) {
-        throw new SagaDefinitionException(
-            "Saga '"
-                + definition.getName()
-                + "' step '"
-                + step.getName()
-                + "' is a code step (stepClass), which daemon mode does not support. Use a"
-                + " declarative service step, or run the engine in embedded mode for code steps.");
+        throw SagaDefinitionException.stepClassNotSupportedOnDaemon(
+            definition.getName(), step.getName());
       }
     }
     orchestrator.register(applyDefaultTimeout(definition));

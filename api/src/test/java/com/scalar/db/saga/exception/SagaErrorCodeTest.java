@@ -100,10 +100,10 @@ class SagaErrorCodeTest {
   @Test
   void buildMessage_multiKeyMetadataGiven_rendersInSchemaOrderNotMapOrder() {
     // Arrange — insertion order deliberately reverses schema order to prove ordering isn't from
-    // the map. The schema declares (saga_name, step_name); the map here inserts step_name first.
-    SagaErrorCode code = SagaErrorCode.DEFINITION_DUPLICATE_STEP_NAME;
+    // the map. The schema declares (saga_name, detail); the map here inserts detail first.
+    SagaErrorCode code = SagaErrorCode.DEFINITION_INVALID;
     Map<String, String> metadata = new LinkedHashMap<>();
-    metadata.put("step_name", "debit");
+    metadata.put("detail", "duplicate step name 'debit'");
     metadata.put("saga_name", "orders");
 
     // Act
@@ -111,7 +111,9 @@ class SagaErrorCodeTest {
 
     // Assert — saga_name comes first because that's the declared schema order
     assertThat(rendered)
-        .isEqualTo("DB-SAGA-10005: Duplicate step name [saga_name=orders, step_name=debit]");
+        .isEqualTo(
+            "DB-SAGA-10003: Saga definition is invalid [saga_name=orders,"
+                + " detail=duplicate step name 'debit']");
   }
 
   @Test

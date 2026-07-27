@@ -37,7 +37,8 @@ class ReflectiveStepResolverTest {
       public SagaHttpClient httpClient(String name) {
         SagaHttpClient client = endpoints.get(name);
         if (client == null) {
-          throw new SagaDefinitionException("no endpoint: " + name);
+          throw SagaDefinitionException.httpEndpointLookupFailed(
+              "no HTTP endpoint registered under name '" + name + "'");
         }
         return client;
       }
@@ -45,10 +46,10 @@ class ReflectiveStepResolverTest {
       @Override
       public SagaHttpClient httpClient() {
         if (endpoints.isEmpty()) {
-          throw new SagaDefinitionException("no HTTP endpoint registered");
+          throw SagaDefinitionException.httpEndpointLookupFailed("no HTTP endpoint is registered");
         }
         if (endpoints.size() > 1) {
-          throw new SagaDefinitionException(
+          throw SagaDefinitionException.httpEndpointLookupFailed(
               "multiple HTTP endpoints registered: " + endpoints.keySet());
         }
         return endpoints.values().iterator().next();

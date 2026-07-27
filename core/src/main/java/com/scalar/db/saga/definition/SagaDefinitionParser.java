@@ -11,7 +11,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Arrays;
 import java.util.Set;
 import org.jspecify.annotations.Nullable;
 
@@ -52,14 +51,14 @@ public final class SagaDefinitionParser {
   public static SagaDefinition parseFile(Path path) {
     Path fileNamePath = path.getFileName();
     if (fileNamePath == null) {
-      throw new SagaDefinitionException("Path has no file name: " + path);
+      throw SagaDefinitionException.sourceUnreadable(path.toString());
     }
     String fileName = fileNamePath.toString().toLowerCase(java.util.Locale.ROOT);
     ObjectMapper mapper = resolveMapper(fileName);
     try (InputStream in = Files.newInputStream(path)) {
       return parse(mapper, in);
     } catch (IOException e) {
-      throw new SagaDefinitionException("Failed to read definition file: " + path, e);
+      throw SagaDefinitionException.sourceUnreadable(path.toString(), e);
     }
   }
 
@@ -73,11 +72,11 @@ public final class SagaDefinitionParser {
     try (InputStream in =
         SagaDefinitionParser.class.getClassLoader().getResourceAsStream(resourcePath)) {
       if (in == null) {
-        throw new SagaDefinitionException("Resource not found on classpath: " + resourcePath);
+        throw SagaDefinitionException.sourceUnreadable(resourcePath);
       }
       return parse(mapper, in);
     } catch (IOException e) {
-      throw new SagaDefinitionException("Failed to read resource: " + resourcePath, e);
+      throw SagaDefinitionException.sourceUnreadable(resourcePath, e);
     }
   }
 
@@ -91,7 +90,7 @@ public final class SagaDefinitionParser {
       JsonNode root = JSON_MAPPER.readTree(json);
       return buildDefinition(root);
     } catch (IOException e) {
-      throw new SagaDefinitionException("Failed to parse JSON definition", e);
+      throw SagaDefinitionException.definitionMalformed("JSON", e);
     }
   }
 
@@ -105,7 +104,7 @@ public final class SagaDefinitionParser {
       JsonNode root = YAML_MAPPER.readTree(yaml);
       return buildDefinition(root);
     } catch (IOException e) {
-      throw new SagaDefinitionException("Failed to parse YAML definition", e);
+      throw SagaDefinitionException.definitionMalformed("YAML", e);
     }
   }
 
@@ -119,10 +118,10 @@ public final class SagaDefinitionParser {
   }
 
   private static SagaDefinition buildDefinition(JsonNode root) {
-    String name = requireText(root, "name");
-    SagaMode mode = parseEnum(root, "mode", SagaMode.class, SagaMode.SAGA);
+    String name = requireText(root, "", "name");
+    SagaMode mode = parseEnum(root, name, "mode", SagaMode.class, SagaMode.SAGA);
     if (!root.has("steps") || !root.get("steps").isArray()) {
-      throw new SagaDefinitionException("Definition '" + name + "' must have a 'steps' array");
+      throw SagaDefinitionException.definitionInvalid(name, "must have a 'steps' array");
     }
     checkUnknownFields(root, name);
     return mode == SagaMode.TCC ? buildTcc(name, root) : buildSaga(name, root);
@@ -132,7 +131,8 @@ public final class SagaDefinitionParser {
     SagaDefinition.SagaBuilder builder = SagaDefinition.newBuilder(name).saga();
     applyCommon(builder, root);
     if (isPresent(root, "recoveryStrategy")) {
-      builder.recoveryStrategy(parseEnum(root, "recoveryStrategy", RecoveryStrategy.class, null));
+      builder.recoveryStrategy(
+          parseEnum(root, name, "recoveryStrategy", RecoveryStrategy.class, null));
     }
     for (JsonNode stepNode : root.get("steps")) {
       addSagaStep(builder, stepNode);
@@ -142,15 +142,15 @@ public final class SagaDefinitionParser {
 
   private static SagaDefinition buildTcc(String name, JsonNode root) {
     if (isPresent(root, "recoveryStrategy")) {
-      throw new SagaDefinitionException(
-          "TCC definition '"
-              + name
-              + "' must not specify 'recoveryStrategy' — recovery is predefined (the cancel phase)");
+      throw SagaDefinitionException.definitionInvalid(
+          name,
+          "TCC definition must not specify 'recoveryStrategy' — recovery is predefined (the cancel"
+              + " phase)");
     }
     SagaDefinition.TccBuilder builder = SagaDefinition.newBuilder(name).tcc();
     applyCommon(builder, root);
     for (JsonNode stepNode : root.get("steps")) {
-      addTccStep(builder, stepNode);
+      addTccStep(name, builder, stepNode);
     }
     return builder.build();
   }
@@ -168,9 +168,12 @@ public final class SagaDefinitionParser {
   }
 
   private static void addSagaStep(SagaDefinition.SagaBuilder builder, JsonNode stepNode) {
-    String stepName = requireText(stepNode, "name");
+    String stepName = requireText(stepNode, "", "name");
     String stepClass =
-        CallSpecCodec.classStepOrNull(stepNode, stepName, SagaDefinitionException::new);
+        CallSpecCodec.classStepOrNull(
+            stepNode,
+            stepName,
+            msg -> SagaDefinitionException.declarativeStepInvalid(stepName, msg));
     if (stepClass != null) {
       SagaDefinition.SagaClassStepBuilder sb = builder.step(stepName, stepClass);
       applyStepCommon(sb, stepNode);
@@ -181,8 +184,10 @@ public final class SagaDefinitionParser {
       return;
     }
     String service = stepNode.get("service").asText();
-    CallSpecCodec.requireSagaPhases(stepNode, stepName, SagaDefinitionException::new);
-    CallSpecCodec.rejectAsyncOnBackwardPhase(stepNode, stepName, SagaDefinitionException::new);
+    CallSpecCodec.requireSagaPhases(
+        stepNode, stepName, msg -> SagaDefinitionException.declarativeStepInvalid(stepName, msg));
+    CallSpecCodec.rejectAsyncOnBackwardPhase(
+        stepNode, stepName, msg -> SagaDefinitionException.declarativeStepInvalid(stepName, msg));
     CallSpec.Transport transport = CallSpecCodec.parseTransport(stepNode, stepName);
     SagaDefinition.DeclarativeStepBuilder sb =
         builder
@@ -197,17 +202,19 @@ public final class SagaDefinitionParser {
     sb.add();
   }
 
-  private static void addTccStep(SagaDefinition.TccBuilder builder, JsonNode stepNode) {
-    String stepName = requireText(stepNode, "name");
+  private static void addTccStep(
+      String sagaName, SagaDefinition.TccBuilder builder, JsonNode stepNode) {
+    String stepName = requireText(stepNode, sagaName, "name");
     if (isPresent(stepNode, "pivot")) {
-      throw new SagaDefinitionException(
-          "TCC step '"
-              + stepName
-              + "' must not specify 'pivot' — TCC recovery is predefined (cancel-based), so the"
-              + " pivot is fixed at the last try step");
+      throw SagaDefinitionException.definitionInvalid(
+          sagaName,
+          "TCC step '" + stepName + "' must not specify 'pivot' — TCC recovery is predefined");
     }
     String stepClass =
-        CallSpecCodec.classStepOrNull(stepNode, stepName, SagaDefinitionException::new);
+        CallSpecCodec.classStepOrNull(
+            stepNode,
+            stepName,
+            msg -> SagaDefinitionException.declarativeStepInvalid(stepName, msg));
     if (stepClass != null) {
       SagaDefinition.TccClassStepBuilder sb = builder.step(stepName, stepClass);
       applyStepCommon(sb, stepNode);
@@ -215,8 +222,10 @@ public final class SagaDefinitionParser {
       return;
     }
     String service = stepNode.get("service").asText();
-    CallSpecCodec.requireTccPhases(stepNode, stepName, SagaDefinitionException::new);
-    CallSpecCodec.rejectAsyncOnBackwardPhase(stepNode, stepName, SagaDefinitionException::new);
+    CallSpecCodec.requireTccPhases(
+        stepNode, stepName, msg -> SagaDefinitionException.declarativeStepInvalid(stepName, msg));
+    CallSpecCodec.rejectAsyncOnBackwardPhase(
+        stepNode, stepName, msg -> SagaDefinitionException.declarativeStepInvalid(stepName, msg));
     CallSpec.Transport transport = CallSpecCodec.parseTransport(stepNode, stepName);
     SagaDefinition.TccDeclarativeStepBuilder sb =
         builder
@@ -262,32 +271,33 @@ public final class SagaDefinitionParser {
     return builder.build();
   }
 
-  private static String requireText(JsonNode node, String field) {
+  private static String requireText(JsonNode node, String definitionName, String field) {
     if (!node.has(field) || !node.get(field).isTextual()) {
-      throw new SagaDefinitionException("Missing or non-text field: '" + field + "'");
+      throw SagaDefinitionException.definitionInvalid(
+          definitionName, "missing required field: '" + field + "'");
     }
     return node.get(field).asText();
   }
 
   private static <T extends Enum<T>> T parseEnum(
-      JsonNode node, String field, Class<T> enumClass, @Nullable T defaultValue) {
+      JsonNode node,
+      String definitionName,
+      String field,
+      Class<T> enumClass,
+      @Nullable T defaultValue) {
     if (!node.has(field)) {
       if (defaultValue != null) {
         return defaultValue;
       }
-      throw new SagaDefinitionException("Missing required field: '" + field + "'");
+      throw SagaDefinitionException.definitionInvalid(
+          definitionName, "missing required field: '" + field + "'");
     }
     String value = node.get(field).asText();
     try {
       return Enum.valueOf(enumClass, value);
     } catch (IllegalArgumentException e) {
-      throw new SagaDefinitionException(
-          "Invalid value '"
-              + value
-              + "' for field '"
-              + field
-              + "'; expected one of: "
-              + Arrays.toString(enumClass.getEnumConstants()));
+      throw SagaDefinitionException.definitionInvalid(
+          definitionName, "invalid value '" + value + "' for field '" + field + "'");
     }
   }
 
@@ -320,8 +330,8 @@ public final class SagaDefinitionParser {
         .forEachRemaining(
             f -> {
               if (!known.contains(f)) {
-                throw new SagaDefinitionException(
-                    "Unknown field '" + f + "' in definition '" + definitionName + "'");
+                throw SagaDefinitionException.definitionInvalid(
+                    definitionName, "unknown field '" + f + "' in definition");
               }
             });
 
@@ -332,8 +342,8 @@ public final class SagaDefinitionParser {
             .forEachRemaining(
                 f -> {
                   if (!stepKnown.contains(f)) {
-                    throw new SagaDefinitionException(
-                        "Unknown field '" + f + "' in step of definition '" + definitionName + "'");
+                    throw SagaDefinitionException.definitionInvalid(
+                        definitionName, "unknown field '" + f + "' in step");
                   }
                 });
       }
@@ -347,8 +357,7 @@ public final class SagaDefinitionParser {
     if (fileNameOrPath.endsWith(".json")) {
       return JSON_MAPPER;
     }
-    throw new SagaDefinitionException(
-        "Unsupported file extension: '" + fileNameOrPath + "'; expected .json, .yaml, or .yml");
+    throw SagaDefinitionException.sourceUnreadable(fileNameOrPath);
   }
 
   private static ObjectMapper createMapper(@Nullable JsonFactory factory) {

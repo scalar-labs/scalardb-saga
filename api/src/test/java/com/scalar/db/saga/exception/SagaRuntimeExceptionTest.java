@@ -125,16 +125,17 @@ class SagaRuntimeExceptionTest {
   void getMessage_codeCarryingConstructor_rendersInSchemaOrder() {
     // Arrange — insertion order deliberately reversed to prove ordering isn't from the map
     Map<String, String> metadata = new LinkedHashMap<>();
-    metadata.put("step_name", "debit");
+    metadata.put("detail", "duplicate step name 'debit'");
     metadata.put("saga_name", "orders");
 
     // Act
-    SagaRuntimeException e =
-        new SagaRuntimeException(SagaErrorCode.DEFINITION_DUPLICATE_STEP_NAME, metadata);
+    SagaRuntimeException e = new SagaRuntimeException(SagaErrorCode.DEFINITION_INVALID, metadata);
 
     // Assert — saga_name comes first because that's the declared schema order
     assertThat(e.getMessage())
-        .isEqualTo("DB-SAGA-10005: Duplicate step name [saga_name=orders, step_name=debit]");
+        .isEqualTo(
+            "DB-SAGA-10003: Saga definition is invalid [saga_name=orders,"
+                + " detail=duplicate step name 'debit']");
   }
 
   @SuppressWarnings("NullAway")
