@@ -193,9 +193,9 @@ public enum SagaErrorCode {
   SERVICE_UNAVAILABLE(
       "DB-SAGA-20003",
       Category.RETRYABLE_SERVER_ERROR,
-      "Saga service temporarily unavailable",
+      "Service temporarily unavailable",
       Schema.none(),
-      "The saga service could not fulfill the request; the failure is transient.",
+      "The saga service could not fulfill the request; the failure is transient. Applies to the saga service itself or one of its upstream dependencies (e.g. the identity provider).",
       "Retry the operation with backoff."),
 
   RATE_LIMIT_EXCEEDED(

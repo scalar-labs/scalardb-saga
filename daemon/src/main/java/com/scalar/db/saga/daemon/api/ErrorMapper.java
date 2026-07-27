@@ -10,14 +10,11 @@ import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaNotFoundException;
-import com.scalar.db.saga.exception.SagaPermissionDeniedException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
-import com.scalar.db.saga.exception.SagaTimeoutException;
-import com.scalar.db.saga.exception.SagaUnauthenticatedException;
-import com.scalar.db.saga.exception.SagaUnavailableException;
 import io.javalin.Javalin;
+import io.javalin.http.Context;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.slf4j.Logger;
@@ -34,13 +31,24 @@ import org.slf4j.LoggerFactory;
  *   "metadata":  { "saga_id": "abc-123" } }
  * }</pre>
  *
- * <p><b>{@link SagaErrorCode} is the sole wire-facing source of truth.</b> Every response — engine
- * exceptions, daemon-only exceptions, catch-all — is composed from a {@link SagaErrorCode} + its
- * schema-validated metadata via one path. The mapper carries no hand-authored code tokens or
- * message strings; changing a wire message is a single-line edit on the enum.
+ * <p><b>{@link SagaErrorCode} is the sole wire-facing source of truth.</b> Every response is
+ * composed from the exception's {@link SagaErrorCode} + its schema-validated metadata via one
+ * body-composition path. Log messages also derive from the enum ({@code e.getMessage()}), plus the
+ * server-side-only {@code internalDetail} where the exception carries one — so log and wire never
+ * drift.
  *
- * <p>The per-type handlers exist only to (a) pick the HTTP status per exception type and (b) log at
- * the right severity with the right per-type context; the body composition is uniform.
+ * <p><b>Per-type explicit registration.</b> Every wire-facing exception has its own {@code
+ * app.exception} handler; this file reads as a complete per-type dispatch table. The generic {@link
+ * SagaRuntimeException} handler catches any future subclass that lacks a dedicated entry so the
+ * fallback route is safe.
+ *
+ * <p><b>Logging rule:</b> log per-type only when the operator would learn something the wire body
+ * doesn't already show — i.e. the exception carries a server-side-only field ({@code
+ * internalDetail}, principal, required role, or a cause chain with internal specifics). Everything
+ * else — where the wire body already tells the whole story — is not logged: the client already saw
+ * the error and a duplicate server-side log adds nothing. Severity: 5xx → {@code ERROR} (operator
+ * must investigate); authorization denials → {@code INFO} (security audit); everything else that
+ * logs → {@code DEBUG} (usually high-volume probing traffic).
  */
 public final class ErrorMapper {
 
@@ -54,81 +62,102 @@ public final class ErrorMapper {
    * @param app the Javalin app
    */
   public static void register(Javalin app) {
-    // The daemon's own edge validation — its message is daemon-authored, so it rides in `detail`.
-    app.exception(
-        InvalidRequestException.class,
-        (e, ctx) ->
-            ctx.status(400)
-                .json(
-                    body(
-                        SagaErrorCode.INVALID_REQUEST,
-                        ErrorMetadata.of("detail", nullToEmpty(e.getMessage())))));
-    // A client-supplied value the engine rejects. Do not echo the engine's wording (may contain
-    // internal detail); use a fixed daemon-owned literal in `detail`.
+    // ── Not found (404) ──────────────────────────────────────────────────
+    app.exception(SagaNotFoundException.class, (e, ctx) -> respond(ctx, 404, e));
+    app.exception(SagaDefinitionNotFoundException.class, (e, ctx) -> respond(ctx, 404, e));
+
+    // ── Conflict (409) ───────────────────────────────────────────────────
+    app.exception(SagaAlreadyExistsException.class, (e, ctx) -> respond(ctx, 409, e));
+    app.exception(SagaConcurrentModificationException.class, (e, ctx) -> respond(ctx, 409, e));
+
+    // ── Precondition failed (422) ────────────────────────────────────────
+    app.exception(SagaStatePreconditionException.class, (e, ctx) -> respond(ctx, 422, e));
+
+    // ── Bad request (400) ────────────────────────────────────────────────
+    app.exception(SagaDefinitionException.class, (e, ctx) -> respond(ctx, 400, e));
+    app.exception(InvalidRequestException.class, (e, ctx) -> respond(ctx, 400, e));
+    // A client-supplied value the engine rejects surfaces as IllegalArgumentException — a stdlib
+    // exception. Wrap it in InvalidRequestException with a fixed daemon-owned detail (do not echo
+    // the engine's wording) so it flows through the same code path as every other exception.
     app.exception(
         IllegalArgumentException.class,
-        (e, ctx) ->
-            ctx.status(400)
-                .json(
-                    body(
-                        SagaErrorCode.INVALID_REQUEST,
-                        ErrorMetadata.of("detail", "invalid request parameter"))));
-    // Authentication failure: log at debug (probing traffic can be frequent); the response never
-    // echoes why the credential was rejected — the enum's fixed message conveys "authenticate."
+        (e, ctx) -> respond(ctx, 400, new InvalidRequestException("invalid request parameter")));
+
+    // ── Auth (401 / 403) ─────────────────────────────────────────────────
+    app.exception(
+        CallbackAuthException.class,
+        (e, ctx) -> {
+          // DEBUG: probing traffic can make this frequent; log the internal reason for triage.
+          logger.debug(
+              "{} on {} {}: {}", e.getMessage(), ctx.method(), ctx.path(), e.getInternalDetail());
+          respond(ctx, 401, e);
+        });
     app.exception(
         SagaAuthenticationException.class,
         (e, ctx) -> {
+          // DEBUG: probing traffic can make this frequent.
           logger.debug(
-              "Authentication failed on {} {}: {}", ctx.method(), ctx.path(), e.getMessage());
-          ctx.status(401).json(body(SagaErrorCode.UNAUTHENTICATED, ErrorMetadata.of()));
+              "{} on {} {}: {}", e.getMessage(), ctx.method(), ctx.path(), e.getInternalDetail());
+          respond(ctx, 401, e);
         });
-    // Authorization failure: log the principal + required role for the audit trail; the response is
-    // the enum's generic "permission denied."
     app.exception(
         SagaAuthorizationException.class,
         (e, ctx) -> {
+          // INFO: audit trail with principal + required role.
           logger.info(
-              "Authorization denied on {} {}: caller '{}' lacks role {}",
+              "{} on {} {}: caller '{}' lacks role {}",
+              e.getMessage(),
               ctx.method(),
               ctx.path(),
               e.getPrincipal(),
               e.getRequiredRole().wireName());
-          ctx.status(403).json(body(SagaErrorCode.PERMISSION_DENIED, ErrorMetadata.of()));
+          respond(ctx, 403, e);
         });
-    // Authentication could not be completed because the provider is unavailable — a transient
-    // upstream outage. Log it and return the enum's retryable "service unavailable."
-    app.exception(
-        SagaAuthUnavailableException.class,
-        (e, ctx) -> {
-          logger.error("Authentication provider unavailable on {} {}", ctx.method(), ctx.path(), e);
-          ctx.status(503).json(body(SagaErrorCode.SERVICE_UNAVAILABLE, ErrorMetadata.of()));
-        });
+
+    // ── Rate limit (429) ─────────────────────────────────────────────────
     app.exception(
         RateLimitExceededException.class,
         (e, ctx) -> {
           logger.debug(
-              "Rate limit exceeded on {} {}: {}", ctx.method(), ctx.path(), e.getMessage());
-          ctx.status(429).json(body(SagaErrorCode.RATE_LIMIT_EXCEEDED, ErrorMetadata.of()));
+              "{} on {} {}: {}", e.getMessage(), ctx.method(), ctx.path(), e.getInternalDetail());
+          respond(ctx, 429, e);
         });
-    // Async-callback token missing/invalid. Semantically an auth failure; the response is
-    // deliberately generic (does not distinguish missing from invalid) so it is not an oracle.
-    app.exception(
-        CallbackAuthException.class,
-        (e, ctx) -> ctx.status(401).json(body(SagaErrorCode.UNAUTHENTICATED, ErrorMetadata.of())));
 
-    // Every SagaRuntimeException — generic path. Javalin resolves the closest handler up the
-    // hierarchy, so subclasses fall here unless they need a special-case handler (they don't).
+    // ── Server errors (500 / 503) ────────────────────────────────────────
+    // Identity-provider transient outage; log ERROR with the specific upstream failure.
+    app.exception(
+        SagaAuthUnavailableException.class,
+        (e, ctx) -> {
+          logger.error(
+              "{} on {} {}: {}",
+              e.getMessage(),
+              ctx.method(),
+              ctx.path(),
+              e.getInternalDetail(),
+              e);
+          respond(ctx, 503, e);
+        });
+    // Transient store failure → 503 (retryable); permanent → 500 (do not retry).
+    app.exception(
+        SagaPersistenceException.class,
+        (e, ctx) -> {
+          int status = e.isRetryable() ? 503 : 500;
+          logger.error("{} on {} {}", e.getMessage(), ctx.method(), ctx.path(), e);
+          respond(ctx, status, e);
+        });
+
+    // ── Fallbacks ────────────────────────────────────────────────────────
+    // Any SagaRuntimeException subclass that isn't listed above — sane default via category.
     app.exception(
         SagaRuntimeException.class,
         (e, ctx) -> {
-          int status = httpStatusForType(e);
+          int status = statusForCategory(e.getErrorCode().category());
           if (status >= 500) {
-            logger.error("Server-side error on {} {}", ctx.method(), ctx.path(), e);
+            logger.error("{} on {} {}", e.getMessage(), ctx.method(), ctx.path(), e);
           }
-          ctx.status(status).json(body(e.getErrorCode(), e.getMetadata()));
+          respond(ctx, status, e);
         });
-
-    // Catch-all: never leak an unmapped exception; log it and surface the enum's generic INTERNAL.
+    // Non-Saga catch-all: log and surface the enum's generic INTERNAL_ERROR.
     app.exception(
         Exception.class,
         (e, ctx) -> {
@@ -137,42 +166,17 @@ public final class ErrorMapper {
         });
   }
 
+  /** Writes the wire body for a {@link SagaRuntimeException} at the given HTTP status. */
+  private static void respond(Context ctx, int status, SagaRuntimeException e) {
+    ctx.status(status).json(body(e.getErrorCode(), e.getMetadata()));
+  }
+
   /**
-   * The per-type HTTP status. Types not listed fall back to the {@link SagaErrorCode.Category}
-   * mapping so a newly-added subclass with a code still lands in a sensible bucket.
+   * Category-based HTTP status — used only by the {@link SagaRuntimeException} fallback for an
+   * unmapped subclass, so a newly-added exception still lands in a sensible bucket.
    */
-  private static int httpStatusForType(SagaRuntimeException e) {
-    if (e instanceof SagaNotFoundException || e instanceof SagaDefinitionNotFoundException) {
-      return 404;
-    }
-    if (e instanceof SagaAlreadyExistsException) {
-      return 409;
-    }
-    if (e instanceof SagaConcurrentModificationException) {
-      return 409;
-    }
-    if (e instanceof SagaStatePreconditionException) {
-      return 422;
-    }
-    if (e instanceof SagaDefinitionException) {
-      return 400;
-    }
-    if (e instanceof SagaTimeoutException) {
-      return 504;
-    }
-    if (e instanceof SagaUnauthenticatedException) {
-      return 401;
-    }
-    if (e instanceof SagaPermissionDeniedException) {
-      return 403;
-    }
-    if (e instanceof SagaUnavailableException) {
-      return 503;
-    }
-    if (e instanceof SagaPersistenceException pe) {
-      return pe.isRetryable() ? 503 : 500;
-    }
-    return switch (e.getErrorCode().category()) {
+  private static int statusForCategory(SagaErrorCode.Category c) {
+    return switch (c) {
       case USER_ERROR -> 400;
       case RETRYABLE_SERVER_ERROR -> 503;
       case NON_RETRYABLE_SERVER_ERROR, CLIENT_ERROR -> 500;
@@ -186,9 +190,5 @@ public final class ErrorMapper {
     body.put("message", code.buildMessage(metadata));
     body.put("metadata", metadata);
     return body;
-  }
-
-  private static String nullToEmpty(@org.jspecify.annotations.Nullable String s) {
-    return s == null ? "" : s;
   }
 }
