@@ -3,13 +3,18 @@
 `ghcr.io/scalar-labs/scalardb-saga-daemon` runs the saga engine as a service, exposing it over REST
 (`8080`) and gRPC (`50051`). Built for `linux/amd64` and `linux/arm64`.
 
-See [RELEASING.md](../../RELEASING.md) for how the image is built and how to verify its signature.
+Build it yourself with `./gradlew :daemon:dockerBuild`: that assembles the context from the
+`Dockerfile` in this directory plus the daemon distribution, and loads a single-architecture image
+tagged with the project version. See [RELEASING.md](../../RELEASING.md) for how the published image
+is built and signed, and how to verify its signature.
 
 ## Running it
 
 The image ships a configuration *template* and does not start as-is: the daemon needs a reachable
-ScalarDB database and at least one saga definition, and it refuses to start without either — a healthy
-process that can run no saga is worse than a failure at boot.
+ScalarDB database, at least one saga definition, and — since the template selects the `jwt` security
+provider — the JWKS URL, issuer, and audience of your IdP. It refuses to start if any is missing: a
+healthy process that can run no saga, or that lets anyone start one, is worse than a failure at boot.
+Every value the template cannot guess is marked `REPLACE_ME`.
 
 ```bash
 docker run --rm \
@@ -20,7 +25,8 @@ docker run --rm \
 ```
 
 Mount over `/scalardb-saga/conf` with your own `server.properties` and `definitions/`. Start from the
-template in this directory — every key is documented there and on `SagaServerConfig`.
+template in this directory — every key is documented there and on `SagaServerConfig`, or on
+`JwtConfig` and `ApiKeyConfig` for the security keys of each provider.
 
 Daemon mode is **declarative-only**: a definition naming a code step (`stepClass`) is rejected at
 startup, because an operator cannot add classes to this image. Use a declarative service step, or embed
