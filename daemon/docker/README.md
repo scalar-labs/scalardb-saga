@@ -5,7 +5,8 @@
 
 Build it yourself with `./gradlew :daemon:dockerBuild`: that assembles the context from the
 `Dockerfile` in this directory plus the daemon distribution, and loads a single-architecture image
-tagged with the project version.
+tagged with the project version. See [RELEASING.md](../../RELEASING.md) for how the published image
+is built and signed, and how to verify its signature.
 
 ## Running it
 
