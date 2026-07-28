@@ -14,6 +14,17 @@
       second appender).
 -->
 <configuration>
+  <!--
+    Pushes the levels below down into java.util.logging, whose records reach Logback through the
+    bridge SagaServer.main installs (gRPC logs via JUL, not SLF4J). Without this, JUL keeps its own
+    default level and builds a LogRecord for every call before the bridge can discard it — the whole
+    cost of a log statement that was never going to be printed. resetJUL clears the handlers JUL
+    inherited beforehand so nothing is emitted twice.
+  -->
+  <contextListener class="ch.qos.logback.classic.jul.LevelChangePropagator">
+    <resetJUL>true</resetJUL>
+  </contextListener>
+
   <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
     <encoder>
       <pattern>%d{yyyy-MM-dd'T'HH:mm:ss.SSS'Z', UTC} %-5level [%thread] %logger{40} - %msg%n</pattern>

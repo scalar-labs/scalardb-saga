@@ -1,0 +1,196 @@
+package com.scalar.db.saga.daemon;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.tuple;
+
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.LoggerContext;
+import ch.qos.logback.classic.joran.JoranConfigurator;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.joran.spi.JoranException;
+import ch.qos.logback.core.read.ListAppender;
+import java.net.URL;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Objects;
+import java.util.logging.Handler;
+import java.util.logging.LogManager;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
+import org.slf4j.bridge.SLF4JBridgeHandler;
+
+/**
+ * Covers the path that keeps gRPC's {@code java.util.logging} output inside the daemon's Logback
+ * configuration: {@link SagaServer#installJulToSlf4jBridge()}, which routes the records, and the
+ * {@code LevelChangePropagator} in the shipped {@code logback.xml}, which is what makes routing
+ * them affordable.
+ *
+ * <p>Lives in its own class because it mutates JVM-wide state; the root JUL logger's handlers and
+ * level, plus the root Logback logger's appenders. All are captured and restored per test so
+ * nothing leaks into the rest of the suite.
+ */
+class SagaServerJulBridgeTest {
+
+  private ch.qos.logback.classic.Logger rootLogger;
+  private ListAppender<ILoggingEvent> appender;
+  private List<Handler> originalJulHandlers;
+  private java.util.logging.Level originalJulRootLevel;
+  private LoggerContext propagationContext;
+
+  // Fields, not locals: SpotBugs flags LG_LOST_LOGGER_DUE_TO_WEAK_REFERENCE because LogManager
+  // holds Loggers weakly, so a level set on a local can be lost to garbage collection before the
+  // logging calls run.
+  private java.util.logging.Logger levelTestLogger;
+  private java.util.logging.Logger propagationTestLogger;
+
+  @BeforeEach
+  void setUp() {
+    java.util.logging.Logger julRoot = LogManager.getLogManager().getLogger("");
+    originalJulHandlers = Arrays.asList(julRoot.getHandlers().clone());
+    originalJulRootLevel = julRoot.getLevel();
+    rootLogger =
+        (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+    appender = new ListAppender<>();
+    appender.start();
+    rootLogger.addAppender(appender);
+    levelTestLogger = java.util.logging.Logger.getLogger("io.grpc.test.levels");
+    propagationTestLogger = java.util.logging.Logger.getLogger("io.grpc.test.propagation");
+  }
+
+  @AfterEach
+  void tearDown() {
+    if (propagationContext != null) {
+      propagationContext.stop();
+      propagationContext = null;
+    }
+    rootLogger.detachAppender(appender);
+    appender.stop();
+    SLF4JBridgeHandler.uninstall();
+    java.util.logging.Logger julRoot = LogManager.getLogManager().getLogger("");
+    for (Handler handler : julRoot.getHandlers()) {
+      julRoot.removeHandler(handler);
+    }
+    originalJulHandlers.forEach(julRoot::addHandler);
+    // Restored last: configuring the shipped logback.xml resets JUL, which drops the level as well
+    // as the handlers.
+    if (originalJulRootLevel != null) {
+      julRoot.setLevel(originalJulRootLevel);
+    }
+    propagationTestLogger.setLevel(null);
+  }
+
+  @Test
+  public void installJulToSlf4jBridge_julLoggerUsed_routesTheRecordToSlf4j() {
+    // Arrange
+    SagaServer.installJulToSlf4jBridge();
+
+    // Act — how gRPC emits its logs: java.util.logging, not SLF4J.
+    java.util.logging.Logger.getLogger("io.grpc.netty.NettyServerTransport")
+        .warning("transport failed");
+
+    // Assert
+    assertThat(appender.list)
+        .extracting(ILoggingEvent::getLoggerName, ILoggingEvent::getFormattedMessage)
+        .containsExactly(tuple("io.grpc.netty.NettyServerTransport", "transport failed"));
+  }
+
+  @Test
+  public void installJulToSlf4jBridge_julLoggerUsed_mapsJulLevelsOntoSlf4jLevels() {
+    // Arrange
+    SagaServer.installJulToSlf4jBridge();
+    levelTestLogger.setLevel(java.util.logging.Level.ALL);
+
+    // Act
+    levelTestLogger.severe("severe");
+    levelTestLogger.warning("warning");
+    levelTestLogger.info("info");
+
+    // Assert — a JUL SEVERE must not arrive as anything less than an SLF4J ERROR, or an operator
+    // filtering on ERROR would miss gRPC failures entirely.
+    assertThat(appender.list)
+        .extracting(ILoggingEvent::getLevel)
+        .containsExactly(Level.ERROR, Level.WARN, Level.INFO);
+  }
+
+  @Test
+  public void installJulToSlf4jBridge_defaultConsoleHandlerPresent_removesItToAvoidDoubleLogging() {
+    // Arrange — a handler standing in for JUL's default ConsoleHandler.
+    java.util.logging.Logger julRoot = LogManager.getLogManager().getLogger("");
+    julRoot.addHandler(new java.util.logging.ConsoleHandler());
+
+    // Act
+    SagaServer.installJulToSlf4jBridge();
+
+    // Assert — only the bridge is left, so a record is not also printed in JUL's own format.
+    assertThat(julRoot.getHandlers()).hasSize(1);
+    assertThat(julRoot.getHandlers()[0]).isInstanceOf(SLF4JBridgeHandler.class);
+    assertThat(SLF4JBridgeHandler.isInstalled()).isTrue();
+  }
+
+  @Test
+  public void installJulToSlf4jBridge_calledTwice_installsOnlyOneBridge() {
+    // Arrange / Act — main() runs once, but a double install would double every gRPC log line.
+    SagaServer.installJulToSlf4jBridge();
+    SagaServer.installJulToSlf4jBridge();
+
+    // Act
+    java.util.logging.Logger.getLogger("io.grpc.test.idempotence").warning("once");
+
+    // Assert
+    assertThat(appender.list).hasSize(1);
+  }
+
+  @Test
+  public void logbackConfiguration_withRootLevelRaised_stopsJulFromBuildingTheRecord()
+      throws JoranException {
+    // Arrange
+    propagationContext = configureFromShippedLogbackXml();
+
+    // Act
+    propagationContext.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME).setLevel(Level.WARN);
+
+    // Assert — this is what keeps the bridge affordable. JUL declines the call itself, so no
+    // LogRecord is built for a line Logback would only discard. Drop the LevelChangePropagator
+    // from logback.xml and JUL keeps its own INFO default, paying that cost on every disabled
+    // statement gRPC makes.
+    assertThat(propagationTestLogger.isLoggable(java.util.logging.Level.INFO)).isFalse();
+  }
+
+  @Test
+  public void logbackConfiguration_withRootLevelLowered_enablesTheMatchingJulLevel()
+      throws JoranException {
+    // Arrange
+    propagationContext = configureFromShippedLogbackXml();
+
+    // Act — an operator turning verbosity up through SCALAR_DB_SAGA_LOG_LEVEL.
+    propagationContext.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME).setLevel(Level.DEBUG);
+
+    // Assert — DEBUG has to arrive as JUL FINE, or gRPC detail stays unreachable however the
+    // daemon is configured.
+    assertThat(propagationTestLogger.isLoggable(java.util.logging.Level.FINE)).isTrue();
+  }
+
+  /**
+   * Configures a private {@link LoggerContext} from the daemon's shipped {@code logback.xml}.
+   *
+   * <p>Private rather than the suite's own context so these tests do not disturb its appenders, and
+   * loaded explicitly by URL so the assertions stay pinned to the shipped file even if a {@code
+   * logback-test.xml} is later added to this source set. Either way the {@code
+   * LevelChangePropagator} it installs writes through to the JVM-wide {@code LogManager}, which is
+   * the state these tests observe.
+   */
+  private LoggerContext configureFromShippedLogbackXml() throws JoranException {
+    URL shipped =
+        Objects.requireNonNull(
+            SagaServer.class.getResource("/logback.xml"),
+            "the daemon's shipped logback.xml is not on the test classpath");
+    LoggerContext context = new LoggerContext();
+    context.setName("shipped-logback-under-test");
+    JoranConfigurator configurator = new JoranConfigurator();
+    configurator.setContext(context);
+    configurator.doConfigure(shipped);
+    return context;
+  }
+}

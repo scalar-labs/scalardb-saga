@@ -40,9 +40,14 @@ are resolved by ScalarDB, which supports `${env:...}` but **not** `${file:...}`.
 
 | Variable | Effect |
 | --- | --- |
-| `SCALAR_DB_SAGA_LOG_LEVEL` | Root log level; defaults to `INFO` |
+| `SCALAR_DB_SAGA_LOG_LEVEL` | Root log level; defaults to `INFO`. Covers gRPC too — its `java.util.logging` output is bridged into Logback, so everything the process emits shares one format and one level |
 | `JAVA_OPTS` | Appended after the image's own JVM flags, so it overrides them |
 | `SCALARDB_SAGA_DAEMON_OPTS` | Same, applied after `JAVA_OPTS` |
+
+Setting the level to `DEBUG` turns gRPC up as well, which is the point of bridging it — but `io.grpc`
+logs per RPC at that level, so expect substantial output from a busy daemon. To raise the daemon's own
+level without it, replace the configuration wholesale and set levels per logger:
+`JAVA_OPTS=-Dlogback.configurationFile=/etc/saga/logback.xml`.
 
 The image already sets `-XX:MaxRAMPercentage=75.0` (heap sized from the cgroup limit, not the host) and
 `-XX:+ExitOnOutOfMemoryError` (die on heap exhaustion so the orchestrator restarts it, rather than hold
