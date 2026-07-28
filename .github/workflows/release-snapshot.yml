@@ -9,11 +9,13 @@ on:
 permissions:
   contents: read
 
-# Snapshots are disposable and only the newest one matters, so superseding an in-flight run is fine —
-# the opposite of the release workflow.
+# Serialize snapshot publications: a run uploads several module publications and their Maven metadata
+# independently, so cancelling one midway can leave Central holding a partial snapshot until the next
+# run succeeds. Let the in-flight publish finish instead. Queued runs still collapse to the newest
+# commit, since GitHub keeps only the most recent pending run per group.
 concurrency:
   group: snapshot
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   publish:
