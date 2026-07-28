@@ -3,7 +3,9 @@
 `ghcr.io/scalar-labs/scalardb-saga-daemon` runs the saga engine as a service, exposing it over REST
 (`8080`) and gRPC (`50051`). Built for `linux/amd64` and `linux/arm64`.
 
-See [RELEASING.md](../../RELEASING.md) for how the image is built and how to verify its signature.
+Build it yourself with `./gradlew :daemon:dockerBuild`: that assembles the context from the
+`Dockerfile` in this directory plus the daemon distribution, and loads a single-architecture image
+tagged with the project version.
 
 ## Running it
 
