@@ -67,11 +67,31 @@ jobs:
       - name: Assemble the Docker build context
         run: ./gradlew :daemon:dockerContext
 
+      # The classified epoll natives are the only architecture-specific part of the distribution, and
+      # only linux-x86_64 arrives transitively — a dropped linux-aarch_64 dependency leaves the arm64
+      # image healthy and quiet on NIO, which no assertion against a running amd64 container can see.
+      # The versions must match netty-transport-classes-epoll as well: the loader refuses a native
+      # artifact whose version differs from the classes loading it, which fails the same silent way.
+      - name: Check both epoll natives are packaged
+        run: |
+          set -euo pipefail
+          lib=daemon/build/docker/dist/lib
+          version=$(basename "$(ls "${lib}"/netty-transport-classes-epoll-*.jar)" .jar |
+            sed 's/^netty-transport-classes-epoll-//')
+          for classifier in linux-x86_64 linux-aarch_64; do
+            jar="netty-transport-native-epoll-${version}-${classifier}.jar"
+            if [ ! -f "${lib}/${jar}" ]; then
+              echo "::error::${jar} is missing from the distribution"
+              exit 1
+            fi
+          done
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
-      # Host architecture only, and loaded rather than pushed: this checks that the image runs, which
-      # is architecture-independent here. The release workflow is what builds both architectures.
+      # Host architecture only, and loaded rather than pushed. Everything asserted below except the
+      # epoll load is architecture-independent; the arm64 side is covered by the packaging check above
+      # and by image-arm64-native-test. The release workflow is what builds both architectures.
       - name: Build the image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -82,35 +102,6 @@ jobs:
             IMAGE_VERSION=ci
             IMAGE_REVISION=${{ github.sha }}
 
-      # A SQLite store and one definition, so the daemon has everything it needs to reach a serving
-      # state with no external dependencies. The service base URL is deliberately unreachable — the
-      # saga is never started, and registration only has to resolve the name.
-      - name: Write a minimal configuration
-        run: |
-          mkdir -p smoke/definitions
-          cat > smoke/definitions/smoke-saga.json <<'JSON'
-          {
-            "name": "smoke-saga",
-            "mode": "SAGA",
-            "steps": [
-              {
-                "name": "charge",
-                "service": "payment",
-                "execution": { "method": "POST", "path": "/charge" },
-                "compensation": { "method": "POST", "path": "/refund" }
-              }
-            ]
-          }
-          JSON
-          cat > smoke/server.properties <<'PROPS'
-          scalar.db.storage=jdbc
-          scalar.db.contact_points=jdbc:sqlite:/tmp/smoke.db?busy_timeout=10000
-          scalar.db.saga.store.num_buckets=1
-          scalar.db.saga.server.definitions_path=/smoke/definitions
-          scalar.db.saga.server.service.payment.base_url=http://127.0.0.1:1
-          scalar.db.saga.server.security.insecure_mode.enabled=true
-          PROPS
-
       - name: Check the image runs as a non-root user
         run: |
           set -euo pipefail
@@ -120,11 +111,13 @@ jobs:
             exit 1
           fi
 
+      # The configuration is a checked-in fixture (.github/smoke), shared with image-arm64-native-test
+      # so the two jobs cannot drift into booting differently configured daemons.
       - name: Start the container
         run: |
           docker run --detach --name saga \
             --publish 8080:8080 --publish 50051:50051 \
-            --volume "$PWD/smoke:/smoke:ro" \
+            --volume "$PWD/.github/smoke:/smoke:ro" \
             scalardb-saga-daemon:ci /smoke/server.properties
 
       - name: Wait for the REST health endpoint
@@ -143,6 +136,21 @@ jobs:
           done
           echo "::error::/health did not return 200 within 120s"
           exit 1
+
+      # Packaging the native artifact is not the same as loading it: a version skew against
+      # netty-common, or a jar the JVM cannot read, drops gRPC onto NIO with no warning and a healthy
+      # /health. Netty unlinks the .so the moment it loads it, so /tmp shows nothing — the mapping in
+      # the JVM's address space is the evidence, and it survives the unlink as "(deleted)". The JVM is
+      # PID 1 here (the start script ends in `exec java`). The filename carries the architecture, so
+      # this also catches a native artifact loaded for the wrong one.
+      - name: Check the epoll native transport loaded
+        run: |
+          set -euo pipefail
+          if ! docker exec saga grep -q libnetty_transport_native_epoll_x86_64 /proc/1/maps; then
+            echo "::error::epoll native transport is not loaded; gRPC silently fell back to NIO"
+            docker exec saga grep -o 'libnetty[a-z0-9_]*' /proc/1/maps || echo "no netty native mapped"
+            exit 1
+          fi
 
       # A TCP connect, not a gRPC call: this asserts the transport is bound and reachable in the
       # packaged image. The health service's actual semantics are covered by the daemon's
@@ -186,3 +194,91 @@ jobs:
       - name: Container logs
         if: failure()
         run: docker logs saga 2>&1 || true
+
+  # The defect this packaging is most exposed to is invisible to the job above: only the linux-x86_64
+  # epoll native arrives transitively, so a missing linux-aarch_64 dependency produces an arm64 image
+  # that starts, answers /health, logs nothing unusual, and quietly runs the gRPC transport on NIO.
+  # Seeing that requires actually running arm64. GitHub's hosted arm64 runners are not available to
+  # private repositories on the standard plan, so this emulates, which is slow — hence a job that
+  # boots the image and checks the one thing amd64 cannot show, rather than repeating the
+  # architecture-independent assertions above.
+  image-arm64-native-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Java 21
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6.1.0
+
+      - name: Assemble the Docker build context
+        run: ./gradlew :daemon:dockerContext
+
+      # Registers binfmt handlers so the arm64 image can both build and run on an amd64 runner.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        with:
+          platforms: arm64
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build the arm64 image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: daemon/build/docker
+          platforms: linux/arm64
+          load: true
+          tags: scalardb-saga-daemon:ci-arm64
+          build-args: |
+            IMAGE_VERSION=ci
+            IMAGE_REVISION=${{ github.sha }}
+
+      - name: Start the container
+        run: |
+          docker run --detach --name saga-arm64 --platform linux/arm64 \
+            --publish 8080:8080 \
+            --volume "$PWD/.github/smoke:/smoke:ro" \
+            scalardb-saga-daemon:ci-arm64 /smoke/server.properties
+
+      # A far longer budget than the native job: every instruction the JVM executes is translated, and
+      # startup is the translation-heavy phase.
+      - name: Wait for the REST health endpoint
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 150); do
+            if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/health)" = "200" ]; then
+              echo "GET /health returned 200"
+              exit 0
+            fi
+            if [ "$(docker inspect --format '{{.State.Running}}' saga-arm64)" != "true" ]; then
+              echo "::error::container exited before becoming healthy"
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "::error::/health did not return 200 within 300s"
+          exit 1
+
+      # The point of the whole job. Asserting aarch_64 specifically: the x86_64 artifact is present in
+      # the same image and cannot load here, so matching the bare library name would pass on a fallback
+      # that never touched the arm64 native at all.
+      - name: Check the arm64 epoll native transport loaded
+        run: |
+          set -euo pipefail
+          if ! docker exec saga-arm64 grep -q libnetty_transport_native_epoll_aarch_64 /proc/1/maps; then
+            echo "::error::arm64 epoll native transport is not loaded; gRPC silently fell back to NIO"
+            docker exec saga-arm64 grep -o 'libnetty[a-z0-9_]*' /proc/1/maps ||
+              echo "no netty native mapped"
+            exit 1
+          fi
+
+      - name: Container logs
+        if: failure()
+        run: docker logs saga-arm64 2>&1 || true

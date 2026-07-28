@@ -72,6 +72,13 @@ CMD ["/scalardb-saga/conf/server.properties"]
 # org.opencontainers.image.created is deliberately absent — a build timestamp would give the image a
 # different digest on every rebuild of identical inputs. Buildx records the build time in provenance
 # attestation instead.
+#
+# image.documentation points at the operator guide rather than the project README, which is what the
+# label is defined to carry; image.url is the one that points at the project. It is pinned to the
+# revision, not to main: a label is baked in permanently, so a moving reference would rot the moment
+# the file is renamed or moved, and an operator inspecting an old image wants the guide describing
+# that image's configuration keys, not a later one's. The revision always resolves on GitHub, whereas
+# a tag reference would not for snapshot and CI builds.
 ARG IMAGE_VERSION
 ARG IMAGE_REVISION
 LABEL org.opencontainers.image.title="ScalarDB Saga daemon" \
@@ -80,6 +87,6 @@ LABEL org.opencontainers.image.title="ScalarDB Saga daemon" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.url="https://github.com/scalar-labs/scalardb-saga" \
       org.opencontainers.image.source="https://github.com/scalar-labs/scalardb-saga" \
-      org.opencontainers.image.documentation="https://github.com/scalar-labs/scalardb-saga/blob/main/README.md" \
+      org.opencontainers.image.documentation="https://github.com/scalar-labs/scalardb-saga/blob/${IMAGE_REVISION}/daemon/docker/README.md" \
       org.opencontainers.image.version="${IMAGE_VERSION}" \
       org.opencontainers.image.revision="${IMAGE_REVISION}"

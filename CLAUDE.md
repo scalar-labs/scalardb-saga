@@ -111,7 +111,9 @@ See [daemon/docker/README.md](daemon/docker/README.md) for running it.
 - **GitHub Actions** (`.github/workflows/ci.yml`) — on push/PR to `main`:
   - `check` — `./gradlew check` (`test` + `integrationTest` + `javadoc` + `spotlessCheck` + `spotbugsMain` + Error Prone), then a no-build-cache compile to surface warnings
   - `dockerfile-lint` — hadolint over `daemon/docker/Dockerfile`
-  - `image-smoke-test` — builds the image and runs it against SQLite, asserting health on both transports, non-root uid, `INFO` logging, and a clean `SIGTERM` drain
+  - `image-smoke-test` — builds the image and runs it against SQLite, asserting health on both transports, non-root uid, `INFO` logging, a clean `SIGTERM` drain, and that the epoll native transport actually loaded (a silent NIO fallback keeps the daemon healthy, so `/proc/1/maps` is the evidence)
+  - `image-arm64-native-test` — the same boot under QEMU on `linux/arm64`, asserting the `aarch_64` epoll native loads; only `linux-x86_64` arrives transitively, so nothing else catches a dropped classifier
+  - Both smoke jobs boot from the shared fixture in `.github/smoke/`
 - **Release** (`release.yml`, on `v*` tags) — asserts the tag matches `gradle.properties`, then publishes to Maven Central, pushes the multi-arch image, signs it, and creates the GitHub release
 - **Dependabot** (`.github/dependabot.yml`) — gradle (incl. the version catalog), github-actions, and the Dockerfile base-image digest
 
