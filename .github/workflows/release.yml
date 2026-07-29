@@ -30,8 +30,14 @@ jobs:
   # publishing a commit that never passed through a release branch. Deriving the version from the tag
   # (as some of our other repos do) hides the first instead of catching it; nothing outside this job
   # catches the second, because a tag can be pushed to any commit in the repository.
+  # Each job below carries a timeout because the concurrency group above never cancels, so a hung run
+  # would otherwise hold it for GitHub's default six hours. The bounds are deliberately several times
+  # any plausible healthy runtime: a timeout that fires partway through leaves a half-published
+  # release, which is worse than the stall it prevents. Tighten them once real timings exist; none of
+  # these jobs has ever run.
   verify-version:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.kind.outputs.prerelease }}
@@ -169,6 +175,7 @@ jobs:
   publish-maven:
     needs: verify-version
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -202,6 +209,9 @@ jobs:
   publish-image:
     needs: [verify-version, publish-maven]
     runs-on: ubuntu-latest
+    # The longest bound in the pipeline: this builds linux/arm64 under QEMU emulation, which is by a
+    # wide margin the slowest step in the stack.
+    timeout-minutes: 60
     permissions:
       contents: read
       packages: write
@@ -291,6 +301,7 @@ jobs:
   github-release:
     needs: [verify-version, publish-maven, publish-image]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write
     steps:
