@@ -50,9 +50,10 @@ import org.slf4j.LoggerFactory;
  * transactions for atomicity.
  *
  * <p>All transaction operations are executed through {@link #runInTransaction}, which provides
- * unified retry logic for {@link TransactionException} (including {@link CrudConflictException} and
- * {@link UnknownTransactionStatusException}). {@link CommitConflictException} is retried by default
- * but can be disabled per operation (e.g., {@code createSaga} treats it as a permanent conflict).
+ * unified retry logic for {@link TransactionException} (including {@link
+ * UnknownTransactionStatusException}). A conflict is retried by default, whether it surfaces during
+ * CRUD as {@link CrudConflictException} or at commit as {@link CommitConflictException}; retry can
+ * be disabled per operation (e.g., {@code createSaga} treats a conflict as permanent).
  */
 public class ScalarDbSagaStore implements SagaStore {
 
@@ -1062,21 +1063,22 @@ public class ScalarDbSagaStore implements SagaStore {
   }
 
   /**
-   * Runs a transaction with an option to skip retry on {@link CommitConflictException}.
+   * Runs a transaction with an option to skip retry on a conflict.
    *
    * @param action the transaction action to run
    * @param commitVerifier verifier to check commit status on UTSE, or {@code null} to retry the
    *     whole transaction
    * @param operationName description for error messages
-   * @param retryOnCommitConflict if {@code false}, {@link CommitConflictException} is not retried
+   * @param retryOnConflict if {@code false}, neither {@link CommitConflictException} nor {@link
+   *     CrudConflictException} is retried
    * @return the result of the action
    */
   <T> T runInTransaction(
       TransactionAction<T> action,
       @Nullable CommitVerifier<T> commitVerifier,
       String operationName,
-      boolean retryOnCommitConflict) {
-    return runInTransaction(action, commitVerifier, operationName, retryOnCommitConflict, null);
+      boolean retryOnConflict) {
+    return runInTransaction(action, commitVerifier, operationName, retryOnConflict, null);
   }
 
   /**
@@ -1090,7 +1092,7 @@ public class ScalarDbSagaStore implements SagaStore {
       TransactionAction<T> action,
       @Nullable CommitVerifier<T> commitVerifier,
       String operationName,
-      boolean retryOnCommitConflict,
+      boolean retryOnConflict,
       @Nullable String sagaId) {
     int maxAttempts = config.getTransactionRetryCount();
     Exception lastException = null;
@@ -1147,17 +1149,15 @@ public class ScalarDbSagaStore implements SagaStore {
           }
         }
         lastException = e;
-      } catch (CommitConflictException e) {
+      } catch (CommitConflictException | CrudConflictException e) {
         abortQuietly(tx);
-        if (!retryOnCommitConflict) {
+        if (!retryOnConflict) {
           logger.debug(
-              "Commit conflict for {} (txId={})",
-              operationName,
-              e.getTransactionId().orElse("unknown"));
+              "Conflict for {} (txId={})", operationName, e.getTransactionId().orElse("unknown"));
           throw SagaPersistenceException.retryable("Failed to " + operationName, e);
         }
         logger.debug(
-            "Commit conflict for {} (txId={}), retrying",
+            "Conflict for {} (txId={}), retrying",
             operationName,
             e.getTransactionId().orElse("unknown"));
         lastException = e;
