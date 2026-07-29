@@ -705,6 +705,60 @@ class ScalarDbSagaStoreTest {
 
   @Test
   void
+      recordStatusEvent_crudConflictExhaustedAndAnotherWritersEventAtSequence_throwsSagaConcurrentModification()
+          throws Exception {
+    // Arrange — the CK pre-check itself conflicts on every attempt, so the transition aborts during
+    // CRUD rather than at commit and we never observe the other writer directly. The read-back is
+    // what settles it, and it finds another writer's append_id on the sequence: a proven collision
+    // and a 409, the same answer a commit conflict would have produced on the same evidence.
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
+    ScalarDbSagaStore singleAttemptStore = singleAttemptStore();
+    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
+    doThrow(mock(CrudConflictException.class)).when(tx).get(any(Get.class));
+    Result otherWritersEvent = mock(Result.class);
+    when(otherWritersEvent.getText("append_id")).thenReturn(OTHER_APPEND_ID);
+    when(verifyTx.get(any(Get.class))).thenReturn(Optional.of(otherWritersEvent));
+
+    // Act & Assert
+    assertThatThrownBy(
+            () ->
+                singleAttemptStore.recordStatusEvent(
+                    current, 1, StatusEvent.completed(), "engine-1"))
+        .isInstanceOf(SagaConcurrentModificationException.class);
+  }
+
+  @Test
+  void
+      recordStatusEvent_crudConflictExhaustedAndNoEventAtSequence_throwsRetryablePersistenceException()
+          throws Exception {
+    // Arrange — same sustained CRUD contention, but the sequence is still free. A CRUD conflict is
+    // raised on a record another transaction has prepared and not resolved, and that writer may
+    // still abort, so nobody has won yet. It stays a retryable 503.
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
+    ScalarDbSagaStore singleAttemptStore = singleAttemptStore();
+    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
+    doThrow(mock(CrudConflictException.class)).when(tx).get(any(Get.class));
+    when(verifyTx.get(any(Get.class))).thenReturn(Optional.empty());
+
+    // Act & Assert
+    assertThatThrownBy(
+            () ->
+                singleAttemptStore.recordStatusEvent(
+                    current, 1, StatusEvent.completed(), "engine-1"))
+        .isInstanceOf(SagaPersistenceException.class)
+        .isNotInstanceOf(SagaConcurrentModificationException.class);
+  }
+
+  @Test
+  void
       recordStatusEvent_unknownStatusAndVerifierFindsAnotherWritersEvent_throwsSagaConcurrentModificationException()
           throws Exception {
     // Arrange — the transition's commit is ambiguous and a DIFFERENT writer won the CK and wrote a

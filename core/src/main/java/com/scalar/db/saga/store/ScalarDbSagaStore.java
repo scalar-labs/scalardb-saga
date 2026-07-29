@@ -1040,19 +1040,19 @@ public class ScalarDbSagaStore implements SagaStore {
 
   /**
    * Runs an event-append transaction, adding append-family collision classification to the plain
-   * retry loop: when retries are exhausted on {@link CommitConflictException}, the verifier is
-   * asked once more, and a {@link SagaConcurrentModificationException} from it is a proven
-   * collision for {@code sagaId} rather than the retryable {@link SagaPersistenceException}. Only
-   * the append family — {@code recordStepEvent}, {@code recordStatusEvent}, {@code park}, {@code
-   * transitionParkedStep} — uses this, since only there does a taken sequence mean another writer
-   * rather than a store failure.
+   * retry loop: when retries are exhausted on a conflict, whether it surfaced during CRUD or at
+   * commit, the verifier is asked once more, and a {@link SagaConcurrentModificationException} from
+   * it is a proven collision for {@code sagaId} rather than the retryable {@link
+   * SagaPersistenceException}. Only the append family — {@code recordStepEvent}, {@code
+   * recordStatusEvent}, {@code park}, {@code transitionParkedStep} — uses this, since only there
+   * does a taken sequence mean another writer rather than a store failure.
    *
    * <p>The classification is only as sound as the verifier passed in, which is what actually
    * performs the check: it must identify our own write by its {@code append_id} and throw {@link
    * SagaConcurrentModificationException} when a foreign one holds the sequence. Pass {@link
    * #verifyTransitionCommitted}, or a lambda over {@link #verifyOwnEventCommitted} as {@code
    * recordStepEvent} does. A verifier that cannot tell writers apart will either claim collisions
-   * it has not proven or never report one. See {@link #verifyAfterExhaustedCommitConflict}.
+   * it has not proven or never report one. See {@link #verifyAfterExhaustedConflict}.
    */
   <T> T runInTransaction(
       TransactionAction<T> action,
@@ -1083,10 +1083,10 @@ public class ScalarDbSagaStore implements SagaStore {
 
   /**
    * Shared impl. A non-null {@code sagaId} opts in to append-family collision mapping: retries
-   * exhausted on {@link CommitConflictException} are settled by one verifier read, which can
-   * surface {@link SagaConcurrentModificationException} for that saga instead of the retryable
-   * {@link SagaPersistenceException}. Null, or no verifier to gather evidence with, keeps the
-   * generic exhaustion behavior.
+   * exhausted on a conflict are settled by one verifier read, which can surface {@link
+   * SagaConcurrentModificationException} for that saga instead of the retryable {@link
+   * SagaPersistenceException}. Null, or no verifier to gather evidence with, keeps the generic
+   * exhaustion behavior.
    */
   private <T> T runInTransaction(
       TransactionAction<T> action,
@@ -1179,9 +1179,10 @@ public class ScalarDbSagaStore implements SagaStore {
     }
     logger.warn("All {} attempts exhausted for {}", maxAttempts, operationName, lastException);
     Exception cause = Objects.requireNonNull(lastException);
-    if (sagaId != null && commitVerifier != null && cause instanceof CommitConflictException) {
-      Optional<T> verified =
-          verifyAfterExhaustedCommitConflict(commitVerifier, cause, operationName);
+    if (sagaId != null
+        && commitVerifier != null
+        && (cause instanceof CommitConflictException || cause instanceof CrudConflictException)) {
+      Optional<T> verified = verifyAfterExhaustedConflict(commitVerifier, cause, operationName);
       if (verified.isPresent()) {
         return verified.get();
       }
@@ -1191,9 +1192,8 @@ public class ScalarDbSagaStore implements SagaStore {
   }
 
   /**
-   * Settles an append-family operation that exhausted its retries on {@link
-   * CommitConflictException}, by reading back the sequence instead of inferring an outcome from the
-   * exception type.
+   * Settles an append-family operation that exhausted its retries on a conflict, by reading back
+   * the sequence instead of inferring an outcome from the exception type.
    *
    * <p>A commit conflict is a definite abort, so our write did not land. It does not follow that
    * another writer's did: two writers contending on the same rows can both conflict and both
@@ -1202,6 +1202,12 @@ public class ScalarDbSagaStore implements SagaStore {
    * another writer take it; {@code recordStepEvent} is a bare append that reads nothing and so
    * observes nothing at all. Either way this is the weakest evidence of a collision in this class,
    * not the strongest.
+   *
+   * <p>A CRUD conflict aborts the attempt just as a commit conflict does, and says just as little
+   * about who won. The transition ops raise it when their pre-check read finds a record another
+   * transaction has prepared but not resolved, and that writer may still abort and leave the
+   * sequence free. Which layer reported the abort is not evidence either, so both are settled the
+   * same way rather than one being trusted over the other.
    *
    * <p>The verifier settles it from what is actually persisted. It throws {@link
    * SagaConcurrentModificationException} when a foreign {@code append_id} holds our sequence, which
@@ -1215,7 +1221,7 @@ public class ScalarDbSagaStore implements SagaStore {
    * cause} rather than replacing it: the operation did fail with a retryable conflict, and
    * reporting that is more truthful than reporting how the evidence read broke.
    */
-  private <T> Optional<T> verifyAfterExhaustedCommitConflict(
+  private <T> Optional<T> verifyAfterExhaustedConflict(
       CommitVerifier<T> commitVerifier, Exception cause, String operationName) {
     try {
       return commitVerifier.verify();
@@ -1223,9 +1229,7 @@ public class ScalarDbSagaStore implements SagaStore {
       throw e;
     } catch (Exception e) {
       logger.warn(
-          "Collision check for {} failed after commit conflicts exhausted the retries",
-          operationName,
-          e);
+          "Collision check for {} failed after conflicts exhausted the retries", operationName, e);
       cause.addSuppressed(e);
       return Optional.empty();
     }
