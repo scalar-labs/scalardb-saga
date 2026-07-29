@@ -13,9 +13,14 @@ plugins {
 // mechanism (e.g. to JReleaser, as ScalarDB Cluster uses) is a single-file change.
 
 // Ship the license inside every published jar (META-INF/LICENSE) so the terms travel with the
-// artifact itself, not just the repository it came from — the jar is what ends up vendored into
+// artifact itself, not just the repository it came from. The jar is what ends up vendored into
 // someone else's build.
-tasks.withType<Jar>().configureEach {
+//
+// The type has to be the `org.gradle.jvm.tasks` base class rather than the `bundling` subclass that
+// an unqualified `Jar` resolves to. The javadoc jar is contributed by the publishing plugin and
+// extends only the base class, so an unqualified `Jar` would silently leave it out, as would any
+// future jar that comes from a plugin instead of from `java-library`.
+tasks.withType<org.gradle.jvm.tasks.Jar>().configureEach {
     metaInf {
         from(rootProject.file("LICENSE"))
     }
