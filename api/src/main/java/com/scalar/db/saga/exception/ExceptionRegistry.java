@@ -96,8 +96,12 @@ public final class ExceptionRegistry {
     m.put(
         SagaErrorCode.SAGA_CONCURRENT_MODIFICATION,
         meta -> new SagaConcurrentModificationException(meta.get("saga_id")));
-    m.put(SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE, meta -> new SagaUnavailableException());
-    m.put(SagaErrorCode.SERVICE_UNAVAILABLE, meta -> new SagaUnavailableException());
+    m.put(
+        SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE,
+        meta -> SagaUnavailableException.fromWire(SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE));
+    m.put(
+        SagaErrorCode.SERVICE_UNAVAILABLE,
+        meta -> SagaUnavailableException.fromWire(SagaErrorCode.SERVICE_UNAVAILABLE));
     m.put(SagaErrorCode.RATE_LIMIT_EXCEEDED, meta -> raw(SagaErrorCode.RATE_LIMIT_EXCEEDED, meta));
 
     // ── NON_RETRYABLE_SERVER_ERROR (3xxxx) ────────────────────────────

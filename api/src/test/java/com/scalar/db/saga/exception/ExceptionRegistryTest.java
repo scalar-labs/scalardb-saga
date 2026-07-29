@@ -79,6 +79,20 @@ class ExceptionRegistryTest {
   }
 
   @Test
+  void reconstruct_persistenceStoreUnavailableCode_preservesTheCode() {
+    // Arrange & Act — both codes reconstruct to SagaUnavailableException, so the type alone cannot
+    // tell them apart. The received code must survive; rewriting it to SERVICE_UNAVAILABLE would
+    // make the client report a different code than the daemon sent.
+    SagaRuntimeException e =
+        ExceptionRegistry.reconstruct(
+            SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE.code(), Collections.emptyMap());
+
+    // Assert
+    assertThat(e).isInstanceOf(SagaUnavailableException.class);
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE);
+  }
+
+  @Test
   void reconstruct_codelessCode_producesRawSagaRuntimeException() {
     // Arrange & Act — INTERNAL_ERROR has no dedicated exception type
     SagaRuntimeException e =
