@@ -96,7 +96,7 @@ See [RELEASING.md](RELEASING.md) for the release process.
 - **Maven group is `com.scalar-labs`**, not the Java package — set in `scalardb-saga.base-conventions`. Matches the other Scalar artifacts on Central; cannot change after the first release.
 - Published modules apply `id("scalardb-saga.publishing-conventions")` and **must set `description`** (Maven Central rejects a POM without one). The convention sets the `artifactId` explicitly — `base.archivesName` does not affect it.
 - The daemon is deliberately unpublished: it ships as a container image, so a jar on Central would be an artifact nobody consumes and everyone has to keep patched.
-- Snapshots publish from `main` (`.github/workflows/release-snapshot.yml`); releases leave the Central deployment `VALIDATED` for a human to release, because a released version is immutable.
+- Snapshots publish from `main` and every release branch (`.github/workflows/release-snapshot.yml`); releases leave the Central deployment `VALIDATED` for a human to release, because a released version is immutable.
 
 ## Container image
 
@@ -108,18 +108,19 @@ See [daemon/docker/README.md](daemon/docker/README.md) for running it.
 
 ## CI
 
-- **GitHub Actions** (`.github/workflows/ci.yml`) — on push/PR to `main`:
+- **GitHub Actions** (`.github/workflows/ci.yml`) — on push to `main` and the release branches, and on every PR:
   - `check` — `./gradlew check` (`test` + `integrationTest` + `javadoc` + `spotlessCheck` + `spotbugsMain` + Error Prone), then a no-build-cache compile to surface warnings
   - `dockerfile-lint` — hadolint over `daemon/docker/Dockerfile`
   - `image-smoke-test` — builds the image and runs it against SQLite, asserting health on both transports, non-root uid, `INFO` logging, a clean `SIGTERM` drain, and that the epoll native transport actually loaded (a silent NIO fallback keeps the daemon healthy, so `/proc/1/maps` is the evidence)
   - `image-arm64-native-test` — the same boot under QEMU on `linux/arm64`, asserting the `aarch_64` epoll native loads; only `linux-x86_64` arrives transitively, so nothing else catches a dropped classifier
   - Both smoke jobs boot from the shared fixture in `.github/smoke/`
-- **Release** (`release.yml`, on `v*` tags) — asserts the tag matches `gradle.properties`, then publishes to Maven Central, pushes the multi-arch image, signs it, and creates the GitHub release
+- **Release** (`release.yml`, on `v*` tags) — asserts the tag matches `gradle.properties` and that the tagged commit is on the release branch its version names, then publishes to Maven Central, pushes the multi-arch image, signs it, and creates the GitHub release
 - **Dependabot** (`.github/dependabot.yml`) — gradle (incl. the version catalog), github-actions, and the Dockerfile base-image digest
 
 ## Git
 
-- **Trunk-based development**
+- **Trunk-based development with release branches** — every change lands on `main` first; releases are cut from minor version branches (`1.0`, `1.1`), never from `main`. Fixes are backported down the lines, never merged up. See [RELEASING.md](RELEASING.md).
+- Branches are named after the version they carry, with no prefix — major version branch `1`, minor version branch `1.0` — so they match the `[0-9]+` and `[0-9]+.[0-9]+` patterns every workflow keys off. A patch is a tag, not a branch.
 - **Conventional Commits** (e.g., `feat: add saga engine`, `fix: handle timeout`)
 
 ## TODO
