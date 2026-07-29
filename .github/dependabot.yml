@@ -45,3 +45,31 @@ updates:
     directory: /daemon/docker
     schedule:
       interval: weekly
+
+  # Every entry above targets the default branch only. A minor version branch receives nothing until
+  # it is named by a `target-branch`, so a maintained line would otherwise sit on frozen dependencies
+  # for its whole life. Uncomment a copy of the block below when a release branch is cut, and delete
+  # it when that line reaches end of life. Entries naming a branch that does not exist produce errors,
+  # which is why these are commented rather than written ahead of time.
+  #
+  # Known limitation: Dependabot *security* updates only ever target the default branch. An entry with
+  # `target-branch` produces version updates alone, so a CVE fix still has to be backported by hand.
+  #
+  #  - package-ecosystem: gradle
+  #    directory: /
+  #    target-branch: "1.0"
+  #    schedule:
+  #      interval: weekly
+  #    open-pull-requests-limit: 5
+  #
+  #  - package-ecosystem: github-actions
+  #    directory: /
+  #    target-branch: "1.0"
+  #    schedule:
+  #      interval: weekly
+  #
+  #  - package-ecosystem: docker
+  #    directory: /daemon/docker
+  #    target-branch: "1.0"
+  #    schedule:
+  #      interval: weekly

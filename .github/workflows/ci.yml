@@ -1,8 +1,15 @@
 name: CI
 
+# Version branches are covered as well as main: a release is cut from a minor version branch, and the
+# commit that sets the release version plus every backport after it exist only there. Testing pull
+# requests alone would leave every released commit unverified, since the merge result on the branch is
+# not what the pull request built.
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - "[0-9]+"
+      - "[0-9]+.[0-9]+"
   pull_request:
 
 concurrency:

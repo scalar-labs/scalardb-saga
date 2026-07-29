@@ -1,13 +1,18 @@
 name: Release
 
-# Tags only, deliberately: every job below derives the version from the tag, and a manual dispatch on
-# a branch would have no version to derive or verify. Cut a release by tagging a commit that already
-# carries the release version in gradle.properties.
+# Cut a release by tagging a commit that already carries the release version in gradle.properties.
+#
+# workflow_dispatch is for re-running a release whose tag already exists — a run that failed after
+# Maven Central had accepted the upload, say, where cutting a new tag is not an option. Point it at
+# the tag: GitHub's ref picker lists tags as well as branches, and every job below derives the version
+# from the tag, so a branch has nothing to derive or verify. verify-version rejects one rather than
+# letting it fail later with a confusing message.
 on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
       - "v[0-9]+.[0-9]+.[0-9]+-*"
+  workflow_dispatch:
 
 # Least privilege by default; the two jobs that need to write somewhere widen it themselves.
 permissions:
@@ -20,15 +25,34 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Guards the one mistake this pipeline cannot undo. A released Maven Central version is immutable,
-  # so publishing a jar whose internal version disagrees with the tag would be permanent. Deriving the
-  # version from the tag (as some of our other repos do) hides that mismatch instead of catching it.
+  # Guards the two mistakes this pipeline cannot undo, both permanent because a released Maven Central
+  # version is immutable: publishing a jar whose internal version disagrees with its tag, and
+  # publishing a commit that never passed through a release branch. Deriving the version from the tag
+  # (as some of our other repos do) hides the first instead of catching it; nothing outside this job
+  # catches the second, because a tag can be pushed to any commit in the repository.
   verify-version:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.kind.outputs.prerelease }}
+      latest: ${{ steps.kind.outputs.latest }}
     steps:
+      # A dispatch can be pointed at any ref. On a branch, GITHUB_REF is refs/heads/<name>, the tag
+      # comparison below strips nothing, and the job fails claiming a tag named "refs/heads/1.0" does
+      # not match gradle.properties — true but useless. Failing here keeps dispatch to what it is for:
+      # re-running an existing tag, never releasing from a branch.
+      - name: Reject a ref that is not a tag
+        if: github.ref_type != 'tag'
+        run: |
+          echo "::error::this workflow releases a tag; ${GITHUB_REF} is not one. Re-run the dispatch" \
+            "with the tag selected as the ref."
+          exit 1
+
+      # Full history: on a tag push the default shallow fetch produces a single commit with no
+      # connection to any branch, and the reachability test below would have nothing to walk.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
 
       - name: Check the tag against gradle.properties
         id: version
@@ -53,6 +77,91 @@ jobs:
               ;;
           esac
           echo "Releasing ${version}"
+
+      # The version check above proves the tag and gradle.properties agree, but both live in the
+      # tagged commit and whoever pushed the tag wrote both, so agreeing proves nothing about where
+      # the commit came from. Without this, any commit carrying a matching version publishes — an
+      # unreviewed branch, or one whose CI failed. The release branch is derived from the version
+      # rather than fixed, because a release is never reachable from main: the commit that drops
+      # -SNAPSHOT is made on the release branch and never merges back (see RELEASING.md).
+      - name: Check the tag is on its release branch
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The tag patterns this workflow triggers on guarantee digits and dots before any
+          # pre-release suffix, so dropping the suffix and then the patch component always leaves a
+          # bare `major.minor`. Nothing an arbitrary suffix could contain survives into `line`.
+          core="${VERSION%%-*}"
+          line="${core%.*}"
+
+          if [ -z "$(git ls-remote --heads origin "refs/heads/${line}")" ]; then
+            echo "::error::no release branch '${line}' on origin; a release is cut from its minor" \
+              "version branch, never from main (see RELEASING.md)"
+            exit 1
+          fi
+          git fetch --no-tags --quiet origin "+refs/heads/${line}:refs/remotes/origin/${line}"
+
+          # Three outcomes, not two: git answers 1 for "not an ancestor" and 128 when it could not
+          # tell, and reporting a fetch fault as a misplaced tag would send someone hunting the wrong
+          # bug. Both still fail the release.
+          rc=0
+          git merge-base --is-ancestor "${GITHUB_SHA}" "refs/remotes/origin/${line}" || rc=$?
+          case "${rc}" in
+            0)
+              echo "${GITHUB_SHA} is on ${line}"
+              ;;
+            1)
+              echo "::error::tag ${GITHUB_REF#refs/tags/} points at a commit that is not on release" \
+                "branch ${line}; merge it there first"
+              exit 1
+              ;;
+            *)
+              echo "::error::could not determine whether ${GITHUB_SHA} is on ${line} (git exited ${rc})"
+              exit 1
+              ;;
+          esac
+
+      # Two facts every downstream job needs, decided once here so the image tag and the GitHub
+      # release cannot end up describing the same release differently. `latest` follows the newest
+      # release rather than the tag being built: once several minor version branches are maintained,
+      # patching an older line is routine, and letting that take `latest` would hand everyone who
+      # pulls it an older daemon than the one they already had.
+      - name: Classify the release
+        id: kind
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # A pre-release is never current, wherever it sorts, so both flags are settled at once.
+          case "${VERSION}" in
+            *-*)
+              echo "prerelease=true" >> "$GITHUB_OUTPUT"
+              echo "latest=false" >> "$GITHUB_OUTPUT"
+              echo "${VERSION} is a pre-release; latest stays where it is"
+              exit 0
+              ;;
+          esac
+          echo "prerelease=false" >> "$GITHUB_OUTPUT"
+
+          # Full releases only: the pattern drops anything carrying a pre-release suffix.
+          highest=$(git tag --list 'v*' |
+            sed -n 's/^v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' |
+            sort -V | tail -1)
+          if [ -z "${highest}" ]; then
+            # The tag being built is itself a release tag, so an empty list means the tags were never
+            # fetched. Failing beats defaulting to false, which would pin `latest` silently forever.
+            echo "::error::no release tags found; cannot tell whether ${VERSION} is the newest"
+            exit 1
+          fi
+
+          if [ "${VERSION}" = "${highest}" ]; then
+            echo "latest=true" >> "$GITHUB_OUTPUT"
+            echo "${VERSION} is the highest released version; latest follows it"
+          else
+            echo "latest=false" >> "$GITHUB_OUTPUT"
+            echo "${VERSION} is behind ${highest}; latest stays where it is"
+          fi
 
   # Uploads one aggregated deployment covering api, core, rpc, grpc-client, and the BOM. It is left in
   # the Central Portal's VALIDATED state on purpose: releasing is a deliberate click, because a
@@ -82,8 +191,16 @@ jobs:
           ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.MAVEN_CENTRAL_GPG_PASSPHRASE }}
         run: ./gradlew publishToMavenCentral --no-configuration-cache
 
+  # Ordered after publish-maven rather than run alongside it, because the two failures are not equally
+  # recoverable: a deployment stops at VALIDATED and can be dropped, while an image tag is public the
+  # moment it is pushed and anyone may already have pulled it. Uploading first means a bad credential
+  # or a deployment Central rejects fails the release before anything reaches ghcr.io. What this buys
+  # is one-directional: the image implies Central accepted and validated the deployment, never that a
+  # human released it, so a release abandoned at step 5 still leaves the tags behind. It costs the
+  # Central upload's wall-clock time on every release, which is the cheaper side of the trade for
+  # something cut this rarely.
   publish-image:
-    needs: verify-version
+    needs: [verify-version, publish-maven]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -132,13 +249,13 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/scalar-labs/scalardb-saga-daemon
-          # `latest` follows the tag being built, so releasing a patch on an older line would move it
-          # backwards. Fine while one line is active; revisit when maintaining two.
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+          # Decided once in verify-version, so the image tag and the GitHub release can never disagree
+          # about which release is the current one.
           flavor: |
-            latest=${{ !contains(needs.verify-version.outputs.version, '-') }}
+            latest=${{ needs.verify-version.outputs.latest }}
 
       - name: Build and push
         id: build
@@ -157,12 +274,12 @@ jobs:
           sbom: true
           provenance: mode=max
 
-      # A signature over the image digest, verifiable with
-      #   cosign verify ghcr.io/scalar-labs/scalardb-saga-daemon@<digest> \
-      #     --certificate-identity-regexp='^https://github.com/scalar-labs/scalardb-saga/' \
-      #     --certificate-oidc-issuer=https://token.actions.githubusercontent.com
-      # Keyless, so there is no signing key to leak or rotate — the attestation is bound to this
-      # workflow's identity.
+      # A signature over the image digest. Keyless, so there is no signing key to leak or rotate:
+      # the certificate binds the signature to this workflow file and the ref it ran on, which is
+      # always the release tag. Verifying is only meaningful against that exact identity; a pattern
+      # matching the repository alone accepts a signature from any workflow here, on any ref, because
+      # the file and ref follow the repository in the certificate. RELEASING.md carries the command,
+      # and is the only copy of it — a verification recipe that drifts is worse than none.
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
@@ -191,11 +308,34 @@ jobs:
       - name: Build the distribution archives
         run: ./gradlew :daemon:distTar :daemon:distZip
 
+      # `gh release create` fails outright on a release that already exists, which would make every
+      # dispatched re-run fail at the last step after the image and the deployment had both gone out.
+      # Creating stays the normal path; uploading with --clobber is what lets the second run finish.
+      # Notes are left alone on a re-run: they may have been edited by hand since.
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRERELEASE: ${{ needs.verify-version.outputs.prerelease }}
+          LATEST: ${{ needs.verify-version.outputs.latest }}
         run: |
-          gh release create "${GITHUB_REF#refs/tags/}" \
-            --title "${GITHUB_REF#refs/tags/}" \
-            --generate-notes \
-            daemon/build/distributions/*
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/}"
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            echo "release ${tag} already exists; replacing its assets"
+            gh release upload "${tag}" --clobber daemon/build/distributions/*
+          else
+            # Both flags default to something wrong here. --prerelease is opt-in, so the tag pattern
+            # that accepts v1.0.0-rc.1 would otherwise publish it as an ordinary release. --latest
+            # defaults to GitHub deciding for itself, which is not necessarily the answer the image
+            # tag was given; passing the same value keeps the two consistent by construction.
+            args=(--title "${tag}" --generate-notes)
+            if [ "${PRERELEASE}" = "true" ]; then
+              args+=(--prerelease)
+            fi
+            if [ "${LATEST}" = "true" ]; then
+              args+=(--latest)
+            else
+              args+=(--latest=false)
+            fi
+            gh release create "${tag}" "${args[@]}" daemon/build/distributions/*
+          fi
