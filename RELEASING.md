@@ -66,6 +66,13 @@ after it, live only on that branch and are unreachable from `main` by design.
    the end of [.github/dependabot.yml](.github/dependabot.yml) naming it. Without them the branch gets
    no dependency updates at all, because every existing entry targets `main` only.
 
+   Version branches need a repository ruleset before one is cut, for the same reason `main` has one:
+   a release is built from the commit the tag names, and the workflow's check that the commit sits
+   on its release branch is only worth as much as the branch's own rules. An unprotected `1.0` also
+   takes a force-push or a deletion, which loses a maintenance line's history. One ruleset covers
+   every version branch at once, so this is a one-time setup rather than a per-branch one — see
+   [Repository settings](#repository-settings).
+
    For a patch release the branch already exists — backport the fix to it through a PR.
 
 2. On the release branch, set the release version in `gradle.properties` (drop `-SNAPSHOT`) and merge
@@ -103,8 +110,12 @@ after it, live only on that branch and are unreachable from `main` by design.
 The tag is the source of truth for *which commit*, and `gradle.properties` for *which version*; the
 workflow fails if they disagree rather than deriving one from the other, so a jar whose internal
 version differs from its tag can never be published. It fails the same way if the tagged commit is
-not reachable from the release branch its version names — `v1.0.1` must be on `1.0` — so a tag on an
-unreviewed branch cannot reach Maven Central or `ghcr.io`.
+not reachable from the release branch its version names — `v1.0.1` must be on `1.0` — so a tag on a
+scratch branch reaches neither Maven Central nor `ghcr.io`.
+
+That check inherits whatever the release branch requires: with the ruleset from step 1 in place, the
+published commit went through a pull request, and without it the check proves only that someone put
+the commit on a branch with the right name.
 
 The image is pushed only after the Maven Central upload has succeeded, and for the same reason: a
 deployment can still be dropped, while an image tag is public from the moment it is pushed and may
@@ -136,6 +147,62 @@ Not every step is idempotent, so check what already succeeded before re-running:
 | Image push and signature | Safe in itself: the same tags are overwritten, and an extra signature is harmless. It runs only once the Central upload has succeeded, though, so a re-run aimed at the image still needs the previous deployment dropped. |
 | Maven Central | **Not automatic.** Drop the previous deployment first, as in step 5; the plugin drops one by itself only when the build that uploaded it failed, which a green release is not. Nothing in the workflow enforces this: the build ends at the upload without waiting for the Portal's verdict, so a duplicate can surface as a rejected deployment while the run stays green and the image and the GitHub release go out. If the version was already released, it can never be replaced — ship the fix as the next patch instead. |
 
+## Repository settings
+
+Two things live in GitHub's own settings rather than in this repository, and neither is set today.
+The rulesets are a one-time setup that has to exist before the first release branch is cut; the
+environment is optional and can be added whenever.
+
+### Branch and tag rulesets
+
+`main` is covered by a ruleset requiring a pull request. The version branches are covered by
+nothing, so the release workflow's check that a tagged commit sits on its release branch proves only
+that someone put it on a branch with the right name.
+
+Under **Settings → Rules → Rulesets → New ruleset → New branch ruleset**:
+
+| Field | Value |
+| --- | --- |
+| Name | `version-branches` |
+| Enforcement status | Active |
+| Bypass list | `Organization admin`, `Repository admin`, matching the ruleset on `main` |
+| Target branches | Include by pattern: `[0-9]*` |
+| Rules | Restrict deletions; Block force pushes; Require a pull request before merging, with 2 approvals and conversation resolution; Require status checks to pass, naming `check`, `dockerfile-lint`, `image-smoke-test` and `image-arm64-native-test` |
+
+The pattern is typed without `refs/heads/`, which the UI adds itself. Ruleset patterns are fnmatch,
+not regex, so the `[0-9]+` patterns the workflows key off would match nothing here; `[0-9]*` is what
+matches `1`, `1.0` and `1.10`. Leave **Restrict creations** unticked, or step 1's
+`git push -u origin 1.0` is refused. The four check names may not appear in the picker until they
+have run on a pull request; they can be typed in by hand.
+
+A tag ruleset is worth adding alongside it, so that cutting a release is limited to whoever is
+allowed to release. Under **New ruleset → New tag ruleset**: name `release-tags`, Active, target
+tags `v*`, and the Restrict creations, Restrict deletions and Block force pushes rules. **Restrict
+creations needs a bypass list** — with an empty one, nobody can push a release tag at all.
+
+### Scoping the Central secrets to an environment
+
+The four `MAVEN_CENTRAL_*` secrets are repository secrets, so GitHub makes them available to a
+workflow run on any branch. No ruleset changes that: the workflow doing the reading need not be one
+of the two in this repository, since a branch can carry its own. An environment is the only
+mechanism that scopes secrets by ref, and it fails closed — a run on a ref the environment does not
+admit is refused the environment and never sees them.
+
+1. **Settings → Environments → New environment**, named `maven-central`.
+2. **Deployment branches and tags → Selected branches and tags**: add ref type *Branch* `main`, ref
+   type *Tag* `v*`, and one *Branch* entry per version branch as it is cut. Name the branches
+   explicitly rather than by pattern — deployment policies take wildcards, not the character classes
+   the ruleset above uses, and a policy that matches nothing locks the release out.
+3. Add the four secrets to the environment, then **delete the repository-level copies**. Copying
+   rather than moving gains nothing: the repository-level ones stay readable from anywhere.
+4. Add `environment: maven-central` to the publishing job in
+   [release.yml](.github/workflows/release.yml) and
+   [release-snapshot.yml](.github/workflows/release-snapshot.yml). Without it both jobs lose access
+   to the secrets.
+
+Adding a required reviewer to the environment would also give the release an approval gate, which
+the manual release step at the Portal covers today.
+
 ## Required repository secrets
 
 | Secret | Used for |
@@ -144,6 +211,10 @@ Not every step is idempotent, so check what already succeeded before re-running:
 | `MAVEN_CENTRAL_PASSWORD` | Central Portal token password |
 | `MAVEN_CENTRAL_GPG_SECRET_KEY` | ASCII-armored private key used to sign artifacts |
 | `MAVEN_CENTRAL_GPG_PASSPHRASE` | Passphrase for that key |
+
+Any branch's workflows can read these, so write access to this repository is effectively access to
+the signing key. Scoping them by ref takes an environment, which is not set up today — see
+[Repository settings](#repository-settings).
 
 There is no public-key secret: an OpenPGP private key carries its own public material, and Gradle's
 signing plugin needs nothing else. (ScalarDB publishes with JReleaser, which does additionally require
