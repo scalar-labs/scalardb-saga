@@ -17,6 +17,13 @@ container image to `ghcr.io/scalar-labs/scalardb-saga-daemon`.
 `:daemon` is deliberately not published to Maven Central — it ships as the image, so a jar on Central
 would be an artifact nobody consumes and everyone has to keep patched.
 
+The image carries one tag per release — `1.0.0`, `1.0.1` — plus `latest` on the newest release.
+There is deliberately no floating `1.0` tag: the minor version line is a branch in this repository,
+and a second representation of it in the registry would be one nothing keeps truthful. A moving tag
+cannot be verified by the recipe in [Verifying a published image](#verifying-a-published-image)
+either, because that binds the signature to the release tag which built the image, and a tag that
+moves has no version for the certificate identity to agree with.
+
 Consumers pin one version through the BOM:
 
 ```kotlin
@@ -62,9 +69,61 @@ after it, live only on that branch and are unreachable from `main` by design.
    git switch -c 1.0 && git push -u origin 1.0
    ```
 
-   A newly cut branch also needs its Dependabot entries enabled — uncomment a copy of the template at
-   the end of [.github/dependabot.yml](.github/dependabot.yml) naming it. Without them the branch gets
-   no dependency updates at all, because every existing entry targets `main` only.
+   A newly cut branch also needs its own Dependabot entries. Every entry in
+   [.github/dependabot.yml](.github/dependabot.yml) targets `main` only, so without them the branch
+   gets no dependency updates at all. Paste the block below at the end of that file, substituting the
+   branch you just cut for `1.0`, and delete it again when that line reaches end of life:
+
+   ```yaml
+     - package-ecosystem: gradle
+       directory: /
+       target-branch: "1.0"
+       schedule:
+         interval: weekly
+       open-pull-requests-limit: 5
+       groups:
+         build-tooling:
+           patterns:
+             - "com.diffplug.spotless*"
+             - "com.github.spotbugs*"
+             - "com.google.errorprone*"
+             - "com.h3xstream.findsecbugs*"
+             - "com.uber.nullaway*"
+             - "com.vanniktech*"
+             - "net.ltgt.gradle*"
+         grpc:
+           patterns:
+             - "io.grpc*"
+         netty:
+           patterns:
+             - "io.netty*"
+
+     - package-ecosystem: github-actions
+       directory: /
+       target-branch: "1.0"
+       schedule:
+         interval: weekly
+       groups:
+         actions:
+           patterns:
+             - "*"
+
+     - package-ecosystem: docker
+       directory: /daemon/docker
+       target-branch: "1.0"
+       schedule:
+         interval: weekly
+   ```
+
+   Keep the `groups:` blocks when you paste. Without them each build-tool bump arrives as its own
+   pull request, and the five-PR limit fills with those before a real dependency update can open.
+
+   Version branches need a repository ruleset before one is cut, for the same reason `main` has one:
+   a release is built from the commit the tag names, and the workflow's check that the commit sits
+   on its release branch is only worth as much as the branch's own rules. An unprotected `1.0` also
+   takes a force-push or a deletion, which loses a maintenance line's history. One ruleset covers
+   every version branch at once, so this is a one-time setup rather than a per-branch one — see
+   [Repository settings](#repository-settings).
 
    For a patch release the branch already exists — backport the fix to it through a PR.
 
@@ -87,25 +146,91 @@ after it, live only on that branch and are unreachable from `main` by design.
    the multi-architecture image, signs it, and creates the GitHub release with the distribution
    archives.
 5. Release the Maven Central deployment from the [Central Portal](https://central.sonatype.com/publishing/deployments).
-   This step is a deliberate human action: a released version on Central is immutable and cannot be
-   replaced or withdrawn, so the workflow leaves the deployment `VALIDATED` rather than releasing it.
-   To drop a bad deployment instead, use `./gradlew dropMavenCentralDeployment`.
+   Confirm the deployment reached `VALIDATED` before releasing it: the workflow uploads the bundle
+   and stops there, so a deployment the Portal rejects leaves the release green (see
+   [Publishing the public key](#publishing-the-public-key)). Releasing is a deliberate human action —
+   a released version on Central is immutable and cannot be replaced or withdrawn — so the workflow
+   never releases the deployment itself. To drop a bad deployment instead, use the Portal's own Drop
+   button: it needs no id and no local credentials, and the operator is already signed in here. The
+   Gradle task is the fallback: `./gradlew dropMavenCentralDeployment --deployment-id=<id>` needs
+   the id from the `publish-maven` log (`Uploaded bundle to Central Portal as USER_MANAGED,
+   deployment id: <id>`) and the Portal token in `~/.gradle/gradle.properties` as
+   `mavenCentralUsername` and `mavenCentralPassword`. Without the token the task itself still
+   reports success and the build fails afterwards, during its end-of-build actions.
 6. Bump the release branch to the next patch `-SNAPSHOT` (`1.0.1-SNAPSHOT`).
 
 The tag is the source of truth for *which commit*, and `gradle.properties` for *which version*; the
 workflow fails if they disagree rather than deriving one from the other, so a jar whose internal
 version differs from its tag can never be published. It fails the same way if the tagged commit is
-not reachable from the release branch its version names — `v1.0.1` must be on `1.0` — so a tag on an
-unreviewed branch cannot reach Maven Central or `ghcr.io`.
+not reachable from the release branch its version names — `v1.0.1` must be on `1.0` — so a tag on a
+scratch branch reaches neither Maven Central nor `ghcr.io`.
 
-The image is pushed only after Central has accepted the deployment, and for the same reason: a
-validated deployment can still be dropped, while an image tag is public from the moment it is pushed
-and may already have been pulled. A release that fails at the upload therefore leaves nothing behind
-on `ghcr.io`. The converse does not hold — the image goes out before step 5, so abandoning a release
-at the Portal leaves its tags published.
+That check inherits whatever the release branch requires: with the ruleset from step 1 in place, the
+published commit went through a pull request, and without it the check proves only that someone put
+the commit on a branch with the right name.
+
+The image is pushed only after the Maven Central upload has succeeded, and for the same reason: a
+deployment can still be dropped, while an image tag is public from the moment it is pushed and may
+already have been pulled. A release that fails at the upload — a bad credential, a signing failure,
+a network fault — therefore leaves nothing behind on `ghcr.io`.
+
+The ordering guarantees nothing beyond the upload. The build does not wait for the Portal to
+validate the deployment (see [Publishing the public key](#publishing-the-public-key)), so an image
+tag does not mean validation passed, and it does not mean a human released the deployment either —
+the image goes out before step 5. Abandoning a release at the Portal, for either reason, leaves its
+tags published.
 
 Every commit on `main` and on each release branch publishes a `-SNAPSHOT` to the Central snapshot
 repository, so downstream work can track either trunk or a maintenance line without waiting for a tag.
+
+### Rehearsing the pipeline
+
+Nothing in `publish-maven`, `publish-image` or `github-release` has ever run: the Central credentials,
+the emulated arm64 build, the keyless signature and the release creation are all untested. `1.0.0`
+is the worst version to discover that with, because it is the one that cannot be taken back.
+
+A rehearsal has to look like a real release, because the guards in `verify-version` are doing their
+job. A throwaway tag pushed on its own is refused by the version check, since the tag has to equal
+the `version` in `gradle.properties`, and then by the branch check, since `v0.0.1` derives the line
+`0.0` and looks for a branch by that name. So it takes three pushes:
+
+```bash
+git switch -c 0.0 && git push -u origin 0.0    # scratch release branch
+# set version=0.0.1-rc.1 in gradle.properties, then commit and push
+git tag v0.0.1-rc.1 && git push origin v0.0.1-rc.1
+```
+
+Use a pre-release version rather than a bare `0.0.1`. `latest` follows the highest released version,
+and with no other tags in the repository a bare `0.0.1` *is* the highest, so `latest` would follow
+a throwaway image. A version carrying a suffix is classified as a pre-release, which never takes it.
+
+Three rungs are worth climbing in order, because each leaves more behind than the last.
+
+**Guards only.** Leave the four `MAVEN_CENTRAL_*` secrets unset. `verify-version` runs end to end
+for real, and `publish-maven` then fails at the signing task: an unset secret arrives as an empty
+string, which Gradle reports as *present*, so `signAllPublications()` applies with no key to sign
+with. The upload never happens — it is an end-of-build action that runs only when the build
+succeeded — so nothing reaches Central or `ghcr.io`, and there is nothing to clean up but the tag
+and the branch. A forgotten GPG secret therefore cannot publish unsigned artifacts.
+
+**Snapshot.** Set `version=0.0.1-SNAPSHOT` on the scratch branch and push. That runs
+[release-snapshot.yml](.github/workflows/release-snapshot.yml), which exercises the credentials, the
+GPG key and a genuine upload, against the Central snapshot repository, which is mutable and
+expendable. It does not cover the Portal deployment, the arm64 leg, cosign or the GitHub release.
+
+**The full path.** Secrets in place, and the pre-release tag above. This is the only rung that
+exercises the Portal deployment, the `linux/arm64` build under QEMU, the signature and the release
+creation. **Do not release the deployment at the Portal** — dropping it is what keeps the rehearsal
+reversible, and a released version is immutable.
+
+Clean up afterwards:
+
+| Left behind | Removal |
+| --- | --- |
+| Central deployment | Drop it, as in step 5. It was never released, so Central never published the version and nothing was ever downloadable. |
+| Image tag | Delete the package version in `ghcr.io`. While this repository is private the package is private too, so it was never world-visible. |
+| GitHub release, tag, scratch branch | Delete all three. |
+| Cosign signature | **Cannot be removed.** Keyless signing records the image digest and this workflow's identity in Sigstore's public transparency log, which is append-only. It reveals the repository path and that a release ran — nothing confidential, but it is permanent, and it is the only part of a rehearsal that is. |
 
 ### Re-running a failed release
 
@@ -121,7 +246,63 @@ Not every step is idempotent, so check what already succeeded before re-running:
 | --- | --- |
 | GitHub release | Safe. Assets are replaced with `--clobber`, and existing notes are left alone in case they were edited by hand. |
 | Image push and signature | Safe in itself: the same tags are overwritten, and an extra signature is harmless. It runs only once the Central upload has succeeded, though, so a re-run aimed at the image still needs the previous deployment dropped. |
-| Maven Central | **Not automatic.** Drop the previous deployment first with `./gradlew dropMavenCentralDeployment`, or the upload is rejected as a duplicate, which stops the image and the GitHub release with it. If it was already released, that version can never be replaced — ship the fix as the next patch instead. |
+| Maven Central | **Not automatic.** Drop the previous deployment first, as in step 5; the plugin drops one by itself only when the build that uploaded it failed, which a green release is not. Nothing in the workflow enforces this: the build ends at the upload without waiting for the Portal's verdict, so a duplicate can surface as a rejected deployment while the run stays green and the image and the GitHub release go out. If the version was already released, it can never be replaced — ship the fix as the next patch instead. |
+
+## Repository settings
+
+Two things live in GitHub's own settings rather than in this repository, and neither is set today.
+The rulesets are a one-time setup that has to exist before the first release branch is cut; the
+environment is optional and can be added whenever.
+
+### Branch and tag rulesets
+
+`main` is covered by a ruleset requiring a pull request. The version branches are covered by
+nothing, so the release workflow's check that a tagged commit sits on its release branch proves only
+that someone put it on a branch with the right name.
+
+Under **Settings → Rules → Rulesets → New ruleset → New branch ruleset**:
+
+| Field | Value |
+| --- | --- |
+| Name | `version-branches` |
+| Enforcement status | Active |
+| Bypass list | `Organization admin`, `Repository admin`, matching the ruleset on `main` |
+| Target branches | Include by pattern: `[0-9]*` |
+| Rules | Restrict deletions; Block force pushes; Require a pull request before merging, with 2 approvals and conversation resolution; Require status checks to pass, naming `check`, `dockerfile-lint`, `image-smoke-test` and `image-arm64-native-test` |
+
+The pattern is typed without `refs/heads/`, which the UI adds itself. Ruleset patterns are fnmatch,
+not regex, so the `[0-9]+` patterns the workflows key off would match nothing here; `[0-9]*` is what
+matches `1`, `1.0` and `1.10`. Leave **Restrict creations** unticked, or step 1's
+`git push -u origin 1.0` is refused. The four check names may not appear in the picker until they
+have run on a pull request; they can be typed in by hand.
+
+A tag ruleset is worth adding alongside it, so that cutting a release is limited to whoever is
+allowed to release. Under **New ruleset → New tag ruleset**: name `release-tags`, Active, target
+tags `v*`, and the Restrict creations, Restrict deletions and Block force pushes rules. **Restrict
+creations needs a bypass list** — with an empty one, nobody can push a release tag at all.
+
+### Scoping the Central secrets to an environment
+
+The four `MAVEN_CENTRAL_*` secrets are repository secrets, so GitHub makes them available to a
+workflow run on any branch. No ruleset changes that: the workflow doing the reading need not be one
+of the two in this repository, since a branch can carry its own. An environment is the only
+mechanism that scopes secrets by ref, and it fails closed — a run on a ref the environment does not
+admit is refused the environment and never sees them.
+
+1. **Settings → Environments → New environment**, named `maven-central`.
+2. **Deployment branches and tags → Selected branches and tags**: add ref type *Branch* `main`, ref
+   type *Tag* `v*`, and one *Branch* entry per version branch as it is cut. Name the branches
+   explicitly rather than by pattern — deployment policies take wildcards, not the character classes
+   the ruleset above uses, and a policy that matches nothing locks the release out.
+3. Add the four secrets to the environment, then **delete the repository-level copies**. Copying
+   rather than moving gains nothing: the repository-level ones stay readable from anywhere.
+4. Add `environment: maven-central` to the publishing job in
+   [release.yml](.github/workflows/release.yml) and
+   [release-snapshot.yml](.github/workflows/release-snapshot.yml). Without it both jobs lose access
+   to the secrets.
+
+Adding a required reviewer to the environment would also give the release an approval gate, which
+the manual release step at the Portal covers today.
 
 ## Required repository secrets
 
@@ -131,6 +312,10 @@ Not every step is idempotent, so check what already succeeded before re-running:
 | `MAVEN_CENTRAL_PASSWORD` | Central Portal token password |
 | `MAVEN_CENTRAL_GPG_SECRET_KEY` | ASCII-armored private key used to sign artifacts |
 | `MAVEN_CENTRAL_GPG_PASSPHRASE` | Passphrase for that key |
+
+Any branch's workflows can read these, so write access to this repository is effectively access to
+the signing key. Scoping them by ref takes an environment, which is not set up today — see
+[Repository settings](#repository-settings).
 
 There is no public-key secret: an OpenPGP private key carries its own public material, and Gradle's
 signing plugin needs nothing else. (ScalarDB publishes with JReleaser, which does additionally require

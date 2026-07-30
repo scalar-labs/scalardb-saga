@@ -43,6 +43,10 @@ slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
 # bypass Logback entirely — see SagaServer.installJulToSlf4jBridge.
 jul-to-slf4j = { module = "org.slf4j:jul-to-slf4j", version.ref = "slf4j" }
 logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
+# The test suites take the version string rather than the module (see useJUnitJupiter in
+# scalardb-saga.java-conventions), so nothing resolves this entry. It exists because a version key no
+# [libraries] entry points at is one Dependabot cannot see, and so can never bump.
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit-jupiter" }
 mockito-core = { module = "org.mockito:mockito-core", version.ref = "mockito" }
 mockito-junit-jupiter = { module = "org.mockito:mockito-junit-jupiter", version.ref = "mockito" }
 assertj-core = { module = "org.assertj:assertj-core", version.ref = "assertj" }
@@ -68,3 +72,16 @@ netty-bom = { module = "io.netty:netty-bom", version.ref = "netty" }
 # Version deliberately omitted: it comes from netty-bom, so the native artifact can never drift from
 # the netty classes that load it.
 netty-transport-native-epoll = { module = "io.netty:netty-transport-native-epoll" }
+
+# The Gradle plugins the convention plugins in build-logic apply. They are libraries rather than a
+# [plugins] block because build-logic puts them on its own compile classpath instead of applying them
+# there, and they carry their coordinate here rather than inline in build-logic/build.gradle.kts
+# because Dependabot only reads versions reachable from [libraries] or [plugins]. A version consumed
+# solely as libs.versions.<name>.get() interpolation is one it can never bump.
+spotless-gradle-plugin = { module = "com.diffplug.spotless:spotless-plugin-gradle", version.ref = "spotless" }
+spotbugs-gradle-plugin = { module = "com.github.spotbugs.snom:spotbugs-gradle-plugin", version.ref = "spotbugs-plugin" }
+errorprone-gradle-plugin = { module = "net.ltgt.gradle:gradle-errorprone-plugin", version.ref = "errorprone-plugin" }
+nullaway-gradle-plugin = { module = "net.ltgt.gradle:gradle-nullaway-plugin", version.ref = "nullaway-plugin" }
+protobuf-gradle-plugin = { module = "com.google.protobuf:protobuf-gradle-plugin", version.ref = "protobuf-plugin" }
+maven-publish-gradle-plugin = { module = "com.vanniktech:gradle-maven-publish-plugin", version.ref = "maven-publish-plugin" }
+license-report-gradle-plugin = { module = "com.github.jk1:gradle-license-report", version.ref = "license-report" }

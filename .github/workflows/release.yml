@@ -169,15 +169,22 @@ jobs:
             echo "${VERSION} is behind ${highest}; latest stays where it is"
           fi
 
-  # Uploads one aggregated deployment covering api, core, rpc, grpc-client, and the BOM. It is left in
-  # the Central Portal's VALIDATED state on purpose: releasing is a deliberate click, because a
-  # released version can never be replaced or withdrawn.
+  # Uploads one aggregated deployment covering api, core, rpc, grpc-client, and the BOM. It goes up as
+  # USER_MANAGED on purpose: the Portal validates it and then waits, so releasing is a deliberate
+  # click, because a released version can never be replaced or withdrawn. The job ends at the upload
+  # and never sees the validation verdict, so a deployment the Portal rejects still leaves it green.
   publish-maven:
     needs: verify-version
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # Pin to the verified commit, not the tag. verify-version validated GITHUB_SHA, but a bare
+      # checkout on a tag push fetches `+refs/tags/<tag>:refs/tags/<tag>` and resolves the name
+      # again on the server, so a tag moved mid-run would build a commit nothing checked. The cosign
+      # identity would not show it either, since the certificate binds the ref name.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.sha }}
 
       - name: Set up Java 21
         uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
@@ -199,13 +206,14 @@ jobs:
         run: ./gradlew publishToMavenCentral --no-configuration-cache
 
   # Ordered after publish-maven rather than run alongside it, because the two failures are not equally
-  # recoverable: a deployment stops at VALIDATED and can be dropped, while an image tag is public the
-  # moment it is pushed and anyone may already have pulled it. Uploading first means a bad credential
-  # or a deployment Central rejects fails the release before anything reaches ghcr.io. What this buys
-  # is one-directional: the image implies Central accepted and validated the deployment, never that a
-  # human released it, so a release abandoned at step 5 still leaves the tags behind. It costs the
-  # Central upload's wall-clock time on every release, which is the cheaper side of the trade for
-  # something cut this rarely.
+  # recoverable: a deployment can be dropped before anyone sees it, while an image tag is public the
+  # moment it is pushed and anyone may already have pulled it. Uploading first means a bad credential,
+  # a failed signature, or a network fault fails the release before anything reaches ghcr.io. The
+  # guarantee stops at the upload: the build does not wait for the Portal's verdict, so an image tag
+  # implies the bundle was accepted for validation, not that validation passed, and not that a human
+  # released it. Both gaps are closed by the operator at step 5 of RELEASING.md, not here. It costs
+  # the Central upload's wall-clock time on every release, which is the cheaper side of the trade
+  # for something cut this rarely.
   publish-image:
     needs: [verify-version, publish-maven]
     runs-on: ubuntu-latest
@@ -219,7 +227,10 @@ jobs:
       # certificate instead of relying on a long-lived signing key held in a secret.
       id-token: write
     steps:
+      # The verified commit, for the reason publish-maven gives.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.sha }}
 
       - name: Set up Java 21
         uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
@@ -259,9 +270,13 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/scalar-labs/scalardb-saga-daemon
+          # One tag per release and nothing else that floats. A `<major>.<minor>` tag would be a
+          # second representation of the minor version line, which is a branch in this repository,
+          # and nothing would keep the two in step: it is pushed by whichever run is executing, so
+          # re-running a superseded patch — the recovery path in RELEASING.md — would pull it back to
+          # an older image. RELEASING.md records the tag scheme and why the line lives only in git.
           tags: |
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
           # Decided once in verify-version, so the image tag and the GitHub release can never disagree
           # about which release is the current one.
           flavor: |
@@ -305,7 +320,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      # The verified commit, for the reason publish-maven gives.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.sha }}
 
       - name: Set up Java 21
         uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
@@ -323,6 +341,9 @@ jobs:
       # dispatched re-run fail at the last step after the image and the deployment had both gone out.
       # Creating stays the normal path; uploading with --clobber is what lets the second run finish.
       # Notes are left alone on a re-run: they may have been edited by hand since.
+      #
+      # --verify-tag because `gh release create` creates a missing tag itself, from the default
+      # branch, so a tag deleted mid-run would otherwise be silently recreated on main.
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -348,5 +369,5 @@ jobs:
             else
               args+=(--latest=false)
             fi
-            gh release create "${tag}" "${args[@]}" daemon/build/distributions/*
+            gh release create "${tag}" --verify-tag "${args[@]}" daemon/build/distributions/*
           fi
