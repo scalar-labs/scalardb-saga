@@ -3,6 +3,7 @@ package com.scalar.db.saga.exception;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.util.Collections;
 import org.junit.jupiter.api.Test;
 
 class SagaPersistenceExceptionTest {
@@ -84,5 +85,30 @@ class SagaPersistenceExceptionTest {
   void classHierarchy_always_isRuntimeException() {
     // Assert
     assertThat(RuntimeException.class).isAssignableFrom(SagaPersistenceException.class);
+  }
+
+  @Test
+  void fromWire_persistenceCodeGiven_reconstructsCauseFreeWithItsRetryVerdict() {
+    // Act — no cause crosses the wire, so the reconstructed exception carries none
+    SagaPersistenceException e =
+        SagaPersistenceException.fromWire(
+            SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE, Collections.emptyMap());
+
+    // Assert
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE);
+    assertThat(e.isRetryable()).isTrue();
+    assertThat(e.getCause()).isNull();
+  }
+
+  @Test
+  void fromWire_unrelatedCodeGiven_throwsIllegalState() {
+    // Only ExceptionRegistry calls fromWire, so an unrelated code is a registry wiring bug rather
+    // than caller error — and IllegalStateException escapes the registry's IllegalArgumentException
+    // | NullPointerException catch, so it is not misreported as UNRECOGNIZED_SERVER_ERROR.
+    assertThatThrownBy(
+            () ->
+                SagaPersistenceException.fromWire(
+                    SagaErrorCode.SAGA_NOT_FOUND, Collections.emptyMap()))
+        .isInstanceOf(IllegalStateException.class);
   }
 }

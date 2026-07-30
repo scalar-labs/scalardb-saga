@@ -92,13 +92,17 @@ public class SagaDefinitionException extends SagaRuntimeException {
   }
 
   /**
-   * Reconstructs the exception from a wire-received {@link SagaErrorCode} and metadata, for use by
-   * the client SDK when it decodes an {@code ErrorInfo} from the daemon. The code must be one this
-   * exception represents (any of the definition/step/endpoint codes routed here); other codes throw
-   * {@link IllegalArgumentException}.
+   * Reconstructs the exception from a wire-received {@link SagaErrorCode} and metadata, when the
+   * client SDK decodes an {@code ErrorInfo} from the daemon. The code must be one this exception
+   * represents (any of the definition, step, or endpoint codes routed here).
+   *
+   * <p>Package-private: {@link ExceptionRegistry} is the only caller, so a code this type does not
+   * represent is a registry wiring bug rather than caller error, and throws {@link
+   * IllegalStateException}. That is deliberately outside the {@code IllegalArgumentException |
+   * NullPointerException} the registry catches for genuine wire-metadata drift, so a wiring bug
+   * surfaces as itself instead of as {@code UNRECOGNIZED_SERVER_ERROR}.
    */
-  public static SagaDefinitionException fromWire(SagaErrorCode code, Map<String, String> metadata) {
-    Objects.requireNonNull(code, "code must not be null");
+  static SagaDefinitionException fromWire(SagaErrorCode code, Map<String, String> metadata) {
     switch (code) {
       case INVALID_DEFINITION:
       case MALFORMED_DEFINITION:
@@ -109,7 +113,7 @@ public class SagaDefinitionException extends SagaRuntimeException {
       case HTTP_ENDPOINT_LOOKUP_FAILED:
         return new SagaDefinitionException(code, metadata);
       default:
-        throw new IllegalArgumentException("SagaDefinitionException does not carry code " + code);
+        throw new IllegalStateException("SagaDefinitionException does not carry code " + code);
     }
   }
 }

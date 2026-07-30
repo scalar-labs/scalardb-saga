@@ -61,14 +61,17 @@ public class SagaStatePreconditionException extends SagaRuntimeException {
    * Reconstructs the exception from a wire-received {@link SagaErrorCode} and metadata, for use by
    * the client SDK when it decodes an {@code ErrorInfo} from the daemon. The code must be one this
    * exception represents ({@link SagaErrorCode#SAGA_WRONG_STATE} or {@link
-   * SagaErrorCode#SAGA_PARKED}); other codes throw {@link IllegalArgumentException}.
+   * SagaErrorCode#SAGA_PARKED}).
+   *
+   * <p>Package-private: {@link ExceptionRegistry} is the only caller, so a code this type does not
+   * represent is a registry wiring bug rather than caller error, and throws {@link
+   * IllegalStateException}. That is deliberately outside the {@code IllegalArgumentException |
+   * NullPointerException} the registry catches for genuine wire-metadata drift, so a wiring bug
+   * surfaces as itself instead of as {@code UNRECOGNIZED_SERVER_ERROR}.
    */
-  public static SagaStatePreconditionException fromWire(
-      SagaErrorCode code, Map<String, String> metadata) {
-    Objects.requireNonNull(code, "code must not be null");
+  static SagaStatePreconditionException fromWire(SagaErrorCode code, Map<String, String> metadata) {
     if (code != SagaErrorCode.SAGA_WRONG_STATE && code != SagaErrorCode.SAGA_PARKED) {
-      throw new IllegalArgumentException(
-          "SagaStatePreconditionException does not carry code " + code);
+      throw new IllegalStateException("SagaStatePreconditionException does not carry code " + code);
     }
     return new SagaStatePreconditionException(code, metadata);
   }

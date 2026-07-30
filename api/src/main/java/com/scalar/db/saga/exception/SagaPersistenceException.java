@@ -46,18 +46,20 @@ public class SagaPersistenceException extends SagaRuntimeException {
    * specifics, and the daemon deliberately does not transmit it. The wire layer attaches the
    * transport status as the cause instead.
    *
-   * @throws IllegalArgumentException if {@code code} is not one of this type's three codes
+   * <p>Package-private: {@link ExceptionRegistry} is the only caller, so a code this type does not
+   * represent is a registry wiring bug rather than caller error, and throws {@link
+   * IllegalStateException}. That is deliberately outside the {@code IllegalArgumentException |
+   * NullPointerException} the registry catches for genuine wire-metadata drift, so a wiring bug
+   * surfaces as itself instead of as {@code UNRECOGNIZED_SERVER_ERROR}.
    */
-  public static SagaPersistenceException fromWire(
-      SagaErrorCode code, Map<String, String> metadata) {
-    Objects.requireNonNull(code, "code must not be null");
+  static SagaPersistenceException fromWire(SagaErrorCode code, Map<String, String> metadata) {
     switch (code) {
       case PERSISTENCE_STORE_UNAVAILABLE:
       case PERSISTENCE_SERIALIZATION_FAILED:
       case PERSISTENCE_DESERIALIZATION_FAILED:
         return new SagaPersistenceException(code);
       default:
-        throw new IllegalArgumentException("SagaPersistenceException does not carry code " + code);
+        throw new IllegalStateException("SagaPersistenceException does not carry code " + code);
     }
   }
 

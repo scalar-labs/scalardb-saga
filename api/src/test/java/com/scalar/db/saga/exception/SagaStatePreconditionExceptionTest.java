@@ -75,13 +75,16 @@ class SagaStatePreconditionExceptionTest {
   }
 
   @Test
-  void fromWire_unrelatedCodeGiven_throwsIllegalArgument() {
-    // Arrange & Act & Assert — guards against a wire misroute of an unrelated code
+  void fromWire_unrelatedCodeGiven_throwsIllegalState() {
+    // Arrange & Act & Assert — only ExceptionRegistry calls fromWire, so an unrelated code is a
+    // registry wiring bug, not caller error. IllegalStateException also sits outside the
+    // IllegalArgumentException | NullPointerException the registry catches for wire-metadata drift,
+    // so the bug propagates instead of being reported as UNRECOGNIZED_SERVER_ERROR.
     assertThatThrownBy(
             () ->
                 SagaStatePreconditionException.fromWire(
                     SagaErrorCode.SAGA_NOT_FOUND, Collections.singletonMap("saga_id", "s-z")))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(IllegalStateException.class);
   }
 
   @SuppressWarnings("NullAway")

@@ -3,6 +3,8 @@ package com.scalar.db.saga.exception;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.util.Collections;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class SagaDefinitionExceptionTest {
@@ -183,5 +185,27 @@ class SagaDefinitionExceptionTest {
     // Assert
     assertThat(RuntimeException.class).isAssignableFrom(SagaDefinitionException.class);
     assertThat(SagaRuntimeException.class).isAssignableFrom(SagaDefinitionException.class);
+  }
+
+  @Test
+  void fromWire_definitionCodeGiven_reconstructsThatCode() {
+    // Act
+    Map<String, String> wire = Map.of("saga_name", "orders", "detail", "duplicate step 'debit'");
+    SagaDefinitionException e =
+        SagaDefinitionException.fromWire(SagaErrorCode.INVALID_DEFINITION, wire);
+
+    // Assert
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.INVALID_DEFINITION);
+    assertThat(e.getMetadata()).containsEntry("saga_name", "orders");
+  }
+
+  @Test
+  void fromWire_unrelatedCodeGiven_throwsIllegalState() {
+    // A code this type does not represent is a registry wiring bug, not caller error.
+    assertThatThrownBy(
+            () ->
+                SagaDefinitionException.fromWire(
+                    SagaErrorCode.SAGA_NOT_FOUND, Collections.emptyMap()))
+        .isInstanceOf(IllegalStateException.class);
   }
 }
