@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.logging.Handler;
 import java.util.logging.LogManager;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -30,8 +31,8 @@ import org.slf4j.bridge.SLF4JBridgeHandler;
  * makes routing them affordable.
  *
  * <p>Lives in its own class because it mutates JVM-wide state; the root JUL logger's handlers and
- * level, plus the root Logback logger's appenders. All are captured and restored per test so
- * nothing leaks into the rest of the suite.
+ * level, the JUL test loggers' levels, and the root Logback logger's level and appenders. All are
+ * captured and restored per test so nothing leaks into the rest of the suite.
  */
 class SagaServerJulBridgeTest {
 
@@ -39,7 +40,8 @@ class SagaServerJulBridgeTest {
   private ListAppender<ILoggingEvent> appender;
   private List<Handler> originalJulHandlers;
   private java.util.logging.Level originalJulRootLevel;
-  private LoggerContext propagationContext;
+  private Level originalLogbackRootLevel;
+  private @Nullable LoggerContext propagationContext;
 
   // Fields, not locals: SpotBugs flags LG_LOST_LOGGER_DUE_TO_WEAK_REFERENCE because LogManager
   // holds Loggers weakly, so a level set on a local can be lost to garbage collection before the
@@ -54,6 +56,11 @@ class SagaServerJulBridgeTest {
     originalJulRootLevel = julRoot.getLevel();
     rootLogger =
         (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+    originalLogbackRootLevel = rootLogger.getLevel();
+    // The assertions read events off the appender below, so the root level is a live input to them.
+    // Pinned rather than inherited, so an exported SCALAR_DB_SAGA_LOG_LEVEL cannot filter the
+    // records out from under the tests.
+    rootLogger.setLevel(Level.TRACE);
     appender = new ListAppender<>();
     appender.start();
     rootLogger.addAppender(appender);
@@ -67,6 +74,7 @@ class SagaServerJulBridgeTest {
       propagationContext.stop();
       propagationContext = null;
     }
+    rootLogger.setLevel(originalLogbackRootLevel);
     rootLogger.detachAppender(appender);
     appender.stop();
     SLF4JBridgeHandler.uninstall();
@@ -75,11 +83,12 @@ class SagaServerJulBridgeTest {
       julRoot.removeHandler(handler);
     }
     originalJulHandlers.forEach(julRoot::addHandler);
-    // Restored last: configuring the shipped logback.xml resets JUL, which drops the level as well
-    // as the handlers.
+    // Configuring the shipped logback.xml propagates the Logback root level onto the JUL root
+    // logger, overwriting whatever the JVM started with.
     if (originalJulRootLevel != null) {
       julRoot.setLevel(originalJulRootLevel);
     }
+    levelTestLogger.setLevel(null);
     propagationTestLogger.setLevel(null);
   }
 
@@ -133,7 +142,7 @@ class SagaServerJulBridgeTest {
 
   @Test
   public void installJulToSlf4jBridge_calledTwice_installsOnlyOneBridge() {
-    // Arrange / Act — main() runs once, but a double install would double every gRPC log line.
+    // Arrange — main() runs once, but a double install would double every gRPC log line.
     SagaServer.installJulToSlf4jBridge();
     SagaServer.installJulToSlf4jBridge();
 

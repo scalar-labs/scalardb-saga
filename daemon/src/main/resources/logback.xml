@@ -18,8 +18,9 @@
     Pushes the levels below down into java.util.logging, whose records reach Logback through the
     bridge SagaServer.main installs (gRPC logs via JUL, not SLF4J). Without this, JUL keeps its own
     default level and builds a LogRecord for every call before the bridge can discard it — the whole
-    cost of a log statement that was never going to be printed. resetJUL clears the handlers JUL
-    inherited beforehand so nothing is emitted twice.
+    cost of a log statement that was never going to be printed. resetJUL clears any level a JUL logger
+    already had set explicitly, which would otherwise mask the level pushed down here. (Double logging
+    is prevented separately, by removeHandlersForRootLogger in the bridge install.)
   -->
   <contextListener class="ch.qos.logback.classic.jul.LevelChangePropagator">
     <resetJUL>true</resetJUL>
