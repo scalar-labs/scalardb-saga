@@ -1,5 +1,6 @@
 package com.scalar.db.saga.exception;
 
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -30,6 +31,34 @@ public class SagaPersistenceException extends SagaRuntimeException {
   private SagaPersistenceException(SagaErrorCode code, Throwable cause) {
     super(code, ErrorMetadata.of(), Objects.requireNonNull(cause, "cause must not be null"));
     this.retryable = code.category() == SagaErrorCode.Category.RETRYABLE_SERVER_ERROR;
+  }
+
+  /** Cause-free construction, for {@link #fromWire} only — see its contract. */
+  private SagaPersistenceException(SagaErrorCode code) {
+    super(code, ErrorMetadata.of());
+    this.retryable = code.category() == SagaErrorCode.Category.RETRYABLE_SERVER_ERROR;
+  }
+
+  /**
+   * Reconstructs the exception from a wire-received code, so a remote caller sees the same type,
+   * code, and {@link #isRetryable()} verdict an embedded caller would. The three static factories
+   * all demand a cause, but no cause crosses the wire: the server-side chain can carry internal
+   * specifics, and the daemon deliberately does not transmit it. The wire layer attaches the
+   * transport status as the cause instead.
+   *
+   * @throws IllegalArgumentException if {@code code} is not one of this type's three codes
+   */
+  public static SagaPersistenceException fromWire(
+      SagaErrorCode code, Map<String, String> metadata) {
+    Objects.requireNonNull(code, "code must not be null");
+    switch (code) {
+      case PERSISTENCE_STORE_UNAVAILABLE:
+      case PERSISTENCE_SERIALIZATION_FAILED:
+      case PERSISTENCE_DESERIALIZATION_FAILED:
+        return new SagaPersistenceException(code);
+      default:
+        throw new IllegalArgumentException("SagaPersistenceException does not carry code " + code);
+    }
   }
 
   /**

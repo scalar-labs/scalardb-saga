@@ -4,10 +4,52 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class ExceptionRegistryTest {
+
+  @Test
+  void reconstruct_everyCode_roundTripsToItsOwnCode() {
+    // Every enum constant must have a registry entry that preserves its code. Without this, a code
+    // can be added to the enum and silently degrade to UNRECOGNIZED_SERVER_ERROR, or — as
+    // PERSISTENCE_STORE_UNAVAILABLE did — be reconstructed as an exception hardcoding a *different*
+    // code, so the caller sees DB-SAGA-20003 for a DB-SAGA-20002 failure.
+    for (SagaErrorCode code : SagaErrorCode.values()) {
+      Map<String, String> metadata = new LinkedHashMap<>();
+      for (String key : code.schema().requiredKeys()) {
+        metadata.put(key, "x");
+      }
+
+      SagaRuntimeException reconstructed = ExceptionRegistry.reconstruct(code.code(), metadata);
+
+      assertThat(reconstructed.getErrorCode())
+          .as("reconstructed code of %s", code.name())
+          .isEqualTo(code);
+    }
+  }
+
+  @Test
+  void reconstruct_persistenceCodes_produceSagaPersistenceExceptionWithItsRetryVerdict() {
+    // Arrange & Act — the transient code and one permanent code
+    SagaRuntimeException transientFailure =
+        ExceptionRegistry.reconstruct(
+            SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE.code(), Collections.emptyMap());
+    SagaRuntimeException permanent =
+        ExceptionRegistry.reconstruct(
+            SagaErrorCode.PERSISTENCE_DESERIALIZATION_FAILED.code(), Collections.emptyMap());
+
+    // Assert — a remote caller gets the same type and the same isRetryable() an embedded one does
+    assertThat(transientFailure)
+        .isInstanceOf(SagaPersistenceException.class)
+        .extracting(e -> ((SagaPersistenceException) e).isRetryable())
+        .isEqualTo(true);
+    assertThat(permanent)
+        .isInstanceOf(SagaPersistenceException.class)
+        .extracting(e -> ((SagaPersistenceException) e).isRetryable())
+        .isEqualTo(false);
+  }
 
   @Test
   void reconstruct_knownCodeWithValidMetadata_producesTypedException() {

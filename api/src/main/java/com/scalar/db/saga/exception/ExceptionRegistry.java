@@ -97,20 +97,34 @@ public final class ExceptionRegistry {
     m.put(
         SagaErrorCode.SAGA_CONCURRENT_MODIFICATION,
         meta -> new SagaConcurrentModificationException(meta.get("saga_id")));
-    m.put(SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE, meta -> new SagaUnavailableException());
+    // Reconstructs as SagaPersistenceException, not SagaUnavailableException: the latter hardcodes
+    // SERVICE_UNAVAILABLE, so substituting it silently rewrote the code (and the rendered message)
+    // from DB-SAGA-20002 to DB-SAGA-20003 and dropped isRetryable(). A remote caller keying on
+    // SagaUnavailableException alone no longer sees this one — key on
+    // Category.RETRYABLE_SERVER_ERROR, which covers both.
+    m.put(
+        SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE,
+        meta ->
+            SagaPersistenceException.fromWire(SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE, meta));
     m.put(SagaErrorCode.SERVICE_UNAVAILABLE, meta -> new SagaUnavailableException());
     m.put(SagaErrorCode.RATE_LIMIT_EXCEEDED, meta -> raw(SagaErrorCode.RATE_LIMIT_EXCEEDED, meta));
 
     // ── NON_RETRYABLE_SERVER_ERROR (3xxxx) ────────────────────────────
-    // Persistence serialization/deserialization and step-level codes (STEP_TIMEOUT,
-    // STEP_USER_FAILURE, COMPENSATION_FAILED) can appear only via saga state, not as top-level
-    // RPC errors; they still get a raw reconstructor for defensive completeness.
+    // Persistence serialization/deserialization reconstruct as the real SagaPersistenceException,
+    // so catch (SagaPersistenceException) and isRetryable() behave the same remote as embedded. The
+    // step-level codes (STEP_TIMEOUT, STEP_USER_FAILURE, COMPENSATION_FAILED) can appear only via
+    // saga state, not as top-level RPC errors; they keep a raw reconstructor for defensive
+    // completeness.
     m.put(
         SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED,
-        meta -> raw(SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED, meta));
+        meta ->
+            SagaPersistenceException.fromWire(
+                SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED, meta));
     m.put(
         SagaErrorCode.PERSISTENCE_DESERIALIZATION_FAILED,
-        meta -> raw(SagaErrorCode.PERSISTENCE_DESERIALIZATION_FAILED, meta));
+        meta ->
+            SagaPersistenceException.fromWire(
+                SagaErrorCode.PERSISTENCE_DESERIALIZATION_FAILED, meta));
     m.put(SagaErrorCode.STEP_TIMEOUT, meta -> raw(SagaErrorCode.STEP_TIMEOUT, meta));
     m.put(SagaErrorCode.STEP_USER_FAILURE, meta -> raw(SagaErrorCode.STEP_USER_FAILURE, meta));
     m.put(SagaErrorCode.COMPENSATION_FAILED, meta -> raw(SagaErrorCode.COMPENSATION_FAILED, meta));

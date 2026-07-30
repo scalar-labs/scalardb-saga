@@ -14,6 +14,14 @@ import com.scalar.db.saga.exception.SagaUnauthenticatedException;
  * remotely by {@code GrpcSagaAdminClient} (the Java 8 client SDK), so the same surface works
  * embedded or against a saga server.
  *
+ * <p><b>Deciding what to retry.</b> Key on {@link
+ * com.scalar.db.saga.exception.SagaErrorCode.Category#RETRYABLE_SERVER_ERROR} via {@code
+ * e.getErrorCode().category()} rather than on a single exception type. A transient store failure
+ * reaches a remote caller as {@link com.scalar.db.saga.exception.SagaPersistenceException} (the
+ * type the engine threw, reconstructed from the wire) while a connectivity failure that never
+ * reached the server arrives as {@link com.scalar.db.saga.exception.SagaUnavailableException}. Both
+ * are retryable, and only the category covers both.
+ *
  * <p><b>Direction-agnostic mutations.</b> The operator never chooses "compensate" vs. "resume
  * forward" — the engine decides from the saga's pivot, exactly as automatic recovery does. The
  * operator only chooses <em>whether</em> to let the engine continue ({@link #recoverSaga}, {@link

@@ -16,6 +16,14 @@ import java.util.Map;
  * is an implementation detail (the embedded orchestrator mints it server-side, a remote client may
  * mint it client-side as an idempotency key). Callers depend only on receiving a unique id back.
  *
+ * <p><b>Deciding what to retry.</b> Key on {@link
+ * com.scalar.db.saga.exception.SagaErrorCode.Category#RETRYABLE_SERVER_ERROR} via {@code
+ * e.getErrorCode().category()} rather than on a single exception type. A transient store failure
+ * reaches a remote caller as {@link com.scalar.db.saga.exception.SagaPersistenceException} (the
+ * type the engine threw, reconstructed from the wire) while a connectivity failure that never
+ * reached the server arrives as {@link com.scalar.db.saga.exception.SagaUnavailableException}. Both
+ * are retryable, and only the category covers both.
+ *
  * <p>Construct the embedded implementation via its builder:
  *
  * <pre>{@code
