@@ -46,11 +46,19 @@ public enum SagaErrorCode {
       Category.USER_ERROR,
       "Request is invalid",
       Schema.of("detail"),
-      "The request failed validation at the daemon edge — a missing or malformed field, an unrecognized query parameter, or a value the engine rejected.",
+      "The request message itself failed validation at the daemon edge: a missing or malformed field, an unparseable body, or an unrecognized query parameter. Only a remote caller can produce this; the embedded engine has no request to validate. A caller value the engine rejected is INVALID_ARGUMENT instead.",
       "Fix the request per the detail and retry."),
 
-  INVALID_DEFINITION(
+  INVALID_ARGUMENT(
       "DB-SAGA-10002",
+      Category.USER_ERROR,
+      "Argument is invalid",
+      Schema.of("detail"),
+      "A value the caller passed failed validation — a malformed page token, a blank reason, an out-of-range timestamp. Raised by the engine and by client-side pre-checks, so it reaches callers in both embedded and daemon mode.",
+      "Fix the argument per the detail and retry."),
+
+  INVALID_DEFINITION(
+      "DB-SAGA-10003",
       Category.USER_ERROR,
       "Saga definition is invalid",
       Schema.of("saga_name", "detail"),
@@ -58,7 +66,7 @@ public enum SagaErrorCode {
       "Fix the definition per the detail and re-register."),
 
   MALFORMED_DEFINITION(
-      "DB-SAGA-10003",
+      "DB-SAGA-10004",
       Category.USER_ERROR,
       "Saga definition source is not parseable",
       Schema.of("source", "detail"),
@@ -66,7 +74,7 @@ public enum SagaErrorCode {
       "Fix the JSON/YAML syntax error indicated by the parser cause."),
 
   UNREADABLE_DEFINITION_SOURCE(
-      "DB-SAGA-10004",
+      "DB-SAGA-10005",
       Category.USER_ERROR,
       "Saga definition source cannot be read",
       Schema.of("source"),
@@ -74,7 +82,7 @@ public enum SagaErrorCode {
       "Verify the path/resource exists, is readable, and has a supported extension (.json, .yaml, .yml)."),
 
   INVALID_STEP_CLASS(
-      "DB-SAGA-10005",
+      "DB-SAGA-10006",
       Category.USER_ERROR,
       "Step class cannot be resolved or instantiated",
       Schema.of("step_class", "detail"),
@@ -82,7 +90,7 @@ public enum SagaErrorCode {
       "Fix the step class per the detail and ensure it is on the runtime classpath."),
 
   STEP_CLASS_NOT_SUPPORTED_ON_DAEMON(
-      "DB-SAGA-10006",
+      "DB-SAGA-10007",
       Category.USER_ERROR,
       "Class-based step is not supported on the daemon",
       Schema.of("saga_name", "step_name"),
@@ -90,7 +98,7 @@ public enum SagaErrorCode {
       "Convert the step to a declarative service step or embed the engine instead."),
 
   HTTP_ENDPOINT_LOOKUP_FAILED(
-      "DB-SAGA-10007",
+      "DB-SAGA-10008",
       Category.USER_ERROR,
       "HTTP endpoint lookup failed",
       Schema.of("detail"),

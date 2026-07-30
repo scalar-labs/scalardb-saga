@@ -39,6 +39,7 @@ public final class ExceptionRegistry {
 
     // ── USER_ERROR — Bad request (100xx) ──────────────────────────────
     m.put(SagaErrorCode.INVALID_REQUEST, meta -> raw(SagaErrorCode.INVALID_REQUEST, meta));
+    m.put(SagaErrorCode.INVALID_ARGUMENT, meta -> raw(SagaErrorCode.INVALID_ARGUMENT, meta));
     m.put(
         SagaErrorCode.INVALID_DEFINITION,
         meta -> SagaDefinitionException.fromWire(SagaErrorCode.INVALID_DEFINITION, meta));

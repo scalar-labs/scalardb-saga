@@ -23,6 +23,27 @@ class ExceptionRegistryTest {
   }
 
   @Test
+  void reconstruct_invalidArgumentCode_keepsTheCodeDistinctFromInvalidRequest() {
+    // Arrange — the two bad-input codes are deliberately separate: INVALID_REQUEST is the wire
+    // message failing validation at the daemon edge, INVALID_ARGUMENT a caller value the engine
+    // rejected. A remote client must not collapse one into the other.
+    Map<String, String> argumentMeta = Collections.singletonMap("detail", "malformed page token");
+    Map<String, String> requestMeta = Collections.singletonMap("detail", "'name' is required");
+
+    // Act
+    SagaRuntimeException argument =
+        ExceptionRegistry.reconstruct(SagaErrorCode.INVALID_ARGUMENT.code(), argumentMeta);
+    SagaRuntimeException request =
+        ExceptionRegistry.reconstruct(SagaErrorCode.INVALID_REQUEST.code(), requestMeta);
+
+    // Assert — each round-trips to its own code, carrying its own detail
+    assertThat(argument.getErrorCode()).isEqualTo(SagaErrorCode.INVALID_ARGUMENT);
+    assertThat(argument.getMetadata()).containsEntry("detail", "malformed page token");
+    assertThat(request.getErrorCode()).isEqualTo(SagaErrorCode.INVALID_REQUEST);
+    assertThat(request.getMetadata()).containsEntry("detail", "'name' is required");
+  }
+
+  @Test
   void reconstruct_definitionCode_producesSagaDefinitionException() {
     // Arrange
     Map<String, String> metadata = new HashMap<>();

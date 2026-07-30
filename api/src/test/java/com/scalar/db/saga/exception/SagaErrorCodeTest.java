@@ -112,7 +112,7 @@ class SagaErrorCodeTest {
     // Assert — saga_name comes first because that's the declared schema order
     assertThat(rendered)
         .isEqualTo(
-            "DB-SAGA-10002: Saga definition is invalid [saga_name=orders,"
+            "DB-SAGA-10003: Saga definition is invalid [saga_name=orders,"
                 + " detail=duplicate step name 'debit']");
   }
 
