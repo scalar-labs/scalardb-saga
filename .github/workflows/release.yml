@@ -169,9 +169,10 @@ jobs:
             echo "${VERSION} is behind ${highest}; latest stays where it is"
           fi
 
-  # Uploads one aggregated deployment covering api, core, rpc, grpc-client, and the BOM. It is left in
-  # the Central Portal's VALIDATED state on purpose: releasing is a deliberate click, because a
-  # released version can never be replaced or withdrawn.
+  # Uploads one aggregated deployment covering api, core, rpc, grpc-client, and the BOM. It goes up as
+  # USER_MANAGED on purpose: the Portal validates it and then waits, so releasing is a deliberate
+  # click, because a released version can never be replaced or withdrawn. The job ends at the upload
+  # and never sees the validation verdict, so a deployment the Portal rejects still leaves it green.
   publish-maven:
     needs: verify-version
     runs-on: ubuntu-latest
@@ -199,13 +200,14 @@ jobs:
         run: ./gradlew publishToMavenCentral --no-configuration-cache
 
   # Ordered after publish-maven rather than run alongside it, because the two failures are not equally
-  # recoverable: a deployment stops at VALIDATED and can be dropped, while an image tag is public the
-  # moment it is pushed and anyone may already have pulled it. Uploading first means a bad credential
-  # or a deployment Central rejects fails the release before anything reaches ghcr.io. What this buys
-  # is one-directional: the image implies Central accepted and validated the deployment, never that a
-  # human released it, so a release abandoned at step 5 still leaves the tags behind. It costs the
-  # Central upload's wall-clock time on every release, which is the cheaper side of the trade for
-  # something cut this rarely.
+  # recoverable: a deployment can be dropped before anyone sees it, while an image tag is public the
+  # moment it is pushed and anyone may already have pulled it. Uploading first means a bad credential,
+  # a failed signature, or a network fault fails the release before anything reaches ghcr.io. The
+  # guarantee stops at the upload: the build does not wait for the Portal's verdict, so an image tag
+  # implies the bundle was accepted for validation, not that validation passed, and not that a human
+  # released it. Both gaps are closed by the operator at step 5 of RELEASING.md, not here. It costs
+  # the Central upload's wall-clock time on every release, which is the cheaper side of the trade
+  # for something cut this rarely.
   publish-image:
     needs: [verify-version, publish-maven]
     runs-on: ubuntu-latest

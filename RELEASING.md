@@ -87,9 +87,12 @@ after it, live only on that branch and are unreachable from `main` by design.
    the multi-architecture image, signs it, and creates the GitHub release with the distribution
    archives.
 5. Release the Maven Central deployment from the [Central Portal](https://central.sonatype.com/publishing/deployments).
-   This step is a deliberate human action: a released version on Central is immutable and cannot be
-   replaced or withdrawn, so the workflow leaves the deployment `VALIDATED` rather than releasing it.
-   To drop a bad deployment instead, use `./gradlew dropMavenCentralDeployment`.
+   Confirm the deployment reached `VALIDATED` before releasing it: the workflow uploads the bundle
+   and stops there, so a deployment the Portal rejects leaves the release green (see
+   [Publishing the public key](#publishing-the-public-key)). Releasing is a deliberate human action —
+   a released version on Central is immutable and cannot be replaced or withdrawn — so the workflow
+   never releases the deployment itself. To drop a bad deployment instead, use the Portal, or
+   `./gradlew dropMavenCentralDeployment --deployment-id=<id>` with the id the release log printed.
 6. Bump the release branch to the next patch `-SNAPSHOT` (`1.0.1-SNAPSHOT`).
 
 The tag is the source of truth for *which commit*, and `gradle.properties` for *which version*; the
@@ -98,11 +101,16 @@ version differs from its tag can never be published. It fails the same way if th
 not reachable from the release branch its version names — `v1.0.1` must be on `1.0` — so a tag on an
 unreviewed branch cannot reach Maven Central or `ghcr.io`.
 
-The image is pushed only after Central has accepted the deployment, and for the same reason: a
-validated deployment can still be dropped, while an image tag is public from the moment it is pushed
-and may already have been pulled. A release that fails at the upload therefore leaves nothing behind
-on `ghcr.io`. The converse does not hold — the image goes out before step 5, so abandoning a release
-at the Portal leaves its tags published.
+The image is pushed only after the Maven Central upload has succeeded, and for the same reason: a
+deployment can still be dropped, while an image tag is public from the moment it is pushed and may
+already have been pulled. A release that fails at the upload — a bad credential, a signing failure,
+a network fault — therefore leaves nothing behind on `ghcr.io`.
+
+The ordering guarantees nothing beyond the upload. The build does not wait for the Portal to
+validate the deployment (see [Publishing the public key](#publishing-the-public-key)), so an image
+tag does not mean validation passed, and it does not mean a human released the deployment either —
+the image goes out before step 5. Abandoning a release at the Portal, for either reason, leaves its
+tags published.
 
 Every commit on `main` and on each release branch publishes a `-SNAPSHOT` to the Central snapshot
 repository, so downstream work can track either trunk or a maintenance line without waiting for a tag.
@@ -121,7 +129,7 @@ Not every step is idempotent, so check what already succeeded before re-running:
 | --- | --- |
 | GitHub release | Safe. Assets are replaced with `--clobber`, and existing notes are left alone in case they were edited by hand. |
 | Image push and signature | Safe in itself: the same tags are overwritten, and an extra signature is harmless. It runs only once the Central upload has succeeded, though, so a re-run aimed at the image still needs the previous deployment dropped. |
-| Maven Central | **Not automatic.** Drop the previous deployment first with `./gradlew dropMavenCentralDeployment`, or the upload is rejected as a duplicate, which stops the image and the GitHub release with it. If it was already released, that version can never be replaced — ship the fix as the next patch instead. |
+| Maven Central | **Not automatic.** Drop the previous deployment first, from the Portal or with `./gradlew dropMavenCentralDeployment --deployment-id=<id>`. Nothing in the workflow enforces this: the build ends at the upload without waiting for the Portal's verdict, so a duplicate can surface as a rejected deployment while the run stays green and the image and the GitHub release go out. If the version was already released, it can never be replaced — ship the fix as the next patch instead. |
 
 ## Required repository secrets
 
