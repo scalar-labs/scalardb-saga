@@ -1,7 +1,5 @@
 package com.scalar.db.saga.grpc;
 
-import com.google.protobuf.Any;
-import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.rpc.ErrorInfo;
 import com.scalar.db.saga.api.ResetResult;
 import com.scalar.db.saga.api.SagaAdminService;
@@ -22,7 +20,6 @@ import io.grpc.ManagedChannel;
 import io.grpc.Metadata;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
-import io.grpc.protobuf.StatusProto;
 import java.util.Objects;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
@@ -217,7 +214,7 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
    * SagaConcurrentModificationException}; everything else via {@link #mapCommon}.
    */
   private static RuntimeException mapMutation(StatusRuntimeException e, String sagaId) {
-    SagaRuntimeException reconstructed = reconstructFromErrorInfo(e);
+    SagaRuntimeException reconstructed = GrpcClientSupport.reconstruct(e);
     if (reconstructed != null) {
       return reconstructed;
     }
@@ -228,42 +225,11 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
     if (code == Status.Code.ABORTED) {
       return new SagaConcurrentModificationException(sagaId, e);
     }
-    return mapCommon(e);
-  }
-
-  /**
-   * Reconstructs a typed exception from the daemon's {@link ErrorInfo}, or returns {@code null} if
-   * the response has no {@link ErrorInfo} (older daemon, intermediary stripped it, or a
-   * transport-level failure that never reached the mapper).
-   */
-  private static @Nullable SagaRuntimeException reconstructFromErrorInfo(StatusRuntimeException e) {
-    ErrorInfo info = errorInfo(e);
-    if (info == null) {
-      return null;
-    }
-    return ExceptionRegistry.reconstruct(info.getReason(), info.getMetadataMap());
-  }
-
-  /** The first {@link ErrorInfo} detail the daemon attached to {@code e}, or {@code null}. */
-  private static @Nullable ErrorInfo errorInfo(StatusRuntimeException e) {
-    com.google.rpc.Status status = StatusProto.fromThrowable(e);
-    if (status == null) {
-      return null;
-    }
-    for (Any detail : status.getDetailsList()) {
-      if (detail.is(ErrorInfo.class)) {
-        try {
-          return detail.unpack(ErrorInfo.class);
-        } catch (InvalidProtocolBufferException malformed) {
-          return null;
-        }
-      }
-    }
-    return null;
+    return GrpcClientSupport.mapTransport(e);
   }
 
   private static RuntimeException mapCommon(StatusRuntimeException e) {
-    return GrpcClientSupport.mapCommon(e);
+    return GrpcClientSupport.mapWire(e);
   }
 
   /** Builder for {@link GrpcSagaAdminClient}, mirroring the application client's builder. */

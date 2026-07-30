@@ -4,7 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.protobuf.Any;
 import com.google.protobuf.Timestamp;
+import com.google.rpc.ErrorInfo;
 import com.scalar.db.saga.api.SagaCallback;
 import com.scalar.db.saga.api.SagaDefinitionId;
 import com.scalar.db.saga.api.SagaDetail;
@@ -12,8 +14,10 @@ import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.api.TimelineEvent;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
+import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaErrorCode;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaPermissionDeniedException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
@@ -32,6 +36,7 @@ import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.inprocess.InProcessChannelBuilder;
 import io.grpc.inprocess.InProcessServerBuilder;
+import io.grpc.protobuf.StatusProto;
 import io.grpc.stub.StreamObserver;
 import java.io.IOException;
 import java.util.ArrayDeque;
@@ -274,10 +279,80 @@ class GrpcSagaOrchestratorClientTest {
   }
 
   @Test
-  void start_invalidArgument_throwsIllegalArgument() {
+  void start_definitionInvalidWithErrorInfo_throwsSagaDefinitionException() {
+    // Arrange — SagaOrchestrator.start declares @throws SagaDefinitionException, and the daemon
+    // maps
+    // it to INVALID_ARGUMENT with the exact code in the ErrorInfo. Before reconstruction reached
+    // this path the client flattened every INVALID_ARGUMENT alike, so the declared type never
+    // arrived and a caller's catch block could not fire.
+    fake.startError =
+        statusWithReason(
+            Status.Code.INVALID_ARGUMENT,
+            SagaErrorCode.INVALID_DEFINITION.code(),
+            Map.of("saga_name", "transfer", "detail", "duplicate step name 'debit'"));
+
+    // Act + Assert
+    assertThatThrownBy(() -> client.start("transfer", Map.of()))
+        .isInstanceOf(SagaDefinitionException.class)
+        .extracting(e -> ((SagaDefinitionException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.INVALID_DEFINITION);
+  }
+
+  @Test
+  void getStateSnapshot_internalWithErrorInfo_reconstructsTheServerCode() {
+    // Arrange — INTERNAL has no transport-dispatch case, so it used to fall to the catch-all and
+    // report UNRECOGNIZED_SERVER_ERROR ("upgrade the client SDK") even though the daemon sent a
+    // code
+    // this client understands.
+    fake.getError =
+        statusWithReason(
+            Status.Code.INTERNAL, SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED.code(), Map.of());
+
+    // Act + Assert
+    assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
+        .isInstanceOf(SagaRuntimeException.class)
+        .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED);
+  }
+
+  @Test
+  void getStateSnapshot_errorInfoGiven_attachesTheGrpcStatusAsCause() {
+    // Arrange — the registry builds every exception cause-free, so without an explicit initCause
+    // the
+    // gRPC status (and its description and trailers) would be lost to anyone debugging.
+    fake.getError =
+        statusWithReason(Status.Code.INTERNAL, SagaErrorCode.INTERNAL_ERROR.code(), Map.of());
+
+    // Act + Assert
+    assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
+        .hasCauseInstanceOf(StatusRuntimeException.class);
+  }
+
+  @Test
+  void start_alreadyExistsWithErrorInfo_stillRefetchesTheExistingSnapshot() {
+    // Arrange — SAGA_ALREADY_EXISTS is deliberately not reconstructible, since the typed exception
+    // needs the existing snapshot and the wire metadata has no room for it. So ALREADY_EXISTS must
+    // stay ahead of reconstruction even when an ErrorInfo is present, or the refetch is skipped and
+    // the caller gets a bare code instead of the snapshot.
+    fake.startError =
+        statusWithReason(
+            Status.Code.ALREADY_EXISTS,
+            SagaErrorCode.SAGA_ALREADY_EXISTS.code(),
+            Map.of("saga_id", "my-id"));
+    fake.getResponse = snapshot("my-id", SagaStatus.COMPLETED);
+
+    // Act + Assert
+    assertThatThrownBy(() -> client.start("my-id", "transfer", Map.of()))
+        .isInstanceOfSatisfying(
+            SagaAlreadyExistsException.class,
+            e -> assertThat(e.getExisting().getStatus()).isEqualTo(SagaStatus.COMPLETED));
+  }
+
+  @Test
+  void start_invalidArgumentWithoutErrorInfo_throwsSagaIllegalArgument() {
     fake.startError = Status.INVALID_ARGUMENT.withDescription("bad input").asRuntimeException();
     assertThatThrownBy(() -> client.start("transfer", Map.of()))
-        .isInstanceOf(IllegalArgumentException.class)
+        .isInstanceOf(SagaIllegalArgumentException.class)
         .hasMessageContaining("bad input");
   }
 
@@ -505,6 +580,21 @@ class GrpcSagaOrchestratorClientTest {
   void getStateSnapshot_nullId_throwsNpe() {
     assertThatThrownBy(() -> client.getStateSnapshot(null))
         .isInstanceOf(NullPointerException.class);
+  }
+
+  /**
+   * Builds a {@link StatusRuntimeException} carrying an {@link ErrorInfo} detail, as the daemon's
+   * {@code GrpcErrorMapper} does, so the client's reason-based reconstruction is exercised end to
+   * end.
+   */
+  private static StatusRuntimeException statusWithReason(
+      Status.Code code, String reason, Map<String, String> metadata) {
+    ErrorInfo info = ErrorInfo.newBuilder().setReason(reason).putAllMetadata(metadata).build();
+    return StatusProto.toStatusRuntimeException(
+        com.google.rpc.Status.newBuilder()
+            .setCode(code.value())
+            .addDetails(Any.pack(info))
+            .build());
   }
 
   // ---------------------------------------------------------------------------

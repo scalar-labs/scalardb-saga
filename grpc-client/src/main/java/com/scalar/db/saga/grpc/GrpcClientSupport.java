@@ -1,7 +1,12 @@
 package com.scalar.db.saga.grpc;
 
+import com.google.protobuf.Any;
+import com.google.protobuf.InvalidProtocolBufferException;
+import com.google.rpc.ErrorInfo;
 import com.scalar.db.saga.exception.ErrorMetadata;
+import com.scalar.db.saga.exception.ExceptionRegistry;
 import com.scalar.db.saga.exception.SagaErrorCode;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaPermissionDeniedException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaTimeoutException;
@@ -11,8 +16,10 @@ import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
+import io.grpc.protobuf.StatusProto;
 import java.util.concurrent.TimeUnit;
 import javax.net.ssl.SSLEngine;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Transport mechanics shared by the two gRPC clients ({@link GrpcSagaOrchestratorClient} and {@link
@@ -65,21 +72,79 @@ final class GrpcClientSupport {
   }
 
   /**
-   * Maps a gRPC {@link Status} to the api exception for the statuses that carry no saga-scoped
-   * context. {@code NOT_FOUND} is deliberately absent — each client's context-specific mapper
-   * handles it upstream (a missing saga vs a missing definition), so it never reaches this
-   * catch-all. Every status but {@code INVALID_ARGUMENT} takes its message from its {@link
-   * SagaErrorCode} and carries the gRPC status, description included, as the cause. {@code
-   * INVALID_ARGUMENT} instead passes the daemon's description through as the {@link
-   * IllegalArgumentException} message (falling back to a fixed one when the daemon sent none),
+   * Maps a wire failure to the api exception: the daemon's {@link ErrorInfo} when it sent one,
+   * otherwise transport-status dispatch. This is the whole mapping for a call with no saga-scoped
+   * context to add; the context-specific mappers call {@link #reconstruct} and {@link
+   * #mapTransport} separately so they can slot their own handling between the two.
+   */
+  static RuntimeException mapWire(StatusRuntimeException e) {
+    SagaRuntimeException reconstructed = reconstruct(e);
+    return reconstructed != null ? reconstructed : mapTransport(e);
+  }
+
+  /**
+   * Rebuilds the typed exception the daemon's {@link ErrorInfo} describes, inverting what {@code
+   * GrpcErrorMapper} put on the wire, or returns {@code null} when the response carried no {@code
+   * ErrorInfo} — an older daemon, an intermediary that stripped it, or a transport failure that
+   * never reached the daemon's mapper.
+   *
+   * <p>Prefer this over {@link #mapTransport} wherever both could apply: the gRPC status is a
+   * coarse family ({@code INVALID_ARGUMENT} carries both a rejected argument and seven definition
+   * codes; {@code NOT_FOUND} carries a missing saga and a missing definition), while the {@code
+   * ErrorInfo} reason names the exact code. The gRPC status is attached as the cause so its
+   * description and trailers stay available for debugging.
+   */
+  static @Nullable SagaRuntimeException reconstruct(StatusRuntimeException e) {
+    ErrorInfo info = errorInfo(e);
+    if (info == null) {
+      return null;
+    }
+    SagaRuntimeException reconstructed =
+        ExceptionRegistry.reconstruct(info.getReason(), info.getMetadataMap());
+    if (reconstructed.getCause() == null) {
+      // The registry builds every exception cause-free, so this is the one chance to attach the
+      // gRPC status. Guarded rather than unconditional: initCause throws once a cause is set, and a
+      // future reconstructor may pass one.
+      reconstructed.initCause(e);
+    }
+    return reconstructed;
+  }
+
+  /** The first {@link ErrorInfo} detail on {@code e}, or {@code null} if it carries none. */
+  private static @Nullable ErrorInfo errorInfo(StatusRuntimeException e) {
+    com.google.rpc.Status status = StatusProto.fromThrowable(e);
+    if (status == null) {
+      return null;
+    }
+    for (Any detail : status.getDetailsList()) {
+      if (detail.is(ErrorInfo.class)) {
+        try {
+          return detail.unpack(ErrorInfo.class);
+        } catch (InvalidProtocolBufferException malformed) {
+          return null;
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Maps a gRPC {@link Status} to the api exception, for a response that carried no {@link
+   * ErrorInfo} to reconstruct from. {@code NOT_FOUND} is deliberately absent — each client's
+   * context-specific mapper handles it upstream (a missing saga vs a missing definition), so it
+   * never reaches this catch-all. Every status but {@code INVALID_ARGUMENT} takes its message from
+   * its {@link SagaErrorCode} and carries the gRPC status, description included, as the cause.
+   * {@code INVALID_ARGUMENT} instead passes the daemon's description through as the {@link
+   * SagaIllegalArgumentException} detail (falling back to a fixed one when the daemon sent none),
    * because that text is the validation detail the caller needs.
    */
-  static RuntimeException mapCommon(StatusRuntimeException e) {
+  static RuntimeException mapTransport(StatusRuntimeException e) {
     Status status = e.getStatus();
     String description = status.getDescription();
     switch (status.getCode()) {
       case INVALID_ARGUMENT:
-        return new IllegalArgumentException(description == null ? "Invalid request" : description);
+        return new SagaIllegalArgumentException(
+            description == null ? "Invalid request" : description, e);
       case DEADLINE_EXCEEDED:
         // The gRPC status (with its description) is preserved as the cause; the fixed message
         // comes from SagaErrorCode.REQUEST_TIMEOUT.

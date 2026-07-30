@@ -266,11 +266,30 @@ class GrpcSagaAdminClientTest {
   }
 
   @Test
-  void listSagas_invalidArgument_throwsIllegalArgument() {
+  void listSagas_invalidArgumentWithoutErrorInfo_throwsSagaIllegalArgument() {
+    // No ErrorInfo, so there is nothing to reconstruct and the transport status decides. The
+    // daemon's description is the validation detail, so it is passed through.
     fake.listError = Status.INVALID_ARGUMENT.withDescription("bad page token").asRuntimeException();
     assertThatThrownBy(() -> client.listSagas(SagaQuery.newBuilder().build()))
-        .isInstanceOf(IllegalArgumentException.class)
+        .isInstanceOf(SagaIllegalArgumentException.class)
         .hasMessageContaining("bad page token");
+  }
+
+  @Test
+  void listSagas_internalWithErrorInfo_reconstructsTheServerCode() {
+    // Arrange — reads used to skip ErrorInfo reconstruction entirely, so an INTERNAL response fell
+    // to the transport catch-all and reported UNRECOGNIZED_SERVER_ERROR ("upgrade the client SDK")
+    // for a code this client understands. Mutations already reconstructed; the two paths disagreed
+    // on identical wire input.
+    fake.listError =
+        statusWithReason(
+            Status.Code.INTERNAL, SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED.code(), Map.of());
+
+    // Act + Assert
+    assertThatThrownBy(() -> client.listSagas(SagaQuery.newBuilder().build()))
+        .isInstanceOf(SagaRuntimeException.class)
+        .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED);
   }
 
   @Test

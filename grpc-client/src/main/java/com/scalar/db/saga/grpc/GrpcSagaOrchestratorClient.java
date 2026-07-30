@@ -464,15 +464,22 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
       @Nullable String version,
       @Nullable String clientSagaId) {
     Status.Code code = e.getStatus().getCode();
+    // ALREADY_EXISTS is handled ahead of reconstruction: SAGA_ALREADY_EXISTS is deliberately not
+    // reconstructible, because SagaAlreadyExistsException needs the existing snapshot and the wire
+    // metadata has no room for it. Only this path can re-fetch it.
+    if (code == Status.Code.ALREADY_EXISTS) {
+      return alreadyExists(clientSagaId, e);
+    }
+    SagaRuntimeException reconstructed = GrpcClientSupport.reconstruct(e);
+    if (reconstructed != null) {
+      return reconstructed;
+    }
     if (code == Status.Code.NOT_FOUND) {
       return version == null
           ? new SagaDefinitionNotFoundException(name)
           : new SagaDefinitionNotFoundException(name, version);
     }
-    if (code == Status.Code.ALREADY_EXISTS) {
-      return alreadyExists(clientSagaId, e);
-    }
-    return mapCommon(e);
+    return GrpcClientSupport.mapTransport(e);
   }
 
   private RuntimeException alreadyExists(@Nullable String clientSagaId, StatusRuntimeException e) {
@@ -500,22 +507,21 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
   }
 
   /**
-   * Maps a saga-instance RPC failure ({@code getSaga}/{@code awaitSaga}) to the api exception.
-   * {@code NOT_FOUND} means the saga id is gone — purged, TTL'd, or never existed — vs the start
-   * path, where {@code NOT_FOUND} means the <i>definition</i> is missing (see {@link
-   * #mapStartException}). Everything else routes through {@link #mapCommon}.
+   * Maps a saga-instance RPC failure ({@code getSaga}/{@code awaitSaga}) to the api exception. The
+   * daemon's {@link com.google.rpc.ErrorInfo} wins when present, since it names the exact code.
+   * Without one, {@code NOT_FOUND} means the saga id is gone — purged, TTL'd, or never existed — vs
+   * the start path, where {@code NOT_FOUND} means the <i>definition</i> is missing (see {@link
+   * #mapStartException}); everything else routes through {@code GrpcClientSupport.mapTransport}.
    */
   private static RuntimeException mapSagaCall(StatusRuntimeException e, String sagaId) {
+    SagaRuntimeException reconstructed = GrpcClientSupport.reconstruct(e);
+    if (reconstructed != null) {
+      return reconstructed;
+    }
     if (e.getStatus().getCode() == Status.Code.NOT_FOUND) {
       return new SagaNotFoundException(sagaId);
     }
-    return mapCommon(e);
-  }
-
-  private static RuntimeException mapCommon(StatusRuntimeException e) {
-    // NOT_FOUND is deliberately not handled here — the two context mappers (mapSagaCall,
-    // mapStartException) handle it upstream, so it never reaches this shared catch-all.
-    return GrpcClientSupport.mapCommon(e);
+    return GrpcClientSupport.mapTransport(e);
   }
 
   /** Builder for {@link GrpcSagaOrchestratorClient}. */
