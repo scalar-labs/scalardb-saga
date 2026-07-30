@@ -116,6 +116,7 @@ See [daemon/docker/README.md](daemon/docker/README.md) for running it.
   - Both smoke jobs boot from the shared fixture in `.github/smoke/`
 - **Release** (`release.yml`, on `v*` tags) — asserts the tag matches `gradle.properties` and that the tagged commit is on the release branch its version names, then publishes to Maven Central, pushes the multi-arch image, signs it, and creates the GitHub release
 - **Dependabot** (`.github/dependabot.yml`) — gradle (incl. the version catalog), github-actions, and the Dockerfile base-image digest
+  - Every `[versions]` key needs a `[libraries]` entry pointing at it with `version.ref`, even one nothing resolves (see `junit-jupiter`). Dependabot reads only `[libraries]` and `[plugins]`; a version consumed solely as `libs.versions.<name>.get()` interpolation is one it cannot map to a module, so it never bumps it. Consume plugin coordinates in `build-logic` through catalog accessors, not interpolated strings.
 
 ## Git
 
