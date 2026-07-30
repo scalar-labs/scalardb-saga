@@ -69,9 +69,54 @@ after it, live only on that branch and are unreachable from `main` by design.
    git switch -c 1.0 && git push -u origin 1.0
    ```
 
-   A newly cut branch also needs its Dependabot entries enabled — uncomment a copy of the template at
-   the end of [.github/dependabot.yml](.github/dependabot.yml) naming it. Without them the branch gets
-   no dependency updates at all, because every existing entry targets `main` only.
+   A newly cut branch also needs its own Dependabot entries. Every entry in
+   [.github/dependabot.yml](.github/dependabot.yml) targets `main` only, so without them the branch
+   gets no dependency updates at all. Paste the block below at the end of that file, substituting the
+   branch you just cut for `1.0`, and delete it again when that line reaches end of life:
+
+   ```yaml
+     - package-ecosystem: gradle
+       directory: /
+       target-branch: "1.0"
+       schedule:
+         interval: weekly
+       open-pull-requests-limit: 5
+       groups:
+         build-tooling:
+           patterns:
+             - "com.diffplug.spotless*"
+             - "com.github.spotbugs*"
+             - "com.google.errorprone*"
+             - "com.h3xstream.findsecbugs*"
+             - "com.uber.nullaway*"
+             - "com.vanniktech*"
+             - "net.ltgt.gradle*"
+         grpc:
+           patterns:
+             - "io.grpc*"
+         netty:
+           patterns:
+             - "io.netty*"
+
+     - package-ecosystem: github-actions
+       directory: /
+       target-branch: "1.0"
+       schedule:
+         interval: weekly
+       groups:
+         actions:
+           patterns:
+             - "*"
+
+     - package-ecosystem: docker
+       directory: /daemon/docker
+       target-branch: "1.0"
+       schedule:
+         interval: weekly
+   ```
+
+   Keep the `groups:` blocks when you paste. Without them each build-tool bump arrives as its own
+   pull request, and the five-PR limit fills with those before a real dependency update can open.
 
    Version branches need a repository ruleset before one is cut, for the same reason `main` has one:
    a release is built from the commit the tag names, and the workflow's check that the commit sits
