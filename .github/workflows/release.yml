@@ -55,9 +55,21 @@ jobs:
           exit 1
 
       # Full history: on a tag push the default shallow fetch produces a single commit with no
-      # connection to any branch, and the reachability test below would have nothing to walk.
+      # connection to any branch, and the reachability test below would have nothing to walk. Naming
+      # `ref` does not narrow that -- checkout's all-history refspec carries
+      # `+refs/tags/*:refs/tags/*` whatever `ref` says -- so `Classify the release` still sees every
+      # tag.
+      #
+      # Pinned to the verified commit like the three jobs downstream, so the commit whose
+      # gradle.properties is read here is the commit that gets published. Checkout enforces that on
+      # its own today: given no `ref` it takes GITHUB_SHA as well, and fails when the tag no longer
+      # points there. That assertion belongs to the action rather than to this workflow, though, and
+      # nothing here would notice if a later version stopped making it. A tag moved mid-run now
+      # releases whichever commit each run was triggered for instead of failing this job, which is
+      # how the other three already behave.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Check the tag against gradle.properties
