@@ -15,6 +15,7 @@ import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaErrorCode;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaPermissionDeniedException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
@@ -185,13 +186,13 @@ class GrpcSagaAdminClientTest {
   }
 
   @Test
-  void resetEscalated_bulk_conflictingStatusGiven_throwsIllegalArgumentBeforeRpc() {
+  void resetEscalated_bulk_conflictingStatusGiven_throwsSagaIllegalArgumentBeforeRpc() {
     // Arrange
     SagaQuery query = SagaQuery.newBuilder().status(SagaStatus.COMPLETED).build();
 
     // Act + Assert — rejected client-side, before the wire request is ever built or sent
     assertThatThrownBy(() -> client.resetEscalated(query, "sweep"))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class);
     assertThat(fake.lastBulk).isNull();
   }
 

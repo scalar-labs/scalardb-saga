@@ -22,6 +22,7 @@ import com.scalar.db.saga.definition.SagaDefinition.RecoveryStrategy;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaErrorCode;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
@@ -372,13 +373,13 @@ class DefaultSagaAdminServiceTest {
   // ---------------------------------------------------------------------------
 
   @Test
-  void resetEscalated_bulkConflictingStatusFilter_throwsIllegalArgument() {
+  void resetEscalated_bulkConflictingStatusFilter_throwsSagaIllegalArgument() {
     // Arrange
     SagaQuery query = SagaQuery.newBuilder().status(SagaStatus.RUNNING).build();
 
     // Act & Assert
     assertThatThrownBy(() -> service.resetEscalated(query, "why"))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class);
   }
 
   @Test
@@ -515,20 +516,24 @@ class DefaultSagaAdminServiceTest {
   // ---------------------------------------------------------------------------
 
   @Test
-  void recoverSaga_blankReason_throwsIllegalArgument() {
-    // Act & Assert — validated before any store interaction
+  void recoverSaga_blankReason_throwsSagaIllegalArgument() {
+    // Act & Assert — validated before any store interaction. The point of the typed exception is
+    // that the embedded caller reaches the same error code a remote caller reconstructs from the
+    // wire, so assert the code and not just the type.
     assertThatThrownBy(() -> service.recoverSaga(SAGA_ID, "   "))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class)
+        .extracting(e -> ((SagaIllegalArgumentException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.INVALID_ARGUMENT);
   }
 
   @Test
-  void recoverSaga_tooLongReason_throwsIllegalArgument() {
+  void recoverSaga_tooLongReason_throwsSagaIllegalArgument() {
     // Arrange
     String longReason = "x".repeat(1025);
 
     // Act & Assert
     assertThatThrownBy(() -> service.recoverSaga(SAGA_ID, longReason))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class);
   }
 
   @Test

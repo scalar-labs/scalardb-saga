@@ -9,6 +9,7 @@ import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
@@ -180,7 +181,7 @@ public class DefaultSagaAdminService implements SagaAdminService {
     String operator = operator();
 
     if (query.getStatus() != null && query.getStatus() != SagaStatus.ESCALATED) {
-      throw new IllegalArgumentException(
+      throw new SagaIllegalArgumentException(
           "resetEscalated only sweeps ESCALATED sagas; conflicting status filter: "
               + query.getStatus());
     }
@@ -459,10 +460,10 @@ public class DefaultSagaAdminService implements SagaAdminService {
     Objects.requireNonNull(reason, "reason must not be null");
     String sanitized = sanitizeControlChars(reason).trim();
     if (sanitized.isEmpty()) {
-      throw new IllegalArgumentException("reason must not be blank");
+      throw new SagaIllegalArgumentException("reason must not be blank");
     }
     if (sanitized.length() > MAX_REASON_LENGTH) {
-      throw new IllegalArgumentException(
+      throw new SagaIllegalArgumentException(
           "reason must be at most " + MAX_REASON_LENGTH + " characters, got " + sanitized.length());
     }
     return sanitized;

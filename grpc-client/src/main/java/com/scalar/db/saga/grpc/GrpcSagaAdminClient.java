@@ -11,6 +11,7 @@ import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.exception.ExceptionRegistry;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.rpc.AdminServiceGrpc;
@@ -147,7 +148,7 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
     // ESCALATED sweep remote (matching SagaAdminService's contract).
     SagaStatus status = query.getStatus();
     if (status != null && status != SagaStatus.ESCALATED) {
-      throw new IllegalArgumentException(
+      throw new SagaIllegalArgumentException(
           "resetEscalated only sweeps ESCALATED sagas; conflicting status filter: " + status);
     }
     try {

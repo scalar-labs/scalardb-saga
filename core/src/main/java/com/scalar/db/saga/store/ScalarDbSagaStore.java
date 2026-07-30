@@ -25,6 +25,7 @@ import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionException;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -741,7 +742,7 @@ public class ScalarDbSagaStore implements SagaStore {
     if (bound != null
         && (bound.isBefore(TimestampTZColumn.MIN_VALUE)
             || bound.isAfter(TimestampTZColumn.MAX_VALUE))) {
-      throw new IllegalArgumentException(
+      throw new SagaIllegalArgumentException(
           field
               + " must be in ["
               + TimestampTZColumn.MIN_VALUE
@@ -1471,7 +1472,7 @@ public class ScalarDbSagaStore implements SagaStore {
 
   private void validateSagaId(String sagaId) {
     if (!SAGA_ID_PATTERN.matcher(sagaId).matches()) {
-      throw new IllegalArgumentException(
+      throw new SagaIllegalArgumentException(
           "Invalid saga ID format (must match [a-zA-Z0-9._-]{1,128})");
     }
   }
@@ -1604,22 +1605,22 @@ public class ScalarDbSagaStore implements SagaStore {
       // Reject an oversized token before allocating its decoded bytes (defense in depth; the daemon
       // also bounds request size).
       if (token.length() > MAX_ENCODED_LENGTH) {
-        throw new IllegalArgumentException("Page token too long");
+        throw new SagaIllegalArgumentException("Page token too long");
       }
       String payload;
       try {
         payload = new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8);
       } catch (IllegalArgumentException e) {
-        throw new IllegalArgumentException("Malformed page token", e);
+        throw new SagaIllegalArgumentException("Malformed page token", e);
       }
       // version | status | after | before | bucket | statusCode | updatedAt
       String[] parts = payload.split(Pattern.quote(DELIMITER), 7);
       if (parts.length != 7 || !PAGE_TOKEN_VERSION.equals(parts[0])) {
-        throw new IllegalArgumentException("Unrecognized page token");
+        throw new SagaIllegalArgumentException("Unrecognized page token");
       }
       String filterKey = String.join(DELIMITER, parts[1], parts[2], parts[3]);
       if (!expectedFilterKey.equals(filterKey)) {
-        throw new IllegalArgumentException("Page token does not match the query");
+        throw new SagaIllegalArgumentException("Page token does not match the query");
       }
       int bucket;
       int statusCode;
@@ -1629,16 +1630,16 @@ public class ScalarDbSagaStore implements SagaStore {
         statusCode = Integer.parseInt(parts[5]);
         updatedAt = Instant.parse(parts[6]);
       } catch (RuntimeException e) {
-        throw new IllegalArgumentException("Malformed page token", e);
+        throw new SagaIllegalArgumentException("Malformed page token", e);
       }
       if (bucket < 0 || bucket >= numBuckets) {
-        throw new IllegalArgumentException("Page token bucket out of range");
+        throw new SagaIllegalArgumentException("Page token bucket out of range");
       }
       // Defense in depth: even with a matching filter key the token is unsigned, so guard the
       // resume math against a tampered statusCode outside the swept set (would index out of
       // bounds).
       if (indexOfStatus(allowedStatusCodes, statusCode) < 0) {
-        throw new IllegalArgumentException("Page token does not match the query");
+        throw new SagaIllegalArgumentException("Page token does not match the query");
       }
       return new PageCursor(bucket, statusCode, updatedAt);
     }

@@ -2,6 +2,7 @@ package com.scalar.db.saga.api;
 
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaPermissionDeniedException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
@@ -54,7 +55,8 @@ public interface SagaAdminService extends AutoCloseable {
    *
    * @param query the status/time filter, page size, and continuation token
    * @return a page of matching snapshots and a token for the next page
-   * @throws IllegalArgumentException if the page token is malformed (the daemon maps this to 400)
+   * @throws SagaIllegalArgumentException if the page token is malformed (the daemon maps this to
+   *     400); both implementations throw it, so the same handling works embedded and remote
    */
   SagaPage<SagaStateSnapshot> listSagas(SagaQuery query);
 
@@ -138,8 +140,8 @@ public interface SagaAdminService extends AutoCloseable {
    * @param query the page of escalated sagas to sweep (status filter fixed to {@code ESCALATED})
    * @param reason why the operator is un-escalating (recorded per row for audit; must be non-blank)
    * @return the per-page counts and the token to continue the sweep
-   * @throws IllegalArgumentException if {@code query} sets a status other than {@code ESCALATED},
-   *     or its page token is malformed (the daemon maps this to 400)
+   * @throws SagaIllegalArgumentException if {@code query} sets a status other than {@code
+   *     ESCALATED}, or its page token is malformed (the daemon maps this to 400)
    */
   ResetResult resetEscalated(SagaQuery query, String reason);
 
