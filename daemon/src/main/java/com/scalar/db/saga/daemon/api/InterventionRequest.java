@@ -1,5 +1,6 @@
 package com.scalar.db.saga.daemon.api;
 
+import com.scalar.db.saga.exception.SagaInvalidRequestException;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -11,15 +12,15 @@ import org.jspecify.annotations.Nullable;
 public record InterventionRequest(@Nullable String reason) {
 
   /**
-   * Returns the reason, failing with {@link InvalidRequestException} (mapped to {@code 400}) if it
-   * is missing or blank. The engine sanitizes and length-checks it further; this is the edge check
-   * that turns a missing reason into a clean {@code 400} rather than a downstream error.
+   * Returns the reason, failing with {@link SagaInvalidRequestException} (mapped to {@code 400}) if
+   * it is missing or blank. The engine sanitizes and length-checks it further; this is the edge
+   * check that turns a missing reason into a clean {@code 400} rather than a downstream error.
    *
    * @return the reason
    */
   public String requireReason() {
     if (reason == null || reason.isBlank()) {
-      throw new InvalidRequestException("'reason' is required");
+      throw new SagaInvalidRequestException("'reason' is required");
     }
     return reason;
   }

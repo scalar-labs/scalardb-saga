@@ -1,6 +1,7 @@
 package com.scalar.db.saga.daemon.api;
 
 import com.scalar.db.saga.api.SagaQuery;
+import com.scalar.db.saga.exception.SagaInvalidRequestException;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -17,14 +18,14 @@ public record BulkResetRequest(
     @Nullable String pageToken) {
 
   /**
-   * Returns the reason, failing with {@link InvalidRequestException} (mapped to {@code 400}) if it
-   * is missing or blank.
+   * Returns the reason, failing with {@link SagaInvalidRequestException} (mapped to {@code 400}) if
+   * it is missing or blank.
    *
    * @return the reason
    */
   public String requireReason() {
     if (reason == null || reason.isBlank()) {
-      throw new InvalidRequestException("'reason' is required");
+      throw new SagaInvalidRequestException("'reason' is required");
     }
     return reason;
   }
@@ -32,7 +33,7 @@ public record BulkResetRequest(
   /**
    * Builds the {@link SagaQuery} selecting the sweep window. The engine pins the status to
    * escalated and applies its own bounds; a malformed timestamp or out-of-range page size fails
-   * with {@link InvalidRequestException} ({@code 400}).
+   * with {@link SagaInvalidRequestException} ({@code 400}).
    *
    * @return the query
    */

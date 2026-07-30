@@ -9,6 +9,8 @@ import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaErrorCode;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
+import com.scalar.db.saga.exception.SagaInvalidRequestException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
@@ -75,13 +77,17 @@ public final class ErrorMapper {
 
     // ── Bad request (400) ────────────────────────────────────────────────
     app.exception(SagaDefinitionException.class, (e, ctx) -> respond(ctx, 400, e));
-    app.exception(InvalidRequestException.class, (e, ctx) -> respond(ctx, 400, e));
-    // A client-supplied value the engine rejects surfaces as IllegalArgumentException — a stdlib
-    // exception. Wrap it in InvalidRequestException with a fixed daemon-owned detail (do not echo
-    // the engine's wording) so it flows through the same code path as every other exception.
+    app.exception(SagaInvalidRequestException.class, (e, ctx) -> respond(ctx, 400, e));
+    app.exception(SagaIllegalArgumentException.class, (e, ctx) -> respond(ctx, 400, e));
+    // A client-supplied value the engine rejects surfaces as a stdlib IllegalArgumentException from
+    // the engine sites not yet migrated to SagaIllegalArgumentException. Wrap it in the latter with
+    // a fixed daemon-owned detail (do not echo the engine's wording) so it flows through the same
+    // code path as every other exception. INVALID_ARGUMENT, not INVALID_REQUEST: the request
+    // message was well-formed; a value inside it was rejected.
     app.exception(
         IllegalArgumentException.class,
-        (e, ctx) -> respond(ctx, 400, new InvalidRequestException("invalid request parameter")));
+        (e, ctx) ->
+            respond(ctx, 400, new SagaIllegalArgumentException("invalid request parameter")));
 
     // ── Auth (401 / 403) ─────────────────────────────────────────────────
     app.exception(

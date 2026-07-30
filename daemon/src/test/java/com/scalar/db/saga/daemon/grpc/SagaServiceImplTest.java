@@ -276,7 +276,7 @@ class SagaServiceImplTest {
             e -> {
               assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
               assertThat(e.getStatus().getDescription())
-                  .contains(SagaErrorCode.INVALID_REQUEST.code())
+                  .contains(SagaErrorCode.INVALID_ARGUMENT.code())
                   .doesNotContain("engine-internal");
             });
   }

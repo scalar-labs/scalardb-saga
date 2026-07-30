@@ -35,17 +35,19 @@ class GrpcErrorMapperTest {
   }
 
   @Test
-  void toStatusRuntimeException_illegalArgumentGiven_mapsToRequestInvalid() {
+  void toStatusRuntimeException_illegalArgumentGiven_mapsToArgumentInvalid() {
     StatusRuntimeException e =
         GrpcErrorMapper.toStatusRuntimeException(new IllegalArgumentException("bad client value"));
 
     assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
     // Engine's wording is not echoed; a fixed daemon-owned detail is.
     assertThat(e.getStatus().getDescription())
-        .contains(SagaErrorCode.INVALID_REQUEST.code())
+        .contains(SagaErrorCode.INVALID_ARGUMENT.code())
         .doesNotContain("bad client value");
     ErrorInfo info = errorInfo(e);
-    assertThat(info.getReason()).isEqualTo(SagaErrorCode.INVALID_REQUEST.code());
+    // INVALID_ARGUMENT, not INVALID_REQUEST: the request message was well-formed; a value inside
+    // it was rejected. INVALID_REQUEST is reserved for the message itself failing validation.
+    assertThat(info.getReason()).isEqualTo(SagaErrorCode.INVALID_ARGUMENT.code());
     assertThat(info.getMetadataMap()).containsEntry("detail", "invalid request parameter");
   }
 

@@ -1,5 +1,6 @@
 package com.scalar.db.saga.daemon.api;
 
+import com.scalar.db.saga.exception.SagaInvalidRequestException;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -17,14 +18,14 @@ public record StartSagaRequest(@Nullable String sagaName, @Nullable Map<String, 
   }
 
   /**
-   * Returns the saga definition name, failing with {@link InvalidRequestException} (mapped to
+   * Returns the saga definition name, failing with {@link SagaInvalidRequestException} (mapped to
    * {@code 400}) if it is missing or blank.
    *
    * @return the saga definition name
    */
   public String requireSagaName() {
     if (sagaName == null || sagaName.isBlank()) {
-      throw new InvalidRequestException("'sagaName' is required");
+      throw new SagaInvalidRequestException("'sagaName' is required");
     }
     return sagaName;
   }

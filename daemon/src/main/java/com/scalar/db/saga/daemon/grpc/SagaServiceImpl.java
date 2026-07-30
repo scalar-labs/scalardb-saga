@@ -7,7 +7,7 @@ import com.scalar.db.saga.api.SagaCallback;
 import com.scalar.db.saga.api.SagaDefinitionId;
 import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
-import com.scalar.db.saga.daemon.api.InvalidRequestException;
+import com.scalar.db.saga.exception.SagaInvalidRequestException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.rpc.AwaitSagaRequest;
 import com.scalar.db.saga.rpc.GetSagaDetailRequest;
@@ -242,7 +242,7 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
   private static void requireName(String name) {
     // allMatch is vacuously true for an empty string, so this also rejects "".
     if (name.codePoints().allMatch(Character::isWhitespace)) {
-      throw new InvalidRequestException("'name' is required");
+      throw new SagaInvalidRequestException("'name' is required");
     }
   }
 
@@ -254,10 +254,10 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
     try {
       input = objectMapper.readValue(inputJson.newInput(), MAP_TYPE);
     } catch (IOException e) {
-      throw new InvalidRequestException("malformed input_json");
+      throw new SagaInvalidRequestException("malformed input_json");
     }
     if (input == null) {
-      throw new InvalidRequestException("input_json must be a JSON object");
+      throw new SagaInvalidRequestException("input_json must be a JSON object");
     }
     return input;
   }

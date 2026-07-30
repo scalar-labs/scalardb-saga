@@ -2,13 +2,14 @@ package com.scalar.db.saga.daemon.grpc;
 
 import com.google.protobuf.Any;
 import com.google.rpc.ErrorInfo;
-import com.scalar.db.saga.daemon.api.InvalidRequestException;
 import com.scalar.db.saga.exception.ErrorMetadata;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaErrorCode;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
+import com.scalar.db.saga.exception.SagaInvalidRequestException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
@@ -47,13 +48,15 @@ final class GrpcErrorMapper {
 
   static StatusRuntimeException toStatusRuntimeException(Throwable t) {
     return switch (t) {
-      // A client-supplied value the engine rejected surfaces as IllegalArgumentException — a stdlib
-      // exception. Wrap it in InvalidRequestException with a fixed daemon-owned detail (do not
-      // echo the engine's wording) so it flows through the same code path as every other case.
+      // A client-supplied value the engine rejected surfaces as a stdlib IllegalArgumentException
+      // from the engine sites not yet migrated to SagaIllegalArgumentException. Wrap it in the
+      // latter with a fixed daemon-owned detail (do not echo the engine's wording) so it flows
+      // through the same code path as every other case. INVALID_ARGUMENT, not INVALID_REQUEST: the
+      // request message was well-formed; a value inside it was rejected.
       case IllegalArgumentException iae ->
           respond(
               Status.Code.INVALID_ARGUMENT,
-              new InvalidRequestException("invalid request parameter"));
+              new SagaIllegalArgumentException("invalid request parameter"));
 
       // ── Not found ──────────────────────────────────────────────────
       case SagaNotFoundException e -> respond(Status.Code.NOT_FOUND, e);
@@ -68,7 +71,8 @@ final class GrpcErrorMapper {
 
       // ── Bad request ────────────────────────────────────────────────
       case SagaDefinitionException e -> respond(Status.Code.INVALID_ARGUMENT, e);
-      case InvalidRequestException e -> respond(Status.Code.INVALID_ARGUMENT, e);
+      case SagaInvalidRequestException e -> respond(Status.Code.INVALID_ARGUMENT, e);
+      case SagaIllegalArgumentException e -> respond(Status.Code.INVALID_ARGUMENT, e);
 
       // ── Server errors ──────────────────────────────────────────────
       case SagaPersistenceException pe -> {

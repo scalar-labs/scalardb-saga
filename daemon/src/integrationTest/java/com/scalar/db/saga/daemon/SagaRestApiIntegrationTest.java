@@ -138,13 +138,16 @@ class SagaRestApiIntegrationTest extends DaemonIntegrationTestSupport {
 
   @Test
   void putWithInvalidSagaId_returns400() throws Exception {
-    // A client-supplied id outside [a-zA-Z0-9._-]{1,128} is a client error (400), not a 500.
+    // A client-supplied id outside [a-zA-Z0-9._-]{1,128} is a client error (400), not a 500. The
+    // request itself parsed fine and a value inside it was rejected, so this is INVALID_ARGUMENT —
+    // contrast postWithoutSagaName_returns400 below, where the body is missing a required field and
+    // the code is INVALID_REQUEST.
     HttpResponse<String> put =
         put("/sagas/" + "a".repeat(129), "{\"sagaName\":\"" + SAGA_NAME + "\"}");
 
     assertThat(put.statusCode()).isEqualTo(400);
     assertThat(MAPPER.readTree(put.body()).get("errorCode").asText())
-        .isEqualTo(SagaErrorCode.INVALID_REQUEST.code());
+        .isEqualTo(SagaErrorCode.INVALID_ARGUMENT.code());
   }
 
   @Test

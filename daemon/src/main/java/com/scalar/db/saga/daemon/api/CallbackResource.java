@@ -4,6 +4,7 @@ import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.daemon.security.SagaOperation;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
+import com.scalar.db.saga.exception.SagaInvalidRequestException;
 import io.javalin.Javalin;
 import io.javalin.http.Context;
 import java.time.Clock;
@@ -142,7 +143,7 @@ public final class CallbackResource {
       Map<String, Object> parsed = ctx.bodyAsClass(Map.class);
       output = parsed;
     } catch (Exception e) {
-      throw new InvalidRequestException("malformed callback body");
+      throw new SagaInvalidRequestException("malformed callback body");
     }
     // A body of the JSON null literal deserializes to null without throwing; treat it as no output.
     return output == null ? Map.of() : output;
