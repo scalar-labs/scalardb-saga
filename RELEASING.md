@@ -138,6 +138,55 @@ tags published.
 Every commit on `main` and on each release branch publishes a `-SNAPSHOT` to the Central snapshot
 repository, so downstream work can track either trunk or a maintenance line without waiting for a tag.
 
+### Rehearsing the pipeline
+
+Nothing in `publish-maven`, `publish-image` or `github-release` has ever run: the Central credentials,
+the emulated arm64 build, the keyless signature and the release creation are all untested. `1.0.0`
+is the worst version to discover that with, because it is the one that cannot be taken back.
+
+A rehearsal has to look like a real release, because the guards in `verify-version` are doing their
+job. A throwaway tag pushed on its own is refused by the version check, since the tag has to equal
+the `version` in `gradle.properties`, and then by the branch check, since `v0.0.1` derives the line
+`0.0` and looks for a branch by that name. So it takes three pushes:
+
+```bash
+git switch -c 0.0 && git push -u origin 0.0    # scratch release branch
+# set version=0.0.1-rc.1 in gradle.properties, then commit and push
+git tag v0.0.1-rc.1 && git push origin v0.0.1-rc.1
+```
+
+Use a pre-release version rather than a bare `0.0.1`. `latest` follows the highest released version,
+and with no other tags in the repository a bare `0.0.1` *is* the highest, so `latest` would follow
+a throwaway image. A version carrying a suffix is classified as a pre-release, which never takes it.
+
+Three rungs are worth climbing in order, because each leaves more behind than the last.
+
+**Guards only.** Leave the four `MAVEN_CENTRAL_*` secrets unset. `verify-version` runs end to end
+for real, and `publish-maven` then fails at the signing task: an unset secret arrives as an empty
+string, which Gradle reports as *present*, so `signAllPublications()` applies with no key to sign
+with. The upload never happens — it is an end-of-build action that runs only when the build
+succeeded — so nothing reaches Central or `ghcr.io`, and there is nothing to clean up but the tag
+and the branch. A forgotten GPG secret therefore cannot publish unsigned artifacts.
+
+**Snapshot.** Set `version=0.0.1-SNAPSHOT` on the scratch branch and push. That runs
+[release-snapshot.yml](.github/workflows/release-snapshot.yml), which exercises the credentials, the
+GPG key and a genuine upload, against the Central snapshot repository, which is mutable and
+expendable. It does not cover the Portal deployment, the arm64 leg, cosign or the GitHub release.
+
+**The full path.** Secrets in place, and the pre-release tag above. This is the only rung that
+exercises the Portal deployment, the `linux/arm64` build under QEMU, the signature and the release
+creation. **Do not release the deployment at the Portal** — dropping it is what keeps the rehearsal
+reversible, and a released version is immutable.
+
+Clean up afterwards:
+
+| Left behind | Removal |
+| --- | --- |
+| Central deployment | Drop it, as in step 5. It was never released, so Central never published the version and nothing was ever downloadable. |
+| Image tag | Delete the package version in `ghcr.io`. While this repository is private the package is private too, so it was never world-visible. |
+| GitHub release, tag, scratch branch | Delete all three. |
+| Cosign signature | **Cannot be removed.** Keyless signing records the image digest and this workflow's identity in Sigstore's public transparency log, which is append-only. It reveals the repository path and that a release ran — nothing confidential, but it is permanent, and it is the only part of a rehearsal that is. |
+
 ### Re-running a failed release
 
 A release can fail partway — the image push breaking after Maven Central has already accepted the
