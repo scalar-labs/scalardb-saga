@@ -34,7 +34,7 @@ repositories {
 
 spotless {
     java {
-        googleJavaFormat()
+        googleJavaFormat("1.35.0")
         formatAnnotations()
     }
 }
