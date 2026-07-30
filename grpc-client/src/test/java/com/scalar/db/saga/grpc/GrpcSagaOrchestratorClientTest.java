@@ -13,6 +13,7 @@ import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.api.TimelineEvent;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaPermissionDeniedException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
@@ -247,6 +248,22 @@ class GrpcSagaOrchestratorClientTest {
     fake.getError = Status.UNAUTHENTICATED.withDescription("no credential").asRuntimeException();
     assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
         .isInstanceOf(SagaUnauthenticatedException.class);
+  }
+
+  // CANCELLED is retryable on the synchronous start path, where an interrupt already surfaces as
+  // REQUEST_ABORTED from backoff(); the mapping is asserted on a single-shot read, which reaches
+  // mapCommon directly.
+  @Test
+  void getStateSnapshot_cancelled_throwsRequestAborted() {
+    // Arrange — the blocking stub reports a caller interrupt (and an in-flight call killed by a
+    // concurrent shutdownNow) as CANCELLED.
+    fake.getError = Status.CANCELLED.withDescription("Thread interrupted").asRuntimeException();
+
+    // Act + Assert — a caller-side abort, not the version skew the catch-all would report.
+    assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
+        .isExactlyInstanceOf(SagaRuntimeException.class)
+        .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.REQUEST_ABORTED);
   }
 
   @Test

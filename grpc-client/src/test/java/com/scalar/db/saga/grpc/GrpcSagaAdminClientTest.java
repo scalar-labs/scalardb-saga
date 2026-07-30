@@ -17,6 +17,7 @@ import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaPermissionDeniedException;
+import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import com.scalar.db.saga.exception.SagaTimeoutException;
 import com.scalar.db.saga.exception.SagaUnauthenticatedException;
@@ -291,6 +292,19 @@ class GrpcSagaAdminClientTest {
         Status.UNAUTHENTICATED.withDescription("no credential").asRuntimeException();
     assertThatThrownBy(() -> client.recoverSaga("s-1", "x"))
         .isInstanceOf(SagaUnauthenticatedException.class);
+  }
+
+  @Test
+  void recoverSaga_cancelled_throwsRequestAborted() {
+    // Arrange — the blocking stub reports a caller interrupt (and an in-flight call killed by a
+    // concurrent shutdownNow) as CANCELLED.
+    fake.recoverError = Status.CANCELLED.withDescription("Thread interrupted").asRuntimeException();
+
+    // Act + Assert — a caller-side abort, not the version skew the catch-all would report.
+    assertThatThrownBy(() -> client.recoverSaga("s-1", "x"))
+        .isExactlyInstanceOf(SagaRuntimeException.class)
+        .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.REQUEST_ABORTED);
   }
 
   @Test

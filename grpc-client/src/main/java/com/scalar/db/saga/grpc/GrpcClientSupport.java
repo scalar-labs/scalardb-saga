@@ -81,6 +81,14 @@ final class GrpcClientSupport {
         // The gRPC status (with its description) is preserved as the cause; the fixed message
         // comes from SagaErrorCode.REQUEST_TIMEOUT.
         return new SagaTimeoutException(e);
+      case CANCELLED:
+        // Caller-initiated, not a server error. The blocking stub reports an interrupt of the
+        // calling thread as CANCELLED ("Thread interrupted"; gRPC has already restored the
+        // interrupt flag), as it does an in-flight call killed by a concurrent shutdownNow. Letting
+        // these fall through to the catch-all would claim a version skew and tell the caller to
+        // upgrade the SDK. This matches the retry loops, which already surface an interrupt during
+        // backoff as REQUEST_ABORTED.
+        return new SagaRuntimeException(SagaErrorCode.REQUEST_ABORTED, ErrorMetadata.of(), e);
       case UNAVAILABLE:
         return new SagaUnavailableException(e);
       case PERMISSION_DENIED:
