@@ -142,6 +142,21 @@ class ExceptionRegistryTest {
   }
 
   @Test
+  void reconstruct_persistenceStoreUnavailableCode_producesSagaPersistenceException() {
+    // Arrange & Act — the code must survive, and so must the type: a transient store failure is
+    // what the engine threw, so a remote caller sees SagaPersistenceException with isRetryable()
+    // working, not a SagaUnavailableException substituted for it.
+    SagaRuntimeException e =
+        ExceptionRegistry.reconstruct(
+            SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE.code(), Collections.emptyMap());
+
+    // Assert
+    assertThat(e).isInstanceOf(SagaPersistenceException.class);
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE);
+    assertThat(((SagaPersistenceException) e).isRetryable()).isTrue();
+  }
+
+  @Test
   void reconstruct_codelessCode_producesRawSagaRuntimeException() {
     // Arrange & Act — INTERNAL_ERROR has no dedicated exception type
     SagaRuntimeException e =
