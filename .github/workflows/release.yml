@@ -72,6 +72,16 @@ jobs:
             echo "::error::no version= line found in gradle.properties"
             exit 1
           fi
+          # The push trigger already restricts the tag shape, but a dispatch can name any tag, and the
+          # branch check below derives `line` from the version on the assumption that it is digits and
+          # dots. Assert it here so both paths carry the same guarantee. Deliberately stricter than the
+          # trigger's `-*` suffix glob: a suffix outside semver's alphabet would fail later in
+          # docker/metadata-action, which is a worse place to find out.
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::${tag} is not a release tag; expected v<major>.<minor>.<patch> with an" \
+              "optional pre-release suffix"
+            exit 1
+          fi
           if [ "v${version}" != "${tag}" ]; then
             echo "::error::tag ${tag} does not match gradle.properties version ${version} (expected v${version})"
             exit 1
@@ -95,13 +105,25 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          # The tag patterns this workflow triggers on guarantee digits and dots before any
-          # pre-release suffix, so dropping the suffix and then the patch component always leaves a
-          # bare `major.minor`. Nothing an arbitrary suffix could contain survives into `line`.
+          # The shape assert in the step above guarantees digits and dots before any pre-release
+          # suffix, on the dispatch path as well as the push one, so dropping the suffix and then the
+          # patch component always leaves a bare `major.minor`. Nothing a suffix could contain
+          # survives into `line`.
           core="${VERSION%%-*}"
           line="${core%.*}"
 
-          if [ -z "$(git ls-remote --heads origin "refs/heads/${line}")" ]; then
+          # Three outcomes here too, for the reason the merge-base check below gives: an empty answer
+          # means no such branch, but a non-zero exit means git could not ask. Testing the output
+          # inside `if [ -z "$(...)" ]` would discard that status and report a network or auth fault
+          # as a misplaced tag.
+          rc=0
+          heads=$(git ls-remote --heads origin "refs/heads/${line}") || rc=$?
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::could not reach origin to look for release branch '${line}'" \
+              "(git exited ${rc})"
+            exit 1
+          fi
+          if [ -z "${heads}" ]; then
             echo "::error::no release branch '${line}' on origin; a release is cut from its minor" \
               "version branch, never from main (see RELEASING.md)"
             exit 1
@@ -183,9 +205,16 @@ jobs:
       # checkout on a tag push fetches `+refs/tags/<tag>:refs/tags/<tag>` and resolves the name
       # again on the server, so a tag moved mid-run would build a commit nothing checked. The cosign
       # identity would not show it either, since the certificate binds the ref name.
+      #
+      # No persisted token either. Checkout otherwise stores the job's GITHUB_TOKEN as a git
+      # extraheader in the workspace, where the Gradle build that runs next can read it, and in
+      # publish-image and github-release that token carries `packages: write` and `contents: write`.
+      # Nothing in these three jobs uses git auth after checkout: gh takes GH_TOKEN from the
+      # environment. verify-version keeps its credentials, because it does fetch from origin.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Set up Java 21
         uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
@@ -237,10 +266,11 @@ jobs:
       # certificate instead of relying on a long-lived signing key held in a secret.
       id-token: write
     steps:
-      # The verified commit, for the reason publish-maven gives.
+      # The verified commit and no persisted token, for the reasons publish-maven gives.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Set up Java 21
         uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
@@ -338,10 +368,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      # The verified commit, for the reason publish-maven gives.
+      # The verified commit and no persisted token, for the reasons publish-maven gives.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Set up Java 21
         uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
