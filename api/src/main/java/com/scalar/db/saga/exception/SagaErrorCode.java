@@ -231,6 +231,10 @@ public enum SagaErrorCode {
       "The stored data could not be deserialized, possibly due to schema drift.",
       "Check for schema-version mismatch between the writer and reader."),
 
+  // RESERVED, not yet produced. A step failure is recorded into saga state as an event whose
+  // payload carries only type, message, and knownNotCommitted, with no room for a code; the engine
+  // never attaches either of these two. They are declared so the classification is agreed and
+  // numbered, and the reader surfaces them once the engine records one. See todos/032.
   STEP_TIMEOUT(
       "DB-SAGA-30003",
       Category.NON_RETRYABLE_SERVER_ERROR,
@@ -244,7 +248,7 @@ public enum SagaErrorCode {
       Category.NON_RETRYABLE_SERVER_ERROR,
       "Step reported a user failure",
       Schema.of("step_name", "step_index"),
-      "The step returned a non-retryable failure result — a business-rule rejection.",
+      "The step threw a non-retryable failure; a business-rule rejection, or a 4xx from a declarative service step.",
       "Inspect the step's failure detail; the saga compensates and settles."),
 
   COMPENSATION_FAILED(

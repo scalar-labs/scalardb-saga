@@ -111,10 +111,14 @@ public final class ExceptionRegistry {
 
     // ── NON_RETRYABLE_SERVER_ERROR (3xxxx) ────────────────────────────
     // Persistence serialization/deserialization reconstruct as the real SagaPersistenceException,
-    // so catch (SagaPersistenceException) and isRetryable() behave the same remote as embedded. The
-    // step-level codes (STEP_TIMEOUT, STEP_USER_FAILURE, COMPENSATION_FAILED) can appear only via
-    // saga state, not as top-level RPC errors; they keep a raw reconstructor for defensive
-    // completeness.
+    // so catch (SagaPersistenceException) and isRetryable() behave the same remote as embedded.
+    //
+    // The step-level codes are never top-level RPC errors: a step failure is caught by the engine,
+    // recorded as an event, and compensated, so it reaches a caller as saga state rather than as a
+    // thrown exception. COMPENSATION_FAILED is the only one the engine actually attaches today;
+    // STEP_TIMEOUT and STEP_USER_FAILURE are reserved and not yet produced anywhere (see
+    // todos/032). All three keep a raw reconstructor so that a code echoed by a future or newer
+    // server still round-trips instead of degrading.
     m.put(
         SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED,
         meta ->
