@@ -262,7 +262,7 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
   }
 
   private static RuntimeException mapCommon(StatusRuntimeException e) {
-    return GrpcClientSupport.mapCommon(e, "Admin");
+    return GrpcClientSupport.mapCommon(e);
   }
 
   /** Builder for {@link GrpcSagaAdminClient}, mirroring the application client's builder. */

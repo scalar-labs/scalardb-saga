@@ -515,7 +515,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
   private static RuntimeException mapCommon(StatusRuntimeException e) {
     // NOT_FOUND is deliberately not handled here — the two context mappers (mapSagaCall,
     // mapStartException) handle it upstream, so it never reaches this shared catch-all.
-    return GrpcClientSupport.mapCommon(e, "Saga");
+    return GrpcClientSupport.mapCommon(e);
   }
 
   /** Builder for {@link GrpcSagaOrchestratorClient}. */

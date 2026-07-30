@@ -68,10 +68,13 @@ final class GrpcClientSupport {
    * Maps a gRPC {@link Status} to the api exception for the statuses that carry no saga-scoped
    * context. {@code NOT_FOUND} is deliberately absent — each client's context-specific mapper
    * handles it upstream (a missing saga vs a missing definition), so it never reaches this
-   * catch-all. {@code rpcLabel} ({@code "Admin"} / {@code "Saga"}) flavors the human-readable
-   * fallback messages; the daemon's own description, when present, is preferred over them.
+   * catch-all. Every status but {@code INVALID_ARGUMENT} takes its message from its {@link
+   * SagaErrorCode} and carries the gRPC status, description included, as the cause. {@code
+   * INVALID_ARGUMENT} instead passes the daemon's description through as the {@link
+   * IllegalArgumentException} message (falling back to a fixed one when the daemon sent none),
+   * because that text is the validation detail the caller needs.
    */
-  static RuntimeException mapCommon(StatusRuntimeException e, String rpcLabel) {
+  static RuntimeException mapCommon(StatusRuntimeException e) {
     Status status = e.getStatus();
     String description = status.getDescription();
     switch (status.getCode()) {
