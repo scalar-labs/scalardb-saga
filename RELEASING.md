@@ -17,6 +17,13 @@ container image to `ghcr.io/scalar-labs/scalardb-saga-daemon`.
 `:daemon` is deliberately not published to Maven Central — it ships as the image, so a jar on Central
 would be an artifact nobody consumes and everyone has to keep patched.
 
+The image carries one tag per release — `1.0.0`, `1.0.1` — plus `latest` on the newest release.
+There is deliberately no floating `1.0` tag: the minor version line is a branch in this repository,
+and a second representation of it in the registry would be one nothing keeps truthful. A moving tag
+cannot be verified by the recipe in [Verifying a published image](#verifying-a-published-image)
+either, because that binds the signature to the release tag which built the image, and a tag that
+moves has no version for the certificate identity to agree with.
+
 Consumers pin one version through the BOM:
 
 ```kotlin

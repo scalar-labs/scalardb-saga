@@ -270,9 +270,13 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/scalar-labs/scalardb-saga-daemon
+          # One tag per release and nothing else that floats. A `<major>.<minor>` tag would be a
+          # second representation of the minor version line, which is a branch in this repository,
+          # and nothing would keep the two in step: it is pushed by whichever run is executing, so
+          # re-running a superseded patch — the recovery path in RELEASING.md — would pull it back to
+          # an older image. RELEASING.md records the tag scheme and why the line lives only in git.
           tags: |
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
           # Decided once in verify-version, so the image tag and the GitHub release can never disagree
           # about which release is the current one.
           flavor: |
