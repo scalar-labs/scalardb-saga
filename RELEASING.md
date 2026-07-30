@@ -91,8 +91,13 @@ after it, live only on that branch and are unreachable from `main` by design.
    and stops there, so a deployment the Portal rejects leaves the release green (see
    [Publishing the public key](#publishing-the-public-key)). Releasing is a deliberate human action —
    a released version on Central is immutable and cannot be replaced or withdrawn — so the workflow
-   never releases the deployment itself. To drop a bad deployment instead, use the Portal, or
-   `./gradlew dropMavenCentralDeployment --deployment-id=<id>` with the id the release log printed.
+   never releases the deployment itself. To drop a bad deployment instead, use the Portal's own Drop
+   button: it needs no id and no local credentials, and the operator is already signed in here. The
+   Gradle task is the fallback: `./gradlew dropMavenCentralDeployment --deployment-id=<id>` needs
+   the id from the `publish-maven` log (`Uploaded bundle to Central Portal as USER_MANAGED,
+   deployment id: <id>`) and the Portal token in `~/.gradle/gradle.properties` as
+   `mavenCentralUsername` and `mavenCentralPassword`. Without the token the task itself still
+   reports success and the build fails afterwards, during its end-of-build actions.
 6. Bump the release branch to the next patch `-SNAPSHOT` (`1.0.1-SNAPSHOT`).
 
 The tag is the source of truth for *which commit*, and `gradle.properties` for *which version*; the
@@ -129,7 +134,7 @@ Not every step is idempotent, so check what already succeeded before re-running:
 | --- | --- |
 | GitHub release | Safe. Assets are replaced with `--clobber`, and existing notes are left alone in case they were edited by hand. |
 | Image push and signature | Safe in itself: the same tags are overwritten, and an extra signature is harmless. It runs only once the Central upload has succeeded, though, so a re-run aimed at the image still needs the previous deployment dropped. |
-| Maven Central | **Not automatic.** Drop the previous deployment first, from the Portal or with `./gradlew dropMavenCentralDeployment --deployment-id=<id>`. Nothing in the workflow enforces this: the build ends at the upload without waiting for the Portal's verdict, so a duplicate can surface as a rejected deployment while the run stays green and the image and the GitHub release go out. If the version was already released, it can never be replaced — ship the fix as the next patch instead. |
+| Maven Central | **Not automatic.** Drop the previous deployment first, as in step 5; the plugin drops one by itself only when the build that uploaded it failed, which a green release is not. Nothing in the workflow enforces this: the build ends at the upload without waiting for the Portal's verdict, so a duplicate can surface as a rejected deployment while the run stays green and the image and the GitHub release go out. If the version was already released, it can never be replaced — ship the fix as the next patch instead. |
 
 ## Required repository secrets
 
