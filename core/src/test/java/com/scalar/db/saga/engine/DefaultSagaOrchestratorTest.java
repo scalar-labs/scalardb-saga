@@ -21,8 +21,10 @@ import com.scalar.db.saga.api.SagaDetail;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.definition.SagaDefinition;
+import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
@@ -203,6 +205,34 @@ class DefaultSagaOrchestratorTest {
       assertThatThrownBy(() -> orchestrator.start("unknown", Map.of()))
           .isInstanceOf(SagaDefinitionNotFoundException.class);
       verify(definitionRegistry).resolve("unknown");
+    }
+
+    @Test
+    void start_clientSuppliedIdAlreadyExists_propagatesSagaAlreadyExists() {
+      // Arrange — the store raises this on the create; assert the orchestrator passes it through
+      // untouched, since SagaOrchestrator declares it on the client-supplied-id overloads.
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.execute(eq(def), eq("dup"), any()))
+          .thenThrow(new SagaAlreadyExistsException("dup", snapshot("dup", SagaStatus.RUNNING)));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.start("dup", "transfer", Map.of()))
+          .isInstanceOf(SagaAlreadyExistsException.class);
+    }
+
+    @Test
+    void start_malformedClientSuppliedId_propagatesSagaIllegalArgument() {
+      // Arrange — validateSagaId rejects it in the store (covered there end to end); this asserts
+      // the orchestrator does not wrap or swallow it, as the interface declaration promises.
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.execute(eq(def), eq("bad id!"), any()))
+          .thenThrow(new SagaIllegalArgumentException("Invalid saga ID format"));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.start("bad id!", "transfer", Map.of()))
+          .isInstanceOf(SagaIllegalArgumentException.class);
     }
 
     @Test

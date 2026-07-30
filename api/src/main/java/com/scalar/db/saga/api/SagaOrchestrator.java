@@ -1,7 +1,10 @@
 package com.scalar.db.saga.api;
 
+import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
+import com.scalar.db.saga.exception.SagaNotFoundException;
 import java.util.Map;
 
 /**
@@ -23,6 +26,23 @@ import java.util.Map;
  * type the engine threw, reconstructed from the wire) while a connectivity failure that never
  * reached the server arrives as {@link com.scalar.db.saga.exception.SagaUnavailableException}. Both
  * are retryable, and only the category covers both.
+ *
+ * <p><b>Why {@code startAsync} declares fewer failures.</b> A {@code startAsync} overload validates
+ * the definition name and the caller-supplied id, then persists the saga and hands execution to a
+ * background thread. Anything that goes wrong after that point — step resolution, a failing step,
+ * compensation — cannot reach the caller, so those overloads do not declare {@link
+ * SagaDefinitionException}. Such a saga is recoverable from its persisted state and its outcome is
+ * observed through {@link #getStateSnapshot} or {@link #getSagaDetail}, typically as {@code
+ * ESCALATED}. The synchronous {@code start} overloads run execution on the calling thread and do
+ * surface it.
+ *
+ * <p><b>A remote implementation throws more, never less.</b> Every failure declared here arrives
+ * from either implementation as the same type and {@link
+ * com.scalar.db.saga.exception.SagaErrorCode}. A remote client adds the failures that only exist
+ * over a network: {@link com.scalar.db.saga.exception.SagaUnavailableException}, {@link
+ * com.scalar.db.saga.exception.SagaTimeoutException}, and {@link
+ * com.scalar.db.saga.exception.SagaErrorCode#REQUEST_ABORTED} for a caller-cancelled call. The
+ * embedded implementation never throws those.
  *
  * <p>Construct the embedded implementation via its builder:
  *
@@ -63,6 +83,9 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @param input initial data for the saga context
    * @throws SagaDefinitionNotFoundException if no definition matches the given name
    * @throws SagaDefinitionException if step resolution fails
+   * @throws SagaAlreadyExistsException if a saga already exists with {@code sagaId}
+   * @throws SagaIllegalArgumentException if {@code sagaId} is not of the form {@code
+   *     [a-zA-Z0-9._-]{1,128}}
    */
   void start(String sagaId, String sagaName, Map<String, Object> input);
 
@@ -89,6 +112,9 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @param input initial data for the saga context
    * @throws SagaDefinitionNotFoundException if no definition matches the given name and version
    * @throws SagaDefinitionException if step resolution fails
+   * @throws SagaAlreadyExistsException if a saga already exists with {@code sagaId}
+   * @throws SagaIllegalArgumentException if {@code sagaId} is not of the form {@code
+   *     [a-zA-Z0-9._-]{1,128}}
    */
   void start(String sagaId, SagaDefinitionId id, Map<String, Object> input);
 
@@ -134,6 +160,9 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @param sagaName the registered saga definition name
    * @param input initial data for the saga context
    * @throws SagaDefinitionNotFoundException if no definition matches the given name
+   * @throws SagaAlreadyExistsException if a saga already exists with {@code sagaId}
+   * @throws SagaIllegalArgumentException if {@code sagaId} is not of the form {@code
+   *     [a-zA-Z0-9._-]{1,128}}
    */
   void startAsync(String sagaId, String sagaName, Map<String, Object> input);
 
@@ -151,6 +180,9 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @throws SagaDefinitionNotFoundException if no definition matches the given name
    * @throws UnsupportedOperationException if the implementation cannot deliver a local completion
    *     callback (e.g. a remote client with no server-streaming callback channel)
+   * @throws SagaAlreadyExistsException if a saga already exists with {@code sagaId}
+   * @throws SagaIllegalArgumentException if {@code sagaId} is not of the form {@code
+   *     [a-zA-Z0-9._-]{1,128}}
    */
   void startAsync(String sagaId, String sagaName, Map<String, Object> input, SagaCallback callback);
 
@@ -190,6 +222,9 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @param id the saga definition name and version
    * @param input initial data for the saga context
    * @throws SagaDefinitionNotFoundException if no definition matches the given name and version
+   * @throws SagaAlreadyExistsException if a saga already exists with {@code sagaId}
+   * @throws SagaIllegalArgumentException if {@code sagaId} is not of the form {@code
+   *     [a-zA-Z0-9._-]{1,128}}
    */
   void startAsync(String sagaId, SagaDefinitionId id, Map<String, Object> input);
 
@@ -205,6 +240,9 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @throws SagaDefinitionNotFoundException if no definition matches the given name and version
    * @throws UnsupportedOperationException if the implementation cannot deliver a local completion
    *     callback (e.g. a remote client with no server-streaming callback channel)
+   * @throws SagaAlreadyExistsException if a saga already exists with {@code sagaId}
+   * @throws SagaIllegalArgumentException if {@code sagaId} is not of the form {@code
+   *     [a-zA-Z0-9._-]{1,128}}
    */
   void startAsync(
       String sagaId, SagaDefinitionId id, Map<String, Object> input, SagaCallback callback);
@@ -214,6 +252,7 @@ public interface SagaOrchestrator extends AutoCloseable {
    *
    * @param sagaId the saga instance ID
    * @return the current saga state snapshot
+   * @throws SagaNotFoundException if no saga has that id
    */
   SagaStateSnapshot getStateSnapshot(String sagaId);
 
@@ -225,6 +264,7 @@ public interface SagaOrchestrator extends AutoCloseable {
    *
    * @param sagaId the saga instance ID
    * @return the saga's state and timeline
+   * @throws SagaNotFoundException if no saga has that id
    */
   SagaDetail getSagaDetail(String sagaId);
 
