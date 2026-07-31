@@ -13,6 +13,7 @@ dependencies {
     implementation("net.ltgt.gradle:gradle-errorprone-plugin:${libs.versions.errorprone.plugin.get()}")
     implementation("net.ltgt.gradle:gradle-nullaway-plugin:${libs.versions.nullaway.plugin.get()}")
     implementation("com.google.protobuf:protobuf-gradle-plugin:${libs.versions.protobuf.plugin.get()}")
+    implementation("com.vanniktech:gradle-maven-publish-plugin:${libs.versions.maven.publish.plugin.get()}")
 
     // Workaround: expose version catalog type-safe accessors (LibrariesForLibs) to convention
     // plugins. Gradle does not officially support this yet (https://github.com/gradle/gradle/issues/15383).

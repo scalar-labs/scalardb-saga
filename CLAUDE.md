@@ -79,10 +79,22 @@ Refer to `~/git/scalardb-saga-design/docs/scalardb-saga-design.md` for architect
 
 ## Module Structure
 
-Subproject directories use short names; published artifacts are prefixed with `scalardb-saga-` (via `base.archivesName`).
+Subproject directories use short names; artifacts are prefixed with `scalardb-saga-` (via `base.archivesName` for the jar and the publication's `artifactId` for the coordinate — these are set separately).
 
-- `core` — Core engine (API, engine, store, recovery, testing harness)
-- Future: `spring`, `quarkus`, `participant`, `daemon`, `client`, `dev-server`, `lra`
+- `api` — Java-8-clean public API surface (interfaces, value types, exceptions)
+- `core` — Core engine (engine, store, recovery, testing harness)
+- `rpc` — gRPC wire contract (`.proto` plus generated stubs), Java 8
+- `grpc-client` — Java 8 daemon client SDK
+- `daemon` — Standalone server (REST + gRPC); not published to Maven Central
+- `bom` — `java-platform` BOM pinning every published artifact to one version
+- Future: `spring`, `quarkus`, `participant`, `client` (HTTP SDK), `dev-server`, `lra`
+
+## Publishing
+
+- **Maven group is `com.scalar-labs`**, not the Java package — set in `scalardb-saga.base-conventions`. Matches the other Scalar artifacts on Central; cannot change after the first release.
+- Published modules apply `id("scalardb-saga.publishing-conventions")` and **must set `description`** (Maven Central rejects a POM without one). The convention sets the `artifactId` explicitly — `base.archivesName` does not affect it.
+- The daemon is deliberately unpublished: it ships as a container image, so a jar on Central would be an artifact nobody consumes and everyone has to keep patched.
+- Snapshots publish from `main` (`.github/workflows/release-snapshot.yml`); releases leave the Central deployment `VALIDATED` for a human to release, because a released version is immutable.
 
 ## CI
 
