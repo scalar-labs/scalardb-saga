@@ -78,6 +78,7 @@ public final class SagaSchema {
         .addColumn("saga_id", DataType.TEXT) // PK
         .addColumn("sequence", DataType.INT) // CK: monotonically increasing per saga
         .addColumn("event_type", DataType.TEXT) // SAGA_STARTED, STEP_COMPLETED, etc.
+        .addColumn("append_id", DataType.TEXT) // per-append UUID; identifies the writer
         .addColumn("step_index", DataType.INT) // step index (-1 for saga-level events)
         .addColumn("step_name", DataType.TEXT) // step name (null for saga-level events)
         .addColumn("payload", DataType.TEXT) // JSON: step result, error, input, etc.

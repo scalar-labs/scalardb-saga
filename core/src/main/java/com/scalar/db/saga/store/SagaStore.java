@@ -68,6 +68,10 @@ public interface SagaStore extends AutoCloseable {
    * @param sagaId the saga instance ID
    * @param sequence the event sequence number (tracked by the caller)
    * @param event the step event to record
+   * @throws com.scalar.db.saga.exception.SagaConcurrentModificationException if another writer took
+   *     the same {@code sequence} for this saga; the row there carries someone else's writer id, as
+   *     read by an in-doubt commit's verifier or by the read-back once conflicts have exhausted the
+   *     retries
    */
   void recordStepEvent(String sagaId, int sequence, StepEvent event);
 
@@ -82,6 +86,10 @@ public interface SagaStore extends AutoCloseable {
    * @param event the status event to record
    * @param ownerId the replica recording this transition (stamped as the saga's owner)
    * @return the post-transition state snapshot
+   * @throws com.scalar.db.saga.exception.SagaConcurrentModificationException if another writer
+   *     transitioned the saga first: the pre-check finds the state row already moved, or the event
+   *     row at {@code sequence} carries someone else's writer id, as read by an in-doubt commit's
+   *     verifier or by the read-back once conflicts have exhausted the retries
    */
   default SagaStateSnapshot recordStatusEvent(
       SagaStateSnapshot current, int sequence, StatusEvent event, String ownerId) {
@@ -111,6 +119,10 @@ public interface SagaStore extends AutoCloseable {
    *     for the current transition time; {@link Instant#EPOCH} schedules the saga for immediate
    *     recovery
    * @return the post-transition state snapshot
+   * @throws com.scalar.db.saga.exception.SagaConcurrentModificationException if another writer
+   *     transitioned the saga first: the pre-check finds the state row already moved, or the event
+   *     row at {@code sequence} carries someone else's writer id, as read by an in-doubt commit's
+   *     verifier or by the read-back once conflicts have exhausted the retries
    */
   SagaStateSnapshot recordStatusEvent(
       SagaStateSnapshot current,
@@ -130,6 +142,10 @@ public interface SagaStore extends AutoCloseable {
    * @param pendingEvent the {@link EventType#STEP_PENDING} event marking which step parked
    * @param parkedDeadline the absolute timeout deadline, or {@code null} for an unbounded wait
    * @return the post-transition ({@code WAITING}) snapshot
+   * @throws com.scalar.db.saga.exception.SagaConcurrentModificationException if another writer
+   *     transitioned the saga first: the pre-check finds the state row already moved, or the event
+   *     row at {@code sequence} carries someone else's writer id, as read by an in-doubt commit's
+   *     verifier or by the read-back once conflicts have exhausted the retries
    */
   SagaStateSnapshot park(
       SagaStateSnapshot current,
@@ -147,6 +163,10 @@ public interface SagaStore extends AutoCloseable {
    * @param sequence the event sequence number
    * @param completedEvent the {@link EventType#STEP_COMPLETED} event carrying the callback output
    * @return the post-transition ({@code RUNNING}) snapshot
+   * @throws com.scalar.db.saga.exception.SagaConcurrentModificationException if another writer
+   *     transitioned the saga first: the pre-check finds the state row already moved, or the event
+   *     row at {@code sequence} carries someone else's writer id, as read by an in-doubt commit's
+   *     verifier or by the read-back once conflicts have exhausted the retries
    */
   SagaStateSnapshot resumeParkedStep(
       SagaStateSnapshot current, int sequence, StepEvent completedEvent);
@@ -165,6 +185,10 @@ public interface SagaStore extends AutoCloseable {
    * @param targetStatus {@code COMPENSATING} (pre-pivot, will compensate) or {@code ESCALATED}
    *     (post-pivot, needs manual resolution)
    * @return the post-transition snapshot
+   * @throws com.scalar.db.saga.exception.SagaConcurrentModificationException if another writer
+   *     transitioned the saga first: the pre-check finds the state row already moved, or the event
+   *     row at {@code sequence} carries someone else's writer id, as read by an in-doubt commit's
+   *     verifier or by the read-back once conflicts have exhausted the retries
    * @throws IllegalArgumentException if {@code targetStatus} is not {@code COMPENSATING} or {@code
    *     ESCALATED}
    */
@@ -183,6 +207,10 @@ public interface SagaStore extends AutoCloseable {
    * @param sequence the event sequence number
    * @param redriveEvent the {@link EventType#STEP_REISSUING} event for the un-parked step
    * @return the post-transition ({@code RUNNING}) snapshot
+   * @throws com.scalar.db.saga.exception.SagaConcurrentModificationException if another writer
+   *     transitioned the saga first: the pre-check finds the state row already moved, or the event
+   *     row at {@code sequence} carries someone else's writer id, as read by an in-doubt commit's
+   *     verifier or by the read-back once conflicts have exhausted the retries
    */
   SagaStateSnapshot redriveParkedStep(
       SagaStateSnapshot current, int sequence, StepEvent redriveEvent);

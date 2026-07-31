@@ -36,6 +36,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -49,9 +50,10 @@ import org.slf4j.LoggerFactory;
  * transactions for atomicity.
  *
  * <p>All transaction operations are executed through {@link #runInTransaction}, which provides
- * unified retry logic for {@link TransactionException} (including {@link CrudConflictException} and
- * {@link UnknownTransactionStatusException}). {@link CommitConflictException} is retried by default
- * but can be disabled per operation (e.g., {@code createSaga} treats it as a permanent conflict).
+ * unified retry logic for {@link TransactionException} (including {@link
+ * UnknownTransactionStatusException}). A conflict is retried by default, whether it surfaces during
+ * CRUD as {@link CrudConflictException} or at commit as {@link CommitConflictException}; retry can
+ * be disabled per operation (e.g., {@code createSaga} treats a conflict as permanent).
  */
 public class ScalarDbSagaStore implements SagaStore {
 
@@ -81,6 +83,7 @@ public class ScalarDbSagaStore implements SagaStore {
   private final SagaSchema schema;
   private final ScalarDbSagaStoreConfig config;
   private final SagaDefinitionSerializer definitionSerializer;
+  private final Supplier<String> appendIdSupplier;
 
   /**
    * Creates a new store instance.
@@ -95,10 +98,25 @@ public class ScalarDbSagaStore implements SagaStore {
       ObjectMapper objectMapper,
       SagaSchema schema,
       ScalarDbSagaStoreConfig config) {
+    this(txManager, objectMapper, schema, config, () -> UUID.randomUUID().toString());
+  }
+
+  /**
+   * Visible for testing: inject a deterministic {@code appendIdSupplier} so contention scenarios
+   * around the per-append UUID verifier are reproducible.
+   */
+  ScalarDbSagaStore(
+      DistributedTransactionManager txManager,
+      ObjectMapper objectMapper,
+      SagaSchema schema,
+      ScalarDbSagaStoreConfig config,
+      Supplier<String> appendIdSupplier) {
     this.txManager = Objects.requireNonNull(txManager, "txManager must not be null");
     this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper must not be null");
     this.schema = Objects.requireNonNull(schema, "schema must not be null");
     this.config = Objects.requireNonNull(config, "config must not be null");
+    this.appendIdSupplier =
+        Objects.requireNonNull(appendIdSupplier, "appendIdSupplier must not be null");
     this.definitionSerializer = new SagaDefinitionSerializer(objectMapper);
   }
 
@@ -136,12 +154,15 @@ public class ScalarDbSagaStore implements SagaStore {
     StatusEvent startedEvent = StatusEvent.started(payload);
     String id = sagaId; // effectively final for lambda
     int bucket = schema.bucketOf(id);
+    // Minted for schema uniformity — every saga_events row has an append_id — even though
+    // createSaga's verifier is state-row based, not append-id based.
+    String appendId = appendIdSupplier.get();
 
     try {
       return runInTransaction(
           tx -> {
             Instant now = Instant.now();
-            tx.insert(buildEventInsert(id, 0, startedEvent, now));
+            tx.insert(buildEventInsert(id, 0, startedEvent, appendId, now));
             SagaStateSnapshot snapshot =
                 new SagaStateSnapshot(
                     id, sagaName, SagaStatus.RUNNING, ownerId, definitionVersion, now, now);
@@ -241,19 +262,18 @@ public class ScalarDbSagaStore implements SagaStore {
   @Override
   public void recordStepEvent(String sagaId, int sequence, StepEvent event) {
     validatePayloadSize(event.getPayload());
+    String appendId = appendIdSupplier.get();
     runInTransaction(
         tx -> {
-          tx.insert(buildEventInsert(sagaId, sequence, event, Instant.now()));
+          tx.insert(buildEventInsert(sagaId, sequence, event, appendId, Instant.now()));
           return Boolean.TRUE;
         },
         () ->
-            // Verify an event of our type committed at this sequence. This rules out another
-            // writer's differently-typed event; it does not prove the event is ours, since a
-            // same-type racer is indistinguishable. See eventCommittedWithType.
-            eventCommittedWithType(sagaId, sequence, event.getEventType())
+            verifyOwnEventCommitted(sagaId, sequence, appendId)
                 ? Optional.of(Boolean.TRUE)
                 : Optional.empty(),
-        "append event for saga " + sagaId);
+        "append event for saga " + sagaId,
+        sagaId);
   }
 
   @Override
@@ -267,6 +287,7 @@ public class ScalarDbSagaStore implements SagaStore {
     String sagaId = current.getSagaId();
     SagaStatus newStatus = event.getTargetStatus();
     int bucket = schema.bucketOf(sagaId);
+    String appendId = appendIdSupplier.get();
 
     return runInTransaction(
         tx -> {
@@ -283,7 +304,7 @@ public class ScalarDbSagaStore implements SagaStore {
             throw new SagaConcurrentModificationException(sagaId);
           }
 
-          tx.insert(buildEventInsert(sagaId, sequence, event, now));
+          tx.insert(buildEventInsert(sagaId, sequence, event, appendId, now));
           tx.delete(buildStateDelete(bucket, oldStatus, current.getUpdatedAt(), sagaId));
           // The event's audit timestamp is always the real time; the state row's updated_at is the
           // recovery-scan key, so a caller passes EPOCH to hand the saga to the sweeper immediately
@@ -293,8 +314,9 @@ public class ScalarDbSagaStore implements SagaStore {
           tx.insert(buildStateInsert(bucket, updated));
           return updated;
         },
-        verifyTransitionCommitted(sagaId, sequence, event.getEventType()),
-        "record transition for saga " + sagaId);
+        verifyTransitionCommitted(sagaId, sequence, appendId),
+        "record transition for saga " + sagaId,
+        sagaId);
   }
 
   // ---------------------------------------------------------------------------
@@ -309,6 +331,7 @@ public class ScalarDbSagaStore implements SagaStore {
       @Nullable Instant parkedDeadline) {
     String sagaId = current.getSagaId();
     int bucket = schema.bucketOf(sagaId);
+    String appendId = appendIdSupplier.get();
 
     return runInTransaction(
         tx -> {
@@ -320,7 +343,7 @@ public class ScalarDbSagaStore implements SagaStore {
             throw new SagaConcurrentModificationException(sagaId);
           }
 
-          tx.insert(buildEventInsert(sagaId, sequence, pendingEvent, now));
+          tx.insert(buildEventInsert(sagaId, sequence, pendingEvent, appendId, now));
           tx.delete(buildStateDelete(bucket, oldStatus, current.getUpdatedAt(), sagaId));
           SagaStateSnapshot updated = current.withTransition(SagaStatus.WAITING, now);
           tx.insert(buildStateInsert(bucket, updated));
@@ -331,8 +354,9 @@ public class ScalarDbSagaStore implements SagaStore {
           }
           return updated;
         },
-        verifyTransitionCommitted(sagaId, sequence, pendingEvent.getEventType()),
-        "park saga " + sagaId);
+        verifyTransitionCommitted(sagaId, sequence, appendId),
+        "park saga " + sagaId,
+        sagaId);
   }
 
   @Override
@@ -382,6 +406,7 @@ public class ScalarDbSagaStore implements SagaStore {
       String op) {
     String sagaId = current.getSagaId();
     int bucket = schema.bucketOf(sagaId);
+    String appendId = appendIdSupplier.get();
 
     return runInTransaction(
         tx -> {
@@ -394,7 +419,7 @@ public class ScalarDbSagaStore implements SagaStore {
             throw new SagaConcurrentModificationException(sagaId);
           }
 
-          tx.insert(buildEventInsert(sagaId, sequence, event, now));
+          tx.insert(buildEventInsert(sagaId, sequence, event, appendId, now));
           tx.delete(buildStateDelete(bucket, oldStatus, current.getUpdatedAt(), sagaId));
           SagaStateSnapshot updated = current.withTransition(targetStatus, now);
           tx.insert(buildStateInsert(bucket, updated));
@@ -404,39 +429,46 @@ public class ScalarDbSagaStore implements SagaStore {
           }
           return updated;
         },
-        verifyTransitionCommitted(sagaId, sequence, event.getEventType()),
-        op + " for saga " + sagaId);
+        verifyTransitionCommitted(sagaId, sequence, appendId),
+        op + " for saga " + sagaId,
+        sagaId);
   }
 
   /**
-   * Whether the event at {@code sequence} is present <em>and</em> of {@code expectedType}. This is
-   * the post-{@code UnknownTransactionStatus} verification check the event-append and transition
-   * paths share: presence alone answers "did some event land at this sequence?", and the type match
-   * narrows that to "an event of our type landed".
+   * Post-{@code UnknownTransactionStatus} verification shared by the event-append and transition
+   * paths: identifies the event at {@code sequence} by the caller's {@code appendId}, a UUID minted
+   * once per logical append and persisted with the row, and distinguishes three outcomes.
    *
-   * <p><b>This does not identify the writer.</b> The type describes the row; it does not say who
-   * wrote it. Two racers appending the same type at the same sequence are indistinguishable here,
-   * so a loser whose commit returned unknown can read the winner's event and wrongly report its own
-   * commit as successful. What the check does buy is the exclusion of cross-type false positives,
-   * such as a callback racing a deadline timeout, or a live executor racing a recovery claim.
+   * <ul>
+   *   <li>Present with our {@code append_id}: our commit landed; returns {@code true}.
+   *   <li>Absent: our commit did not land; returns {@code false} so the caller retries.
+   *   <li>Present with another {@code append_id}: another writer won this sequence. A mismatch
+   *       proves only that the row is not ours, not what type it is; the winner may be a same-type
+   *       racer (two at-least-once callbacks both appending {@code STEP_COMPLETED}) or a cross-type
+   *       one (a callback racing a deadline timeout's re-drive). Either way it is a proven
+   *       collision, not an unresolved commit, so this throws {@link
+   *       SagaConcurrentModificationException} at once instead of reporting "not committed";
+   *       retrying would only reuse the same taken sequence.
+   * </ul>
    *
-   * <p><b>Known gap.</b> {@link #resumeParkedStep} and {@link #recordStepEvent} can have same-type
-   * racers: at-least-once callback delivery, and the timeout re-drive of a slow-but-live
-   * participant, both let two {@code completeStepAsync} calls append {@code STEP_COMPLETED} at the
-   * same sequence. Their outputs can differ even when the participant is correctly idempotent: the
-   * {@code sagaId + stepName} dedup key skips the duplicate <em>write</em>, but a saga provides no
-   * isolation, so a result read back from state can observe a value another saga committed in
-   * between. Differing outputs are themselves fine; the defect is that the loser drives the saga on
-   * an output that was never persisted, so the live run and the durable log disagree about which
-   * one won. Closing this needs a per-append identifier persisted with the event and compared here,
-   * replacing the type comparison; that is tracked separately because it changes the {@code
-   * saga_events} schema.
+   * <p>Comparing {@code append_id} rather than {@code event_type} is what makes this exact: every
+   * logical append mints its own UUID, so a same-type racer (which type alone cannot distinguish
+   * from us) is caught, and a cross-type racer differs as well. The reader that sees the winner's
+   * {@code append_id} knows the row is not its own.
    */
-  private boolean eventCommittedWithType(String sagaId, int sequence, EventType expectedType) {
+  private boolean verifyOwnEventCommitted(String sagaId, int sequence, String appendId) {
     return runInTransaction(
         tx -> {
           Optional<Result> event = tx.get(buildEventGet(sagaId, sequence));
-          return event.isPresent() && expectedType.name().equals(event.get().getText("event_type"));
+          if (event.isEmpty()) {
+            return false;
+          }
+          if (appendId.equals(event.get().getText("append_id"))) {
+            return true;
+          }
+          // Another writer's row sits at our sequence: a proven collision, not an unresolved
+          // commit. Retrying would only reuse the same taken sequence, so surface the conflict now.
+          throw new SagaConcurrentModificationException(sagaId);
         },
         null,
         "verify event " + sagaId + " seq " + sequence);
@@ -444,16 +476,15 @@ public class ScalarDbSagaStore implements SagaStore {
 
   /**
    * Verifier for a state transition (park, resume, timeout, {@code recordStatusEvent}): treats the
-   * tx as committed when the event at {@code sequence} is present and of {@code expectedType} (see
-   * {@link #eventCommittedWithType}, whose writer-identity gap this inherits). On a match it
-   * returns the resulting state snapshot; a mismatch (the other op won) returns empty, so the
-   * caller retries, re-reads the now-moved CK, and throws {@link
-   * SagaConcurrentModificationException}.
+   * tx as committed when the event at {@code sequence} was written by us (see {@link
+   * #verifyOwnEventCommitted}). On a match it returns the resulting state snapshot; when the event
+   * is absent it returns empty so the caller retries; when another writer won the sequence, {@link
+   * #verifyOwnEventCommitted} throws {@link SagaConcurrentModificationException} directly.
    */
   private CommitVerifier<SagaStateSnapshot> verifyTransitionCommitted(
-      String sagaId, int sequence, EventType expectedType) {
+      String sagaId, int sequence, String appendId) {
     return () ->
-        eventCommittedWithType(sagaId, sequence, expectedType)
+        verifyOwnEventCommitted(sagaId, sequence, appendId)
             ? loadStateSnapshot(sagaId)
             : Optional.empty();
   }
@@ -1004,24 +1035,65 @@ public class ScalarDbSagaStore implements SagaStore {
       TransactionAction<T> action,
       @Nullable CommitVerifier<T> commitVerifier,
       String operationName) {
-    return runInTransaction(action, commitVerifier, operationName, true);
+    return runInTransaction(action, commitVerifier, operationName, true, null);
   }
 
   /**
-   * Runs a transaction with an option to skip retry on {@link CommitConflictException}.
+   * Runs an event-append transaction, adding append-family collision classification to the plain
+   * retry loop: when retries are exhausted on a conflict, whether it surfaced during CRUD or at
+   * commit, the verifier is asked once more, and a {@link SagaConcurrentModificationException} from
+   * it is a proven collision for {@code sagaId} rather than the retryable {@link
+   * SagaPersistenceException}. Only the append family — {@code recordStepEvent}, {@code
+   * recordStatusEvent}, {@code park}, {@code transitionParkedStep} — uses this, since only there
+   * does a taken sequence mean another writer rather than a store failure.
+   *
+   * <p>The classification is only as sound as the verifier passed in, which is what actually
+   * performs the check: it must identify our own write by its {@code append_id} and throw {@link
+   * SagaConcurrentModificationException} when a foreign one holds the sequence. Pass {@link
+   * #verifyTransitionCommitted}, or a lambda over {@link #verifyOwnEventCommitted} as {@code
+   * recordStepEvent} does. A verifier that cannot tell writers apart will either claim collisions
+   * it has not proven or never report one. See {@link #verifyAfterExhaustedConflict}.
+   */
+  <T> T runInTransaction(
+      TransactionAction<T> action,
+      @Nullable CommitVerifier<T> commitVerifier,
+      String operationName,
+      String sagaId) {
+    return runInTransaction(action, commitVerifier, operationName, true, sagaId);
+  }
+
+  /**
+   * Runs a transaction with an option to skip retry on a conflict.
    *
    * @param action the transaction action to run
    * @param commitVerifier verifier to check commit status on UTSE, or {@code null} to retry the
    *     whole transaction
    * @param operationName description for error messages
-   * @param retryOnCommitConflict if {@code false}, {@link CommitConflictException} is not retried
+   * @param retryOnConflict if {@code false}, neither {@link CommitConflictException} nor {@link
+   *     CrudConflictException} is retried
    * @return the result of the action
    */
   <T> T runInTransaction(
       TransactionAction<T> action,
       @Nullable CommitVerifier<T> commitVerifier,
       String operationName,
-      boolean retryOnCommitConflict) {
+      boolean retryOnConflict) {
+    return runInTransaction(action, commitVerifier, operationName, retryOnConflict, null);
+  }
+
+  /**
+   * Shared impl. A non-null {@code sagaId} opts in to append-family collision mapping: retries
+   * exhausted on a conflict are settled by one verifier read, which can surface {@link
+   * SagaConcurrentModificationException} for that saga instead of the retryable {@link
+   * SagaPersistenceException}. Null, or no verifier to gather evidence with, keeps the generic
+   * exhaustion behavior.
+   */
+  private <T> T runInTransaction(
+      TransactionAction<T> action,
+      @Nullable CommitVerifier<T> commitVerifier,
+      String operationName,
+      boolean retryOnConflict,
+      @Nullable String sagaId) {
     int maxAttempts = config.getTransactionRetryCount();
     Exception lastException = null;
 
@@ -1077,17 +1149,15 @@ public class ScalarDbSagaStore implements SagaStore {
           }
         }
         lastException = e;
-      } catch (CommitConflictException e) {
+      } catch (CommitConflictException | CrudConflictException e) {
         abortQuietly(tx);
-        if (!retryOnCommitConflict) {
+        if (!retryOnConflict) {
           logger.debug(
-              "Commit conflict for {} (txId={})",
-              operationName,
-              e.getTransactionId().orElse("unknown"));
+              "Conflict for {} (txId={})", operationName, e.getTransactionId().orElse("unknown"));
           throw SagaPersistenceException.retryable("Failed to " + operationName, e);
         }
         logger.debug(
-            "Commit conflict for {} (txId={}), retrying",
+            "Conflict for {} (txId={}), retrying",
             operationName,
             e.getTransactionId().orElse("unknown"));
         lastException = e;
@@ -1108,9 +1178,61 @@ public class ScalarDbSagaStore implements SagaStore {
       }
     }
     logger.warn("All {} attempts exhausted for {}", maxAttempts, operationName, lastException);
+    Exception cause = Objects.requireNonNull(lastException);
+    if (sagaId != null
+        && commitVerifier != null
+        && (cause instanceof CommitConflictException || cause instanceof CrudConflictException)) {
+      Optional<T> verified = verifyAfterExhaustedConflict(commitVerifier, cause, operationName);
+      if (verified.isPresent()) {
+        return verified.get();
+      }
+    }
     throw SagaPersistenceException.retryable(
-        "Failed to " + operationName + " after " + maxAttempts + " attempts",
-        Objects.requireNonNull(lastException));
+        "Failed to " + operationName + " after " + maxAttempts + " attempts", cause);
+  }
+
+  /**
+   * Settles an append-family operation that exhausted its retries on a conflict, by reading back
+   * the sequence instead of inferring an outcome from the exception type.
+   *
+   * <p>A commit conflict is a definite abort, so our write did not land. It does not follow that
+   * another writer's did: two writers contending on the same rows can both conflict and both
+   * exhaust with neither committing. Every attempt re-runs the action from scratch, and the
+   * transition ops re-read the state row each time, so reaching here means we never once observed
+   * another writer take it; {@code recordStepEvent} is a bare append that reads nothing and so
+   * observes nothing at all. Either way this is the weakest evidence of a collision in this class,
+   * not the strongest.
+   *
+   * <p>A CRUD conflict aborts the attempt just as a commit conflict does, and says just as little
+   * about who won. The transition ops raise it when their pre-check read finds a record another
+   * transaction has prepared but not resolved, and that writer may still abort and leave the
+   * sequence free. Which layer reported the abort is not evidence either, so both are settled the
+   * same way rather than one being trusted over the other.
+   *
+   * <p>The verifier settles it from what is actually persisted. It throws {@link
+   * SagaConcurrentModificationException} when a foreign {@code append_id} holds our sequence, which
+   * is a proven collision (409). It reports "not committed" when the sequence is still free, and
+   * that stays the retryable exhaustion failure (503) so the caller retries rather than being told
+   * a race it may have won was lost. It can also confirm our own {@code append_id}: an earlier
+   * attempt whose status was unknown may since have been rolled forward, which is what makes the
+   * later attempt conflict, and that operation succeeded.
+   *
+   * <p>A failure of the read itself proves nothing either way, so it is suppressed onto {@code
+   * cause} rather than replacing it: the operation did fail with a retryable conflict, and
+   * reporting that is more truthful than reporting how the evidence read broke.
+   */
+  private <T> Optional<T> verifyAfterExhaustedConflict(
+      CommitVerifier<T> commitVerifier, Exception cause, String operationName) {
+    try {
+      return commitVerifier.verify();
+    } catch (SagaConcurrentModificationException e) {
+      throw e;
+    } catch (Exception e) {
+      logger.warn(
+          "Collision check for {} failed after conflicts exhausted the retries", operationName, e);
+      cause.addSuppressed(e);
+      return Optional.empty();
+    }
   }
 
   private void sleepForRetry(int retryIndex) {
@@ -1300,7 +1422,8 @@ public class ScalarDbSagaStore implements SagaStore {
         .build();
   }
 
-  private Insert buildEventInsert(String sagaId, int sequence, SagaEvent event, Instant now) {
+  private Insert buildEventInsert(
+      String sagaId, int sequence, SagaEvent event, String appendId, Instant now) {
     var builder =
         Insert.newBuilder()
             .namespace(SagaSchema.NAMESPACE)
@@ -1308,6 +1431,7 @@ public class ScalarDbSagaStore implements SagaStore {
             .partitionKey(Key.ofText("saga_id", sagaId))
             .clusteringKey(Key.ofInt("sequence", sequence))
             .textValue("event_type", event.getEventType().name())
+            .textValue("append_id", appendId)
             .textValue("payload", event.getPayload())
             .timestampTZValue("created_at", now);
     switch (event) {
