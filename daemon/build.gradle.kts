@@ -53,6 +53,9 @@ dependencies {
     implementation(libs.nimbus.jose.jwt)
     implementation(libs.commons.text)
     implementation(libs.slf4j.api)
+    // Not runtimeOnly: SagaServer.main installs the bridge handler itself, so SLF4JBridgeHandler has
+    // to be on the compile classpath.
+    implementation(libs.jul.to.slf4j)
     implementation(platform(libs.jackson.bom))
     implementation(libs.jackson.databind)
 
@@ -60,6 +63,9 @@ dependencies {
 
     testImplementation(platform(libs.grpc.bom))
     testImplementation(libs.grpc.inprocess)
+    // The bridge test captures what actually reaches Logback, which needs its appender types at
+    // compile time — the main source set only needs Logback at runtime.
+    testImplementation(libs.logback.classic)
 
     "integrationTestImplementation"(project(":core"))
     "integrationTestImplementation"(project(":grpc-client"))
