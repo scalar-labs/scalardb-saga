@@ -1,20 +1,29 @@
 name: Publish snapshot
 
-# Every commit on main publishes a snapshot, so downstream work can consume the engine between
-# releases without waiting for a tag or building locally.
+# Every commit on main and on each version branch publishes a snapshot, so downstream work can track
+# either trunk or a maintenance line between releases without waiting for a tag or building locally.
+# The patterns match the unprefixed branch names described in RELEASING.md: `1` for a major version
+# branch, `1.0` for a minor one.
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - "[0-9]+"
+      - "[0-9]+.[0-9]+"
 
 permissions:
   contents: read
 
-# Serialize snapshot publications: a run uploads several module publications and their Maven metadata
-# independently, so cancelling one midway can leave Central holding a partial snapshot until the next
-# run succeeds. Let the in-flight publish finish instead. Queued runs still collapse to the newest
-# commit, since GitHub keeps only the most recent pending run per group.
+# Serialize snapshot publications per branch: a run uploads several module publications and their
+# Maven metadata independently, so cancelling one midway can leave Central holding a partial snapshot
+# until the next run succeeds. Let the in-flight publish finish instead. Queued runs still collapse to
+# the newest commit, since GitHub keeps only the most recent pending run per group.
+#
+# The group is keyed by branch rather than shared, because each branch publishes a different version.
+# A single shared group would let a push to one branch evict another branch's still-pending
+# publication, and that snapshot would then be missing until the next commit on that branch.
 concurrency:
-  group: snapshot
+  group: snapshot-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -35,9 +44,9 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6.1.0
 
-      # Immediately after a release, main still carries the released version until the next
-      # development bump. Publishing that to the snapshot repository would be a no-op at best and
-      # confusing at worst, so skip rather than fail.
+      # Between the commit that sets the release version and the next development bump, a release
+      # branch carries a released version rather than a snapshot. Publishing that to the snapshot
+      # repository would be a no-op at best and confusing at worst, so skip rather than fail.
       - name: Check that the version is a snapshot
         id: snapshot
         run: |

@@ -37,10 +37,11 @@ mavenPublishing {
         version = project.version.toString(),
     )
 
-    // Uploads a deployment to the Central Portal and leaves it VALIDATED for a human to release.
-    // Passing `true` here would publish to Central the moment a tag builds green, with no way to
-    // take it back — a released version is immutable. SNAPSHOT versions bypass this and go straight
-    // to the Central snapshot repository.
+    // Uploads a USER_MANAGED deployment to the Central Portal for a human to release; the build
+    // ends at the upload and does not wait for the Portal's validation verdict. Passing `true` here
+    // would publish to Central the moment a tag builds green, with no way to take it back — a
+    // released version is immutable, and waiting for the verdict is only available bundled with
+    // that. SNAPSHOT versions bypass this and go straight to the Central snapshot repository.
     publishToMavenCentral()
 
     // Central rejects unsigned releases, but requiring a signature unconditionally would also break
