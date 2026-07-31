@@ -24,6 +24,13 @@ nimbus-jose-jwt = "10.3"
 grpc = "1.82.1"
 protobuf-java = "4.35.1"
 protobuf-plugin = "0.10.0"
+maven-publish-plugin = "0.37.0"
+# Netty is never a direct dependency — it arrives transitively via gRPC and via ScalarDB's Azure and
+# AWS SDKs, which pull different 4.1.x lines. Netty requires every one of its modules to be on the
+# same version (the native transports resolve version-matched .so files), so the daemon imports the
+# BOM to align them. Bump this to the highest 4.1.x that any dependency requests.
+netty = "4.1.133.Final"
+license-report = "3.1.4"
 
 [libraries]
 scalardb = { module = "com.scalar-labs:scalardb", version.ref = "scalardb" }
@@ -32,7 +39,14 @@ jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind" }
 jackson-dataformat-yaml = { module = "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml" }
 commons-text = { module = "org.apache.commons:commons-text", version.ref = "commons-text" }
 slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
+# Routes java.util.logging into SLF4J. gRPC logs through JUL directly, so without this its records
+# bypass Logback entirely — see SagaServer.installJulToSlf4jBridge.
+jul-to-slf4j = { module = "org.slf4j:jul-to-slf4j", version.ref = "slf4j" }
 logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
+# The test suites take the version string rather than the module (see useJUnitJupiter in
+# scalardb-saga.java-conventions), so nothing resolves this entry. It exists because a version key no
+# [libraries] entry points at is one Dependabot cannot see, and so can never bump.
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit-jupiter" }
 mockito-core = { module = "org.mockito:mockito-core", version.ref = "mockito" }
 mockito-junit-jupiter = { module = "org.mockito:mockito-junit-jupiter", version.ref = "mockito" }
 assertj-core = { module = "org.assertj:assertj-core", version.ref = "assertj" }
@@ -54,3 +68,20 @@ grpc-services = { module = "io.grpc:grpc-services" }
 grpc-netty-shaded = { module = "io.grpc:grpc-netty-shaded" }
 grpc-inprocess = { module = "io.grpc:grpc-inprocess" }
 protobuf-java = { module = "com.google.protobuf:protobuf-java", version.ref = "protobuf-java" }
+netty-bom = { module = "io.netty:netty-bom", version.ref = "netty" }
+# Version deliberately omitted: it comes from netty-bom, so the native artifact can never drift from
+# the netty classes that load it.
+netty-transport-native-epoll = { module = "io.netty:netty-transport-native-epoll" }
+
+# The Gradle plugins the convention plugins in build-logic apply. They are libraries rather than a
+# [plugins] block because build-logic puts them on its own compile classpath instead of applying them
+# there, and they carry their coordinate here rather than inline in build-logic/build.gradle.kts
+# because Dependabot only reads versions reachable from [libraries] or [plugins]. A version consumed
+# solely as libs.versions.<name>.get() interpolation is one it can never bump.
+spotless-gradle-plugin = { module = "com.diffplug.spotless:spotless-plugin-gradle", version.ref = "spotless" }
+spotbugs-gradle-plugin = { module = "com.github.spotbugs.snom:spotbugs-gradle-plugin", version.ref = "spotbugs-plugin" }
+errorprone-gradle-plugin = { module = "net.ltgt.gradle:gradle-errorprone-plugin", version.ref = "errorprone-plugin" }
+nullaway-gradle-plugin = { module = "net.ltgt.gradle:gradle-nullaway-plugin", version.ref = "nullaway-plugin" }
+protobuf-gradle-plugin = { module = "com.google.protobuf:protobuf-gradle-plugin", version.ref = "protobuf-plugin" }
+maven-publish-gradle-plugin = { module = "com.vanniktech:gradle-maven-publish-plugin", version.ref = "maven-publish-plugin" }
+license-report-gradle-plugin = { module = "com.github.jk1:gradle-license-report", version.ref = "license-report" }

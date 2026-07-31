@@ -1,5 +1,11 @@
 package com.scalar.db.saga.engine;
 
+// Imported for the Javadoc references below: these types are named throughout this interface's
+// contract but appear in no signature, since resolve() is deliberately typed as Object.
+import com.scalar.db.saga.api.SagaHttpClient;
+import com.scalar.db.saga.api.Step;
+import com.scalar.db.saga.api.TccStep;
+
 /**
  * Resolves step class names to step instances.
  *
@@ -7,7 +13,7 @@ package com.scalar.db.saga.engine;
  * {@link Step} or {@link TccStep} instances from fully-qualified class names stored in saga
  * definitions.
  *
- * <h3>Contract</h3>
+ * <h2>Contract</h2>
  *
  * <ul>
  *   <li>Must never return {@code null} — throw an exception on resolution failure
@@ -17,7 +23,7 @@ package com.scalar.db.saga.engine;
  *       verifies this after resolution
  * </ul>
  *
- * <h3>Built-in implementation (default)</h3>
+ * <h2>Built-in implementation (default)</h2>
  *
  * <p>{@code ReflectiveStepResolver} resolves steps via reflection-based constructor injection,
  * matching constructor parameter types against registered resources and injecting an
@@ -36,7 +42,7 @@ package com.scalar.db.saga.engine;
  * <p>With more than one endpoint registered, qualify the parameter to select one, e.g.
  * {@code @Named("account-svc") SagaHttpClient}.
  *
- * <h3>Custom implementations</h3>
+ * <h2>Custom implementations</h2>
  *
  * <p>Supply a custom resolver via {@link
  * DefaultSagaOrchestrator.Builder#stepResolver(StepResolver)} for full control (e.g. DI-framework
@@ -66,7 +72,9 @@ package com.scalar.db.saga.engine;
  *                 n ->
  *                     switch (n) {
  *                       case "debit" -> new DebitStep(ctx.httpClient(accountSvc));
- *                       default -> throw new SagaDefinitionException("unknown step: " + n);
+ *                       default ->
+ *                           throw SagaDefinitionException.stepClassInvalid(
+ *                               className, "unknown step '" + n + "'");
  *                     }))
  *     .build();
  * }</pre>

@@ -10,7 +10,7 @@ import com.scalar.db.saga.exception.SagaDefinitionException;
  * {@link StepResolver} must obtain its clients from here rather than constructing its own, so code
  * steps keep parity with declarative steps.
  *
- * @see ResolutionContext#httpClient(String)
+ * @see StepResolver.ResolutionContext#httpClient(String)
  */
 public interface SagaHttpClientProvider {
 
