@@ -114,6 +114,11 @@ testing {
 
 tasks.named("check") {
     dependsOn(testing.suites.named("integrationTest"))
+    // Javadoc is not part of `check` by default, so an unresolvable {@link} or a malformed tag fails
+    // nothing until something builds the javadoc jar — which only happens when publishing, i.e. at
+    // release time. The javadoc is a published artifact, so hold it to the same bar as the code and
+    // find out on the pull request instead.
+    dependsOn(tasks.named("javadoc"))
 }
 
 dependencies {
