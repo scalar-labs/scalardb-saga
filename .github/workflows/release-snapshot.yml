@@ -44,9 +44,9 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6.1.0
 
-      # Immediately after a release, main still carries the released version until the next
-      # development bump. Publishing that to the snapshot repository would be a no-op at best and
-      # confusing at worst, so skip rather than fail.
+      # Between the commit that sets the release version and the next development bump, a release
+      # branch carries a released version rather than a snapshot. Publishing that to the snapshot
+      # repository would be a no-op at best and confusing at worst, so skip rather than fail.
       - name: Check that the version is a snapshot
         id: snapshot
         run: |

@@ -17,12 +17,17 @@ container image to `ghcr.io/scalar-labs/scalardb-saga-daemon`.
 `:daemon` is deliberately not published to Maven Central — it ships as the image, so a jar on Central
 would be an artifact nobody consumes and everyone has to keep patched.
 
-The image carries one tag per release — `1.0.0`, `1.0.1` — plus `latest` on the newest release.
-There is deliberately no floating `1.0` tag: the minor version line is a branch in this repository,
-and a second representation of it in the registry would be one nothing keeps truthful. A moving tag
-cannot be verified by the recipe in [Verifying a published image](#verifying-a-published-image)
-either, because that binds the signature to the release tag which built the image, and a tag that
-moves has no version for the certificate identity to agree with.
+The image carries one immutable tag per release — `1.0.0`, `1.0.1` — and nothing that floats. There is
+deliberately no `1.0` tag: the minor version line is a branch in this repository, and a second
+representation of it in the registry would be one nothing keeps truthful. There is no `latest` either,
+for that reason and a stronger one: a moving tag cannot be verified by the recipe in
+[Verifying a published image](#verifying-a-published-image), because that binds the signature to the
+release tag which built the image, and a tag that moves has no version for the certificate identity to
+agree with. `latest` would be the tag most people pull and the only one nobody can check.
+
+Every other Scalar image publishes exact versions only, so pin one. Let Dependabot or Renovate bump it,
+which puts the change in your repository rather than silently in ours. (The GitHub release page still
+marks the newest release *Latest*; that is a badge on the release, not a tag on the image.)
 
 Consumers pin one version through the BOM:
 
@@ -69,54 +74,16 @@ after it, live only on that branch and are unreachable from `main` by design.
    git switch -c 1.0 && git push -u origin 1.0
    ```
 
-   A newly cut branch also needs its own Dependabot entries. Every entry in
-   [.github/dependabot.yml](.github/dependabot.yml) targets `main` only, so without them the branch
-   gets no dependency updates at all. Paste the block below at the end of that file, substituting the
-   branch you just cut for `1.0`, and delete it again when that line reaches end of life:
+   A newly cut branch also needs its own Dependabot entries. Dependabot reads
+   [.github/dependabot.yml](.github/dependabot.yml) from the default branch only, and every entry
+   there targets that branch, so a newly cut line gets no dependency updates until an entry names it.
+   **On `main`, through a pull request**, copy the three `updates:` entries already in that file to the
+   end of it, adding `target-branch: "1.0"` to each — substituting the branch you just cut — and delete
+   the copies again when that line reaches end of life.
 
-   ```yaml
-     - package-ecosystem: gradle
-       directory: /
-       target-branch: "1.0"
-       schedule:
-         interval: weekly
-       open-pull-requests-limit: 5
-       groups:
-         build-tooling:
-           patterns:
-             - "com.diffplug.spotless*"
-             - "com.github.spotbugs*"
-             - "com.google.errorprone*"
-             - "com.h3xstream.findsecbugs*"
-             - "com.uber.nullaway*"
-             - "com.vanniktech*"
-             - "net.ltgt.gradle*"
-         grpc:
-           patterns:
-             - "io.grpc*"
-         netty:
-           patterns:
-             - "io.netty*"
-
-     - package-ecosystem: github-actions
-       directory: /
-       target-branch: "1.0"
-       schedule:
-         interval: weekly
-       groups:
-         actions:
-           patterns:
-             - "*"
-
-     - package-ecosystem: docker
-       directory: /daemon/docker
-       target-branch: "1.0"
-       schedule:
-         interval: weekly
-   ```
-
-   Keep the `groups:` blocks when you paste. Without them each build-tool bump arrives as its own
-   pull request, and the five-PR limit fills with those before a real dependency update can open.
+   Copy whole entries rather than retyping them, so the `groups:` blocks come along. Without them each
+   build-tool bump arrives as its own pull request, and the five-PR limit fills with those before a
+   real dependency update can open.
 
    Version branches need a repository ruleset before one is cut, for the same reason `main` has one:
    a release is built from the commit the tag names, and the workflow's check that the commit sits
@@ -180,6 +147,13 @@ tag does not mean validation passed, and it does not mean a human released the d
 the image goes out before step 5. Abandoning a release at the Portal, for either reason, leaves its
 tags published.
 
+Clean that up rather than leaving it behind: delete the git tag, the GitHub release and the `ghcr.io`
+package version, so nothing advertises a version Central never published. The tag matters most, because
+both the *Latest* badge and the pre-release classification are derived from tags rather than from what
+was published — so an abandoned tag left in place stops every later release on an older line from taking
+the badge. Dropping the deployment costs nothing else: the version was never released, so the same tag
+can be cut again once whatever caused the abandonment is fixed.
+
 Every commit on `main` and on each release branch publishes a `-SNAPSHOT` to the Central snapshot
 repository, so downstream work can track either trunk or a maintenance line without waiting for a tag.
 
@@ -200,9 +174,10 @@ git switch -c 0.0 && git push -u origin 0.0    # scratch release branch
 git tag v0.0.1-rc.1 && git push origin v0.0.1-rc.1
 ```
 
-Use a pre-release version rather than a bare `0.0.1`. `latest` follows the highest released version,
-and with no other tags in the repository a bare `0.0.1` *is* the highest, so `latest` would follow
-a throwaway image. A version carrying a suffix is classified as a pre-release, which never takes it.
+Use a pre-release version rather than a bare `0.0.1`. The GitHub release's *Latest* badge follows the
+highest released version, and with no other tags in the repository a bare `0.0.1` *is* the highest, so
+a throwaway release would take the badge. A version carrying a suffix is classified as a pre-release,
+which never takes it.
 
 Three rungs are worth climbing in order, because each leaves more behind than the last.
 

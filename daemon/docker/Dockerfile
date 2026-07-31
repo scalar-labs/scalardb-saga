@@ -77,10 +77,17 @@ CMD ["/scalardb-saga/conf/server.properties"]
 # label is defined to carry; image.url is the one that points at the project. It is pinned to the
 # revision, not to main: a label is baked in permanently, so a moving reference would rot the moment
 # the file is renamed or moved, and an operator inspecting an old image wants the guide describing
-# that image's configuration keys, not a later one's. The revision always resolves on GitHub, whereas
-# a tag reference would not for snapshot and CI builds.
-ARG IMAGE_VERSION
-ARG IMAGE_REVISION
+# that image's configuration keys, not a later one's. The revision resolves on GitHub for every
+# published image, since CI and the release workflow build only pushed commits, whereas a tag
+# reference would not for snapshot and CI builds. A local build of an unpushed commit is the one
+# case it does not, and it produces no image anyone else consumes.
+#
+# Both carry a default so a bare `docker build` of an assembled context still yields a resolvable
+# documentation URL. Without one the arg expands to empty and the label becomes a double-slashed URL
+# that 404s; main is less precise than a revision, but it is not broken. Every image built through
+# `:daemon:dockerBuild` or CI passes both args and so never falls back to these.
+ARG IMAGE_VERSION=unspecified
+ARG IMAGE_REVISION=main
 LABEL org.opencontainers.image.title="ScalarDB Saga daemon" \
       org.opencontainers.image.description="Saga-based distributed transaction coordination engine, exposed over REST and gRPC." \
       org.opencontainers.image.vendor="Scalar, Inc." \

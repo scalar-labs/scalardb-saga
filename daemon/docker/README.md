@@ -11,10 +11,12 @@ is built and signed, and how to verify its signature.
 ## Running it
 
 The image ships a configuration *template* and does not start as-is: the daemon needs a reachable
-ScalarDB database, at least one saga definition, and — since the template selects the `jwt` security
-provider — the JWKS URL, issuer, and audience of your IdP. It refuses to start if any is missing: a
+ScalarDB database, at least one saga definition, and a security provider — uncomment either the
+`jwt` or the `apikey` block in the template and fill it in. It refuses to start if any is missing: a
 healthy process that can run no saga, or that lets anyone start one, is worse than a failure at boot.
-Every value the template cannot guess is marked `REPLACE_ME`.
+Every value the template cannot guess is marked `REPLACE_ME`. Fill those in as well: a `REPLACE_ME`
+is a syntactically valid value, so it is accepted at startup and fails only later, once a caller
+first presents a credential.
 
 ```bash
 docker run --rm \
@@ -82,7 +84,9 @@ readinessProbe:
 ```
 
 `GET /health` and the `grpc.health.v1.Health` service are both reachable without a credential, by
-design — a probe cannot present one. Every other route requires authentication.
+design — a probe cannot present one. Every other route is governed by the configured security
+provider: `jwt` and `apikey` authenticate them, `noop` does not, which is why the daemon refuses to
+start under `noop` on a non-loopback interface.
 
 ## Security
 
@@ -111,7 +115,16 @@ design — a probe cannot present one. Every other route requires authentication
 
 ## Graceful shutdown
 
-The JVM is PID 1 and receives `SIGTERM` directly, which triggers a drain of in-flight sagas rather than
-dropping them. Allow time for it: the gRPC drain window is `max(30s, sync_max_wait_millis + 5s)` — 65s
-at the default `sync_max_wait_millis` of 60s — and the engine then drains running sagas. A
-`terminationGracePeriodSeconds` below that will `SIGKILL` the daemon mid-drain.
+The JVM is PID 1 and receives `SIGTERM` directly, which triggers a drain rather than dropping
+in-flight work. The daemon drains in two windows, one after the other, so budget for their sum:
+
+- **gRPC call drain** — `max(30s, sync_max_wait_millis + 5s)`, so 65s at the default
+  `sync_max_wait_millis` of 60s. It tracks that setting: raise it to `300000` and this window
+  becomes 305s.
+- **Saga engine drain** — a fixed 30s, not reachable through any `scalar.db.saga.server.*` key.
+
+At defaults that totals 95s. Set `terminationGracePeriodSeconds` above the sum; below it, the daemon
+is `SIGKILL`ed mid-drain. Since the second window is fixed, the grace period is the only lever.
+
+Being cut short costs latency, not integrity: whatever was interrupted is reclaimed by the recovery
+scan on the next boot.

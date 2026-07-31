@@ -55,9 +55,21 @@ jobs:
           exit 1
 
       # Full history: on a tag push the default shallow fetch produces a single commit with no
-      # connection to any branch, and the reachability test below would have nothing to walk.
+      # connection to any branch, and the reachability test below would have nothing to walk. Naming
+      # `ref` does not narrow that -- checkout's all-history refspec carries
+      # `+refs/tags/*:refs/tags/*` whatever `ref` says -- so `Classify the release` still sees every
+      # tag.
+      #
+      # Pinned to the verified commit like the three jobs downstream, so the commit whose
+      # gradle.properties is read here is the commit that gets published. Checkout enforces that on
+      # its own today: given no `ref` it takes GITHUB_SHA as well, and fails when the tag no longer
+      # points there. That assertion belongs to the action rather than to this workflow, though, and
+      # nothing here would notice if a later version stopped making it. A tag moved mid-run now
+      # releases whichever commit each run was triggered for instead of failing this job, which is
+      # how the other three already behave.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Check the tag against gradle.properties
@@ -70,6 +82,16 @@ jobs:
 
           if [ -z "${version}" ]; then
             echo "::error::no version= line found in gradle.properties"
+            exit 1
+          fi
+          # The push trigger already restricts the tag shape, but a dispatch can name any tag, and the
+          # branch check below derives `line` from the version on the assumption that it is digits and
+          # dots. Assert it here so both paths carry the same guarantee. Deliberately stricter than the
+          # trigger's `-*` suffix glob: a suffix outside semver's alphabet would fail later in
+          # docker/metadata-action, which is a worse place to find out.
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::${tag} is not a release tag; expected v<major>.<minor>.<patch> with an" \
+              "optional pre-release suffix"
             exit 1
           fi
           if [ "v${version}" != "${tag}" ]; then
@@ -95,13 +117,25 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          # The tag patterns this workflow triggers on guarantee digits and dots before any
-          # pre-release suffix, so dropping the suffix and then the patch component always leaves a
-          # bare `major.minor`. Nothing an arbitrary suffix could contain survives into `line`.
+          # The shape assert in the step above guarantees digits and dots before any pre-release
+          # suffix, on the dispatch path as well as the push one, so dropping the suffix and then the
+          # patch component always leaves a bare `major.minor`. Nothing a suffix could contain
+          # survives into `line`.
           core="${VERSION%%-*}"
           line="${core%.*}"
 
-          if [ -z "$(git ls-remote --heads origin "refs/heads/${line}")" ]; then
+          # Three outcomes here too, for the reason the merge-base check below gives: an empty answer
+          # means no such branch, but a non-zero exit means git could not ask. Testing the output
+          # inside `if [ -z "$(...)" ]` would discard that status and report a network or auth fault
+          # as a misplaced tag.
+          rc=0
+          heads=$(git ls-remote --heads origin "refs/heads/${line}") || rc=$?
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::could not reach origin to look for release branch '${line}'" \
+              "(git exited ${rc})"
+            exit 1
+          fi
+          if [ -z "${heads}" ]; then
             echo "::error::no release branch '${line}' on origin; a release is cut from its minor" \
               "version branch, never from main (see RELEASING.md)"
             exit 1
@@ -128,11 +162,12 @@ jobs:
               ;;
           esac
 
-      # Two facts every downstream job needs, decided once here so the image tag and the GitHub
-      # release cannot end up describing the same release differently. `latest` follows the newest
-      # release rather than the tag being built: once several minor version branches are maintained,
-      # patching an older line is routine, and letting that take `latest` would hand everyone who
-      # pulls it an older daemon than the one they already had.
+      # Two facts the github-release job needs. `prerelease` keeps a suffixed version from going out as
+      # an ordinary release, and `latest` decides the GitHub release's "Latest" badge. That badge
+      # follows the newest release rather than the tag being built: once several minor version branches
+      # are maintained, patching an older line is routine, and letting that take the badge would point
+      # everyone at an older release than the one they already had. The image carries no floating tag
+      # at all, so nothing decided here reaches the registry.
       - name: Classify the release
         id: kind
         env:
@@ -144,7 +179,7 @@ jobs:
             *-*)
               echo "prerelease=true" >> "$GITHUB_OUTPUT"
               echo "latest=false" >> "$GITHUB_OUTPUT"
-              echo "${VERSION} is a pre-release; latest stays where it is"
+              echo "${VERSION} is a pre-release; the Latest badge stays where it is"
               exit 0
               ;;
           esac
@@ -156,17 +191,17 @@ jobs:
             sort -V | tail -1)
           if [ -z "${highest}" ]; then
             # The tag being built is itself a release tag, so an empty list means the tags were never
-            # fetched. Failing beats defaulting to false, which would pin `latest` silently forever.
+            # fetched. Failing beats defaulting to false, which would pin the badge silently forever.
             echo "::error::no release tags found; cannot tell whether ${VERSION} is the newest"
             exit 1
           fi
 
           if [ "${VERSION}" = "${highest}" ]; then
             echo "latest=true" >> "$GITHUB_OUTPUT"
-            echo "${VERSION} is the highest released version; latest follows it"
+            echo "${VERSION} is the highest released version; the Latest badge follows it"
           else
             echo "latest=false" >> "$GITHUB_OUTPUT"
-            echo "${VERSION} is behind ${highest}; latest stays where it is"
+            echo "${VERSION} is behind ${highest}; the Latest badge stays where it is"
           fi
 
   # Uploads one aggregated deployment covering api, core, rpc, grpc-client, and the BOM. It goes up as
@@ -182,9 +217,16 @@ jobs:
       # checkout on a tag push fetches `+refs/tags/<tag>:refs/tags/<tag>` and resolves the name
       # again on the server, so a tag moved mid-run would build a commit nothing checked. The cosign
       # identity would not show it either, since the certificate binds the ref name.
+      #
+      # No persisted token either. Checkout otherwise stores the job's GITHUB_TOKEN as a git
+      # extraheader in the workspace, where the Gradle build that runs next can read it, and in
+      # publish-image and github-release that token carries `packages: write` and `contents: write`.
+      # Nothing in these three jobs uses git auth after checkout: gh takes GH_TOKEN from the
+      # environment. verify-version keeps its credentials, because it does fetch from origin.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Set up Java 21
         uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
@@ -192,8 +234,17 @@ jobs:
           distribution: temurin
           java-version: 21
 
+      # No cache anywhere on the release path. setup-gradle writes cache entries only from jobs on the
+      # default branch and reads them everywhere else, and its last restore key is scoped to the
+      # operating system alone — so a job id that only ever runs on a tag has no entry of its own and
+      # falls back to whatever ci.yml last saved on main. A release would then compile against
+      # dependency jars and compiled build scripts that no reviewed commit accounts for, and sign the
+      # result; Gradle does not re-verify the checksum of anything already in the cache. The other side
+      # of the trade is a few minutes of re-resolution on something cut this rarely.
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6.1.0
+        with:
+          cache-disabled: true
 
       - name: Publish to Maven Central
         # The plugin reads all four as Gradle properties; ORG_GRADLE_PROJECT_* is how they arrive
@@ -227,10 +278,11 @@ jobs:
       # certificate instead of relying on a long-lived signing key held in a secret.
       id-token: write
     steps:
-      # The verified commit, for the reason publish-maven gives.
+      # The verified commit and no persisted token, for the reasons publish-maven gives.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Set up Java 21
         uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
@@ -238,8 +290,11 @@ jobs:
           distribution: temurin
           java-version: 21
 
+      # No cache, for the reason publish-maven gives.
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6.1.0
+        with:
+          cache-disabled: true
 
       # Gradle builds the distribution and assembles the context; Docker only packages it. Building
       # inside the Dockerfile instead would re-resolve every dependency per architecture and throw
@@ -270,17 +325,22 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/scalar-labs/scalardb-saga-daemon
-          # One tag per release and nothing else that floats. A `<major>.<minor>` tag would be a
+          # One immutable tag per release and nothing that floats. A `<major>.<minor>` tag would be a
           # second representation of the minor version line, which is a branch in this repository,
           # and nothing would keep the two in step: it is pushed by whichever run is executing, so
           # re-running a superseded patch — the recovery path in RELEASING.md — would pull it back to
           # an older image. RELEASING.md records the tag scheme and why the line lives only in git.
           tags: |
             type=semver,pattern={{version}}
-          # Decided once in verify-version, so the image tag and the GitHub release can never disagree
-          # about which release is the current one.
+          # `latest` is off for that reason and a stronger one: the cosign certificate binds a signature
+          # to the tag the workflow ran on, so a tag that moves has no version for the documented
+          # verification to agree with. It would be the one tag nobody can check and the one most people
+          # pull. Every other Scalar image publishes exact versions only.
+          #
+          # This has to be stated rather than omitted. The action defaults to `latest=auto`, which adds
+          # the tag on any semver build, so deleting this line would restore it rather than remove it.
           flavor: |
-            latest=${{ needs.verify-version.outputs.latest }}
+            latest=false
 
       - name: Build and push
         id: build
@@ -320,10 +380,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      # The verified commit, for the reason publish-maven gives.
+      # The verified commit and no persisted token, for the reasons publish-maven gives.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Set up Java 21
         uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
@@ -331,8 +392,11 @@ jobs:
           distribution: temurin
           java-version: 21
 
+      # No cache, for the reason publish-maven gives.
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6.1.0
+        with:
+          cache-disabled: true
 
       - name: Build the distribution archives
         run: ./gradlew :daemon:distTar :daemon:distZip
@@ -358,8 +422,9 @@ jobs:
           else
             # Both flags default to something wrong here. --prerelease is opt-in, so the tag pattern
             # that accepts v1.0.0-rc.1 would otherwise publish it as an ordinary release. --latest
-            # defaults to GitHub deciding for itself, which is not necessarily the answer the image
-            # tag was given; passing the same value keeps the two consistent by construction.
+            # defaults to GitHub deciding for itself from dates and version numbers, which would badge
+            # a patch on an older line as the newest release; verify-version has already settled the
+            # answer, so pass it rather than let it be guessed.
             args=(--title "${tag}" --generate-notes)
             if [ "${PRERELEASE}" = "true" ]; then
               args+=(--prerelease)
