@@ -85,7 +85,7 @@ Subproject directories use short names; artifacts are prefixed with `scalardb-sa
 - `core` — Core engine (engine, store, recovery, testing harness)
 - `rpc` — gRPC wire contract (`.proto` plus generated stubs), Java 8
 - `grpc-client` — Java 8 daemon client SDK
-- `daemon` — Standalone server (REST + gRPC); not published to Maven Central
+- `daemon` — Standalone server (REST + gRPC); ships as a container image, not a Maven artifact
 - `bom` — `java-platform` BOM pinning every published artifact to one version
 - Future: `spring`, `quarkus`, `participant`, `client` (HTTP SDK), `dev-server`, `lra`
 
@@ -96,9 +96,22 @@ Subproject directories use short names; artifacts are prefixed with `scalardb-sa
 - The daemon is deliberately unpublished: it ships as a container image, so a jar on Central would be an artifact nobody consumes and everyone has to keep patched.
 - Snapshots publish from `main` (`.github/workflows/release-snapshot.yml`); releases leave the Central deployment `VALIDATED` for a human to release, because a released version is immutable.
 
+## Container image
+
+See [daemon/docker/README.md](daemon/docker/README.md) for running it.
+
+- **Every external Gradle plugin goes through `build-logic`**, never a subproject's own `plugins {}` block: declaring one in a subproject gives that project a separate classloader scope and breaks Spotless' shared build service.
+- Netty must stay on a single version across all modules (`libs.versions.toml` `netty` + the BOM import in `:daemon`) — the native transports load version-matched `.so` files.
+- Built from `installDist`, not `distTar` (whose internal root embeds the version): `./gradlew :daemon:dockerBuild` locally, or `:daemon:dockerContext` + `docker/build-push-action` in CI.
+
 ## CI
 
-- **GitHub Actions** (`.github/workflows/ci.yml`) — runs `./gradlew check` (includes `test` + `spotlessCheck` + `spotbugsMain` + Error Prone) on push/PR to `main`
+- **GitHub Actions** (`.github/workflows/ci.yml`) — on push/PR to `main`:
+  - `check` — `./gradlew check` (`test` + `integrationTest` + `javadoc` + `spotlessCheck` + `spotbugsMain` + Error Prone), then a no-build-cache compile to surface warnings
+  - `dockerfile-lint` — hadolint over `daemon/docker/Dockerfile`
+  - `image-smoke-test` — builds the image and runs it against SQLite, asserting health on both transports, non-root uid, `INFO` logging, a clean `SIGTERM` drain, and that the epoll native transport actually loaded (a silent NIO fallback keeps the daemon healthy, so `/proc/1/maps` is the evidence)
+  - `image-arm64-native-test` — the same boot under QEMU on `linux/arm64`, asserting the `aarch_64` epoll native loads; only `linux-x86_64` arrives transitively, so nothing else catches a dropped classifier
+  - Both smoke jobs boot from the shared fixture in `.github/smoke/`
 
 ## Git
 
