@@ -50,6 +50,7 @@ import org.eclipse.jetty.util.thread.QueuedThreadPool;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.bridge.SLF4JBridgeHandler;
 
 /**
  * Standalone server that hosts a saga engine and exposes it over a REST and/or gRPC API (daemon
@@ -558,6 +559,36 @@ public final class SagaServer implements AutoCloseable {
   }
 
   /**
+   * Redirects {@code java.util.logging} into SLF4J, so every log line the process emits goes
+   * through the same Logback configuration.
+   *
+   * <p>gRPC logs through {@code java.util.logging} directly rather than SLF4J. Without this bridge
+   * its records skip Logback entirely: they print in the JUL default format instead of the
+   * configured pattern, and the configured log level does not reach them — so an operator can
+   * neither quiet gRPC transport noise nor turn gRPC detail up while debugging, and a log collector
+   * configured for one format silently mis-parses the other. (Netty needs no such help; it detects
+   * SLF4J on its own.)
+   *
+   * <p>Removing the root handlers first drops JUL's default {@code ConsoleHandler}, which would
+   * otherwise keep printing every record a second time in its own format.
+   *
+   * <p>Called only from {@link #main}, deliberately. Installing a handler on the JVM-wide JUL root
+   * logger is an application's decision to make, not a library's: an application that embeds the
+   * engine must be free to configure its own logging, so this must not run merely because a {@link
+   * SagaServer} was constructed.
+   *
+   * <p>The bridge is only cheap when paired with Logback's {@code LevelChangePropagator}, which the
+   * shipped {@code logback.xml} enables: without it JUL builds a {@code LogRecord} for every call
+   * even when the level is disabled, because JUL itself never learns the level is off.
+   *
+   * <p>Package-private for testing.
+   */
+  static void installJulToSlf4jBridge() {
+    SLF4JBridgeHandler.removeHandlersForRootLogger();
+    SLF4JBridgeHandler.install();
+  }
+
+  /**
    * Command-line entry point: {@code SagaServer <server.properties>}. The properties file holds
    * ScalarDB connection settings plus optional {@code scalar.db.saga.server.*} keys.
    *
@@ -566,6 +597,7 @@ public final class SagaServer implements AutoCloseable {
    * @throws InterruptedException if interrupted while awaiting shutdown
    */
   public static void main(String[] args) throws IOException, InterruptedException {
+    installJulToSlf4jBridge();
     if (args.length < 1) {
       throw new IllegalArgumentException("usage: SagaServer <server.properties>");
     }

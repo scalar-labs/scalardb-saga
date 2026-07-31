@@ -79,20 +79,53 @@ Refer to `~/git/scalardb-saga-design/docs/scalardb-saga-design.md` for architect
 
 ## Module Structure
 
-Subproject directories use short names; published artifacts are prefixed with `scalardb-saga-` (via `base.archivesName`).
+Subproject directories use short names; artifacts are prefixed with `scalardb-saga-` (via `base.archivesName` for the jar and the publication's `artifactId` for the coordinate — these are set separately).
 
-- `core` — Core engine (API, engine, store, recovery, testing harness)
-- Future: `spring`, `quarkus`, `participant`, `daemon`, `client`, `dev-server`, `lra`
+- `api` — Java-8-clean public API surface (interfaces, value types, exceptions)
+- `core` — Core engine (engine, store, recovery, testing harness)
+- `rpc` — gRPC wire contract (`.proto` plus generated stubs), Java 8
+- `grpc-client` — Java 8 daemon client SDK
+- `daemon` — Standalone server (REST + gRPC); ships as a container image, not a Maven artifact
+- `bom` — `java-platform` BOM pinning every published artifact to one version
+- Future: `spring`, `quarkus`, `participant`, `client` (HTTP SDK), `dev-server`, `lra`
+
+## Publishing
+
+See [RELEASING.md](RELEASING.md) for the release process.
+
+- **Maven group is `com.scalar-labs`**, not the Java package — set in `scalardb-saga.base-conventions`. Matches the other Scalar artifacts on Central; cannot change after the first release.
+- Published modules apply `id("scalardb-saga.publishing-conventions")` and **must set `description`** (Maven Central rejects a POM without one). The convention sets the `artifactId` explicitly — `base.archivesName` does not affect it.
+- The daemon is deliberately unpublished: it ships as a container image, so a jar on Central would be an artifact nobody consumes and everyone has to keep patched.
+- Snapshots publish from `main` and every release branch (`.github/workflows/release-snapshot.yml`); releases leave the Central deployment `VALIDATED` for a human to release, because a released version is immutable.
+
+## Container image
+
+See [daemon/docker/README.md](daemon/docker/README.md) for running it.
+
+- **Every external Gradle plugin goes through `build-logic`**, never a subproject's own `plugins {}` block: declaring one in a subproject gives that project a separate classloader scope and breaks Spotless' shared build service.
+- Netty must stay on a single version across all modules (`libs.versions.toml` `netty` + the BOM import in `:daemon`) — the native transports load version-matched `.so` files.
+- Built from `installDist`, not `distTar` (whose internal root embeds the version): `./gradlew :daemon:dockerBuild` locally, or `:daemon:dockerContext` + `docker/build-push-action` in CI.
 
 ## CI
 
-- **GitHub Actions** (`.github/workflows/ci.yml`) — runs `./gradlew check` (includes `test` + `spotlessCheck` + `spotbugsMain` + Error Prone) on push/PR to `main`
+- **GitHub Actions** (`.github/workflows/ci.yml`) — on push to `main` and the release branches, and on every PR:
+  - `check` — `./gradlew check` (`test` + `integrationTest` + `javadoc` + `spotlessCheck` + `spotbugsMain` + Error Prone), then a no-build-cache compile to surface warnings
+  - `dockerfile-lint` — hadolint over `daemon/docker/Dockerfile`
+  - `image-smoke-test` — builds the image and runs it against SQLite, asserting health on both transports, non-root uid, `INFO` logging, a clean `SIGTERM` drain, and that the epoll native transport actually loaded (a silent NIO fallback keeps the daemon healthy, so `/proc/1/maps` is the evidence)
+  - `image-arm64-native-test` — the same boot under QEMU on `linux/arm64`, asserting the `aarch_64` epoll native loads; only `linux-x86_64` arrives transitively, so nothing else catches a dropped classifier
+  - Both smoke jobs boot from the shared fixture in `.github/smoke/`
+- **Release** (`release.yml`, on `v<major>.<minor>.<patch>` tags, with or without a pre-release suffix) — asserts the tag matches `gradle.properties` and that the tagged commit is on the release branch its version names, then publishes to Maven Central, pushes the multi-arch image, signs it, and creates the GitHub release
+- **Dependabot** (`.github/dependabot.yml`) — gradle (incl. the version catalog), github-actions, and the Dockerfile base-image digest
+  - Dependabot resolves against Maven Central only: it reads repositories from the root build file and root settings, never from `build-logic`'s own block. The `repositories {}` block in `build.gradle.kts` is therefore load-bearing despite resolving nothing at build time — it is what makes the portal-only Error Prone, NullAway, SpotBugs, and license-report plugins visible. Deleting it freezes them silently.
+  - Every `[versions]` key needs a `[libraries]` entry pointing at it with `version.ref`, even one nothing resolves (see `junit-jupiter`). Dependabot reads only `[libraries]` and `[plugins]`; a version consumed solely as `libs.versions.<name>.get()` interpolation is one it cannot map to a module, so it never bumps it. Consume plugin coordinates in `build-logic` through catalog accessors, not interpolated strings.
 
 ## Git
 
-- **Trunk-based development**
+- **Trunk-based development with release branches** — every change lands on `main` first; releases are cut from minor version branches (`1.0`, `1.1`), never from `main`. Fixes are backported down the lines, never merged up. See [RELEASING.md](RELEASING.md).
+- Branches are named after the version they carry, with no prefix — major version branch `1`, minor version branch `1.0` — so they match the `[0-9]+` and `[0-9]+.[0-9]+` patterns every workflow keys off. A patch is a tag, not a branch.
 - **Conventional Commits** (e.g., `feat: add saga engine`, `fix: handle timeout`)
 
 ## TODO
 
-- [ ] Add CI workflow details once GitHub Actions are verified in CI
+- [ ] Verify the release workflow end to end on the first tag (Maven Central credentials and the ghcr push are untested)
+- [ ] Add the UBI variant of the daemon image if Red Hat Marketplace / OpenShift certification is needed

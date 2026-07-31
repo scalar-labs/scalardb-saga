@@ -1,0 +1,12 @@
+{
+  "name": "smoke-saga",
+  "mode": "SAGA",
+  "steps": [
+    {
+      "name": "charge",
+      "service": "payment",
+      "execution": { "method": "POST", "path": "/charge" },
+      "compensation": { "method": "POST", "path": "/refund" }
+    }
+  ]
+}
