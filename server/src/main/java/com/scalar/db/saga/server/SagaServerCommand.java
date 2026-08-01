@@ -59,9 +59,10 @@ public class SagaServerCommand implements Callable<Integer> {
 
   @Override
   public Integer call() throws Exception {
-    // picocli enforces required = true before it ever calls this, so a null here would be a picocli
-    // contract violation rather than an operator error.
-    Path path = Objects.requireNonNull(configFile, "configFile must have been set by picocli");
+    // Unreachable in practice: picocli rejects a missing required option before it calls this, so a
+    // null here would be a parser contract violation, not an operator error. The message names both
+    // spellings rather than the parser, since either one satisfies it.
+    Path path = Objects.requireNonNull(configFile, "--config or --properties must be set");
 
     Properties properties = new Properties();
     try (InputStream in = Files.newInputStream(path)) {
@@ -95,8 +96,8 @@ public class SagaServerCommand implements Callable<Integer> {
    * @param args the command-line arguments
    */
   public static void main(String[] args) {
-    // Exit with picocli's code so a usage error (a missing or unreadable --config) is a non-zero
-    // exit an init system or container runtime can act on, rather than a stack trace and a 1.
+    // Exit with the parsed exit code so a usage error (a missing or unreadable --config) becomes a
+    // non-zero exit an init system or container runtime can act on, rather than a stack trace.
     System.exit(run(args));
   }
 
@@ -108,7 +109,7 @@ public class SagaServerCommand implements Callable<Integer> {
    * makes {@code main} itself uncallable from a test JVM.
    *
    * @param args the command-line arguments
-   * @return the picocli exit code
+   * @return the exit code to pass to {@link System#exit}
    */
   static int run(String[] args) {
     SagaServer.installJulToSlf4jBridge();
