@@ -1,7 +1,7 @@
 # Releasing
 
 A release publishes two things from one tag: the Java artifacts to Maven Central, and the daemon
-container image to `ghcr.io/scalar-labs/scalardb-saga-daemon`.
+container image to `ghcr.io/scalar-labs/scalardb-saga-server`.
 
 ## What gets published
 
@@ -12,9 +12,9 @@ container image to `ghcr.io/scalar-labs/scalardb-saga-daemon`.
 | Wire contract | `com.scalar-labs:scalardb-saga-rpc` | The gRPC client, transitively |
 | Client SDK | `com.scalar-labs:scalardb-saga-grpc-client` | Java 8+ applications calling the daemon |
 | BOM | `com.scalar-labs:scalardb-saga-bom` | Anyone pinning several of the above |
-| Daemon image | `ghcr.io/scalar-labs/scalardb-saga-daemon` | Operators running daemon mode |
+| Server image | `ghcr.io/scalar-labs/scalardb-saga-server` | Operators running daemon mode |
 
-`:daemon` is deliberately not published to Maven Central — it ships as the image, so a jar on Central
+`:server` is deliberately not published to Maven Central — it ships as the image, so a jar on Central
 would be an artifact nobody consumes and everyone has to keep patched.
 
 The image carries one immutable tag per release — `1.0.0`, `1.0.1` — and nothing that floats. There is
@@ -342,7 +342,7 @@ a developer machine.
 ## Verifying a published image
 
 ```bash
-cosign verify ghcr.io/scalar-labs/scalardb-saga-daemon:1.0.0 \
+cosign verify ghcr.io/scalar-labs/scalardb-saga-server:1.0.0 \
   --certificate-identity=https://github.com/scalar-labs/scalardb-saga/.github/workflows/release.yml@refs/tags/v1.0.0 \
   --certificate-oidc-issuer=https://token.actions.githubusercontent.com
 ```
@@ -362,13 +362,13 @@ dispatched re-run is rejected unless it targets the tag, so it signs under the s
 Each image also carries an SBOM and a build provenance attestation:
 
 ```bash
-docker buildx imagetools inspect ghcr.io/scalar-labs/scalardb-saga-daemon:1.0.0
+docker buildx imagetools inspect ghcr.io/scalar-labs/scalardb-saga-server:1.0.0
 ```
 
 ## Building locally
 
 ```bash
-./gradlew :daemon:dockerBuild     # single architecture, loaded into the local Docker
+./gradlew :server:dockerBuild     # single architecture, loaded into the local Docker
 ./gradlew publishToMavenLocal     # all published artifacts into ~/.m2, unsigned
 ```
 

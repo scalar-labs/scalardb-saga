@@ -24,7 +24,7 @@ dependencies {
 // The generated stubs (build/generated/source/proto) are machine-generated, not hand-written, and live
 // inside the NullAway-annotated `com.scalar.db.saga` package. Exclude them from the static-analysis
 // stack so generated code can't fail the build. Module-local — this does not loosen analysis for the
-// hand-written api/core/daemon modules.
+// hand-written api/core/server modules.
 spotless {
     java {
         targetExclude("build/generated/**")

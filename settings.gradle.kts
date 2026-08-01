@@ -7,6 +7,6 @@ rootProject.name = "scalardb-saga"
 include("api")
 include("bom")
 include("core")
-include("daemon")
+include("server")
 include("rpc")
 include("grpc-client")
