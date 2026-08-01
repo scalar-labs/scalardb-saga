@@ -95,5 +95,5 @@ LABEL name="scalardb-saga-server" \
       vendor="Scalar, Inc." \
       version="${IMAGE_VERSION}" \
       release="${IMAGE_REVISION}" \
-      summary="ScalarDB Saga Daemon Container Image" \
+      summary="ScalarDB Saga Server Container Image" \
       description="ScalarDB Saga is a modern saga orchestration engine for microservices. It coordinates eventually consistent distributed transactions across services using the Saga pattern (steps with compensations) and TCC (try/confirm/cancel), keeping saga state durable in a database of your choice — with no message broker to operate."

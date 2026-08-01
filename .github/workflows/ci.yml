@@ -125,7 +125,7 @@ jobs:
           docker run --detach --name saga \
             --publish 12080:12080 --publish 12051:12051 \
             --volume "$PWD/.github/smoke:/smoke:ro" \
-            scalardb-saga-server:ci /smoke/server.properties
+            scalardb-saga-server:ci --config /smoke/server.properties
 
       - name: Wait for the REST health endpoint
         run: |
@@ -252,7 +252,7 @@ jobs:
           docker run --detach --name saga-arm64 --platform linux/arm64 \
             --publish 12080:12080 \
             --volume "$PWD/.github/smoke:/smoke:ro" \
-            scalardb-saga-server:ci-arm64 /smoke/server.properties
+            scalardb-saga-server:ci-arm64 --config /smoke/server.properties
 
       # A far longer budget than the native job: every instruction the JVM executes is translated, and
       # startup is the translation-heavy phase.

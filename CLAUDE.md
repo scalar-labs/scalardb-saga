@@ -128,4 +128,4 @@ See [server/docker/README.md](server/docker/README.md) for running it.
 ## TODO
 
 - [ ] Verify the release workflow end to end on the first tag (Maven Central credentials and the ghcr push are untested)
-- [ ] Add the UBI variant of the daemon image if Red Hat Marketplace / OpenShift certification is needed
+- [ ] Add the UBI variant of the server image if Red Hat Marketplace / OpenShift certification is needed

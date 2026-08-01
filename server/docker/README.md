@@ -1,10 +1,10 @@
-# ScalarDB Saga daemon image
+# ScalarDB Saga server image
 
 `ghcr.io/scalar-labs/scalardb-saga-server` runs the saga engine as a service, exposing it over REST
 (`12080`) and gRPC (`12051`). Built for `linux/amd64` and `linux/arm64`.
 
 Build it yourself with `./gradlew :server:dockerBuild`: that assembles the context from the
-`Dockerfile` in this directory plus the daemon distribution, and loads a single-architecture image
+`Dockerfile` in this directory plus the server distribution, and loads a single-architecture image
 tagged with the project version. See [RELEASING.md](../../RELEASING.md) for how the published image
 is built and signed, and how to verify its signature.
 
