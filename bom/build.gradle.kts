@@ -8,7 +8,10 @@ plugins {
 //
 //     implementation(platform("com.scalar-labs:scalardb-saga-bom:<version>"))
 //     implementation("com.scalar-labs:scalardb-saga-core")
-//     implementation("com.scalar-labs:scalardb-saga-grpc-client")
+//
+// One artifact is enough to show the mechanism; which ones a given application declares depends on
+// whether it embeds the engine or calls the daemon, and RELEASING.md is the one place that explains
+// that.
 //
 // This module holds no code and applies no java-conventions — a `java-platform` cannot also be a
 // `java-library`, which is why the shared coordinates live in base-conventions.
@@ -24,6 +27,6 @@ dependencies {
         api(project(":api"))
         api(project(":core"))
         api(project(":rpc"))
-        api(project(":grpc-client"))
+        api(project(":client"))
     }
 }
