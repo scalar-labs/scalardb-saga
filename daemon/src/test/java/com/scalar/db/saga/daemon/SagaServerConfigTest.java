@@ -752,9 +752,19 @@ class SagaServerConfigTest {
   }
 
   @Test
-  void shutdownTimeoutMillis_zero_throwsIllegalArgumentException() {
+  void shutdownTimeoutMillis_zero_isAccepted() {
     Properties props = new Properties();
+    // 0 is a drain of nothing, not a disabled setting: the engine accepts it and cancels in-flight
+    // work at once, so the daemon must be able to express it too.
     props.setProperty(SagaServerConfig.SHUTDOWN_TIMEOUT_MILLIS_KEY, "0");
+
+    assertThat(SagaServerConfig.load(props).shutdownTimeoutMillis()).isZero();
+  }
+
+  @Test
+  void shutdownTimeoutMillis_negative_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SHUTDOWN_TIMEOUT_MILLIS_KEY, "-1");
 
     assertThatThrownBy(() -> SagaServerConfig.load(props))
         .isInstanceOf(IllegalArgumentException.class);

@@ -99,7 +99,9 @@ import org.jspecify.annotations.Nullable;
  *       in-flight sagas to reach a terminal state
  *   <li>{@code shutdown.timeout_millis} — ceiling (ms) on that drain (default {@value
  *       #DEFAULT_SHUTDOWN_TIMEOUT_MILLIS}). It is the second of the two shutdown windows the daemon
- *       spends in sequence; budget a container's termination grace period for their sum
+ *       spends in sequence; budget a container's termination grace period for their sum. {@code 0}
+ *       drains nothing: in-flight work is cancelled at once and left for the recovery scan, which
+ *       trades shutdown latency for reclaim latency on the next boot
  * </ul>
  *
  * <h2>Crash recovery ({@code recovery.*})</h2>
@@ -473,12 +475,15 @@ public final class SagaServerConfig {
             DEFAULT_SYNC_MAX_WAIT_MILLIS,
             1L);
     this.shutdownMode = parseShutdownMode(resolved.getProperty(SHUTDOWN_MODE_KEY));
+    // 0 is a real setting, not a disabled one: it drains nothing and cancels in flight work at
+    // once. The engine accepts it, so the daemon must too, or daemon mode cannot express a
+    // configuration embedded mode can.
     this.shutdownTimeoutMillis =
         parseBoundedLong(
             resolved.getProperty(SHUTDOWN_TIMEOUT_MILLIS_KEY),
             SHUTDOWN_TIMEOUT_MILLIS_KEY,
             DEFAULT_SHUTDOWN_TIMEOUT_MILLIS,
-            1L);
+            0L);
     this.recoveryConfig = parseRecoveryConfig(resolved);
     this.retentionConfig = parseRetentionConfig(resolved);
     this.securityProvider = parseSecurityProvider(resolved.getProperty(SECURITY_PROVIDER_KEY));

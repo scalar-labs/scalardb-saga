@@ -124,7 +124,9 @@ in-flight work. The daemon drains in two windows, one after the other, so budget
 - **Saga engine drain** — `shutdown.timeout_millis`, 30s by default. Under the default
   `shutdown.mode=WAIT_CURRENT_STEP` the engine only finishes each running step and leaves the saga
   for recovery, so this window is rarely spent in full; `WAIT_ALL_SAGAS` instead waits for in-flight
-  sagas to reach a terminal state, which needs a window sized to your longest saga.
+  sagas to reach a terminal state, which needs a window sized to your longest saga. Setting it to
+  `0` skips this window entirely, cancelling in-flight work at once and leaving all of it to the
+  recovery scan.
 
 At defaults that totals 95s. Set `terminationGracePeriodSeconds` above the sum; below it, the daemon
 is `SIGKILL`ed mid-drain.

@@ -92,6 +92,21 @@ class SagaServerStartupIntegrationTest {
     }
   }
 
+  @Test
+  void close_withZeroShutdownTimeout_drainsNothingAndReturns() throws Exception {
+    Properties props = storeProperties();
+    props.setProperty(
+        SagaServerConfig.SERVICE_KEY_PREFIX + "account" + SagaServerConfig.SERVICE_BASE_URL_SUFFIX,
+        "http://127.0.0.1:1");
+    // A drain of nothing: every deadline the close path computes has already passed. The managers
+    // and the async executor must take their skip-the-wait branch rather than block or throw.
+    props.setProperty(SagaServerConfig.SHUTDOWN_TIMEOUT_MILLIS_KEY, "0");
+
+    SagaServer server = new SagaServer(SagaServerConfig.load(props)).start();
+    assertThat(server.port()).isPositive();
+    server.close();
+  }
+
   /** The store and transport settings every case here needs: a SQLite file and ephemeral ports. */
   private Properties storeProperties() {
     Properties props = new Properties();
