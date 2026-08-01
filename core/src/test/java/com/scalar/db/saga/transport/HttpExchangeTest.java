@@ -112,6 +112,34 @@ class HttpExchangeTest {
   }
 
   @Test
+  void exchange_defaultHeaderNamedLikeCorrelationHeader_sendsOnlyTheFrameworkValue()
+      throws Exception {
+    // Arrange — a server that records every X-Saga-Id value it received, not just the first. An
+    // endpoint default of that name must not survive: the JDK's header() appends, so applying the
+    // framework value after the defaults would send both and leave the participant to pick.
+    java.util.concurrent.atomic.AtomicReference<List<String>> received =
+        new java.util.concurrent.atomic.AtomicReference<>();
+    server.createContext(
+        "/correlation",
+        ex -> {
+          received.set(List.copyOf(ex.getRequestHeaders().get("X-Saga-Id")));
+          respond(ex, 200, "{}");
+        });
+    com.scalar.db.saga.transport.HttpExchange withDefaults =
+        new com.scalar.db.saga.transport.HttpExchange(
+            HttpClient.newHttpClient(),
+            OutboundHttpPolicy.allowAll(),
+            Map.of("X-Saga-Id", "spoofed"));
+
+    // Act
+    withDefaults.exchange(
+        "GET", baseUrl, "/correlation", NO_PARAMS, NO_PARAMS, null, null, "saga-1", "s", null);
+
+    // Assert — exactly one value, the framework's.
+    assertThat(received.get()).containsExactly("saga-1");
+  }
+
+  @Test
   void exchange_2xxJsonObject_returnsDecodableResponse() throws Exception {
     HttpCallResponse response =
         exchange.exchange(
