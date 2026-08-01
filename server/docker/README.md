@@ -1,7 +1,7 @@
 # ScalarDB Saga daemon image
 
 `ghcr.io/scalar-labs/scalardb-saga-server` runs the saga engine as a service, exposing it over REST
-(`8080`) and gRPC (`50051`). Built for `linux/amd64` and `linux/arm64`.
+(`12080`) and gRPC (`12051`). Built for `linux/amd64` and `linux/arm64`.
 
 Build it yourself with `./gradlew :server:dockerBuild`: that assembles the context from the
 `Dockerfile` in this directory plus the daemon distribution, and loads a single-architecture image
@@ -20,7 +20,7 @@ first presents a credential.
 
 ```bash
 docker run --rm \
-  --publish 8080:8080 --publish 50051:50051 \
+  --publish 12080:12080 --publish 12051:12051 \
   --volume "$PWD/conf:/scalardb-saga/conf:ro" \
   --env SCALAR_DB_USERNAME=saga --env SCALAR_DB_PASSWORD=... \
   ghcr.io/scalar-labs/scalardb-saga-server:1.0.0
@@ -77,10 +77,10 @@ in 1.27), and each transport carries its own check, so whichever one you run sta
 livenessProbe:
   httpGet:
     path: /health
-    port: 8080
+    port: 12080
 readinessProbe:
   grpc:
-    port: 50051
+    port: 12051
 ```
 
 `GET /health` and the `grpc.health.v1.Health` service are both reachable without a credential, by

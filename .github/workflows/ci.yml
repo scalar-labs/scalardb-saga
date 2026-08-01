@@ -123,7 +123,7 @@ jobs:
       - name: Start the container
         run: |
           docker run --detach --name saga \
-            --publish 8080:8080 --publish 50051:50051 \
+            --publish 12080:12080 --publish 12051:12051 \
             --volume "$PWD/.github/smoke:/smoke:ro" \
             scalardb-saga-server:ci /smoke/server.properties
 
@@ -131,7 +131,7 @@ jobs:
         run: |
           set -euo pipefail
           for _ in $(seq 1 60); do
-            if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/health)" = "200" ]; then
+            if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:12080/health)" = "200" ]; then
               echo "GET /health returned 200"
               exit 0
             fi
@@ -170,7 +170,7 @@ jobs:
       - name: Check the gRPC port is bound
         # Block scalar because the command contains ": ", which YAML would otherwise read as a mapping.
         run: |
-          timeout 30 bash -c 'until : < /dev/tcp/127.0.0.1/50051; do sleep 1; done'
+          timeout 30 bash -c 'until : < /dev/tcp/127.0.0.1/12051; do sleep 1; done'
 
       # Guards against a regression in the shipped logback.xml: with no configuration on the classpath
       # Logback would default to DEBUG, flooding an operator's log pipeline.
@@ -250,7 +250,7 @@ jobs:
       - name: Start the container
         run: |
           docker run --detach --name saga-arm64 --platform linux/arm64 \
-            --publish 8080:8080 \
+            --publish 12080:12080 \
             --volume "$PWD/.github/smoke:/smoke:ro" \
             scalardb-saga-server:ci-arm64 /smoke/server.properties
 
@@ -260,7 +260,7 @@ jobs:
         run: |
           set -euo pipefail
           for _ in $(seq 1 150); do
-            if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/health)" = "200" ]; then
+            if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:12080/health)" = "200" ]; then
               echo "GET /health returned 200"
               exit 0
             fi

@@ -292,8 +292,8 @@ public final class SagaServerConfig {
   static final String STORE_MAX_EVENT_PAYLOAD_BYTES_KEY = PREFIX + "store.max_event_payload_bytes";
 
   static final String DEFAULT_HOST = "0.0.0.0";
-  static final int DEFAULT_HTTP_PORT = 8080;
-  static final int DEFAULT_GRPC_PORT = 50051;
+  static final int DEFAULT_HTTP_PORT = 12080;
+  static final int DEFAULT_GRPC_PORT = 12051;
   static final boolean DEFAULT_HTTP_ENABLED = true;
   static final boolean DEFAULT_GRPC_ENABLED = true;
   static final int DEFAULT_GRPC_MAX_INBOUND_METADATA_BYTES = 8 * 1024;

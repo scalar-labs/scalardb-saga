@@ -263,6 +263,22 @@ class SagaServerConfigTest {
   }
 
   @Test
+  void load_unsetGrpcPort_usesDefault() {
+    assertThat(SagaServerConfig.load(new Properties()).grpcPort())
+        .isEqualTo(SagaServerConfig.DEFAULT_GRPC_PORT);
+  }
+
+  @Test
+  void defaultPorts_areTheDocumentedValues() {
+    // Pinned as literals, not against the constants the parser reads, so that changing a default
+    // has to be a deliberate edit here as well. These numbers are published in the image's EXPOSE,
+    // the compose and Kubernetes examples, and the shipped server.properties; a silent change would
+    // leave those wrong.
+    assertThat(SagaServerConfig.DEFAULT_HTTP_PORT).isEqualTo(12_080);
+    assertThat(SagaServerConfig.DEFAULT_GRPC_PORT).isEqualTo(12_051);
+  }
+
+  @Test
   void load_unsetHost_usesDefault() {
     assertThat(SagaServerConfig.load(new Properties()).host())
         .isEqualTo(SagaServerConfig.DEFAULT_HOST);
@@ -822,9 +838,9 @@ class SagaServerConfigTest {
   void load_samePortWithOneTransportDisabled_isAccepted() {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
-    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "50051");
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "12051");
 
-    assertThat(SagaServerConfig.load(props).httpPort()).isEqualTo(50_051);
+    assertThat(SagaServerConfig.load(props).httpPort()).isEqualTo(12_051);
   }
 
   @Test

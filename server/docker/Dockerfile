@@ -61,9 +61,9 @@ COPY LICENSE THIRD-PARTY-NOTICES.txt /licenses/
 
 USER 201:201
 
-# The SagaServerConfig defaults: 8080 REST, 50051 gRPC. Both transports are on by default and either
+# The SagaServerConfig defaults: 12080 REST, 12051 gRPC. Both transports are on by default and either
 # can be disabled in the configuration, in which case its port simply goes unbound.
-EXPOSE 8080 50051
+EXPOSE 12080 12051
 
 # No entrypoint wrapper script. Container-aware JVM flags (MaxRAMPercentage, ExitOnOutOfMemoryError)
 # are baked into the start script by Gradle's applicationDefaultJvmArgs, and JAVA_OPTS still
