@@ -11,7 +11,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * End-to-end coverage of the <b>bounded synchronous start</b> ({@code
- * scalar.db.saga.server.sync_timeout_millis}). With a small sync timeout configured: a saga whose
+ * scalar.db.saga.server.sync.timeout_millis}). With a small sync timeout configured: a saga whose
  * participant answers quickly finishes within the bound and returns {@code 200}; a saga whose
  * participant is slower than the bound returns {@code 202} (the request thread is released) and the
  * saga keeps running on the engine's executor, reaching {@code COMPLETED} once the participant

@@ -174,7 +174,7 @@ public final class SagaServer implements AutoCloseable {
         .addService(intercepted(adminService, security))
         .addService(health.getHealthService())
         .maxInboundMessageSize(config.grpcMaxInboundMessageBytes())
-        .maxInboundMetadataSize(8 * 1024)
+        .maxInboundMetadataSize(config.grpcMaxInboundMetadataBytes())
         .executor(executor)
         .permitKeepAliveTime(1, TimeUnit.MINUTES)
         .build();
@@ -204,8 +204,13 @@ public final class SagaServer implements AutoCloseable {
     Objects.requireNonNull(config, "config must not be null");
     DefaultSagaOrchestrator.Builder builder =
         DefaultSagaOrchestrator.newBuilder()
-            .storeFactory(ScalarDbSagaStoreFactory.create(config.properties()));
-    config.serviceBaseUrls().forEach((name, baseUrl) -> builder.httpEndpoint(name, baseUrl).add());
+            .storeFactory(ScalarDbSagaStoreFactory.create(config.properties()))
+            .ownerId(config.ownerId())
+            .shutdownMode(config.shutdownMode())
+            .shutdownTimeoutMillis(config.shutdownTimeoutMillis())
+            .recoveryConfig(config.recoveryConfig())
+            .retentionConfig(config.retentionConfig());
+    config.services().forEach((name, service) -> addHttpEndpoint(builder, name, service));
     // Enable async-callback provisioning only when both the callback base URL and secret are set;
     // otherwise no provider is wired and registering an async definition fails fast (in the
     // engine).
@@ -215,6 +220,26 @@ public final class SagaServer implements AutoCloseable {
               config.callbackBaseUrl().get(), config.callbackSecret().get(), Clock.systemUTC()));
     }
     return builder.build();
+  }
+
+  /**
+   * Registers one configured service as an HTTP endpoint, applying the optional outbound policy.
+   * {@code allowedHosts} and {@code maxBodyBytes} are applied only when configured, so an unset key
+   * leaves the engine's own default in place rather than overwriting it with a sentinel.
+   */
+  private static void addHttpEndpoint(
+      DefaultSagaOrchestrator.Builder builder,
+      String name,
+      SagaServerConfig.ServiceConfig service) {
+    DefaultSagaOrchestrator.Builder.HttpEndpointBuilder endpoint =
+        builder.httpEndpoint(name, service.baseUrl());
+    if (!service.allowedHosts().isEmpty()) {
+      endpoint.allowedHosts(service.allowedHosts().toArray(new String[0]));
+    }
+    if (service.maxBodyBytes() > 0) {
+      endpoint.maxBodyBytes(service.maxBodyBytes());
+    }
+    endpoint.defaultHeaders(service.headers()).add();
   }
 
   private void loadDefinitions() {
@@ -303,7 +328,7 @@ public final class SagaServer implements AutoCloseable {
    * requests wait before the server sheds load (fast failure) rather than queueing unboundedly.
    */
   private static Javalin createHttpServer(SagaServerConfig config) {
-    int queueCap = config.maxQueuedRequests();
+    int queueCap = config.httpMaxQueuedRequests();
     // A fixed-capacity queue (initial == growBy == max == cap): it never grows past the cap, so the
     // backlog is memory-bounded and the pool rejects further work once threads and queue are full.
     BlockingArrayQueue<Runnable> jobQueue = new BlockingArrayQueue<>(queueCap, queueCap, queueCap);
@@ -311,8 +336,8 @@ public final class SagaServer implements AutoCloseable {
         cfg ->
             cfg.jetty.threadPool =
                 new QueuedThreadPool(
-                    config.maxThreads(),
-                    config.minThreads(),
+                    config.httpMaxThreads(),
+                    config.httpMinThreads(),
                     (int) THREAD_POOL_IDLE_TIMEOUT_MILLIS,
                     jobQueue));
   }
@@ -352,13 +377,13 @@ public final class SagaServer implements AutoCloseable {
   }
 
   /**
-   * The bound on a single-saga admin inline drive: {@code sync_max_wait_millis} — the daemon's
+   * The bound on a single-saga admin inline drive: {@code sync.max_wait_millis} — the daemon's
    * standing ceiling on how long any request may hold a thread — tightened by {@code
-   * sync_timeout_millis} when that is set. This mirrors the terms {@code
+   * sync.timeout_millis} when that is set. This mirrors the terms {@code
    * SagaServiceImpl.computeBoundMillis} applies on the request-thread paths, minus the per-call
    * gRPC client deadline, which has no REST analogue. Past the bound the durable transition is
    * already recorded and the response carries the saga's current state, so the bound only caps how
-   * long the request waits, never correctness. Reusing {@code sync_max_wait_millis} keeps the drive
+   * long the request waits, never correctness. Reusing {@code sync.max_wait_millis} keeps the drive
    * inside the shutdown drain window {@link #grpcDrainMillis()} derives from the same value.
    */
   private long adminDriveDeadlineMillis() {
@@ -431,7 +456,7 @@ public final class SagaServer implements AutoCloseable {
       warnIfRateLimitGlobalUnderNoop();
       orchestrator.startBackgroundTasks();
       if (httpServer != null) {
-        httpServer.start(config.host(), config.port());
+        httpServer.start(config.host(), config.httpPort());
       }
       if (grpcServer != null) {
         grpcServer.start();
@@ -542,10 +567,10 @@ public final class SagaServer implements AutoCloseable {
   }
 
   /**
-   * The graceful gRPC drain window (ms). Derived from {@code sync_max_wait_millis} so an in-flight
+   * The graceful gRPC drain window (ms). Derived from {@code sync.max_wait_millis} so an in-flight
    * bounded-sync {@code StartSaga}/{@code AwaitSaga} call can reach its own wait ceiling before we
    * force-cancel it: a fixed 30s drain would cut a legitimate 60s (default) wait in half, and the
-   * gap would widen further whenever an operator raises {@code sync_max_wait_millis}. Kept at a
+   * gap would widen further whenever an operator raises {@code sync.max_wait_millis}. Kept at a
    * {@value #GRPC_SHUTDOWN_MIN_SECONDS}s floor for small ceilings, and padded with {@value
    * #GRPC_SHUTDOWN_SLACK_MILLIS}ms of slack so the call unwinds before the deadline rather than at
    * it.

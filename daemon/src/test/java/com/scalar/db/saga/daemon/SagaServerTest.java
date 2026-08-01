@@ -64,7 +64,7 @@ class SagaServerTest {
 
   private static SagaServerConfig configWithDefinitionsPath(Path path) {
     Properties props = new Properties();
-    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, path.toString());
     return SagaServerConfig.load(props);
   }
@@ -86,7 +86,7 @@ class SagaServerTest {
     // Arrange — a definition with no timeout, and a server default of 30s
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     Properties props = new Properties();
-    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
     props.setProperty(SagaServerConfig.DEFAULT_SAGA_TIMEOUT_MILLIS_KEY, "30000");
     DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
@@ -106,7 +106,7 @@ class SagaServerTest {
     // Arrange — a definition that sets its own timeout, and a different server default
     Files.writeString(dir.resolve("saga.json"), declarativeJsonWithTimeout("saga", 5000));
     Properties props = new Properties();
-    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
     props.setProperty(SagaServerConfig.DEFAULT_SAGA_TIMEOUT_MILLIS_KEY, "30000");
     DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
@@ -183,7 +183,7 @@ class SagaServerTest {
   @Test
   void constructor_noDefinitionsPath_throwsAndClosesOrchestrator() {
     Properties props = new Properties();
-    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
 
     assertThatThrownBy(() -> new SagaServer(SagaServerConfig.load(props), orchestrator))
@@ -238,7 +238,7 @@ class SagaServerTest {
     try {
       Properties props = new Properties();
       props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
-      props.setProperty(SagaServerConfig.PORT_KEY, Integer.toString(portHolder.port()));
+      props.setProperty(SagaServerConfig.HTTP_PORT_KEY, Integer.toString(portHolder.port()));
       props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
       DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
       SagaServer server = new SagaServer(SagaServerConfig.load(props), orchestrator);
@@ -271,7 +271,7 @@ class SagaServerTest {
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.HOST_KEY, "0.0.0.0");
-    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
     SagaServer server =
         new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class));
@@ -287,7 +287,7 @@ class SagaServerTest {
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.HOST_KEY, "0.0.0.0");
-    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
     props.setProperty(SagaServerConfig.INSECURE_MODE_ENABLED_KEY, "true");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
@@ -304,7 +304,7 @@ class SagaServerTest {
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
-    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
     try (SagaServer server =
@@ -322,10 +322,10 @@ class SagaServerTest {
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
-    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
-    props.setProperty(SagaServerConfig.MAX_QUEUED_REQUESTS_KEY, "16"); // small explicit cap
+    props.setProperty(SagaServerConfig.HTTP_MAX_QUEUED_REQUESTS_KEY, "16"); // small explicit cap
     try (SagaServer server =
         new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class)).start()) {
       // The 4-arg QueuedThreadPool (bounded job queue) boots and binds the HTTP port; a bad queue
@@ -335,20 +335,21 @@ class SagaServerTest {
   }
 
   @Test
-  void start_callbackSecretWithoutBaseUrl_registersCallbackRoute(@TempDir Path dir)
-      throws Exception {
+  void start_callbackConfigured_registersCallbackRoute(@TempDir Path dir) throws Exception {
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
-    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
-    props.setProperty(SagaServerConfig.CALLBACK_SECRET_KEY, "s3cr3t"); // secret set, no base URL
+    // Both callback keys: the config layer requires them together, so this is the only shape in
+    // which the callback route exists.
+    props.setProperty(SagaServerConfig.CALLBACK_SECRET_KEY, "s3cr3t");
+    props.setProperty(SagaServerConfig.CALLBACK_BASE_URL_KEY, "http://127.0.0.1:8080");
     try (SagaServer server =
         new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class)).start()) {
-      // The callback route is gated on the secret alone (verifying a callback needs no base URL),
-      // so
-      // it is registered: a bad-token request is authenticated-and-rejected (401), not 404.
+      // The route is registered, so a bad-token request is authenticated-and-rejected (401) rather
+      // than missing (404).
       assertThat(postComplete(server.port()).statusCode()).isEqualTo(401);
     }
   }
@@ -358,7 +359,7 @@ class SagaServerTest {
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
-    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
     // No callback secret configured → no callback route registered.
@@ -378,7 +379,7 @@ class SagaServerTest {
     Path keyFile = Files.writeString(dir.resolve("apikey.secret"), "s3cr3t-key");
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
-    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
     props.setProperty(SagaServerConfig.SECURITY_PROVIDER_KEY, "apikey");
@@ -439,7 +440,7 @@ class SagaServerTest {
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
-    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
     try (SagaServer server =
@@ -462,7 +463,7 @@ class SagaServerTest {
   private SagaServer serverWithSyncMaxWait(Path dir, long syncMaxWaitMillis) throws Exception {
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     Properties props = new Properties();
-    props.setProperty(SagaServerConfig.PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
     props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, Long.toString(syncMaxWaitMillis));
     return new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class));
