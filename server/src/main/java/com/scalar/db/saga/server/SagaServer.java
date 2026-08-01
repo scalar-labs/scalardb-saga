@@ -28,7 +28,6 @@ import io.grpc.netty.NettyServerBuilder;
 import io.grpc.protobuf.services.HealthStatusManager;
 import io.javalin.Javalin;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.nio.file.Files;
@@ -38,8 +37,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
-import java.util.Properties;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -597,10 +594,10 @@ public final class SagaServer implements AutoCloseable {
    * <p>Removing the root handlers first drops JUL's default {@code ConsoleHandler}, which would
    * otherwise keep printing every record a second time in its own format.
    *
-   * <p>Called only from {@link #main}, deliberately. Installing a handler on the JVM-wide JUL root
-   * logger is an application's decision to make, not a library's: an application that embeds the
-   * engine must be free to configure its own logging, so this must not run merely because a {@link
-   * SagaServer} was constructed.
+   * <p>Called only from {@link SagaServerCommand#main}, deliberately. Installing a handler on the
+   * JVM-wide JUL root logger is an application's decision to make, not a library's: an application
+   * that embeds the engine must be free to configure its own logging, so this must not run merely
+   * because a {@link SagaServer} was constructed.
    *
    * <p>The bridge is only cheap when paired with Logback's {@code LevelChangePropagator}, which the
    * shipped {@code logback.xml} enables: without it JUL builds a {@code LogRecord} for every call
@@ -611,35 +608,5 @@ public final class SagaServer implements AutoCloseable {
   static void installJulToSlf4jBridge() {
     SLF4JBridgeHandler.removeHandlersForRootLogger();
     SLF4JBridgeHandler.install();
-  }
-
-  /**
-   * Command-line entry point: {@code SagaServer <server.properties>}. The properties file holds
-   * ScalarDB connection settings plus optional {@code scalar.db.saga.server.*} keys.
-   *
-   * @param args {@code args[0]} is the path to the server properties file
-   * @throws IOException if the properties file cannot be read
-   * @throws InterruptedException if interrupted while awaiting shutdown
-   */
-  public static void main(String[] args) throws IOException, InterruptedException {
-    installJulToSlf4jBridge();
-    if (args.length < 1) {
-      throw new IllegalArgumentException("usage: SagaServer <server.properties>");
-    }
-    Properties properties = new Properties();
-    try (InputStream in = Files.newInputStream(Path.of(args[0]))) {
-      properties.load(in);
-    }
-    SagaServer server = new SagaServer(SagaServerConfig.load(properties)).start();
-    CountDownLatch shutdown = new CountDownLatch(1);
-    Runtime.getRuntime()
-        .addShutdownHook(
-            new Thread(
-                () -> {
-                  server.close();
-                  shutdown.countDown();
-                },
-                "saga-server-shutdown"));
-    shutdown.await();
   }
 }

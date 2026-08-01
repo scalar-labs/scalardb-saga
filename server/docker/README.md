@@ -39,7 +39,7 @@ startup, because an operator cannot add classes to this image. Use a declarative
 Point the daemon at a different file by overriding the command:
 
 ```bash
-docker run ... ghcr.io/scalar-labs/scalardb-saga-server:1.0.0 /etc/saga/other.properties
+docker run ... ghcr.io/scalar-labs/scalardb-saga-server:1.0.0 --config /etc/saga/other.properties
 ```
 
 Secrets do not have to be baked in. Any value under `scalar.db.saga.*` accepts `${env:NAME}` or

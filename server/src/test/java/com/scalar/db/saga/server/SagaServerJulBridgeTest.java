@@ -1,7 +1,6 @@
 package com.scalar.db.saga.server;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.tuple;
 
 import ch.qos.logback.classic.Level;
@@ -22,13 +21,14 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 import org.slf4j.bridge.SLF4JBridgeHandler;
+import picocli.CommandLine;
 
 /**
  * Covers the path that keeps gRPC's {@code java.util.logging} output inside the daemon's Logback
  * configuration: {@link SagaServer#installJulToSlf4jBridge()}, which routes the records, {@link
- * SagaServer#main}, which is the sole caller and therefore the only reason the routing happens at
- * all, and the {@code LevelChangePropagator} in the shipped {@code logback.xml}, which is what
- * makes routing them affordable.
+ * SagaServerCommand#run}, which is the sole caller and therefore the only reason the routing
+ * happens at all, and the {@code LevelChangePropagator} in the shipped {@code logback.xml}, which
+ * is what makes routing them affordable.
  *
  * <p>Lives in its own class because it mutates JVM-wide state; the root JUL logger's handlers and
  * level, the JUL test loggers' levels, and the root Logback logger's level and appenders. All are
@@ -161,15 +161,15 @@ class SagaServerJulBridgeTest {
     java.util.logging.Logger julRoot = LogManager.getLogManager().getLogger("");
     julRoot.addHandler(new java.util.logging.ConsoleHandler());
 
-    // Act — main installs the bridge before it validates its arguments, so the usage error reaches
-    // the wiring without a properties file or a started server. That ordering is the thing being
-    // pinned: validating first would leave this failing, and would also mean the entry point can
+    // Act — the entry point installs the bridge before it parses its arguments, so the usage error
+    // reaches the wiring without a properties file or a started server. That ordering is the thing
+    // being pinned: parsing first would leave this failing, and would also mean the entry point can
     // exit before the daemon's logging is configured.
-    assertThatThrownBy(() -> SagaServer.main(new String[0]))
-        .isInstanceOf(IllegalArgumentException.class);
+    int exitCode = SagaServerCommand.run(new String[0]);
+    assertThat(exitCode).isEqualTo(CommandLine.ExitCode.USAGE);
 
     // Assert — the entry point installs the handler, not merely the method it is supposed to call.
-    // Every other test here calls installJulToSlf4jBridge() itself, so deleting the call from main
+    // Every other test here calls installJulToSlf4jBridge() itself, so deleting the call from run()
     // would restore unbridged gRPC logging with the whole class still green.
     assertThat(julRoot.getHandlers()).hasSize(1);
     assertThat(julRoot.getHandlers()[0]).isInstanceOf(SLF4JBridgeHandler.class);

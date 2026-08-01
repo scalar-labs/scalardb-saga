@@ -5,7 +5,7 @@ plugins {
 }
 
 application {
-    mainClass = "com.scalar.db.saga.server.SagaServer"
+    mainClass = "com.scalar.db.saga.server.SagaServerCommand"
 
     // Without this, the start script, its install directory, and the distribution archives are all
     // named after the Gradle project ("server"), which is too generic to identify the product on an
@@ -26,6 +26,15 @@ application {
         // without making progress.
         "-XX:+ExitOnOutOfMemoryError",
     )
+}
+
+// The version picocli reports for --version. Read from the manifest at run time rather than baked
+// into the annotation, so it cannot drift from the build. Deterministic, so it does not disturb the
+// reproducible-archive settings in java-conventions.
+tasks.jar {
+    manifest {
+        attributes("Implementation-Version" to project.version)
+    }
 }
 
 dependencies {
@@ -51,6 +60,7 @@ dependencies {
     implementation(libs.protobuf.java)
     implementation(libs.javalin)
     implementation(libs.nimbus.jose.jwt)
+    implementation(libs.picocli)
     implementation(libs.commons.text)
     implementation(libs.slf4j.api)
     // Not runtimeOnly: SagaServer.main installs the bridge handler itself, so SLF4JBridgeHandler has

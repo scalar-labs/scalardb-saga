@@ -75,7 +75,7 @@ EXPOSE 8080 50051
 # and the daemon serves both `GET /health` and the standard grpc.health.v1.Health service — the
 # latter deliberately left unauthenticated so a gRPC-only deployment stays probeable.
 ENTRYPOINT ["/scalardb-saga/bin/scalardb-saga-server"]
-CMD ["/scalardb-saga/conf/server.properties"]
+CMD ["--config", "/scalardb-saga/conf/server.properties"]
 
 # Declared last: these change on every release, and anything below a changed instruction is rebuilt.
 #

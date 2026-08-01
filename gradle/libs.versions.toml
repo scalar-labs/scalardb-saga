@@ -21,6 +21,7 @@ caffeine = "2.9.3"
 jcip = "1.0-1"
 javalin = "6.7.0"
 nimbus-jose-jwt = "10.3"
+picocli = "4.7.7"
 grpc = "1.82.1"
 protobuf-java = "4.35.1"
 protobuf-plugin = "0.10.0"
@@ -60,6 +61,7 @@ caffeine = { module = "com.github.ben-manes.caffeine:caffeine", version.ref = "c
 jcip-annotations = { module = "com.github.stephenc.jcip:jcip-annotations", version.ref = "jcip" }
 javalin = { module = "io.javalin:javalin", version.ref = "javalin" }
 nimbus-jose-jwt = { module = "com.nimbusds:nimbus-jose-jwt", version.ref = "nimbus-jose-jwt" }
+picocli = { module = "info.picocli:picocli", version.ref = "picocli" }
 grpc-bom = { module = "io.grpc:grpc-bom", version.ref = "grpc" }
 grpc-protobuf = { module = "io.grpc:grpc-protobuf" }
 grpc-stub = { module = "io.grpc:grpc-stub" }
