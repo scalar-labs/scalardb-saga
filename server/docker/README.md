@@ -50,7 +50,7 @@ are resolved by ScalarDB, which supports `${env:...}` but **not** `${file:...}`.
 | --- | --- |
 | `SCALAR_DB_SAGA_LOG_LEVEL` | Root log level; defaults to `INFO`. Covers gRPC too — its `java.util.logging` output is bridged into Logback, so everything the process emits shares one format and one level |
 | `JAVA_OPTS` | Appended after the image's own JVM flags, so it overrides them |
-| `SCALARDB_SAGA_DAEMON_OPTS` | Same, applied after `JAVA_OPTS` |
+| `SCALARDB_SAGA_SERVER_OPTS` | Same, applied after `JAVA_OPTS` |
 
 Setting the level to `DEBUG` turns gRPC up as well, which is the point of bridging it — Logback's
 `DEBUG` reaches JUL as `FINE`, and `io.grpc` logs per RPC at that level, so expect substantial output

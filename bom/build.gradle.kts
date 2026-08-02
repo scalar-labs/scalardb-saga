@@ -18,7 +18,7 @@ description =
 
 dependencies {
     constraints {
-        // Every published module, and only those: the daemon ships as a container image, so it has
+        // Every published module, and only those: the server ships as a container image, so it has
         // no coordinate a consumer could declare. Listed explicitly rather than derived from the
         // subproject list so adding a module is a deliberate decision to publish it.
         api(project(":api"))

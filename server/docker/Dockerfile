@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# Build context is daemon/build/docker, assembled by the `dockerContext` Gradle task — not this
+# Build context is server/build/docker, assembled by the `dockerContext` Gradle task — not this
 # directory and not the repository root. Build it with `./gradlew :server:dockerBuild` locally, or
 # via docker/build-push-action in the release workflow. The distribution is built by Gradle on the
 # host and only packaged here: building it inside a stage instead would re-resolve every dependency

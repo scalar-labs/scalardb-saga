@@ -154,7 +154,7 @@ class SagaServerJulBridgeTest {
   }
 
   @Test
-  public void main_noArgumentsGiven_installsTheBridgeBeforeFailing() {
+  public void run_noArgumentsGiven_installsTheBridgeBeforeFailing() {
     // Arrange — a handler standing in for JUL's default ConsoleHandler. Without one already on the
     // root logger, an assertion that the bridge is installed could pass on a JVM that simply had no
     // handlers to begin with, rather than because main removed them and installed the bridge.

@@ -63,7 +63,7 @@ dependencies {
     implementation(libs.picocli)
     implementation(libs.commons.text)
     implementation(libs.slf4j.api)
-    // Not runtimeOnly: SagaServer.main installs the bridge handler itself, so SLF4JBridgeHandler has
+    // Not runtimeOnly: SagaServerCommand installs the bridge handler itself, so SLF4JBridgeHandler has
     // to be on the compile classpath.
     implementation(libs.jul.to.slf4j)
     implementation(platform(libs.jackson.bom))

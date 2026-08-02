@@ -4,7 +4,7 @@ plugins {
 }
 
 description =
-    "The Java 8 client SDK for the ScalarDB Saga daemon: starts, inspects, and administers sagas " +
+    "The Java 8 client SDK for the ScalarDB Saga server: starts, inspects, and administers sagas " +
     "over gRPC. Depends only on the API and the wire contract, never on the engine."
 
 // The Java 8 gRPC client SDK: GrpcSagaOrchestratorClient implements api.SagaOrchestrator over a gRPC

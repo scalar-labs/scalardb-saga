@@ -594,7 +594,7 @@ public final class SagaServer implements AutoCloseable {
    * <p>Removing the root handlers first drops JUL's default {@code ConsoleHandler}, which would
    * otherwise keep printing every record a second time in its own format.
    *
-   * <p>Called only from {@link SagaServerCommand#main}, deliberately. Installing a handler on the
+   * <p>Called only from {@link SagaServerCommand#run}, deliberately. Installing a handler on the
    * JVM-wide JUL root logger is an application's decision to make, not a library's: an application
    * that embeds the engine must be free to configure its own logging, so this must not run merely
    * because a {@link SagaServer} was constructed.

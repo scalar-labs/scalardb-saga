@@ -4,8 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import picocli.CommandLine;
 
 /**
@@ -18,12 +20,16 @@ class SagaServerCommandTest {
 
   /** Parses {@code args} without running the command, returning the parse result. */
   private static CommandLine.ParseResult parse(String... args) {
-    return new CommandLine(new SagaServerCommand()).parseArgs(args);
+    return SagaServerCommand.newCommandLine().parseArgs(args);
   }
 
-  /** Runs the command far enough to produce an exit code, capturing what it writes. */
+  /**
+   * Runs the command far enough to produce an exit code, capturing what it writes. Goes through
+   * {@link SagaServerCommand#newCommandLine()} so these assertions cover the parser the process
+   * actually runs, including the at-file and exception-handler configuration.
+   */
   private static int executeCapturingErr(StringWriter err, String... args) {
-    CommandLine commandLine = new CommandLine(new SagaServerCommand());
+    CommandLine commandLine = SagaServerCommand.newCommandLine();
     commandLine.setErr(new PrintWriter(err, true));
     return commandLine.execute(args);
   }
@@ -53,21 +59,41 @@ class SagaServerCommandTest {
     int exitCode = executeCapturingErr(err);
 
     assertThat(exitCode).isEqualTo(CommandLine.ExitCode.USAGE);
-    assertThat(err.toString()).contains("--config");
+    // The first line must be the diagnosis, with the usage block after it. Asserting only that
+    // "--config" appears somewhere would pass off the usage block alone and pin nothing at all.
+    assertThat(err.toString().lines().findFirst().orElse(""))
+        .startsWith("Missing required option:");
   }
 
   @Test
-  void execute_unreadableConfigGiven_failsWithNonZeroExitCode() {
+  void execute_unreadableConfigGiven_reportsWithoutAStackTrace() {
     StringWriter err = new StringWriter();
 
+    // The likeliest operator error. picocli's default handler would rethrow and bury the message
+    // under JDK and picocli frames; the configured handler must reduce it to a logged line.
     int exitCode = executeCapturingErr(err, "--config", "/nonexistent/server.properties");
 
+    assertThat(exitCode).isEqualTo(CommandLine.ExitCode.SOFTWARE);
+    assertThat(err.toString()).doesNotContain("at picocli.").doesNotContain("at java.base/");
+  }
+
+  @Test
+  void execute_atFileArgumentGiven_isNotExpanded(@TempDir Path dir) throws Exception {
+    Path secret = dir.resolve("secret");
+    Files.writeString(secret, "super-secret-token\n");
+    StringWriter err = new StringWriter();
+
+    // picocli expands @file by default and echoes lines it cannot match, which would print the
+    // file's contents. The argument must be rejected as-is instead.
+    int exitCode = executeCapturingErr(err, "--config", "/nonexistent/x.properties", "@" + secret);
+
     assertThat(exitCode).isNotZero();
+    assertThat(err.toString()).doesNotContain("super-secret-token");
   }
 
   @Test
   void execute_versionRequested_printsAVersionRatherThanNothing() {
-    CommandLine commandLine = new CommandLine(new SagaServerCommand());
+    CommandLine commandLine = SagaServerCommand.newCommandLine();
     StringWriter out = new StringWriter();
     commandLine.setOut(new PrintWriter(out, true));
 
@@ -82,7 +108,7 @@ class SagaServerCommandTest {
 
   @Test
   void execute_helpRequested_succeedsAndNamesTheCommand() {
-    CommandLine commandLine = new CommandLine(new SagaServerCommand());
+    CommandLine commandLine = SagaServerCommand.newCommandLine();
     StringWriter out = new StringWriter();
     commandLine.setOut(new PrintWriter(out, true));
 

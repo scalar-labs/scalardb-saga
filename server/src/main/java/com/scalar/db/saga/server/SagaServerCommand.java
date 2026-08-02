@@ -1,5 +1,6 @@
 package com.scalar.db.saga.server;
 
+import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -8,6 +9,8 @@ import java.util.Properties;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import org.jspecify.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import picocli.CommandLine;
 
 /**
@@ -29,6 +32,8 @@ import picocli.CommandLine;
     mixinStandardHelpOptions = true,
     versionProvider = SagaServerCommand.ManifestVersionProvider.class)
 public class SagaServerCommand implements Callable<Integer> {
+
+  private static final Logger logger = LoggerFactory.getLogger(SagaServerCommand.class);
 
   /**
    * Reports the version {@code --version} prints, read from the jar manifest rather than a constant
@@ -67,6 +72,16 @@ public class SagaServerCommand implements Callable<Integer> {
     Properties properties = new Properties();
     try (InputStream in = Files.newInputStream(path)) {
       properties.load(in);
+    } catch (IOException e) {
+      // A mistyped path is the likeliest operator error, so this line has to stand on its own.
+      // FileSystemException carries the path as its whole message, which the prefix already names —
+      // there the exception type is what says what went wrong; elsewhere the message does.
+      String reason =
+          e.getMessage() == null || e.getMessage().equals(path.toString())
+              ? e.getClass().getSimpleName()
+              : e.getMessage();
+      throw new IllegalArgumentException(
+          "Cannot read the configuration file '" + path + "': " + reason, e);
     }
 
     SagaServer server = new SagaServer(SagaServerConfig.load(properties)).start();
@@ -90,15 +105,36 @@ public class SagaServerCommand implements Callable<Integer> {
    *
    * <p>The JUL-to-SLF4J bridge is installed here rather than inside {@link SagaServer} because
    * installing a handler on the JVM-wide JUL root logger is an application's decision, not a
-   * library's; see {@link SagaServer#installJulToSlf4jBridge()}. It runs before parsing so that a
-   * usage error is reported through the same logging pipeline as everything else.
+   * library's; see {@link SagaServer#installJulToSlf4jBridge()}. It runs before parsing so the
+   * process cannot fail and exit before its logging is configured.
    *
    * @param args the command-line arguments
    */
   public static void main(String[] args) {
-    // Exit with the parsed exit code so a usage error (a missing or unreadable --config) becomes a
-    // non-zero exit an init system or container runtime can act on, rather than a stack trace.
+    // Exit with the parsed exit code so a startup failure becomes a non-zero exit an init system or
+    // container runtime can act on.
     System.exit(run(args));
+  }
+
+  /**
+   * Reports a startup failure as one log line instead of a stack trace, and returns the exit code
+   * for it.
+   *
+   * <p>picocli formats a <i>parse</i> error itself, but its default handler rethrows an exception
+   * from {@link #call()} and prints the whole trace. Every message this server produces on a bad
+   * configuration is written for an operator, and burying those under JDK and picocli frames is
+   * what this avoids. The trace is still available at {@code DEBUG}, which the image exposes
+   * through {@code SCALAR_DB_SAGA_LOG_LEVEL}.
+   */
+  private static int reportStartupFailure(
+      Exception e, CommandLine commandLine, CommandLine.ParseResult parseResult) {
+    // getMessage() is the operator-facing text everywhere it is set; toString() keeps an exception
+    // that carries none (an NPE, say) from logging an empty line.
+    String detail =
+        e.getMessage() == null || e.getMessage().isBlank() ? e.toString() : e.getMessage();
+    logger.error("Failed to start the server: {}", detail);
+    logger.debug("Startup failure detail", e);
+    return CommandLine.ExitCode.SOFTWARE;
   }
 
   /**
@@ -113,6 +149,20 @@ public class SagaServerCommand implements Callable<Integer> {
    */
   static int run(String[] args) {
     SagaServer.installJulToSlf4jBridge();
-    return new CommandLine(new SagaServerCommand()).execute(args);
+    return newCommandLine().execute(args);
+  }
+
+  /**
+   * The configured parser, package-private so a test exercises the same configuration the process
+   * runs rather than a bare {@code CommandLine} that would silently lack it.
+   */
+  static CommandLine newCommandLine() {
+    return new CommandLine(new SagaServerCommand())
+        // picocli expands an @-prefixed argument by reading that file and splicing its lines into
+        // the argument list, echoing any it cannot match back in the error message. This command
+        // takes one option and has no use for that, while the process it runs can read every
+        // mounted secret — so anyone able to append an argument could print one to the log.
+        .setExpandAtFiles(false)
+        .setExecutionExceptionHandler(SagaServerCommand::reportStartupFailure);
   }
 }
