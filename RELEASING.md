@@ -100,12 +100,17 @@ after it, live only on that branch and are unreachable from `main` by design.
    build-tool bump arrives as its own pull request, and the five-PR limit fills with those before a
    real dependency update can open.
 
-   Version branches need a repository ruleset before one is cut, for the same reason `main` has one:
-   a release is built from the commit the tag names, and the workflow's check that the commit sits
-   on its release branch is only worth as much as the branch's own rules. An unprotected `1.0` also
-   takes a force-push or a deletion, which loses a maintenance line's history. One ruleset covers
-   every version branch at once, so this is a one-time setup rather than a per-branch one — see
-   [Repository settings](#repository-settings).
+   A repository ruleset covering version branches is worth having before one is cut, for the same
+   reason `main` has one: a release is built from the commit the tag names, and the workflow's check
+   that the commit sits on its release branch is only worth as much as the branch's own rules. An
+   unprotected `1.0` also takes a force-push or a deletion, which loses a maintenance line's
+   history. One ruleset covers every version branch at once, so this is a one-time setup rather than
+   a per-branch one — see [Repository settings](#repository-settings).
+
+   Nothing enforces it: `verify-version` checks that the branch exists and that the tagged commit is
+   reachable from it, not how the branch is protected. ScalarDB cuts its releases without one, so
+   skipping it is a defensible choice for a line nothing depends on yet. What it costs is that the
+   branch can be force-pushed or deleted, and that a commit can reach a tag without review.
 
    For a patch release the branch already exists — backport the fix to it through a PR.
 
@@ -257,8 +262,8 @@ Not every step is idempotent, so check what already succeeded before re-running:
 ## Repository settings
 
 Two things live in GitHub's own settings rather than in this repository, and neither is set today.
-The rulesets are a one-time setup that has to exist before the first release branch is cut; the
-environment is optional and can be added whenever.
+The rulesets are a one-time setup, best done before the first release branch is cut though nothing
+enforces them; the environment is optional and can be added whenever.
 
 ### Branch and tag rulesets
 
@@ -289,19 +294,23 @@ creations needs a bypass list** — with an empty one, nobody can push a release
 
 ### Scoping the Central secrets to an environment
 
-The four `MAVEN_CENTRAL_*` secrets are repository secrets, so GitHub makes them available to a
-workflow run on any branch. No ruleset changes that: the workflow doing the reading need not be one
-of the two in this repository, since a branch can carry its own. An environment is the only
-mechanism that scopes secrets by ref, and it fails closed — a run on a ref the environment does not
-admit is refused the environment and never sees them.
+The four `MAVEN_CENTRAL_*` secrets reach these workflows from the organization: this repository
+defines none of its own, and neither publishing job declares an environment, which leaves the
+organization as the only scope they can come from. Organization access is granted per repository,
+not per ref, so GitHub still makes them available to a workflow run on any branch here. No ruleset
+changes that: the workflow doing the reading need not be one of the two in this repository, since a
+branch can carry its own. An environment is the only mechanism that scopes secrets by ref, and it
+fails closed — a run on a ref the environment does not admit is refused the environment and never
+sees them.
 
 1. **Settings → Environments → New environment**, named `maven-central`.
 2. **Deployment branches and tags → Selected branches and tags**: add ref type *Branch* `main`, ref
    type *Tag* `v*`, and one *Branch* entry per version branch as it is cut. Name the branches
    explicitly rather than by pattern — deployment policies take wildcards, not the character classes
    the ruleset above uses, and a policy that matches nothing locks the release out.
-3. Add the four secrets to the environment, then **delete the repository-level copies**. Copying
-   rather than moving gains nothing: the repository-level ones stay readable from anywhere.
+3. Add the four secrets to the environment, then **remove this repository from the organization
+   secrets' access list**. Copying rather than moving gains nothing: the organization grant stays
+   readable from any ref here.
 4. Add `environment: maven-central` to the publishing job in
    [release.yml](.github/workflows/release.yml) and
    [release-snapshot.yml](.github/workflows/release-snapshot.yml). Without it both jobs lose access
