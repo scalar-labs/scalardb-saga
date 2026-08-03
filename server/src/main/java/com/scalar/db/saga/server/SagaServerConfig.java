@@ -158,7 +158,9 @@ import org.jspecify.annotations.Nullable;
  *       names are case-insensitive per the HTTP spec, so setting one name in two spellings is
  *       rejected too. A header value is trimmed, which is what lets a {@code ${file:...}} secret
  *       ending in a newline be sent at all — an untrimmed newline is a control character no HTTP
- *       header value may carry
+ *       header value may carry. The five names the JDK's HTTP client reserves for itself ({@code
+ *       Connection}, {@code Content-Length}, {@code Expect}, {@code Host}, {@code Upgrade}) are
+ *       rejected as well, since it refuses to send them; see {@link #JDK_RESTRICTED_HEADERS}
  * </ul>
  *
  * <h2>Async callbacks ({@code callback.*})</h2>
@@ -190,8 +192,10 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code security.insecure_mode.enabled} — acknowledges running {@code noop} on a
  *       network-reachable interface, which {@link SagaServer} otherwise refuses (default {@value
  *       #DEFAULT_INSECURE_MODE_ENABLED})
- *   <li>{@code security.jwt.*} / {@code security.apikey.*} — the selected provider's own settings;
- *       documented on {@code JwtConfig} and {@code ApiKeyConfig}, which parse and validate them
+ *   <li>{@code security.jwt.*} / {@code security.apikey.*} — the selected provider's own settings,
+ *       documented on {@code JwtConfig} and {@code ApiKeyConfig}, which parse them. Their names are
+ *       still checked here: a provider is built only when it is the selected one, and even then it
+ *       notices only a missing <em>required</em> key
  * </ul>
  *
  * <h2>Secret references and unknown keys</h2>
@@ -207,6 +211,19 @@ import org.jspecify.annotations.Nullable;
  * <p>An unrecognized {@code scalar.db.saga.server.*} key fails startup. Every key here has a
  * default or is optional, so a typo would otherwise be indistinguishable from leaving the setting
  * unset — silently serving traffic under a policy the operator believes they changed.
+ *
+ * <p>A blank value means unset: the key takes its default, as an absent key does, so a templated
+ * configuration whose variable resolves empty starts on documented defaults rather than crashing.
+ * Keys where that default would leave a protection <b>off</b> reject a blank value instead. Blank
+ * is never a deliberate way to disable a control, since omitting the key already says that, so an
+ * empty value there is far more likely a template that failed to resolve than an intent to run
+ * without the protection. That covers {@code callback.max_age_seconds} and {@code
+ * max_start_requests_per_minute}, whose defaults disable the check outright, plus the {@code
+ * service.<name>} attributes whose blank fallback would be open ({@code allowed_hosts} would admit
+ * any host; a {@code header.<Name>} would send an empty header, and an empty {@code Authorization}
+ * is an unauthenticated call) or meaningless ({@code base_url} has no default to fall back to).
+ * {@code service.<name>.max_body_bytes} sits on the other side of that line deliberately: unset
+ * leaves the engine's own 1 MiB cap in place, so the body stays bounded either way.
  *
  * <p>All other properties configure the saga engine's persistence (e.g. ScalarDB connection
  * settings and the {@code scalar.db.saga.store.*} keys documented on {@code
@@ -275,13 +292,19 @@ public final class SagaServerConfig {
   static final String CALLBACK_SECRET_KEY = CALLBACK_PREFIX + "secret";
   static final String CALLBACK_MAX_AGE_SECONDS_KEY = CALLBACK_PREFIX + "max_age_seconds";
 
-  // Security keys — daemon-only (embedded mode delegates auth to the host framework). The two
-  // per-provider namespaces are parsed and validated by the security package, not here.
+  // Security keys — daemon-only (embedded mode delegates auth to the host framework). The
+  // per-provider namespaces are parsed by the security package; their names are still checked
+  // here, since a provider notices only a missing required key (see SECURITY_PROVIDER_KEYS).
   static final String SECURITY_PREFIX = SERVER_PREFIX + "security.";
   static final String SECURITY_PROVIDER_KEY = SECURITY_PREFIX + "provider";
   static final String INSECURE_MODE_ENABLED_KEY = SECURITY_PREFIX + "insecure_mode.enabled";
   static final String SECURITY_JWT_PREFIX = SECURITY_PREFIX + "jwt.";
   static final String SECURITY_APIKEY_PREFIX = SECURITY_PREFIX + "apikey.";
+  static final String SECURITY_APIKEY_HEADER_KEY = SECURITY_APIKEY_PREFIX + "header";
+  static final String SECURITY_APIKEY_KEY_PREFIX = SECURITY_APIKEY_PREFIX + "key.";
+  static final String SECURITY_APIKEY_SECRET_SUFFIX = ".secret";
+  static final String SECURITY_APIKEY_ROLES_SUFFIX = ".roles";
+  static final String SECURITY_APIKEY_PRINCIPAL_SUFFIX = ".principal";
 
   static final String SERVICE_KEY_PREFIX = SERVER_PREFIX + "service.";
   static final String SERVICE_BASE_URL_SUFFIX = ".base_url";
@@ -318,9 +341,9 @@ public final class SagaServerConfig {
   static final int DEFAULT_MAX_START_REQUESTS_PER_MINUTE = 0; // 0 = disabled (no rate limiting)
 
   /**
-   * Every key parsed here, for the unknown-key check. A key under one of {@link
-   * #DELEGATED_PREFIXES} is validated by whoever owns that namespace instead, so it is absent from
-   * this set.
+   * Every key parsed here, for the unknown-key check. Keys the security package parses are listed
+   * in {@link #SECURITY_PROVIDER_KEYS} instead, and a key under one of {@link #DELEGATED_PREFIXES}
+   * carries an operator-chosen segment, so neither kind is in this set.
    */
   private static final Set<String> KNOWN_KEYS =
       Set.of(
@@ -357,12 +380,42 @@ public final class SagaServerConfig {
           INSECURE_MODE_ENABLED_KEY);
 
   /**
-   * Namespaces whose keys carry an operator-chosen segment, so they cannot be enumerated. {@code
-   * service.} is still validated key by key (see {@link #parseServices}); the two security
-   * namespaces are validated by the provider configs that parse them.
+   * Keys the security package parses, listed here only so the unknown-key check accepts them. They
+   * are fixed names, and the provider that owns them notices only a missing <em>required</em> key.
+   * An optional one has a default, so a typo there reads as unset: a mistyped {@code
+   * principal_claim} authenticates on the default claim, and a mistyped {@code token_type} drops a
+   * check the operator asked for. A provider is built only when it is the selected one, so for the
+   * others nothing parses these keys at all. {@code JwtConfig} and {@code ApiKeyConfig} own the
+   * names, which are not visible from this package; their tests assert this list stays in step.
+   */
+  private static final Set<String> SECURITY_PROVIDER_KEYS = securityProviderKeys();
+
+  private static Set<String> securityProviderKeys() {
+    Set<String> keys = new TreeSet<>();
+    for (String name :
+        List.of(
+            "jwks_url",
+            "issuer",
+            "audience",
+            "token_type",
+            "principal_claim",
+            "roles_claim",
+            "connect_timeout_millis",
+            "read_timeout_millis")) {
+      keys.add(SECURITY_JWT_PREFIX + name);
+    }
+    keys.add(SECURITY_APIKEY_HEADER_KEY);
+    return Collections.unmodifiableSet(keys);
+  }
+
+  /**
+   * Namespaces whose keys carry an operator-chosen segment, so they cannot be enumerated. Only that
+   * one segment is the operator's; the sub-settings around it are fixed names, still checked key by
+   * key (see {@link #parseServices} and {@link #rejectUnknownApiKeySetting}). The rest of {@code
+   * security.} has no such segment and is enumerated in {@link #SECURITY_PROVIDER_KEYS}.
    */
   private static final List<String> DELEGATED_PREFIXES =
-      List.of(SERVICE_KEY_PREFIX, SECURITY_JWT_PREFIX, SECURITY_APIKEY_PREFIX);
+      List.of(SERVICE_KEY_PREFIX, SECURITY_APIKEY_KEY_PREFIX);
 
   /**
    * Header names the engine issues itself, so configuring one as a service header cannot change
@@ -378,6 +431,57 @@ public final class SagaServerConfig {
   private static Set<String> reservedHeaders() {
     Set<String> names = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
     names.addAll(List.of("X-Saga-Id", "X-Saga-Step", "X-Saga-Callback-Url"));
+    return Collections.unmodifiableSet(names);
+  }
+
+  /** The system property with which the JDK opens individual {@link #JDK_RESTRICTED_HEADERS}. */
+  private static final String ALLOW_RESTRICTED_HEADERS_PROPERTY =
+      "jdk.httpclient.allowRestrictedHeaders";
+
+  /**
+   * Header names {@code java.net.http} owns for framing, connection management, and routing, and so
+   * refuses outright: {@code HttpRequest.Builder.header()} throws {@link IllegalArgumentException}
+   * on them. Unlike a {@link #RESERVED_HEADERS} name, one of these does not merely fail to arrive —
+   * the engine cannot build the request at all, so every call to the service fails permanently and
+   * compensates. Nothing catches that at startup: the throw lands on the first outbound call, where
+   * it is reported against the URI rather than the config key that caused it, while liveness and
+   * readiness stay green. Rejecting at load turns a silent, service-wide outage into a startup
+   * error naming the key.
+   *
+   * <p>Whoever sets {@link #ALLOW_RESTRICTED_HEADERS_PROPERTY} takes a name back off this set, so
+   * the check forbids exactly what the JDK forbids rather than a fixed five; {@code Host} is worth
+   * opening to route a participant through a shared ingress. Read from the system property, which
+   * is where the JDK looks first — a name opened through {@code conf/net.properties} instead is not
+   * visible here, since {@code sun.net.NetProperties} is not exported.
+   */
+  private static final Set<String> JDK_RESTRICTED_HEADERS =
+      jdkRestrictedHeaders(System.getProperty(ALLOW_RESTRICTED_HEADERS_PROPERTY));
+
+  /**
+   * Returns the restricted header names the JDK still refuses once {@code allowRestrictedHeaders} —
+   * the raw {@link #ALLOW_RESTRICTED_HEADERS_PROPERTY} value, or null when unset — has opened the
+   * names it lists.
+   *
+   * <p>Deliberately mirrors {@code jdk.internal.net.http.common.Utils.getDisallowedHeaders()} quirk
+   * for quirk: the whole value is trimmed once and split on commas, but the tokens themselves are
+   * not trimmed, so {@code "host, connection"} opens only {@code host}. Trimming the tokens here
+   * would be the friendlier reading and exactly the wrong one — it would accept a config key the
+   * JDK then rejects at send time, which is the bug this check exists to prevent. Token matching is
+   * case-insensitive, as it is there.
+   *
+   * @param allowRestrictedHeaders the raw system property value, or null when unset
+   * @return the names still refused, compared case-insensitively
+   */
+  static Set<String> jdkRestrictedHeaders(@Nullable String allowRestrictedHeaders) {
+    Set<String> names = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+    names.addAll(List.of("Connection", "Content-Length", "Expect", "Host", "Upgrade"));
+    if (allowRestrictedHeaders != null) {
+      // The JDK splits with the default limit; -1 here only keeps the trailing empty tokens it
+      // drops, and removing "" from a set of five header names is a no-op either way.
+      for (String token : allowRestrictedHeaders.trim().split(",", -1)) {
+        names.remove(token);
+      }
+    }
     return Collections.unmodifiableSet(names);
   }
 
@@ -500,7 +604,8 @@ public final class SagaServerConfig {
     this.callbackBaseUrl = parseCallbackBaseUrl(resolved.getProperty(CALLBACK_BASE_URL_KEY));
     this.callbackMaxAgeSeconds =
         parseBoundedLong(
-            resolved.getProperty(CALLBACK_MAX_AGE_SECONDS_KEY),
+            requireNonBlankIfSet(
+                CALLBACK_MAX_AGE_SECONDS_KEY, resolved.getProperty(CALLBACK_MAX_AGE_SECONDS_KEY)),
             CALLBACK_MAX_AGE_SECONDS_KEY,
             DEFAULT_CALLBACK_MAX_AGE_SECONDS,
             0L);
@@ -512,7 +617,9 @@ public final class SagaServerConfig {
             0L);
     this.maxStartRequestsPerMinute =
         parseBoundedInt(
-            resolved.getProperty(MAX_START_REQUESTS_PER_MINUTE_KEY),
+            requireNonBlankIfSet(
+                MAX_START_REQUESTS_PER_MINUTE_KEY,
+                resolved.getProperty(MAX_START_REQUESTS_PER_MINUTE_KEY)),
             MAX_START_REQUESTS_PER_MINUTE_KEY,
             DEFAULT_MAX_START_REQUESTS_PER_MINUTE,
             0);
@@ -620,10 +727,17 @@ public final class SagaServerConfig {
    */
   private static void rejectUnknownKeys(Properties properties) {
     for (String key : new TreeSet<>(properties.stringPropertyNames())) {
-      if (!key.startsWith(SERVER_PREFIX) || KNOWN_KEYS.contains(key)) {
+      if (!key.startsWith(SERVER_PREFIX)
+          || KNOWN_KEYS.contains(key)
+          || SECURITY_PROVIDER_KEYS.contains(key)) {
         continue;
       }
       if (DELEGATED_PREFIXES.stream().anyMatch(key::startsWith)) {
+        // The name segment is the operator's, but the settings around it are fixed. Check the
+        // API-key ones here; parseServices checks the service ones as it builds each service.
+        if (key.startsWith(SECURITY_APIKEY_KEY_PREFIX)) {
+          rejectUnknownApiKeySetting(key);
+        }
         continue;
       }
       throw new IllegalArgumentException(
@@ -632,6 +746,37 @@ public final class SagaServerConfig {
               + "'. Check it against the keys documented on SagaServerConfig; unknown keys under '"
               + SERVER_PREFIX
               + "' are rejected so a typo cannot silently leave a setting at its default.");
+    }
+  }
+
+  /**
+   * Fails on a {@code security.apikey.key.<name>.<setting>} key whose trailing setting is not one
+   * the API-key provider reads. Only {@code <name>} is the operator's; the three settings are fixed
+   * names, and {@code principal} is optional, so a typo of it would otherwise record the key's own
+   * name for audit instead of the principal configured. Split at the last dot rather than the
+   * first: the provider derives the name by stripping the prefix and the suffix, so a name may
+   * itself contain dots and the first dot need not end it.
+   */
+  private static void rejectUnknownApiKeySetting(String key) {
+    String remainder = key.substring(SECURITY_APIKEY_KEY_PREFIX.length());
+    int dot = remainder.lastIndexOf('.');
+    String name = dot <= 0 ? "" : remainder.substring(0, dot);
+    // Keep the leading dot so the setting matches the suffix constants directly.
+    String setting = dot < 0 ? "" : remainder.substring(dot);
+    boolean known =
+        setting.equals(SECURITY_APIKEY_SECRET_SUFFIX)
+            || setting.equals(SECURITY_APIKEY_ROLES_SUFFIX)
+            || setting.equals(SECURITY_APIKEY_PRINCIPAL_SUFFIX);
+    if (name.isBlank() || !known) {
+      throw new IllegalArgumentException(
+          "'"
+              + key
+              + "' is not a valid API-key setting. Use '"
+              + SECURITY_APIKEY_KEY_PREFIX
+              + "<name>"
+              + SECURITY_APIKEY_SECRET_SUFFIX
+              + "' and the other per-key settings documented on ApiKeyConfig. Valid settings are"
+              + " secret, roles, and principal.");
     }
   }
 
@@ -791,6 +936,24 @@ public final class SagaServerConfig {
                     + "', which the engine issues itself. Its value wins on every request the"
                     + " engine sets it on, so configuring it here either has no effect or sends a"
                     + " header the engine never issued. Remove the key.");
+          }
+          if (JDK_RESTRICTED_HEADERS.contains(header)) {
+            throw new IllegalArgumentException(
+                "'"
+                    + key
+                    + "' sets '"
+                    + header
+                    + "', which the JDK's HTTP client — not the engine — refuses to send: it owns"
+                    + " that name for framing, connection management, and routing. Left in place,"
+                    + " every call to service '"
+                    + name
+                    + "' would fail permanently and compensate. Remove the key, or start the daemon"
+                    + " with -D"
+                    + ALLOW_RESTRICTED_HEADERS_PROPERTY
+                    + "="
+                    + header.toLowerCase(Locale.ROOT)
+                    + " to allow it (comma-separated for several, with no spaces around the"
+                    + " commas).");
           }
           String duplicate = findSameNameIgnoringCase(builder.headers, header);
           if (duplicate != null) {
@@ -1270,6 +1433,29 @@ public final class SagaServerConfig {
       throw new IllegalArgumentException("'" + key + "' must not be blank");
     }
     return value.trim();
+  }
+
+  /**
+   * Returns {@code value} unchanged, rejecting one that is present but blank. For the keys whose
+   * default leaves a protection off, where {@link #parseBoundedLong}'s blank-is-unset rule would
+   * turn a templated value that resolved empty into a silently disabled control. Absent stays
+   * legal: omitting the key is how an operator asks for the default, so only the empty spelling is
+   * refused.
+   *
+   * @param key the property key, for the error message
+   * @param value the raw property value, or null when unset
+   * @return {@code value}, unchanged
+   */
+  private static @Nullable String requireNonBlankIfSet(String key, @Nullable String value) {
+    if (value != null && value.isBlank()) {
+      throw new IllegalArgumentException(
+          "'"
+              + key
+              + "' is set to a blank value. Blank is not a way to disable this setting — it would"
+              + " take the default, which leaves the protection off. Remove the key to accept that"
+              + " default, or give it a value.");
+    }
+    return value;
   }
 
   /**

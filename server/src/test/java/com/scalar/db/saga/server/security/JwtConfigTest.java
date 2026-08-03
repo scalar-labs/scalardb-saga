@@ -1,8 +1,12 @@
 package com.scalar.db.saga.server.security;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.scalar.db.saga.server.SagaServerConfig;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.util.Properties;
 import org.junit.jupiter.api.Test;
 
@@ -197,5 +201,29 @@ class JwtConfigTest {
 
     // Act / Assert
     assertThatThrownBy(() -> JwtConfig.from(props)).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void serverConfigLoad_everyKeyDeclaredHereGiven_isAccepted() throws IllegalAccessException {
+    // Arrange
+    // This class owns the key names, but it is not visible from the daemon package, so
+    // SagaServerConfig lists them again for its unknown-key check. Reflect over the constants
+    // rather than restating them: a key added here and not there would otherwise be rejected as
+    // unknown, refusing to start on a setting this class supports.
+    Properties props = new Properties();
+    for (Field field : JwtConfig.class.getDeclaredFields()) {
+      if (isKeyConstant(field)) {
+        props.setProperty((String) field.get(null), "x");
+      }
+    }
+
+    // Act / Assert
+    assertThatCode(() -> SagaServerConfig.load(props)).doesNotThrowAnyException();
+  }
+
+  private static boolean isKeyConstant(Field field) {
+    return Modifier.isStatic(field.getModifiers())
+        && field.getType() == String.class
+        && field.getName().endsWith("_KEY");
   }
 }

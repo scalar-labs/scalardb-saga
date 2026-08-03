@@ -16,8 +16,11 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class SagaServerConfigTest {
 
@@ -190,6 +193,50 @@ class SagaServerConfigTest {
     props.setProperty(SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY, "100");
 
     assertThat(SagaServerConfig.load(props).maxStartRequestsPerMinute()).isEqualTo(100);
+  }
+
+  /**
+   * The two keys whose default leaves a protection off, so the general blank-is-unset rule would
+   * turn a templated value that resolved empty into a silently disabled control. Omitting the key
+   * remains the way to accept the default; only the empty spelling is refused.
+   */
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY,
+        SagaServerConfig.CALLBACK_MAX_AGE_SECONDS_KEY
+      })
+  void load_blankProtectionDisablingKey_throwsIllegalArgumentException(String key) {
+    Properties props = new Properties();
+    props.setProperty(key, "   ");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(key);
+  }
+
+  @Test
+  void load_protectionDisablingKeysAbsent_stillDefaultToDisabled() {
+    // The other half of the rule above: rejecting blank must not turn these into required keys.
+    SagaServerConfig config = SagaServerConfig.load(new Properties());
+
+    assertThat(config.maxStartRequestsPerMinute())
+        .isEqualTo(SagaServerConfig.DEFAULT_MAX_START_REQUESTS_PER_MINUTE);
+    assertThat(config.callbackMaxAgeSeconds())
+        .isEqualTo(SagaServerConfig.DEFAULT_CALLBACK_MAX_AGE_SECONDS);
+  }
+
+  @Test
+  void load_blankMaxBodyBytes_isTreatedAsUnset() {
+    Properties props = new Properties();
+    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
+    // Deliberately on the other side of the line from the two keys above: unset leaves the engine's
+    // own cap in place, so a blank value still bounds the body rather than removing a protection.
+    props.setProperty(serviceKey("account", ".max_body_bytes"), "");
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(requireNonNull(config.services().get("account")).maxBodyBytes()).isZero();
   }
 
   @Test
@@ -552,6 +599,65 @@ class SagaServerConfigTest {
         .isInstanceOf(IllegalArgumentException.class);
   }
 
+  @ParameterizedTest
+  @ValueSource(strings = {"Connection", "Content-Length", "Expect", "Host", "Upgrade", "host"})
+  void load_serviceHeaderRestrictedByJdkGiven_throwsIllegalArgumentException(String header) {
+    Properties props = new Properties();
+    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
+    // HttpRequest.Builder.header() throws on these, so the engine cannot build the request at all
+    // and every call to the service fails permanently. Accepting the key would defer that to the
+    // first outbound call, long after startup reported healthy. The lower-cased spelling is in the
+    // list because the JDK's own check is case-insensitive.
+    props.setProperty(serviceKey("account", ".header." + header), "value");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void jdkRestrictedHeaders_nullGiven_returnsAllFiveRestrictedNames() {
+    Set<String> restricted = SagaServerConfig.jdkRestrictedHeaders(null);
+
+    assertThat(restricted)
+        .containsExactlyInAnyOrder("Connection", "Content-Length", "Expect", "Host", "Upgrade");
+  }
+
+  @Test
+  void jdkRestrictedHeaders_nameGiven_omitsThatNameCaseInsensitively() {
+    Set<String> restricted = SagaServerConfig.jdkRestrictedHeaders("HOST");
+
+    // The JDK removes from a case-insensitively ordered set, so the spelling in the property does
+    // not have to match the canonical one.
+    assertThat(restricted).doesNotContain("Host", "host");
+    assertThat(restricted).contains("Connection");
+  }
+
+  @Test
+  void jdkRestrictedHeaders_commaSeparatedNamesGiven_omitsAllOfThem() {
+    Set<String> restricted = SagaServerConfig.jdkRestrictedHeaders("host,connection");
+
+    assertThat(restricted).containsExactlyInAnyOrder("Content-Length", "Expect", "Upgrade");
+  }
+
+  @Test
+  void jdkRestrictedHeaders_spaceAfterCommaGiven_keepsTheNameFollowingTheSpace() {
+    Set<String> restricted = SagaServerConfig.jdkRestrictedHeaders("host, connection");
+
+    // Mirrors the JDK, which trims the whole value once and then splits on commas without trimming
+    // the tokens; " connection" therefore matches nothing. Trimming here instead would accept a
+    // config key that the JDK still rejects at send time, which is the failure this check prevents.
+    assertThat(restricted).doesNotContain("Host");
+    assertThat(restricted).contains("Connection");
+  }
+
+  @Test
+  void jdkRestrictedHeaders_unrelatedNameGiven_omitsNothing() {
+    Set<String> restricted = SagaServerConfig.jdkRestrictedHeaders("X-Nonsense");
+
+    assertThat(restricted)
+        .containsExactlyInAnyOrder("Connection", "Content-Length", "Expect", "Host", "Upgrade");
+  }
+
   @Test
   void load_serviceHeadersDifferingOnlyInCase_throwsIllegalArgumentException() {
     Properties props = new Properties();
@@ -655,15 +761,6 @@ class SagaServerConfigTest {
   }
 
   @Test
-  void recoveryConfig_zeroInterval_throwsIllegalArgumentException() {
-    Properties props = new Properties();
-    props.setProperty(SagaServerConfig.RECOVERY_INTERVAL_SECONDS_KEY, "0");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
   void recoveryConfig_negativeTimeout_throwsIllegalArgumentException() {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.RECOVERY_TIMEOUT_MILLIS_KEY, "-1");
@@ -719,22 +816,73 @@ class SagaServerConfigTest {
     assertThat(config.maxConcurrentPurges()).isEqualTo(4);
   }
 
-  @Test
-  void retentionConfig_zeroPeriod_throwsIllegalArgumentException() {
+  /**
+   * Pins every recovery and retention bound against the engine's own validation, which rejects
+   * anything below 1 on all nine. Both directions of drift are silent: a looser daemon bound lets a
+   * value through that the engine then rejects, and a stricter one refuses a value embedded mode
+   * accepts, with an ordinary-looking IllegalArgumentException either way. That is not hypothetical
+   * — shutdown.timeout_millis shipped requiring 1 while the engine accepted 0, and only a review
+   * caught it. A hand audit does not survive the next refactor; this does.
+   */
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        SagaServerConfig.RECOVERY_TIMEOUT_MILLIS_KEY,
+        SagaServerConfig.RECOVERY_INTERVAL_SECONDS_KEY,
+        SagaServerConfig.RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY,
+        SagaServerConfig.RECOVERY_BATCH_SIZE_KEY,
+        SagaServerConfig.RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY,
+        SagaServerConfig.RETENTION_PERIOD_SECONDS_KEY,
+        SagaServerConfig.RETENTION_CLEANUP_INTERVAL_SECONDS_KEY,
+        SagaServerConfig.RETENTION_BATCH_SIZE_KEY,
+        SagaServerConfig.RETENTION_MAX_CONCURRENT_PURGES_KEY
+      })
+  void load_zeroRecoveryOrRetentionBound_throwsIllegalArgumentException(String key) {
     Properties props = new Properties();
-    props.setProperty(SagaServerConfig.RETENTION_PERIOD_SECONDS_KEY, "0");
+    props.setProperty(key, "0");
 
+    // Asserting the message is what makes this test pin the daemon's bound rather than the
+    // engine's.
+    // Two validation paths throw IllegalArgumentException for this input — the bound here and the
+    // config record's own constructor — so the type alone cannot tell them apart, and a daemon
+    // bound
+    // that drifted below the engine's would still throw from the record and keep an isInstanceOf
+    // assertion green. Only the daemon names the property key; the record names its field.
     assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(key);
   }
 
   @Test
-  void retentionConfig_zeroMaxConcurrentPurges_throwsIllegalArgumentException() {
+  void load_everyRecoveryAndRetentionBoundAtOne_isAccepted() {
+    // The other half of the pin above: rejecting 0 alone would still allow a bound to drift to 2
+    // and
+    // refuse a value the engine takes. 1 is the smallest the engine accepts on all nine, so setting
+    // them together proves no daemon bound sits above it.
     Properties props = new Properties();
-    props.setProperty(SagaServerConfig.RETENTION_MAX_CONCURRENT_PURGES_KEY, "0");
+    props.setProperty(SagaServerConfig.RECOVERY_TIMEOUT_MILLIS_KEY, "1");
+    props.setProperty(SagaServerConfig.RECOVERY_INTERVAL_SECONDS_KEY, "1");
+    props.setProperty(SagaServerConfig.RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY, "1");
+    props.setProperty(SagaServerConfig.RECOVERY_BATCH_SIZE_KEY, "1");
+    props.setProperty(SagaServerConfig.RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY, "1");
+    props.setProperty(SagaServerConfig.RETENTION_PERIOD_SECONDS_KEY, "1");
+    props.setProperty(SagaServerConfig.RETENTION_CLEANUP_INTERVAL_SECONDS_KEY, "1");
+    props.setProperty(SagaServerConfig.RETENTION_BATCH_SIZE_KEY, "1");
+    props.setProperty(SagaServerConfig.RETENTION_MAX_CONCURRENT_PURGES_KEY, "1");
 
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    RecoveryConfig recovery = config.recoveryConfig();
+    assertThat(recovery.recoveryTimeoutMillis()).isEqualTo(1L);
+    assertThat(recovery.recoveryIntervalSeconds()).isEqualTo(1L);
+    assertThat(recovery.compensationGracePeriod()).isEqualTo(Duration.ofSeconds(1));
+    assertThat(recovery.batchSize()).isEqualTo(1);
+    assertThat(recovery.maxConcurrentRecoveries()).isEqualTo(1);
+    RetentionConfig retention = config.retentionConfig();
+    assertThat(retention.retentionPeriod()).isEqualTo(Duration.ofSeconds(1));
+    assertThat(retention.cleanupIntervalSeconds()).isEqualTo(1L);
+    assertThat(retention.batchSize()).isEqualTo(1);
+    assertThat(retention.maxConcurrentPurges()).isEqualTo(1);
   }
 
   @Test
@@ -900,15 +1048,93 @@ class SagaServerConfigTest {
   }
 
   @Test
-  void load_securityProviderNamespaceKey_isDelegatedNotRejected() {
-    // The jwt and apikey namespaces are validated by the provider configs that parse them, so the
-    // unknown-key check must not reject a key it does not itself know.
+  void load_securityProviderKeysGiven_areAccepted() {
+    // The provider parses these, but their names are fixed, so the unknown-key check knows them.
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.SECURITY_JWT_PREFIX + "issuer", "https://issuer.example");
-    props.setProperty(SagaServerConfig.SECURITY_APIKEY_PREFIX + "key.svc.roles", "saga:read");
+    props.setProperty(SagaServerConfig.SECURITY_JWT_PREFIX + "principal_claim", "email");
+    props.setProperty(SagaServerConfig.SECURITY_APIKEY_HEADER_KEY, "X-Key");
+    props.setProperty(SagaServerConfig.SECURITY_APIKEY_KEY_PREFIX + "svc.roles", "saga:read");
 
     assertThat(SagaServerConfig.load(props).securityProvider())
         .isEqualTo(SagaServerConfig.DEFAULT_SECURITY_PROVIDER);
+  }
+
+  @Test
+  void load_misspelledOptionalJwtKey_throwsIllegalArgumentException() {
+    // principal_claim defaults to sub, so the provider cannot tell a typo from an unset key: it
+    // would authenticate on a claim the operator did not choose. Nothing parses this namespace at
+    // all under another provider, which is the case here.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SECURITY_JWT_PREFIX + "principal_clam", "email");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void load_misspelledApiKeyHeaderKey_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SECURITY_APIKEY_PREFIX + "headers", "X-Key");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void load_apiKeySettingsGiven_areAccepted() {
+    Properties props = new Properties();
+    props.setProperty(
+        SagaServerConfig.SECURITY_APIKEY_KEY_PREFIX + "writer.secret", "${env:WRITER_KEY}");
+    props.setProperty(SagaServerConfig.SECURITY_APIKEY_KEY_PREFIX + "writer.roles", "saga:write");
+    props.setProperty(
+        SagaServerConfig.SECURITY_APIKEY_KEY_PREFIX + "writer.principal", "writer@example.com");
+
+    assertThat(SagaServerConfig.load(props).securityProvider())
+        .isEqualTo(SagaServerConfig.DEFAULT_SECURITY_PROVIDER);
+  }
+
+  @Test
+  void load_apiKeyNameContainingDotGiven_isAccepted() {
+    // The provider derives <name> by stripping the prefix and the suffix, so a dotted name is a
+    // legal key id. The setting check has to split at the last dot, not the first.
+    Properties props = new Properties();
+    props.setProperty(
+        SagaServerConfig.SECURITY_APIKEY_KEY_PREFIX + "billing.svc.secret", "${env:BILLING_KEY}");
+
+    assertThat(SagaServerConfig.load(props).securityProvider())
+        .isEqualTo(SagaServerConfig.DEFAULT_SECURITY_PROVIDER);
+  }
+
+  @Test
+  void load_unknownApiKeySetting_throwsIllegalArgumentException() {
+    // principal is optional, so a typo of it would record the key's own name for audit instead of
+    // the principal configured.
+    Properties props = new Properties();
+    props.setProperty(
+        SagaServerConfig.SECURITY_APIKEY_KEY_PREFIX + "writer.principle", "writer@example.com");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void load_apiKeyWithoutSetting_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SECURITY_APIKEY_KEY_PREFIX + "writer", "${env:WRITER_KEY}");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void load_apiKeyWithBlankName_throwsIllegalArgumentException() {
+    // The provider skips a blank name, so the key would configure nothing at all.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SECURITY_APIKEY_KEY_PREFIX + ".secret", "${env:WRITER_KEY}");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test

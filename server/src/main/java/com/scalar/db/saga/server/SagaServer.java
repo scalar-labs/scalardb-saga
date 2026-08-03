@@ -166,15 +166,30 @@ public final class SagaServer implements AutoCloseable {
         new SagaServiceImpl(orchestrator, config.syncTimeoutMillis(), config.syncMaxWaitMillis());
     AdminServiceImpl adminService = new AdminServiceImpl(orchestrator, adminDriveDeadlineMillis());
     SagaSecurityInterceptor security = new SagaSecurityInterceptor(securityProvider);
-    return NettyServerBuilder.forAddress(new InetSocketAddress(config.host(), config.grpcPort()))
-        .addService(intercepted(service, security))
-        .addService(intercepted(adminService, security))
-        .addService(health.getHealthService())
+    NettyServerBuilder builder =
+        NettyServerBuilder.forAddress(new InetSocketAddress(config.host(), config.grpcPort()))
+            .addService(intercepted(service, security))
+            .addService(intercepted(adminService, security))
+            .addService(health.getHealthService())
+            .executor(executor)
+            .permitKeepAliveTime(1, TimeUnit.MINUTES);
+    applyGrpcTransportSettings(builder, config);
+    return builder.build();
+  }
+
+  /**
+   * Applies the two inbound caps to the gRPC transport. The message cap is the load-bearing one: it
+   * is derived from the store's payload cap, so dropping it would leave gRPC on its own 4 MiB
+   * default and the daemon would accept a message the store then refuses to persist, surfacing as a
+   * write error that names the store rather than the transport that let it in.
+   *
+   * <p>Visible for testing, for the same reason as {@link #applyEngineSettings}: a builder does not
+   * read its settings back, so the only way to observe the forwarding is to watch it receive them.
+   */
+  static void applyGrpcTransportSettings(NettyServerBuilder builder, SagaServerConfig config) {
+    builder
         .maxInboundMessageSize(config.grpcMaxInboundMessageBytes())
-        .maxInboundMetadataSize(config.grpcMaxInboundMetadataBytes())
-        .executor(executor)
-        .permitKeepAliveTime(1, TimeUnit.MINUTES)
-        .build();
+        .maxInboundMetadataSize(config.grpcMaxInboundMetadataBytes());
   }
 
   /**
@@ -201,12 +216,29 @@ public final class SagaServer implements AutoCloseable {
     Objects.requireNonNull(config, "config must not be null");
     DefaultSagaOrchestrator.Builder builder =
         DefaultSagaOrchestrator.newBuilder()
-            .storeFactory(ScalarDbSagaStoreFactory.create(config.properties()))
-            .ownerId(config.ownerId())
-            .shutdownMode(config.shutdownMode())
-            .shutdownTimeoutMillis(config.shutdownTimeoutMillis())
-            .recoveryConfig(config.recoveryConfig())
-            .retentionConfig(config.retentionConfig());
+            .storeFactory(ScalarDbSagaStoreFactory.create(config.properties()));
+    applyEngineSettings(builder, config);
+    return builder.build();
+  }
+
+  /**
+   * Applies every engine setting the operator configured, which is the whole point of the daemon's
+   * configuration surface: a key that parses but never reaches the builder leaves the daemon on the
+   * engine default while the operator believes they changed it.
+   *
+   * <p>Visible for testing, and separate from {@link #buildDefaultSagaOrchestrator} for the same
+   * reason. Nothing on {@link DefaultSagaOrchestrator} reads these values back, so the only way to
+   * observe the forwarding is to watch the builder receive them; a test passes a mock. Keeping the
+   * store factory in the caller is what lets that test run without a database.
+   */
+  static void applyEngineSettings(
+      DefaultSagaOrchestrator.Builder builder, SagaServerConfig config) {
+    builder
+        .ownerId(config.ownerId())
+        .shutdownMode(config.shutdownMode())
+        .shutdownTimeoutMillis(config.shutdownTimeoutMillis())
+        .recoveryConfig(config.recoveryConfig())
+        .retentionConfig(config.retentionConfig());
     config.services().forEach((name, service) -> addHttpEndpoint(builder, name, service));
     // Enable async-callback provisioning only when both the callback base URL and secret are set;
     // otherwise no provider is wired and registering an async definition fails fast (in the
@@ -216,15 +248,15 @@ public final class SagaServer implements AutoCloseable {
           new HmacCallbackUrlProvider(
               config.callbackBaseUrl().get(), config.callbackSecret().get(), Clock.systemUTC()));
     }
-    return builder.build();
   }
 
   /**
    * Registers one configured service as an HTTP endpoint, applying the optional outbound policy.
    * {@code allowedHosts} and {@code maxBodyBytes} are applied only when configured, so an unset key
-   * leaves the engine's own default in place rather than overwriting it with a sentinel.
+   * leaves the engine's own default in place rather than overwriting it with a sentinel. Visible
+   * for testing, like {@link #applyEngineSettings}.
    */
-  private static void addHttpEndpoint(
+  static void addHttpEndpoint(
       DefaultSagaOrchestrator.Builder builder,
       String name,
       SagaServerConfig.ServiceConfig service) {
