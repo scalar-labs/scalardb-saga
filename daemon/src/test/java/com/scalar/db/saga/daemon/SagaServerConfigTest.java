@@ -16,8 +16,11 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class SagaServerConfigTest {
 
@@ -534,6 +537,65 @@ class SagaServerConfigTest {
 
     assertThatThrownBy(() -> SagaServerConfig.load(props))
         .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"Connection", "Content-Length", "Expect", "Host", "Upgrade", "host"})
+  void load_serviceHeaderRestrictedByJdkGiven_throwsIllegalArgumentException(String header) {
+    Properties props = new Properties();
+    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
+    // HttpRequest.Builder.header() throws on these, so the engine cannot build the request at all
+    // and every call to the service fails permanently. Accepting the key would defer that to the
+    // first outbound call, long after startup reported healthy. The lower-cased spelling is in the
+    // list because the JDK's own check is case-insensitive.
+    props.setProperty(serviceKey("account", ".header." + header), "value");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void jdkRestrictedHeaders_nullGiven_returnsAllFiveRestrictedNames() {
+    Set<String> restricted = SagaServerConfig.jdkRestrictedHeaders(null);
+
+    assertThat(restricted)
+        .containsExactlyInAnyOrder("Connection", "Content-Length", "Expect", "Host", "Upgrade");
+  }
+
+  @Test
+  void jdkRestrictedHeaders_nameGiven_omitsThatNameCaseInsensitively() {
+    Set<String> restricted = SagaServerConfig.jdkRestrictedHeaders("HOST");
+
+    // The JDK removes from a case-insensitively ordered set, so the spelling in the property does
+    // not have to match the canonical one.
+    assertThat(restricted).doesNotContain("Host", "host");
+    assertThat(restricted).contains("Connection");
+  }
+
+  @Test
+  void jdkRestrictedHeaders_commaSeparatedNamesGiven_omitsAllOfThem() {
+    Set<String> restricted = SagaServerConfig.jdkRestrictedHeaders("host,connection");
+
+    assertThat(restricted).containsExactlyInAnyOrder("Content-Length", "Expect", "Upgrade");
+  }
+
+  @Test
+  void jdkRestrictedHeaders_spaceAfterCommaGiven_keepsTheNameFollowingTheSpace() {
+    Set<String> restricted = SagaServerConfig.jdkRestrictedHeaders("host, connection");
+
+    // Mirrors the JDK, which trims the whole value once and then splits on commas without trimming
+    // the tokens; " connection" therefore matches nothing. Trimming here instead would accept a
+    // config key that the JDK still rejects at send time, which is the failure this check prevents.
+    assertThat(restricted).doesNotContain("Host");
+    assertThat(restricted).contains("Connection");
+  }
+
+  @Test
+  void jdkRestrictedHeaders_unrelatedNameGiven_omitsNothing() {
+    Set<String> restricted = SagaServerConfig.jdkRestrictedHeaders("X-Nonsense");
+
+    assertThat(restricted)
+        .containsExactlyInAnyOrder("Connection", "Content-Length", "Expect", "Host", "Upgrade");
   }
 
   @Test

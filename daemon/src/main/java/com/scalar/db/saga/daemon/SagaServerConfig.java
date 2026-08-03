@@ -158,7 +158,9 @@ import org.jspecify.annotations.Nullable;
  *       names are case-insensitive per the HTTP spec, so setting one name in two spellings is
  *       rejected too. A header value is trimmed, which is what lets a {@code ${file:...}} secret
  *       ending in a newline be sent at all — an untrimmed newline is a control character no HTTP
- *       header value may carry
+ *       header value may carry. The five names the JDK's HTTP client reserves for itself ({@code
+ *       Connection}, {@code Content-Length}, {@code Expect}, {@code Host}, {@code Upgrade}) are
+ *       rejected as well, since it refuses to send them; see {@link #JDK_RESTRICTED_HEADERS}
  * </ul>
  *
  * <h2>Async callbacks ({@code callback.*})</h2>
@@ -378,6 +380,57 @@ public final class SagaServerConfig {
   private static Set<String> reservedHeaders() {
     Set<String> names = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
     names.addAll(List.of("X-Saga-Id", "X-Saga-Step", "X-Saga-Callback-Url"));
+    return Collections.unmodifiableSet(names);
+  }
+
+  /** The system property with which the JDK opens individual {@link #JDK_RESTRICTED_HEADERS}. */
+  private static final String ALLOW_RESTRICTED_HEADERS_PROPERTY =
+      "jdk.httpclient.allowRestrictedHeaders";
+
+  /**
+   * Header names {@code java.net.http} owns for framing, connection management, and routing, and so
+   * refuses outright: {@code HttpRequest.Builder.header()} throws {@link IllegalArgumentException}
+   * on them. Unlike a {@link #RESERVED_HEADERS} name, one of these does not merely fail to arrive —
+   * the engine cannot build the request at all, so every call to the service fails permanently and
+   * compensates. Nothing catches that at startup: the throw lands on the first outbound call, where
+   * it is reported against the URI rather than the config key that caused it, while liveness and
+   * readiness stay green. Rejecting at load turns a silent, service-wide outage into a startup
+   * error naming the key.
+   *
+   * <p>Whoever sets {@link #ALLOW_RESTRICTED_HEADERS_PROPERTY} takes a name back off this set, so
+   * the check forbids exactly what the JDK forbids rather than a fixed five; {@code Host} is worth
+   * opening to route a participant through a shared ingress. Read from the system property, which
+   * is where the JDK looks first — a name opened through {@code conf/net.properties} instead is not
+   * visible here, since {@code sun.net.NetProperties} is not exported.
+   */
+  private static final Set<String> JDK_RESTRICTED_HEADERS =
+      jdkRestrictedHeaders(System.getProperty(ALLOW_RESTRICTED_HEADERS_PROPERTY));
+
+  /**
+   * Returns the restricted header names the JDK still refuses once {@code allowRestrictedHeaders} —
+   * the raw {@link #ALLOW_RESTRICTED_HEADERS_PROPERTY} value, or null when unset — has opened the
+   * names it lists.
+   *
+   * <p>Deliberately mirrors {@code jdk.internal.net.http.common.Utils.getDisallowedHeaders()} quirk
+   * for quirk: the whole value is trimmed once and split on commas, but the tokens themselves are
+   * not trimmed, so {@code "host, connection"} opens only {@code host}. Trimming the tokens here
+   * would be the friendlier reading and exactly the wrong one — it would accept a config key the
+   * JDK then rejects at send time, which is the bug this check exists to prevent. Token matching is
+   * case-insensitive, as it is there.
+   *
+   * @param allowRestrictedHeaders the raw system property value, or null when unset
+   * @return the names still refused, compared case-insensitively
+   */
+  static Set<String> jdkRestrictedHeaders(@Nullable String allowRestrictedHeaders) {
+    Set<String> names = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+    names.addAll(List.of("Connection", "Content-Length", "Expect", "Host", "Upgrade"));
+    if (allowRestrictedHeaders != null) {
+      // The JDK splits with the default limit; -1 here only keeps the trailing empty tokens it
+      // drops, and removing "" from a set of five header names is a no-op either way.
+      for (String token : allowRestrictedHeaders.trim().split(",", -1)) {
+        names.remove(token);
+      }
+    }
     return Collections.unmodifiableSet(names);
   }
 
@@ -791,6 +844,24 @@ public final class SagaServerConfig {
                     + "', which the engine issues itself. Its value wins on every request the"
                     + " engine sets it on, so configuring it here either has no effect or sends a"
                     + " header the engine never issued. Remove the key.");
+          }
+          if (JDK_RESTRICTED_HEADERS.contains(header)) {
+            throw new IllegalArgumentException(
+                "'"
+                    + key
+                    + "' sets '"
+                    + header
+                    + "', which the JDK's HTTP client — not the engine — refuses to send: it owns"
+                    + " that name for framing, connection management, and routing. Left in place,"
+                    + " every call to service '"
+                    + name
+                    + "' would fail permanently and compensate. Remove the key, or start the daemon"
+                    + " with -D"
+                    + ALLOW_RESTRICTED_HEADERS_PROPERTY
+                    + "="
+                    + header.toLowerCase(Locale.ROOT)
+                    + " to allow it (comma-separated for several, with no spaces around the"
+                    + " commas).");
           }
           String duplicate = findSameNameIgnoringCase(builder.headers, header);
           if (duplicate != null) {
