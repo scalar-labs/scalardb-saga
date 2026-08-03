@@ -185,8 +185,12 @@ repository, so downstream work can track either trunk or a maintenance line with
 ### Rehearsing the pipeline
 
 Nothing in `publish-maven`, `publish-image` or `github-release` has ever run: the Central credentials,
-the emulated arm64 build, the keyless signature and the release creation are all untested. `1.0.0`
-is the worst version to discover that with, because it is the one that cannot be taken back.
+the emulated arm64 build, the keyless signature and the release creation are all untested. The first
+release is the worst version to discover that with, because it is the one that cannot be taken back.
+
+A pre-release version is not a substitute. It lowers the stakes — nothing depends on it, and the
+suffix keeps it from taking the *Latest* badge — but a released Central version is immutable
+whatever it is called. An alpha or rc is still a first release, not a rehearsal.
 
 A rehearsal has to look like a real release, because the guards in `verify-version` are doing their
 job. A throwaway tag pushed on its own is refused by the version check, since the tag has to equal
