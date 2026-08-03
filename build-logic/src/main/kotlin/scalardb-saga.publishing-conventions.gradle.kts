@@ -3,7 +3,7 @@ plugins {
     id("com.vanniktech.maven.publish")
 }
 
-// Publishing to Maven Central for the consumable modules (api, core, rpc, grpc-client, bom). The
+// Publishing to Maven Central for the consumable modules (api, core, rpc, client, bom). The
 // server is deliberately NOT published: it ships as a container image, so a jar on Central would be
 // an artifact nobody consumes but everyone has to keep secure.
 //
@@ -31,6 +31,11 @@ mavenPublishing {
     // project name ("api", "core", ...), which would publish four generically-named artifacts under
     // our group. This mirrors `base.archivesName` in java-conventions, so the POM coordinate and the
     // jar file name stay in step.
+    //
+    // A module whose published name is not derivable from its directory reassigns this from its own
+    // build file, where the later call wins. Three names come from the module name here and in
+    // java-conventions, so such a module has to override all three together; the client SDK is the
+    // only one that does.
     coordinates(
         groupId = project.group.toString(),
         artifactId = "scalardb-saga-${project.name}",
@@ -53,7 +58,8 @@ mavenPublishing {
 
     pom {
         // Central shows the name verbatim, so keeping it equal to the artifactId makes the listing
-        // match what people type in their build file. The human-readable text is the description,
+        // match what people type in their build file — which is also why a module that overrides
+        // the artifactId must override this with it. The human-readable text is the description,
         // which each module sets via `description = "..."`.
         name = "scalardb-saga-${project.name}"
         description = provider {

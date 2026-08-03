@@ -1,8 +1,12 @@
 package com.scalar.db.saga.server.security;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.scalar.db.saga.server.SagaServerConfig;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.util.Properties;
 import org.junit.jupiter.api.Test;
 
@@ -155,5 +159,28 @@ class ApiKeyConfigTest {
     // Act / Assert — provider selected but nothing configured
     assertThatThrownBy(() -> ApiKeyConfig.from(new Properties(), new Properties()))
         .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void serverConfigLoad_everyKeyDeclaredHereGiven_isAccepted() throws IllegalAccessException {
+    // Arrange
+    // This class owns the key and per-key setting names, but it is not visible from the daemon
+    // package, so SagaServerConfig restates them for its unknown-key check. Reflect over the
+    // constants rather than repeating them: a name added here and not there would otherwise be
+    // rejected as unknown, refusing to start on a setting this class supports.
+    Properties props = new Properties();
+    for (Field field : ApiKeyConfig.class.getDeclaredFields()) {
+      if (!Modifier.isStatic(field.getModifiers()) || field.getType() != String.class) {
+        continue;
+      }
+      if (field.getName().endsWith("_KEY")) {
+        props.setProperty((String) field.get(null), "x");
+      } else if (field.getName().endsWith("_SUFFIX")) {
+        props.setProperty(ApiKeyConfig.KEY_PREFIX + "svc" + field.get(null), "x");
+      }
+    }
+
+    // Act / Assert
+    assertThatCode(() -> SagaServerConfig.load(props)).doesNotThrowAnyException();
   }
 }

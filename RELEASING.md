@@ -10,7 +10,7 @@ container image to `ghcr.io/scalar-labs/scalardb-saga-server`.
 | API | `com.scalar-labs:scalardb-saga-api` | Everyone, transitively |
 | Engine | `com.scalar-labs:scalardb-saga-core` | Applications embedding the engine in-process |
 | Wire contract | `com.scalar-labs:scalardb-saga-rpc` | The gRPC client, transitively |
-| Client SDK | `com.scalar-labs:scalardb-saga-grpc-client` | Java 8+ applications calling the daemon |
+| Client SDK | `com.scalar-labs:scalardb-saga-java-client-sdk` | Java 8+ applications calling the daemon |
 | BOM | `com.scalar-labs:scalardb-saga-bom` | Anyone pinning several of the above |
 | Server image | `ghcr.io/scalar-labs/scalardb-saga-server` | Operators running daemon mode |
 
@@ -29,13 +29,27 @@ Every other Scalar image publishes exact versions only, so pin one. Let Dependab
 which puts the change in your repository rather than silently in ours. (The GitHub release page still
 marks the newest release *Latest*; that is a badge on the release, not a tag on the image.)
 
-Consumers pin one version through the BOM:
+Consumers pin one version through the BOM, and declare the artifact for the mode they run in. The two
+are alternatives, not a pair: `core` embeds the engine in the application's own process, while the
+client SDK calls a daemon that runs it elsewhere. The SDK deliberately never depends on `core`, so
+declaring both puts the whole engine into an application that only wanted a client.
 
 ```kotlin
+// Daemon mode — calling the daemon from a Java 8+ application
+implementation(platform("com.scalar-labs:scalardb-saga-bom:1.0.0"))
+implementation("com.scalar-labs:scalardb-saga-java-client-sdk")
+```
+
+```kotlin
+// Embedded mode — running the engine in-process
 implementation(platform("com.scalar-labs:scalardb-saga-bom:1.0.0"))
 implementation("com.scalar-labs:scalardb-saga-core")
-implementation("com.scalar-labs:scalardb-saga-grpc-client")
 ```
+
+Neither snippet needs `scalardb-saga-api` or `scalardb-saga-rpc` declared: each module exposes what
+it needs with `api(project(...))` — `core` the API, the client SDK the API and the wire contract —
+so they arrive transitively with their versions constrained by the BOM. The client SDK also brings
+`grpc-netty-shaded` as `runtimeOnly`, so a consumer never picks a transport.
 
 ## Branching model
 

@@ -9,4 +9,4 @@ plugins {
 description =
     "The public API of ScalarDB Saga: the saga orchestrator interface, step and definition types, " +
     "and exceptions. Java 8 compatible. Pulled in transitively by scalardb-saga-core and " +
-    "scalardb-saga-grpc-client."
+    "scalardb-saga-java-client-sdk."

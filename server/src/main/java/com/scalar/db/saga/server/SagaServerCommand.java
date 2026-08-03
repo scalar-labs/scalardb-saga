@@ -4,10 +4,14 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.Objects;
 import java.util.Properties;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
+import java.util.regex.Pattern;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -128,13 +132,67 @@ public class SagaServerCommand implements Callable<Integer> {
    */
   private static int reportStartupFailure(
       Exception e, CommandLine commandLine, CommandLine.ParseResult parseResult) {
-    // getMessage() is the operator-facing text everywhere it is set; toString() keeps an exception
-    // that carries none (an NPE, say) from logging an empty line.
-    String detail =
-        e.getMessage() == null || e.getMessage().isBlank() ? e.toString() : e.getMessage();
-    logger.error("Failed to start the server: {}", detail);
+    logger.error("Failed to start the server: {}", describeChain(e));
     logger.debug("Startup failure detail", e);
     return CommandLine.ExitCode.SOFTWARE;
+  }
+
+  /** Matches a line break and the whitespace around it, so a chained message stays on one line. */
+  private static final Pattern LINE_BREAK = Pattern.compile("\\s*\\R\\s*");
+
+  /**
+   * Renders a failure and every cause that adds something the text does not already carry, as one
+   * line. Package-private so the cases the command line cannot reach — a cause with no message, a
+   * multi-line one, a chain that loops — are testable directly.
+   *
+   * <p>A wrapper names the operation it was attempting and leaves the reason to its cause, so the
+   * outermost message alone can misdirect. A malformed definition file reports only {@code Failed
+   * to read definition file: /conf/definitions/order.json}, sending an operator to check mounts and
+   * permissions when the file was read without error and its JSON is bad. Walking the chain keeps
+   * the reason at the level the operator sees, without the frames this handler exists to suppress.
+   *
+   * <p>A cause whose message the line already carries is skipped, so a wrapper that only prefixes
+   * its cause does not print the reason twice. A cause that restates the outer message in other
+   * words is still appended: a redundant clause costs the operator a few words, whereas dropping
+   * the one clause carrying the diagnosis costs a restart at {@code DEBUG}.
+   */
+  static String describeChain(Throwable failure) {
+    String message = failure.getMessage();
+    // toString() keeps an exception that carries no message (an NPE, say) from logging an empty
+    // line; getMessage() is the operator-facing text everywhere it is set.
+    StringBuilder detail =
+        new StringBuilder(
+            message == null || message.isBlank() ? failure.toString() : oneLine(message));
+    // Compared by identity so a cause chain that loops back terminates rather than hanging the
+    // handler that was supposed to end the process.
+    Set<Throwable> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+    seen.add(failure);
+    for (Throwable cause = failure.getCause();
+        cause != null && seen.add(cause);
+        cause = cause.getCause()) {
+      String causeMessage = cause.getMessage();
+      if (causeMessage == null || causeMessage.isBlank()) {
+        continue;
+      }
+      String text = oneLine(causeMessage);
+      if (detail.indexOf(text) >= 0) {
+        continue;
+      }
+      // The type is named because a cause often reads as a fragment on its own; "NumberFormat
+      // Exception" or "JsonParseException" is what makes the appended clause self-explanatory.
+      detail.append(" (").append(cause.getClass().getSimpleName()).append(": ").append(text);
+      detail.append(')');
+    }
+    return detail.toString();
+  }
+
+  /**
+   * Collapses line breaks so a multi-line message stays on one line. Jackson puts the source
+   * location of a parse error on a second line, which would otherwise split the report in two and
+   * leave a log pipeline keying off the first line alone.
+   */
+  private static String oneLine(String message) {
+    return LINE_BREAK.matcher(message.strip()).replaceAll(" ");
   }
 
   /**

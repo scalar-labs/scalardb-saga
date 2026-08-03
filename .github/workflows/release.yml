@@ -204,7 +204,7 @@ jobs:
             echo "${VERSION} is behind ${highest}; the Latest badge stays where it is"
           fi
 
-  # Uploads one aggregated deployment covering api, core, rpc, grpc-client, and the BOM. It goes up as
+  # Uploads one aggregated deployment covering api, core, rpc, client, and the BOM. It goes up as
   # USER_MANAGED on purpose: the Portal validates it and then waits, so releasing is a deliberate
   # click, because a released version can never be replaced or withdrawn. The job ends at the upload
   # and never sees the validation verdict, so a deployment the Portal rejects still leaves it green.

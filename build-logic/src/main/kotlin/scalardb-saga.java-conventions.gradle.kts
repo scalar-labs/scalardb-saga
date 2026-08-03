@@ -45,8 +45,8 @@ tasks.withType<AbstractArchiveTask>().configureEach {
 // and a dc.created meta tag unless it runs with -notimestamp. Gradle's StandardJavadocDocletOptions
 // already defaults noTimestamp to true, so this line changes no bytes today; it is here so the
 // reproducibility of a published artifact rests on this file rather than on a Gradle default that
-// could be re-tuned upstream. Verified either way: two clean builds of api, core, rpc, and
-// grpc-client yield byte-identical jar, sources jar, and javadoc jar, and forcing this to false
+// could be re-tuned upstream. Verified either way: two clean builds of api, core, rpc, and the
+// client SDK yield byte-identical jar, sources jar, and javadoc jar, and forcing this to false
 // makes both stamps reappear.
 tasks.withType<Javadoc>().configureEach {
     (options as StandardJavadocDocletOptions).isNoTimestamp = true

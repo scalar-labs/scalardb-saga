@@ -21,7 +21,10 @@ import picocli.CommandLine;
  * Argument parsing for {@link SagaServerCommand}. The parse is what stands between an operator's
  * command line and a process that either serves or exits, and it is the half of the command that
  * can be exercised without binding ports — {@link SagaServerCommand#call()} blocks until shutdown
- * by design, so the server-starting half is covered by the integration tests instead.
+ * by design, so the server-starting half is exercised only by the {@code image-smoke-test} CI job,
+ * which boots the image with {@code --config}. The integration tests do not reach it: they
+ * construct {@link SagaServer} directly, so a change to {@code call()} that they all survive can
+ * still break the entry point the container runs.
  */
 class SagaServerCommandTest {
 
@@ -116,9 +119,118 @@ class SagaServerCommandTest {
                   .contains("Cannot read the configuration file")
                   .contains("/nonexistent/server.properties");
               assertThat(event.getThrowableProxy()).isNull();
+              // The cause here is a NoSuchFileException whose message is the path the line already
+              // names, so walking the chain must add nothing — the path appears once.
+              assertThat(event.getFormattedMessage().split("/nonexistent/server.properties", -1))
+                  .hasSize(2);
             });
     // And picocli's default handler, which is what would have printed the trace, never ran.
     assertThat(err.toString()).isEmpty();
+  }
+
+  @Test
+  void execute_configWithUnparsablePortGiven_reportsTheCauseOnTheSameLine(@TempDir Path dir)
+      throws Exception {
+    // Arrange — a value that fails in SagaServerConfig.load, before anything touches a database.
+    Path config = dir.resolve("server.properties");
+    Files.writeString(config, "scalar.db.saga.server.http.port=notanumber\n");
+    StringWriter err = new StringWriter();
+
+    // Act
+    int exitCode = executeCapturingErr(err, "--config", config.toString());
+
+    // Assert — the wrapper names the key, the cause names what was wrong with the value, and both
+    // reach the operator at the default level rather than only under SCALAR_DB_SAGA_LOG_LEVEL.
+    assertThat(exitCode).isEqualTo(CommandLine.ExitCode.SOFTWARE);
+    assertThat(errorEvents())
+        .singleElement()
+        .satisfies(
+            event -> {
+              assertThat(event.getFormattedMessage())
+                  .contains("scalar.db.saga.server.http.port")
+                  .contains("NumberFormatException");
+              assertThat(event.getThrowableProxy()).isNull();
+            });
+  }
+
+  @Test
+  void describeChain_wrappedCauseGiven_appendsTheReason() {
+    // The shape that costs the diagnosis: the wrapper names the operation, the cause holds the
+    // reason, and the operation succeeded as far as the wrapper's own wording goes.
+    Exception failure =
+        new IllegalStateException(
+            "Failed to read definition file: /conf/definitions/order.json",
+            new IllegalArgumentException("Unexpected character ('t' (code 116))"));
+
+    assertThat(SagaServerCommand.describeChain(failure))
+        .isEqualTo(
+            "Failed to read definition file: /conf/definitions/order.json"
+                + " (IllegalArgumentException: Unexpected character ('t' (code 116)))");
+  }
+
+  @Test
+  void describeChain_causeAlreadyQuotedGiven_doesNotRepeatIt() {
+    // The common wrapper appends its cause's message verbatim; re-appending would print it twice.
+    Exception cause = new IllegalArgumentException("Permission denied");
+    Exception failure = new IllegalStateException("Cannot read '/etc/x': Permission denied", cause);
+
+    assertThat(SagaServerCommand.describeChain(failure))
+        .isEqualTo("Cannot read '/etc/x': Permission denied");
+  }
+
+  @Test
+  void describeChain_multiLineCauseGiven_collapsesItToOneLine() {
+    // Jackson puts the source location on a second line. A report split across two lines loses its
+    // second half to any pipeline that keys off the first.
+    Exception failure =
+        new IllegalStateException(
+            "Failed to parse", new IllegalArgumentException("Unexpected character\n at [line: 3]"));
+
+    assertThat(SagaServerCommand.describeChain(failure))
+        .isEqualTo("Failed to parse (IllegalArgumentException: Unexpected character at [line: 3])")
+        .doesNotContain("\n");
+  }
+
+  @Test
+  void describeChain_messagelessFailureGiven_fallsBackToTheType() {
+    // An NPE carries no message; without the fallback the line would read "Failed to start the
+    // server: " and name nothing at all.
+    assertThat(SagaServerCommand.describeChain(new NullPointerException()))
+        .contains("NullPointerException");
+  }
+
+  @Test
+  void describeChain_messagelessCauseGiven_skipsIt() {
+    Exception failure = new IllegalStateException("Startup failed", new NullPointerException());
+
+    // An empty parenthesised clause would be noise, not a diagnosis.
+    assertThat(SagaServerCommand.describeChain(failure)).isEqualTo("Startup failed");
+  }
+
+  @Test
+  void describeChain_deeplyNestedCauseGiven_reachesTheInnermostReason() {
+    Exception failure =
+        new IllegalStateException(
+            "Failed to start",
+            new IllegalStateException(
+                "Failed to open the store", new IllegalStateException("EOF")));
+
+    assertThat(SagaServerCommand.describeChain(failure))
+        .isEqualTo(
+            "Failed to start (IllegalStateException: Failed to open the store)"
+                + " (IllegalStateException: EOF)");
+  }
+
+  @Test
+  void describeChain_cyclicChainGiven_terminates() {
+    // Nothing in the JDK forbids a cause chain that loops. Hanging here would leave the process
+    // alive with no diagnosis, which is worse than the failure being reported.
+    Exception first = new IllegalStateException("first");
+    Exception second = new IllegalStateException("second", first);
+    first.initCause(second);
+
+    assertThat(SagaServerCommand.describeChain(first))
+        .isEqualTo("first (IllegalStateException: second)");
   }
 
   @Test
