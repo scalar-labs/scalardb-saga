@@ -169,15 +169,30 @@ public final class SagaServer implements AutoCloseable {
         new SagaServiceImpl(orchestrator, config.syncTimeoutMillis(), config.syncMaxWaitMillis());
     AdminServiceImpl adminService = new AdminServiceImpl(orchestrator, adminDriveDeadlineMillis());
     SagaSecurityInterceptor security = new SagaSecurityInterceptor(securityProvider);
-    return NettyServerBuilder.forAddress(new InetSocketAddress(config.host(), config.grpcPort()))
-        .addService(intercepted(service, security))
-        .addService(intercepted(adminService, security))
-        .addService(health.getHealthService())
+    NettyServerBuilder builder =
+        NettyServerBuilder.forAddress(new InetSocketAddress(config.host(), config.grpcPort()))
+            .addService(intercepted(service, security))
+            .addService(intercepted(adminService, security))
+            .addService(health.getHealthService())
+            .executor(executor)
+            .permitKeepAliveTime(1, TimeUnit.MINUTES);
+    applyGrpcTransportSettings(builder, config);
+    return builder.build();
+  }
+
+  /**
+   * Applies the two inbound caps to the gRPC transport. The message cap is the load-bearing one: it
+   * is derived from the store's payload cap, so dropping it would leave gRPC on its own 4 MiB
+   * default and the daemon would accept a message the store then refuses to persist, surfacing as a
+   * write error that names the store rather than the transport that let it in.
+   *
+   * <p>Visible for testing, for the same reason as {@link #applyEngineSettings}: a builder does not
+   * read its settings back, so the only way to observe the forwarding is to watch it receive them.
+   */
+  static void applyGrpcTransportSettings(NettyServerBuilder builder, SagaServerConfig config) {
+    builder
         .maxInboundMessageSize(config.grpcMaxInboundMessageBytes())
-        .maxInboundMetadataSize(config.grpcMaxInboundMetadataBytes())
-        .executor(executor)
-        .permitKeepAliveTime(1, TimeUnit.MINUTES)
-        .build();
+        .maxInboundMetadataSize(config.grpcMaxInboundMetadataBytes());
   }
 
   /**

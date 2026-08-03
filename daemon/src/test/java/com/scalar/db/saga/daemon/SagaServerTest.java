@@ -22,6 +22,7 @@ import io.grpc.ManagedChannelBuilder;
 import io.grpc.health.v1.HealthCheckRequest;
 import io.grpc.health.v1.HealthCheckResponse;
 import io.grpc.health.v1.HealthGrpc;
+import io.grpc.netty.NettyServerBuilder;
 import io.javalin.Javalin;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -661,5 +662,55 @@ class SagaServerTest {
     verify(endpoint, never()).allowedHosts(any(String[].class));
     verify(endpoint, never()).maxBodyBytes(anyLong());
     verify(endpoint).add();
+  }
+
+  @Test
+  void applyGrpcTransportSettings_withCapsConfigured_forwardsEachToTheBuilder() {
+    // Arrange
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.GRPC_MAX_INBOUND_METADATA_BYTES_KEY, "16384");
+    props.setProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY, "2097152");
+    SagaServerConfig config = SagaServerConfig.load(props);
+    NettyServerBuilder builder = mock(NettyServerBuilder.class, RETURNS_SELF);
+
+    // Act
+    SagaServer.applyGrpcTransportSettings(builder, config);
+
+    // Assert
+    verify(builder).maxInboundMessageSize(2_097_152);
+    verify(builder).maxInboundMetadataSize(16_384);
+  }
+
+  @Test
+  void applyGrpcTransportSettings_withStorePayloadCapRaised_derivesTheMessageCapFromIt() {
+    // Arrange
+    // The message cap has no key of its own: it tracks the store's payload cap so no transport can
+    // accept an input the store would then reject. Left to gRPC's own 4 MiB default, a 2 MiB
+    // message would be accepted here and refused at persist time, blaming the store.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY, "524288");
+    NettyServerBuilder builder = mock(NettyServerBuilder.class, RETURNS_SELF);
+
+    // Act
+    SagaServer.applyGrpcTransportSettings(builder, SagaServerConfig.load(props));
+
+    // Assert
+    verify(builder).maxInboundMessageSize(524_288);
+  }
+
+  @Test
+  void applyGrpcTransportSettings_withCapsUnset_forwardsTheDaemonDefaults() {
+    // Arrange
+    // Unset must still be pushed down: the daemon's message default (1 MiB) is a quarter of gRPC's
+    // own, so skipping the call would quietly quadruple what the transport accepts.
+    NettyServerBuilder builder = mock(NettyServerBuilder.class, RETURNS_SELF);
+
+    // Act
+    SagaServer.applyGrpcTransportSettings(builder, SagaServerConfig.load(new Properties()));
+
+    // Assert
+    verify(builder).maxInboundMessageSize(SagaServerConfig.DEFAULT_MAX_EVENT_PAYLOAD_BYTES);
+    verify(builder)
+        .maxInboundMetadataSize(SagaServerConfig.DEFAULT_GRPC_MAX_INBOUND_METADATA_BYTES);
   }
 }
