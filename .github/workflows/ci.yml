@@ -47,10 +47,10 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Lint the daemon Dockerfile
+      - name: Lint the server Dockerfile
         uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5 # v3.3.0
         with:
-          dockerfile: daemon/docker/Dockerfile
+          dockerfile: server/docker/Dockerfile
 
   # The unit and integration suites exercise the daemon in-process; nothing there would catch a
   # packaging fault — a wrong path in the Dockerfile, a start script that cannot find its jars, a file
@@ -72,7 +72,7 @@ jobs:
         uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6.1.0
 
       - name: Assemble the Docker build context
-        run: ./gradlew :daemon:dockerContext
+        run: ./gradlew :server:dockerContext
 
       # The classified epoll natives are the only architecture-specific part of the distribution, and
       # only linux-x86_64 arrives transitively — a dropped linux-aarch_64 dependency leaves the arm64
@@ -82,7 +82,7 @@ jobs:
       - name: Check both epoll natives are packaged
         run: |
           set -euo pipefail
-          lib=daemon/build/docker/dist/lib
+          lib=server/build/docker/dist/lib
           version=$(basename "$(ls "${lib}"/netty-transport-classes-epoll-*.jar)" .jar |
             sed 's/^netty-transport-classes-epoll-//')
           for classifier in linux-x86_64 linux-aarch_64; do
@@ -102,9 +102,9 @@ jobs:
       - name: Build the image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
-          context: daemon/build/docker
+          context: server/build/docker
           load: true
-          tags: scalardb-saga-daemon:ci
+          tags: scalardb-saga-server:ci
           build-args: |
             IMAGE_VERSION=ci
             IMAGE_REVISION=${{ github.sha }}
@@ -112,7 +112,7 @@ jobs:
       - name: Check the image runs as a non-root user
         run: |
           set -euo pipefail
-          user=$(docker image inspect --format '{{.Config.User}}' scalardb-saga-daemon:ci)
+          user=$(docker image inspect --format '{{.Config.User}}' scalardb-saga-server:ci)
           if [ "${user}" != "201:201" ]; then
             echo "::error::image runs as '${user}', expected 201:201"
             exit 1
@@ -123,15 +123,15 @@ jobs:
       - name: Start the container
         run: |
           docker run --detach --name saga \
-            --publish 8080:8080 --publish 50051:50051 \
+            --publish 12080:12080 --publish 12051:12051 \
             --volume "$PWD/.github/smoke:/smoke:ro" \
-            scalardb-saga-daemon:ci /smoke/server.properties
+            scalardb-saga-server:ci --config /smoke/server.properties
 
       - name: Wait for the REST health endpoint
         run: |
           set -euo pipefail
           for _ in $(seq 1 60); do
-            if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/health)" = "200" ]; then
+            if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:12080/health)" = "200" ]; then
               echo "GET /health returned 200"
               exit 0
             fi
@@ -160,7 +160,7 @@ jobs:
           fi
 
       # A TCP connect, not a gRPC call: this asserts the transport is bound and reachable in the
-      # packaged image. The health service's actual semantics are covered by the daemon's
+      # packaged image. The health service's actual semantics are covered by the server's
       # integrationTest suite, which needs no container.
       #
       # The redirect is `<`, not `>`: writing to the socket sends a byte that is not an HTTP/2 client
@@ -170,7 +170,7 @@ jobs:
       - name: Check the gRPC port is bound
         # Block scalar because the command contains ": ", which YAML would otherwise read as a mapping.
         run: |
-          timeout 30 bash -c 'until : < /dev/tcp/127.0.0.1/50051; do sleep 1; done'
+          timeout 30 bash -c 'until : < /dev/tcp/127.0.0.1/12051; do sleep 1; done'
 
       # Guards against a regression in the shipped logback.xml: with no configuration on the classpath
       # Logback would default to DEBUG, flooding an operator's log pipeline.
@@ -225,7 +225,7 @@ jobs:
         uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6.1.0
 
       - name: Assemble the Docker build context
-        run: ./gradlew :daemon:dockerContext
+        run: ./gradlew :server:dockerContext
 
       # Registers binfmt handlers so the arm64 image can both build and run on an amd64 runner.
       - name: Set up QEMU
@@ -239,10 +239,10 @@ jobs:
       - name: Build the arm64 image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
-          context: daemon/build/docker
+          context: server/build/docker
           platforms: linux/arm64
           load: true
-          tags: scalardb-saga-daemon:ci-arm64
+          tags: scalardb-saga-server:ci-arm64
           build-args: |
             IMAGE_VERSION=ci
             IMAGE_REVISION=${{ github.sha }}
@@ -250,9 +250,9 @@ jobs:
       - name: Start the container
         run: |
           docker run --detach --name saga-arm64 --platform linux/arm64 \
-            --publish 8080:8080 \
+            --publish 12080:12080 \
             --volume "$PWD/.github/smoke:/smoke:ro" \
-            scalardb-saga-daemon:ci-arm64 /smoke/server.properties
+            scalardb-saga-server:ci-arm64 --config /smoke/server.properties
 
       # A far longer budget than the native job: every instruction the JVM executes is translated, and
       # startup is the translation-heavy phase.
@@ -260,7 +260,7 @@ jobs:
         run: |
           set -euo pipefail
           for _ in $(seq 1 150); do
-            if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/health)" = "200" ]; then
+            if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:12080/health)" = "200" ]; then
               echo "GET /health returned 200"
               exit 0
             fi

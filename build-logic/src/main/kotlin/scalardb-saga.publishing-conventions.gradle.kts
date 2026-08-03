@@ -4,7 +4,7 @@ plugins {
 }
 
 // Publishing to Maven Central for the consumable modules (api, core, rpc, client, bom). The
-// daemon is deliberately NOT published: it ships as a container image, so a jar on Central would be
+// server is deliberately NOT published: it ships as a container image, so a jar on Central would be
 // an artifact nobody consumes but everyone has to keep secure.
 //
 // The Vanniktech plugin auto-detects the platform from the applied plugins — `java-library` gets a

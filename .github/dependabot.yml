@@ -45,10 +45,10 @@ updates:
         patterns:
           - "*"
 
-  # Keeps the digest-pinned base image in the daemon Dockerfile current. Without this the pin would
+  # Keeps the digest-pinned base image in the server Dockerfile current. Without this the pin would
   # quietly rot, and the image would ship an ever-older Ubuntu and JRE.
   - package-ecosystem: docker
-    directory: /daemon/docker
+    directory: /server/docker
     schedule:
       interval: weekly
 

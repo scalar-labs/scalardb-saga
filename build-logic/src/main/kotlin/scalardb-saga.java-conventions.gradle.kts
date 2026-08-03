@@ -33,7 +33,7 @@ repositories {
 
 // Build timestamps and filesystem ordering would otherwise make every jar, distribution tar, and
 // zip byte-different across builds of the same source. Pinning both makes a published artifact
-// verifiable against a rebuild, and keeps the Docker layer holding the daemon distribution stable
+// verifiable against a rebuild, and keeps the Docker layer holding the server distribution stable
 // when nothing changed.
 tasks.withType<AbstractArchiveTask>().configureEach {
     isPreserveFileTimestamps = false
