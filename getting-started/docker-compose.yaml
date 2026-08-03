@@ -44,7 +44,9 @@ services:
       - ./services/service.py:/service.py:ro
 
   saga-server:
-    image: ghcr.io/scalar-labs/scalardb-saga-server:${SAGA_VERSION:-1.0.0}
+    # The default names the newest published image. The release workflow asserts that it matches the
+    # version being released, so a stale default fails the release rather than reaching a reader.
+    image: ghcr.io/scalar-labs/scalardb-saga-server:${SAGA_VERSION:-3.19.0-alpha.1}
     ports:
       - "12080:12080" # REST
       - "12051:12051" # gRPC

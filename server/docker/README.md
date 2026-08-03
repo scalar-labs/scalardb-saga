@@ -23,7 +23,7 @@ docker run --rm \
   --publish 12080:12080 --publish 12051:12051 \
   --volume "$PWD/conf:/scalardb-saga/conf:ro" \
   --env SCALAR_DB_USERNAME=saga --env SCALAR_DB_PASSWORD=... \
-  ghcr.io/scalar-labs/scalardb-saga-server:1.0.0
+  ghcr.io/scalar-labs/scalardb-saga-server:<version>
 ```
 
 Mount over `/scalardb-saga/conf` with your own `server.properties` and `definitions/`. Start from the
@@ -39,7 +39,7 @@ startup, because an operator cannot add classes to this image. Use a declarative
 Point the daemon at a different file by overriding the command:
 
 ```bash
-docker run ... ghcr.io/scalar-labs/scalardb-saga-server:1.0.0 --config /etc/saga/other.properties
+docker run ... ghcr.io/scalar-labs/scalardb-saga-server:<version> --config /etc/saga/other.properties
 ```
 
 Secrets do not have to be baked in. Any value under `scalar.db.saga.*` accepts `${env:NAME}` or

@@ -36,13 +36,13 @@ declaring both puts the whole engine into an application that only wanted a clie
 
 ```kotlin
 // Daemon mode — calling the daemon from a Java 8+ application
-implementation(platform("com.scalar-labs:scalardb-saga-bom:1.0.0"))
+implementation(platform("com.scalar-labs:scalardb-saga-bom:VERSION"))
 implementation("com.scalar-labs:scalardb-saga-java-client-sdk")
 ```
 
 ```kotlin
 // Embedded mode — running the engine in-process
-implementation(platform("com.scalar-labs:scalardb-saga-bom:1.0.0"))
+implementation(platform("com.scalar-labs:scalardb-saga-bom:VERSION"))
 implementation("com.scalar-labs:scalardb-saga-core")
 ```
 
@@ -67,7 +67,8 @@ The versions below are an example of the state once 1.1 has shipped and work on 
 | `1.0` | `1.0.4-SNAPSHOT` | Minor version branch, in maintenance; still takes backported fixes. |
 
 There is no patch version branch: a patch is a tag on its minor version branch, not a branch of its
-own. Today only `main` exists, at `1.0.0-SNAPSHOT`; `1.0` gets cut when 1.0 is ready to ship.
+own. Today only `main` exists; the first minor version branch gets cut when its release is ready to
+ship.
 
 Branch names carry no prefix — `1`, `1.0`, `1.1`. Every workflow matches them with the `[0-9]+` and
 `[0-9]+.[0-9]+` patterns, so a name like `release/1.0` gets no CI and publishes no snapshot.
@@ -85,7 +86,7 @@ after it, live only on that branch and are unreachable from `main` by design.
 
    ```bash
    git switch main && git pull
-   git switch -c 1.0 && git push -u origin 1.0
+   git switch -c <release-branch> && git push -u origin <release-branch>
    ```
 
    A newly cut branch also needs its own Dependabot entries. Dependabot reads
@@ -112,14 +113,14 @@ after it, live only on that branch and are unreachable from `main` by design.
    it through a PR so CI runs on it:
 
    ```properties
-   version=1.0.0
+   version=<version>
    ```
 
 3. Tag that commit on the release branch and push the tag:
 
    ```bash
-   git switch 1.0 && git pull
-   git tag v1.0.0 && git push origin v1.0.0
+   git switch <release-branch> && git pull
+   git tag v<version> && git push origin v<version>
    ```
 
 4. The `Release` workflow verifies the tag against `gradle.properties`, verifies the tagged commit is
@@ -262,8 +263,8 @@ Under **Settings → Rules → Rulesets → New ruleset → New branch ruleset**
 The pattern is typed without `refs/heads/`, which the UI adds itself. Ruleset patterns are fnmatch,
 not regex, so the `[0-9]+` patterns the workflows key off would match nothing here; `[0-9]*` is what
 matches `1`, `1.0` and `1.10`. Leave **Restrict creations** unticked, or step 1's
-`git push -u origin 1.0` is refused. The four check names may not appear in the picker until they
-have run on a pull request; they can be typed in by hand.
+`git push -u origin <release-branch>` is refused. The four check names may not appear in the picker
+until they have run on a pull request; they can be typed in by hand.
 
 A tag ruleset is worth adding alongside it, so that cutting a release is limited to whoever is
 allowed to release. Under **New ruleset → New tag ruleset**: name `release-tags`, Active, target
@@ -356,8 +357,8 @@ a developer machine.
 ## Verifying a published image
 
 ```bash
-cosign verify ghcr.io/scalar-labs/scalardb-saga-server:1.0.0 \
-  --certificate-identity=https://github.com/scalar-labs/scalardb-saga/.github/workflows/release.yml@refs/tags/v1.0.0 \
+cosign verify ghcr.io/scalar-labs/scalardb-saga-server:<version> \
+  --certificate-identity=https://github.com/scalar-labs/scalardb-saga/.github/workflows/release.yml@refs/tags/v<version> \
   --certificate-oidc-issuer=https://token.actions.githubusercontent.com
 ```
 
@@ -366,8 +367,8 @@ that *some* GitHub Actions job signed this image, so a pattern that stops at the
 `--certificate-identity-regexp='^https://github.com/scalar-labs/scalardb-saga/'` — is satisfied by a
 signature from any workflow in this repository running on any branch, since the certificate names the
 workflow file and ref after the repository. Any job here granted `id-token: write` would pass it.
-Naming `release.yml@refs/tags/v1.0.0` is what makes the signature evidence that the release workflow,
-running on that tag, produced this image.
+Naming `release.yml@refs/tags/v<version>` is what makes the signature evidence that the release
+workflow, running on that tag, produced this image.
 
 Both halves carry the version, and they have to agree: a `v1.0.0` identity verifying a `:1.1.0` image
 would mean the image was not built by the release it claims to be. Re-runs do not change this — a
@@ -376,7 +377,7 @@ dispatched re-run is rejected unless it targets the tag, so it signs under the s
 Each image also carries an SBOM and a build provenance attestation:
 
 ```bash
-docker buildx imagetools inspect ghcr.io/scalar-labs/scalardb-saga-server:1.0.0
+docker buildx imagetools inspect ghcr.io/scalar-labs/scalardb-saga-server:<version>
 ```
 
 ## Building locally

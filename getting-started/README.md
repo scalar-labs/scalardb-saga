@@ -299,4 +299,5 @@ To go further:
 
 The Compose file pulls `ghcr.io/scalar-labs/scalardb-saga-server`, which is published from the first
 release onward. To run against a locally built image instead, run `./gradlew :server:dockerBuild` from
-the repository root, then `SAGA_VERSION=1.0.0-SNAPSHOT docker compose up -d`.
+the repository root, then run `docker compose up -d --wait` with `SAGA_VERSION` set to the `version`
+in `gradle.properties`, which is the tag `dockerBuild` applies.
