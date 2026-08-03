@@ -9,10 +9,10 @@ plugins {
 description =
     "The gRPC wire contract of the ScalarDB Saga daemon: the protobuf messages and generated " +
     "service stubs shared by the server and the client SDK. Java 8 compatible. Pulled in " +
-    "transitively by scalardb-saga-grpc-client."
+    "transitively by scalardb-saga-java-client-sdk."
 
 // The Java-8 gRPC wire contract: the `.proto` plus the generated message + service stubs, shared by
-// the daemon (server side) and the grpc-client SDK (client side). Generated under --release 8 so the
+// the daemon (server side) and the client SDK (client side). Generated under --release 8 so the
 // Java 8 client can consume it; the Java 21 daemon consumes it too (newer-uses-older).
 dependencies {
     api(platform(libs.grpc.bom))
