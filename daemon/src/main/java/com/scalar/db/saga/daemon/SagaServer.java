@@ -204,12 +204,29 @@ public final class SagaServer implements AutoCloseable {
     Objects.requireNonNull(config, "config must not be null");
     DefaultSagaOrchestrator.Builder builder =
         DefaultSagaOrchestrator.newBuilder()
-            .storeFactory(ScalarDbSagaStoreFactory.create(config.properties()))
-            .ownerId(config.ownerId())
-            .shutdownMode(config.shutdownMode())
-            .shutdownTimeoutMillis(config.shutdownTimeoutMillis())
-            .recoveryConfig(config.recoveryConfig())
-            .retentionConfig(config.retentionConfig());
+            .storeFactory(ScalarDbSagaStoreFactory.create(config.properties()));
+    applyEngineSettings(builder, config);
+    return builder.build();
+  }
+
+  /**
+   * Applies every engine setting the operator configured, which is the whole point of the daemon's
+   * configuration surface: a key that parses but never reaches the builder leaves the daemon on the
+   * engine default while the operator believes they changed it.
+   *
+   * <p>Visible for testing, and separate from {@link #buildDefaultSagaOrchestrator} for the same
+   * reason. Nothing on {@link DefaultSagaOrchestrator} reads these values back, so the only way to
+   * observe the forwarding is to watch the builder receive them; a test passes a mock. Keeping the
+   * store factory in the caller is what lets that test run without a database.
+   */
+  static void applyEngineSettings(
+      DefaultSagaOrchestrator.Builder builder, SagaServerConfig config) {
+    builder
+        .ownerId(config.ownerId())
+        .shutdownMode(config.shutdownMode())
+        .shutdownTimeoutMillis(config.shutdownTimeoutMillis())
+        .recoveryConfig(config.recoveryConfig())
+        .retentionConfig(config.retentionConfig());
     config.services().forEach((name, service) -> addHttpEndpoint(builder, name, service));
     // Enable async-callback provisioning only when both the callback base URL and secret are set;
     // otherwise no provider is wired and registering an async definition fails fast (in the
@@ -219,15 +236,15 @@ public final class SagaServer implements AutoCloseable {
           new HmacCallbackUrlProvider(
               config.callbackBaseUrl().get(), config.callbackSecret().get(), Clock.systemUTC()));
     }
-    return builder.build();
   }
 
   /**
    * Registers one configured service as an HTTP endpoint, applying the optional outbound policy.
    * {@code allowedHosts} and {@code maxBodyBytes} are applied only when configured, so an unset key
-   * leaves the engine's own default in place rather than overwriting it with a sentinel.
+   * leaves the engine's own default in place rather than overwriting it with a sentinel. Visible
+   * for testing, like {@link #applyEngineSettings}.
    */
-  private static void addHttpEndpoint(
+  static void addHttpEndpoint(
       DefaultSagaOrchestrator.Builder builder,
       String name,
       SagaServerConfig.ServiceConfig service) {

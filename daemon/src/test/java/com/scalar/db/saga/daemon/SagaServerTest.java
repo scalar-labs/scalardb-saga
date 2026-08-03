@@ -3,14 +3,19 @@ package com.scalar.db.saga.daemon;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
+import com.scalar.db.saga.daemon.api.HmacCallbackUrlProvider;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
+import com.scalar.db.saga.engine.ShutdownMode;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
@@ -24,6 +29,8 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Properties;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -492,5 +499,167 @@ class SagaServerTest {
     SagaServer server = serverWithSyncMaxWait(dir, 120_000L);
 
     assertThat(server.grpcDrainMillis()).isEqualTo(125_000L);
+  }
+
+  /**
+   * A config whose every engine setting differs from its default, and whose numeric values all
+   * differ from one another, so a setter wired to the wrong getter fails rather than coincidentally
+   * matching.
+   */
+  private static SagaServerConfig configWithEveryEngineSetting() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.OWNER_ID_KEY, "saga-daemon-7");
+    props.setProperty(SagaServerConfig.SHUTDOWN_MODE_KEY, "WAIT_ALL_SAGAS");
+    props.setProperty(SagaServerConfig.SHUTDOWN_TIMEOUT_MILLIS_KEY, "7001");
+    props.setProperty(SagaServerConfig.SYNC_TIMEOUT_MILLIS_KEY, "7002");
+    props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "7003");
+    props.setProperty(SagaServerConfig.RECOVERY_TIMEOUT_MILLIS_KEY, "7004");
+    props.setProperty(SagaServerConfig.RECOVERY_BATCH_SIZE_KEY, "51");
+    props.setProperty(SagaServerConfig.RETENTION_BATCH_SIZE_KEY, "52");
+    return SagaServerConfig.load(props);
+  }
+
+  @Test
+  void applyEngineSettings_withEveryEngineSettingConfigured_forwardsEachToTheBuilder() {
+    // Arrange
+    // Nothing on the orchestrator reads these back, so the builder is the only place the
+    // forwarding is observable. A dropped setter here leaves the daemon on the engine default
+    // while the operator's key parses and validates, which is the gap the config surface exists
+    // to close.
+    SagaServerConfig config = configWithEveryEngineSetting();
+    DefaultSagaOrchestrator.Builder builder =
+        mock(DefaultSagaOrchestrator.Builder.class, RETURNS_SELF);
+
+    // Act
+    SagaServer.applyEngineSettings(builder, config);
+
+    // Assert
+    verify(builder).ownerId("saga-daemon-7");
+    verify(builder).shutdownMode(ShutdownMode.WAIT_ALL_SAGAS);
+    verify(builder).shutdownTimeoutMillis(7001L);
+    verify(builder).recoveryConfig(config.recoveryConfig());
+    verify(builder).retentionConfig(config.retentionConfig());
+  }
+
+  @Test
+  void applyEngineSettings_withServicesConfigured_registersEachAsAnEndpoint() {
+    // Arrange
+    Properties props = new Properties();
+    props.setProperty(
+        SagaServerConfig.SERVICE_KEY_PREFIX + "account" + SagaServerConfig.SERVICE_BASE_URL_SUFFIX,
+        "https://account.example");
+    props.setProperty(
+        SagaServerConfig.SERVICE_KEY_PREFIX + "ledger" + SagaServerConfig.SERVICE_BASE_URL_SUFFIX,
+        "https://ledger.example");
+    SagaServerConfig config = SagaServerConfig.load(props);
+    DefaultSagaOrchestrator.Builder builder =
+        mock(DefaultSagaOrchestrator.Builder.class, RETURNS_SELF);
+    when(builder.httpEndpoint(any(), any()))
+        .thenReturn(mock(DefaultSagaOrchestrator.Builder.HttpEndpointBuilder.class, RETURNS_SELF));
+
+    // Act
+    SagaServer.applyEngineSettings(builder, config);
+
+    // Assert
+    verify(builder).httpEndpoint("account", "https://account.example");
+    verify(builder).httpEndpoint("ledger", "https://ledger.example");
+  }
+
+  @Test
+  void applyEngineSettings_withCallbackConfigured_wiresTheCallbackUrlProvider() {
+    // Arrange
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.CALLBACK_BASE_URL_KEY, "http://daemon:8080");
+    props.setProperty(SagaServerConfig.CALLBACK_SECRET_KEY, "s3cr3t-key");
+    SagaServerConfig config = SagaServerConfig.load(props);
+    DefaultSagaOrchestrator.Builder builder =
+        mock(DefaultSagaOrchestrator.Builder.class, RETURNS_SELF);
+
+    // Act
+    SagaServer.applyEngineSettings(builder, config);
+
+    // Assert
+    verify(builder).callbackUrlProvider(any(HmacCallbackUrlProvider.class));
+  }
+
+  @Test
+  void applyEngineSettings_withoutCallbackConfigured_wiresNoCallbackUrlProvider() {
+    // Arrange
+    // Neither key set, so async completion stays disabled and registering an async definition
+    // fails fast in the engine rather than handing out a URL nothing can authenticate.
+    DefaultSagaOrchestrator.Builder builder =
+        mock(DefaultSagaOrchestrator.Builder.class, RETURNS_SELF);
+
+    // Act
+    SagaServer.applyEngineSettings(builder, SagaServerConfig.load(new Properties()));
+
+    // Assert
+    verify(builder, never()).callbackUrlProvider(any());
+  }
+
+  /** Builds the single service {@code account} from the given extra {@code service.account.*}. */
+  private static SagaServerConfig.ServiceConfig accountService(Properties extra) {
+    Properties props = new Properties();
+    props.setProperty(
+        SagaServerConfig.SERVICE_KEY_PREFIX + "account" + SagaServerConfig.SERVICE_BASE_URL_SUFFIX,
+        "https://account.example");
+    extra.stringPropertyNames().forEach(k -> props.setProperty(k, extra.getProperty(k)));
+    return Objects.requireNonNull(SagaServerConfig.load(props).services().get("account"));
+  }
+
+  @Test
+  void addHttpEndpoint_withOutboundPolicyConfigured_forwardsEachSettingToTheEndpoint() {
+    // Arrange
+    Properties extra = new Properties();
+    extra.setProperty(
+        SagaServerConfig.SERVICE_KEY_PREFIX
+            + "account"
+            + SagaServerConfig.SERVICE_ALLOWED_HOSTS_SUFFIX,
+        "account.example");
+    extra.setProperty(
+        SagaServerConfig.SERVICE_KEY_PREFIX
+            + "account"
+            + SagaServerConfig.SERVICE_MAX_BODY_BYTES_SUFFIX,
+        "4096");
+    extra.setProperty(
+        SagaServerConfig.SERVICE_KEY_PREFIX
+            + "account"
+            + SagaServerConfig.SERVICE_HEADER_INFIX
+            + "Authorization",
+        "Bearer t0ken");
+    DefaultSagaOrchestrator.Builder builder =
+        mock(DefaultSagaOrchestrator.Builder.class, RETURNS_SELF);
+    DefaultSagaOrchestrator.Builder.HttpEndpointBuilder endpoint =
+        mock(DefaultSagaOrchestrator.Builder.HttpEndpointBuilder.class, RETURNS_SELF);
+    when(builder.httpEndpoint(any(), any())).thenReturn(endpoint);
+
+    // Act
+    SagaServer.addHttpEndpoint(builder, "account", accountService(extra));
+
+    // Assert
+    verify(endpoint).allowedHosts("account.example");
+    verify(endpoint).maxBodyBytes(4096L);
+    verify(endpoint).defaultHeaders(Map.of("Authorization", "Bearer t0ken"));
+    verify(endpoint).add();
+  }
+
+  @Test
+  void addHttpEndpoint_withoutOptionalPolicy_leavesTheEngineDefaults() {
+    // Arrange
+    // An unset allowlist or body cap must not be pushed down as a sentinel: the engine's own
+    // default has to survive, so the setters are not to be called at all.
+    DefaultSagaOrchestrator.Builder builder =
+        mock(DefaultSagaOrchestrator.Builder.class, RETURNS_SELF);
+    DefaultSagaOrchestrator.Builder.HttpEndpointBuilder endpoint =
+        mock(DefaultSagaOrchestrator.Builder.HttpEndpointBuilder.class, RETURNS_SELF);
+    when(builder.httpEndpoint(any(), any())).thenReturn(endpoint);
+
+    // Act
+    SagaServer.addHttpEndpoint(builder, "account", accountService(new Properties()));
+
+    // Assert
+    verify(endpoint, never()).allowedHosts(any(String[].class));
+    verify(endpoint, never()).maxBodyBytes(anyLong());
+    verify(endpoint).add();
   }
 }
