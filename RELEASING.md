@@ -194,12 +194,14 @@ whatever it is called. An alpha or rc is still a first release, not a rehearsal.
 
 A rehearsal has to look like a real release, because the guards in `verify-version` are doing their
 job. A throwaway tag pushed on its own is refused by the version check, since the tag has to equal
-the `version` in `gradle.properties`, and then by the branch check, since `v0.0.1` derives the line
-`0.0` and looks for a branch by that name. So it takes three pushes:
+the `version` in `gradle.properties`; then by the branch check, since `v0.0.1` derives the line
+`0.0` and looks for a branch by that name; and then by the Compose-default check, which wants that
+default to name the version being released. So it takes three pushes:
 
 ```bash
 git switch -c 0.0 && git push -u origin 0.0    # scratch release branch
-# set version=0.0.1-rc.1 in gradle.properties, then commit and push
+# set version=0.0.1-rc.1 in gradle.properties, and the SAGA_VERSION default in
+# getting-started/docker-compose.yaml to match, then commit and push
 git tag v0.0.1-rc.1 && git push origin v0.0.1-rc.1
 ```
 
