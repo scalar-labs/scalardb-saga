@@ -7,7 +7,7 @@ Refer to `~/git/scalardb-saga-design/docs/scalardb-saga-design.md` for architect
 ## Language
 
 - **Java 21** for all modules (core engine, framework integrations, daemon, testing, dev server, etc.)
-- **Java 8** only for daemon client SDKs (`scalardb-saga-client`, `scalardb-saga-grpc-client`) to maximize adoption
+- **Java 8** only for the daemon client SDK (`scalardb-saga-java-client-sdk`) to maximize adoption
 - Users on Java 8 use daemon mode via client SDK or call HTTP/gRPC endpoints directly
 
 ## Build
@@ -79,15 +79,17 @@ Refer to `~/git/scalardb-saga-design/docs/scalardb-saga-design.md` for architect
 
 ## Module Structure
 
-Subproject directories use short names; artifacts are prefixed with `scalardb-saga-` (via `base.archivesName` for the jar and the publication's `artifactId` for the coordinate — these are set separately).
+Subproject directories use short names; artifacts are prefixed with `scalardb-saga-` (via `base.archivesName` for the jar, the publication's `artifactId` for the coordinate, and the POM `name` for the Maven Central listing — these are set separately). A module whose published name is not derivable from its directory overrides all three from its own build file; `client` is the only one, and any further override has to move all three together.
 
 - `api` — Java-8-clean public API surface (interfaces, value types, exceptions)
 - `core` — Core engine (engine, store, recovery, testing harness)
 - `rpc` — gRPC wire contract (`.proto` plus generated stubs), Java 8
-- `grpc-client` — Java 8 daemon client SDK
+- `client` — Java 8 daemon client SDK, published as `scalardb-saga-java-client-sdk`
 - `daemon` — Standalone server (REST + gRPC); ships as a container image, not a Maven artifact
 - `bom` — `java-platform` BOM pinning every published artifact to one version
-- Future: `spring`, `quarkus`, `participant`, `client` (HTTP SDK), `dev-server`, `lra`
+- Future: `spring`, `quarkus`, `participant`, `dev-server`, `lra`
+
+There is no HTTP client SDK and none is planned: the daemon's REST API exists so non-Java consumers can skip an SDK entirely, and a Java HTTP SDK would serve the same Java 8 audience over a slower transport.
 
 ## Publishing
 
