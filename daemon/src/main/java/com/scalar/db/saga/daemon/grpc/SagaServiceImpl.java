@@ -36,7 +36,7 @@ import org.jspecify.annotations.Nullable;
  *
  * <p><b>Sync vs async.</b> {@code async=true} starts the saga and returns the running snapshot
  * immediately. {@code async=false} blocks until the saga is terminal, bounded by {@code min(}{@code
- * sync_timeout_millis}, remaining gRPC call deadline{@code )}; when that bound elapses it returns
+ * sync.timeout_millis}, remaining gRPC call deadline{@code )}; when that bound elapses it returns
  * the in-flight snapshot (whose status — the source of truth — is non-terminal, the gRPC analogue
  * of REST's {@code 202}) and <b>the saga keeps running</b>. The wait runs on the server's
  * virtual-thread executor, so a blocked call is cheap.
@@ -185,11 +185,11 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
   }
 
   /**
-   * Computes a wait bound (ms): the {@code sync_max_wait_millis} ceiling, further tightened by the
+   * Computes a wait bound (ms): the {@code sync.max_wait_millis} ceiling, further tightened by the
    * caller's {@code requestedCapMillis} (AwaitSaga's {@code max_wait_millis}; {@link
-   * Long#MAX_VALUE} for the start path), {@code sync_timeout_millis} (when set), and the remaining
+   * Long#MAX_VALUE} for the start path), {@code sync.timeout_millis} (when set), and the remaining
    * call deadline minus a slack (when the client set one). Always in {@code [0,
-   * sync_max_wait_millis]} — the wait is never unbounded.
+   * sync.max_wait_millis]} — the wait is never unbounded.
    */
   private long computeBoundMillis(long requestedCapMillis) {
     long bound = Math.min(syncMaxWaitMillis, requestedCapMillis);

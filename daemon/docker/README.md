@@ -118,13 +118,18 @@ start under `noop` on a non-loopback interface.
 The JVM is PID 1 and receives `SIGTERM` directly, which triggers a drain rather than dropping
 in-flight work. The daemon drains in two windows, one after the other, so budget for their sum:
 
-- **gRPC call drain** — `max(30s, sync_max_wait_millis + 5s)`, so 65s at the default
-  `sync_max_wait_millis` of 60s. It tracks that setting: raise it to `300000` and this window
+- **gRPC call drain** — `max(30s, sync.max_wait_millis + 5s)`, so 65s at the default
+  `sync.max_wait_millis` of 60s. It tracks that setting: raise it to `300000` and this window
   becomes 305s.
-- **Saga engine drain** — a fixed 30s, not reachable through any `scalar.db.saga.server.*` key.
+- **Saga engine drain** — `shutdown.timeout_millis`, 30s by default. Under the default
+  `shutdown.mode=WAIT_CURRENT_STEP` the engine only finishes each running step and leaves the saga
+  for recovery, so this window is rarely spent in full; `WAIT_ALL_SAGAS` instead waits for in-flight
+  sagas to reach a terminal state, which needs a window sized to your longest saga. Setting it to
+  `0` skips this window entirely, cancelling in-flight work at once and leaving all of it to the
+  recovery scan.
 
 At defaults that totals 95s. Set `terminationGracePeriodSeconds` above the sum; below it, the daemon
-is `SIGKILL`ed mid-drain. Since the second window is fixed, the grace period is the only lever.
+is `SIGKILL`ed mid-drain.
 
 Being cut short costs latency, not integrity: whatever was interrupted is reclaimed by the recovery
 scan on the next boot.

@@ -36,7 +36,7 @@ import org.jspecify.annotations.Nullable;
  * <p><b>Bounded synchronous start (opt-in).</b> A synchronous start runs the saga on the engine's
  * (virtual-thread) executor and blocks the request thread only until the saga is terminal — which,
  * with retries/compensation over slow participants, can be long. When {@code
- * scalar.db.saga.server.sync_timeout_millis} is set (default {@code 0} = disabled, i.e. block to
+ * scalar.db.saga.server.sync.timeout_millis} is set (default {@code 0} = disabled, i.e. block to
  * terminal), the request instead returns {@code 202} once that bound elapses, while the saga keeps
  * running (poll {@code GET /sagas/{id}}). This caps how long a single request can hold a thread, so
  * a burst of slow synchronous sagas cannot exhaust the request pool. Returning {@code 202} (rather

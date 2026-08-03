@@ -36,7 +36,7 @@ import org.junit.jupiter.api.Test;
  *
  * <p>The daemon must know its own externally-reachable URL to mint the callback URL, so — unlike
  * the other daemon ITs that bind an ephemeral port — this test pre-allocates a free port and pins
- * the daemon (and its {@code callback_base_url}) to it.
+ * the daemon (and its {@code callback.base_url}) to it.
  */
 class SagaTccAsyncCallbackIntegrationTest extends DaemonIntegrationTestSupport {
 
@@ -101,7 +101,7 @@ class SagaTccAsyncCallbackIntegrationTest extends DaemonIntegrationTestSupport {
   protected void configureProperties(Properties props) {
     // Pin the daemon to a known port so it can mint a callback URL that points back at itself.
     int daemonPort = freePort();
-    props.setProperty(SagaServerConfig.PORT_KEY, String.valueOf(daemonPort));
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, String.valueOf(daemonPort));
     props.setProperty(SagaServerConfig.CALLBACK_BASE_URL_KEY, "http://localhost:" + daemonPort);
     props.setProperty(SagaServerConfig.CALLBACK_SECRET_KEY, SECRET);
   }

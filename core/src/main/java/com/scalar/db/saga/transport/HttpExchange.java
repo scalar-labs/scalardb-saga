@@ -44,8 +44,9 @@ import org.jspecify.annotations.Nullable;
  * a definition — the channel for auth/secrets) are applied to every request through this exchange,
  * so both the declarative {@code HttpTransportAdapter} and the code-step {@code SagaHttpClient} get
  * them for free. Precedence per header name: a caller-supplied per-call header overrides a default
- * header of the same name; the framework correlation headers ({@code X-Saga-Id}/{@code
- * X-Saga-Step}) are always set last and win.
+ * header of the same name, and the framework correlation headers ({@code X-Saga-Id}/{@code
+ * X-Saga-Step}) override both — a default header named like one of them is replaced, never sent
+ * alongside it.
  */
 final class HttpExchange {
 
@@ -146,19 +147,21 @@ final class HttpExchange {
     try {
       requestBuilder = HttpRequest.newBuilder(uri).timeout(effectiveTimeout);
       // Merge by header name so a caller-supplied per-call header overrides an endpoint default of
-      // the same name; the JDK header() appends (not replaces), so dedupe here before applying.
-      // Case-insensitive per the HTTP spec. The framework correlation/content-type headers are set
-      // afterward and always win.
+      // the same name, and the framework correlation and content-type headers override both.
+      // Case-insensitive per the HTTP spec. Everything goes through this one map because the JDK
+      // header() appends rather than replaces: applying a framework header after the map would add
+      // a second value alongside an endpoint default of the same name, not win over it.
       Map<String, String> merged = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
       merged.putAll(defaultHeaders);
       for (Map.Entry<String, String> header : headers) {
         merged.put(header.getKey(), header.getValue());
       }
-      merged.forEach(requestBuilder::header);
-      requestBuilder.header(HttpHeaders.SAGA_ID, sagaId).header(HttpHeaders.SAGA_STEP, stepName);
+      merged.put(HttpHeaders.SAGA_ID, sagaId);
+      merged.put(HttpHeaders.SAGA_STEP, stepName);
       if (body != null && contentType != null) {
-        requestBuilder.header(HttpHeaders.CONTENT_TYPE, contentType);
+        merged.put(HttpHeaders.CONTENT_TYPE, contentType);
       }
+      merged.forEach(requestBuilder::header);
     } catch (IllegalArgumentException e) {
       // newBuilder rejects a non-http(s) scheme or a non-absolute URI; header() rejects a control
       // character in a value (a saga correlation header or a caller-supplied one). Both are

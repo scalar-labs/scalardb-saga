@@ -423,16 +423,16 @@ class SagaServiceImplTest {
 
   @Test
   void startSaga_syncClientDeadlineElapsesBeforeTerminal_returnsRunningWithoutDeadlineExceeded() {
-    // Arrange — a large sync_timeout, but the client sets a short gRPC deadline and the callback
-    // never fires. The bound is min(sync_timeout, deadline - 100ms slack) = the deadline side, so
-    // the
-    // wait ends ~one slack before the gRPC deadline and the server returns OK + RUNNING (the saga
-    // keeps running) rather than letting the call expire as DEADLINE_EXCEEDED.
+    // Arrange — a large sync.timeout_millis, but the client sets a short gRPC deadline and the
+    // callback never fires. The bound is min(sync.timeout_millis, deadline - 100ms slack), so the
+    // deadline side wins: the wait ends ~one slack before the gRPC deadline and the server returns
+    // OK + RUNNING (the saga keeps running) rather than letting the call expire as
+    // DEADLINE_EXCEEDED.
     when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
         .thenReturn("gen-d");
     when(orchestrator.getStateSnapshot("gen-d")).thenReturn(snapshot("gen-d", SagaStatus.RUNNING));
 
-    // Act — sync_timeout is large (30s) so the client's 500ms deadline is the binding bound.
+    // Act — sync.timeout_millis is large (30s) so the client's 500ms deadline is the binding bound.
     SagaSnapshot response =
         stub(30_000)
             .withDeadlineAfter(500, TimeUnit.MILLISECONDS)
@@ -446,8 +446,8 @@ class SagaServiceImplTest {
 
   @Test
   void startSaga_noTimeoutNoDeadline_boundedByMaxWaitReturnsTerminal() {
-    // Arrange — sync_timeout=0 and no client deadline, so the wait is bounded only by the
-    // sync_max_wait_millis ceiling. The callback fires synchronously, so it returns the terminal
+    // Arrange — sync.timeout_millis=0 and no client deadline, so the wait is bounded only by the
+    // sync.max_wait_millis ceiling. The callback fires synchronously, so it returns the terminal
     // snapshot immediately, well under the ceiling.
     SagaStateSnapshot terminal = snapshot("gen-u", SagaStatus.COMPLETED);
     when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
@@ -457,7 +457,7 @@ class SagaServiceImplTest {
               return "gen-u";
             });
 
-    // Act — sync_timeout=0, no deadline.
+    // Act — sync.timeout_millis=0, no deadline.
     SagaSnapshot response = stub(0).startSaga(startByName("transfer", false));
 
     // Assert
@@ -468,16 +468,14 @@ class SagaServiceImplTest {
 
   @Test
   void startSaga_noTimeoutNoDeadline_maxWaitElapsesReturnsRunningWithoutCancelling() {
-    // Arrange — sync_timeout=0 and no deadline; with a small sync_max_wait_millis the ceiling
-    // bounds
-    // the wait. The callback never fires, so the ceiling elapses and the server returns the
-    // in-flight
-    // RUNNING snapshot (the saga keeps running) rather than blocking forever.
+    // Arrange — sync.timeout_millis=0 and no deadline, so a small sync.max_wait_millis is the only
+    // ceiling on the wait. The callback never fires, so that ceiling elapses and the server returns
+    // the in-flight RUNNING snapshot (the saga keeps running) rather than blocking forever.
     when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
         .thenReturn("gen-m");
     when(orchestrator.getStateSnapshot("gen-m")).thenReturn(snapshot("gen-m", SagaStatus.RUNNING));
 
-    // Act — sync_timeout=0, no deadline, a 50ms ceiling.
+    // Act — sync.timeout_millis=0, no deadline, a 50ms ceiling.
     SagaSnapshot response = stub(0, 50).startSaga(startByName("transfer", false));
 
     // Assert
