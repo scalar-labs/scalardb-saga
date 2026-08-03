@@ -109,12 +109,22 @@ after it, live only on that branch and are unreachable from `main` by design.
 
    For a patch release the branch already exists — backport the fix to it through a PR.
 
-2. On the release branch, set the release version in `gradle.properties` (drop `-SNAPSHOT`) and merge
-   it through a PR so CI runs on it:
+2. On the release branch, set the release version in `gradle.properties` (drop `-SNAPSHOT`) and
+   update the image default the getting-started walkthrough pulls, then merge both through a PR so
+   CI runs on them:
 
    ```properties
    version=<version>
    ```
+
+   ```yaml
+   # getting-started/docker-compose.yaml
+   image: ghcr.io/scalar-labs/scalardb-saga-server:${SAGA_VERSION:-<version>}
+   ```
+
+   That default is the only image a reader who has built nothing pulls, so it has to name a version
+   that exists. CI fails the pull request when the two disagree, and `verify-version` refuses the
+   tag, so a release cannot ship with a stale one.
 
 3. Tag that commit on the release branch and push the tag:
 

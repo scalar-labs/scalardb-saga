@@ -26,6 +26,40 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
+      # On a release-version commit the getting-started Compose default has to name the version being
+      # released. `verify-version` refuses the tag otherwise, but by then the tag is already pushed,
+      # so catching it here puts the failure in the pull request that sets the version — which is
+      # where the omission happens, and what step 2 of RELEASING.md merges through a PR for.
+      #
+      # A snapshot version means an ordinary branch, where the default legitimately names the last
+      # release rather than what this tree builds, so there is nothing to compare.
+      - name: Check the getting-started Compose default on a release-version commit
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version=//p' gradle.properties)
+          case "${version}" in
+            *-SNAPSHOT)
+              echo "::notice::${version} is a snapshot; the Compose default names the last release"
+              exit 0
+              ;;
+          esac
+          compose=getting-started/docker-compose.yaml
+          # Single-quoted on purpose: sed must see the literal `${SAGA_VERSION:-` text, so the shell
+          # must not expand it.
+          # shellcheck disable=SC2016
+          default=$(sed -n 's/.*scalardb-saga-server:${SAGA_VERSION:-\([^}]*\)}.*/\1/p' "${compose}")
+          if [ -z "${default}" ]; then
+            echo "::error::could not read the SAGA_VERSION default from ${compose}; the image line" \
+              "no longer matches the expected \${SAGA_VERSION:-<version>} form"
+            exit 1
+          fi
+          if [ "${default}" != "${version}" ]; then
+            echo "::error::${compose} defaults SAGA_VERSION to ${default}, but gradle.properties" \
+              "names release ${version}. Update the default in this pull request; the release" \
+              "workflow refuses the tag otherwise."
+            exit 1
+          fi
+
       - name: Set up Java 21
         uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
         with:
