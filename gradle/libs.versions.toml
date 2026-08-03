@@ -30,7 +30,7 @@ maven-publish-plugin = "0.37.0"
 # AWS SDKs, which pull different 4.1.x lines. Netty requires every one of its modules to be on the
 # same version (the native transports resolve version-matched .so files), so the server imports the
 # BOM to align them. Bump this to the highest 4.1.x that any dependency requests.
-netty = "4.1.133.Final"
+netty = "4.1.136.Final"
 license-report = "3.1.4"
 
 [libraries]
