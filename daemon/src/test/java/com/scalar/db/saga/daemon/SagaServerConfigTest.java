@@ -701,15 +701,6 @@ class SagaServerConfigTest {
   }
 
   @Test
-  void recoveryConfig_zeroInterval_throwsIllegalArgumentException() {
-    Properties props = new Properties();
-    props.setProperty(SagaServerConfig.RECOVERY_INTERVAL_SECONDS_KEY, "0");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
   void recoveryConfig_negativeTimeout_throwsIllegalArgumentException() {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.RECOVERY_TIMEOUT_MILLIS_KEY, "-1");
@@ -765,22 +756,73 @@ class SagaServerConfigTest {
     assertThat(config.maxConcurrentPurges()).isEqualTo(4);
   }
 
-  @Test
-  void retentionConfig_zeroPeriod_throwsIllegalArgumentException() {
+  /**
+   * Pins every recovery and retention bound against the engine's own validation, which rejects
+   * anything below 1 on all nine. Both directions of drift are silent: a looser daemon bound lets a
+   * value through that the engine then rejects, and a stricter one refuses a value embedded mode
+   * accepts, with an ordinary-looking IllegalArgumentException either way. That is not hypothetical
+   * — shutdown.timeout_millis shipped requiring 1 while the engine accepted 0, and only a review
+   * caught it. A hand audit does not survive the next refactor; this does.
+   */
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        SagaServerConfig.RECOVERY_TIMEOUT_MILLIS_KEY,
+        SagaServerConfig.RECOVERY_INTERVAL_SECONDS_KEY,
+        SagaServerConfig.RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY,
+        SagaServerConfig.RECOVERY_BATCH_SIZE_KEY,
+        SagaServerConfig.RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY,
+        SagaServerConfig.RETENTION_PERIOD_SECONDS_KEY,
+        SagaServerConfig.RETENTION_CLEANUP_INTERVAL_SECONDS_KEY,
+        SagaServerConfig.RETENTION_BATCH_SIZE_KEY,
+        SagaServerConfig.RETENTION_MAX_CONCURRENT_PURGES_KEY
+      })
+  void load_zeroRecoveryOrRetentionBound_throwsIllegalArgumentException(String key) {
     Properties props = new Properties();
-    props.setProperty(SagaServerConfig.RETENTION_PERIOD_SECONDS_KEY, "0");
+    props.setProperty(key, "0");
 
+    // Asserting the message is what makes this test pin the daemon's bound rather than the
+    // engine's.
+    // Two validation paths throw IllegalArgumentException for this input — the bound here and the
+    // config record's own constructor — so the type alone cannot tell them apart, and a daemon
+    // bound
+    // that drifted below the engine's would still throw from the record and keep an isInstanceOf
+    // assertion green. Only the daemon names the property key; the record names its field.
     assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(key);
   }
 
   @Test
-  void retentionConfig_zeroMaxConcurrentPurges_throwsIllegalArgumentException() {
+  void load_everyRecoveryAndRetentionBoundAtOne_isAccepted() {
+    // The other half of the pin above: rejecting 0 alone would still allow a bound to drift to 2
+    // and
+    // refuse a value the engine takes. 1 is the smallest the engine accepts on all nine, so setting
+    // them together proves no daemon bound sits above it.
     Properties props = new Properties();
-    props.setProperty(SagaServerConfig.RETENTION_MAX_CONCURRENT_PURGES_KEY, "0");
+    props.setProperty(SagaServerConfig.RECOVERY_TIMEOUT_MILLIS_KEY, "1");
+    props.setProperty(SagaServerConfig.RECOVERY_INTERVAL_SECONDS_KEY, "1");
+    props.setProperty(SagaServerConfig.RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY, "1");
+    props.setProperty(SagaServerConfig.RECOVERY_BATCH_SIZE_KEY, "1");
+    props.setProperty(SagaServerConfig.RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY, "1");
+    props.setProperty(SagaServerConfig.RETENTION_PERIOD_SECONDS_KEY, "1");
+    props.setProperty(SagaServerConfig.RETENTION_CLEANUP_INTERVAL_SECONDS_KEY, "1");
+    props.setProperty(SagaServerConfig.RETENTION_BATCH_SIZE_KEY, "1");
+    props.setProperty(SagaServerConfig.RETENTION_MAX_CONCURRENT_PURGES_KEY, "1");
 
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    RecoveryConfig recovery = config.recoveryConfig();
+    assertThat(recovery.recoveryTimeoutMillis()).isEqualTo(1L);
+    assertThat(recovery.recoveryIntervalSeconds()).isEqualTo(1L);
+    assertThat(recovery.compensationGracePeriod()).isEqualTo(Duration.ofSeconds(1));
+    assertThat(recovery.batchSize()).isEqualTo(1);
+    assertThat(recovery.maxConcurrentRecoveries()).isEqualTo(1);
+    RetentionConfig retention = config.retentionConfig();
+    assertThat(retention.retentionPeriod()).isEqualTo(Duration.ofSeconds(1));
+    assertThat(retention.cleanupIntervalSeconds()).isEqualTo(1L);
+    assertThat(retention.batchSize()).isEqualTo(1);
+    assertThat(retention.maxConcurrentPurges()).isEqualTo(1);
   }
 
   @Test
