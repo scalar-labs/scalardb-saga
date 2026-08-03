@@ -10,8 +10,9 @@ message broker to operate.
 
 A saga is a sequence of steps, each with a compensation that undoes it. ScalarDB Saga drives the
 steps in order; if one fails, it runs the compensations for everything already attempted, in
-reverse. Every transition is persisted before it happens, so a coordinator that crashes mid-saga
-does not leave the operation half-applied — another replica picks it up and finishes it.
+reverse. Every outcome is written to a durable log as it happens, so a coordinator that crashes
+mid-saga is picked up by another replica and driven to a terminal state. A step interrupted between
+running and being recorded runs again, so steps must be idempotent.
 
 ### ScalarDB Saga and ScalarDB
 
@@ -34,12 +35,12 @@ which is what lets it run on the database you already have.
 - **Runs on your database.** Saga state is stored through ScalarDB, so it lives in any database
   ScalarDB supports — PostgreSQL, MySQL, Oracle, SQL Server, Cassandra, DynamoDB, Cosmos DB — on any
   cloud or on-premises. No message broker, no dedicated coordinator datastore.
-- **Durable by construction.** Saga state and its event history are written as an append-only log
-  before each action, so recovery has an exact record of what was attempted.
+- **Durable by construction.** Saga state and its event history are written to an append-only log as
+  the saga progresses, so recovery has an exact record of what was attempted.
 - **Crash recovery.** Any replica can pick up a saga stranded by a failed one; there is no leader to
   elect and no standby to run.
 - **Retries that know what is retryable.** Per-step retry policies with exponential backoff, applied
-  to transient failures (5xx, transport errors) and not to permanent ones (4xx).
+  to transient failures (5xx, 408, 429, transport errors) and not to permanent ones (other 4xx).
 - **Synchronous or asynchronous.** Block until the saga reaches a terminal state, or start it and
   poll. Steps whose work outlives the request can park the saga and resume it from a callback.
 - **Declarative definitions.** Define sagas in JSON or YAML, versioned and registered without

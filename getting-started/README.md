@@ -39,10 +39,11 @@ cd scalardb-saga/getting-started
 Start the database, the participant services, and the saga server by running the following command:
 
 ```console
-docker compose up -d
+docker compose up -d --wait
 ```
 
-That starts five containers:
+`--wait` holds the command until the saga server reports healthy, so the requests below cannot race
+its startup. That starts five containers:
 
 | Container | Purpose |
 | --- | --- |
@@ -197,8 +198,8 @@ according to the step's retry policy.
 
 ### Check what the engine did
 
-Get a saga's timeline — the durable record the engine writes before each action — by running the
-following command:
+Get a saga's timeline — the durable record the engine writes as the saga progresses — by running
+the following command:
 
 ```console
 curl localhost:12080/sagas/<SAGA_ID_UUID>/detail
@@ -219,9 +220,10 @@ You should see the saga's state followed by its timeline, abridged here for read
              {"timestamp":"...","type":"SAGA_COMPENSATED","resultingStatus":"COMPENSATED"}]}
 ```
 
-This record is written before each action rather than after, which is what lets another server pick up
-a saga whose coordinator died mid-flight and finish it. The timeline carries metadata and failure
-details only; raw step payloads are never returned.
+This record is what lets another server pick up a saga whose coordinator died mid-flight and finish
+it. A step interrupted between running and being recorded runs again on recovery, which is why steps
+must be idempotent. The timeline carries metadata and failure details only; raw step payloads are
+never returned.
 
 ### Start a saga without waiting for it to finish
 
@@ -286,8 +288,9 @@ docker compose down -v
 
 To go further:
 
-- Add a step, or a `retryPolicy`, to a definition and run `docker compose up -d` again to see it take
-  effect.
+- Add a step, or a `retryPolicy`, to a definition, bump its `version`, then restart the server with
+  `docker compose restart saga-server`. Definitions are immutable once registered, so editing one in
+  place without bumping the version stops the server on its next start.
 - Switch a definition to `"mode": "TCC"` to reserve every step before confirming any of them.
 - [server/docker/README.md](../server/docker/README.md) — running the server for real: configuration,
   authentication, health checks, and deployment.

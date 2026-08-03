@@ -50,6 +50,14 @@ services:
       - "12051:12051" # gRPC
     volumes:
       - ./conf:/scalardb-saga/conf:ro
+    # Lets `docker compose up -d --wait` hold until the server is actually serving. Without it,
+    # `up -d` returns as soon as the container starts and the first request loses a race with
+    # schema creation and definition loading.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:12080/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
     depends_on:
       postgres:
         condition: service_healthy
