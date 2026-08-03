@@ -1,0 +1,69 @@
+name: scalardb-saga-getting-started
+
+services:
+  # Where the saga server keeps its state. Any database ScalarDB supports works here; PostgreSQL
+  # needs no extra driver, and the saga tables are created on first start.
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: scalardb
+      POSTGRES_USER: scalardb
+      POSTGRES_PASSWORD: scalardb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scalardb -d scalardb"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  # The three participants the saga calls. All three run the same script; SERVICE_NAME decides which
+  # one a container is. Nothing is built — the script is mounted into a stock Python image.
+  payment:
+    image: python:3.13-slim
+    command: ["python", "/service.py"]
+    environment:
+      SERVICE_NAME: payment
+    volumes:
+      - ./services/service.py:/service.py:ro
+
+  inventory:
+    image: python:3.13-slim
+    command: ["python", "/service.py"]
+    environment:
+      SERVICE_NAME: inventory
+    volumes:
+      - ./services/service.py:/service.py:ro
+
+  shipping:
+    image: python:3.13-slim
+    command: ["python", "/service.py"]
+    environment:
+      SERVICE_NAME: shipping
+      # /ship succeeds; /ship-fail answers 422 so order-saga-failing has something to compensate.
+      FAIL_PATHS: /ship-fail
+    volumes:
+      - ./services/service.py:/service.py:ro
+
+  saga-server:
+    image: ghcr.io/scalar-labs/scalardb-saga-server:${SAGA_VERSION:-1.0.0}
+    ports:
+      - "12080:12080" # REST
+      - "12051:12051" # gRPC
+    volumes:
+      - ./conf:/scalardb-saga/conf:ro
+    # Lets `docker compose up -d --wait` hold until the server is actually serving. Without it,
+    # `up -d` returns as soon as the container starts and the first request loses a race with
+    # schema creation and definition loading.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:12080/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    depends_on:
+      postgres:
+        condition: service_healthy
+      payment:
+        condition: service_started
+      inventory:
+        condition: service_started
+      shipping:
+        condition: service_started
