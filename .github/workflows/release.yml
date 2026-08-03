@@ -106,6 +106,35 @@ jobs:
           esac
           echo "Releasing ${version}"
 
+      # The getting-started Compose file pins the image it pulls, and its default is the only thing a
+      # reader who has not built anything gets. A default naming a version that was never published
+      # fails on `docker compose up -d`, the walkthrough's first command, which is the worst place in
+      # the repository to leave a stale value. Nothing else notices: it is a documentation default, so
+      # no build resolves it and no test covers it. Assert it here, where the version being released
+      # is known, rather than trusting a release checklist to remember.
+      - name: Check the getting-started Compose default matches this release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          compose=getting-started/docker-compose.yaml
+          # Matches the `${SAGA_VERSION:-<default>}` form only. A default written any other way is a
+          # miss rather than a false pass, and the emptiness check below turns that into a failure.
+          # The pattern is single-quoted on purpose: sed must see the literal `${SAGA_VERSION:-`
+          # text, so the shell must not expand it.
+          # shellcheck disable=SC2016
+          default=$(sed -n 's/.*scalardb-saga-server:${SAGA_VERSION:-\([^}]*\)}.*/\1/p' "${compose}")
+          if [ -z "${default}" ]; then
+            echo "::error::could not read the SAGA_VERSION default from ${compose}; the image line" \
+              "no longer matches the expected \${SAGA_VERSION:-<version>} form"
+            exit 1
+          fi
+          if [ "${default}" != "${VERSION}" ]; then
+            echo "::error::${compose} defaults SAGA_VERSION to ${default}, but this release is" \
+              "${VERSION}. Update the default so the walkthrough pulls an image that exists."
+            exit 1
+          fi
+
       # The version check above proves the tag and gradle.properties agree, but both live in the
       # tagged commit and whoever pushed the tag wrote both, so agreeing proves nothing about where
       # the commit came from. Without this, any commit carrying a matching version publishes — an
