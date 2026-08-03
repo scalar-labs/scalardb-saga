@@ -212,6 +212,19 @@ import org.jspecify.annotations.Nullable;
  * default or is optional, so a typo would otherwise be indistinguishable from leaving the setting
  * unset — silently serving traffic under a policy the operator believes they changed.
  *
+ * <p>A blank value means unset: the key takes its default, as an absent key does, so a templated
+ * configuration whose variable resolves empty starts on documented defaults rather than crashing.
+ * Keys where that default would leave a protection <b>off</b> reject a blank value instead. Blank
+ * is never a deliberate way to disable a control, since omitting the key already says that, so an
+ * empty value there is far more likely a template that failed to resolve than an intent to run
+ * without the protection. That covers {@code callback.max_age_seconds} and {@code
+ * max_start_requests_per_minute}, whose defaults disable the check outright, plus the {@code
+ * service.<name>} attributes whose blank fallback would be open ({@code allowed_hosts} would admit
+ * any host; a {@code header.<Name>} would send an empty header, and an empty {@code Authorization}
+ * is an unauthenticated call) or meaningless ({@code base_url} has no default to fall back to).
+ * {@code service.<name>.max_body_bytes} sits on the other side of that line deliberately: unset
+ * leaves the engine's own 1 MiB cap in place, so the body stays bounded either way.
+ *
  * <p>All other properties configure the saga engine's persistence (e.g. ScalarDB connection
  * settings and the {@code scalar.db.saga.store.*} keys documented on {@code
  * ScalarDbSagaStoreFactory}) and are forwarded as-is. In daemon mode, {@code
@@ -591,7 +604,8 @@ public final class SagaServerConfig {
     this.callbackBaseUrl = parseCallbackBaseUrl(resolved.getProperty(CALLBACK_BASE_URL_KEY));
     this.callbackMaxAgeSeconds =
         parseBoundedLong(
-            resolved.getProperty(CALLBACK_MAX_AGE_SECONDS_KEY),
+            requireNonBlankIfSet(
+                CALLBACK_MAX_AGE_SECONDS_KEY, resolved.getProperty(CALLBACK_MAX_AGE_SECONDS_KEY)),
             CALLBACK_MAX_AGE_SECONDS_KEY,
             DEFAULT_CALLBACK_MAX_AGE_SECONDS,
             0L);
@@ -603,7 +617,9 @@ public final class SagaServerConfig {
             0L);
     this.maxStartRequestsPerMinute =
         parseBoundedInt(
-            resolved.getProperty(MAX_START_REQUESTS_PER_MINUTE_KEY),
+            requireNonBlankIfSet(
+                MAX_START_REQUESTS_PER_MINUTE_KEY,
+                resolved.getProperty(MAX_START_REQUESTS_PER_MINUTE_KEY)),
             MAX_START_REQUESTS_PER_MINUTE_KEY,
             DEFAULT_MAX_START_REQUESTS_PER_MINUTE,
             0);
@@ -1417,6 +1433,29 @@ public final class SagaServerConfig {
       throw new IllegalArgumentException("'" + key + "' must not be blank");
     }
     return value.trim();
+  }
+
+  /**
+   * Returns {@code value} unchanged, rejecting one that is present but blank. For the keys whose
+   * default leaves a protection off, where {@link #parseBoundedLong}'s blank-is-unset rule would
+   * turn a templated value that resolved empty into a silently disabled control. Absent stays
+   * legal: omitting the key is how an operator asks for the default, so only the empty spelling is
+   * refused.
+   *
+   * @param key the property key, for the error message
+   * @param value the raw property value, or null when unset
+   * @return {@code value}, unchanged
+   */
+  private static @Nullable String requireNonBlankIfSet(String key, @Nullable String value) {
+    if (value != null && value.isBlank()) {
+      throw new IllegalArgumentException(
+          "'"
+              + key
+              + "' is set to a blank value. Blank is not a way to disable this setting — it would"
+              + " take the default, which leaves the protection off. Remove the key to accept that"
+              + " default, or give it a value.");
+    }
+    return value;
   }
 
   /**

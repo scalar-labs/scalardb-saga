@@ -195,6 +195,50 @@ class SagaServerConfigTest {
     assertThat(SagaServerConfig.load(props).maxStartRequestsPerMinute()).isEqualTo(100);
   }
 
+  /**
+   * The two keys whose default leaves a protection off, so the general blank-is-unset rule would
+   * turn a templated value that resolved empty into a silently disabled control. Omitting the key
+   * remains the way to accept the default; only the empty spelling is refused.
+   */
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY,
+        SagaServerConfig.CALLBACK_MAX_AGE_SECONDS_KEY
+      })
+  void load_blankProtectionDisablingKey_throwsIllegalArgumentException(String key) {
+    Properties props = new Properties();
+    props.setProperty(key, "   ");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(key);
+  }
+
+  @Test
+  void load_protectionDisablingKeysAbsent_stillDefaultToDisabled() {
+    // The other half of the rule above: rejecting blank must not turn these into required keys.
+    SagaServerConfig config = SagaServerConfig.load(new Properties());
+
+    assertThat(config.maxStartRequestsPerMinute())
+        .isEqualTo(SagaServerConfig.DEFAULT_MAX_START_REQUESTS_PER_MINUTE);
+    assertThat(config.callbackMaxAgeSeconds())
+        .isEqualTo(SagaServerConfig.DEFAULT_CALLBACK_MAX_AGE_SECONDS);
+  }
+
+  @Test
+  void load_blankMaxBodyBytes_isTreatedAsUnset() {
+    Properties props = new Properties();
+    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
+    // Deliberately on the other side of the line from the two keys above: unset leaves the engine's
+    // own cap in place, so a blank value still bounds the body rather than removing a protection.
+    props.setProperty(serviceKey("account", ".max_body_bytes"), "");
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(requireNonNull(config.services().get("account")).maxBodyBytes()).isZero();
+  }
+
   @Test
   void securityProvider_unset_defaultsToNoop() {
     SagaServerConfig config = SagaServerConfig.load(new Properties());
