@@ -192,8 +192,10 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code security.insecure_mode.enabled} — acknowledges running {@code noop} on a
  *       network-reachable interface, which {@link SagaServer} otherwise refuses (default {@value
  *       #DEFAULT_INSECURE_MODE_ENABLED})
- *   <li>{@code security.jwt.*} / {@code security.apikey.*} — the selected provider's own settings;
- *       documented on {@code JwtConfig} and {@code ApiKeyConfig}, which parse and validate them
+ *   <li>{@code security.jwt.*} / {@code security.apikey.*} — the selected provider's own settings,
+ *       documented on {@code JwtConfig} and {@code ApiKeyConfig}, which parse them. Their names are
+ *       still checked here: a provider is built only when it is the selected one, and even then it
+ *       notices only a missing <em>required</em> key
  * </ul>
  *
  * <h2>Secret references and unknown keys</h2>
@@ -277,13 +279,19 @@ public final class SagaServerConfig {
   static final String CALLBACK_SECRET_KEY = CALLBACK_PREFIX + "secret";
   static final String CALLBACK_MAX_AGE_SECONDS_KEY = CALLBACK_PREFIX + "max_age_seconds";
 
-  // Security keys — daemon-only (embedded mode delegates auth to the host framework). The two
-  // per-provider namespaces are parsed and validated by the security package, not here.
+  // Security keys — daemon-only (embedded mode delegates auth to the host framework). The
+  // per-provider namespaces are parsed by the security package; their names are still checked
+  // here, since a provider notices only a missing required key (see SECURITY_PROVIDER_KEYS).
   static final String SECURITY_PREFIX = SERVER_PREFIX + "security.";
   static final String SECURITY_PROVIDER_KEY = SECURITY_PREFIX + "provider";
   static final String INSECURE_MODE_ENABLED_KEY = SECURITY_PREFIX + "insecure_mode.enabled";
   static final String SECURITY_JWT_PREFIX = SECURITY_PREFIX + "jwt.";
   static final String SECURITY_APIKEY_PREFIX = SECURITY_PREFIX + "apikey.";
+  static final String SECURITY_APIKEY_HEADER_KEY = SECURITY_APIKEY_PREFIX + "header";
+  static final String SECURITY_APIKEY_KEY_PREFIX = SECURITY_APIKEY_PREFIX + "key.";
+  static final String SECURITY_APIKEY_SECRET_SUFFIX = ".secret";
+  static final String SECURITY_APIKEY_ROLES_SUFFIX = ".roles";
+  static final String SECURITY_APIKEY_PRINCIPAL_SUFFIX = ".principal";
 
   static final String SERVICE_KEY_PREFIX = SERVER_PREFIX + "service.";
   static final String SERVICE_BASE_URL_SUFFIX = ".base_url";
@@ -320,9 +328,9 @@ public final class SagaServerConfig {
   static final int DEFAULT_MAX_START_REQUESTS_PER_MINUTE = 0; // 0 = disabled (no rate limiting)
 
   /**
-   * Every key parsed here, for the unknown-key check. A key under one of {@link
-   * #DELEGATED_PREFIXES} is validated by whoever owns that namespace instead, so it is absent from
-   * this set.
+   * Every key parsed here, for the unknown-key check. Keys the security package parses are listed
+   * in {@link #SECURITY_PROVIDER_KEYS} instead, and a key under one of {@link #DELEGATED_PREFIXES}
+   * carries an operator-chosen segment, so neither kind is in this set.
    */
   private static final Set<String> KNOWN_KEYS =
       Set.of(
@@ -359,12 +367,42 @@ public final class SagaServerConfig {
           INSECURE_MODE_ENABLED_KEY);
 
   /**
-   * Namespaces whose keys carry an operator-chosen segment, so they cannot be enumerated. {@code
-   * service.} is still validated key by key (see {@link #parseServices}); the two security
-   * namespaces are validated by the provider configs that parse them.
+   * Keys the security package parses, listed here only so the unknown-key check accepts them. They
+   * are fixed names, and the provider that owns them notices only a missing <em>required</em> key.
+   * An optional one has a default, so a typo there reads as unset: a mistyped {@code
+   * principal_claim} authenticates on the default claim, and a mistyped {@code token_type} drops a
+   * check the operator asked for. A provider is built only when it is the selected one, so for the
+   * others nothing parses these keys at all. {@code JwtConfig} and {@code ApiKeyConfig} own the
+   * names, which are not visible from this package; their tests assert this list stays in step.
+   */
+  private static final Set<String> SECURITY_PROVIDER_KEYS = securityProviderKeys();
+
+  private static Set<String> securityProviderKeys() {
+    Set<String> keys = new TreeSet<>();
+    for (String name :
+        List.of(
+            "jwks_url",
+            "issuer",
+            "audience",
+            "token_type",
+            "principal_claim",
+            "roles_claim",
+            "connect_timeout_millis",
+            "read_timeout_millis")) {
+      keys.add(SECURITY_JWT_PREFIX + name);
+    }
+    keys.add(SECURITY_APIKEY_HEADER_KEY);
+    return Collections.unmodifiableSet(keys);
+  }
+
+  /**
+   * Namespaces whose keys carry an operator-chosen segment, so they cannot be enumerated. Only that
+   * one segment is the operator's; the sub-settings around it are fixed names, still checked key by
+   * key (see {@link #parseServices} and {@link #rejectUnknownApiKeySetting}). The rest of {@code
+   * security.} has no such segment and is enumerated in {@link #SECURITY_PROVIDER_KEYS}.
    */
   private static final List<String> DELEGATED_PREFIXES =
-      List.of(SERVICE_KEY_PREFIX, SECURITY_JWT_PREFIX, SECURITY_APIKEY_PREFIX);
+      List.of(SERVICE_KEY_PREFIX, SECURITY_APIKEY_KEY_PREFIX);
 
   /**
    * Header names the engine issues itself, so configuring one as a service header cannot change
@@ -673,10 +711,17 @@ public final class SagaServerConfig {
    */
   private static void rejectUnknownKeys(Properties properties) {
     for (String key : new TreeSet<>(properties.stringPropertyNames())) {
-      if (!key.startsWith(SERVER_PREFIX) || KNOWN_KEYS.contains(key)) {
+      if (!key.startsWith(SERVER_PREFIX)
+          || KNOWN_KEYS.contains(key)
+          || SECURITY_PROVIDER_KEYS.contains(key)) {
         continue;
       }
       if (DELEGATED_PREFIXES.stream().anyMatch(key::startsWith)) {
+        // The name segment is the operator's, but the settings around it are fixed. Check the
+        // API-key ones here; parseServices checks the service ones as it builds each service.
+        if (key.startsWith(SECURITY_APIKEY_KEY_PREFIX)) {
+          rejectUnknownApiKeySetting(key);
+        }
         continue;
       }
       throw new IllegalArgumentException(
@@ -685,6 +730,37 @@ public final class SagaServerConfig {
               + "'. Check it against the keys documented on SagaServerConfig; unknown keys under '"
               + SERVER_PREFIX
               + "' are rejected so a typo cannot silently leave a setting at its default.");
+    }
+  }
+
+  /**
+   * Fails on a {@code security.apikey.key.<name>.<setting>} key whose trailing setting is not one
+   * the API-key provider reads. Only {@code <name>} is the operator's; the three settings are fixed
+   * names, and {@code principal} is optional, so a typo of it would otherwise record the key's own
+   * name for audit instead of the principal configured. Split at the last dot rather than the
+   * first: the provider derives the name by stripping the prefix and the suffix, so a name may
+   * itself contain dots and the first dot need not end it.
+   */
+  private static void rejectUnknownApiKeySetting(String key) {
+    String remainder = key.substring(SECURITY_APIKEY_KEY_PREFIX.length());
+    int dot = remainder.lastIndexOf('.');
+    String name = dot <= 0 ? "" : remainder.substring(0, dot);
+    // Keep the leading dot so the setting matches the suffix constants directly.
+    String setting = dot < 0 ? "" : remainder.substring(dot);
+    boolean known =
+        setting.equals(SECURITY_APIKEY_SECRET_SUFFIX)
+            || setting.equals(SECURITY_APIKEY_ROLES_SUFFIX)
+            || setting.equals(SECURITY_APIKEY_PRINCIPAL_SUFFIX);
+    if (name.isBlank() || !known) {
+      throw new IllegalArgumentException(
+          "'"
+              + key
+              + "' is not a valid API-key setting. Use '"
+              + SECURITY_APIKEY_KEY_PREFIX
+              + "<name>"
+              + SECURITY_APIKEY_SECRET_SUFFIX
+              + "' and the other per-key settings documented on ApiKeyConfig. Valid settings are"
+              + " secret, roles, and principal.");
     }
   }
 

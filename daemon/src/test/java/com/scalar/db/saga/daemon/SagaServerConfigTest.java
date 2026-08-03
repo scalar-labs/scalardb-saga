@@ -946,15 +946,93 @@ class SagaServerConfigTest {
   }
 
   @Test
-  void load_securityProviderNamespaceKey_isDelegatedNotRejected() {
-    // The jwt and apikey namespaces are validated by the provider configs that parse them, so the
-    // unknown-key check must not reject a key it does not itself know.
+  void load_securityProviderKeysGiven_areAccepted() {
+    // The provider parses these, but their names are fixed, so the unknown-key check knows them.
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.SECURITY_JWT_PREFIX + "issuer", "https://issuer.example");
-    props.setProperty(SagaServerConfig.SECURITY_APIKEY_PREFIX + "key.svc.roles", "saga:read");
+    props.setProperty(SagaServerConfig.SECURITY_JWT_PREFIX + "principal_claim", "email");
+    props.setProperty(SagaServerConfig.SECURITY_APIKEY_HEADER_KEY, "X-Key");
+    props.setProperty(SagaServerConfig.SECURITY_APIKEY_KEY_PREFIX + "svc.roles", "saga:read");
 
     assertThat(SagaServerConfig.load(props).securityProvider())
         .isEqualTo(SagaServerConfig.DEFAULT_SECURITY_PROVIDER);
+  }
+
+  @Test
+  void load_misspelledOptionalJwtKey_throwsIllegalArgumentException() {
+    // principal_claim defaults to sub, so the provider cannot tell a typo from an unset key: it
+    // would authenticate on a claim the operator did not choose. Nothing parses this namespace at
+    // all under another provider, which is the case here.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SECURITY_JWT_PREFIX + "principal_clam", "email");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void load_misspelledApiKeyHeaderKey_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SECURITY_APIKEY_PREFIX + "headers", "X-Key");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void load_apiKeySettingsGiven_areAccepted() {
+    Properties props = new Properties();
+    props.setProperty(
+        SagaServerConfig.SECURITY_APIKEY_KEY_PREFIX + "writer.secret", "${env:WRITER_KEY}");
+    props.setProperty(SagaServerConfig.SECURITY_APIKEY_KEY_PREFIX + "writer.roles", "saga:write");
+    props.setProperty(
+        SagaServerConfig.SECURITY_APIKEY_KEY_PREFIX + "writer.principal", "writer@example.com");
+
+    assertThat(SagaServerConfig.load(props).securityProvider())
+        .isEqualTo(SagaServerConfig.DEFAULT_SECURITY_PROVIDER);
+  }
+
+  @Test
+  void load_apiKeyNameContainingDotGiven_isAccepted() {
+    // The provider derives <name> by stripping the prefix and the suffix, so a dotted name is a
+    // legal key id. The setting check has to split at the last dot, not the first.
+    Properties props = new Properties();
+    props.setProperty(
+        SagaServerConfig.SECURITY_APIKEY_KEY_PREFIX + "billing.svc.secret", "${env:BILLING_KEY}");
+
+    assertThat(SagaServerConfig.load(props).securityProvider())
+        .isEqualTo(SagaServerConfig.DEFAULT_SECURITY_PROVIDER);
+  }
+
+  @Test
+  void load_unknownApiKeySetting_throwsIllegalArgumentException() {
+    // principal is optional, so a typo of it would record the key's own name for audit instead of
+    // the principal configured.
+    Properties props = new Properties();
+    props.setProperty(
+        SagaServerConfig.SECURITY_APIKEY_KEY_PREFIX + "writer.principle", "writer@example.com");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void load_apiKeyWithoutSetting_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SECURITY_APIKEY_KEY_PREFIX + "writer", "${env:WRITER_KEY}");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void load_apiKeyWithBlankName_throwsIllegalArgumentException() {
+    // The provider skips a blank name, so the key would configure nothing at all.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SECURITY_APIKEY_KEY_PREFIX + ".secret", "${env:WRITER_KEY}");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
