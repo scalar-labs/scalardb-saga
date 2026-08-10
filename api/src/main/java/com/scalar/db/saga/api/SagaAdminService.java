@@ -94,6 +94,8 @@ public interface SagaAdminService extends AutoCloseable {
    * @throws SagaDefinitionNotFoundException if the saga's definition is no longer registered, so
    *     the engine cannot drive it
    * @throws SagaConcurrentModificationException if a concurrent writer changed the saga first
+   * @throws SagaIllegalArgumentException if {@code reason} is blank or exceeds the audit length
+   *     limit
    */
   SagaStateSnapshot recoverSaga(String sagaId, String reason);
 
@@ -108,6 +110,8 @@ public interface SagaAdminService extends AutoCloseable {
    * @throws SagaNotFoundException if no such saga exists
    * @throws SagaStatePreconditionException if the saga is not {@code ESCALATED}
    * @throws SagaConcurrentModificationException if a concurrent writer changed the saga first
+   * @throws SagaIllegalArgumentException if {@code reason} is blank or exceeds the audit length
+   *     limit
    */
   SagaStateSnapshot forceComplete(String sagaId, String reason);
 
@@ -129,6 +133,8 @@ public interface SagaAdminService extends AutoCloseable {
    *     the engine cannot drive it — the single-saga counterpart of the bulk form's {@link
    *     ResetResult.SkipReason#DEFINITION_NOT_FOUND}
    * @throws SagaConcurrentModificationException if a concurrent writer changed the saga first
+   * @throws SagaIllegalArgumentException if {@code reason} is blank or exceeds the audit length
+   *     limit
    */
   SagaStateSnapshot resetEscalated(String sagaId, String reason);
 

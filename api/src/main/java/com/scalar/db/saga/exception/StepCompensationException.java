@@ -17,8 +17,10 @@ import org.jspecify.annotations.Nullable;
  * compensate} should not have to reason about the saga error-code taxonomy). The engine, when it
  * wraps a compensation failure with structured step info, attaches {@link
  * SagaErrorCode#COMPENSATION_FAILED} via {@link #getErrorCode()}; user-thrown instances leave
- * {@link #getErrorCode()} null and the client SDK maps such wire arrivals to the sentinel {@code
- * STEP_USER_FAILURE} code (see the error-code design).
+ * {@link #getErrorCode()} null. A user-thrown failure reaches a remote caller only through saga
+ * state, as a step-event payload carrying the exception type, message, and commit flag — no error
+ * code travels with it today; a coded form is deferred work (see {@code SagaErrorCode}'s reserved
+ * step codes and todos/032).
  */
 public class StepCompensationException extends RuntimeException {
 

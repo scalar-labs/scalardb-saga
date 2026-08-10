@@ -277,6 +277,11 @@ public enum SagaErrorCode {
       "Contact your administrator with the error details."),
 
   // ── CLIENT_ERROR (4xxxx — client SDK only) ────────────────────────────
+
+  // RESERVED, not yet produced. The client maps every UNAVAILABLE without an ErrorInfo to
+  // SERVICE_UNAVAILABLE today, because the transport layer cannot reliably distinguish "the
+  // request never reached the server" from "the server said it is unavailable". Declared so the
+  // classification is agreed and numbered at the head of the CLIENT_ERROR block.
   SERVER_UNREACHABLE(
       "DB-SAGA-40001",
       Category.CLIENT_ERROR,
