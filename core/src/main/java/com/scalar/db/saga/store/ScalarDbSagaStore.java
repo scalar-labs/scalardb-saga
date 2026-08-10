@@ -30,6 +30,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -501,7 +502,10 @@ public class ScalarDbSagaStore implements SagaStore {
   }
 
   @Override
-  public Optional<SagaStateAndEvents> getStateWithEvents(String sagaId) {
+  public Optional<SagaStateAndEvents> getStateWithEvents(String sagaId, int maxEvents) {
+    if (maxEvents < 1) {
+      throw new IllegalArgumentException("maxEvents must be positive, got " + maxEvents);
+    }
     return runInTransaction(
         tx -> {
           Optional<SagaStateSnapshot> snapshot =
@@ -511,9 +515,26 @@ public class ScalarDbSagaStore implements SagaStore {
           if (snapshot.isEmpty()) {
             return Optional.<SagaStateAndEvents>empty();
           }
-          List<SagaEvent> events =
-              tx.scan(buildEventScan(sagaId)).stream().map(this::toSagaEvent).toList();
-          return Optional.of(new SagaStateAndEvents(snapshot.get(), events));
+          if (maxEvents == Integer.MAX_VALUE) {
+            // Unbounded read; also keeps maxEvents + 1 below from overflowing.
+            List<SagaEvent> events =
+                tx.scan(buildEventScan(sagaId)).stream().map(this::toSagaEvent).toList();
+            return Optional.of(new SagaStateAndEvents(snapshot.get(), events, false));
+          }
+          // Scan newest-first with one extra row so truncation is detected without a second read
+          // or a count; the events table clusters on the single INT key `sequence`, so a reverse
+          // ordered, limited scan is exactly the supported shape.
+          Scan scan =
+              Scan.newBuilder(buildEventScan(sagaId))
+                  .ordering(Scan.Ordering.desc("sequence"))
+                  .limit(maxEvents + 1)
+                  .build();
+          List<SagaEvent> newestFirst = tx.scan(scan).stream().map(this::toSagaEvent).toList();
+          boolean truncated = newestFirst.size() > maxEvents;
+          List<SagaEvent> retained =
+              new ArrayList<>(truncated ? newestFirst.subList(0, maxEvents) : newestFirst);
+          Collections.reverse(retained); // back to ascending (chronological) order
+          return Optional.of(new SagaStateAndEvents(snapshot.get(), retained, truncated));
         },
         null, // read-only — retry the whole transaction on UTSE
         "get saga state with events " + sagaId);

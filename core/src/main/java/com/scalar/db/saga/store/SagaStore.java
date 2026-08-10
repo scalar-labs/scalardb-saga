@@ -229,12 +229,20 @@ public interface SagaStore extends AutoCloseable {
   Optional<SagaStateSnapshot> getStateSnapshot(String sagaId);
 
   /**
-   * Reads a saga's state snapshot and its full event stream in a single transaction, so the two are
-   * a coherent point-in-time view — a concurrent status transition cannot pair a stale snapshot
-   * with a timeline that already contains the newer event. Returns empty if the saga does not
-   * exist.
+   * Reads a saga's state snapshot and its event stream in a single transaction, so the two are a
+   * coherent point-in-time view — a concurrent status transition cannot pair a stale snapshot with
+   * a timeline that already contains the newer event. Returns empty if the saga does not exist.
+   *
+   * <p>At most {@code maxEvents} events are returned, always in ascending sequence order. When the
+   * stream is longer, the <b>newest</b> {@code maxEvents} events are kept (the recent history is
+   * the diagnostically useful slice) and the result is flagged {@link
+   * SagaStateAndEvents#truncated()}; the full history remains in the store. Pass {@link
+   * Integer#MAX_VALUE} for an unbounded read.
+   *
+   * @param sagaId the saga id
+   * @param maxEvents the maximum number of events to return; must be positive
    */
-  Optional<SagaStateAndEvents> getStateWithEvents(String sagaId);
+  Optional<SagaStateAndEvents> getStateWithEvents(String sagaId, int maxEvents);
 
   /**
    * Lists saga state snapshots matching the given query, one page at a time. Used by the Admin

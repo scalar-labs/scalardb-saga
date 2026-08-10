@@ -39,11 +39,28 @@ class SagaDetailReaderTest {
   @Test
   void read_missingSaga_throwsNotFound() {
     // Arrange
-    when(store.getStateWithEvents(SAGA_ID)).thenReturn(Optional.empty());
+    when(store.getStateWithEvents(SAGA_ID, Integer.MAX_VALUE)).thenReturn(Optional.empty());
 
     // Act & Assert
-    assertThatThrownBy(() -> SagaDetailReader.read(store, SAGA_ID))
+    assertThatThrownBy(() -> SagaDetailReader.read(store, SAGA_ID, Integer.MAX_VALUE))
         .isInstanceOf(SagaNotFoundException.class);
+  }
+
+  @Test
+  void read_truncatedStream_forwardsBoundAndFlagsDetailTruncated() {
+    // Arrange — the store reports the stream was cut to the newest events
+    SagaStateSnapshot snap = snapshot(SagaStatus.RUNNING);
+    List<SagaEvent> events = List.of(StepEvent.completed(7, "ship", "{}").withTimestamp(TS));
+    when(store.getStateWithEvents(SAGA_ID, 1))
+        .thenReturn(Optional.of(new SagaStateAndEvents(snap, events, true)));
+
+    // Act
+    SagaDetail detail = SagaDetailReader.read(store, SAGA_ID, 1);
+
+    // Assert — the caller's bound reaches the store and the flag reaches the detail
+    assertThat(detail.isTruncated()).isTrue();
+    assertThat(detail.getTimeline()).hasSize(1);
+    assertThat(detail.getTimeline().get(0).getStepName()).isEqualTo("ship");
   }
 
   @Test
@@ -58,14 +75,15 @@ class SagaDetailReaderTest {
             StatusEvent.escalated("retries exhausted").withTimestamp(TS),
             StatusEvent.recovering(SagaStatus.COMPENSATING, "bob", "rolling back")
                 .withTimestamp(TS));
-    when(store.getStateWithEvents(SAGA_ID))
-        .thenReturn(Optional.of(new SagaStateAndEvents(snap, events)));
+    when(store.getStateWithEvents(SAGA_ID, Integer.MAX_VALUE))
+        .thenReturn(Optional.of(new SagaStateAndEvents(snap, events, false)));
 
     // Act
-    SagaDetail detail = SagaDetailReader.read(store, SAGA_ID);
+    SagaDetail detail = SagaDetailReader.read(store, SAGA_ID, Integer.MAX_VALUE);
 
     // Assert — the snapshot and timeline come from the one atomic read
     assertThat(detail.getSnapshot()).isEqualTo(snap);
+    assertThat(detail.isTruncated()).isFalse();
     List<TimelineEvent> timeline = detail.getTimeline();
     assertThat(timeline).hasSize(5);
 

@@ -64,7 +64,13 @@ class DefaultSagaOrchestratorTest {
   void setUp() {
     orchestrator =
         new DefaultSagaOrchestrator(
-            engine, store, definitionRegistry, recoveryManager, retentionManager, 30_000);
+            engine,
+            store,
+            definitionRegistry,
+            recoveryManager,
+            retentionManager,
+            30_000,
+            Integer.MAX_VALUE);
   }
 
   @AfterEach
@@ -556,6 +562,7 @@ class DefaultSagaOrchestratorTest {
               recoveryManager,
               retentionManager,
               30_000,
+              Integer.MAX_VALUE,
               mockExecutor);
 
       SagaDefinition def = definition("transfer");
@@ -606,8 +613,8 @@ class DefaultSagaOrchestratorTest {
     void getSagaDetail_existingSaga_returnsStateAndTimeline() {
       // Arrange — the application read of its own saga's detail, backed by the store's atomic read
       SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.COMPENSATED);
-      when(store.getStateWithEvents("saga-1"))
-          .thenReturn(Optional.of(new SagaStateAndEvents(saga, List.of())));
+      when(store.getStateWithEvents("saga-1", Integer.MAX_VALUE))
+          .thenReturn(Optional.of(new SagaStateAndEvents(saga, List.of(), false)));
 
       // Act
       SagaDetail detail = orchestrator.getSagaDetail("saga-1");
@@ -615,12 +622,31 @@ class DefaultSagaOrchestratorTest {
       // Assert — the projection itself is covered by SagaDetailReaderTest; here just the wiring
       assertThat(detail.getSnapshot()).isSameAs(saga);
       assertThat(detail.getTimeline()).isEmpty();
+      assertThat(detail.isTruncated()).isFalse();
+    }
+
+    @Test
+    void getSagaDetail_withMaxTimelineEvents_passesBoundToStore() {
+      // Arrange — a bounded orchestrator (the daemon path) forwards its bound to the store read
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.ESCALATED);
+      when(store.getStateWithEvents("saga-1", 42))
+          .thenReturn(Optional.of(new SagaStateAndEvents(saga, List.of(), true)));
+      try (DefaultSagaOrchestrator bounded =
+          new DefaultSagaOrchestrator(
+              engine, store, definitionRegistry, recoveryManager, retentionManager, 30_000, 42)) {
+
+        // Act
+        SagaDetail detail = bounded.getSagaDetail("saga-1");
+
+        // Assert
+        assertThat(detail.isTruncated()).isTrue();
+      }
     }
 
     @Test
     void getSagaDetail_unknownSaga_throwsSagaNotFound() {
       // Arrange
-      when(store.getStateWithEvents("unknown")).thenReturn(Optional.empty());
+      when(store.getStateWithEvents("unknown", Integer.MAX_VALUE)).thenReturn(Optional.empty());
 
       // Act & Assert
       assertThatThrownBy(() -> orchestrator.getSagaDetail("unknown"))
@@ -728,6 +754,7 @@ class DefaultSagaOrchestratorTest {
               recoveryManager,
               retentionManager,
               30_000,
+              Integer.MAX_VALUE,
               mockExecutor);
 
       SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
@@ -769,6 +796,7 @@ class DefaultSagaOrchestratorTest {
               recoveryManager,
               retentionManager,
               30_000,
+              Integer.MAX_VALUE,
               mockExecutor);
 
       SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
@@ -877,6 +905,7 @@ class DefaultSagaOrchestratorTest {
               recoveryManager,
               retentionManager,
               30_000,
+              Integer.MAX_VALUE,
               mockExecutor);
 
       // Act

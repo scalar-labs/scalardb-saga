@@ -28,16 +28,20 @@ final class SagaDetailReader {
   private SagaDetailReader() {}
 
   /**
-   * Reads {@code sagaId}'s current state and timeline.
+   * Reads {@code sagaId}'s current state and timeline. The timeline holds at most {@code
+   * maxTimelineEvents} entries; when the saga's history is longer, the newest events are kept and
+   * the detail is flagged truncated (see {@link SagaDetail#isTruncated()}).
    *
    * @throws SagaNotFoundException if no saga has that id
    */
-  static SagaDetail read(SagaStore store, String sagaId) {
+  static SagaDetail read(SagaStore store, String sagaId, int maxTimelineEvents) {
     // One atomic read pairs the snapshot with its event stream, so the status is always coherent
     // with the timeline (a concurrent transition can't wedge a newer event past a stale snapshot).
     SagaStateAndEvents data =
-        store.getStateWithEvents(sagaId).orElseThrow(() -> new SagaNotFoundException(sagaId));
-    return new SagaDetail(data.snapshot(), toTimeline(data.events()));
+        store
+            .getStateWithEvents(sagaId, maxTimelineEvents)
+            .orElseThrow(() -> new SagaNotFoundException(sagaId));
+    return new SagaDetail(data.snapshot(), toTimeline(data.events()), data.truncated());
   }
 
   private static List<TimelineEvent> toTimeline(List<SagaEvent> events) {

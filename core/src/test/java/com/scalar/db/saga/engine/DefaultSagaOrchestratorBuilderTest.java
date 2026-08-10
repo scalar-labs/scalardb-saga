@@ -43,6 +43,7 @@ class DefaultSagaOrchestratorBuilderTest {
             .ownerId("pod-1")
             .shutdownMode(ShutdownMode.WAIT_ALL_SAGAS)
             .shutdownTimeoutMillis(60_000)
+            .maxTimelineEvents(500)
             .clock(java.time.Clock.systemUTC())
             .resource(String.class, "account-channel", "account")
             .resource(Integer.class, 42)
@@ -146,6 +147,20 @@ class DefaultSagaOrchestratorBuilderTest {
     // Assert
     assertThat(orchestrator).isNotNull();
     orchestrator.close();
+  }
+
+  @Test
+  void maxTimelineEvents_zeroGiven_throwsIllegalArgumentException() {
+    // Act & Assert
+    assertThatThrownBy(() -> DefaultSagaOrchestrator.newBuilder().maxTimelineEvents(0))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void maxTimelineEvents_negativeGiven_throwsIllegalArgumentException() {
+    // Act & Assert
+    assertThatThrownBy(() -> DefaultSagaOrchestrator.newBuilder().maxTimelineEvents(-1))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
