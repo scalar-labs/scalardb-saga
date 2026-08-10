@@ -160,7 +160,7 @@ public enum SagaErrorCode {
       "DB-SAGA-10302",
       Category.USER_ERROR,
       "Definition version is already registered with different content",
-      Schema.of("name", "version"),
+      Schema.of("saga_name", "version"),
       "A definition with this (name, version) already exists but its content differs from what was submitted.",
       "Bump the version instead of re-registering under the same one."),
 

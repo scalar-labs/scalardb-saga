@@ -62,7 +62,7 @@ public class SagaDefinitionException extends SagaRuntimeException {
   public static SagaDefinitionException versionContentConflict(String name, String version) {
     return new SagaDefinitionException(
         SagaErrorCode.DEFINITION_VERSION_CONTENT_CONFLICT,
-        ErrorMetadata.of("name", name, "version", version));
+        ErrorMetadata.of("saga_name", name, "version", version));
   }
 
   public static SagaDefinitionException stepClassInvalid(String stepClass, String detail) {

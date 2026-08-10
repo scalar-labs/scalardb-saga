@@ -86,8 +86,11 @@ class SagaDefinitionExceptionTest {
 
     // Assert
     assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.DEFINITION_VERSION_CONTENT_CONFLICT);
+    // saga_name, not name: every sibling code that carries a definition name uses saga_name, and
+    // the key freezes at first release, so a client dispatching on metadata keys never
+    // special-cases this one code.
     assertThat(e.getMetadata())
-        .containsEntry("name", "transfer")
+        .containsEntry("saga_name", "transfer")
         .containsEntry("version", "1.0")
         .hasSize(2);
   }
