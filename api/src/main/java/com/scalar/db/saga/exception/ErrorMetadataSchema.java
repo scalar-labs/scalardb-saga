@@ -11,21 +11,21 @@ import net.jcip.annotations.Immutable;
 /**
  * Declares the required metadata keys of a {@link SagaErrorCode}, in the order they render in the
  * assembled message. The base exception constructor validates every metadata map against its code's
- * {@code Schema} at construction time so a wrong or missing key fails fast rather than shipping to
- * logs and the wire.
+ * {@code ErrorMetadataSchema} at construction time so a wrong or missing key fails fast rather than
+ * shipping to logs and the wire.
  *
  * <p>Codes with alternate context shapes (e.g., "user identified by name OR id") are modeled as two
- * separate codes rather than one code with an either-or schema. Keeps {@code Schema} trivial and
- * each generated docs page unambiguous.
+ * separate codes rather than one code with an either-or schema. Keeps {@code ErrorMetadataSchema}
+ * trivial and each generated docs page unambiguous.
  */
 @Immutable
-public final class Schema {
+public final class ErrorMetadataSchema {
 
-  private static final Schema EMPTY = new Schema(Collections.emptyList());
+  private static final ErrorMetadataSchema EMPTY = new ErrorMetadataSchema(Collections.emptyList());
 
   private final List<String> requiredKeys;
 
-  private Schema(List<String> requiredKeys) {
+  private ErrorMetadataSchema(List<String> requiredKeys) {
     // Defensive copy in the constructor (not the factory) so SpotBugs's EI_EXPOSE_REP is satisfied
     // seeing the copy in the ctor's bytecode; also lets the getter return the field directly.
     this.requiredKeys = Collections.unmodifiableList(new ArrayList<>(requiredKeys));
@@ -37,7 +37,7 @@ public final class Schema {
    *
    * @throws IllegalArgumentException if any key is null, blank, or duplicated
    */
-  public static Schema of(String... keys) {
+  public static ErrorMetadataSchema of(String... keys) {
     Set<String> seen = new LinkedHashSet<>();
     for (String key : keys) {
       if (key == null || key.trim().isEmpty()) {
@@ -47,11 +47,11 @@ public final class Schema {
         throw new IllegalArgumentException("duplicate schema key: " + key);
       }
     }
-    return new Schema(new ArrayList<>(seen));
+    return new ErrorMetadataSchema(new ArrayList<>(seen));
   }
 
   /** For codes whose failure carries no per-invocation context. */
-  public static Schema none() {
+  public static ErrorMetadataSchema none() {
     return EMPTY;
   }
 

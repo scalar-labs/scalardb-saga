@@ -10,12 +10,12 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
-class SchemaTest {
+class ErrorMetadataSchemaTest {
 
   @Test
   void of_keysGiven_preservesInsertionOrder() {
     // Arrange & Act
-    Schema schema = Schema.of("saga_id", "step_name", "step_index");
+    ErrorMetadataSchema schema = ErrorMetadataSchema.of("saga_id", "step_name", "step_index");
 
     // Assert
     assertThat(schema.requiredKeys()).containsExactly("saga_id", "step_name", "step_index");
@@ -24,7 +24,7 @@ class SchemaTest {
   @Test
   void of_noKeysGiven_returnsEmptySchema() {
     // Arrange & Act
-    Schema schema = Schema.of();
+    ErrorMetadataSchema schema = ErrorMetadataSchema.of();
 
     // Assert
     assertThat(schema.requiredKeys()).isEmpty();
@@ -33,36 +33,37 @@ class SchemaTest {
   @Test
   void none_called_returnsEmptySchema() {
     // Arrange & Act & Assert
-    assertThat(Schema.none().requiredKeys()).isEmpty();
+    assertThat(ErrorMetadataSchema.none().requiredKeys()).isEmpty();
   }
 
   @SuppressWarnings("NullAway")
   @Test
   void of_nullKeyGiven_throwsIllegalArgument() {
     // Arrange & Act & Assert
-    assertThatThrownBy(() -> Schema.of("saga_id", null))
+    assertThatThrownBy(() -> ErrorMetadataSchema.of("saga_id", null))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
   void of_blankKeyGiven_throwsIllegalArgument() {
     // Arrange & Act & Assert
-    assertThatThrownBy(() -> Schema.of("saga_id", "  "))
+    assertThatThrownBy(() -> ErrorMetadataSchema.of("saga_id", "  "))
         .isInstanceOf(IllegalArgumentException.class);
-    assertThatThrownBy(() -> Schema.of("")).isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> ErrorMetadataSchema.of(""))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
   void of_duplicateKeyGiven_throwsIllegalArgument() {
     // Arrange & Act & Assert
-    assertThatThrownBy(() -> Schema.of("saga_id", "saga_id"))
+    assertThatThrownBy(() -> ErrorMetadataSchema.of("saga_id", "saga_id"))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
   void requiredKeys_always_isUnmodifiable() {
     // Arrange
-    Schema schema = Schema.of("saga_id");
+    ErrorMetadataSchema schema = ErrorMetadataSchema.of("saga_id");
 
     // Act & Assert
     assertThatThrownBy(() -> schema.requiredKeys().add("intruder"))
@@ -72,7 +73,7 @@ class SchemaTest {
   @Test
   void validate_matchingKeysAndValuesGiven_passes() {
     // Arrange
-    Schema schema = Schema.of("saga_id", "step_name");
+    ErrorMetadataSchema schema = ErrorMetadataSchema.of("saga_id", "step_name");
     Map<String, String> metadata = new LinkedHashMap<>();
     metadata.put("saga_id", "s-1");
     metadata.put("step_name", "debit");
@@ -85,7 +86,7 @@ class SchemaTest {
   @Test
   void validate_missingKeyGiven_throwsIllegalArgument() {
     // Arrange
-    Schema schema = Schema.of("saga_id", "step_name");
+    ErrorMetadataSchema schema = ErrorMetadataSchema.of("saga_id", "step_name");
     Map<String, String> metadata = Collections.singletonMap("saga_id", "s-1");
 
     // Act & Assert
@@ -96,7 +97,7 @@ class SchemaTest {
   @Test
   void validate_extraKeyGiven_throwsIllegalArgument() {
     // Arrange
-    Schema schema = Schema.of("saga_id");
+    ErrorMetadataSchema schema = ErrorMetadataSchema.of("saga_id");
     Map<String, String> metadata = new HashMap<>();
     metadata.put("saga_id", "s-1");
     metadata.put("uninvited", "value");
@@ -109,7 +110,7 @@ class SchemaTest {
   @Test
   void validate_nullValueGiven_throwsIllegalArgument() {
     // Arrange
-    Schema schema = Schema.of("saga_id");
+    ErrorMetadataSchema schema = ErrorMetadataSchema.of("saga_id");
     Map<String, String> metadata = new HashMap<>();
     metadata.put("saga_id", null);
 
@@ -122,7 +123,9 @@ class SchemaTest {
   void validate_emptySchemaAndEmptyMetadataGiven_passes() {
     // Arrange & Act & Assert
     assertThatCode(
-            () -> Schema.none().validate(SagaErrorCode.INTERNAL_ERROR, Collections.emptyMap()))
+            () ->
+                ErrorMetadataSchema.none()
+                    .validate(SagaErrorCode.INTERNAL_ERROR, Collections.emptyMap()))
         .doesNotThrowAnyException();
   }
 
@@ -132,7 +135,8 @@ class SchemaTest {
     Map<String, String> metadata = Collections.singletonMap("saga_id", "s-1");
 
     // Act & Assert
-    assertThatThrownBy(() -> Schema.none().validate(SagaErrorCode.INTERNAL_ERROR, metadata))
+    assertThatThrownBy(
+            () -> ErrorMetadataSchema.none().validate(SagaErrorCode.INTERNAL_ERROR, metadata))
         .isInstanceOf(IllegalArgumentException.class);
   }
 }

@@ -20,8 +20,8 @@ import java.util.Objects;
  * do not extend this type.)
  *
  * <p>Every instance carries a non-null {@link SagaErrorCode} and its schema-validated metadata map.
- * {@link Schema#validate} runs at construction, so a missing/extra/null-valued key fails fast
- * rather than shipping to logs and the wire.
+ * {@link ErrorMetadataSchema#validate} runs at construction, so a missing/extra/null-valued key
+ * fails fast rather than shipping to logs and the wire.
  */
 public class SagaRuntimeException extends RuntimeException {
 

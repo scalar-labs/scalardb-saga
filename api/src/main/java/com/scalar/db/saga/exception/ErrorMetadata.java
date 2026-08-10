@@ -14,7 +14,8 @@ import java.util.Map;
  * throw-site argument order for readability in a debugger; {@link SagaErrorCode#buildMessage}
  * iterates in schema-declared order regardless.
  *
- * <p>Overloads cover arity 0-3, which matches every current {@link Schema}. Extend as arity grows.
+ * <p>Overloads cover arity 0-3, which matches every current {@link ErrorMetadataSchema}. Extend as
+ * arity grows.
  */
 public final class ErrorMetadata {
 

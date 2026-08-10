@@ -168,7 +168,7 @@ public final class ExceptionRegistry {
       justification =
           "Catching NPE is intentional: some typed exception ctors call Objects.requireNonNull on"
               + " metadata values (e.g. SagaNotFoundException(saga_id)), so a missing wire key"
-              + " surfaces as NPE rather than the IllegalArgumentException that Schema.validate"
+              + " surfaces as NPE rather than the IllegalArgumentException that ErrorMetadataSchema.validate"
               + " throws. Both indicate the same protocol-drift condition and degrade the same"
               + " way.")
   public static Optional<SagaRuntimeException> tryReconstruct(
