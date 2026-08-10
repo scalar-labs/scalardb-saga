@@ -30,10 +30,11 @@ service AdminService {
   rpc ResetEscalated (InterventionRequest) returns (SagaSnapshot);
 
   // Un-escalates a page of ESCALATED sagas, handing each drive to the recovery loop; returns the
-  // per-page counts and the token to continue the sweep. A page is swept to completion server-side
-  // even if the caller's deadline fires mid-page, and swept rows leave the ESCALATED filter — so a
-  // DEADLINE_EXCEEDED means the page is still draining, not that the sweep failed, and retrying
-  // (even without the lost token) resumes with what is still escalated.
+  // per-page counts and the token to continue the sweep. A caller deadline does not abort or undo
+  // the server-side sweep, but its outcome is unknown to the caller: the page may complete after
+  // DEADLINE_EXCEEDED, or a store failure may still abort it. Retrying is safe — reset rows leave
+  // the ESCALATED filter, so a retry (even without the lost token) resumes with what is still
+  // escalated.
   rpc ResetEscalatedBulk (ResetEscalatedBulkRequest) returns (ResetResult);
 }
 

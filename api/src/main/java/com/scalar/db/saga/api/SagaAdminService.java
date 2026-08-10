@@ -52,12 +52,15 @@ public interface SagaAdminService extends AutoCloseable {
    * Lists saga state snapshots matching {@code query}, one page at a time. Drive pagination by the
    * returned {@link SagaPage#getNextPageToken()} until it is {@code null}.
    *
-   * <p>A returned page can exceed the requested page size — even {@link SagaQuery#MAX_PAGE_SIZE} —
-   * by a whole {@code updated_at} cohort, because a page never splits one. A mass event that stamps
-   * many sagas in the same millisecond (e.g. a burst outage escalating a large batch at once) is
-   * therefore returned as a single over-sized page; size client-side memory and transport message
-   * limits for the largest cohort a mass event can produce, not for the requested page size. See
-   * {@link SagaQuery.Builder#pageSize(int)}.
+   * <p>A returned page can exceed the requested page size — even {@link SagaQuery#MAX_PAGE_SIZE}.
+   * Results are scanned one internal {@code (bucket, status)} slice at a time, and a page never
+   * splits a slice's same-{@code updated_at} cohort: the cohort straddling the page boundary is
+   * completed whole. A mass event that stamps many sagas in the same millisecond (e.g. a burst
+   * outage escalating a large batch at once) therefore produces over-sized pages — each slice's
+   * share of that millisecond returns whole in whichever page reaches it, on top of up to a full
+   * target of rows from earlier slices. Budget client-side memory and transport message limits for
+   * the requested page size plus the largest cohort a mass event can produce. See {@link
+   * SagaQuery.Builder#pageSize(int)}.
    *
    * @param query the status/time filter, page size, and continuation token
    * @return a page of matching snapshots and a token for the next page
@@ -142,13 +145,14 @@ public interface SagaAdminService extends AutoCloseable {
    * saga never stops the sweep from reaching the rest. A failure of the store itself is not a
    * per-row skip: it aborts the call, since every remaining row would fail the same way.
    *
-   * <p>A page is swept to completion on the server even if the caller stops waiting: a client
-   * deadline that fires mid-page does not abort or undo the sweep, so a timeout means the page is
-   * still draining, not that the call failed. Because every reset row leaves the {@code ESCALATED}
-   * filter, retrying after a timeout — even from the start, without the lost continuation token —
-   * sweeps only what is still escalated. A mass escalation stamped into one {@code updated_at}
-   * millisecond returns as a single over-sized page (see {@link SagaQuery.Builder#pageSize(int)}),
-   * which is the page most likely to outlive a short client deadline.
+   * <p>A client deadline that fires mid-sweep does not abort or undo the server's work, but the
+   * outcome is unknown to the caller: the sweep may complete the page after the deadline, or a
+   * store failure may still abort it. Treat a timeout as an unknown outcome, not a failure.
+   * Retrying is safe and cheap: every reset row leaves the {@code ESCALATED} filter, so a retry —
+   * even from the start, without the lost continuation token — sweeps only what is still escalated.
+   * A mass escalation stamped into one {@code updated_at} millisecond makes over-sized pages (see
+   * {@link SagaQuery.Builder#pageSize(int)}), which are the sweeps most likely to outlive a short
+   * client deadline.
    *
    * @param query the page of escalated sagas to sweep (status filter fixed to {@code ESCALATED})
    * @param reason why the operator is un-escalating (recorded per row for audit; must be non-blank)

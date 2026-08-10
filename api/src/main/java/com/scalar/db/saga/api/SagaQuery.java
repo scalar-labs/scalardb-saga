@@ -148,8 +148,9 @@ public final class SagaQuery {
      * larger than the target is returned whole as one over-sized page, so a page may exceed the
      * target — and even {@link SagaQuery#MAX_PAGE_SIZE} — by the full cohort size; it is not an
      * upper bound on the returned item count. Callers should provision memory and response limits
-     * for the largest expected cohort, not for this target. This bounds the requested target only,
-     * in {@code [1, MAX_PAGE_SIZE]}.
+     * for this target plus the largest expected cohort: a page can already hold up to a full target
+     * of rows from earlier scan slices when the cohort that overflows it is completed. This bounds
+     * the requested target only, in {@code [1, MAX_PAGE_SIZE]}.
      *
      * @param pageSize the target results per page, in {@code [1, MAX_PAGE_SIZE]}
      * @throws IllegalArgumentException if out of range
