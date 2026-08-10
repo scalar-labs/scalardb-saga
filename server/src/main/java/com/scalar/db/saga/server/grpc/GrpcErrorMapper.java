@@ -54,10 +54,15 @@ final class GrpcErrorMapper {
       // latter with a fixed daemon-owned detail (do not echo the engine's wording) so it flows
       // through the same code path as every other case. INVALID_ARGUMENT, not INVALID_REQUEST: the
       // request message was well-formed; a value inside it was rejected.
-      case IllegalArgumentException iae ->
-          respond(
-              Status.Code.INVALID_ARGUMENT,
-              new SagaIllegalArgumentException("invalid request parameter"));
+      case IllegalArgumentException iae -> {
+        // The engine's wording and cause are replaced on the wire, so log them: a server-side bug
+        // surfacing as IllegalArgumentException (NumberFormatException, say) would otherwise be
+        // reported to the caller as their fault with no evidence left anywhere.
+        logger.debug("Replacing a bare IllegalArgumentException for the wire", iae);
+        yield respond(
+            Status.Code.INVALID_ARGUMENT,
+            new SagaIllegalArgumentException("invalid request parameter"));
+      }
 
       // ── Not found ──────────────────────────────────────────────────
       case SagaNotFoundException e -> respond(Status.Code.NOT_FOUND, e);

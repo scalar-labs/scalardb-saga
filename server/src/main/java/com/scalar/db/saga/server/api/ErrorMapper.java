@@ -102,8 +102,14 @@ public final class ErrorMapper {
     // message was well-formed; a value inside it was rejected.
     app.exception(
         IllegalArgumentException.class,
-        (e, ctx) ->
-            respond(ctx, 400, new SagaIllegalArgumentException("invalid request parameter")));
+        (e, ctx) -> {
+          // The engine's wording and cause are replaced on the wire, so log them: a server-side
+          // bug surfacing as IllegalArgumentException (NumberFormatException, say) would otherwise
+          // be reported to the caller as their fault with no evidence left anywhere.
+          logger.debug(
+              "Replacing a bare IllegalArgumentException on {} {}", ctx.method(), ctx.path(), e);
+          respond(ctx, 400, new SagaIllegalArgumentException("invalid request parameter"));
+        });
 
     // ── Auth (401 / 403) ─────────────────────────────────────────────────
     app.exception(
