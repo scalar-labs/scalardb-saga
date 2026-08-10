@@ -45,9 +45,6 @@ final class GrpcErrorMapper {
 
   private static final Logger logger = LoggerFactory.getLogger(GrpcErrorMapper.class);
 
-  /** The {@link ErrorInfo} domain scoping every reason. */
-  private static final String ERROR_DOMAIN = "saga.scalar.com";
-
   private GrpcErrorMapper() {}
 
   static StatusRuntimeException toStatusRuntimeException(Throwable t) {
@@ -141,7 +138,7 @@ final class GrpcErrorMapper {
     ErrorInfo info =
         ErrorInfo.newBuilder()
             .setReason(code.code())
-            .setDomain(ERROR_DOMAIN)
+            .setDomain(SagaErrorCode.WIRE_DOMAIN)
             .putAllMetadata(metadata)
             .build();
     com.google.rpc.Status status =

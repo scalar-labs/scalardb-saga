@@ -410,7 +410,14 @@ class GrpcSagaAdminClientTest {
    */
   private static StatusRuntimeException statusWithReason(
       Status.Code code, String reason, Map<String, String> metadata) {
-    ErrorInfo info = ErrorInfo.newBuilder().setReason(reason).putAllMetadata(metadata).build();
+    // The saga domain is what the client's ErrorInfo filter matches on; without it the detail is
+    // treated as an intermediary's and ignored.
+    ErrorInfo info =
+        ErrorInfo.newBuilder()
+            .setReason(reason)
+            .setDomain(SagaErrorCode.WIRE_DOMAIN)
+            .putAllMetadata(metadata)
+            .build();
     return StatusProto.toStatusRuntimeException(
         com.google.rpc.Status.newBuilder()
             .setCode(code.value())

@@ -346,6 +346,50 @@ class GrpcSagaOrchestratorClientTest {
   }
 
   @Test
+  void getStateSnapshot_foreignDomainErrorInfo_isIgnored() {
+    // Arrange — an intermediary (mesh sidecar, gateway) generated the failure and attached its own
+    // ErrorInfo. Its reason means nothing in the saga vocabulary; reading it as one used to
+    // discard the status the infrastructure set correctly and claim a version skew.
+    ErrorInfo foreign =
+        ErrorInfo.newBuilder().setReason("upstream_connect_failure").setDomain("envoy.io").build();
+    fake.getError =
+        StatusProto.toStatusRuntimeException(
+            com.google.rpc.Status.newBuilder()
+                .setCode(Status.Code.UNAVAILABLE.value())
+                .addDetails(Any.pack(foreign))
+                .build());
+
+    // Act + Assert — classified by the transport status, as if no ErrorInfo were present.
+    assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
+        .isInstanceOf(SagaUnavailableException.class);
+  }
+
+  @Test
+  void getStateSnapshot_foreignErrorInfoAheadOfOurs_readsOurs() {
+    // Arrange — a proxy prepended its own ErrorInfo before the daemon's. The scan must skip the
+    // foreign one and keep going, not stop at the first detail it sees.
+    ErrorInfo foreign =
+        ErrorInfo.newBuilder().setReason("proxy_error").setDomain("envoy.io").build();
+    ErrorInfo ours =
+        ErrorInfo.newBuilder()
+            .setReason(SagaErrorCode.SAGA_NOT_FOUND.code())
+            .setDomain(SagaErrorCode.WIRE_DOMAIN)
+            .putMetadata("saga_id", "s-1")
+            .build();
+    fake.getError =
+        StatusProto.toStatusRuntimeException(
+            com.google.rpc.Status.newBuilder()
+                .setCode(Status.Code.NOT_FOUND.value())
+                .addDetails(Any.pack(foreign))
+                .addDetails(Any.pack(ours))
+                .build());
+
+    // Act + Assert
+    assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
+        .isInstanceOf(SagaNotFoundException.class);
+  }
+
+  @Test
   void getStateSnapshot_errorInfoGiven_attachesTheGrpcStatusAsCause() {
     // Arrange — the registry builds every exception cause-free, so without an explicit initCause
     // the
@@ -651,7 +695,14 @@ class GrpcSagaOrchestratorClientTest {
    */
   private static StatusRuntimeException statusWithReason(
       Status.Code code, String reason, Map<String, String> metadata) {
-    ErrorInfo info = ErrorInfo.newBuilder().setReason(reason).putAllMetadata(metadata).build();
+    // The saga domain is what the client's ErrorInfo filter matches on; without it the detail is
+    // treated as an intermediary's and ignored.
+    ErrorInfo info =
+        ErrorInfo.newBuilder()
+            .setReason(reason)
+            .setDomain(SagaErrorCode.WIRE_DOMAIN)
+            .putAllMetadata(metadata)
+            .build();
     return StatusProto.toStatusRuntimeException(
         com.google.rpc.Status.newBuilder()
             .setCode(code.value())

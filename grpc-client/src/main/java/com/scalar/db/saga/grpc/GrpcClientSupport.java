@@ -119,19 +119,31 @@ final class GrpcClientSupport {
     return reconstructed;
   }
 
-  /** The first {@link ErrorInfo} detail on {@code e}, or {@code null} if it carries none. */
+  /**
+   * The first {@link ErrorInfo} detail on {@code e} whose domain is {@link
+   * SagaErrorCode#WIRE_DOMAIN}, or {@code null} if it carries none. In {@code google.rpc.ErrorInfo}
+   * the domain is what scopes the reason, and any hop in the request path may attach its own {@code
+   * ErrorInfo} — a mesh sidecar or gateway generating the failure, for example — so an entry with a
+   * foreign domain (or one that fails to parse) is skipped rather than read as a saga code, and the
+   * scan continues in case the daemon's own entry follows it.
+   */
   private static @Nullable ErrorInfo errorInfo(StatusRuntimeException e) {
     com.google.rpc.Status status = StatusProto.fromThrowable(e);
     if (status == null) {
       return null;
     }
     for (Any detail : status.getDetailsList()) {
-      if (detail.is(ErrorInfo.class)) {
-        try {
-          return detail.unpack(ErrorInfo.class);
-        } catch (InvalidProtocolBufferException malformed) {
-          return null;
-        }
+      if (!detail.is(ErrorInfo.class)) {
+        continue;
+      }
+      ErrorInfo info;
+      try {
+        info = detail.unpack(ErrorInfo.class);
+      } catch (InvalidProtocolBufferException malformed) {
+        continue;
+      }
+      if (SagaErrorCode.WIRE_DOMAIN.equals(info.getDomain())) {
+        return info;
       }
     }
     return null;

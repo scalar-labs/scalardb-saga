@@ -301,6 +301,16 @@ public enum SagaErrorCode {
       "Upgrade the client SDK to a version compatible with the server."),
   ;
 
+  /**
+   * The {@code google.rpc.ErrorInfo} domain scoping every {@code DB-SAGA-*} reason — per the
+   * ErrorInfo convention, the service name styled on the vendor's own domain. The daemon stamps it
+   * on every {@code ErrorInfo} it emits, and the client SDK ignores an {@code ErrorInfo} carrying
+   * any other domain: an intermediary (mesh sidecar, gateway) may attach its own, whose reason
+   * means nothing in this vocabulary. Frozen at first release — clients match it exactly, so
+   * renaming it would make every older client treat a newer daemon's {@code ErrorInfo} as foreign.
+   */
+  public static final String WIRE_DOMAIN = "scalardb-saga.scalar-labs.com";
+
   private final String code;
   private final Category category;
   private final String message;
