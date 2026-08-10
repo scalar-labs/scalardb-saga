@@ -111,7 +111,9 @@ import org.jspecify.annotations.Nullable;
  *       returns (default {@value #DEFAULT_DETAIL_MAX_TIMELINE_EVENTS}). A longer history is cut to
  *       the newest events and the response is flagged {@code truncated}; the full history remains
  *       in the store. The bound keeps a pathological saga's detail under a gRPC client's default 4
- *       MB inbound message cap, so the saga stays diagnosable
+ *       MB inbound message cap, so the saga stays diagnosable. A window widened far beyond the
+ *       default can exceed that cap again; the oversized detail still arrives over REST, which has
+ *       no equivalent limit, but not through the Java client SDK
  * </ul>
  *
  * <h2>Crash recovery ({@code recovery.*})</h2>
@@ -276,9 +278,10 @@ public final class SagaServerConfig {
 
   static final String SHUTDOWN_PREFIX = SERVER_PREFIX + "shutdown.";
   static final String SHUTDOWN_MODE_KEY = SHUTDOWN_PREFIX + "mode";
+  static final String SHUTDOWN_TIMEOUT_MILLIS_KEY = SHUTDOWN_PREFIX + "timeout_millis";
+
   static final String DETAIL_PREFIX = SERVER_PREFIX + "detail.";
   static final String DETAIL_MAX_TIMELINE_EVENTS_KEY = DETAIL_PREFIX + "max_timeline_events";
-  static final String SHUTDOWN_TIMEOUT_MILLIS_KEY = SHUTDOWN_PREFIX + "timeout_millis";
 
   static final String RECOVERY_PREFIX = SERVER_PREFIX + "recovery.";
   static final String RECOVERY_TIMEOUT_MILLIS_KEY = RECOVERY_PREFIX + "timeout_millis";
