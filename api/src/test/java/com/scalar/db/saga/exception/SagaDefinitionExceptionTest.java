@@ -130,13 +130,13 @@ class SagaDefinitionExceptionTest {
   }
 
   @Test
-  void stepClassNotSupportedOnDaemon_always_carriesCodeAndBothNames() {
+  void stepClassNotSupportedOnServer_always_carriesCodeAndBothNames() {
     // Arrange & Act
     SagaDefinitionException e =
-        SagaDefinitionException.stepClassNotSupportedOnDaemon("transfer", "debit");
+        SagaDefinitionException.stepClassNotSupportedOnServer("transfer", "debit");
 
     // Assert
-    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.STEP_CLASS_NOT_SUPPORTED_ON_DAEMON);
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.STEP_CLASS_NOT_SUPPORTED_ON_SERVER);
     assertThat(e.getMetadata())
         .containsEntry("saga_name", "transfer")
         .containsEntry("step_name", "debit")

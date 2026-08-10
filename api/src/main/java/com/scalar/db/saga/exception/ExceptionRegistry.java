@@ -57,10 +57,10 @@ public final class ExceptionRegistry {
         SagaErrorCode.INVALID_STEP_CLASS,
         meta -> SagaDefinitionException.fromWire(SagaErrorCode.INVALID_STEP_CLASS, meta));
     m.put(
-        SagaErrorCode.STEP_CLASS_NOT_SUPPORTED_ON_DAEMON,
+        SagaErrorCode.STEP_CLASS_NOT_SUPPORTED_ON_SERVER,
         meta ->
             SagaDefinitionException.fromWire(
-                SagaErrorCode.STEP_CLASS_NOT_SUPPORTED_ON_DAEMON, meta));
+                SagaErrorCode.STEP_CLASS_NOT_SUPPORTED_ON_SERVER, meta));
     m.put(
         SagaErrorCode.HTTP_ENDPOINT_LOOKUP_FAILED,
         meta -> SagaDefinitionException.fromWire(SagaErrorCode.HTTP_ENDPOINT_LOOKUP_FAILED, meta));

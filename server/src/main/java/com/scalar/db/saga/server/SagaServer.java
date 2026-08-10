@@ -315,7 +315,7 @@ public final class SagaServer implements AutoCloseable {
     SagaDefinition definition = SagaDefinitionParser.parseFile(path);
     for (SagaDefinition.StepDefinition step : definition.getSteps()) {
       if (step instanceof SagaDefinition.ClassStep) {
-        throw SagaDefinitionException.stepClassNotSupportedOnDaemon(
+        throw SagaDefinitionException.stepClassNotSupportedOnServer(
             definition.getName(), step.getName());
       }
     }

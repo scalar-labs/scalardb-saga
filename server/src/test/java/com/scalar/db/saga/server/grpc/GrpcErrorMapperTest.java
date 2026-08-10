@@ -149,9 +149,9 @@ class GrpcErrorMapperTest {
             Status.Code.INVALID_ARGUMENT,
             SagaErrorCode.INVALID_STEP_CLASS),
         new Arm(
-            SagaDefinitionException.stepClassNotSupportedOnDaemon("transfer", "debit"),
+            SagaDefinitionException.stepClassNotSupportedOnServer("transfer", "debit"),
             Status.Code.INVALID_ARGUMENT,
-            SagaErrorCode.STEP_CLASS_NOT_SUPPORTED_ON_DAEMON),
+            SagaErrorCode.STEP_CLASS_NOT_SUPPORTED_ON_SERVER),
         new Arm(
             SagaDefinitionException.httpEndpointLookupFailed("none registered"),
             Status.Code.INVALID_ARGUMENT,

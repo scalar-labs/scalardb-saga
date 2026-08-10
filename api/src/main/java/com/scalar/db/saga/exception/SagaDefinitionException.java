@@ -79,10 +79,10 @@ public class SagaDefinitionException extends SagaRuntimeException {
         Objects.requireNonNull(cause, "cause must not be null"));
   }
 
-  public static SagaDefinitionException stepClassNotSupportedOnDaemon(
+  public static SagaDefinitionException stepClassNotSupportedOnServer(
       String sagaName, String stepName) {
     return new SagaDefinitionException(
-        SagaErrorCode.STEP_CLASS_NOT_SUPPORTED_ON_DAEMON,
+        SagaErrorCode.STEP_CLASS_NOT_SUPPORTED_ON_SERVER,
         ErrorMetadata.of("saga_name", sagaName, "step_name", stepName));
   }
 
@@ -109,7 +109,7 @@ public class SagaDefinitionException extends SagaRuntimeException {
       case UNREADABLE_DEFINITION_SOURCE:
       case DEFINITION_VERSION_CONTENT_CONFLICT:
       case INVALID_STEP_CLASS:
-      case STEP_CLASS_NOT_SUPPORTED_ON_DAEMON:
+      case STEP_CLASS_NOT_SUPPORTED_ON_SERVER:
       case HTTP_ENDPOINT_LOOKUP_FAILED:
         return new SagaDefinitionException(code, metadata);
       default:

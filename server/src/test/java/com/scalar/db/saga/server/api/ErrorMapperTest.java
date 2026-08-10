@@ -211,9 +211,9 @@ class ErrorMapperTest {
             400,
             SagaErrorCode.INVALID_STEP_CLASS),
         new Arm(
-            SagaDefinitionException.stepClassNotSupportedOnDaemon("transfer", "debit"),
+            SagaDefinitionException.stepClassNotSupportedOnServer("transfer", "debit"),
             400,
-            SagaErrorCode.STEP_CLASS_NOT_SUPPORTED_ON_DAEMON),
+            SagaErrorCode.STEP_CLASS_NOT_SUPPORTED_ON_SERVER),
         new Arm(
             SagaDefinitionException.httpEndpointLookupFailed("none registered"),
             400,

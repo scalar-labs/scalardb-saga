@@ -46,7 +46,7 @@ public enum SagaErrorCode {
       Category.USER_ERROR,
       "Request is invalid",
       Schema.of("detail"),
-      "The request message itself failed validation at the daemon edge: a missing or malformed field, an unparseable body, or an unrecognized query parameter. Only a remote caller can produce this; the embedded engine has no request to validate. A caller value the engine rejected is INVALID_ARGUMENT instead.",
+      "The request message itself failed validation at the server edge: a missing or malformed field, an unparseable body, or an unrecognized query parameter. Only a remote caller can produce this; the embedded engine has no request to validate. A caller value the engine rejected is INVALID_ARGUMENT instead.",
       "Fix the request per the detail and retry."),
 
   INVALID_ARGUMENT(
@@ -54,7 +54,7 @@ public enum SagaErrorCode {
       Category.USER_ERROR,
       "Argument is invalid",
       Schema.of("detail"),
-      "A value the caller passed failed validation — a malformed page token, a blank reason, an out-of-range timestamp. Raised by the engine and by client-side pre-checks, so it reaches callers in both embedded and daemon mode.",
+      "A value the caller passed failed validation — a malformed page token, a blank reason, an out-of-range timestamp. Raised by the engine and by client-side pre-checks, so it reaches callers in both embedded and server mode.",
       "Fix the argument per the detail and retry."),
 
   INVALID_DEFINITION(
@@ -89,12 +89,12 @@ public enum SagaErrorCode {
       "Reflective resolution of the class-based step failed (not found, not a Step/TccStep, wrong constructor shape, unresolvable parameter, or constructor threw). The detail identifies the specific failure.",
       "Fix the step class per the detail and ensure it is on the runtime classpath."),
 
-  STEP_CLASS_NOT_SUPPORTED_ON_DAEMON(
+  STEP_CLASS_NOT_SUPPORTED_ON_SERVER(
       "DB-SAGA-10007",
       Category.USER_ERROR,
-      "Class-based step is not supported on the daemon",
+      "Class-based step is not supported on the server",
       Schema.of("saga_name", "step_name"),
-      "The daemon runs declarative definitions only; class steps cannot be executed remotely.",
+      "The server runs declarative definitions only; class steps cannot be executed remotely.",
       "Convert the step to a declarative service step or embed the engine instead."),
 
   HTTP_ENDPOINT_LOOKUP_FAILED(
