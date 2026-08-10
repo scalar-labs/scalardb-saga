@@ -1,8 +1,8 @@
 package com.scalar.db.saga.daemon.grpc;
 
+import static com.scalar.db.saga.daemon.grpc.ErrorInfos.errorInfo;
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.google.protobuf.Any;
 import com.google.rpc.ErrorInfo;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaErrorCode;
@@ -10,7 +10,6 @@ import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
-import io.grpc.protobuf.StatusProto;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -102,23 +101,5 @@ class GrpcErrorMapperTest {
         .containsEntry("saga_id", "s-1")
         .containsEntry("current_state", "RUNNING")
         .containsEntry("requested_operation", "recover");
-  }
-
-  /** Extracts the {@link ErrorInfo} detail, failing the test if the status carries none. */
-  private static ErrorInfo errorInfo(StatusRuntimeException e) {
-    com.google.rpc.Status status = StatusProto.fromThrowable(e);
-    if (status == null) {
-      throw new AssertionError("status carried no google.rpc.Status details");
-    }
-    for (Any detail : status.getDetailsList()) {
-      if (detail.is(ErrorInfo.class)) {
-        try {
-          return detail.unpack(ErrorInfo.class);
-        } catch (com.google.protobuf.InvalidProtocolBufferException malformed) {
-          throw new AssertionError("malformed ErrorInfo detail", malformed);
-        }
-      }
-    }
-    throw new AssertionError("status carried no ErrorInfo detail");
   }
 }

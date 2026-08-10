@@ -373,10 +373,29 @@ class GrpcSagaOrchestratorClientTest {
   }
 
   @Test
-  void start_internal_throwsSagaRuntimeException() {
+  void start_internalWithoutErrorInfo_throwsInternalError() {
+    // Arrange — an older daemon's security interceptor reports an unexpected server fault as a
+    // bare INTERNAL with no ErrorInfo.
     fake.startError = Status.INTERNAL.withDescription("boom").asRuntimeException();
+
+    // Act + Assert — a server fault to escalate, not the version skew the catch-all would report.
     assertThatThrownBy(() -> client.start("transfer", Map.of()))
-        .isExactlyInstanceOf(SagaRuntimeException.class);
+        .isExactlyInstanceOf(SagaRuntimeException.class)
+        .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.INTERNAL_ERROR);
+  }
+
+  @Test
+  void getStateSnapshot_resourceExhaustedWithoutErrorInfo_throwsRateLimitExceeded() {
+    // Arrange — an older daemon's rate limiter closes an over-limit call with a bare
+    // RESOURCE_EXHAUSTED and no ErrorInfo.
+    fake.getError = Status.RESOURCE_EXHAUSTED.withDescription("throttled").asRuntimeException();
+
+    // Act + Assert — retryable rate limiting, not the version skew the catch-all would report.
+    assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
+        .isExactlyInstanceOf(SagaRuntimeException.class)
+        .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.RATE_LIMIT_EXCEEDED);
   }
 
   @Test

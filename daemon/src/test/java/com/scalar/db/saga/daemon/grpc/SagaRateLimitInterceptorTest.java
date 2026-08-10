@@ -17,6 +17,7 @@ import com.scalar.db.saga.daemon.security.SagaAuthenticationException;
 import com.scalar.db.saga.daemon.security.SagaIdentity;
 import com.scalar.db.saga.daemon.security.SagaRole;
 import com.scalar.db.saga.daemon.security.SagaSecurityProvider;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.rpc.GetSagaRequest;
 import com.scalar.db.saga.rpc.SagaServiceGrpc;
 import com.scalar.db.saga.rpc.SagaServiceGrpc.SagaServiceBlockingStub;
@@ -93,6 +94,10 @@ class SagaRateLimitInterceptorTest {
     assertThat(start().getSagaId()).isEqualTo("s-1");
     StatusRuntimeException error = catchThrowableOfType(StatusRuntimeException.class, this::start);
     assertThat(error.getStatus().getCode()).isEqualTo(Status.Code.RESOURCE_EXHAUSTED);
+    // The refusal carries the code, so the client SDK classifies it as retryable rate limiting
+    // instead of falling to its unrecognized-error catch-all.
+    assertThat(ErrorInfos.errorInfo(error).getReason())
+        .isEqualTo(SagaErrorCode.RATE_LIMIT_EXCEEDED.code());
   }
 
   @Test

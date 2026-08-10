@@ -159,10 +159,22 @@ final class GrpcClientSupport {
         return new SagaRuntimeException(SagaErrorCode.REQUEST_ABORTED, ErrorMetadata.of(), e);
       case UNAVAILABLE:
         return new SagaUnavailableException(e);
+      case RESOURCE_EXHAUSTED:
+        // The daemon's rate limiter refuses over-limit calls at the interceptor layer, and an
+        // older daemon does so without an ErrorInfo. Letting that fall through to the catch-all
+        // would turn "back off and retry" into "upgrade the SDK". gRPC also uses
+        // RESOURCE_EXHAUSTED for an oversized message; the original description stays readable on
+        // the cause.
+        return new SagaRuntimeException(SagaErrorCode.RATE_LIMIT_EXCEEDED, ErrorMetadata.of(), e);
       case PERMISSION_DENIED:
         return new SagaPermissionDeniedException(e);
       case UNAUTHENTICATED:
         return new SagaUnauthenticatedException(e);
+      case INTERNAL:
+        // A server fault reported without an ErrorInfo — an older daemon's security interceptor,
+        // or an intermediary. INTERNAL_ERROR tells the caller to escalate and not retry, which
+        // beats the catch-all's claim of a version skew.
+        return new SagaRuntimeException(SagaErrorCode.INTERNAL_ERROR, ErrorMetadata.of(), e);
       default:
         return new SagaRuntimeException(
             SagaErrorCode.UNRECOGNIZED_SERVER_ERROR,

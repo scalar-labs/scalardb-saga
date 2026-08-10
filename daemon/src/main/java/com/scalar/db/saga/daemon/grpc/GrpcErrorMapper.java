@@ -14,6 +14,8 @@ import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
+import io.grpc.Metadata;
+import io.grpc.ServerCall;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.protobuf.StatusProto;
@@ -35,7 +37,9 @@ import org.slf4j.LoggerFactory;
  * branch; the generic {@link SagaRuntimeException} branch catches any future subclass so the
  * fallback route is safe. Auth-family exceptions ({@code SagaAuthenticationException}, {@code
  * SagaAuthorizationException}, {@code SagaAuthUnavailableException}) reach the gRPC layer only
- * through {@link SagaSecurityInterceptor} — they don't flow through this mapper.
+ * through {@link SagaSecurityInterceptor} — they don't flow through this mapper's exception
+ * dispatch; the interceptors compose their refusals through {@link #close} instead, so those
+ * responses still carry an {@link ErrorInfo} from the same vocabulary.
  */
 final class GrpcErrorMapper {
 
@@ -101,6 +105,19 @@ final class GrpcErrorMapper {
   /** Builds a status carrying an ErrorInfo detail for a {@link SagaRuntimeException}. */
   private static StatusRuntimeException respond(Status.Code statusCode, SagaRuntimeException e) {
     return status(statusCode, e.getErrorCode(), e.getMetadata());
+  }
+
+  /**
+   * Closes a call an interceptor refuses before it reaches a service handler, composing the body
+   * through the same path as the exception dispatch above. Without this, an interceptor-level
+   * refusal would be the one daemon response with no {@link ErrorInfo}, and the client SDK would
+   * fall back to transport-status dispatch — or, for a status it has no case for, misreport the
+   * refusal as an unrecognized server error.
+   */
+  static void close(ServerCall<?, ?> call, Status.Code statusCode, SagaErrorCode code) {
+    StatusRuntimeException e = status(statusCode, code, ErrorMetadata.of());
+    Metadata trailers = e.getTrailers();
+    call.close(e.getStatus(), trailers == null ? new Metadata() : trailers);
   }
 
   /**

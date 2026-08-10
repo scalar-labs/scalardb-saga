@@ -17,6 +17,7 @@ import com.scalar.db.saga.daemon.security.SagaAuthenticationException;
 import com.scalar.db.saga.daemon.security.SagaIdentity;
 import com.scalar.db.saga.daemon.security.SagaRole;
 import com.scalar.db.saga.daemon.security.SagaSecurityProvider;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.rpc.GetSagaRequest;
 import com.scalar.db.saga.rpc.SagaServiceGrpc;
 import com.scalar.db.saga.rpc.SagaServiceGrpc.SagaServiceBlockingStub;
@@ -98,8 +99,10 @@ class SagaSecurityInterceptorTest {
     // Act
     StatusRuntimeException error = callGetExpectingError(stub(null));
 
-    // Assert
+    // Assert — the refusal also carries the code, like every other daemon response
     assertThat(error.getStatus().getCode()).isEqualTo(Status.Code.UNAUTHENTICATED);
+    assertThat(ErrorInfos.errorInfo(error).getReason())
+        .isEqualTo(SagaErrorCode.UNAUTHENTICATED.code());
   }
 
   @Test
@@ -121,6 +124,8 @@ class SagaSecurityInterceptorTest {
 
     // Assert
     assertThat(error.getStatus().getCode()).isEqualTo(Status.Code.PERMISSION_DENIED);
+    assertThat(ErrorInfos.errorInfo(error).getReason())
+        .isEqualTo(SagaErrorCode.PERMISSION_DENIED.code());
   }
 
   @Test
@@ -153,8 +158,12 @@ class SagaSecurityInterceptorTest {
     StatusRuntimeException error = callGetExpectingError(stubFor(throwing));
 
     // Assert — mapped to INTERNAL (fail closed), not UNAUTHENTICATED, so a server-side fault is not
-    // reported to the caller as a bad credential.
+    // reported to the caller as a bad credential. INTERNAL_ERROR, not an auth-specific code: all
+    // that is known here is that the server broke unexpectedly, and a more specific code would
+    // hand probing callers an oracle on the auth subsystem.
     assertThat(error.getStatus().getCode()).isEqualTo(Status.Code.INTERNAL);
+    assertThat(ErrorInfos.errorInfo(error).getReason())
+        .isEqualTo(SagaErrorCode.INTERNAL_ERROR.code());
   }
 
   @Test
@@ -179,6 +188,8 @@ class SagaSecurityInterceptorTest {
 
     // Assert — retryable UNAVAILABLE, not UNAUTHENTICATED (not a bad credential) or INTERNAL.
     assertThat(error.getStatus().getCode()).isEqualTo(Status.Code.UNAVAILABLE);
+    assertThat(ErrorInfos.errorInfo(error).getReason())
+        .isEqualTo(SagaErrorCode.SERVICE_UNAVAILABLE.code());
   }
 
   private SagaServiceBlockingStub stubFor(SagaSecurityProvider provider) throws IOException {

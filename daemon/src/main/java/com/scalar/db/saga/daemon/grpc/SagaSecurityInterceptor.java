@@ -7,6 +7,7 @@ import com.scalar.db.saga.daemon.security.SagaIdentity;
 import com.scalar.db.saga.daemon.security.SagaOperation;
 import com.scalar.db.saga.daemon.security.SagaRole;
 import com.scalar.db.saga.daemon.security.SagaSecurityProvider;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import io.grpc.Context;
 import io.grpc.Contexts;
 import io.grpc.Grpc;
@@ -36,8 +37,10 @@ import org.slf4j.LoggerFactory;
  * exactly as the REST handler does. An authentication failure closes the call with {@code
  * UNAUTHENTICATED}; a role shortfall with {@code PERMISSION_DENIED} — the gRPC analogues of {@code
  * 401}/{@code 403}. A provider that is unavailable (e.g. an unreachable JWKS endpoint) closes the
- * call with {@code UNAVAILABLE} — a retryable outage, not a bad credential. The resolved identity
- * is attached to the gRPC {@link Context} under {@link #IDENTITY} for downstream audit.
+ * call with {@code UNAVAILABLE} — a retryable outage, not a bad credential. Every refusal is
+ * composed through {@link GrpcErrorMapper#close}, so it carries the matching {@link SagaErrorCode}
+ * in an {@code ErrorInfo} detail like every other daemon response. The resolved identity is
+ * attached to the gRPC {@link Context} under {@link #IDENTITY} for downstream audit.
  */
 public final class SagaSecurityInterceptor implements ServerInterceptor {
 
@@ -64,7 +67,7 @@ public final class SagaSecurityInterceptor implements ServerInterceptor {
       logger.error(
           "gRPC method '{}' has no mapped SagaOperation; refusing the call",
           call.getMethodDescriptor().getFullMethodName());
-      return deny(call, Status.INTERNAL.withDescription("Internal server error"));
+      return deny(call, Status.Code.INTERNAL, SagaErrorCode.INTERNAL_ERROR);
     }
     SagaRole required = operation.requiredRole();
     if (required == null) {
@@ -77,31 +80,31 @@ public final class SagaSecurityInterceptor implements ServerInterceptor {
     try {
       identity = provider.authenticate(toAuthRequest(call, headers));
     } catch (SagaAuthenticationException e) {
-      return deny(call, Status.UNAUTHENTICATED.withDescription("Authentication required"));
+      return deny(call, Status.Code.UNAUTHENTICATED, SagaErrorCode.UNAUTHENTICATED);
     } catch (SagaAuthUnavailableException e) {
       // The provider could not verify the credential because it is unavailable (e.g. the JWKS
       // endpoint is unreachable) — a transient upstream outage, not a bad credential. Map to
       // UNAVAILABLE so the caller can retry, mirroring the REST path's 503.
       logger.warn("Authentication provider unavailable for a gRPC call", e);
-      return deny(call, Status.UNAVAILABLE.withDescription("Service temporarily unavailable"));
+      return deny(call, Status.Code.UNAVAILABLE, SagaErrorCode.SERVICE_UNAVAILABLE);
     } catch (RuntimeException e) {
       // An unexpected provider failure (not a rejected credential) — a bug or an unwrapped
       // transient error. Fail closed and log it server-side; map to INTERNAL rather than
       // UNAUTHENTICATED so it is not mistaken for a bad credential (the REST path's ErrorMapper
       // maps an unhandled error to 500 the same way). No detail leaks to the client.
       logger.error("Unexpected error authenticating a gRPC call", e);
-      return deny(call, Status.INTERNAL.withDescription("Authentication error"));
+      return deny(call, Status.Code.INTERNAL, SagaErrorCode.INTERNAL_ERROR);
     }
     if (!identity.hasRole(required)) {
-      return deny(call, Status.PERMISSION_DENIED.withDescription("Insufficient permissions"));
+      return deny(call, Status.Code.PERMISSION_DENIED, SagaErrorCode.PERMISSION_DENIED);
     }
     Context context = Context.current().withValue(IDENTITY, identity);
     return Contexts.interceptCall(context, call, headers, next);
   }
 
   private static <ReqT, RespT> ServerCall.Listener<ReqT> deny(
-      ServerCall<ReqT, RespT> call, Status status) {
-    call.close(status, new Metadata());
+      ServerCall<ReqT, RespT> call, Status.Code statusCode, SagaErrorCode errorCode) {
+    GrpcErrorMapper.close(call, statusCode, errorCode);
     return new ServerCall.Listener<ReqT>() {};
   }
 

@@ -328,6 +328,33 @@ class GrpcSagaAdminClientTest {
   }
 
   @Test
+  void recoverSaga_resourceExhaustedWithoutErrorInfo_throwsRateLimitExceeded() {
+    // Arrange — an older daemon's rate limiter closes an over-limit call with a bare
+    // RESOURCE_EXHAUSTED and no ErrorInfo.
+    fake.recoverError = Status.RESOURCE_EXHAUSTED.withDescription("throttled").asRuntimeException();
+
+    // Act + Assert — retryable rate limiting, not the version skew the catch-all would report;
+    // the admin client has no retry loop, so this category is the caller's only backoff signal.
+    assertThatThrownBy(() -> client.recoverSaga("s-1", "x"))
+        .isExactlyInstanceOf(SagaRuntimeException.class)
+        .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.RATE_LIMIT_EXCEEDED);
+  }
+
+  @Test
+  void recoverSaga_internalWithoutErrorInfo_throwsInternalError() {
+    // Arrange — an older daemon's security interceptor reports an unexpected server fault as a
+    // bare INTERNAL with no ErrorInfo.
+    fake.recoverError = Status.INTERNAL.withDescription("boom").asRuntimeException();
+
+    // Act + Assert — a server fault to escalate, not the version skew the catch-all would report.
+    assertThatThrownBy(() -> client.recoverSaga("s-1", "x"))
+        .isExactlyInstanceOf(SagaRuntimeException.class)
+        .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.INTERNAL_ERROR);
+  }
+
+  @Test
   void recoverSaga_afterClose_throwsIllegalStateException() {
     // Arrange
     client.close();
