@@ -17,6 +17,7 @@ import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import io.javalin.Javalin;
 import io.javalin.http.Context;
+import io.javalin.http.NotFoundResponse;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.slf4j.Logger;
@@ -43,6 +44,12 @@ import org.slf4j.LoggerFactory;
  * app.exception} handler; this file reads as a complete per-type dispatch table. The generic {@link
  * SagaRuntimeException} handler catches any future subclass that lacks a dedicated entry so the
  * fallback route is safe.
+ *
+ * <p><b>Route-level 404.</b> A request no route matches surfaces as Javalin's internal {@link
+ * NotFoundResponse}, which Javalin's own handler would render with a default body — the one REST
+ * response without an {@code errorCode}. Registering that exact type routes it through the same
+ * body composition as everything else; handler-produced 404s (saga or definition not found) carry
+ * their own typed exceptions and are unaffected.
  *
  * <p><b>Logging rule:</b> log per-type only when the operator would learn something the wire body
  * doesn't already show — i.e. the exception carries a server-side-only field ({@code
@@ -170,6 +177,24 @@ public final class ErrorMapper {
           logger.error("Unhandled error on {} {}", ctx.method(), ctx.path(), e);
           ctx.status(500).json(body(SagaErrorCode.INTERNAL_ERROR, ErrorMetadata.of()));
         });
+
+    // ── Unmatched route (404) ────────────────────────────────────────────
+    // Javalin reports a path (or method) no route matches by throwing NotFoundResponse internally,
+    // so mapping that type gives the response a structured body like every other; without this
+    // entry it would ship Javalin's default body, the one REST response without an errorCode.
+    // INVALID_REQUEST, because only a remote caller can produce a request the daemon edge cannot
+    // route. Handler-produced 404s (saga or definition not found) carry their own typed exceptions
+    // and never reach this entry. Registering the exact type outranks Javalin's built-in
+    // HttpResponseException handler, which resolves by nearest class.
+    app.exception(
+        NotFoundResponse.class,
+        (e, ctx) ->
+            ctx.status(404)
+                .json(
+                    body(
+                        SagaErrorCode.INVALID_REQUEST,
+                        ErrorMetadata.of(
+                            "detail", "no such endpoint: " + ctx.method() + " " + ctx.path()))));
   }
 
   /** Writes the wire body for a {@link SagaRuntimeException} at the given HTTP status. */

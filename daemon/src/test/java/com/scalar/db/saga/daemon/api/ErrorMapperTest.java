@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.scalar.db.saga.daemon.security.SagaAuthUnavailableException;
 import com.scalar.db.saga.exception.SagaErrorCode;
+import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import io.javalin.Javalin;
 import io.javalin.http.BadRequestResponse;
@@ -65,6 +66,11 @@ class ErrorMapperTest {
           throw SagaPersistenceException.serializationFailed(
               new RuntimeException("bad json for secret_table"));
         });
+    app.get(
+        "/not-found-typed",
+        ctx -> {
+          throw new SagaNotFoundException("s-404");
+        });
     app.start(0);
   }
 
@@ -117,6 +123,29 @@ class ErrorMapperTest {
     assertThat(response.body())
         .contains(SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED.code())
         .doesNotContain("secret_table");
+  }
+
+  @Test
+  void unknownRoute_mapsTo404_withStructuredBody() throws Exception {
+    // Javalin reports an unroutable request as an internal NotFoundResponse; the registered
+    // handler for that exact type must compose the structured body, or this would be the one REST
+    // response without an errorCode.
+    HttpResponse<String> response = get("/no-such-route");
+    assertThat(response.statusCode()).isEqualTo(404);
+    assertThat(response.body())
+        .contains(SagaErrorCode.INVALID_REQUEST.code())
+        .contains("/no-such-route");
+  }
+
+  @Test
+  void handlerProduced404_keepsItsTypedBody_notAffectedByNotFoundRouteMapping() throws Exception {
+    // A typed not-found from a handler must keep its own code; the NotFoundResponse entry covers
+    // only Javalin's unmatched-route signal, not every 404.
+    HttpResponse<String> response = get("/not-found-typed");
+    assertThat(response.statusCode()).isEqualTo(404);
+    assertThat(response.body())
+        .contains(SagaErrorCode.SAGA_NOT_FOUND.code())
+        .doesNotContain(SagaErrorCode.INVALID_REQUEST.code());
   }
 
   private HttpResponse<String> get(String path) throws Exception {
