@@ -293,6 +293,20 @@ class GrpcSagaAdminClientTest {
   }
 
   @Test
+  void recoverSaga_driftedMetadataWithNotFoundStatus_fallsBackToTypedNotFound() {
+    // Arrange — a known code whose wire metadata no longer fits its schema (a key renamed across
+    // versions). Reconstruction must report failure so the NOT_FOUND transport dispatch still
+    // produces the typed exception, instead of masking the drift as UNRECOGNIZED_SERVER_ERROR.
+    fake.recoverError =
+        statusWithReason(
+            Status.Code.NOT_FOUND, SagaErrorCode.SAGA_NOT_FOUND.code(), Map.of("sagaId", "s-1"));
+
+    // Act + Assert
+    assertThatThrownBy(() -> client.recoverSaga("s-1", "x"))
+        .isInstanceOf(SagaNotFoundException.class);
+  }
+
+  @Test
   void resetEscalated_bulk_unavailable_throwsSagaUnavailable() {
     fake.bulkError = Status.UNAVAILABLE.withDescription("down").asRuntimeException();
     assertThatThrownBy(() -> client.resetEscalated(SagaQuery.newBuilder().build(), "x"))

@@ -316,6 +316,36 @@ class GrpcSagaOrchestratorClientTest {
   }
 
   @Test
+  void startAsync_unknownCodeWithUnavailableStatus_throwsSagaUnavailable() {
+    // Arrange — a rolling upgrade: a newer daemon sends a code this client does not know, on a
+    // retryable UNAVAILABLE. Degrading it to UNRECOGNIZED_SERVER_ERROR (CLIENT_ERROR) here used to
+    // stop a caller keying retries on Category.RETRYABLE_SERVER_ERROR; the status the daemon set
+    // correctly must win instead.
+    fake.startError = statusWithReason(Status.Code.UNAVAILABLE, "DB-SAGA-99999", Map.of());
+
+    // Act + Assert — classified by the transport status, not the unresolvable code.
+    assertThatThrownBy(() -> client.startAsync("transfer", Map.of()))
+        .isInstanceOf(SagaUnavailableException.class);
+  }
+
+  @Test
+  void getStateSnapshot_serverSentUnrecognizedCode_keepsIt() {
+    // Arrange — a genuine DB-SAGA-49999 from the server is a registered code, not a degradation,
+    // so it must round-trip with the server's own metadata rather than fall to the status.
+    fake.getError =
+        statusWithReason(
+            Status.Code.INTERNAL,
+            SagaErrorCode.UNRECOGNIZED_SERVER_ERROR.code(),
+            Map.of("server_value", "SOME_ENUM_VALUE"));
+
+    // Act + Assert
+    assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
+        .isExactlyInstanceOf(SagaRuntimeException.class)
+        .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.UNRECOGNIZED_SERVER_ERROR);
+  }
+
+  @Test
   void getStateSnapshot_errorInfoGiven_attachesTheGrpcStatusAsCause() {
     // Arrange — the registry builds every exception cause-free, so without an explicit initCause
     // the

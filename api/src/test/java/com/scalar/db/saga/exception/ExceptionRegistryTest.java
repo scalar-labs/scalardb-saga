@@ -198,4 +198,50 @@ class ExceptionRegistryTest {
     // Assert
     assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.UNRECOGNIZED_SERVER_ERROR);
   }
+
+  @Test
+  void tryReconstruct_knownCodeWithValidMetadata_returnsTypedException() {
+    // Arrange & Act
+    SagaRuntimeException e =
+        ExceptionRegistry.tryReconstruct(
+                SagaErrorCode.SAGA_NOT_FOUND.code(), Collections.singletonMap("saga_id", "s-1"))
+            .orElseThrow(() -> new AssertionError("expected a reconstruction"));
+
+    // Assert
+    assertThat(e).isInstanceOf(SagaNotFoundException.class);
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.SAGA_NOT_FOUND);
+  }
+
+  @Test
+  void tryReconstruct_unknownCode_returnsEmpty() {
+    // Arrange & Act — a code this client SDK doesn't know (server newer than client). Empty, not
+    // UNRECOGNIZED_SERVER_ERROR: the caller may hold a better classification (the gRPC status),
+    // and substituting a CLIENT_ERROR here is what used to flip a retryable failure into "upgrade
+    // the SDK".
+    assertThat(ExceptionRegistry.tryReconstruct("DB-SAGA-99999", Collections.emptyMap())).isEmpty();
+  }
+
+  @Test
+  void tryReconstruct_knownCodeButMissingMetadata_returnsEmpty() {
+    // Arrange & Act — SAGA_NOT_FOUND requires "saga_id" but the wire lacks it
+    assertThat(
+            ExceptionRegistry.tryReconstruct(
+                SagaErrorCode.SAGA_NOT_FOUND.code(), Collections.emptyMap()))
+        .isEmpty();
+  }
+
+  @Test
+  void tryReconstruct_unrecognizedServerErrorCode_returnsIt() {
+    // Arrange & Act — a genuine DB-SAGA-49999 sent by the server is a registered code, not a
+    // degradation, so it round-trips with the server's own metadata.
+    SagaRuntimeException e =
+        ExceptionRegistry.tryReconstruct(
+                SagaErrorCode.UNRECOGNIZED_SERVER_ERROR.code(),
+                Collections.singletonMap("server_value", "SOME_ENUM_VALUE"))
+            .orElseThrow(() -> new AssertionError("expected a reconstruction"));
+
+    // Assert
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.UNRECOGNIZED_SERVER_ERROR);
+    assertThat(e.getMetadata()).containsEntry("server_value", "SOME_ENUM_VALUE");
+  }
 }

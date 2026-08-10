@@ -86,13 +86,19 @@ final class GrpcClientSupport {
    * Rebuilds the typed exception the daemon's {@link ErrorInfo} describes, inverting what {@code
    * GrpcErrorMapper} put on the wire, or returns {@code null} when the response carried no {@code
    * ErrorInfo} — an older daemon, an intermediary that stripped it, or a transport failure that
-   * never reached the daemon's mapper.
+   * never reached the daemon's mapper — <b>and</b> when it carried one this client cannot resolve:
+   * an unknown code (a newer daemon, during a rolling upgrade) or metadata that no longer fits the
+   * code's schema. Returning {@code null} for those routes the failure to {@link #mapTransport},
+   * which classifies by the status family the daemon did set correctly; reporting them as {@code
+   * UNRECOGNIZED_SERVER_ERROR} here would flip a retryable {@code UNAVAILABLE} into {@code
+   * CLIENT_ERROR} and stop a caller's retries. A genuine {@code DB-SAGA-49999} the server itself
+   * sent still round-trips — that code has a registered reconstructor.
    *
    * <p>Prefer this over {@link #mapTransport} wherever both could apply: the gRPC status is a
    * coarse family ({@code INVALID_ARGUMENT} carries both a rejected argument and seven definition
    * codes; {@code NOT_FOUND} carries a missing saga and a missing definition), while the {@code
    * ErrorInfo} reason names the exact code. The gRPC status is attached as the cause so its
-   * description and trailers stay available for debugging.
+   * description and trailers — the unresolved reason included — stay available for debugging.
    */
   static @Nullable SagaRuntimeException reconstruct(StatusRuntimeException e) {
     ErrorInfo info = errorInfo(e);
@@ -100,7 +106,10 @@ final class GrpcClientSupport {
       return null;
     }
     SagaRuntimeException reconstructed =
-        ExceptionRegistry.reconstruct(info.getReason(), info.getMetadataMap());
+        ExceptionRegistry.tryReconstruct(info.getReason(), info.getMetadataMap()).orElse(null);
+    if (reconstructed == null) {
+      return null;
+    }
     if (reconstructed.getCause() == null) {
       // The registry builds every exception cause-free, so this is the one chance to attach the
       // gRPC status. Guarded rather than unconditional: initCause throws once a cause is set, and a
