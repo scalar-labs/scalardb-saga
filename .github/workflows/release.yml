@@ -106,6 +106,35 @@ jobs:
           esac
           echo "Releasing ${version}"
 
+      # The getting-started Compose file pins the image it pulls, and its default is the only thing a
+      # reader who has not built anything gets. A default naming a version that was never published
+      # fails on `docker compose up -d`, the walkthrough's first command, which is the worst place in
+      # the repository to leave a stale value. Nothing else notices: it is a documentation default, so
+      # no build resolves it and no test covers it. Assert it here, where the version being released
+      # is known, rather than trusting a release checklist to remember.
+      - name: Check the getting-started Compose default matches this release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          compose=getting-started/docker-compose.yaml
+          # Matches the `${SAGA_VERSION:-<default>}` form only. A default written any other way is a
+          # miss rather than a false pass, and the emptiness check below turns that into a failure.
+          # The pattern is single-quoted on purpose: sed must see the literal `${SAGA_VERSION:-`
+          # text, so the shell must not expand it.
+          # shellcheck disable=SC2016
+          default=$(sed -n 's/.*scalardb-saga-server:${SAGA_VERSION:-\([^}]*\)}.*/\1/p' "${compose}")
+          if [ -z "${default}" ]; then
+            echo "::error::could not read the SAGA_VERSION default from ${compose}; the image line" \
+              "no longer matches the expected \${SAGA_VERSION:-<version>} form"
+            exit 1
+          fi
+          if [ "${default}" != "${VERSION}" ]; then
+            echo "::error::${compose} defaults SAGA_VERSION to ${default}, but this release is" \
+              "${VERSION}. Update the default so the walkthrough pulls an image that exists."
+            exit 1
+          fi
+
       # The version check above proves the tag and gradle.properties agree, but both live in the
       # tagged commit and whoever pushed the tag wrote both, so agreeing proves nothing about where
       # the commit came from. Without this, any commit carrying a matching version publishes — an
@@ -204,7 +233,7 @@ jobs:
             echo "${VERSION} is behind ${highest}; the Latest badge stays where it is"
           fi
 
-  # Uploads one aggregated deployment covering api, core, rpc, grpc-client, and the BOM. It goes up as
+  # Uploads one aggregated deployment covering api, core, rpc, client, and the BOM. It goes up as
   # USER_MANAGED on purpose: the Portal validates it and then waits, so releasing is a deliberate
   # click, because a released version can never be replaced or withdrawn. The job ends at the upload
   # and never sees the validation verdict, so a deployment the Portal rejects still leaves it green.
@@ -300,7 +329,7 @@ jobs:
       # inside the Dockerfile instead would re-resolve every dependency per architecture and throw
       # away the Gradle cache this runner already has.
       - name: Assemble the Docker build context
-        run: ./gradlew :daemon:dockerContext
+        run: ./gradlew :server:dockerContext
 
       # The arm64 leg has to execute the Dockerfile's apt and useradd steps, which are native
       # instructions — hence emulation. The payload itself is architecture-independent Java, so this
@@ -324,7 +353,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/scalar-labs/scalardb-saga-daemon
+          images: ghcr.io/scalar-labs/scalardb-saga-server
           # One immutable tag per release and nothing that floats. A `<major>.<minor>` tag would be a
           # second representation of the minor version line, which is a branch in this repository,
           # and nothing would keep the two in step: it is pushed by whichever run is executing, so
@@ -346,7 +375,7 @@ jobs:
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
-          context: daemon/build/docker
+          context: server/build/docker
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -369,7 +398,7 @@ jobs:
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       - name: Sign the image
-        run: cosign sign --yes "ghcr.io/scalar-labs/scalardb-saga-daemon@${{ steps.build.outputs.digest }}"
+        run: cosign sign --yes "ghcr.io/scalar-labs/scalardb-saga-server@${{ steps.build.outputs.digest }}"
 
   # The distribution archives, for anyone running the daemon outside a container. Runs last so the
   # release page never advertises artifacts that failed to publish.
@@ -399,7 +428,7 @@ jobs:
           cache-disabled: true
 
       - name: Build the distribution archives
-        run: ./gradlew :daemon:distTar :daemon:distZip
+        run: ./gradlew :server:distTar :server:distZip
 
       # `gh release create` fails outright on a release that already exists, which would make every
       # dispatched re-run fail at the last step after the image and the deployment had both gone out.
@@ -418,7 +447,7 @@ jobs:
           tag="${GITHUB_REF#refs/tags/}"
           if gh release view "${tag}" >/dev/null 2>&1; then
             echo "release ${tag} already exists; replacing its assets"
-            gh release upload "${tag}" --clobber daemon/build/distributions/*
+            gh release upload "${tag}" --clobber server/build/distributions/*
           else
             # Both flags default to something wrong here. --prerelease is opt-in, so the tag pattern
             # that accepts v1.0.0-rc.1 would otherwise publish it as an ordinary release. --latest
@@ -434,5 +463,5 @@ jobs:
             else
               args+=(--latest=false)
             fi
-            gh release create "${tag}" --verify-tag "${args[@]}" daemon/build/distributions/*
+            gh release create "${tag}" --verify-tag "${args[@]}" server/build/distributions/*
           fi

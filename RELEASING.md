@@ -1,7 +1,7 @@
 # Releasing
 
 A release publishes two things from one tag: the Java artifacts to Maven Central, and the daemon
-container image to `ghcr.io/scalar-labs/scalardb-saga-daemon`.
+container image to `ghcr.io/scalar-labs/scalardb-saga-server`.
 
 ## What gets published
 
@@ -10,11 +10,11 @@ container image to `ghcr.io/scalar-labs/scalardb-saga-daemon`.
 | API | `com.scalar-labs:scalardb-saga-api` | Everyone, transitively |
 | Engine | `com.scalar-labs:scalardb-saga-core` | Applications embedding the engine in-process |
 | Wire contract | `com.scalar-labs:scalardb-saga-rpc` | The gRPC client, transitively |
-| Client SDK | `com.scalar-labs:scalardb-saga-grpc-client` | Java 8+ applications calling the daemon |
+| Client SDK | `com.scalar-labs:scalardb-saga-java-client-sdk` | Java 8+ applications calling the daemon |
 | BOM | `com.scalar-labs:scalardb-saga-bom` | Anyone pinning several of the above |
-| Daemon image | `ghcr.io/scalar-labs/scalardb-saga-daemon` | Operators running daemon mode |
+| Server image | `ghcr.io/scalar-labs/scalardb-saga-server` | Operators running daemon mode |
 
-`:daemon` is deliberately not published to Maven Central — it ships as the image, so a jar on Central
+`:server` is deliberately not published to Maven Central — it ships as the image, so a jar on Central
 would be an artifact nobody consumes and everyone has to keep patched.
 
 The image carries one immutable tag per release — `1.0.0`, `1.0.1` — and nothing that floats. There is
@@ -29,13 +29,27 @@ Every other Scalar image publishes exact versions only, so pin one. Let Dependab
 which puts the change in your repository rather than silently in ours. (The GitHub release page still
 marks the newest release *Latest*; that is a badge on the release, not a tag on the image.)
 
-Consumers pin one version through the BOM:
+Consumers pin one version through the BOM, and declare the artifact for the mode they run in. The two
+are alternatives, not a pair: `core` embeds the engine in the application's own process, while the
+client SDK calls a daemon that runs it elsewhere. The SDK deliberately never depends on `core`, so
+declaring both puts the whole engine into an application that only wanted a client.
 
 ```kotlin
-implementation(platform("com.scalar-labs:scalardb-saga-bom:1.0.0"))
-implementation("com.scalar-labs:scalardb-saga-core")
-implementation("com.scalar-labs:scalardb-saga-grpc-client")
+// Daemon mode — calling the daemon from a Java 8+ application
+implementation(platform("com.scalar-labs:scalardb-saga-bom:VERSION"))
+implementation("com.scalar-labs:scalardb-saga-java-client-sdk")
 ```
+
+```kotlin
+// Embedded mode — running the engine in-process
+implementation(platform("com.scalar-labs:scalardb-saga-bom:VERSION"))
+implementation("com.scalar-labs:scalardb-saga-core")
+```
+
+Neither snippet needs `scalardb-saga-api` or `scalardb-saga-rpc` declared: each module exposes what
+it needs with `api(project(...))` — `core` the API, the client SDK the API and the wire contract —
+so they arrive transitively with their versions constrained by the BOM. The client SDK also brings
+`grpc-netty-shaded` as `runtimeOnly`, so a consumer never picks a transport.
 
 ## Branching model
 
@@ -53,7 +67,8 @@ The versions below are an example of the state once 1.1 has shipped and work on 
 | `1.0` | `1.0.4-SNAPSHOT` | Minor version branch, in maintenance; still takes backported fixes. |
 
 There is no patch version branch: a patch is a tag on its minor version branch, not a branch of its
-own. Today only `main` exists, at `1.0.0-SNAPSHOT`; `1.0` gets cut when 1.0 is ready to ship.
+own. Today only `main` exists; the first minor version branch gets cut when its release is ready to
+ship.
 
 Branch names carry no prefix — `1`, `1.0`, `1.1`. Every workflow matches them with the `[0-9]+` and
 `[0-9]+.[0-9]+` patterns, so a name like `release/1.0` gets no CI and publishes no snapshot.
@@ -71,7 +86,7 @@ after it, live only on that branch and are unreachable from `main` by design.
 
    ```bash
    git switch main && git pull
-   git switch -c 1.0 && git push -u origin 1.0
+   git switch -c <release-branch> && git push -u origin <release-branch>
    ```
 
    A newly cut branch also needs its own Dependabot entries. Dependabot reads
@@ -85,27 +100,42 @@ after it, live only on that branch and are unreachable from `main` by design.
    build-tool bump arrives as its own pull request, and the five-PR limit fills with those before a
    real dependency update can open.
 
-   Version branches need a repository ruleset before one is cut, for the same reason `main` has one:
-   a release is built from the commit the tag names, and the workflow's check that the commit sits
-   on its release branch is only worth as much as the branch's own rules. An unprotected `1.0` also
-   takes a force-push or a deletion, which loses a maintenance line's history. One ruleset covers
-   every version branch at once, so this is a one-time setup rather than a per-branch one — see
-   [Repository settings](#repository-settings).
+   A repository ruleset covering version branches is worth having before one is cut, for the same
+   reason `main` has one: a release is built from the commit the tag names, and the workflow's check
+   that the commit sits on its release branch is only worth as much as the branch's own rules. An
+   unprotected `1.0` also takes a force-push or a deletion, which loses a maintenance line's
+   history. One ruleset covers every version branch at once, so this is a one-time setup rather than
+   a per-branch one — see [Repository settings](#repository-settings).
+
+   Nothing enforces it: `verify-version` checks that the branch exists and that the tagged commit is
+   reachable from it, not how the branch is protected. ScalarDB cuts its releases without one, so
+   skipping it is a defensible choice for a line nothing depends on yet. What it costs is that the
+   branch can be force-pushed or deleted, and that a commit can reach a tag without review.
 
    For a patch release the branch already exists — backport the fix to it through a PR.
 
-2. On the release branch, set the release version in `gradle.properties` (drop `-SNAPSHOT`) and merge
-   it through a PR so CI runs on it:
+2. On the release branch, set the release version in `gradle.properties` (drop `-SNAPSHOT`) and
+   update the image default the getting-started walkthrough pulls, then merge both through a PR so
+   CI runs on them:
 
    ```properties
-   version=1.0.0
+   version=<version>
    ```
+
+   ```yaml
+   # getting-started/docker-compose.yaml
+   image: ghcr.io/scalar-labs/scalardb-saga-server:${SAGA_VERSION:-<version>}
+   ```
+
+   That default is the only image a reader who has built nothing pulls, so it has to name a version
+   that exists. CI fails the pull request when the two disagree, and `verify-version` refuses the
+   tag, so a release cannot ship with a stale one.
 
 3. Tag that commit on the release branch and push the tag:
 
    ```bash
-   git switch 1.0 && git pull
-   git tag v1.0.0 && git push origin v1.0.0
+   git switch <release-branch> && git pull
+   git tag v<version> && git push origin v<version>
    ```
 
 4. The `Release` workflow verifies the tag against `gradle.properties`, verifies the tagged commit is
@@ -160,17 +190,23 @@ repository, so downstream work can track either trunk or a maintenance line with
 ### Rehearsing the pipeline
 
 Nothing in `publish-maven`, `publish-image` or `github-release` has ever run: the Central credentials,
-the emulated arm64 build, the keyless signature and the release creation are all untested. `1.0.0`
-is the worst version to discover that with, because it is the one that cannot be taken back.
+the emulated arm64 build, the keyless signature and the release creation are all untested. The first
+release is the worst version to discover that with, because it is the one that cannot be taken back.
+
+A pre-release version is not a substitute. It lowers the stakes — nothing depends on it, and the
+suffix keeps it from taking the *Latest* badge — but a released Central version is immutable
+whatever it is called. An alpha or rc is still a first release, not a rehearsal.
 
 A rehearsal has to look like a real release, because the guards in `verify-version` are doing their
 job. A throwaway tag pushed on its own is refused by the version check, since the tag has to equal
-the `version` in `gradle.properties`, and then by the branch check, since `v0.0.1` derives the line
-`0.0` and looks for a branch by that name. So it takes three pushes:
+the `version` in `gradle.properties`; then by the branch check, since `v0.0.1` derives the line
+`0.0` and looks for a branch by that name; and then by the Compose-default check, which wants that
+default to name the version being released. So it takes three pushes:
 
 ```bash
 git switch -c 0.0 && git push -u origin 0.0    # scratch release branch
-# set version=0.0.1-rc.1 in gradle.properties, then commit and push
+# set version=0.0.1-rc.1 in gradle.properties, and the SAGA_VERSION default in
+# getting-started/docker-compose.yaml to match, then commit and push
 git tag v0.0.1-rc.1 && git push origin v0.0.1-rc.1
 ```
 
@@ -226,8 +262,8 @@ Not every step is idempotent, so check what already succeeded before re-running:
 ## Repository settings
 
 Two things live in GitHub's own settings rather than in this repository, and neither is set today.
-The rulesets are a one-time setup that has to exist before the first release branch is cut; the
-environment is optional and can be added whenever.
+The rulesets are a one-time setup, best done before the first release branch is cut though nothing
+enforces them; the environment is optional and can be added whenever.
 
 ### Branch and tag rulesets
 
@@ -248,8 +284,8 @@ Under **Settings → Rules → Rulesets → New ruleset → New branch ruleset**
 The pattern is typed without `refs/heads/`, which the UI adds itself. Ruleset patterns are fnmatch,
 not regex, so the `[0-9]+` patterns the workflows key off would match nothing here; `[0-9]*` is what
 matches `1`, `1.0` and `1.10`. Leave **Restrict creations** unticked, or step 1's
-`git push -u origin 1.0` is refused. The four check names may not appear in the picker until they
-have run on a pull request; they can be typed in by hand.
+`git push -u origin <release-branch>` is refused. The four check names may not appear in the picker
+until they have run on a pull request; they can be typed in by hand.
 
 A tag ruleset is worth adding alongside it, so that cutting a release is limited to whoever is
 allowed to release. Under **New ruleset → New tag ruleset**: name `release-tags`, Active, target
@@ -258,19 +294,23 @@ creations needs a bypass list** — with an empty one, nobody can push a release
 
 ### Scoping the Central secrets to an environment
 
-The four `MAVEN_CENTRAL_*` secrets are repository secrets, so GitHub makes them available to a
-workflow run on any branch. No ruleset changes that: the workflow doing the reading need not be one
-of the two in this repository, since a branch can carry its own. An environment is the only
-mechanism that scopes secrets by ref, and it fails closed — a run on a ref the environment does not
-admit is refused the environment and never sees them.
+The four `MAVEN_CENTRAL_*` secrets reach these workflows from the organization: this repository
+defines none of its own, and neither publishing job declares an environment, which leaves the
+organization as the only scope they can come from. Organization access is granted per repository,
+not per ref, so GitHub still makes them available to a workflow run on any branch here. No ruleset
+changes that: the workflow doing the reading need not be one of the two in this repository, since a
+branch can carry its own. An environment is the only mechanism that scopes secrets by ref, and it
+fails closed — a run on a ref the environment does not admit is refused the environment and never
+sees them.
 
 1. **Settings → Environments → New environment**, named `maven-central`.
 2. **Deployment branches and tags → Selected branches and tags**: add ref type *Branch* `main`, ref
    type *Tag* `v*`, and one *Branch* entry per version branch as it is cut. Name the branches
    explicitly rather than by pattern — deployment policies take wildcards, not the character classes
    the ruleset above uses, and a policy that matches nothing locks the release out.
-3. Add the four secrets to the environment, then **delete the repository-level copies**. Copying
-   rather than moving gains nothing: the repository-level ones stay readable from anywhere.
+3. Add the four secrets to the environment, then **remove this repository from the organization
+   secrets' access list**. Copying rather than moving gains nothing: the organization grant stays
+   readable from any ref here.
 4. Add `environment: maven-central` to the publishing job in
    [release.yml](.github/workflows/release.yml) and
    [release-snapshot.yml](.github/workflows/release-snapshot.yml). Without it both jobs lose access
@@ -342,8 +382,8 @@ a developer machine.
 ## Verifying a published image
 
 ```bash
-cosign verify ghcr.io/scalar-labs/scalardb-saga-daemon:1.0.0 \
-  --certificate-identity=https://github.com/scalar-labs/scalardb-saga/.github/workflows/release.yml@refs/tags/v1.0.0 \
+cosign verify ghcr.io/scalar-labs/scalardb-saga-server:<version> \
+  --certificate-identity=https://github.com/scalar-labs/scalardb-saga/.github/workflows/release.yml@refs/tags/v<version> \
   --certificate-oidc-issuer=https://token.actions.githubusercontent.com
 ```
 
@@ -352,8 +392,8 @@ that *some* GitHub Actions job signed this image, so a pattern that stops at the
 `--certificate-identity-regexp='^https://github.com/scalar-labs/scalardb-saga/'` — is satisfied by a
 signature from any workflow in this repository running on any branch, since the certificate names the
 workflow file and ref after the repository. Any job here granted `id-token: write` would pass it.
-Naming `release.yml@refs/tags/v1.0.0` is what makes the signature evidence that the release workflow,
-running on that tag, produced this image.
+Naming `release.yml@refs/tags/v<version>` is what makes the signature evidence that the release
+workflow, running on that tag, produced this image.
 
 Both halves carry the version, and they have to agree: a `v1.0.0` identity verifying a `:1.1.0` image
 would mean the image was not built by the release it claims to be. Re-runs do not change this — a
@@ -362,13 +402,13 @@ dispatched re-run is rejected unless it targets the tag, so it signs under the s
 Each image also carries an SBOM and a build provenance attestation:
 
 ```bash
-docker buildx imagetools inspect ghcr.io/scalar-labs/scalardb-saga-daemon:1.0.0
+docker buildx imagetools inspect ghcr.io/scalar-labs/scalardb-saga-server:<version>
 ```
 
 ## Building locally
 
 ```bash
-./gradlew :daemon:dockerBuild     # single architecture, loaded into the local Docker
+./gradlew :server:dockerBuild     # single architecture, loaded into the local Docker
 ./gradlew publishToMavenLocal     # all published artifacts into ~/.m2, unsigned
 ```
 

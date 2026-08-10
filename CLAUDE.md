@@ -7,7 +7,7 @@ Refer to `~/git/scalardb-saga-design/docs/scalardb-saga-design.md` for architect
 ## Language
 
 - **Java 21** for all modules (core engine, framework integrations, daemon, testing, dev server, etc.)
-- **Java 8** only for daemon client SDKs (`scalardb-saga-client`, `scalardb-saga-grpc-client`) to maximize adoption
+- **Java 8** only for the daemon client SDK (`scalardb-saga-java-client-sdk`) to maximize adoption
 - Users on Java 8 use daemon mode via client SDK or call HTTP/gRPC endpoints directly
 
 ## Build
@@ -79,15 +79,17 @@ Refer to `~/git/scalardb-saga-design/docs/scalardb-saga-design.md` for architect
 
 ## Module Structure
 
-Subproject directories use short names; artifacts are prefixed with `scalardb-saga-` (via `base.archivesName` for the jar and the publication's `artifactId` for the coordinate — these are set separately).
+Subproject directories use short names; artifacts are prefixed with `scalardb-saga-` (via `base.archivesName` for the jar, the publication's `artifactId` for the coordinate, and the POM `name` for the Maven Central listing — these are set separately). A module whose published name is not derivable from its directory overrides all three from its own build file; `client` is the only one, and any further override has to move all three together.
 
 - `api` — Java-8-clean public API surface (interfaces, value types, exceptions)
 - `core` — Core engine (engine, store, recovery, testing harness)
 - `rpc` — gRPC wire contract (`.proto` plus generated stubs), Java 8
-- `grpc-client` — Java 8 daemon client SDK
-- `daemon` — Standalone server (REST + gRPC); ships as a container image, not a Maven artifact
+- `client` — Java 8 daemon client SDK, published as `scalardb-saga-java-client-sdk`
+- `server` — Standalone server (REST + gRPC); ships as a container image, not a Maven artifact
 - `bom` — `java-platform` BOM pinning every published artifact to one version
-- Future: `spring`, `quarkus`, `participant`, `client` (HTTP SDK), `dev-server`, `lra`
+- Future: `spring`, `quarkus`, `participant`, `dev-server`, `lra`
+
+There is no HTTP client SDK and none is planned: the daemon's REST API exists so non-Java consumers can skip an SDK entirely, and a Java HTTP SDK would serve the same Java 8 audience over a slower transport.
 
 ## Publishing
 
@@ -95,23 +97,23 @@ See [RELEASING.md](RELEASING.md) for the release process.
 
 - **Maven group is `com.scalar-labs`**, not the Java package — set in `scalardb-saga.base-conventions`. Matches the other Scalar artifacts on Central; cannot change after the first release.
 - Published modules apply `id("scalardb-saga.publishing-conventions")` and **must set `description`** (Maven Central rejects a POM without one). The convention sets the `artifactId` explicitly — `base.archivesName` does not affect it.
-- The daemon is deliberately unpublished: it ships as a container image, so a jar on Central would be an artifact nobody consumes and everyone has to keep patched.
+- The server is deliberately unpublished: it ships as a container image, so a jar on Central would be an artifact nobody consumes and everyone has to keep patched.
 - Snapshots publish from `main` and every release branch (`.github/workflows/release-snapshot.yml`); releases leave the Central deployment `VALIDATED` for a human to release, because a released version is immutable.
 
 ## Container image
 
-See [daemon/docker/README.md](daemon/docker/README.md) for running it.
+See [server/docker/README.md](server/docker/README.md) for running it.
 
 - **Every external Gradle plugin goes through `build-logic`**, never a subproject's own `plugins {}` block: declaring one in a subproject gives that project a separate classloader scope and breaks Spotless' shared build service.
-- Netty must stay on a single version across all modules (`libs.versions.toml` `netty` + the BOM import in `:daemon`) — the native transports load version-matched `.so` files.
-- Built from `installDist`, not `distTar` (whose internal root embeds the version): `./gradlew :daemon:dockerBuild` locally, or `:daemon:dockerContext` + `docker/build-push-action` in CI.
+- Netty must stay on a single version across all modules (`libs.versions.toml` `netty` + the BOM import in `:server`) — the native transports load version-matched `.so` files.
+- Built from `installDist`, not `distTar` (whose internal root embeds the version): `./gradlew :server:dockerBuild` locally, or `:server:dockerContext` + `docker/build-push-action` in CI.
 
 ## CI
 
 - **GitHub Actions** (`.github/workflows/ci.yml`) — on push to `main` and the release branches, and on every PR:
   - `check` — `./gradlew check` (`test` + `integrationTest` + `javadoc` + `spotlessCheck` + `spotbugsMain` + Error Prone), then a no-build-cache compile to surface warnings
-  - `dockerfile-lint` — hadolint over `daemon/docker/Dockerfile`
-  - `image-smoke-test` — builds the image and runs it against SQLite, asserting health on both transports, non-root uid, `INFO` logging, a clean `SIGTERM` drain, and that the epoll native transport actually loaded (a silent NIO fallback keeps the daemon healthy, so `/proc/1/maps` is the evidence)
+  - `dockerfile-lint` — hadolint over `server/docker/Dockerfile`
+  - `image-smoke-test` — builds the image and runs it against SQLite, asserting health on both transports, non-root uid, `INFO` logging, a clean `SIGTERM` drain, and that the epoll native transport actually loaded (a silent NIO fallback keeps the server healthy, so `/proc/1/maps` is the evidence)
   - `image-arm64-native-test` — the same boot under QEMU on `linux/arm64`, asserting the `aarch_64` epoll native loads; only `linux-x86_64` arrives transitively, so nothing else catches a dropped classifier
   - Both smoke jobs boot from the shared fixture in `.github/smoke/`
 - **Release** (`release.yml`, on `v<major>.<minor>.<patch>` tags, with or without a pre-release suffix) — asserts the tag matches `gradle.properties` and that the tagged commit is on the release branch its version names, then publishes to Maven Central, pushes the multi-arch image, signs it, and creates the GitHub release
@@ -128,4 +130,4 @@ See [daemon/docker/README.md](daemon/docker/README.md) for running it.
 ## TODO
 
 - [ ] Verify the release workflow end to end on the first tag (Maven Central credentials and the ghcr push are untested)
-- [ ] Add the UBI variant of the daemon image if Red Hat Marketplace / OpenShift certification is needed
+- [ ] Add the UBI variant of the server image if Red Hat Marketplace / OpenShift certification is needed

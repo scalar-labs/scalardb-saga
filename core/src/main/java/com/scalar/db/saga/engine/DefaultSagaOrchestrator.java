@@ -48,6 +48,19 @@ import org.slf4j.LoggerFactory;
 @ThreadSafe
 public class DefaultSagaOrchestrator implements SagaOrchestrator {
 
+  /**
+   * The shutdown mode applied when {@link Builder#shutdownMode(ShutdownMode)} is not called.
+   * Exposed so a front end that configures the engine from an external source (e.g. the daemon's
+   * properties file) can document and apply the same default instead of restating it.
+   */
+  public static final ShutdownMode DEFAULT_SHUTDOWN_MODE = ShutdownMode.WAIT_CURRENT_STEP;
+
+  /**
+   * The shutdown timeout in milliseconds applied when {@link Builder#shutdownTimeoutMillis(long)}
+   * is not called. Exposed for the same reason as {@link #DEFAULT_SHUTDOWN_MODE}.
+   */
+  public static final long DEFAULT_SHUTDOWN_TIMEOUT_MILLIS = 30_000L;
+
   private static final Logger logger = LoggerFactory.getLogger(DefaultSagaOrchestrator.class);
 
   // Embedded mode has no authenticated user, so admin interventions are attributed to this fixed
@@ -630,8 +643,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
 
     private @Nullable SagaStoreFactory storeFactory;
     private String ownerId = java.util.UUID.randomUUID().toString();
-    private ShutdownMode shutdownMode = ShutdownMode.WAIT_CURRENT_STEP;
-    private long shutdownTimeoutMillis = 30_000;
+    private ShutdownMode shutdownMode = DEFAULT_SHUTDOWN_MODE;
+    private long shutdownTimeoutMillis = DEFAULT_SHUTDOWN_TIMEOUT_MILLIS;
     private Clock clock = Clock.systemUTC();
     private ResourceRegistry.@Nullable Builder resourceRegistryBuilder;
     private @Nullable StepResolver customStepResolver;
@@ -673,7 +686,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     }
 
     /**
-     * Sets the shutdown mode. Defaults to {@link ShutdownMode#WAIT_CURRENT_STEP}.
+     * Sets the shutdown mode. Defaults to {@link #DEFAULT_SHUTDOWN_MODE}.
      *
      * @param shutdownMode the shutdown mode
      * @return this builder
@@ -684,7 +697,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     }
 
     /**
-     * Sets the shutdown timeout in milliseconds. Defaults to 30,000 (30 seconds).
+     * Sets the shutdown timeout in milliseconds. Defaults to {@value
+     * #DEFAULT_SHUTDOWN_TIMEOUT_MILLIS}.
      *
      * @param shutdownTimeoutMillis the shutdown timeout
      * @return this builder
