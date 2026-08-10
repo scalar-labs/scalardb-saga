@@ -22,6 +22,7 @@ services:
     command: ["python", "/service.py"]
     environment:
       SERVICE_NAME: payment
+      EVENT_SINK_URL: http://dashboard:12090/feed
     volumes:
       - ./services/service.py:/service.py:ro
 
@@ -30,6 +31,7 @@ services:
     command: ["python", "/service.py"]
     environment:
       SERVICE_NAME: inventory
+      EVENT_SINK_URL: http://dashboard:12090/feed
     volumes:
       - ./services/service.py:/service.py:ro
 
@@ -38,8 +40,15 @@ services:
     command: ["python", "/service.py"]
     environment:
       SERVICE_NAME: shipping
-      # /ship succeeds; /ship-fail answers 422 so order-saga-failing has something to compensate.
-      FAIL_PATHS: /ship-fail
+      # /ship succeeds; /ship-fail answers 422 so order-saga-failing has something to compensate;
+      # /ship-flaky answers 503 twice per saga so order-saga-flaky has something to retry;
+      # /ship-fail-retryable always answers 503 so order-saga-retry-failing exhausts its retries.
+      # The tcc variants fail the same ways in TCC's two phases: a rejected reservation
+      # (order-tcc-try-fail) and a flaky confirmation (order-tcc-confirm-retry).
+      FAIL_PATHS: /ship-fail,/tcc/shipping/reserve-fail
+      FAIL_RETRYABLE_PATHS: /ship-fail-retryable
+      FLAKY_PATHS: /ship-flaky,/tcc/shipping/confirm-flaky
+      EVENT_SINK_URL: http://dashboard:12090/feed
     volumes:
       - ./services/service.py:/service.py:ro
 
@@ -69,3 +78,30 @@ services:
         condition: service_started
       shipping:
         condition: service_started
+
+  # The live dashboard: a web page on http://localhost:12090 that shows sagas executing in
+  # realtime. It only reads the saga server's REST API (and relays it to the browser), so the
+  # walkthrough works exactly the same without it. Like the participants, nothing is built — the
+  # stock Python image runs the mounted script. The healthcheck is a Python one-liner because the
+  # image ships no curl.
+  dashboard:
+    image: python:3.13-slim
+    command: ["python", "/dashboard/server.py"]
+    ports:
+      - "12090:12090"
+    environment:
+      SAGA_SERVER_URL: http://saga-server:12080
+      # Where the pace slider's value is registered when a saga starts, so the participants know
+      # how long to hold that saga's calls.
+      PARTICIPANT_URLS: http://payment:8080,http://inventory:8080,http://shipping:8080
+    volumes:
+      - ./dashboard:/dashboard:ro
+      - ./conf/definitions:/definitions:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:12090/health', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    depends_on:
+      saga-server:
+        condition: service_healthy
