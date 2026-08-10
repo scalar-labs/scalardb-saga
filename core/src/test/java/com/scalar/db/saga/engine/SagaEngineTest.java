@@ -1557,8 +1557,7 @@ class SagaEngineTest {
   class RecordStepCompletedFailure {
 
     @Test
-    void executeSagaSteps_recordStepCompletedThrows_compensatesIncludingCurrentStep()
-        throws Exception {
+    void executeSteps_recordStepCompletedThrows_compensatesIncludingCurrentStep() throws Exception {
       // Arrange — 2 steps, both execute successfully
       Step step0 = successStep("s0");
       Step step1 = successStep("s1");
@@ -1613,7 +1612,7 @@ class SagaEngineTest {
 
     @Test
     void
-        executeSagaSteps_recordStepCompletedThrowsButCompletionPersisted_propagatesWithoutCompensating()
+        executeSteps_recordStepCompletedThrowsButCompletionPersisted_propagatesWithoutCompensating()
             throws Exception {
       // The committed-residual case: recordStepCompleted's ack was lost (the event IS persisted),
       // so
@@ -1668,7 +1667,7 @@ class SagaEngineTest {
     }
 
     @Test
-    void executeSagaSteps_executionFailureKnownNotCommitted_doesNotCompensateCurrentStep()
+    void executeSteps_executionFailureKnownNotCommitted_doesNotCompensateCurrentStep()
         throws Exception {
       // A forward failure the framework PROVED did not commit (knownNotCommitted) compensates from
       // i-1 (only step 0), skipping step 1 — it provably has no side effect to undo.
@@ -1691,7 +1690,7 @@ class SagaEngineTest {
     }
 
     @Test
-    void executeSagaSteps_executionFailureNotKnownNotCommitted_compensatesIncludingCurrentStep()
+    void executeSteps_executionFailureNotKnownNotCommitted_compensatesIncludingCurrentStep()
         throws Exception {
       // The core fix: a forward failure whose non-delivery is NOT proven (the default — e.g. any
       // non-HTTP class step throwing a bare StepExecutionException) may have committed step 1's
@@ -1751,7 +1750,7 @@ class SagaEngineTest {
     }
 
     @Test
-    void executeSagaSteps_recordStepCompletedThrowsPastPivot_noCompensation() throws Exception {
+    void executeSteps_recordStepCompletedThrowsPastPivot_noCompensation() throws Exception {
       // Arrange — MIXED strategy: s0, s1 (pivot), s2 (past pivot)
       Step step0 = successStep("s0");
       Step step1 = successStep("s1");
@@ -1797,7 +1796,7 @@ class SagaEngineTest {
     }
 
     @Test
-    void executeSagaSteps_recordStepCompletedThrowsAndCompensationFails_staysCompensating()
+    void executeSteps_recordStepCompletedThrowsAndCompensationFails_staysCompensating()
         throws Exception {
       // Arrange — 1 step: execution succeeds, recording fails, compensation also fails.
       // Saga should stay COMPENSATING for recovery to retry.

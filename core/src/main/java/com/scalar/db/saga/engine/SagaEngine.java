@@ -134,7 +134,8 @@ public class SagaEngine implements AutoCloseable {
     try {
       ExecutionContext context = new ExecutionContext(sagaId, input, saga);
       context.setNextEventSequence(1); // SAGA_STARTED was seq 0
-      executeSteps(def, context, 0);
+      List<StepWithPolicy> plan = getOrBuildPlan(def);
+      executeSteps(plan, context, 0, def.getPivotIndex(), def.getTimeoutMillis());
     } finally {
       unregisterActive(sagaId);
     }
@@ -156,14 +157,16 @@ public class SagaEngine implements AutoCloseable {
    *
    * @return the final state snapshot
    */
-  public SagaStateSnapshot resumeFrom(SagaDefinition def, ExecutionContext context, int fromStep) {
+  public SagaStateSnapshot resumeFrom(
+      SagaDefinition def, ExecutionContext context, int fromStepIndex) {
     String sagaId = context.getSagaId();
     if (!registerActive(sagaId)) {
       store.markForRecovery(sagaId);
       return context.getCurrentState();
     }
     try {
-      executeSteps(def, context, fromStep);
+      List<StepWithPolicy> plan = getOrBuildPlan(def);
+      executeSteps(plan, context, fromStepIndex, def.getPivotIndex(), def.getTimeoutMillis());
     } finally {
       unregisterActive(sagaId);
     }
@@ -173,7 +176,7 @@ public class SagaEngine implements AutoCloseable {
   /**
    * Triggers compensation from a specific step (used by recovery for sagas stuck in COMPENSATING).
    */
-  public void compensateFrom(SagaDefinition def, ExecutionContext context, int fromStep) {
+  public void compensateFrom(SagaDefinition def, ExecutionContext context, int fromStepIndex) {
     String sagaId = context.getSagaId();
     if (!registerActive(sagaId)) {
       store.markForRecovery(sagaId);
@@ -181,7 +184,7 @@ public class SagaEngine implements AutoCloseable {
     }
     try {
       List<StepWithPolicy> plan = getOrBuildPlan(def);
-      compensate(plan, context, fromStep);
+      compensateSaga(plan, context, fromStepIndex);
     } finally {
       unregisterActive(sagaId);
     }
@@ -300,22 +303,16 @@ public class SagaEngine implements AutoCloseable {
   // Private — execution loop
   // ---------------------------------------------------------------------------
 
-  private void executeSteps(SagaDefinition def, ExecutionContext context, int startIndex) {
-    List<StepWithPolicy> plan = getOrBuildPlan(def);
-    int pivotIndex = def.getPivotIndex();
-    executeSagaSteps(plan, pivotIndex, context, startIndex, def.getTimeoutMillis());
-  }
-
-  private void executeSagaSteps(
+  private void executeSteps(
       List<StepWithPolicy> plan,
-      int pivotIndex,
       ExecutionContext context,
-      int startIndex,
+      int fromStepIndex,
+      int pivotIndex,
       long sagaTimeoutMillis) {
 
     long sagaDeadline = TimeoutPolicy.calculateSagaDeadline(sagaTimeoutMillis, clock.millis());
 
-    for (int i = startIndex; i < plan.size(); i++) {
+    for (int i = fromStepIndex; i < plan.size(); i++) {
       // Check graceful shutdown between steps
       if (shouldStopBetweenSteps()) {
         logger.info("Stopping saga {} between steps due to shutdown", context.getSagaId());
@@ -326,7 +323,7 @@ public class SagaEngine implements AutoCloseable {
       if (TimeoutPolicy.isSagaTimedOut(sagaDeadline, clock.millis())) {
         logger.info("Saga {} timed out before step {}", context.getSagaId(), i);
         if (i <= pivotIndex) {
-          compensate(plan, context, i - 1);
+          compensateSaga(plan, context, i - 1);
         }
         return;
       }
@@ -362,7 +359,7 @@ public class SagaEngine implements AutoCloseable {
           // body, an in-doubt timeout, any non-HTTP class step). The honest default is to include
           // step i; skip it (compensate from i - 1) only when the failure proved non-delivery.
           int from = e.knownNotCommitted() ? i - 1 : i;
-          compensate(plan, context, from);
+          compensateSaga(plan, context, from);
         }
         return;
       }
@@ -394,7 +391,7 @@ public class SagaEngine implements AutoCloseable {
               new StepExecutionException(
                   "Failed to record completion for step '" + stepName + "'", e, false);
           recordStepFailed(context, i, stepName, recordFailure);
-          compensate(plan, context, i);
+          compensateSaga(plan, context, i);
         }
         return;
       }
@@ -663,7 +660,8 @@ public class SagaEngine implements AutoCloseable {
    * Transitions to COMPENSATING (if not already), runs compensation, and transitions to COMPENSATED
    * on success. On failure, the saga stays COMPENSATING for recovery to retry.
    */
-  private void compensate(List<StepWithPolicy> plan, ExecutionContext context, int fromStepIndex) {
+  private void compensateSaga(
+      List<StepWithPolicy> plan, ExecutionContext context, int fromStepIndex) {
     if (context.getCurrentState().getStatus() != SagaStatus.COMPENSATING) {
       transition(context, StatusEvent.compensating());
     }
