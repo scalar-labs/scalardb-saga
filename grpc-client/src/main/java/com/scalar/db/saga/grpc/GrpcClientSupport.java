@@ -171,9 +171,12 @@ final class GrpcClientSupport {
       case UNAUTHENTICATED:
         return new SagaUnauthenticatedException(e);
       case INTERNAL:
+      case UNKNOWN:
         // A server fault reported without an ErrorInfo — an older daemon's security interceptor,
-        // or an intermediary. INTERNAL_ERROR tells the caller to escalate and not retry, which
-        // beats the catch-all's claim of a version skew.
+        // or an intermediary. UNKNOWN is its sibling: what the gRPC runtime emits when a failure
+        // escapes the daemon's handlers entirely (an Error, or a fault in interceptor code).
+        // INTERNAL_ERROR tells the caller to escalate and not retry, which beats the catch-all's
+        // claim of a version skew.
         return new SagaRuntimeException(SagaErrorCode.INTERNAL_ERROR, ErrorMetadata.of(), e);
       default:
         return new SagaRuntimeException(
