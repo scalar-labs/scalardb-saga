@@ -58,7 +58,7 @@ tasks.withType<Javadoc>().configureEach {
 
 spotless {
     java {
-        googleJavaFormat("1.35.0")
+        googleJavaFormat(libs.versions.google.java.format.get())
         formatAnnotations()
     }
 }
