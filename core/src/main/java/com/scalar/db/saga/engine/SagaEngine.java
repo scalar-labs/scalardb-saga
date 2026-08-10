@@ -659,6 +659,10 @@ public class SagaEngine implements AutoCloseable {
   /**
    * Transitions to COMPENSATING (if not already), runs compensation, and transitions to COMPENSATED
    * on success. On failure, the saga stays COMPENSATING for recovery to retry.
+   *
+   * <p>Despite the name, not the backward counterpart of {@link #executeSaga} (a guarded entry
+   * point, whose backward peer is {@link #compensateFrom}); this is the saga-status layer above
+   * {@link #compensateSteps}, called only from already-guarded contexts.
    */
   private void compensateSaga(
       List<StepWithPolicy> plan, ExecutionContext context, int fromStepIndex) {
