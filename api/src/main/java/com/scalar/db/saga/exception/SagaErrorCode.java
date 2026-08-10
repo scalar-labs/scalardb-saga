@@ -105,6 +105,14 @@ public enum SagaErrorCode {
       "A step needed an HTTP endpoint, but the orchestrator has no matching registration (none registered, name not found, or multiple registered without a qualifier).",
       "Register the endpoint on the orchestrator's builder, fix the lookup name, or annotate the SagaHttpClient parameter with @Named to select one."),
 
+  INVALID_STEP_DEFINITION(
+      "DB-SAGA-10009",
+      Category.USER_ERROR,
+      "Declarative step definition is invalid",
+      Schema.of("step_name", "detail"),
+      "One declarative service step violates a validation rule (e.g. a missing or malformed call field, a bad phase combination). The step-scoped sibling of INVALID_DEFINITION: the step-level validation paths know which step failed but not which saga definition encloses it.",
+      "Fix the step per the detail and re-register the definition."),
+
   // ── Auth (101xx) ─────────────────────────────────────────────────────
   UNAUTHENTICATED(
       "DB-SAGA-10101",

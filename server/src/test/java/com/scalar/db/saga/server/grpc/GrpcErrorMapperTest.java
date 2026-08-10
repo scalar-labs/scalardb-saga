@@ -137,6 +137,10 @@ class GrpcErrorMapperTest {
             Status.Code.INVALID_ARGUMENT,
             SagaErrorCode.INVALID_DEFINITION),
         new Arm(
+            SagaDefinitionException.declarativeStepInvalid("debit", "missing 'path'"),
+            Status.Code.INVALID_ARGUMENT,
+            SagaErrorCode.INVALID_STEP_DEFINITION),
+        new Arm(
             SagaDefinitionException.definitionMalformed("json", new RuntimeException()),
             Status.Code.INVALID_ARGUMENT,
             SagaErrorCode.MALFORMED_DEFINITION),

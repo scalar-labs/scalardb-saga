@@ -10,9 +10,10 @@ import java.util.Objects;
  * <p>One factory per {@link SagaErrorCode}: throw sites construct the {@code detail} string
  * themselves. Follows the K8s / AWS / Spring pattern of per-code (not per-rule) factories.
  *
- * <p>{@link #declarativeStepInvalid} is a formatting shortcut over {@link #definitionInvalid} that
- * prefixes the step context; it's kept as a public factory because it's reused across the parser
- * and call-spec codec paths.
+ * <p>{@link #declarativeStepInvalid} carries {@link SagaErrorCode#INVALID_STEP_DEFINITION}, the
+ * step-scoped sibling of {@link SagaErrorCode#INVALID_DEFINITION}: its throw sites (the parser and
+ * call-spec codec paths) know which step failed but not which saga definition encloses it, so the
+ * schema asks for the step name rather than a saga name those sites would have to fake.
  */
 public class SagaDefinitionException extends SagaRuntimeException {
 
@@ -31,12 +32,10 @@ public class SagaDefinitionException extends SagaRuntimeException {
         ErrorMetadata.of("saga_name", sagaName, "detail", detail));
   }
 
-  /**
-   * Convenience over {@link #definitionInvalid} that prefixes the declarative step context so every
-   * declarative-step failure reads {@code "declarative service step '<name>': <detail>"}.
-   */
   public static SagaDefinitionException declarativeStepInvalid(String stepName, String detail) {
-    return definitionInvalid("", "declarative service step '" + stepName + "': " + detail);
+    return new SagaDefinitionException(
+        SagaErrorCode.INVALID_STEP_DEFINITION,
+        ErrorMetadata.of("step_name", stepName, "detail", detail));
   }
 
   public static SagaDefinitionException definitionMalformed(String format, Throwable cause) {
@@ -105,6 +104,7 @@ public class SagaDefinitionException extends SagaRuntimeException {
   static SagaDefinitionException fromWire(SagaErrorCode code, Map<String, String> metadata) {
     switch (code) {
       case INVALID_DEFINITION:
+      case INVALID_STEP_DEFINITION:
       case MALFORMED_DEFINITION:
       case UNREADABLE_DEFINITION_SOURCE:
       case DEFINITION_VERSION_CONTENT_CONFLICT:

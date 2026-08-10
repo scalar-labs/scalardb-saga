@@ -48,6 +48,9 @@ public final class ExceptionRegistry {
         SagaErrorCode.INVALID_DEFINITION,
         meta -> SagaDefinitionException.fromWire(SagaErrorCode.INVALID_DEFINITION, meta));
     m.put(
+        SagaErrorCode.INVALID_STEP_DEFINITION,
+        meta -> SagaDefinitionException.fromWire(SagaErrorCode.INVALID_STEP_DEFINITION, meta));
+    m.put(
         SagaErrorCode.MALFORMED_DEFINITION,
         meta -> SagaDefinitionException.fromWire(SagaErrorCode.MALFORMED_DEFINITION, meta));
     m.put(

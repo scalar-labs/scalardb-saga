@@ -199,6 +199,10 @@ class ErrorMapperTest {
             400,
             SagaErrorCode.INVALID_DEFINITION),
         new Arm(
+            SagaDefinitionException.declarativeStepInvalid("debit", "missing 'path'"),
+            400,
+            SagaErrorCode.INVALID_STEP_DEFINITION),
+        new Arm(
             SagaDefinitionException.definitionMalformed("json", new RuntimeException()),
             400,
             SagaErrorCode.MALFORMED_DEFINITION),

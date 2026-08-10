@@ -25,16 +25,19 @@ class SagaDefinitionExceptionTest {
   }
 
   @Test
-  void declarativeStepInvalid_always_carriesDefinitionInvalidWithStepPrefix() {
+  void declarativeStepInvalid_always_carriesStepDefinitionCodeWithStepName() {
     // Arrange & Act
     SagaDefinitionException e =
         SagaDefinitionException.declarativeStepInvalid("debit", "missing 'path'");
 
-    // Assert — routes through INVALID_DEFINITION with the step prefix baked into detail
-    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.INVALID_DEFINITION);
-    assertThat(e.getMetadata()).containsEntry("saga_name", "");
-    assertThat(e.getMetadata().get("detail"))
-        .isEqualTo("declarative service step 'debit': missing 'path'");
+    // Assert — its own code with the step name as a real metadata field. It used to route through
+    // INVALID_DEFINITION, faking the required saga_name as "" (no throw site knows the saga name)
+    // and smuggling the step name into the detail text.
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.INVALID_STEP_DEFINITION);
+    assertThat(e.getMetadata())
+        .containsEntry("step_name", "debit")
+        .containsEntry("detail", "missing 'path'")
+        .hasSize(2);
   }
 
   @Test
