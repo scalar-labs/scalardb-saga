@@ -17,6 +17,7 @@ Refer to `~/git/scalardb-saga-design/docs/scalardb-saga-design.md` for architect
 - Check (test + format + static analysis): `./gradlew check`
 - Check for compiler warnings (hidden when cached): `./gradlew clean compileTestJava --no-build-cache`
 - **Always run all three in order (`spotlessApply` → `check` → `clean compileTestJava --no-build-cache`) before confirming code changes are OK**
+- Gradle's exit status is lost through a pipe (`./gradlew check | tail` reports tail's status, so `&&` chains continue past a failed build) — redirect to a file with `>|` (plain `>` is blocked by zsh noclobber) and test `$?` before committing
 - **Convention plugins** in `build-logic/` — shared build logic lives here, not in `subprojects {}` / `allprojects {}`
 - **Version catalog** in `gradle/libs.versions.toml` — single source of truth for dependency versions
 - **Configuration cache** enabled (`org.gradle.configuration-cache=true`)
@@ -46,6 +47,12 @@ Refer to `~/git/scalardb-saga-design/docs/scalardb-saga-design.md` for architect
 - Base package: `com.scalar.db.saga`
 - Public API classes use `Saga` prefix when the remainder is too generic to stand alone (e.g., `SagaManager`, `SagaContext`, `SagaStatus`). Domain-specific names that are already unambiguous within the package omit the prefix (e.g., `Step`, `StepResult`, `RetryPolicy`, `TccStep`).
 - Internal classes use domain-specific names without prefix (e.g., `CompensationManager`)
+
+## Error codes
+
+- `SagaErrorCode` (api) is the single wire vocabulary. Everything in it freezes at first release: code numbers, the USER_ERROR sub-ranges (`10Nxx` ↔ HTTP status family), metadata schema keys, and `WIRE_DOMAIN` (clients match it verbatim)
+- Adding a code: register it in `ExceptionRegistry` and add a row to the golden-table tests in both `GrpcErrorMapperTest` and `ErrorMapperTest` — the registry round-trip and sub-range guard tests fail the build otherwise
+- Every wire-facing error carries a code: gRPC interceptor refusals compose through `GrpcErrorMapper.close`, and REST's unmatched-route 404 goes through `ErrorMapper`'s `NotFoundResponse` handler — never close a call or write an error body outside the two mappers
 
 ## Design Principles
 
