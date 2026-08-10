@@ -85,7 +85,10 @@ public final class SagaSecurityInterceptor implements ServerInterceptor {
       // The provider could not verify the credential because it is unavailable (e.g. the JWKS
       // endpoint is unreachable) — a transient upstream outage, not a bad credential. Map to
       // UNAVAILABLE so the caller can retry, mirroring the REST path's 503.
-      logger.warn("Authentication provider unavailable for a gRPC call", e);
+      // The message is the enum's generic wire text; internalDetail carries which provider failed
+      // and why, which is the one field the wire body deliberately withholds. The REST path logs
+      // it the same way.
+      logger.warn("{} for a gRPC call: {}", e.getMessage(), e.getInternalDetail(), e);
       return deny(call, Status.Code.UNAVAILABLE, SagaErrorCode.SERVICE_UNAVAILABLE);
     } catch (RuntimeException e) {
       // An unexpected provider failure (not a rejected credential) — a bug or an unwrapped
