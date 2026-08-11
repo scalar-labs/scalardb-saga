@@ -75,6 +75,20 @@ jobs:
       - name: Check compiler warnings
         run: ./gradlew clean compileTestJava --no-build-cache
 
+      # The 2026-07-27 test flake destroyed its own evidence: the failing test's result XML was
+      # overwritten by the next run before anyone read it. Preserve every module's test output
+      # whenever this job fails so the next occurrence is diagnosable. The warnings step's `clean`
+      # wipes build/, so a failure there has nothing to upload; if-no-files-found tolerates that.
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-reports
+          path: |
+            **/build/reports/tests/**
+            **/build/test-results/**
+          if-no-files-found: ignore
+
   dockerfile-lint:
     runs-on: ubuntu-latest
 
