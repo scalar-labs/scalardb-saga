@@ -342,17 +342,21 @@ class GrpcSagaAdminClientTest {
   }
 
   @Test
-  void recoverSaga_resourceExhaustedWithoutErrorInfo_throwsRateLimitExceeded() {
-    // Arrange — an older daemon's rate limiter closes an over-limit call with a bare
-    // RESOURCE_EXHAUSTED and no ErrorInfo.
-    fake.recoverError = Status.RESOURCE_EXHAUSTED.withDescription("throttled").asRuntimeException();
+  void recoverSaga_resourceExhaustedWithoutErrorInfo_throwsUnmappedServerStatus() {
+    // Arrange — every shipped server attaches an ErrorInfo to a rate-limit refusal, so a bare
+    // RESOURCE_EXHAUSTED most likely means the gRPC runtime rejected an oversized message.
+    fake.recoverError = Status.RESOURCE_EXHAUSTED.withDescription("too large").asRuntimeException();
 
-    // Act + Assert — retryable rate limiting, not the version skew the catch-all would report;
-    // the admin client has no retry loop, so this category is the caller's only backoff signal.
+    // Act + Assert — not rate-limit backoff advice (retrying an oversized message never fits) and
+    // not the version-skew catch-all (no code was sent; upgrading changes nothing).
     assertThatThrownBy(() -> client.recoverSaga("s-1", "x"))
         .isExactlyInstanceOf(SagaRuntimeException.class)
-        .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
-        .isEqualTo(SagaErrorCode.RATE_LIMIT_EXCEEDED);
+        .isInstanceOfSatisfying(
+            SagaRuntimeException.class,
+            e -> {
+              assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.UNMAPPED_SERVER_STATUS);
+              assertThat(e.getMetadata()).containsEntry("server_value", "RESOURCE_EXHAUSTED");
+            });
   }
 
   @Test

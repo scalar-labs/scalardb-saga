@@ -7,11 +7,13 @@ import java.util.Objects;
  * Thrown when the saga store layer encounters a failure (e.g., a database write error, a
  * serialization or parse failure).
  *
- * <p>Carries one of three codes chosen by the static factory used:
+ * <p>Carries one of four codes chosen by the static factory used:
  *
  * <ul>
  *   <li>{@link SagaErrorCode#PERSISTENCE_STORE_UNAVAILABLE} — a transient store failure or a
  *       retry-exhausted transaction; construct via {@link #storeUnavailable(Throwable)}.
+ *   <li>{@link SagaErrorCode#OPERATION_ABORTED} — the store operation was abandoned mid-flight,
+ *       typically an interrupt during shutdown; construct via {@link #operationAborted(Throwable)}.
  *   <li>{@link SagaErrorCode#PERSISTENCE_SERIALIZATION_FAILED} — a permanent JSON serialization
  *       failure; construct via {@link #serializationFailed(Throwable)}.
  *   <li>{@link SagaErrorCode#PERSISTENCE_DESERIALIZATION_FAILED} — a permanent JSON or event-stream
@@ -55,6 +57,7 @@ public class SagaPersistenceException extends SagaRuntimeException {
   static SagaPersistenceException fromWire(SagaErrorCode code, Map<String, String> metadata) {
     switch (code) {
       case PERSISTENCE_STORE_UNAVAILABLE:
+      case OPERATION_ABORTED:
       case PERSISTENCE_SERIALIZATION_FAILED:
       case PERSISTENCE_DESERIALIZATION_FAILED:
         return new SagaPersistenceException(code);
@@ -69,6 +72,15 @@ public class SagaPersistenceException extends SagaRuntimeException {
    */
   public static SagaPersistenceException storeUnavailable(Throwable cause) {
     return new SagaPersistenceException(SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE, cause);
+  }
+
+  /**
+   * The server abandoned the store operation mid-flight — typically an interrupt during shutdown —
+   * rather than the store failing. Retryable: the retry lands on another replica, or on this server
+   * after it restarts. Not a store outage, so it must not be reported as one.
+   */
+  public static SagaPersistenceException operationAborted(Throwable cause) {
+    return new SagaPersistenceException(SagaErrorCode.OPERATION_ABORTED, cause);
   }
 
   /**

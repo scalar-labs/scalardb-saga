@@ -197,13 +197,6 @@ final class GrpcClientSupport {
         return new SagaRuntimeException(SagaErrorCode.REQUEST_ABORTED, ErrorMetadata.of(), e);
       case UNAVAILABLE:
         return new SagaUnavailableException(e);
-      case RESOURCE_EXHAUSTED:
-        // The daemon's rate limiter refuses over-limit calls at the interceptor layer, and an
-        // older daemon does so without an ErrorInfo. Letting that fall through to the catch-all
-        // would turn "back off and retry" into "upgrade the SDK". gRPC also uses
-        // RESOURCE_EXHAUSTED for an oversized message; the original description stays readable on
-        // the cause.
-        return new SagaRuntimeException(SagaErrorCode.RATE_LIMIT_EXCEEDED, ErrorMetadata.of(), e);
       case PERMISSION_DENIED:
         return new SagaPermissionDeniedException(e);
       case UNAUTHENTICATED:
@@ -217,11 +210,31 @@ final class GrpcClientSupport {
         // claim of a version skew.
         return new SagaRuntimeException(SagaErrorCode.INTERNAL_ERROR, ErrorMetadata.of(), e);
       default:
-        return new SagaRuntimeException(
-            SagaErrorCode.UNRECOGNIZED_SERVER_ERROR,
-            ErrorMetadata.of("server_value", status.getCode().name()),
-            e);
+        return unresolvedOrBare(e, status);
     }
+  }
+
+  /**
+   * The catch-all for a status with no dedicated arm. Two stories share it, split by whether a saga
+   * error body was present: an {@link ErrorInfo} whose code could not be resolved is genuine
+   * version skew (upgrade the SDK), while a truly bare status came from the transport runtime or an
+   * intermediary — a message-size rejection, say — where upgrading changes nothing. Bare {@code
+   * RESOURCE_EXHAUSTED} lands here deliberately: no shipped server sends it without a code (the
+   * rate limiter attaches one), so it most likely means an oversized message, and rate-limit
+   * backoff advice would have the caller retry a request that can never fit.
+   */
+  private static SagaRuntimeException unresolvedOrBare(StatusRuntimeException e, Status status) {
+    ErrorInfo unresolved = errorInfo(e);
+    if (unresolved != null) {
+      return new SagaRuntimeException(
+          SagaErrorCode.UNRECOGNIZED_SERVER_ERROR,
+          ErrorMetadata.of("server_value", unresolved.getReason()),
+          e);
+    }
+    return new SagaRuntimeException(
+        SagaErrorCode.UNMAPPED_SERVER_STATUS,
+        ErrorMetadata.of("server_value", status.getCode().name()),
+        e);
   }
 
   /**

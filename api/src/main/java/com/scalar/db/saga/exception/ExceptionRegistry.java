@@ -119,6 +119,9 @@ public final class ExceptionRegistry {
             SagaPersistenceException.fromWire(SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE, meta));
     m.put(SagaErrorCode.SERVICE_UNAVAILABLE, meta -> new SagaUnavailableException());
     m.put(SagaErrorCode.RATE_LIMIT_EXCEEDED, meta -> raw(SagaErrorCode.RATE_LIMIT_EXCEEDED, meta));
+    m.put(
+        SagaErrorCode.OPERATION_ABORTED,
+        meta -> SagaPersistenceException.fromWire(SagaErrorCode.OPERATION_ABORTED, meta));
     // The client-side unknown-but-retryable sentinel, sibling of UNRECOGNIZED_SERVER_ERROR below;
     // registered defensively so a server that echoes it still round-trips.
     m.put(
@@ -154,6 +157,9 @@ public final class ExceptionRegistry {
     // These are produced client-side and should not appear on the wire; register defensive
     // reconstructors so a server that echoes one still round-trips cleanly.
     m.put(SagaErrorCode.SERVER_UNREACHABLE, meta -> raw(SagaErrorCode.SERVER_UNREACHABLE, meta));
+    m.put(
+        SagaErrorCode.UNMAPPED_SERVER_STATUS,
+        meta -> raw(SagaErrorCode.UNMAPPED_SERVER_STATUS, meta));
     m.put(SagaErrorCode.REQUEST_TIMEOUT, meta -> raw(SagaErrorCode.REQUEST_TIMEOUT, meta));
     m.put(SagaErrorCode.REQUEST_ABORTED, meta -> raw(SagaErrorCode.REQUEST_ABORTED, meta));
     m.put(

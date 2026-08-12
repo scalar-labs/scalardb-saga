@@ -519,16 +519,39 @@ class GrpcSagaOrchestratorClientTest {
   }
 
   @Test
-  void getStateSnapshot_resourceExhaustedWithoutErrorInfo_throwsRateLimitExceeded() {
-    // Arrange — an older daemon's rate limiter closes an over-limit call with a bare
-    // RESOURCE_EXHAUSTED and no ErrorInfo.
-    fake.getError = Status.RESOURCE_EXHAUSTED.withDescription("throttled").asRuntimeException();
+  void getStateSnapshot_resourceExhaustedWithoutErrorInfo_throwsUnmappedServerStatus() {
+    // Arrange — every shipped server attaches an ErrorInfo to a rate-limit refusal, so a bare
+    // RESOURCE_EXHAUSTED most likely means the gRPC runtime rejected an oversized message.
+    fake.getError = Status.RESOURCE_EXHAUSTED.withDescription("too large").asRuntimeException();
 
-    // Act + Assert — retryable rate limiting, not the version skew the catch-all would report.
+    // Act + Assert — not rate-limit backoff advice (retrying an oversized message never fits) and
+    // not the version-skew catch-all (no code was sent; upgrading changes nothing).
     assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
         .isExactlyInstanceOf(SagaRuntimeException.class)
-        .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
-        .isEqualTo(SagaErrorCode.RATE_LIMIT_EXCEEDED);
+        .isInstanceOfSatisfying(
+            SagaRuntimeException.class,
+            e -> {
+              assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.UNMAPPED_SERVER_STATUS);
+              assertThat(e.getMetadata()).containsEntry("server_value", "RESOURCE_EXHAUSTED");
+            });
+  }
+
+  @Test
+  void getStateSnapshot_unknownCodeUnderUnmappedStatus_throwsUnrecognizedWithTheCode() {
+    // Arrange — an unresolvable non-retryable code riding a status with no transport arm. The
+    // default split must report genuine version skew (the body was there, this client is too old)
+    // and carry the unresolved code, not the bare-status story.
+    fake.getError = statusWithReason(Status.Code.FAILED_PRECONDITION, "DB-SAGA-10999", Map.of());
+
+    // Act + Assert
+    assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
+        .isExactlyInstanceOf(SagaRuntimeException.class)
+        .isInstanceOfSatisfying(
+            SagaRuntimeException.class,
+            e -> {
+              assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.UNRECOGNIZED_SERVER_ERROR);
+              assertThat(e.getMetadata()).containsEntry("server_value", "DB-SAGA-10999");
+            });
   }
 
   @Test

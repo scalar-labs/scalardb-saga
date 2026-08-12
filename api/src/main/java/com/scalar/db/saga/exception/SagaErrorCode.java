@@ -247,6 +247,13 @@ public enum SagaErrorCode {
       "The request exceeded the server's configured rate limit for this operation.",
       "Back off and retry after a short delay."),
 
+  OPERATION_ABORTED(
+      "DB-SAGA-20005",
+      Category.RETRYABLE_SERVER_ERROR,
+      "Operation aborted by the server",
+      ErrorMetadataSchema.none(),
+      "The server abandoned the operation mid-flight — typically an interrupt during shutdown — rather than a dependency failing. Distinct from REQUEST_ABORTED, where the caller cancelled its own request.",
+      "Retry the operation; it will land on another replica, or on this server after it restarts."),
 
   UNRECOGNIZED_RETRYABLE_SERVER_ERROR(
       "DB-SAGA-29999",
@@ -339,6 +346,13 @@ public enum SagaErrorCode {
       "The caller cancelled the operation (thread interrupt, future cancellation, or client shutdown) before the RPC completed.",
       "If the abort was unintentional, avoid interrupting or cancelling the calling thread and retry."),
 
+  UNMAPPED_SERVER_STATUS(
+      "DB-SAGA-40004",
+      Category.CLIENT_ERROR,
+      "The server reported only a transport status with no error body",
+      ErrorMetadataSchema.of("server_value"),
+      "The response carried a bare transport status and no saga error body. Servers attach a code to every response, so this typically comes from the transport runtime itself (a message-size rejection, say) or an intermediary, not from the saga application.",
+      "Inspect server_value (the transport status) and the cause. This is not a version skew; upgrading the client SDK will not change it."),
 
   UNRECOGNIZED_SERVER_ERROR(
       "DB-SAGA-49999",

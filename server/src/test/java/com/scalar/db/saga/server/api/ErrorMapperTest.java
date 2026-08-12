@@ -319,6 +319,10 @@ class ErrorMapperTest {
             503,
             SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE),
         new Arm(
+            SagaPersistenceException.operationAborted(new InterruptedException("shutdown")),
+            503,
+            SagaErrorCode.OPERATION_ABORTED),
+        new Arm(
             SagaPersistenceException.serializationFailed(new RuntimeException("bad json")),
             500,
             SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED),
@@ -398,6 +402,7 @@ class ErrorMapperTest {
             SagaErrorCode.REQUEST_ABORTED,
             SagaErrorCode.UNRECOGNIZED_SERVER_ERROR,
             SagaErrorCode.UNRECOGNIZED_RETRYABLE_SERVER_ERROR,
+            SagaErrorCode.UNMAPPED_SERVER_STATUS,
             // Reserved, produced nowhere yet (see SagaErrorCode).
             SagaErrorCode.STEP_TIMEOUT,
             SagaErrorCode.STEP_USER_FAILURE,

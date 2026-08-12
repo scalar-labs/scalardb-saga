@@ -198,6 +198,10 @@ class GrpcErrorMapperTest {
             Status.Code.UNAVAILABLE,
             SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE),
         new Arm(
+            SagaPersistenceException.operationAborted(new InterruptedException("shutdown")),
+            Status.Code.UNAVAILABLE,
+            SagaErrorCode.OPERATION_ABORTED),
+        new Arm(
             SagaPersistenceException.serializationFailed(new RuntimeException("bad json")),
             Status.Code.INTERNAL,
             SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED),
@@ -277,6 +281,7 @@ class GrpcErrorMapperTest {
             SagaErrorCode.REQUEST_ABORTED,
             SagaErrorCode.UNRECOGNIZED_SERVER_ERROR,
             SagaErrorCode.UNRECOGNIZED_RETRYABLE_SERVER_ERROR,
+            SagaErrorCode.UNMAPPED_SERVER_STATUS,
             // Reserved, produced nowhere yet (see SagaErrorCode).
             SagaErrorCode.STEP_TIMEOUT,
             SagaErrorCode.STEP_USER_FAILURE,

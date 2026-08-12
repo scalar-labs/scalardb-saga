@@ -1237,7 +1237,10 @@ public class ScalarDbSagaStore implements SagaStore {
       Thread.sleep(delay);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
-      throw SagaPersistenceException.storeUnavailable(e);
+      // OPERATION_ABORTED, not storeUnavailable: the interrupt means this server is abandoning
+      // the operation (typically shutdown), and reporting it as a store outage would emit false
+      // store alarms on every deploy. Still retryable — the retry lands elsewhere.
+      throw SagaPersistenceException.operationAborted(e);
     }
   }
 
