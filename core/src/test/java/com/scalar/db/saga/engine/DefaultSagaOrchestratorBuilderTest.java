@@ -107,6 +107,21 @@ class DefaultSagaOrchestratorBuilderTest {
   }
 
   @Test
+  void ownerId_controlCharactersGiven_throwsIllegalArgumentException() {
+    // The owner id is stamped on claimed rows and echoed in log lines; a CRLF in it would forge
+    // log entries, so the builder rejects it up front.
+    assertThatThrownBy(() -> DefaultSagaOrchestrator.newBuilder().ownerId("pod-7\nFORGED LOG LINE"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void ownerId_overlongValueGiven_throwsIllegalArgumentException() {
+    // Act & Assert
+    assertThatThrownBy(() -> DefaultSagaOrchestrator.newBuilder().ownerId("x".repeat(129)))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void build_withHttpEndpointAndResource_returnsDefaultSagaOrchestrator() {
     // Arrange — httpEndpoint is orthogonal to resource() (D1)
     SagaStore store = mock(SagaStore.class);
