@@ -12,17 +12,23 @@ import com.scalar.db.saga.definition.RetryPolicy;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.definition.SagaDefinition.RecoveryStrategy;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
+import com.scalar.db.saga.engine.RecoveryConfig;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.StepCompensationException;
 import com.scalar.db.saga.exception.StepExecutionException;
 import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
+import com.scalar.db.saga.store.SagaSchema;
 import com.scalar.db.saga.store.SagaStore;
+import com.scalar.db.saga.store.SagaStore.Recoverables;
+import com.scalar.db.saga.store.SagaStore.ScanCursor;
 import com.scalar.db.saga.store.ScalarDbSagaStoreFactory;
 import com.scalar.db.saga.store.StepEvent;
+import com.scalar.db.saga.store.SweepScatter;
 import com.scalar.db.saga.testing.CrashingStoreDecorator;
 import com.scalar.db.saga.testing.FakeStep;
 import com.scalar.db.saga.testing.FakeTccStep;
+import com.scalar.db.saga.testing.ForwardingSagaStore;
 import com.scalar.db.saga.testing.SimulatedCrashError;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -31,6 +37,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -41,8 +48,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
@@ -1188,6 +1197,327 @@ class SagaIntegrationTest {
 
     private Instant farFuture() {
       return Instant.parse("2100-01-01T00:00:00Z");
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Multi-replica sweep scatter (scattered order, success budget, page isolation)
+  // ---------------------------------------------------------------------------
+
+  @Nested
+  class MultiReplicaSweeps {
+
+    private static final int NUM_BUCKETS = 4;
+    private final SagaSchema schema = new SagaSchema(NUM_BUCKETS);
+
+    private SagaDefinition twoStepDefinition() {
+      return SagaDefinition.newBuilder("test-saga")
+          .saga()
+          .step("step1", STEP_CLASS)
+          .add()
+          .step("step2", STEP_CLASS)
+          .add()
+          .build();
+    }
+
+    /** A saga ID that {@code SagaSchema.bucketOf} maps into the requested bucket. */
+    private String sagaIdInBucket(int bucket, String prefix) {
+      for (int i = 0; ; i++) {
+        String candidate = prefix + i;
+        if (schema.bucketOf(candidate) == bucket) {
+          return candidate;
+        }
+      }
+    }
+
+    private DefaultSagaOrchestrator replica(
+        SagaStore store, Map<String, Object> steps, String ownerId, RecoveryConfig config) {
+      return DefaultSagaOrchestrator.newBuilder()
+          .storeFactory(() -> store)
+          .stepResolver((name, cls, ctx) -> Objects.requireNonNull(steps.get(name)))
+          .ownerId(ownerId)
+          .recoveryConfig(config)
+          .build();
+    }
+
+    /**
+     * Starts {@code sagaIds} so each crashes after step 0 (persisted) and stays RUNNING, then marks
+     * every one for immediate recovery — a ready-made stale backlog.
+     */
+    private void crashStartBacklog(
+        SagaDefinition def, Map<String, Object> steps, List<String> sagaIds) {
+      try (SagaStore baseStore = ScalarDbSagaStoreFactory.create(props).createStore();
+          SagaStore crashingStore = new CrashingStoreDecorator(baseStore, 0);
+          DefaultSagaOrchestrator starter = buildOrchestrator(crashingStore, steps)) {
+        starter.register(def);
+        for (String sagaId : sagaIds) {
+          try {
+            starter.start(sagaId, "test-saga", Map.of());
+          } catch (SimulatedCrashError expected) {
+            // Each start "crashes" after step1's completion is persisted.
+          }
+          baseStore.markForRecovery(sagaId);
+        }
+      }
+    }
+
+    private long completedCount(DefaultSagaOrchestrator orchestrator, List<String> sagaIds) {
+      return sagaIds.stream()
+          .filter(id -> orchestrator.getStateSnapshot(id).getStatus() == SagaStatus.COMPLETED)
+          .count();
+    }
+
+    @Test
+    void recover_twoReplicasDrainBacklog_eachSagaRecoveredExactlyOnce() {
+      // Arrange — 8 crashed sagas across 4 buckets; two replicas with budgets of 2 per pass, so
+      // neither can drain the backlog alone in one pass.
+      props.setProperty("scalar.db.saga.store.num_buckets", String.valueOf(NUM_BUCKETS));
+      FakeStep step1 = FakeStep.newBuilder("step1").executeReturns(StepResult.of("a", 1)).build();
+      FakeStep step2 = FakeStep.newBuilder("step2").build();
+      Map<String, Object> steps = Map.of("step1", step1, "step2", step2);
+      List<String> sagaIds = new ArrayList<>();
+      for (int i = 0; i < 8; i++) {
+        sagaIds.add(sagaIdInBucket(i % NUM_BUCKETS, "drain-" + i + "-"));
+      }
+      crashStartBacklog(twoStepDefinition(), steps, sagaIds);
+
+      RecoveryConfig smallBatch =
+          new RecoveryConfig(60_000, 30, Duration.ofHours(4), 2, 10, Clock.systemUTC());
+      try (SagaStore storeA = ScalarDbSagaStoreFactory.create(props).createStore();
+          SagaStore storeB = ScalarDbSagaStoreFactory.create(props).createStore();
+          DefaultSagaOrchestrator replicaA = replica(storeA, steps, "replica-a", smallBatch);
+          DefaultSagaOrchestrator replicaB = replica(storeB, steps, "replica-b", smallBatch)) {
+
+        // Act — alternate passes until the backlog drains
+        int passes = 0;
+        while (completedCount(replicaA, sagaIds) < sagaIds.size() && passes < 12) {
+          replicaA.recover();
+          replicaB.recover();
+          passes++;
+        }
+
+        // Assert — every saga recovered, and exactly once across BOTH replicas: step1 ran only at
+        // start (never re-executed) and step2 ran exactly once per saga, whichever replica won it
+        assertThat(completedCount(replicaA, sagaIds)).isEqualTo(sagaIds.size());
+        assertThat(step1.getExecutionCount()).isEqualTo(sagaIds.size());
+        assertThat(step2.getExecutionCount()).isEqualTo(sagaIds.size());
+      }
+    }
+
+    @Test
+    void recover_budgetOfOne_drainsOneSagaPerPassAcrossAllBuckets() {
+      // Arrange — one crashed saga per bucket, budget of 1 successful recovery per pass
+      props.setProperty("scalar.db.saga.store.num_buckets", String.valueOf(NUM_BUCKETS));
+      FakeStep step1 = FakeStep.newBuilder("step1").executeReturns(StepResult.of("a", 1)).build();
+      FakeStep step2 = FakeStep.newBuilder("step2").build();
+      Map<String, Object> steps = Map.of("step1", step1, "step2", step2);
+      List<String> sagaIds = new ArrayList<>();
+      for (int bucket = 0; bucket < NUM_BUCKETS; bucket++) {
+        sagaIds.add(sagaIdInBucket(bucket, "budget-" + bucket + "-"));
+      }
+      crashStartBacklog(twoStepDefinition(), steps, sagaIds);
+
+      RecoveryConfig batchOfOne =
+          new RecoveryConfig(60_000, 30, Duration.ofHours(4), 1, 10, Clock.systemUTC());
+      try (SagaStore store = ScalarDbSagaStoreFactory.create(props).createStore();
+          DefaultSagaOrchestrator orchestrator = replica(store, steps, "replica-a", batchOfOne)) {
+
+        // Act & Assert — each pass recovers exactly one saga (the budget counts successes), and
+        // the budget-stopped sweep resumes across passes until every bucket's saga is recovered
+        for (int pass = 1; pass <= NUM_BUCKETS; pass++) {
+          orchestrator.recover();
+          assertThat(completedCount(orchestrator, sagaIds)).isEqualTo(pass);
+        }
+      }
+    }
+
+    @Test
+    void recover_driveFailsAfterClaim_budgetSpentWithoutClaimSpree() {
+      // Arrange — three crashed sagas in distinct buckets; the recovering replica's event reads
+      // fail, so every claim commits but every drive fails
+      props.setProperty("scalar.db.saga.store.num_buckets", String.valueOf(NUM_BUCKETS));
+      FakeStep step1 = FakeStep.newBuilder("step1").executeReturns(StepResult.of("a", 1)).build();
+      FakeStep step2 = FakeStep.newBuilder("step2").build();
+      Map<String, Object> steps = Map.of("step1", step1, "step2", step2);
+      List<String> sagaIds = new ArrayList<>();
+      for (int bucket = 0; bucket < 3; bucket++) {
+        sagaIds.add(sagaIdInBucket(bucket, "spree-" + bucket + "-"));
+      }
+      crashStartBacklog(twoStepDefinition(), steps, sagaIds);
+
+      RecoveryConfig batchOfOne =
+          new RecoveryConfig(60_000, 30, Duration.ofHours(4), 1, 10, Clock.systemUTC());
+      try (SagaStore baseStore = ScalarDbSagaStoreFactory.create(props).createStore();
+          DriveFailingStore failingStore = new DriveFailingStore(baseStore);
+          DefaultSagaOrchestrator orchestrator =
+              replica(failingStore, steps, "replica-fail", batchOfOne)) {
+        failingStore.failEventReads.set(true);
+
+        // Act — one pass with budget 1
+        orchestrator.recover();
+
+        // Assert — the committed-but-failed claim spent the budget: exactly one saga was claimed,
+        // not a full-revolution claim spree that would hide all three from other replicas
+        failingStore.failEventReads.set(false);
+        long claimed =
+            sagaIds.stream()
+                .filter(id -> "replica-fail".equals(orchestrator.getStateSnapshot(id).getOwnerId()))
+                .count();
+        assertThat(claimed).isEqualTo(1);
+        assertThat(completedCount(orchestrator, sagaIds)).isZero();
+      }
+    }
+
+    @Test
+    void recover_poisonFirstPage_otherBucketsStillSweptSamePass() {
+      // Arrange — one crashed saga per bucket; the first scanned page of the pass fails
+      props.setProperty("scalar.db.saga.store.num_buckets", String.valueOf(NUM_BUCKETS));
+      FakeStep step1 = FakeStep.newBuilder("step1").executeReturns(StepResult.of("a", 1)).build();
+      FakeStep step2 = FakeStep.newBuilder("step2").build();
+      Map<String, Object> steps = Map.of("step1", step1, "step2", step2);
+      List<String> sagaIds = new ArrayList<>();
+      for (int bucket = 0; bucket < NUM_BUCKETS; bucket++) {
+        sagaIds.add(sagaIdInBucket(bucket, "poison-" + bucket + "-"));
+      }
+      crashStartBacklog(twoStepDefinition(), steps, sagaIds);
+
+      String ownerId = "poison-owner";
+      try (SagaStore baseStore = ScalarDbSagaStoreFactory.create(props).createStore();
+          FirstPageFailingStore poisonStore = new FirstPageFailingStore(baseStore);
+          DefaultSagaOrchestrator orchestrator =
+              replica(poisonStore, steps, ownerId, RecoveryConfig.defaults())) {
+
+        // Act — the first page's scan throws; the sweep must skip it and recover the rest
+        orchestrator.recover();
+
+        // Assert — every bucket except the poisoned first one recovered in the same pass, and the
+        // un-recovered saga sits exactly in the owner permutation's first bucket
+        assertThat(completedCount(orchestrator, sagaIds)).isEqualTo(NUM_BUCKETS - 1);
+        int poisonedBucket = SweepScatter.permutation(SweepScatter.seed(ownerId), NUM_BUCKETS)[0];
+        List<String> stillRunning =
+            sagaIds.stream()
+                .filter(id -> orchestrator.getStateSnapshot(id).getStatus() == SagaStatus.RUNNING)
+                .toList();
+        assertThat(stillRunning).hasSize(1);
+        assertThat(schema.bucketOf(stillRunning.get(0))).isEqualTo(poisonedBucket);
+
+        // Act 2 — the poison was transient (first call only): the next pass recovers the rest
+        orchestrator.recover();
+        assertThat(completedCount(orchestrator, sagaIds)).isEqualTo(NUM_BUCKETS);
+      }
+    }
+
+    @Test
+    void recover_twoReplicasRaceOverdueParkedSaga_exactlyOneCompensates() throws Exception {
+      // Arrange — a parked (WAITING) saga past both its deadline and the grace period; two
+      // replicas sweep it concurrently. The WAITING-CK check must let exactly one give up.
+      MutableClock clock = new MutableClock(Instant.now());
+      // The manager clock runs 5h ahead of the store's wall-clock row stamps, which would make
+      // any row the winner just transitioned look instantly "stale" to the loser's staleness
+      // sweep — a double-drive window this test is not about. A staleness timeout far larger
+      // than the clock advance keeps that sweep inert; only the parked sweep acts.
+      RecoveryConfig parkedSweepOnly =
+          new RecoveryConfig(
+              Duration.ofDays(36_500).toMillis(), 30, Duration.ofHours(4), 1000, 10, clock);
+      FakeStep step1 = FakeStep.newBuilder("step1").build();
+      FakeStep step2 = FakeStep.newBuilder("step2").executeReturns(StepResult.pending()).build();
+      Map<String, Object> steps = Map.of("step1", step1, "step2", step2);
+      SagaDefinition def =
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
+              .timeoutMillis(60_000)
+              .step("step1", STEP_CLASS)
+              .add()
+              .step("step2", STEP_CLASS)
+              .add()
+              .build();
+
+      try (SagaStore storeA = ScalarDbSagaStoreFactory.create(props).createStore();
+          SagaStore storeB = ScalarDbSagaStoreFactory.create(props).createStore();
+          DefaultSagaOrchestrator replicaA =
+              DefaultSagaOrchestrator.newBuilder()
+                  .storeFactory(() -> storeA)
+                  .stepResolver((name, cls, ctx) -> Objects.requireNonNull(steps.get(name)))
+                  .ownerId("replica-a")
+                  .clock(clock)
+                  .recoveryConfig(parkedSweepOnly)
+                  .build();
+          DefaultSagaOrchestrator replicaB =
+              DefaultSagaOrchestrator.newBuilder()
+                  .storeFactory(() -> storeB)
+                  .stepResolver((name, cls, ctx) -> Objects.requireNonNull(steps.get(name)))
+                  .ownerId("replica-b")
+                  .clock(clock)
+                  .recoveryConfig(parkedSweepOnly)
+                  .build()) {
+        replicaA.register(def);
+        String sagaId = replicaA.start("test-saga", Map.of());
+        assertThat(replicaA.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.WAITING);
+        clock.advance(Duration.ofHours(5));
+
+        // Act — both replicas sweep at the same moment
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+          CountDownLatch go = new CountDownLatch(1);
+          Future<?> passA =
+              pool.submit(
+                  () -> {
+                    go.await();
+                    replicaA.recover();
+                    return null;
+                  });
+          Future<?> passB =
+              pool.submit(
+                  () -> {
+                    go.await();
+                    replicaB.recover();
+                    return null;
+                  });
+          go.countDown();
+          passA.get(60, TimeUnit.SECONDS);
+          passB.get(60, TimeUnit.SECONDS);
+        } finally {
+          pool.shutdown();
+        }
+
+        // Assert — timed out exactly once: compensated, and step1 rolled back exactly once
+        assertThat(replicaA.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.COMPENSATED);
+        assertThat(step1.getCompensationCount()).isEqualTo(1);
+      }
+    }
+
+    /** Forwards everything; event reads fail while the flag is set (post-claim drive failure). */
+    private static final class DriveFailingStore extends ForwardingSagaStore {
+      final AtomicBoolean failEventReads = new AtomicBoolean(false);
+
+      DriveFailingStore(SagaStore delegate) {
+        super(delegate);
+      }
+
+      @Override
+      public List<SagaEvent> getEvents(String sagaId) {
+        if (failEventReads.get()) {
+          throw new RuntimeException("simulated post-claim read failure");
+        }
+        return delegate().getEvents(sagaId);
+      }
+    }
+
+    /** Forwards everything; the very first {@code findRecoverable} call fails (poison page). */
+    private static final class FirstPageFailingStore extends ForwardingSagaStore {
+      private final AtomicInteger findRecoverableCalls = new AtomicInteger();
+
+      FirstPageFailingStore(SagaStore delegate) {
+        super(delegate);
+      }
+
+      @Override
+      public Recoverables findRecoverable(Instant threshold, @Nullable ScanCursor cursor) {
+        if (findRecoverableCalls.getAndIncrement() == 0) {
+          throw new RuntimeException("simulated poison page");
+        }
+        return delegate().findRecoverable(threshold, cursor);
+      }
     }
   }
 }
