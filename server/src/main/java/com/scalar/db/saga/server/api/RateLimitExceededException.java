@@ -19,10 +19,21 @@ public final class RateLimitExceededException extends SagaRuntimeException {
   private static final long serialVersionUID = 1L;
 
   private final String internalDetail;
+  private final long retryAfterMillis;
 
-  public RateLimitExceededException(String internalDetail) {
+  public RateLimitExceededException(String internalDetail, long retryAfterMillis) {
     super(SagaErrorCode.RATE_LIMIT_EXCEEDED, ErrorMetadata.of());
     this.internalDetail = Objects.requireNonNull(internalDetail, "internalDetail must not be null");
+    if (retryAfterMillis <= 0) {
+      throw new IllegalArgumentException(
+          "retryAfterMillis must be positive, got " + retryAfterMillis);
+    }
+    this.retryAfterMillis = retryAfterMillis;
+  }
+
+  /** The advisory wait until the caller's window resets; the 429's Retry-After derives from it. */
+  public long getRetryAfterMillis() {
+    return retryAfterMillis;
   }
 
   /** The server-side-only reason (never sent on the wire); used by the daemon's log statement. */

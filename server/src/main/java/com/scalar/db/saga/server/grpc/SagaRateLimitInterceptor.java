@@ -44,10 +44,13 @@ public final class SagaRateLimitInterceptor implements ServerInterceptor {
       // no budget to key on, so the call is left to proceed rather than blocked by a rate limit it
       // cannot attribute.
       SagaIdentity identity = SagaSecurityInterceptor.IDENTITY.get();
-      if (identity != null
-          && !limiter.tryAcquire(identity.principal(), System.currentTimeMillis())) {
+      long now = System.currentTimeMillis();
+      if (identity != null && !limiter.tryAcquire(identity.principal(), now)) {
         GrpcErrorMapper.close(
-            call, Status.Code.RESOURCE_EXHAUSTED, SagaErrorCode.RATE_LIMIT_EXCEEDED);
+            call,
+            Status.Code.RESOURCE_EXHAUSTED,
+            SagaErrorCode.RATE_LIMIT_EXCEEDED,
+            limiter.retryAfterMillis(identity.principal(), now));
         return new ServerCall.Listener<>() {};
       }
     }

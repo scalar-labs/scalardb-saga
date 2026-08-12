@@ -154,6 +154,9 @@ public final class ErrorMapper {
         (e, ctx) -> {
           logger.debug(
               "{} on {} {}: {}", e.getMessage(), ctx.method(), ctx.path(), e.getInternalDetail());
+          // Whole seconds per RFC 9110, rounded up so a compliant client never retries before the
+          // window actually resets.
+          ctx.header("Retry-After", Long.toString((e.getRetryAfterMillis() + 999) / 1000));
           respond(ctx, 429, e);
         });
 

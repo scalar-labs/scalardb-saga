@@ -80,6 +80,11 @@ class RateLimitHandlerTest {
     HttpResponse<String> third = send("POST", "/sagas");
     assertThat(third.statusCode()).isEqualTo(429);
     assertThat(third.body()).contains(SagaErrorCode.RATE_LIMIT_EXCEEDED.code());
+    // The machine-readable wait: whole seconds, rounded up, at most the limiter's window (60s
+    // here). Without it the only backoff guidance is prose.
+    long retryAfterSeconds =
+        Long.parseLong(third.headers().firstValue("Retry-After").orElseThrow());
+    assertThat(retryAfterSeconds).isPositive().isLessThanOrEqualTo(60);
   }
 
   @Test

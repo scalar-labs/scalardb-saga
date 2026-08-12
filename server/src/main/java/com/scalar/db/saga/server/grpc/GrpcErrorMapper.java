@@ -1,7 +1,9 @@
 package com.scalar.db.saga.server.grpc;
 
 import com.google.protobuf.Any;
+import com.google.protobuf.Duration;
 import com.google.rpc.ErrorInfo;
+import com.google.rpc.RetryInfo;
 import com.scalar.db.saga.exception.ErrorMetadata;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
@@ -125,7 +127,28 @@ final class GrpcErrorMapper {
    * refusal as an unrecognized server error.
    */
   static void close(ServerCall<?, ?> call, Status.Code statusCode, SagaErrorCode code) {
-    StatusRuntimeException e = status(statusCode, code, ErrorMetadata.of());
+    closeWith(call, status(statusCode, code, ErrorMetadata.of()));
+  }
+
+  /**
+   * As {@link #close(ServerCall, Status.Code, SagaErrorCode)}, attaching a standard {@code
+   * RetryInfo} detail carrying the advisory wait — for refusals whose reset time the server knows
+   * (the rate limiter's window). The REST transport's analogue is the 429's Retry-After header.
+   */
+  static void close(
+      ServerCall<?, ?> call, Status.Code statusCode, SagaErrorCode code, long retryAfterMillis) {
+    RetryInfo retryInfo =
+        RetryInfo.newBuilder()
+            .setRetryDelay(
+                Duration.newBuilder()
+                    .setSeconds(retryAfterMillis / 1000)
+                    .setNanos((int) ((retryAfterMillis % 1000) * 1_000_000L))
+                    .build())
+            .build();
+    closeWith(call, status(statusCode, code, ErrorMetadata.of(), Any.pack(retryInfo)));
+  }
+
+  private static void closeWith(ServerCall<?, ?> call, StatusRuntimeException e) {
     Metadata trailers = e.getTrailers();
     call.close(e.getStatus(), trailers == null ? new Metadata() : trailers);
   }
@@ -147,19 +170,21 @@ final class GrpcErrorMapper {
    * ErrorInfo.reason = code.code()}; {@code ErrorInfo.metadata = metadata}.
    */
   private static StatusRuntimeException status(
-      Status.Code statusCode, SagaErrorCode code, Map<String, String> metadata) {
+      Status.Code statusCode, SagaErrorCode code, Map<String, String> metadata, Any... extras) {
     ErrorInfo info =
         ErrorInfo.newBuilder()
             .setReason(code.code())
             .setDomain(SagaErrorCode.WIRE_DOMAIN)
             .putAllMetadata(metadata)
             .build();
-    com.google.rpc.Status status =
+    com.google.rpc.Status.Builder status =
         com.google.rpc.Status.newBuilder()
             .setCode(statusCode.value())
             .setMessage(code.buildMessage(metadata))
-            .addDetails(Any.pack(info))
-            .build();
-    return StatusProto.toStatusRuntimeException(status);
+            .addDetails(Any.pack(info));
+    for (Any extra : extras) {
+      status.addDetails(extra);
+    }
+    return StatusProto.toStatusRuntimeException(status.build());
   }
 }

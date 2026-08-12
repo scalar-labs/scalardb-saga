@@ -268,7 +268,9 @@ class ErrorMapperTest {
             403,
             SagaErrorCode.PERMISSION_DENIED),
         new Arm(
-            new RateLimitExceededException("over limit"), 429, SagaErrorCode.RATE_LIMIT_EXCEEDED),
+            new RateLimitExceededException("over limit", 1_000L),
+            429,
+            SagaErrorCode.RATE_LIMIT_EXCEEDED),
         new Arm(
             new SagaAuthUnavailableException("jwks unreachable", new RuntimeException()),
             503,

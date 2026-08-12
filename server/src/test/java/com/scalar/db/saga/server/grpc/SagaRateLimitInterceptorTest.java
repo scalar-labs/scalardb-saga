@@ -8,6 +8,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.google.protobuf.Duration;
 import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
@@ -98,6 +99,11 @@ class SagaRateLimitInterceptorTest {
     // instead of falling to its unrecognized-error catch-all.
     assertThat(ErrorInfos.errorInfo(error).getReason())
         .isEqualTo(SagaErrorCode.RATE_LIMIT_EXCEEDED.code());
+    // And the standard RetryInfo detail carries the advisory wait — positive, at most the
+    // limiter's window (60s here) — so a machine can back off precisely instead of guessing.
+    Duration delay = ErrorInfos.retryInfo(error).getRetryDelay();
+    long delayMillis = delay.getSeconds() * 1000 + delay.getNanos() / 1_000_000;
+    assertThat(delayMillis).isPositive().isLessThanOrEqualTo(60_000L);
   }
 
   @Test

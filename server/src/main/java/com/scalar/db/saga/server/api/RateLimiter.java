@@ -85,6 +85,20 @@ public final class RateLimiter {
   }
 
   /**
+   * Milliseconds until {@code key}'s current window expires — the advisory wait a refused caller
+   * should back off before retrying. In {@code [1, windowMillis]} for a live tracked window; {@code
+   * windowMillis} when the key is untracked or expired (a refusal races with pruning or eviction
+   * only rarely, and one full window is the conservative answer).
+   */
+  public long retryAfterMillis(String key, long nowMillis) {
+    Window window = windows.get(key);
+    if (window == null || isExpired(window, nowMillis)) {
+      return windowMillis;
+    }
+    return window.startMillis + windowMillis - nowMillis;
+  }
+
+  /**
    * Prunes expired windows when the map has grown past {@link #PRUNE_THRESHOLD}, but at most once
    * per window. The {@code compareAndSet} elects a single pruner: concurrent callers that lose the
    * CAS (or that arrive within one window of the last prune) skip the scan, so a burst of

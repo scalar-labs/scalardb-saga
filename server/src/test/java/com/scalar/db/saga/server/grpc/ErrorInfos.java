@@ -3,6 +3,7 @@ package com.scalar.db.saga.server.grpc;
 import com.google.protobuf.Any;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.rpc.ErrorInfo;
+import com.google.rpc.RetryInfo;
 import com.scalar.db.saga.exception.SagaErrorCode;
 import io.grpc.StatusRuntimeException;
 import io.grpc.protobuf.StatusProto;
@@ -43,5 +44,23 @@ final class ErrorInfos {
       }
     }
     throw new AssertionError("status carried no ErrorInfo detail");
+  }
+
+  /** Extracts the {@link RetryInfo} detail, failing the test if the status carries none. */
+  static RetryInfo retryInfo(StatusRuntimeException e) {
+    com.google.rpc.Status status = StatusProto.fromThrowable(e);
+    if (status == null) {
+      throw new AssertionError("status carried no google.rpc.Status details");
+    }
+    for (Any detail : status.getDetailsList()) {
+      if (detail.is(RetryInfo.class)) {
+        try {
+          return detail.unpack(RetryInfo.class);
+        } catch (InvalidProtocolBufferException malformed) {
+          throw new AssertionError("malformed RetryInfo detail", malformed);
+        }
+      }
+    }
+    throw new AssertionError("status carried no RetryInfo detail");
   }
 }
