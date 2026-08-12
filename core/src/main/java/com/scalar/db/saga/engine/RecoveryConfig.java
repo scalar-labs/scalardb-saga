@@ -12,14 +12,18 @@ import java.util.Objects;
  *
  * @param recoveryTimeoutMillis staleness threshold — sagas with {@code updated_at} older than this
  *     are considered stale and eligible for recovery
- * @param recoveryIntervalSeconds how often the recovery scan runs (in seconds)
+ * @param recoveryIntervalSeconds how often the recovery scan runs (in seconds); each replica shifts
+ *     its schedule within this interval by a deterministic offset derived from its owner ID, so
+ *     replicas started together do not scan in phase
  * @param compensationGracePeriod how long a saga can remain stuck (with step failure events) before
  *     being escalated to {@link SagaStatus#ESCALATED}
- * @param batchSize maximum number of sagas recovered per pass. Should be larger than the store's
- *     {@code recoveryScanLimit} (per-status per-bucket cap) multiplied by the number of recoverable
- *     statuses to ensure multiple buckets are covered per pass. For example, with {@code
- *     recoveryScanLimit=100} and 2 recoverable statuses, each bucket can return up to 200 sagas — a
- *     {@code batchSize} of 1000 covers at least 5 buckets per pass.
+ * @param batchSize per-pass work budget (committed claims for the staleness sweep, committed
+ *     WAITING transitions for the parked sweep — each sweep has its own budget). Claims lost to
+ *     another replica do not consume the budget, but failed attempts do, so a degraded store gets
+ *     backpressure instead of a full-ring retry storm; the sweep keeps scanning until the budget is
+ *     spent or a full bucket revolution completes, and a budget-stopped sweep resumes at the same
+ *     position next pass. A small {@code batchSize} therefore never skips buckets — it only spreads
+ *     a revolution across more passes, delaying recovery of the sagas behind the cut.
  * @param maxConcurrentRecoveries maximum number of sagas recovered concurrently within a single
  *     recovery pass (limits database pressure from virtual threads)
  * @param clock clock for time-based decisions (inject a fixed clock for testing)
@@ -58,8 +62,8 @@ public record RecoveryConfig(
   }
 
   /**
-   * Default: 60s timeout, scan every 30s, 4-hour grace period, batch size 1000, 10 concurrent
-   * recoveries.
+   * Default: 60s timeout, scan every 30s, 4-hour grace period, batch size 1000 (successful
+   * recoveries per pass), 10 concurrent recoveries.
    */
   public static RecoveryConfig defaults() {
     return defaults(Clock.systemUTC());
