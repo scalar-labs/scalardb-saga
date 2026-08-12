@@ -84,6 +84,7 @@ public class ScalarDbSagaStore implements SagaStore {
   private final ScalarDbSagaStoreConfig config;
   private final SagaDefinitionSerializer definitionSerializer;
   private final Supplier<String> appendIdSupplier;
+  private final Supplier<Instant> nowSupplier;
 
   /**
    * Creates a new store instance.
@@ -98,7 +99,7 @@ public class ScalarDbSagaStore implements SagaStore {
       ObjectMapper objectMapper,
       SagaSchema schema,
       ScalarDbSagaStoreConfig config) {
-    this(txManager, objectMapper, schema, config, () -> UUID.randomUUID().toString());
+    this(txManager, objectMapper, schema, config, () -> UUID.randomUUID().toString(), Instant::now);
   }
 
   /**
@@ -111,12 +112,28 @@ public class ScalarDbSagaStore implements SagaStore {
       SagaSchema schema,
       ScalarDbSagaStoreConfig config,
       Supplier<String> appendIdSupplier) {
+    this(txManager, objectMapper, schema, config, appendIdSupplier, Instant::now);
+  }
+
+  /**
+   * Visible for testing: additionally inject the timestamp source so tests that pin the recovery
+   * manager's clock keep row timestamps (e.g., the {@code claimForRecovery} stamp) on the same
+   * timeline, avoiding phantom re-claims when a pinned clock runs ahead of wall time.
+   */
+  ScalarDbSagaStore(
+      DistributedTransactionManager txManager,
+      ObjectMapper objectMapper,
+      SagaSchema schema,
+      ScalarDbSagaStoreConfig config,
+      Supplier<String> appendIdSupplier,
+      Supplier<Instant> nowSupplier) {
     this.txManager = Objects.requireNonNull(txManager, "txManager must not be null");
     this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper must not be null");
     this.schema = Objects.requireNonNull(schema, "schema must not be null");
     this.config = Objects.requireNonNull(config, "config must not be null");
     this.appendIdSupplier =
         Objects.requireNonNull(appendIdSupplier, "appendIdSupplier must not be null");
+    this.nowSupplier = Objects.requireNonNull(nowSupplier, "nowSupplier must not be null");
     this.definitionSerializer = new SagaDefinitionSerializer(objectMapper);
   }
 
@@ -161,7 +178,7 @@ public class ScalarDbSagaStore implements SagaStore {
     try {
       return runInTransaction(
           tx -> {
-            Instant now = Instant.now();
+            Instant now = nowSupplier.get();
             tx.insert(buildEventInsert(id, 0, startedEvent, appendId, now));
             SagaStateSnapshot snapshot =
                 new SagaStateSnapshot(
@@ -265,7 +282,7 @@ public class ScalarDbSagaStore implements SagaStore {
     String appendId = appendIdSupplier.get();
     runInTransaction(
         tx -> {
-          tx.insert(buildEventInsert(sagaId, sequence, event, appendId, Instant.now()));
+          tx.insert(buildEventInsert(sagaId, sequence, event, appendId, nowSupplier.get()));
           return Boolean.TRUE;
         },
         () ->
@@ -291,7 +308,7 @@ public class ScalarDbSagaStore implements SagaStore {
 
     return runInTransaction(
         tx -> {
-          Instant now = Instant.now();
+          Instant now = nowSupplier.get();
 
           // Verify the row still exists at the snapshot's CK.
           // Because status and updated_at are part of the clustering key,
@@ -335,7 +352,7 @@ public class ScalarDbSagaStore implements SagaStore {
 
     return runInTransaction(
         tx -> {
-          Instant now = Instant.now();
+          Instant now = nowSupplier.get();
 
           // Optimistic check: the row must still be at the snapshot's (RUNNING) CK.
           int oldStatus = current.getStatus().getStatusCode();
@@ -410,7 +427,7 @@ public class ScalarDbSagaStore implements SagaStore {
 
     return runInTransaction(
         tx -> {
-          Instant now = Instant.now();
+          Instant now = nowSupplier.get();
 
           // Fail-fast pre-check on the WAITING CK; the state-row delete below is the real
           // exclusion.
@@ -764,17 +781,62 @@ public class ScalarDbSagaStore implements SagaStore {
   // ---------------------------------------------------------------------------
 
   @Override
-  public Recoverables findRecoverable(Instant threshold, @Nullable ScanCursor cursor) {
-    int startBucket = 0;
-    if (cursor instanceof BucketCursor(int nextBucket)) {
-      startBucket = nextBucket;
-    }
+  public ScanCursor initialSweepCursor(String ownerId) {
+    return new PermutedBucketCursor(SweepScatter.seed(ownerId), 0);
+  }
 
-    if (startBucket >= schema.getNumBuckets()) {
+  @Override
+  public @Nullable ScanCursor advanceSweepCursor(ScanCursor cursor) {
+    SweepStep step = nextSweepStep(cursor);
+    return step == null ? null : step.nextCursor();
+  }
+
+  /**
+   * Resolves a sweep cursor to the bucket it points at and the cursor for the following bucket, or
+   * {@code null} when the sweep is exhausted. A {@link PermutedBucketCursor} walks the owner's
+   * scattered permutation; a {@code null} or {@link BucketCursor} cursor walks buckets in ascending
+   * order (backward-compatible direct store access).
+   */
+  private @Nullable SweepStep nextSweepStep(@Nullable ScanCursor cursor) {
+    int numBuckets = schema.getNumBuckets();
+    if (cursor instanceof PermutedBucketCursor(int seed, int position)) {
+      if (position >= numBuckets) {
+        return null;
+      }
+      int bucket = SweepScatter.permutation(seed, numBuckets)[position];
+      @Nullable ScanCursor next =
+          position + 1 < numBuckets ? new PermutedBucketCursor(seed, position + 1) : null;
+      return new SweepStep(bucket, next);
+    }
+    int startBucket;
+    if (cursor == null) {
+      startBucket = 0;
+    } else if (cursor instanceof BucketCursor(int nextBucket)) {
+      startBucket = nextBucket;
+    } else {
+      // A foreign cursor type would otherwise silently restart an un-scattered ascending sweep —
+      // the exact lockstep failure the scattered cursors exist to prevent. Fail fast instead.
+      throw new IllegalArgumentException(
+          "Unknown ScanCursor type "
+              + cursor.getClass().getName()
+              + "; cursors are only valid with the store that created them");
+    }
+    if (startBucket >= numBuckets) {
+      return null;
+    }
+    @Nullable ScanCursor next =
+        startBucket + 1 < numBuckets ? new BucketCursor(startBucket + 1) : null;
+    return new SweepStep(startBucket, next);
+  }
+
+  @Override
+  public Recoverables findRecoverable(Instant threshold, @Nullable ScanCursor cursor) {
+    SweepStep step = nextSweepStep(cursor);
+    if (step == null) {
       return new Recoverables(List.of(), null);
     }
 
-    int bucket = startBucket;
+    int bucket = step.bucket();
 
     List<SagaStateSnapshot> result =
         runInTransaction(
@@ -799,10 +861,7 @@ public class ScalarDbSagaStore implements SagaStore {
             null,
             "find recoverable sagas");
 
-    int nextBucket = startBucket + 1;
-    @Nullable ScanCursor nextCursor =
-        nextBucket < schema.getNumBuckets() ? new BucketCursor(nextBucket) : null;
-    return new Recoverables(result, nextCursor);
+    return new Recoverables(result, step.nextCursor());
   }
 
   @Override
@@ -815,7 +874,7 @@ public class ScalarDbSagaStore implements SagaStore {
       SagaStateSnapshot result =
           runInTransaction(
               tx -> {
-                Instant now = Instant.now();
+                Instant now = nowSupplier.get();
 
                 // Verify the row still exists at the snapshot's CK.
                 Optional<Result> current =
@@ -896,15 +955,12 @@ public class ScalarDbSagaStore implements SagaStore {
 
   @Override
   public OverdueParked findOverdueParkedSagas(Instant threshold, @Nullable ScanCursor cursor) {
-    int startBucket = 0;
-    if (cursor instanceof BucketCursor(int nextBucket)) {
-      startBucket = nextBucket;
-    }
-    if (startBucket >= schema.getNumBuckets()) {
+    SweepStep step = nextSweepStep(cursor);
+    if (step == null) {
       return new OverdueParked(List.of(), null);
     }
 
-    int bucket = startBucket;
+    int bucket = step.bucket();
     List<String> sagaIds =
         runInTransaction(
             tx -> {
@@ -919,10 +975,7 @@ public class ScalarDbSagaStore implements SagaStore {
             null,
             "find overdue parked sagas");
 
-    int nextBucket = startBucket + 1;
-    @Nullable ScanCursor nextCursor =
-        nextBucket < schema.getNumBuckets() ? new BucketCursor(nextBucket) : null;
-    return new OverdueParked(sagaIds, nextCursor);
+    return new OverdueParked(sagaIds, step.nextCursor());
   }
 
   // ---------------------------------------------------------------------------
@@ -931,10 +984,20 @@ public class ScalarDbSagaStore implements SagaStore {
 
   @Override
   public List<SagaStateSnapshot> findByStatusOlderThan(
-      SagaStatus status, Instant threshold, int maxResults) {
+      SagaStatus status, Instant threshold, int maxResults, String ownerId, int rotation) {
+    int numBuckets = schema.getNumBuckets();
+    int[] order = SweepScatter.permutation(SweepScatter.seed(ownerId), numBuckets);
     List<SagaStateSnapshot> results = new ArrayList<>();
-    for (int bucket = 0; bucket < schema.getNumBuckets() && results.size() < maxResults; bucket++) {
-      results.addAll(findByStatusInBucket(bucket, status, threshold, maxResults - results.size()));
+    for (int i = 0; i < numBuckets && results.size() < maxResults; i++) {
+      int bucket = order[Math.floorMod(i + rotation, numBuckets)];
+      try {
+        results.addAll(
+            findByStatusInBucket(bucket, status, threshold, maxResults - results.size()));
+      } catch (RuntimeException e) {
+        // One bucket's scan failure (e.g., a row that cannot be deserialized) must not abandon
+        // every bucket after it in the sweep order; skip it and let the next pass retry.
+        logger.warn("Scan of bucket {} for status {} failed; skipping it", bucket, status, e);
+      }
     }
     return results;
   }
@@ -961,8 +1024,8 @@ public class ScalarDbSagaStore implements SagaStore {
   }
 
   @Override
-  public void deleteSaga(String sagaId) {
-    runInTransaction(
+  public boolean deleteSaga(String sagaId) {
+    return runInTransaction(
         tx -> {
           Optional<Result> stateResult = tx.scan(buildStateIndexScan(sagaId)).stream().findFirst();
 
@@ -991,10 +1054,13 @@ public class ScalarDbSagaStore implements SagaStore {
             tx.delete(buildEventDelete(sagaId, r.getInt("sequence")));
           }
 
-          return Boolean.TRUE;
+          // True only when this call removed the state row; an already-purged saga is a no-op so
+          // budgeting callers can tell real purges from races with other replicas.
+          return stateResult.isPresent();
         },
         () -> {
-          // Verify deletion: state row should be absent
+          // Verify deletion after an unknown commit: state row absent means our delete (or an
+          // equivalent one) landed; report it as a real purge.
           Optional<SagaStateSnapshot> state = loadStateSnapshot(sagaId);
           return state.isEmpty() ? Optional.of(Boolean.TRUE) : Optional.empty();
         },
@@ -1391,7 +1457,7 @@ public class ScalarDbSagaStore implements SagaStore {
         .partitionKey(Key.ofText("saga_name", name))
         .clusteringKey(Key.ofText("definition_version", version))
         .textValue("definition_json", json)
-        .timestampTZValue("registered_at", Instant.now())
+        .timestampTZValue("registered_at", nowSupplier.get())
         .build();
   }
 
@@ -1584,6 +1650,16 @@ public class ScalarDbSagaStore implements SagaStore {
 
   /** Internal cursor tracking which bucket to scan next. */
   private record BucketCursor(int nextBucket) implements ScanCursor {}
+
+  /**
+   * Cursor for a scattered sweep: {@code position} indexes into the bucket permutation derived from
+   * {@code seed} (see {@link SweepScatter}), so the cursor stays small while the full order is
+   * recomputed cheaply per call.
+   */
+  private record PermutedBucketCursor(int seed, int position) implements ScanCursor {}
+
+  /** One resolved sweep step: the bucket to scan and the cursor for the following bucket. */
+  private record SweepStep(int bucket, @Nullable ScanCursor nextCursor) {}
 
   /**
    * Result of scanning one {@code (bucket, status)} slice: the rows to emit, and — when the slice
