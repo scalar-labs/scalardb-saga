@@ -1345,11 +1345,20 @@ public final class SagaServerConfig {
       throw new IllegalArgumentException(
           "Invalid value for '"
               + SHUTDOWN_MODE_KEY
-              + "': "
-              + value
-              + ". Valid modes: WAIT_CURRENT_STEP, WAIT_ALL_SAGAS.",
-          e);
+              + "' "
+              + redacted(value)
+              + ". Valid modes: WAIT_CURRENT_STEP, WAIT_ALL_SAGAS.");
     }
+  }
+
+  /**
+   * Describes a rejected value without echoing it. Secret references are resolved for every key
+   * before parsing, so a reference pasted onto the wrong key arrives at the parsers as the secret's
+   * plaintext; echoing it would write the secret to the log. The parsers also throw without the
+   * parse exception as cause for the same reason — its message embeds the raw input.
+   */
+  private static String redacted(String value) {
+    return "(value redacted, " + value.length() + " chars)";
   }
 
   private static int parsePort(@Nullable String value, String key, int defaultPort) {
@@ -1360,7 +1369,8 @@ public final class SagaServerConfig {
     try {
       port = Integer.parseInt(value.trim());
     } catch (NumberFormatException e) {
-      throw new IllegalArgumentException("Invalid value for '" + key + "': " + value, e);
+      throw new IllegalArgumentException(
+          "Invalid value for '" + key + "': not a number " + redacted(value));
     }
     if (port < 0 || port > 65535) {
       throw new IllegalArgumentException("'" + key + "' must be between 0 and 65535, got " + port);
@@ -1384,7 +1394,8 @@ public final class SagaServerConfig {
     if (trimmed.equalsIgnoreCase("false")) {
       return false;
     }
-    throw new IllegalArgumentException("'" + key + "' must be 'true' or 'false', got " + value);
+    throw new IllegalArgumentException(
+        "'" + key + "' must be 'true' or 'false' " + redacted(value));
   }
 
   /**
@@ -1401,7 +1412,8 @@ public final class SagaServerConfig {
     try {
       parsed = Long.parseLong(value.trim());
     } catch (NumberFormatException e) {
-      throw new IllegalArgumentException("Invalid value for '" + key + "': " + value, e);
+      throw new IllegalArgumentException(
+          "Invalid value for '" + key + "': not a number " + redacted(value));
     }
     if (parsed < minInclusive) {
       throw new IllegalArgumentException(
@@ -1468,7 +1480,7 @@ public final class SagaServerConfig {
       String trimmed = element.trim();
       if (trimmed.isEmpty()) {
         throw new IllegalArgumentException(
-            "'" + key + "' has an empty element: " + value + ". Remove the stray comma.");
+            "'" + key + "' has an empty element " + redacted(value) + ". Remove the stray comma.");
       }
       elements.add(trimmed);
     }
@@ -1490,7 +1502,10 @@ public final class SagaServerConfig {
       bytes = Integer.parseInt(value.trim());
     } catch (NumberFormatException e) {
       throw new IllegalArgumentException(
-          "Invalid value for '" + STORE_MAX_EVENT_PAYLOAD_BYTES_KEY + "': " + value, e);
+          "Invalid value for '"
+              + STORE_MAX_EVENT_PAYLOAD_BYTES_KEY
+              + "': not a number "
+              + redacted(value));
     }
     if (bytes < 0) {
       throw new IllegalArgumentException(

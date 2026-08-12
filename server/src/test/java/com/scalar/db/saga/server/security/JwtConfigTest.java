@@ -204,6 +204,50 @@ class JwtConfigTest {
   }
 
   @Test
+  void from_nonNumericTimeout_throwsWithoutEchoingValue() {
+    // Arrange
+    Properties props = minimalProps();
+    props.setProperty(JwtConfig.CONNECT_TIMEOUT_MILLIS_KEY, "swordfish-token");
+
+    // Act / Assert: the security keys sit beside secret references in the same file, so a
+    // reference pasted onto the wrong key must fail without the resolved value in the message,
+    // and without the NumberFormatException cause, whose own message embeds it.
+    assertThatThrownBy(() -> JwtConfig.from(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(JwtConfig.CONNECT_TIMEOUT_MILLIS_KEY)
+        .hasMessageNotContaining("swordfish")
+        .hasNoCause();
+  }
+
+  @Test
+  void from_malformedJwksUrl_throwsWithoutEchoingValue() {
+    // Arrange
+    Properties props = minimalProps();
+    props.setProperty(JwtConfig.JWKS_URL_KEY, "swordfish token, not a url");
+
+    // Act / Assert: URISyntaxException's message embeds the input, so the cause is dropped too.
+    assertThatThrownBy(() -> JwtConfig.from(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(JwtConfig.JWKS_URL_KEY)
+        .hasMessageNotContaining("swordfish")
+        .hasNoCause();
+  }
+
+  @Test
+  void from_credentialBearingNonHttpsJwksUrl_throwsWithoutEchoingValue() {
+    // Arrange: a URL-shaped secret, e.g. a connection string with an embedded password, parses
+    // fine and lands in the https enforcement, which used to echo the full URL.
+    Properties props = minimalProps();
+    props.setProperty(JwtConfig.JWKS_URL_KEY, "http://admin:swordfish@db.internal/prod");
+
+    // Act / Assert
+    assertThatThrownBy(() -> JwtConfig.from(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("must use https")
+        .hasMessageNotContaining("swordfish");
+  }
+
+  @Test
   void serverConfigLoad_everyKeyDeclaredHereGiven_isAccepted() throws IllegalAccessException {
     // Arrange
     // This class owns the key names, but it is not visible from the daemon package, so
