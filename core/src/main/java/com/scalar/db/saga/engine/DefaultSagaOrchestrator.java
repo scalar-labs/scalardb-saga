@@ -522,6 +522,19 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   // Recovery
   // ---------------------------------------------------------------------------
 
+  /**
+   * Runs one recovery pass now (both sweeps: stale sagas and overdue parked sagas), returning when
+   * the pass has finished its work.
+   *
+   * <p>Passes never overlap: if a scheduled pass (see {@link #startBackgroundTasks()}) is already
+   * in flight, this call blocks until that pass completes and then runs its own. The wait honors
+   * thread interruption — an interrupted caller returns without having run a pass, with the
+   * interrupt flag set.
+   *
+   * <p>A pass continues a budget-stopped bucket revolution rather than restarting it, so a saga
+   * just marked via {@link SagaStore#markForRecovery} is not guaranteed to be reached by the next
+   * single call — only within one revolution's worth of passes.
+   */
   public void recover() {
     ensureOpen();
     recoveryManager.recover();
@@ -642,6 +655,11 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   public static final class Builder {
 
     private @Nullable SagaStoreFactory storeFactory;
+    // Mirrors the store's saga-ID discipline: the owner id lands in state rows and log lines, so
+    // it gets the same character set and length bound.
+    private static final java.util.regex.Pattern OWNER_ID_PATTERN =
+        java.util.regex.Pattern.compile("[a-zA-Z0-9._-]{1,128}");
+
     private String ownerId = java.util.UUID.randomUUID().toString();
     private ShutdownMode shutdownMode = DEFAULT_SHUTDOWN_MODE;
     private long shutdownTimeoutMillis = DEFAULT_SHUTDOWN_TIMEOUT_MILLIS;
@@ -675,13 +693,20 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     }
 
     /**
-     * Sets the owner ID for this engine instance. Defaults to a random UUID.
+     * Sets the owner ID for this engine instance. Defaults to a random UUID. The value is stamped
+     * on claimed saga rows and echoed in log lines, so it is validated like a saga ID: {@code
+     * [a-zA-Z0-9._-]{1,128}}.
      *
      * @param ownerId the owner ID (e.g., pod name, hostname)
      * @return this builder
+     * @throws IllegalArgumentException if the value has other characters or an invalid length
      */
     public Builder ownerId(String ownerId) {
-      this.ownerId = Objects.requireNonNull(ownerId, "ownerId must not be null");
+      Objects.requireNonNull(ownerId, "ownerId must not be null");
+      if (!OWNER_ID_PATTERN.matcher(ownerId).matches()) {
+        throw new IllegalArgumentException("ownerId must match " + OWNER_ID_PATTERN.pattern());
+      }
+      this.ownerId = ownerId;
       return this;
     }
 
@@ -914,7 +939,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
             new SagaRecoveryManager(
                 store, engine, definitionRegistry, ownerId, resolvedRecoveryConfig);
         SagaRetentionManager retentionManager =
-            new SagaRetentionManager(store, resolvedRetentionConfig);
+            new SagaRetentionManager(store, ownerId, resolvedRetentionConfig);
 
         return new DefaultSagaOrchestrator(
             engine,
