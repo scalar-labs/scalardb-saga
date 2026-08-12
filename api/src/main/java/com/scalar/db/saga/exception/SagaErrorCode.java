@@ -32,10 +32,9 @@ import java.util.Optional;
  *
  * <p><b>Once a code is released, its number is frozen.</b>
  */
-// Suppress Error Prone's ImmutableEnumChecker: ErrorMetadataSchema is effectively immutable (its
-// List field is
-// Collections.unmodifiableList of a defensive copy), but Error Prone only trusts its own
-// @com.google.errorprone.annotations.Immutable which api/ does not depend on. The claim is real.
+// Suppress Error Prone's ImmutableEnumChecker: ErrorMetadataSchema is effectively immutable — its
+// list field is an unmodifiable defensive copy — but Error Prone only trusts its own Immutable
+// annotation, which api/ does not depend on. The claim is real.
 @SuppressWarnings("ImmutableEnumChecker")
 public enum SagaErrorCode {
 
@@ -173,7 +172,7 @@ public enum SagaErrorCode {
       "A saga with the given client-supplied ID already exists.",
       "Use a different ID, or fetch the existing saga's state."),
 
-  DEFINITION_VERSION_CONTENT_CONFLICT(
+  SAGA_DEFINITION_VERSION_CONTENT_CONFLICT(
       "DB-SAGA-10302",
       Category.USER_ERROR,
       "Definition version is already registered with different content",
@@ -324,12 +323,13 @@ public enum SagaErrorCode {
   ;
 
   /**
-   * The {@code google.rpc.ErrorInfo} domain scoping every {@code DB-SAGA-*} reason — per the
-   * ErrorInfo convention, the service name styled on the vendor's own domain. The daemon stamps it
-   * on every {@code ErrorInfo} it emits, and the client SDK ignores an {@code ErrorInfo} carrying
-   * any other domain: an intermediary (mesh sidecar, gateway) may attach its own, whose reason
-   * means nothing in this vocabulary. Frozen at first release — clients match it exactly, so
-   * renaming it would make every older client treat a newer daemon's {@code ErrorInfo} as foreign.
+   * The globally unique identifier scoping this code vocabulary — the service name styled on the
+   * vendor's own domain. Wherever a {@code DB-SAGA-*} reason travels beside other producers' codes,
+   * this says whose vocabulary the reason belongs to. Its one carrier today is gRPC's {@code
+   * google.rpc.ErrorInfo.domain}: the server stamps it on every {@code ErrorInfo} it emits, and the
+   * client SDK ignores an {@code ErrorInfo} carrying any other domain, since an intermediary (mesh
+   * sidecar, gateway) may attach its own. Frozen at first release — clients match it verbatim, so
+   * renaming it would make every older client treat a newer server's {@code ErrorInfo} as foreign.
    */
   public static final String WIRE_DOMAIN = "scalardb-saga.scalar-labs.com";
 

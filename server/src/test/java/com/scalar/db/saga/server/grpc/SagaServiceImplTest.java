@@ -245,7 +245,7 @@ class SagaServiceImplTest {
   @Test
   void startSaga_definitionNotFound_returnsNotFound() {
     when(orchestrator.startAsync("unknown", Map.of()))
-        .thenThrow(new SagaDefinitionNotFoundException("unknown"));
+        .thenThrow(SagaDefinitionNotFoundException.byName("unknown"));
 
     assertCode(() -> stub(0).startSaga(startByName("unknown", true)), Status.Code.NOT_FOUND);
   }

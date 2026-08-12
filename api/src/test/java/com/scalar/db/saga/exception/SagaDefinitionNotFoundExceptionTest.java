@@ -9,9 +9,9 @@ import org.junit.jupiter.api.Test;
 class SagaDefinitionNotFoundExceptionTest {
 
   @Test
-  void constructor_sagaNameOnlyGiven_carriesNameOnlyCode() {
+  void byName_sagaNameGiven_carriesNameOnlyCode() {
     // Arrange & Act
-    SagaDefinitionNotFoundException e = new SagaDefinitionNotFoundException("order-saga");
+    SagaDefinitionNotFoundException e = SagaDefinitionNotFoundException.byName("order-saga");
 
     // Assert
     assertThat(e.getSagaName()).isEqualTo("order-saga");
@@ -23,9 +23,10 @@ class SagaDefinitionNotFoundExceptionTest {
   }
 
   @Test
-  void constructor_sagaNameAndVersionGiven_carriesVersionedCode() {
+  void byNameAndVersion_bothGiven_carriesVersionedCode() {
     // Arrange & Act
-    SagaDefinitionNotFoundException e = new SagaDefinitionNotFoundException("order-saga", "2.0");
+    SagaDefinitionNotFoundException e =
+        SagaDefinitionNotFoundException.byNameAndVersion("order-saga", "2.0");
 
     // Assert
     assertThat(e.getSagaName()).isEqualTo("order-saga");
@@ -42,11 +43,11 @@ class SagaDefinitionNotFoundExceptionTest {
   }
 
   @Test
-  void constructor_sagaDefinitionIdGiven_carriesVersionedCode() {
+  void byId_sagaDefinitionIdGiven_carriesVersionedCode() {
     // Arrange & Act — the SagaDefinitionId ctor delegates to (name, version), so it always uses
     // the versioned code even though the caller passed an id
     SagaDefinitionId id = new SagaDefinitionId("order-saga", "2.0");
-    SagaDefinitionNotFoundException e = new SagaDefinitionNotFoundException(id);
+    SagaDefinitionNotFoundException e = SagaDefinitionNotFoundException.byId(id);
 
     // Assert
     assertThat(e.getSagaName()).isEqualTo("order-saga");
@@ -60,17 +61,17 @@ class SagaDefinitionNotFoundExceptionTest {
 
   @SuppressWarnings("NullAway")
   @Test
-  void constructor_nullSagaNameGiven_throwsNullPointerException() {
+  void byName_nullSagaNameGiven_throwsNullPointerException() {
     // Arrange & Act & Assert
-    assertThatThrownBy(() -> new SagaDefinitionNotFoundException((String) null))
+    assertThatThrownBy(() -> SagaDefinitionNotFoundException.byName(null))
         .isInstanceOf(NullPointerException.class);
   }
 
   @SuppressWarnings("NullAway")
   @Test
-  void constructor_sagaNameAndNullVersionGiven_throwsNullPointerException() {
+  void byNameAndVersion_nullVersionGiven_throwsNullPointerException() {
     // Arrange & Act & Assert
-    assertThatThrownBy(() -> new SagaDefinitionNotFoundException("order-saga", null))
+    assertThatThrownBy(() -> SagaDefinitionNotFoundException.byNameAndVersion("order-saga", null))
         .isInstanceOf(NullPointerException.class);
   }
 

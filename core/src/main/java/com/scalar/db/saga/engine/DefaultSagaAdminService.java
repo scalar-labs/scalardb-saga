@@ -437,7 +437,7 @@ public class DefaultSagaAdminService implements SagaAdminService {
     SagaDefinition def =
         definitionRegistry.resolve(snapshot.getSagaName(), snapshot.getDefinitionVersion());
     if (def == null) {
-      throw new SagaDefinitionNotFoundException(
+      throw SagaDefinitionNotFoundException.byNameAndVersion(
           snapshot.getSagaName(), snapshot.getDefinitionVersion());
     }
     return def;

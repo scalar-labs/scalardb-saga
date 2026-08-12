@@ -586,7 +586,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   private SagaDefinition requireLatestDefinition(String sagaName) {
     SagaDefinition def = definitionRegistry.resolve(sagaName);
     if (def == null) {
-      throw new SagaDefinitionNotFoundException(sagaName);
+      throw SagaDefinitionNotFoundException.byName(sagaName);
     }
     return def;
   }
@@ -594,7 +594,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   private SagaDefinition requireVersionedDefinition(SagaDefinitionId id) {
     SagaDefinition def = definitionRegistry.resolve(id.name(), id.version());
     if (def == null) {
-      throw new SagaDefinitionNotFoundException(id);
+      throw SagaDefinitionNotFoundException.byId(id);
     }
     return def;
   }
@@ -603,7 +603,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     SagaDefinition def =
         definitionRegistry.resolve(saga.getSagaName(), saga.getDefinitionVersion());
     if (def == null) {
-      throw new SagaDefinitionNotFoundException(saga.getSagaName(), saga.getDefinitionVersion());
+      throw SagaDefinitionNotFoundException.byNameAndVersion(
+          saga.getSagaName(), saga.getDefinitionVersion());
     }
     return def;
   }

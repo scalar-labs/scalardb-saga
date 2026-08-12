@@ -245,14 +245,14 @@ class ErrorMapperTest {
         new Arm(
             SagaDefinitionException.versionContentConflict("transfer", "v2"),
             409,
-            SagaErrorCode.DEFINITION_VERSION_CONTENT_CONFLICT),
+            SagaErrorCode.SAGA_DEFINITION_VERSION_CONTENT_CONFLICT),
         new Arm(new SagaNotFoundException("s-1"), 404, SagaErrorCode.SAGA_NOT_FOUND),
         new Arm(
-            new SagaDefinitionNotFoundException("transfer"),
+            SagaDefinitionNotFoundException.byName("transfer"),
             404,
             SagaErrorCode.SAGA_DEFINITION_NOT_FOUND),
         new Arm(
-            new SagaDefinitionNotFoundException("transfer", "v2"),
+            SagaDefinitionNotFoundException.byNameAndVersion("transfer", "v2"),
             404,
             SagaErrorCode.SAGA_DEFINITION_VERSION_NOT_FOUND),
         // Javalin's unmatched-route signal; its handler must answer with a not-found-family code,
@@ -329,7 +329,7 @@ class ErrorMapperTest {
     // (100xx bad request, 101xx auth, 102xx not-found, 103xx conflict, 104xx precondition), and
     // the docs generator files codes by it. This guards the sub-range digits against what this
     // mapper actually answers, so a code cannot sit in the conflict range while the daemon says
-    // 400 — which is exactly how DEFINITION_VERSION_CONTENT_CONFLICT shipped until its handler
+    // 400 — which is exactly how SAGA_DEFINITION_VERSION_CONTENT_CONFLICT shipped until its handler
     // branched on the code.
     Map<String, List<Integer>> statusesBySubRange =
         Map.of(

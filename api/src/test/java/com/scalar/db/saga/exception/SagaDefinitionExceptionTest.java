@@ -88,7 +88,7 @@ class SagaDefinitionExceptionTest {
     SagaDefinitionException e = SagaDefinitionException.versionContentConflict("transfer", "1.0");
 
     // Assert
-    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.DEFINITION_VERSION_CONTENT_CONFLICT);
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.SAGA_DEFINITION_VERSION_CONTENT_CONFLICT);
     // saga_name, not name: every sibling code that carries a definition name uses saga_name, and
     // the key freezes at first release, so a client dispatching on metadata keys never
     // special-cases this one code.

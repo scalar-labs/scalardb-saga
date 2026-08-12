@@ -476,8 +476,8 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
     }
     if (code == Status.Code.NOT_FOUND) {
       return version == null
-          ? new SagaDefinitionNotFoundException(name)
-          : new SagaDefinitionNotFoundException(name, version);
+          ? SagaDefinitionNotFoundException.byName(name)
+          : SagaDefinitionNotFoundException.byNameAndVersion(name, version);
     }
     return GrpcClientSupport.mapTransport(e);
   }

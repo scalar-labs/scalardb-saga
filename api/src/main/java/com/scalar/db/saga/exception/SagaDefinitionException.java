@@ -69,7 +69,7 @@ public class SagaDefinitionException extends SagaRuntimeException {
 
   public static SagaDefinitionException versionContentConflict(String name, String version) {
     return new SagaDefinitionException(
-        SagaErrorCode.DEFINITION_VERSION_CONTENT_CONFLICT,
+        SagaErrorCode.SAGA_DEFINITION_VERSION_CONTENT_CONFLICT,
         ErrorMetadata.of("saga_name", name, "version", version));
   }
 
@@ -116,7 +116,7 @@ public class SagaDefinitionException extends SagaRuntimeException {
       case INVALID_STEP_DEFINITION:
       case MALFORMED_DEFINITION:
       case UNREADABLE_DEFINITION_SOURCE:
-      case DEFINITION_VERSION_CONTENT_CONFLICT:
+      case SAGA_DEFINITION_VERSION_CONTENT_CONFLICT:
       case INVALID_STEP_CLASS:
       case STEP_CLASS_NOT_SUPPORTED_ON_SERVER:
       case HTTP_ENDPOINT_LOOKUP_FAILED:

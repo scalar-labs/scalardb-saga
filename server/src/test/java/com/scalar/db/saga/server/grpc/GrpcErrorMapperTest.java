@@ -80,7 +80,7 @@ class GrpcErrorMapperTest {
   @Test
   void toStatusRuntimeException_definitionNotFoundNameOnlyGiven_carriesSagaNameMetadata() {
     StatusRuntimeException e =
-        GrpcErrorMapper.toStatusRuntimeException(new SagaDefinitionNotFoundException("orders"));
+        GrpcErrorMapper.toStatusRuntimeException(SagaDefinitionNotFoundException.byName("orders"));
 
     assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.NOT_FOUND);
     ErrorInfo info = errorInfo(e);
@@ -94,7 +94,7 @@ class GrpcErrorMapperTest {
   void toStatusRuntimeException_definitionNotFoundWithVersionGiven_carriesNameAndVersion() {
     StatusRuntimeException e =
         GrpcErrorMapper.toStatusRuntimeException(
-            new SagaDefinitionNotFoundException("orders", "v2"));
+            SagaDefinitionNotFoundException.byNameAndVersion("orders", "v2"));
 
     assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.NOT_FOUND);
     ErrorInfo info = errorInfo(e);
@@ -166,15 +166,15 @@ class GrpcErrorMapperTest {
         new Arm(
             SagaDefinitionException.versionContentConflict("transfer", "v2"),
             Status.Code.ALREADY_EXISTS,
-            SagaErrorCode.DEFINITION_VERSION_CONTENT_CONFLICT),
+            SagaErrorCode.SAGA_DEFINITION_VERSION_CONTENT_CONFLICT),
         new Arm(
             new SagaNotFoundException("s-1"), Status.Code.NOT_FOUND, SagaErrorCode.SAGA_NOT_FOUND),
         new Arm(
-            new SagaDefinitionNotFoundException("transfer"),
+            SagaDefinitionNotFoundException.byName("transfer"),
             Status.Code.NOT_FOUND,
             SagaErrorCode.SAGA_DEFINITION_NOT_FOUND),
         new Arm(
-            new SagaDefinitionNotFoundException("transfer", "v2"),
+            SagaDefinitionNotFoundException.byNameAndVersion("transfer", "v2"),
             Status.Code.NOT_FOUND,
             SagaErrorCode.SAGA_DEFINITION_VERSION_NOT_FOUND),
         new Arm(
@@ -236,7 +236,8 @@ class GrpcErrorMapperTest {
     // the docs generator files codes by it. SagaErrorCodeTest guards digit 1 (the category); this
     // guards the next two against what this mapper actually answers, so a code cannot sit in the
     // conflict range while the daemon says INVALID_ARGUMENT — which is exactly how
-    // DEFINITION_VERSION_CONTENT_CONFLICT shipped 400 until the guarded dispatch arm was added.
+    // SAGA_DEFINITION_VERSION_CONTENT_CONFLICT shipped 400 until the guarded dispatch arm was
+    // added.
     Map<String, List<Status.Code>> statusesBySubRange =
         Map.of(
             "100", List.of(Status.Code.INVALID_ARGUMENT),

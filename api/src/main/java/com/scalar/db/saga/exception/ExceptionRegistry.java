@@ -74,10 +74,12 @@ public final class ExceptionRegistry {
     m.put(SagaErrorCode.SAGA_NOT_FOUND, meta -> new SagaNotFoundException(meta.get("saga_id")));
     m.put(
         SagaErrorCode.SAGA_DEFINITION_NOT_FOUND,
-        meta -> new SagaDefinitionNotFoundException(meta.get("saga_name")));
+        meta -> SagaDefinitionNotFoundException.byName(meta.get("saga_name")));
     m.put(
         SagaErrorCode.SAGA_DEFINITION_VERSION_NOT_FOUND,
-        meta -> new SagaDefinitionNotFoundException(meta.get("saga_name"), meta.get("version")));
+        meta ->
+            SagaDefinitionNotFoundException.byNameAndVersion(
+                meta.get("saga_name"), meta.get("version")));
     // REST-only (the unmatched-route 404); no dedicated exception type, so it round-trips raw.
     m.put(SagaErrorCode.ENDPOINT_NOT_FOUND, meta -> raw(SagaErrorCode.ENDPOINT_NOT_FOUND, meta));
 
@@ -87,10 +89,10 @@ public final class ExceptionRegistry {
     // itself and constructs the typed exception directly (see GrpcSagaOrchestratorClient).
     m.put(SagaErrorCode.SAGA_ALREADY_EXISTS, meta -> raw(SagaErrorCode.SAGA_ALREADY_EXISTS, meta));
     m.put(
-        SagaErrorCode.DEFINITION_VERSION_CONTENT_CONFLICT,
+        SagaErrorCode.SAGA_DEFINITION_VERSION_CONTENT_CONFLICT,
         meta ->
             SagaDefinitionException.fromWire(
-                SagaErrorCode.DEFINITION_VERSION_CONTENT_CONFLICT, meta));
+                SagaErrorCode.SAGA_DEFINITION_VERSION_CONTENT_CONFLICT, meta));
 
     // ── USER_ERROR — Precondition (104xx) ─────────────────────────────
     m.put(
