@@ -32,6 +32,10 @@ final class GrpcClientSupport {
 
   private static final long CLOSE_TIMEOUT_SECONDS = 5L;
 
+  // Cap on transport-description text embedded in an exception message; the same bound the
+  // server's unmatched-route 404 applies to its echoed request line.
+  private static final int MAX_EMBEDDED_DESCRIPTION = 200;
+
   private GrpcClientSupport() {}
 
   /**
@@ -189,7 +193,7 @@ final class GrpcClientSupport {
     switch (status.getCode()) {
       case INVALID_ARGUMENT:
         return new SagaIllegalArgumentException(
-            description == null ? "Invalid request" : description, e);
+            description == null ? "Invalid request" : sanitize(description), e);
       case DEADLINE_EXCEEDED:
         // The gRPC status (with its description) is preserved as the cause; the fixed message
         // comes from SagaErrorCode.REQUEST_TIMEOUT.
@@ -229,6 +233,26 @@ final class GrpcClientSupport {
             ErrorMetadata.of("server_value", status.getCode().name()),
             e);
     }
+  }
+
+  /**
+   * Sanitizes transport text before it enters an exception message: ISO control characters become
+   * spaces (a newline in server-sent text would otherwise fabricate log lines client-side; spaces
+   * rather than removal so flattened multi-line text keeps its word boundaries, matching the
+   * server's own reason sanitizer) and the length is capped. Only the INVALID_ARGUMENT arm embeds
+   * server text; the raw description stays readable on the attached cause.
+   */
+  private static String sanitize(String text) {
+    int cap = Math.min(text.length(), MAX_EMBEDDED_DESCRIPTION);
+    StringBuilder sb = new StringBuilder(cap);
+    for (int i = 0; i < cap; i++) {
+      char c = text.charAt(i);
+      sb.append(Character.isISOControl(c) ? ' ' : c);
+    }
+    if (text.length() > MAX_EMBEDDED_DESCRIPTION) {
+      sb.append("...");
+    }
+    return sb.toString();
   }
 
   private static boolean alpnAvailable() {

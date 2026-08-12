@@ -450,6 +450,32 @@ class GrpcSagaOrchestratorClientTest {
         .hasMessageContaining("bad input");
   }
 
+  @Test
+  void start_invalidArgumentWithControlCharacters_flattensThemInTheMessage() {
+    // Arrange — the description is the one server-controlled text embedded in an exception
+    // message, and an intermediary fully controls it; a newline would fabricate client log lines.
+    fake.startError =
+        Status.INVALID_ARGUMENT.withDescription("line1\nline2\tend").asRuntimeException();
+
+    // Act + Assert — control characters become spaces; the raw text stays on the cause.
+    assertThatThrownBy(() -> client.start("transfer", Map.of()))
+        .isInstanceOf(SagaIllegalArgumentException.class)
+        .hasMessageContaining("line1 line2 end")
+        .hasCauseInstanceOf(StatusRuntimeException.class);
+  }
+
+  @Test
+  void start_invalidArgumentWithOversizedDescription_capsTheMessage() {
+    // Arrange
+    fake.startError = Status.INVALID_ARGUMENT.withDescription("x".repeat(300)).asRuntimeException();
+
+    // Act + Assert — capped with an ellipsis; the full text stays on the cause.
+    assertThatThrownBy(() -> client.start("transfer", Map.of()))
+        .isInstanceOf(SagaIllegalArgumentException.class)
+        .hasMessageContaining("...")
+        .satisfies(e -> assertThat(e.getMessage()).doesNotContain("x".repeat(250)));
+  }
+
   // UNAVAILABLE/DEADLINE_EXCEEDED are retryable on the synchronous start path, so the mapping is
   // asserted on the single-shot startAsync path (which surfaces them immediately).
   @Test
