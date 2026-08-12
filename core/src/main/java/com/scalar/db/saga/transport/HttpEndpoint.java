@@ -170,11 +170,9 @@ public final class HttpEndpoint implements AutoCloseable {
     }
     for (CallSpec spec : phases.values()) {
       if (spec.isAsync()) {
-        throw SagaDefinitionException.definitionInvalid(
-            "",
-            "step '"
-                + stepName
-                + "' is async but async completion is not configured on the daemon (missing"
+        throw SagaDefinitionException.declarativeStepInvalid(
+            stepName,
+            "declares an async phase but async completion is not configured on the daemon (missing"
                 + " callback URL / secret)");
       }
     }

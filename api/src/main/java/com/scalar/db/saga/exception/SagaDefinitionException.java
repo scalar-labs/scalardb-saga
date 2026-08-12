@@ -46,6 +46,15 @@ public class SagaDefinitionException extends SagaRuntimeException {
         Objects.requireNonNull(cause, "cause must not be null"));
   }
 
+  /** As {@link #definitionMalformed(String, Throwable)}, for a file or resource source. */
+  public static SagaDefinitionException definitionMalformed(
+      String format, String source, Throwable cause) {
+    return new SagaDefinitionException(
+        SagaErrorCode.MALFORMED_DEFINITION,
+        ErrorMetadata.of("source", source, "detail", "failed to parse " + format + " definition"),
+        Objects.requireNonNull(cause, "cause must not be null"));
+  }
+
   public static SagaDefinitionException sourceUnreadable(String source) {
     return new SagaDefinitionException(
         SagaErrorCode.UNREADABLE_DEFINITION_SOURCE, ErrorMetadata.of("source", source));

@@ -1,6 +1,7 @@
 package com.scalar.db.saga.definition;
 
 import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
@@ -57,6 +58,10 @@ public final class SagaDefinitionParser {
     ObjectMapper mapper = resolveMapper(fileName);
     try (InputStream in = Files.newInputStream(path)) {
       return parse(mapper, in);
+    } catch (JsonProcessingException e) {
+      // Before the IOException arm, which it extends: a syntactically malformed file is a
+      // malformed definition, not an unreadable source.
+      throw SagaDefinitionException.definitionMalformed(formatOf(fileName), path.toString(), e);
     } catch (IOException e) {
       throw SagaDefinitionException.sourceUnreadable(path.toString(), e);
     }
@@ -68,13 +73,17 @@ public final class SagaDefinitionParser {
    * @throws SagaDefinitionException if the resource cannot be parsed or fails validation
    */
   public static SagaDefinition parseResource(String resourcePath) {
-    ObjectMapper mapper = resolveMapper(resourcePath.toLowerCase(java.util.Locale.ROOT));
+    String lowerPath = resourcePath.toLowerCase(java.util.Locale.ROOT);
+    ObjectMapper mapper = resolveMapper(lowerPath);
     try (InputStream in =
         SagaDefinitionParser.class.getClassLoader().getResourceAsStream(resourcePath)) {
       if (in == null) {
         throw SagaDefinitionException.sourceUnreadable(resourcePath);
       }
       return parse(mapper, in);
+    } catch (JsonProcessingException e) {
+      // Before the IOException arm, which it extends; see parseFile.
+      throw SagaDefinitionException.definitionMalformed(formatOf(lowerPath), resourcePath, e);
     } catch (IOException e) {
       throw SagaDefinitionException.sourceUnreadable(resourcePath, e);
     }
@@ -348,6 +357,11 @@ public final class SagaDefinitionParser {
                 });
       }
     }
+  }
+
+  /** The format label for a path {@link #resolveMapper} accepted; used in failure metadata. */
+  private static String formatOf(String lowerFileNameOrPath) {
+    return lowerFileNameOrPath.endsWith(".json") ? "JSON" : "YAML";
   }
 
   private static ObjectMapper resolveMapper(String fileNameOrPath) {
