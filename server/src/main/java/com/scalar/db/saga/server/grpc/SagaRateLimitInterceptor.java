@@ -8,7 +8,6 @@ import io.grpc.Metadata;
 import io.grpc.ServerCall;
 import io.grpc.ServerCallHandler;
 import io.grpc.ServerInterceptor;
-import io.grpc.Status;
 
 /**
  * The gRPC parallel of {@link com.scalar.db.saga.server.api.RateLimitHandler}: rate-limits calls
@@ -48,7 +47,6 @@ public final class SagaRateLimitInterceptor implements ServerInterceptor {
       if (identity != null && !limiter.tryAcquire(identity.principal(), now)) {
         GrpcErrorMapper.close(
             call,
-            Status.Code.RESOURCE_EXHAUSTED,
             SagaErrorCode.RATE_LIMIT_EXCEEDED,
             limiter.retryAfterMillis(identity.principal(), now));
         return new ServerCall.Listener<>() {};

@@ -24,11 +24,15 @@ public final class ErrorMetadataSchema {
   private static final ErrorMetadataSchema EMPTY = new ErrorMetadataSchema(Collections.emptyList());
 
   private final List<String> requiredKeys;
+  private final Set<String> requiredKeySet;
 
   private ErrorMetadataSchema(List<String> requiredKeys) {
     // Defensive copy in the constructor (not the factory) so SpotBugs's EI_EXPOSE_REP is satisfied
     // seeing the copy in the ctor's bytecode; also lets the getter return the field directly.
     this.requiredKeys = Collections.unmodifiableList(new ArrayList<>(requiredKeys));
+    // Precomputed once: validate runs in every exception constructor, and Set.equals is
+    // order-insensitive, so a per-construction copy added nothing.
+    this.requiredKeySet = Collections.unmodifiableSet(new LinkedHashSet<>(requiredKeys));
   }
 
   /**
@@ -68,10 +72,13 @@ public final class ErrorMetadataSchema {
    *     value is null
    */
   void validate(SagaErrorCode code, Map<String, String> metadata) {
-    Set<String> expected = new LinkedHashSet<>(requiredKeys);
-    if (!metadata.keySet().equals(expected)) {
+    if (!metadata.keySet().equals(requiredKeySet)) {
       throw new IllegalArgumentException(
-          code.name() + " expects metadata keys " + expected + " but got " + metadata.keySet());
+          code.name()
+              + " expects metadata keys "
+              + requiredKeySet
+              + " but got "
+              + metadata.keySet());
     }
     for (String key : requiredKeys) {
       if (metadata.get(key) == null) {

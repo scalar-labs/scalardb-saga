@@ -294,6 +294,19 @@ class GrpcErrorMapperTest {
   }
 
   @Test
+  @SuppressWarnings("unchecked")
+  void close_unmappedCodeGiven_throwsIllegalArgumentException() {
+    // Arrange — only the interceptor refusal codes have precomputed payloads; any other code at
+    // this entry point is an interceptor wiring bug that must be loud, not a silent default.
+    io.grpc.ServerCall<Object, Object> call = org.mockito.Mockito.mock(io.grpc.ServerCall.class);
+
+    // Act & Assert
+    org.assertj.core.api.Assertions.assertThatThrownBy(
+            () -> GrpcErrorMapper.close(call, SagaErrorCode.SAGA_NOT_FOUND))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void toStatusRuntimeException_preconditionGiven_carriesCodeAsReasonNotDescription() {
     StatusRuntimeException e =
         GrpcErrorMapper.toStatusRuntimeException(

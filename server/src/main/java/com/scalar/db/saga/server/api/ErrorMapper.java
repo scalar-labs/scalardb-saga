@@ -236,7 +236,8 @@ public final class ErrorMapper {
 
   /** Writes the wire body for a {@link SagaRuntimeException} at the given HTTP status. */
   private static void respond(Context ctx, int status, SagaRuntimeException e) {
-    ctx.status(status).json(body(e.getErrorCode(), e.getMetadata()));
+    // The exception constructor already built the wire message; reuse it rather than rebuilding.
+    ctx.status(status).json(body(e.getErrorCode(), e.getMetadata(), e.getMessage()));
   }
 
   /**
@@ -253,9 +254,14 @@ public final class ErrorMapper {
 
   /** The one body-composition path: everything wire-facing goes through the enum. */
   private static Map<String, Object> body(SagaErrorCode code, Map<String, String> metadata) {
+    return body(code, metadata, code.buildMessage(metadata));
+  }
+
+  private static Map<String, Object> body(
+      SagaErrorCode code, Map<String, String> metadata, String message) {
     Map<String, Object> body = new LinkedHashMap<>();
     body.put("errorCode", code.code());
-    body.put("message", code.buildMessage(metadata));
+    body.put("message", message);
     body.put("metadata", metadata);
     return body;
   }

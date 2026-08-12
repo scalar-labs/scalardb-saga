@@ -21,6 +21,7 @@ import io.grpc.ServerCall;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.protobuf.StatusProto;
+import java.util.EnumMap;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -116,27 +117,73 @@ final class GrpcErrorMapper {
 
   /** Builds a status carrying an ErrorInfo detail for a {@link SagaRuntimeException}. */
   private static StatusRuntimeException respond(Status.Code statusCode, SagaRuntimeException e) {
-    return status(statusCode, e.getErrorCode(), e.getMetadata());
+    // The exception constructor already built the wire message; reuse it rather than rebuilding.
+    return status(statusCode, e.getErrorCode(), e.getMetadata(), e.getMessage());
   }
 
   /**
-   * Closes a call an interceptor refuses before it reaches a service handler, composing the body
-   * through the same path as the exception dispatch above. Without this, an interceptor-level
-   * refusal would be the one daemon response with no {@link ErrorInfo}, and the client SDK would
-   * fall back to transport-status dispatch — or, for a status it has no case for, misreport the
-   * refusal as an unrecognized server error.
+   * The one pairing table for interceptor refusals: which transport status carries each code the
+   * interceptors emit, with the response payload precomputed — the pair is invariant per code, so a
+   * refusal storm constructs no throwaway exception and serializes nothing per request.
    */
-  static void close(ServerCall<?, ?> call, Status.Code statusCode, SagaErrorCode code) {
-    closeWith(call, status(statusCode, code, ErrorMetadata.of()));
+  private static final Map<SagaErrorCode, Refusal> REFUSALS = buildRefusals();
+
+  /** The standard gRPC trailer carrying a serialized {@code google.rpc.Status}. */
+  private static final Metadata.Key<byte[]> STATUS_DETAILS_BIN =
+      Metadata.Key.of("grpc-status-details-bin", Metadata.BINARY_BYTE_MARSHALLER);
+
+  private static Map<SagaErrorCode, Refusal> buildRefusals() {
+    EnumMap<SagaErrorCode, Refusal> refusals = new EnumMap<>(SagaErrorCode.class);
+    refusals.put(
+        SagaErrorCode.UNAUTHENTICATED,
+        refusal(Status.Code.UNAUTHENTICATED, SagaErrorCode.UNAUTHENTICATED));
+    refusals.put(
+        SagaErrorCode.PERMISSION_DENIED,
+        refusal(Status.Code.PERMISSION_DENIED, SagaErrorCode.PERMISSION_DENIED));
+    refusals.put(
+        SagaErrorCode.SERVICE_UNAVAILABLE,
+        refusal(Status.Code.UNAVAILABLE, SagaErrorCode.SERVICE_UNAVAILABLE));
+    refusals.put(
+        SagaErrorCode.INTERNAL_ERROR, refusal(Status.Code.INTERNAL, SagaErrorCode.INTERNAL_ERROR));
+    refusals.put(
+        SagaErrorCode.RATE_LIMIT_EXCEEDED,
+        refusal(Status.Code.RESOURCE_EXHAUSTED, SagaErrorCode.RATE_LIMIT_EXCEEDED));
+    return refusals;
+  }
+
+  private static Refusal refusal(Status.Code statusCode, SagaErrorCode code) {
+    ErrorInfo info =
+        ErrorInfo.newBuilder().setReason(code.code()).setDomain(SagaErrorCode.WIRE_DOMAIN).build();
+    String message = code.buildMessage(ErrorMetadata.of());
+    com.google.rpc.Status proto =
+        com.google.rpc.Status.newBuilder()
+            .setCode(statusCode.value())
+            .setMessage(message)
+            .addDetails(Any.pack(info))
+            .build();
+    return new Refusal(statusCode.toStatus().withDescription(message), proto);
   }
 
   /**
-   * As {@link #close(ServerCall, Status.Code, SagaErrorCode)}, attaching a standard {@code
-   * RetryInfo} detail carrying the advisory wait — for refusals whose reset time the server knows
-   * (the rate limiter's window). The REST transport's analogue is the 429's Retry-After header.
+   * Closes a call an interceptor refuses before it reaches a service handler. The transport status
+   * derives from the code through {@link #REFUSALS}, so the pairing decision exists in one place; a
+   * code with no entry is an interceptor wiring bug and throws. Without this path, a refusal would
+   * be the one server response with no {@link ErrorInfo}, and the client SDK would fall back to
+   * transport-status dispatch — or misreport the refusal as an unrecognized server error.
    */
-  static void close(
-      ServerCall<?, ?> call, Status.Code statusCode, SagaErrorCode code, long retryAfterMillis) {
+  static void close(ServerCall<?, ?> call, SagaErrorCode code) {
+    Refusal refusal = refusalFor(code);
+    call.close(refusal.status, refusal.trailers());
+  }
+
+  /**
+   * As {@link #close(ServerCall, SagaErrorCode)}, appending a standard {@code RetryInfo} detail
+   * carrying the advisory wait — for refusals whose reset time the server knows (the rate limiter's
+   * window). Rebuilt per call since the delay varies; the cached base payload is reused. The REST
+   * transport's analogue is the 429's Retry-After header.
+   */
+  static void close(ServerCall<?, ?> call, SagaErrorCode code, long retryAfterMillis) {
+    Refusal refusal = refusalFor(code);
     RetryInfo retryInfo =
         RetryInfo.newBuilder()
             .setRetryDelay(
@@ -145,12 +192,41 @@ final class GrpcErrorMapper {
                     .setNanos((int) ((retryAfterMillis % 1000) * 1_000_000L))
                     .build())
             .build();
-    closeWith(call, status(statusCode, code, ErrorMetadata.of(), Any.pack(retryInfo)));
+    com.google.rpc.Status proto = refusal.proto.toBuilder().addDetails(Any.pack(retryInfo)).build();
+    Metadata trailers = new Metadata();
+    trailers.put(STATUS_DETAILS_BIN, proto.toByteArray());
+    call.close(refusal.status, trailers);
   }
 
-  private static void closeWith(ServerCall<?, ?> call, StatusRuntimeException e) {
-    Metadata trailers = e.getTrailers();
-    call.close(e.getStatus(), trailers == null ? new Metadata() : trailers);
+  private static Refusal refusalFor(SagaErrorCode code) {
+    Refusal refusal = REFUSALS.get(code);
+    if (refusal == null) {
+      throw new IllegalArgumentException("no interceptor refusal payload for " + code);
+    }
+    return refusal;
+  }
+
+  /** A precomputed refusal: the transport status, the response proto, and its serialized form. */
+  private static final class Refusal {
+    private final Status status;
+    private final com.google.rpc.Status proto;
+    private final byte[] bytes;
+
+    private Refusal(Status status, com.google.rpc.Status proto) {
+      this.status = status;
+      this.proto = proto;
+      this.bytes = proto.toByteArray();
+    }
+
+    /**
+     * Fresh {@link Metadata} per call (gRPC may take ownership of trailers); the payload bytes are
+     * shared, which is safe — nothing mutates a put array.
+     */
+    private Metadata trailers() {
+      Metadata trailers = new Metadata();
+      trailers.put(STATUS_DETAILS_BIN, bytes);
+      return trailers;
+    }
   }
 
   /**
@@ -170,21 +246,24 @@ final class GrpcErrorMapper {
    * ErrorInfo.reason = code.code()}; {@code ErrorInfo.metadata = metadata}.
    */
   private static StatusRuntimeException status(
-      Status.Code statusCode, SagaErrorCode code, Map<String, String> metadata, Any... extras) {
+      Status.Code statusCode, SagaErrorCode code, Map<String, String> metadata) {
+    return status(statusCode, code, metadata, code.buildMessage(metadata));
+  }
+
+  private static StatusRuntimeException status(
+      Status.Code statusCode, SagaErrorCode code, Map<String, String> metadata, String message) {
     ErrorInfo info =
         ErrorInfo.newBuilder()
             .setReason(code.code())
             .setDomain(SagaErrorCode.WIRE_DOMAIN)
             .putAllMetadata(metadata)
             .build();
-    com.google.rpc.Status.Builder status =
+    com.google.rpc.Status status =
         com.google.rpc.Status.newBuilder()
             .setCode(statusCode.value())
-            .setMessage(code.buildMessage(metadata))
-            .addDetails(Any.pack(info));
-    for (Any extra : extras) {
-      status.addDetails(extra);
-    }
-    return StatusProto.toStatusRuntimeException(status.build());
+            .setMessage(message)
+            .addDetails(Any.pack(info))
+            .build();
+    return StatusProto.toStatusRuntimeException(status);
   }
 }

@@ -15,7 +15,6 @@ import io.grpc.Metadata;
 import io.grpc.ServerCall;
 import io.grpc.ServerCallHandler;
 import io.grpc.ServerInterceptor;
-import io.grpc.Status;
 import java.net.SocketAddress;
 import java.util.Locale;
 import org.slf4j.Logger;
@@ -67,7 +66,7 @@ public final class SagaSecurityInterceptor implements ServerInterceptor {
       logger.error(
           "gRPC method '{}' has no mapped SagaOperation; refusing the call",
           call.getMethodDescriptor().getFullMethodName());
-      return deny(call, Status.Code.INTERNAL, SagaErrorCode.INTERNAL_ERROR);
+      return deny(call, SagaErrorCode.INTERNAL_ERROR);
     }
     SagaRole required = operation.requiredRole();
     if (required == null) {
@@ -85,7 +84,7 @@ public final class SagaSecurityInterceptor implements ServerInterceptor {
           "Authentication failed for gRPC call {}: {}",
           call.getMethodDescriptor().getFullMethodName(),
           e.getInternalDetail());
-      return deny(call, Status.Code.UNAUTHENTICATED, SagaErrorCode.UNAUTHENTICATED);
+      return deny(call, SagaErrorCode.UNAUTHENTICATED);
     } catch (SagaAuthUnavailableException e) {
       // The provider could not verify the credential because it is unavailable (e.g. the JWKS
       // endpoint is unreachable) — a transient upstream outage, not a bad credential. Map to
@@ -94,14 +93,14 @@ public final class SagaSecurityInterceptor implements ServerInterceptor {
       // and why, which is the one field the wire body deliberately withholds. The REST path logs
       // it the same way.
       logger.warn("{} for a gRPC call: {}", e.getMessage(), e.getInternalDetail(), e);
-      return deny(call, Status.Code.UNAVAILABLE, SagaErrorCode.SERVICE_UNAVAILABLE);
+      return deny(call, SagaErrorCode.SERVICE_UNAVAILABLE);
     } catch (RuntimeException e) {
       // An unexpected provider failure (not a rejected credential) — a bug or an unwrapped
       // transient error. Fail closed and log it server-side; map to INTERNAL rather than
       // UNAUTHENTICATED so it is not mistaken for a bad credential (the REST path's ErrorMapper
       // maps an unhandled error to 500 the same way). No detail leaks to the client.
       logger.error("Unexpected error authenticating a gRPC call", e);
-      return deny(call, Status.Code.INTERNAL, SagaErrorCode.INTERNAL_ERROR);
+      return deny(call, SagaErrorCode.INTERNAL_ERROR);
     }
     if (!identity.hasRole(required)) {
       // INFO: audit trail with principal + required role.
@@ -110,15 +109,15 @@ public final class SagaSecurityInterceptor implements ServerInterceptor {
           call.getMethodDescriptor().getFullMethodName(),
           identity.principal(),
           required.wireName());
-      return deny(call, Status.Code.PERMISSION_DENIED, SagaErrorCode.PERMISSION_DENIED);
+      return deny(call, SagaErrorCode.PERMISSION_DENIED);
     }
     Context context = Context.current().withValue(IDENTITY, identity);
     return Contexts.interceptCall(context, call, headers, next);
   }
 
   private static <ReqT, RespT> ServerCall.Listener<ReqT> deny(
-      ServerCall<ReqT, RespT> call, Status.Code statusCode, SagaErrorCode errorCode) {
-    GrpcErrorMapper.close(call, statusCode, errorCode);
+      ServerCall<ReqT, RespT> call, SagaErrorCode errorCode) {
+    GrpcErrorMapper.close(call, errorCode);
     return new ServerCall.Listener<ReqT>() {};
   }
 
