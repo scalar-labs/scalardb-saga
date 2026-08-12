@@ -27,6 +27,13 @@ import java.util.Optional;
  * fault), and {@code 49999} for {@link #UNRECOGNIZED_SERVER_ERROR} (unknown-code fallback in the
  * client SDK).
  *
+ * <p><b>Retry authority.</b> The {@link Category} of the body's {@code errorCode} — readable from a
+ * code string's first digit via {@link Category#fromWireCode} — decides whether to retry; the
+ * transport status (HTTP or gRPC) is only the coarse family, never the authority. The two codes
+ * sharing HTTP {@code 409} show why: {@link #SAGA_ALREADY_EXISTS} (1xxxx — fix the request) and
+ * {@link #SAGA_CONCURRENT_MODIFICATION} (2xxxx — retry from a fresh snapshot) demand opposite
+ * reactions that only the code's digit distinguishes.
+ *
  * <p>Codes stay coarse: one per distinct failure class the client meaningfully differentiates, not
  * one per rule violation. A code owns the shape (schema + fixed template + docs page); per-case
  * specifics ride in the {@code detail} metadata field, following the K8s {@code Status.Reason} +
@@ -124,13 +131,17 @@ public enum SagaErrorCode {
       "The request did not present a valid credential.",
       "Attach a valid credential (API key, bearer token) and retry."),
 
+  // required_role is deliberately absent from the schema: metadata is exact-match (no optional
+  // keys), and this code is also constructed where no role is known — the client's transport
+  // fallback for a bare PERMISSION_DENIED status. The role is static policy per operation,
+  // documented in the API reference; the server-side audit log carries it for operators.
   PERMISSION_DENIED(
       "DB-SAGA-10102",
       Category.USER_ERROR,
       "Permission denied",
       ErrorMetadataSchema.none(),
-      "The authenticated principal lacks the role required for this operation.",
-      "Request the appropriate role from an administrator."),
+      "The authenticated principal lacks the role required for this operation. The role itself is deliberately not sent on the wire; each operation's required role is static policy, documented in the API reference, and the server's audit log records the principal and the missing role.",
+      "Look up the operation's required role in the API reference and request it from an administrator."),
 
   // ── Not-found (102xx) ────────────────────────────────────────────────
   SAGA_NOT_FOUND(
