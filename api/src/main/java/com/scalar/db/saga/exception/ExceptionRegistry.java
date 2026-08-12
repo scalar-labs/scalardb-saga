@@ -80,6 +80,8 @@ public final class ExceptionRegistry {
     m.put(
         SagaErrorCode.SAGA_DEFINITION_VERSION_NOT_FOUND,
         meta -> new SagaDefinitionNotFoundException(meta.get("saga_name"), meta.get("version")));
+    // REST-only (the unmatched-route 404); no dedicated exception type, so it round-trips raw.
+    m.put(SagaErrorCode.ENDPOINT_NOT_FOUND, meta -> raw(SagaErrorCode.ENDPOINT_NOT_FOUND, meta));
 
     // ── USER_ERROR — Conflict (103xx) ─────────────────────────────────
     // SAGA_ALREADY_EXISTS is intentionally NOT here: SagaAlreadyExistsException requires the

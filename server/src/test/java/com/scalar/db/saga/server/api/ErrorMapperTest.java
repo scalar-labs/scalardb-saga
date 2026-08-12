@@ -19,6 +19,7 @@ import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import com.scalar.db.saga.server.security.SagaAuthUnavailableException;
 import io.javalin.Javalin;
 import io.javalin.http.BadRequestResponse;
+import io.javalin.http.NotFoundResponse;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -152,12 +153,25 @@ class ErrorMapperTest {
   void unknownRoute_mapsTo404_withStructuredBody() throws Exception {
     // Javalin reports an unroutable request as an internal NotFoundResponse; the registered
     // handler for that exact type must compose the structured body, or this would be the one REST
-    // response without an errorCode.
+    // response without an errorCode. ENDPOINT_NOT_FOUND, not INVALID_REQUEST: the sub-range is a
+    // wire contract, so the 404 status must carry a not-found-family (102xx) code.
     HttpResponse<String> response = get("/no-such-route");
     assertThat(response.statusCode()).isEqualTo(404);
     assertThat(response.body())
-        .contains(SagaErrorCode.INVALID_REQUEST.code())
+        .contains(SagaErrorCode.ENDPOINT_NOT_FOUND.code())
         .contains("/no-such-route");
+  }
+
+  @Test
+  void unknownRoute_veryLongPathGiven_capsTheEchoedDetail() throws Exception {
+    // The unmatched-route echo is the one response an anonymous caller can shape without matching
+    // any route (auth and rate limiting never run for it), so its length must be bounded by the
+    // handler, not only by Jetty's request-line limit.
+    HttpResponse<String> response = get("/no-such-route/" + "a".repeat(300));
+    assertThat(response.statusCode()).isEqualTo(404);
+    assertThat(response.body())
+        .contains(SagaErrorCode.ENDPOINT_NOT_FOUND.code())
+        .doesNotContain("a".repeat(250));
   }
 
   @Test
@@ -168,7 +182,7 @@ class ErrorMapperTest {
     assertThat(response.statusCode()).isEqualTo(404);
     assertThat(response.body())
         .contains(SagaErrorCode.SAGA_NOT_FOUND.code())
-        .doesNotContain(SagaErrorCode.INVALID_REQUEST.code());
+        .doesNotContain(SagaErrorCode.ENDPOINT_NOT_FOUND.code());
   }
 
   /** One dispatch entry per row: the thrown exception, the HTTP status, and the body's code. */
@@ -235,6 +249,9 @@ class ErrorMapperTest {
             new SagaDefinitionNotFoundException("transfer", "v2"),
             404,
             SagaErrorCode.SAGA_DEFINITION_VERSION_NOT_FOUND),
+        // Javalin's unmatched-route signal; its handler must answer with a not-found-family code,
+        // and this row is what puts the pairing under the sub-range guard below.
+        new Arm(new NotFoundResponse(), 404, SagaErrorCode.ENDPOINT_NOT_FOUND),
         new Arm(
             new SagaAlreadyExistsException("s-1", existing),
             409,

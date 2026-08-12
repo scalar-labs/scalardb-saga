@@ -156,6 +156,14 @@ public enum SagaErrorCode {
       "The saga definition exists but not at the requested version.",
       "Register that version or start the saga at an existing version."),
 
+  ENDPOINT_NOT_FOUND(
+      "DB-SAGA-10204",
+      Category.USER_ERROR,
+      "No such endpoint",
+      ErrorMetadataSchema.of("detail"),
+      "The request path (or method) matches no registered REST route. Only a remote caller can produce this; the embedded engine has no routes.",
+      "Check the request method and path against the API reference."),
+
   // ── Conflict (103xx) ─────────────────────────────────────────────────
   SAGA_ALREADY_EXISTS(
       "DB-SAGA-10301",

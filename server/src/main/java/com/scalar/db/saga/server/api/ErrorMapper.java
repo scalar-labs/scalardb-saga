@@ -63,6 +63,9 @@ public final class ErrorMapper {
 
   private static final Logger logger = LoggerFactory.getLogger(ErrorMapper.class);
 
+  /** Cap on the request line echoed by the unmatched-route 404 body. */
+  private static final int MAX_ECHOED_REQUEST_LINE = 200;
+
   private ErrorMapper() {}
 
   /**
@@ -197,19 +200,32 @@ public final class ErrorMapper {
     // Javalin reports a path (or method) no route matches by throwing NotFoundResponse internally,
     // so mapping that type gives the response a structured body like every other; without this
     // entry it would ship Javalin's default body, the one REST response without an errorCode.
-    // INVALID_REQUEST, because only a remote caller can produce a request the daemon edge cannot
-    // route. Handler-produced 404s (saga or definition not found) carry their own typed exceptions
-    // and never reach this entry. Registering the exact type outranks Javalin's built-in
-    // HttpResponseException handler, which resolves by nearest class.
+    // ENDPOINT_NOT_FOUND (102xx): the sub-range is a wire contract, so a 404 status must carry a
+    // not-found-family code. Handler-produced 404s (saga or definition not found) carry their own
+    // typed exceptions and never reach this entry. Registering the exact type outranks Javalin's
+    // built-in HttpResponseException handler, which resolves by nearest class.
     app.exception(
         NotFoundResponse.class,
         (e, ctx) ->
             ctx.status(404)
                 .json(
                     body(
-                        SagaErrorCode.INVALID_REQUEST,
+                        SagaErrorCode.ENDPOINT_NOT_FOUND,
                         ErrorMetadata.of(
-                            "detail", "no such endpoint: " + ctx.method() + " " + ctx.path()))));
+                            "detail", "no such endpoint: " + boundedRequestLine(ctx)))));
+  }
+
+  /**
+   * The request line echoed by the unmatched-route 404, capped: this is the one response an
+   * anonymous caller can shape without matching any route (auth and rate limiting are beforeMatched
+   * handlers, which never run for it), so the echo is bounded here rather than only by Jetty's
+   * request-line limit.
+   */
+  private static String boundedRequestLine(Context ctx) {
+    String line = ctx.method() + " " + ctx.path();
+    return line.length() <= MAX_ECHOED_REQUEST_LINE
+        ? line
+        : line.substring(0, MAX_ECHOED_REQUEST_LINE) + "...";
   }
 
   /** Writes the wire body for a {@link SagaRuntimeException} at the given HTTP status. */
