@@ -50,7 +50,7 @@ Refer to `~/git/scalardb-saga-design/docs/scalardb-saga-design.md` for architect
 
 ## Error codes
 
-- `SagaErrorCode` (api) is the single wire vocabulary. Everything in it freezes at first release: code numbers, the USER_ERROR sub-ranges (`10Nxx` ↔ HTTP status family), metadata schema keys, and `WIRE_DOMAIN` (clients match it verbatim)
+- `SagaErrorCode` (api) is the single wire vocabulary. Everything in it freezes at first release: code numbers, the USER_ERROR sub-ranges (`10Nxx` ↔ HTTP status family), and `WIRE_DOMAIN` (clients match it verbatim); metadata schemas may gain keys after release but never lose or rename one (clients drop unknown keys)
 - Adding a code: register it in `ExceptionRegistry` and add a row to the golden-table tests in both `GrpcErrorMapperTest` and `ErrorMapperTest` — the registry round-trip and sub-range guard tests fail the build otherwise
 - Every wire-facing error carries a code: gRPC interceptor refusals compose through `GrpcErrorMapper.close`, and REST's unmatched-route 404 goes through `ErrorMapper`'s `NotFoundResponse` handler — never close a call or write an error body outside the two mappers
 

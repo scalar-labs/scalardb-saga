@@ -162,6 +162,40 @@ class ExceptionRegistryTest {
   }
 
   @Test
+  void tryReconstruct_extraUnknownKeyGiven_dropsItAndStaysTyped() {
+    // The schema evolution rule is gain-only: a newer server may add keys, and an older client
+    // must keep typed reconstruction, dropping the addition like an unknown proto field. Before
+    // the filter, pass-through codes like INVALID_DEFINITION degraded on any addition while
+    // field-picking constructors tolerated it — the outcome depended on constructor style.
+    Map<String, String> wire = new HashMap<>();
+    wire.put("saga_name", "orders");
+    wire.put("detail", "duplicate step 'debit'");
+    wire.put("added_in_a_newer_server", "x");
+
+    SagaRuntimeException e = reconstruct(SagaErrorCode.INVALID_DEFINITION.code(), wire);
+
+    assertThat(e).isInstanceOf(SagaDefinitionException.class);
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.INVALID_DEFINITION);
+    assertThat(e.getMetadata())
+        .containsEntry("saga_name", "orders")
+        .doesNotContainKey("added_in_a_newer_server");
+  }
+
+  @Test
+  void tryReconstruct_extraKeyOnRawCodeGiven_dropsItAndKeepsTheCode() {
+    // Same rule on the raw-reconstruction path, which passes metadata straight to the base
+    // constructor's exact-match validation.
+    Map<String, String> wire = new HashMap<>();
+    wire.put("server_value", "SOMETHING");
+    wire.put("added_in_a_newer_server", "x");
+
+    SagaRuntimeException e = reconstruct(SagaErrorCode.UNRECOGNIZED_SERVER_ERROR.code(), wire);
+
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.UNRECOGNIZED_SERVER_ERROR);
+    assertThat(e.getMetadata()).containsEntry("server_value", "SOMETHING").hasSize(1);
+  }
+
+  @Test
   void tryReconstruct_knownCodeButWrongMetadataShape_returnsEmpty() {
     // Arrange & Act — SAGA_WRONG_STATE requires three keys; supply only one
     assertThat(

@@ -39,7 +39,11 @@ import java.util.Optional;
  * specifics ride in the {@code detail} metadata field, following the K8s {@code Status.Reason} +
  * {@code Details.Causes[].message} and AWS {@code ValidationException} pattern.
  *
- * <p><b>Once a code is released, its number is frozen.</b>
+ * <p><b>Once a code is released, its number is frozen.</b> Its metadata schema may <b>gain</b>
+ * keys, but may never lose or rename one: the client SDK drops unknown keys during reconstruction
+ * (so an older client keeps typed reconstruction against an enriched newer server), while a missing
+ * declared key is protocol drift and degrades. The asymmetry is deliberate — a client newer than
+ * its server still degrades when a newly declared key is absent — so roll servers forward first.
  */
 // Suppress Error Prone's ImmutableEnumChecker: ErrorMetadataSchema is effectively immutable — its
 // list field is an unmodifiable defensive copy — but Error Prone only trusts its own Immutable

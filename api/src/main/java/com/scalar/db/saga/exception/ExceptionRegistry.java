@@ -2,6 +2,8 @@ package com.scalar.db.saga.exception;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.util.EnumMap;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -191,11 +193,35 @@ public final class ExceptionRegistry {
       return Optional.empty();
     }
     try {
-      return Optional.of(r.reconstruct(metadata));
+      return Optional.of(r.reconstruct(retainDeclaredKeys(code, metadata)));
     } catch (IllegalArgumentException | NullPointerException schemaMismatch) {
       // Wire metadata doesn't satisfy the code's schema — protocol drift; degrade.
       return Optional.empty();
     }
+  }
+
+  /**
+   * Drops wire metadata keys the code's schema does not declare, so an enriched newer server still
+   * reconstructs typed on an older client: the schema evolution rule is gain-only (see {@link
+   * SagaErrorCode}), and an unknown key is dropped like an unknown proto field. A missing declared
+   * key is genuine drift and still fails the constructor's validation. The equal-size shortcut is
+   * safe: when nothing was added, filtering could only reproduce the map (matching keys) or leave a
+   * mismatch the validation rejects either way (renamed keys).
+   */
+  private static Map<String, String> retainDeclaredKeys(
+      SagaErrorCode code, Map<String, String> metadata) {
+    List<String> declared = code.schema().requiredKeys();
+    if (metadata.size() == declared.size()) {
+      return metadata;
+    }
+    Map<String, String> filtered = new LinkedHashMap<>();
+    for (String key : declared) {
+      String value = metadata.get(key);
+      if (value != null) {
+        filtered.put(key, value);
+      }
+    }
+    return filtered;
   }
 
   private static SagaRuntimeException raw(SagaErrorCode code, Map<String, String> metadata) {
