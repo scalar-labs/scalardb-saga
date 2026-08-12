@@ -80,6 +80,11 @@ public final class SagaSecurityInterceptor implements ServerInterceptor {
     try {
       identity = provider.authenticate(toAuthRequest(call, headers));
     } catch (SagaAuthenticationException e) {
+      // DEBUG: probing traffic can make this frequent; log the internal reason for triage.
+      logger.debug(
+          "Authentication failed for gRPC call {}: {}",
+          call.getMethodDescriptor().getFullMethodName(),
+          e.getInternalDetail());
       return deny(call, Status.Code.UNAUTHENTICATED, SagaErrorCode.UNAUTHENTICATED);
     } catch (SagaAuthUnavailableException e) {
       // The provider could not verify the credential because it is unavailable (e.g. the JWKS
@@ -99,6 +104,12 @@ public final class SagaSecurityInterceptor implements ServerInterceptor {
       return deny(call, Status.Code.INTERNAL, SagaErrorCode.INTERNAL_ERROR);
     }
     if (!identity.hasRole(required)) {
+      // INFO: audit trail with principal + required role.
+      logger.info(
+          "Insufficient permissions for gRPC call {}: caller '{}' lacks role {}",
+          call.getMethodDescriptor().getFullMethodName(),
+          identity.principal(),
+          required.wireName());
       return deny(call, Status.Code.PERMISSION_DENIED, SagaErrorCode.PERMISSION_DENIED);
     }
     Context context = Context.current().withValue(IDENTITY, identity);
