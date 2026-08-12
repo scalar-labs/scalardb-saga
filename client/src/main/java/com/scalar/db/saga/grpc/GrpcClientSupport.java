@@ -186,7 +186,7 @@ final class GrpcClientSupport {
       case DEADLINE_EXCEEDED:
         // The gRPC status (with its description) is preserved as the cause; the fixed message
         // comes from SagaErrorCode.REQUEST_TIMEOUT.
-        return new SagaTimeoutException(e);
+        return SagaTimeoutException.requestTimedOut(e);
       case CANCELLED:
         // Caller-initiated, not a server error. The blocking stub reports an interrupt of the
         // calling thread as CANCELLED ("Thread interrupted"; gRPC has already restored the

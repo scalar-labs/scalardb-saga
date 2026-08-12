@@ -282,6 +282,7 @@ class GrpcErrorMapperTest {
             SagaErrorCode.UNRECOGNIZED_SERVER_ERROR,
             SagaErrorCode.UNRECOGNIZED_RETRYABLE_SERVER_ERROR,
             SagaErrorCode.UNMAPPED_SERVER_STATUS,
+            SagaErrorCode.SAGA_AWAIT_TIMEOUT,
             // Reserved, produced nowhere yet (see SagaErrorCode).
             SagaErrorCode.STEP_TIMEOUT,
             SagaErrorCode.STEP_USER_FAILURE,

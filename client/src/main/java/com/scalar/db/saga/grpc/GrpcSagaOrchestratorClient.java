@@ -341,10 +341,14 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
         || code == Status.Code.DEADLINE_EXCEEDED;
   }
 
-  /** Throws {@link SagaTimeoutException} when the overall client deadline (if any) has elapsed. */
+  /**
+   * Throws when the overall client deadline (if any) has elapsed. SAGA_AWAIT_TIMEOUT, not
+   * REQUEST_TIMEOUT: every request so far succeeded and the saga keeps running — only the
+   * wait-for-terminal budget expired, so the caller should poll by ID rather than re-send.
+   */
   private void guardDeadline(long loopDeadlineNanos) {
     if (loopDeadlineNanos != 0L && System.nanoTime() >= loopDeadlineNanos) {
-      throw new SagaTimeoutException();
+      throw SagaTimeoutException.awaitExpired();
     }
   }
 

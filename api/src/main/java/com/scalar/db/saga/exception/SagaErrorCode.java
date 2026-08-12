@@ -354,6 +354,14 @@ public enum SagaErrorCode {
       "The response carried a bare transport status and no saga error body. Servers attach a code to every response, so this typically comes from the transport runtime itself (a message-size rejection, say) or an intermediary, not from the saga application.",
       "Inspect server_value (the transport status) and the cause. This is not a version skew; upgrading the client SDK will not change it."),
 
+  SAGA_AWAIT_TIMEOUT(
+      "DB-SAGA-40005",
+      Category.CLIENT_ERROR,
+      "The wait for the saga to finish timed out",
+      ErrorMetadataSchema.none(),
+      "The saga did not reach a terminal state within the client-side wait bound. Nothing failed: every request succeeded and the saga keeps running; the caller's wait budget expired. Distinct from REQUEST_TIMEOUT, where the request itself did not complete.",
+      "Poll the saga by its ID (getStateSnapshot or awaitSaga) until it settles; do not re-send the request."),
+
   UNRECOGNIZED_SERVER_ERROR(
       "DB-SAGA-49999",
       Category.CLIENT_ERROR,

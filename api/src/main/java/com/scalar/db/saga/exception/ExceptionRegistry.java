@@ -161,6 +161,7 @@ public final class ExceptionRegistry {
         SagaErrorCode.UNMAPPED_SERVER_STATUS,
         meta -> raw(SagaErrorCode.UNMAPPED_SERVER_STATUS, meta));
     m.put(SagaErrorCode.REQUEST_TIMEOUT, meta -> raw(SagaErrorCode.REQUEST_TIMEOUT, meta));
+    m.put(SagaErrorCode.SAGA_AWAIT_TIMEOUT, meta -> raw(SagaErrorCode.SAGA_AWAIT_TIMEOUT, meta));
     m.put(SagaErrorCode.REQUEST_ABORTED, meta -> raw(SagaErrorCode.REQUEST_ABORTED, meta));
     m.put(
         SagaErrorCode.UNRECOGNIZED_SERVER_ERROR,

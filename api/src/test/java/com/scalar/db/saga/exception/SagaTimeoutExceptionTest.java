@@ -8,24 +8,25 @@ import org.junit.jupiter.api.Test;
 class SagaTimeoutExceptionTest {
 
   @Test
-  void constructor_noArgsGiven_setsCodeAndFixedMessage() {
-    // Arrange & Act
-    SagaTimeoutException e = new SagaTimeoutException();
+  void awaitExpired_always_carriesAwaitTimeoutCode() {
+    // Arrange & Act — the saga keeps running; only the caller's wait budget expired
+    SagaTimeoutException e = SagaTimeoutException.awaitExpired();
 
     // Assert
-    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.REQUEST_TIMEOUT);
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.SAGA_AWAIT_TIMEOUT);
     assertThat(e.getMetadata()).isEmpty();
-    assertThat(e.getMessage()).isEqualTo("DB-SAGA-40002: The request to the saga server timed out");
+    assertThat(e.getMessage())
+        .isEqualTo("DB-SAGA-40005: The wait for the saga to finish timed out");
     assertThat(e.getCause()).isNull();
   }
 
   @Test
-  void constructor_causeGiven_setsCauseAndFixedMessage() {
+  void requestTimedOut_causeGiven_carriesRequestTimeoutCodeAndCause() {
     // Arrange
-    RuntimeException cause = new RuntimeException("interrupted");
+    RuntimeException cause = new RuntimeException("deadline exceeded");
 
     // Act
-    SagaTimeoutException e = new SagaTimeoutException(cause);
+    SagaTimeoutException e = SagaTimeoutException.requestTimedOut(cause);
 
     // Assert
     assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.REQUEST_TIMEOUT);
@@ -36,9 +37,9 @@ class SagaTimeoutExceptionTest {
 
   @SuppressWarnings("NullAway")
   @Test
-  void constructor_nullCauseGiven_throwsNullPointerException() {
+  void requestTimedOut_nullCauseGiven_throwsNullPointerException() {
     // Arrange & Act & Assert
-    assertThatThrownBy(() -> new SagaTimeoutException((Throwable) null))
+    assertThatThrownBy(() -> SagaTimeoutException.requestTimedOut(null))
         .isInstanceOf(NullPointerException.class);
   }
 

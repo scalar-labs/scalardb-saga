@@ -685,9 +685,12 @@ class GrpcSagaOrchestratorClientTest {
     fake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
     fake.awaitError = Status.UNAVAILABLE.withDescription("still down").asRuntimeException();
 
-    // Act + Assert
+    // Act + Assert — SAGA_AWAIT_TIMEOUT, not REQUEST_TIMEOUT: the start succeeded and the saga
+    // keeps running; only the wait budget expired, so the caller should poll by ID.
     assertThatThrownBy(() -> deadlineClient.start("transfer", Map.of()))
-        .isInstanceOf(SagaTimeoutException.class);
+        .isInstanceOf(SagaTimeoutException.class)
+        .extracting(e -> ((SagaTimeoutException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.SAGA_AWAIT_TIMEOUT);
   }
 
   @Test
