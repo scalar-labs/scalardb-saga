@@ -280,6 +280,9 @@ class SagaAdminResourceTest {
     HttpResponse<String> response =
         send("POST", "/sagas/s1/recover", "admin", "{\"reason\":\"  \"}");
     assertThat(response.statusCode()).isEqualTo(400);
+    // INVALID_ARGUMENT, the enum's own example for a blank reason — the same code gRPC and
+    // embedded callers get, so the transports cannot drift apart on this input again.
+    assertThat(response.body()).contains(SagaErrorCode.INVALID_ARGUMENT.code());
   }
 
   @Test

@@ -1,6 +1,7 @@
 package com.scalar.db.saga.server.api;
 
 import com.scalar.db.saga.api.SagaQuery;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaInvalidRequestException;
 import org.jspecify.annotations.Nullable;
 
@@ -18,14 +19,15 @@ public record BulkResetRequest(
     @Nullable String pageToken) {
 
   /**
-   * Returns the reason, failing with {@link SagaInvalidRequestException} (mapped to {@code 400}) if
-   * it is missing or blank.
+   * Returns the reason, failing with {@link SagaIllegalArgumentException} (mapped to {@code 400})
+   * if it is missing or blank. INVALID_ARGUMENT, not INVALID_REQUEST, for the same reason as {@link
+   * InterventionRequest#requireReason}: every transport must classify a blank reason identically.
    *
    * @return the reason
    */
   public String requireReason() {
     if (reason == null || reason.isBlank()) {
-      throw new SagaInvalidRequestException("'reason' is required");
+      throw new SagaIllegalArgumentException("'reason' is required");
     }
     return reason;
   }

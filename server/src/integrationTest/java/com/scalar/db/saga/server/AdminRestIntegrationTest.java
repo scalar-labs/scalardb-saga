@@ -95,10 +95,13 @@ class AdminRestIntegrationTest extends ServerIntegrationTestSupport {
 
   @Test
   void adminKey_mutationMissingReason_returns400() throws Exception {
-    // The body's required 'reason' is validated at the edge before the saga is looked up.
+    // The body's required 'reason' is validated at the edge before the saga is looked up, and
+    // carries INVALID_ARGUMENT — the code the engine gives the same mistake on other transports.
     HttpResponse<String> response = post("/sagas/any/recover", "{}", auth(ADMIN_KEY));
 
     assertThat(response.statusCode()).isEqualTo(400);
+    assertThat(MAPPER.readTree(response.body()).get("errorCode").asText())
+        .isEqualTo(SagaErrorCode.INVALID_ARGUMENT.code());
   }
 
   @Test
