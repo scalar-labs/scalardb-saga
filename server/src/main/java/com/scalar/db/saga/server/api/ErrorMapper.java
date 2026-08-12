@@ -59,8 +59,10 @@ import org.slf4j.LoggerFactory;
  * internalDetail}, principal, required role, or a cause chain with internal specifics). Everything
  * else — where the wire body already tells the whole story — is not logged: the client already saw
  * the error and a duplicate server-side log adds nothing. Severity: 5xx → {@code ERROR} (operator
- * must investigate); authorization denials → {@code INFO} (security audit); everything else that
- * logs → {@code DEBUG} (usually high-volume probing traffic).
+ * must investigate); authorization denials → {@code INFO} (security audit); the replaced bare
+ * {@code IllegalArgumentException} → {@code WARN} (a misattributed server bug or a migration
+ * candidate — evidence that must print at the production default); everything else that logs →
+ * {@code DEBUG} (usually high-volume probing traffic).
  */
 public final class ErrorMapper {
 
@@ -114,8 +116,10 @@ public final class ErrorMapper {
         (e, ctx) -> {
           // The engine's wording and cause are replaced on the wire, so log them: a server-side
           // bug surfacing as IllegalArgumentException (NumberFormatException, say) would otherwise
-          // be reported to the caller as their fault with no evidence left anywhere.
-          logger.debug(
+          // be reported to the caller as their fault with no evidence left anywhere. WARN, visible
+          // at the production default: every hit is either a misattributed server bug or an
+          // unmigrated caller-input site — the branch's shrink-to-zero to-do list.
+          logger.warn(
               "Replacing a bare IllegalArgumentException on {} {}", ctx.method(), ctx.path(), e);
           respond(ctx, 400, new SagaIllegalArgumentException("invalid request parameter"));
         });

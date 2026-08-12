@@ -60,8 +60,10 @@ final class GrpcErrorMapper {
       case IllegalArgumentException iae -> {
         // The engine's wording and cause are replaced on the wire, so log them: a server-side bug
         // surfacing as IllegalArgumentException (NumberFormatException, say) would otherwise be
-        // reported to the caller as their fault with no evidence left anywhere.
-        logger.debug("Replacing a bare IllegalArgumentException for the wire", iae);
+        // reported to the caller as their fault with no evidence left anywhere. WARN, visible at
+        // the production default: every hit is either a misattributed server bug or an unmigrated
+        // caller-input site — the branch's shrink-to-zero to-do list.
+        logger.warn("Replacing a bare IllegalArgumentException for the wire", iae);
         yield respond(
             Status.Code.INVALID_ARGUMENT,
             new SagaIllegalArgumentException("invalid request parameter"));
