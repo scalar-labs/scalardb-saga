@@ -22,8 +22,10 @@ import java.util.Optional;
  * {@code 102xx}=not-found (404), {@code 103xx}=conflict (409), {@code 104xx}=precondition (422).
  * Other categories are single flat blocks — codes number contiguously from {@code XX001}. {@code
  * X9999} is reserved as an always-last sentinel only for categories with a real catch-all code
- * path: {@code 39999} for {@link #INTERNAL_ERROR} (unmapped server fault) and {@code 49999} for
- * {@link #UNRECOGNIZED_SERVER_ERROR} (unknown-code fallback in the client SDK).
+ * path: {@code 29999} for {@link #UNRECOGNIZED_RETRYABLE_SERVER_ERROR} (the client SDK's
+ * unknown-but-retryable fallback), {@code 39999} for {@link #INTERNAL_ERROR} (unmapped server
+ * fault), and {@code 49999} for {@link #UNRECOGNIZED_SERVER_ERROR} (unknown-code fallback in the
+ * client SDK).
  *
  * <p>Codes stay coarse: one per distinct failure class the client meaningfully differentiates, not
  * one per rule violation. A code owns the shape (schema + fixed template + docs page); per-case
@@ -229,6 +231,14 @@ public enum SagaErrorCode {
       ErrorMetadataSchema.none(),
       "The request exceeded the server's configured rate limit for this operation.",
       "Back off and retry after a short delay."),
+
+  UNRECOGNIZED_RETRYABLE_SERVER_ERROR(
+      "DB-SAGA-29999",
+      Category.RETRYABLE_SERVER_ERROR,
+      "The server reported a retryable error this client does not recognize",
+      ErrorMetadataSchema.of("server_value"),
+      "The server sent a RETRYABLE_SERVER_ERROR (2xxxx) code this client SDK has no mapping for; usually a version skew where the server is newer. The category digit is a frozen wire contract, so the failure is known to be transient even though the specific code is not.",
+      "Retry with backoff; upgrade the client SDK to interpret the specific code."),
 
   // ── NON_RETRYABLE_SERVER_ERROR (3xxxx) ───────────────────────────────
   PERSISTENCE_SERIALIZATION_FAILED(
@@ -442,6 +452,32 @@ public enum SagaErrorCode {
 
     public String id() {
       return id;
+    }
+
+    /**
+     * Parses the category digit of a well-formed wire code ({@code DB-SAGA-NNNNN}) into its
+     * category, or empty for anything else. The digit is a frozen wire contract, so a client can
+     * classify a code it does not otherwise recognize — the retryability signal survives a version
+     * skew where the server is newer than the client.
+     */
+    public static Optional<Category> fromWireCode(String wireCode) {
+      String prefix = "DB-SAGA-";
+      if (wireCode.length() != prefix.length() + 5 || !wireCode.startsWith(prefix)) {
+        return Optional.empty();
+      }
+      for (int i = prefix.length(); i < wireCode.length(); i++) {
+        char c = wireCode.charAt(i);
+        if (c < '0' || c > '9') {
+          return Optional.empty();
+        }
+      }
+      char digit = wireCode.charAt(prefix.length());
+      for (Category category : values()) {
+        if (category.id.charAt(0) == digit) {
+          return Optional.of(category);
+        }
+      }
+      return Optional.empty();
     }
   }
 }

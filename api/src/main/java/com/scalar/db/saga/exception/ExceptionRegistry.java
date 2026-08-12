@@ -117,6 +117,11 @@ public final class ExceptionRegistry {
             SagaPersistenceException.fromWire(SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE, meta));
     m.put(SagaErrorCode.SERVICE_UNAVAILABLE, meta -> new SagaUnavailableException());
     m.put(SagaErrorCode.RATE_LIMIT_EXCEEDED, meta -> raw(SagaErrorCode.RATE_LIMIT_EXCEEDED, meta));
+    // The client-side unknown-but-retryable sentinel, sibling of UNRECOGNIZED_SERVER_ERROR below;
+    // registered defensively so a server that echoes it still round-trips.
+    m.put(
+        SagaErrorCode.UNRECOGNIZED_RETRYABLE_SERVER_ERROR,
+        meta -> raw(SagaErrorCode.UNRECOGNIZED_RETRYABLE_SERVER_ERROR, meta));
 
     // ── NON_RETRYABLE_SERVER_ERROR (3xxxx) ────────────────────────────
     // Persistence serialization/deserialization reconstruct as the real SagaPersistenceException,

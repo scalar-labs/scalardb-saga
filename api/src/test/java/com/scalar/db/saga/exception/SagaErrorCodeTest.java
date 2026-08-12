@@ -59,6 +59,35 @@ class SagaErrorCodeTest {
   }
 
   @Test
+  void fromWireCode_everyConstantsOwnCodeGiven_parsesToItsDeclaredCategory() {
+    // The digit parser and the enum must agree forever: the digit is the frozen wire contract a
+    // skewed client falls back on, so a constant whose declared category ever drifted from its
+    // own first digit would break remote retry classification.
+    for (SagaErrorCode code : SagaErrorCode.values()) {
+      assertThat(SagaErrorCode.Category.fromWireCode(code.code()))
+          .as("category parsed from %s", code.code())
+          .hasValue(code.category());
+    }
+  }
+
+  @Test
+  void fromWireCode_unknownButWellFormedCodeGiven_parsesByDigit() {
+    // Arrange & Act & Assert — the rolling-upgrade case: the code is unknown, the digit is not
+    assertThat(SagaErrorCode.Category.fromWireCode("DB-SAGA-20099"))
+        .hasValue(SagaErrorCode.Category.RETRYABLE_SERVER_ERROR);
+  }
+
+  @Test
+  void fromWireCode_malformedGiven_returnsEmpty() {
+    assertThat(SagaErrorCode.Category.fromWireCode("")).isEmpty();
+    assertThat(SagaErrorCode.Category.fromWireCode("DB-SAGA-2009")).isEmpty();
+    assertThat(SagaErrorCode.Category.fromWireCode("DB-SAGA-200999")).isEmpty();
+    assertThat(SagaErrorCode.Category.fromWireCode("DB-CORE-20099")).isEmpty();
+    assertThat(SagaErrorCode.Category.fromWireCode("DB-SAGA-2009x")).isEmpty();
+    assertThat(SagaErrorCode.Category.fromWireCode("DB-SAGA-90001")).isEmpty();
+  }
+
+  @Test
   void fromCode_knownCodeGiven_roundTripsToTheSameConstant() {
     // Assert — fromCode(c.code()) returns c for every enum constant
     for (SagaErrorCode code : SagaErrorCode.values()) {

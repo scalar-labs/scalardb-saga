@@ -92,7 +92,10 @@ final class GrpcClientSupport {
    * which classifies by the status family the daemon did set correctly; reporting them as {@code
    * UNRECOGNIZED_SERVER_ERROR} here would flip a retryable {@code UNAVAILABLE} into {@code
    * CLIENT_ERROR} and stop a caller's retries. A genuine {@code DB-SAGA-49999} the server itself
-   * sent still round-trips — that code has a registered reconstructor.
+   * sent still round-trips — that code has a registered reconstructor. One rescue before the {@code
+   * null}: a reason whose frozen category digit says {@code 2xxxx} (retryable) returns the {@code
+   * UNRECOGNIZED_RETRYABLE_SERVER_ERROR} sentinel instead, so the retry signal survives a version
+   * skew even under a status the transport dispatch has no arm for.
    *
    * <p>Prefer this over {@link #mapTransport} wherever both could apply: the gRPC status is a
    * coarse family ({@code INVALID_ARGUMENT} carries both a rejected argument and seven definition
@@ -108,6 +111,9 @@ final class GrpcClientSupport {
     SagaRuntimeException reconstructed =
         ExceptionRegistry.tryReconstruct(info.getReason(), info.getMetadataMap()).orElse(null);
     if (reconstructed == null) {
+      reconstructed = retryableUnknown(info.getReason());
+    }
+    if (reconstructed == null) {
       return null;
     }
     if (reconstructed.getCause() == null) {
@@ -117,6 +123,24 @@ final class GrpcClientSupport {
       reconstructed.initCause(e);
     }
     return reconstructed;
+  }
+
+  /**
+   * The unknown-but-retryable fallback: the category digit of a well-formed {@code DB-SAGA-*}
+   * reason is a frozen wire contract, so even a code this client cannot resolve still tells it the
+   * one thing retries key on. Only the retryable category is rescued here — the transport dispatch
+   * classifies every other family acceptably, but a retryable code riding a status with no
+   * transport arm (ABORTED, FAILED_PRECONDITION) would land in the CLIENT_ERROR catch-all and stop
+   * a caller's retries. The real code stays readable in {@code server_value}.
+   */
+  private static @Nullable SagaRuntimeException retryableUnknown(String reason) {
+    if (SagaErrorCode.Category.fromWireCode(reason).orElse(null)
+        != SagaErrorCode.Category.RETRYABLE_SERVER_ERROR) {
+      return null;
+    }
+    return new SagaRuntimeException(
+        SagaErrorCode.UNRECOGNIZED_RETRYABLE_SERVER_ERROR,
+        ErrorMetadata.of("server_value", reason));
   }
 
   /**

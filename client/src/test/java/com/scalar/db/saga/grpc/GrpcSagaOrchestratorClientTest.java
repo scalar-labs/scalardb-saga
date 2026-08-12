@@ -329,6 +329,26 @@ class GrpcSagaOrchestratorClientTest {
   }
 
   @Test
+  void getStateSnapshot_unknownRetryableCodeUnderAborted_throwsRetryableSentinel() {
+    // Arrange — a rolling upgrade again, but under ABORTED, a status the transport dispatch has
+    // no arm for. The reason's category digit (2 = retryable) is a frozen wire contract, so the
+    // retry signal must survive even though the code itself is unknown.
+    fake.getError = statusWithReason(Status.Code.ABORTED, "DB-SAGA-20099", Map.of());
+
+    // Act + Assert — the retryable sentinel carrying the real code, not the CLIENT_ERROR
+    // catch-all that would stop a caller's retries.
+    assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
+        .isExactlyInstanceOf(SagaRuntimeException.class)
+        .isInstanceOfSatisfying(
+            SagaRuntimeException.class,
+            e -> {
+              assertThat(e.getErrorCode())
+                  .isEqualTo(SagaErrorCode.UNRECOGNIZED_RETRYABLE_SERVER_ERROR);
+              assertThat(e.getMetadata()).containsEntry("server_value", "DB-SAGA-20099");
+            });
+  }
+
+  @Test
   void getStateSnapshot_serverSentUnrecognizedCode_keepsIt() {
     // Arrange — a genuine DB-SAGA-49999 from the server is a registered code, not a degradation,
     // so it must round-trip with the server's own metadata rather than fall to the status.
