@@ -22,6 +22,8 @@ import com.scalar.db.saga.server.security.SagaAuthorizationException;
 import com.scalar.db.saga.server.security.SagaRole;
 import io.javalin.Javalin;
 import io.javalin.http.BadRequestResponse;
+import io.javalin.http.ContentTooLargeResponse;
+import io.javalin.http.InternalServerErrorResponse;
 import io.javalin.http.NotFoundResponse;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -41,12 +43,12 @@ import org.junit.jupiter.api.Test;
 /**
  * Locks in {@link ErrorMapper}'s exception-resolution behavior against a real Javalin dispatch.
  *
- * <p>The catch-all {@code Exception} handler must <b>not</b> swallow Javalin's built-in {@link
- * io.javalin.http.HttpResponseException}s (e.g. {@link BadRequestResponse}). In Javalin 6.x {@code
- * ExceptionMapper} pre-registers a handler for {@code HttpResponseException} and resolves the
- * nearest handler up the class hierarchy, so {@code HttpResponseException} (1 hop) wins over {@code
- * Exception} (3 hops) and the intended status is preserved. A Javalin upgrade that changed that
- * resolution order — silently mapping client errors to {@code 500} — would fail this test.
+ * <p>Javalin's own {@link io.javalin.http.HttpResponseException}s (e.g. {@link BadRequestResponse},
+ * the request-size cap's 413) are handled by ErrorMapper's family handler, which keeps the
+ * framework's status and composes the structured body; Javalin resolves the nearest registered
+ * handler up the class hierarchy, so the family handler outranks the {@code Exception} catch-all
+ * and NotFoundResponse's dedicated handler outranks the family one. A Javalin upgrade that changed
+ * that resolution order would fail these tests.
  *
  * <p>Binds an ephemeral port (no ScalarDB, no {@code SagaServer}); it exercises only {@code
  * ErrorMapper} on a bare app.
@@ -101,6 +103,12 @@ class ErrorMapperTest {
         ctx -> {
           throw toThrow;
         });
+    app.post(
+        "/read-body",
+        ctx -> {
+          ctx.body(); // triggers Javalin's request-size cap
+          ctx.status(200);
+        });
     app.start(0);
   }
 
@@ -112,9 +120,27 @@ class ErrorMapperTest {
   }
 
   @Test
-  void httpResponseException_keepsItsStatus_notSwallowedByCatchAll() throws Exception {
+  void httpResponseException_keepsItsStatus_andNowCarriesTheStructuredBody() throws Exception {
+    // Once handled by Javalin's built-in resolver with its default body; the family handler now
+    // keeps the framework's status and composes the standard body.
     HttpResponse<String> response = get("/bad-request");
     assertThat(response.statusCode()).isEqualTo(400);
+    assertThat(response.body()).contains(SagaErrorCode.INVALID_REQUEST.code());
+  }
+
+  @Test
+  void oversizedBody_returns413_withStructuredBody() throws Exception {
+    // End-to-end reachability of the framework's own gatekeeper: Javalin's default request-size
+    // cap (about 1 MB) fires before any of our code runs, so its response must still carry an
+    // errorCode.
+    HttpResponse<String> response =
+        http.send(
+            HttpRequest.newBuilder(URI.create("http://localhost:" + app.port() + "/read-body"))
+                .POST(java.net.http.HttpRequest.BodyPublishers.ofString("x".repeat(1_200_000)))
+                .build(),
+            BodyHandlers.ofString());
+    assertThat(response.statusCode()).isEqualTo(413);
+    assertThat(response.body()).contains(SagaErrorCode.INVALID_REQUEST.code());
   }
 
   @Test
@@ -305,6 +331,11 @@ class ErrorMapperTest {
             new SagaRuntimeException(SagaErrorCode.RATE_LIMIT_EXCEEDED, ErrorMetadata.of()),
             503,
             SagaErrorCode.RATE_LIMIT_EXCEEDED),
+        // Javalin-generated errors: the framework's own gatekeepers (e.g. the default request
+        // size cap) answer before our routes run; the family handler keeps the status and adds
+        // the code.
+        new Arm(new ContentTooLargeResponse(), 413, SagaErrorCode.INVALID_REQUEST),
+        new Arm(new InternalServerErrorResponse(), 500, SagaErrorCode.INTERNAL_ERROR),
         // The non-Saga catch-all.
         new Arm(new IllegalStateException("boom"), 500, SagaErrorCode.INTERNAL_ERROR));
   }
@@ -335,7 +366,9 @@ class ErrorMapperTest {
     // branched on the code.
     Map<String, List<Integer>> statusesBySubRange =
         Map.of(
-            "100", List.of(400),
+            // Bad-input covers the request-shape statuses, including the framework-generated
+            // ones the HttpResponseException handler passes through.
+            "100", List.of(400, 405, 413, 415),
             "101", List.of(401, 403),
             "102", List.of(404),
             "103", List.of(409),

@@ -18,14 +18,14 @@ import java.util.Optional;
  * 3=NON_RETRYABLE_SERVER_ERROR, 4=CLIENT_ERROR).
  *
  * <p><b>Numbering.</b> Within USER_ERROR, codes cluster into 100-slot sub-ranges by client-facing
- * consequence (HTTP-status family): {@code 100xx}=bad-input (400), {@code 101xx}=auth (401/403),
- * {@code 102xx}=not-found (404), {@code 103xx}=conflict (409), {@code 104xx}=precondition (422).
- * Other categories are single flat blocks — codes number contiguously from {@code XX001}. {@code
- * X9999} is reserved as an always-last sentinel only for categories with a real catch-all code
- * path: {@code 29999} for {@link #UNRECOGNIZED_RETRYABLE_SERVER_ERROR} (the client SDK's
- * unknown-but-retryable fallback), {@code 39999} for {@link #INTERNAL_ERROR} (unmapped server
- * fault), and {@code 49999} for {@link #UNRECOGNIZED_SERVER_ERROR} (unknown-code fallback in the
- * client SDK).
+ * consequence (HTTP-status family): {@code 100xx}=bad-input (the request-shape statuses: 400 and
+ * the framework-generated 405/413/415), {@code 101xx}=auth (401/403), {@code 102xx}=not-found
+ * (404), {@code 103xx}=conflict (409), {@code 104xx}=precondition (422). Other categories are
+ * single flat blocks — codes number contiguously from {@code XX001}. {@code X9999} is reserved as
+ * an always-last sentinel only for categories with a real catch-all code path: {@code 29999} for
+ * {@link #UNRECOGNIZED_RETRYABLE_SERVER_ERROR} (the client SDK's unknown-but-retryable fallback),
+ * {@code 39999} for {@link #INTERNAL_ERROR} (unmapped server fault), and {@code 49999} for {@link
+ * #UNRECOGNIZED_SERVER_ERROR} (unknown-code fallback in the client SDK).
  *
  * <p><b>Retry authority.</b> The {@link Category} of the body's {@code errorCode} — readable from a
  * code string's first digit via {@link Category#fromWireCode} — decides whether to retry; the
@@ -247,6 +247,7 @@ public enum SagaErrorCode {
       "The request exceeded the server's configured rate limit for this operation.",
       "Back off and retry after a short delay."),
 
+
   UNRECOGNIZED_RETRYABLE_SERVER_ERROR(
       "DB-SAGA-29999",
       Category.RETRYABLE_SERVER_ERROR,
@@ -337,6 +338,7 @@ public enum SagaErrorCode {
       ErrorMetadataSchema.none(),
       "The caller cancelled the operation (thread interrupt, future cancellation, or client shutdown) before the RPC completed.",
       "If the abort was unintentional, avoid interrupting or cancelling the calling thread and retry."),
+
 
   UNRECOGNIZED_SERVER_ERROR(
       "DB-SAGA-49999",

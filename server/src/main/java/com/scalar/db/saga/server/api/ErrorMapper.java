@@ -17,6 +17,7 @@ import com.scalar.db.saga.server.security.SagaAuthenticationException;
 import com.scalar.db.saga.server.security.SagaAuthorizationException;
 import io.javalin.Javalin;
 import io.javalin.http.Context;
+import io.javalin.http.HttpResponseException;
 import io.javalin.http.NotFoundResponse;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -226,6 +227,34 @@ public final class ErrorMapper {
                         SagaErrorCode.ENDPOINT_NOT_FOUND,
                         ErrorMetadata.of(
                             "detail", "no such endpoint: " + boundedRequestLine(ctx)))));
+
+    // ── Javalin-generated errors (the framework's own gatekeepers) ───────
+    // Javalin produces responses of its own before our routes run — the request-size cap (413,
+    // ContentTooLargeResponse, on by default at about 1 MB) is triggerable by any caller — and its
+    // default bodies carry no errorCode. Routing the whole family through the standard
+    // composition keeps the framework's status and adds ours: INVALID_REQUEST for the 4xx
+    // request-shape statuses, INTERNAL_ERROR for 5xx. NotFoundResponse stays on its dedicated
+    // ENDPOINT_NOT_FOUND handler above; Javalin resolves the nearest registered type.
+    app.exception(
+        HttpResponseException.class,
+        (e, ctx) -> {
+          int status = e.getStatus();
+          if (status >= 500) {
+            logger.error("Javalin-generated {} on {} {}", status, ctx.method(), ctx.path(), e);
+            ctx.status(status).json(body(SagaErrorCode.INTERNAL_ERROR, ErrorMetadata.of()));
+          } else {
+            String message = e.getMessage();
+            ctx.status(status)
+                .json(
+                    body(
+                        SagaErrorCode.INVALID_REQUEST,
+                        ErrorMetadata.of(
+                            "detail",
+                            message == null || message.isBlank()
+                                ? "request rejected at the server edge"
+                                : message)));
+          }
+        });
   }
 
   /**
