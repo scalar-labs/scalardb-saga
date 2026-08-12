@@ -174,7 +174,8 @@ final class JwtConfig {
           "Invalid value for '" + key + "': not a number " + redacted(value));
     }
     if (parsed <= 0) {
-      throw new IllegalArgumentException("'" + key + "' must be a positive integer, got " + parsed);
+      throw new IllegalArgumentException(
+          "'" + key + "' must be a positive integer " + redacted(value));
     }
     return parsed;
   }

@@ -220,6 +220,21 @@ class JwtConfigTest {
   }
 
   @Test
+  void from_negativeNumericTimeout_throwsWithoutEchoingValue() {
+    // Arrange — a purely numeric secret parses successfully, so the positive-integer check must
+    // redact too, not just the NumberFormatException path.
+    Properties props = minimalProps();
+    props.setProperty(JwtConfig.CONNECT_TIMEOUT_MILLIS_KEY, "-8675309");
+
+    // Act / Assert
+    assertThatThrownBy(() -> JwtConfig.from(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(JwtConfig.CONNECT_TIMEOUT_MILLIS_KEY)
+        .hasMessageContaining("positive integer")
+        .hasMessageNotContaining("8675309");
+  }
+
+  @Test
   void from_malformedJwksUrl_throwsWithoutEchoingValue() {
     // Arrange
     Properties props = minimalProps();

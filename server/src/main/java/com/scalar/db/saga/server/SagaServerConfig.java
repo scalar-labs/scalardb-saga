@@ -649,27 +649,19 @@ public final class SagaServerConfig {
     }
     // Port 0 is exempt: each transport then binds its own ephemeral port, so they cannot collide.
     if (httpEnabled && grpcEnabled && httpPort != 0 && httpPort == grpcPort) {
+      // The colliding number stays out of the message: echoing it would confirm that a numeric
+      // secret resolved onto one port key equals the other key's port.
       throw new IllegalArgumentException(
           "'"
               + HTTP_PORT_KEY
               + "' and '"
               + GRPC_PORT_KEY
-              + "' are both "
-              + httpPort
-              + ", but each transport binds its own listener. Give them different ports, or disable"
-              + " one transport.");
+              + "' are set to the same port, but each transport binds its own listener. Give them"
+              + " different ports, or disable one transport.");
     }
     if (httpMinThreads > httpMaxThreads) {
       throw new IllegalArgumentException(
-          "'"
-              + HTTP_MIN_THREADS_KEY
-              + "' ("
-              + httpMinThreads
-              + ") must not exceed '"
-              + HTTP_MAX_THREADS_KEY
-              + "' ("
-              + httpMaxThreads
-              + ").");
+          "'" + HTTP_MIN_THREADS_KEY + "' must not exceed '" + HTTP_MAX_THREADS_KEY + "'.");
     }
     // Provisioning a callback needs the URL to hand out; authenticating one needs the secret.
     // Either alone is a half-configured feature that fails only once an async saga runs.
@@ -1373,7 +1365,8 @@ public final class SagaServerConfig {
           "Invalid value for '" + key + "': not a number " + redacted(value));
     }
     if (port < 0 || port > 65535) {
-      throw new IllegalArgumentException("'" + key + "' must be between 0 and 65535, got " + port);
+      throw new IllegalArgumentException(
+          "'" + key + "' must be between 0 and 65535 " + redacted(value));
     }
     return port;
   }
@@ -1417,7 +1410,7 @@ public final class SagaServerConfig {
     }
     if (parsed < minInclusive) {
       throw new IllegalArgumentException(
-          "'" + key + "' must be >= " + minInclusive + ", got " + parsed);
+          "'" + key + "' must be >= " + minInclusive + " " + redacted(value));
     }
     return parsed;
   }
@@ -1433,8 +1426,15 @@ public final class SagaServerConfig {
       @Nullable String value, String key, int defaultValue, int minInclusive) {
     long parsed = parseBoundedLong(value, key, defaultValue, minInclusive);
     if (parsed > Integer.MAX_VALUE) {
+      // parsed can only exceed an int when an explicit value was parsed; the null-value path
+      // returns defaultValue, an int. requireNonNull records what NullAway cannot derive.
       throw new IllegalArgumentException(
-          "'" + key + "' must be <= " + Integer.MAX_VALUE + ", got " + parsed);
+          "'"
+              + key
+              + "' must be <= "
+              + Integer.MAX_VALUE
+              + " "
+              + redacted(Objects.requireNonNull(value)));
     }
     return (int) parsed;
   }
@@ -1509,7 +1509,7 @@ public final class SagaServerConfig {
     }
     if (bytes < 0) {
       throw new IllegalArgumentException(
-          "'" + STORE_MAX_EVENT_PAYLOAD_BYTES_KEY + "' must not be negative, got " + bytes);
+          "'" + STORE_MAX_EVENT_PAYLOAD_BYTES_KEY + "' must not be negative " + redacted(value));
     }
     return bytes == 0 ? Integer.MAX_VALUE : bytes;
   }
