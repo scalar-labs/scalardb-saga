@@ -40,9 +40,12 @@ import java.util.Map;
  * from either implementation as the same type and {@link
  * com.scalar.db.saga.exception.SagaErrorCode}. A remote client adds the failures that only exist
  * over a network: {@link com.scalar.db.saga.exception.SagaUnavailableException}, {@link
- * com.scalar.db.saga.exception.SagaTimeoutException}, and {@link
- * com.scalar.db.saga.exception.SagaErrorCode#REQUEST_ABORTED} for a caller-cancelled call. The
- * embedded implementation never throws those.
+ * com.scalar.db.saga.exception.SagaTimeoutException}, {@link
+ * com.scalar.db.saga.exception.SagaErrorCode#REQUEST_ABORTED} for a caller-cancelled call — and,
+ * against a secured server, {@link com.scalar.db.saga.exception.SagaUnauthenticatedException} and
+ * {@link com.scalar.db.saga.exception.SagaPermissionDeniedException}, plus the client SDK's
+ * fallback codes ({@code UNRECOGNIZED_SERVER_ERROR} and friends) under version skew or an
+ * intermediary failure. The embedded implementation never throws any of those.
  *
  * <p>Construct the embedded implementation via its builder:
  *

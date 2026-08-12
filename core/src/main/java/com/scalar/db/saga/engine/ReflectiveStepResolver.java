@@ -136,6 +136,9 @@ class ReflectiveStepResolver implements StepResolver {
     try {
       return qualifier == null ? context.httpClient() : context.httpClient(qualifier);
     } catch (SagaDefinitionException e) {
+      // Embed the inner failure's detail field, not its rendered message: getMessage() is
+      // "DB-SAGA-NNNNN: ... [detail=...]", and nesting that inside this code's own detail would
+      // put a second code and bracket block on the wire.
       throw SagaDefinitionException.stepClassInvalid(
           stepClass,
           "constructor parameter "
@@ -145,7 +148,7 @@ class ReflectiveStepResolver implements StepResolver {
               + " for step '"
               + stepName
               + "': "
-              + e.getMessage(),
+              + e.getMetadata().getOrDefault("detail", e.getErrorCode().message()),
           e);
     }
   }

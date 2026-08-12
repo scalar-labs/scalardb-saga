@@ -443,6 +443,10 @@ public class DefaultSagaAdminService implements SagaAdminService {
     return def;
   }
 
+  // The 422 wire body renders these preconditions' current_state and requested_operation. That
+  // disclosure is acceptable only while every thrower sits behind ADMIN-gated routes, as all of
+  // these do; a throw site reachable from a non-admin route would turn the body into a saga-state
+  // oracle for any authenticated caller.
   private static SagaStatePreconditionException parked(String sagaId) {
     return SagaStatePreconditionException.parked(sagaId);
   }

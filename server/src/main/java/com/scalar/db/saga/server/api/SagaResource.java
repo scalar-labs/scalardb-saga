@@ -21,7 +21,8 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code POST /sagas} — start a saga with a server-generated ID (synchronous by default;
  *       {@code ?async=true} returns {@code 202} immediately)
  *   <li>{@code PUT /sagas/{id}} — start a saga with a client-supplied ID (idempotent; {@code 409}
- *       with the existing snapshot on conflict)
+ *       with the standard error body on conflict — deliberately without the existing snapshot,
+ *       which would let an ID-guessing caller read another caller's saga state)
  *   <li>{@code GET /sagas/{id}} — fetch a saga's current state
  * </ul>
  *
