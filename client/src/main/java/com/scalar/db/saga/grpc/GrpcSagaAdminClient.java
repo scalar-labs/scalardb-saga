@@ -228,8 +228,14 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
     return GrpcClientSupport.mapTransport(e);
   }
 
+  /**
+   * The whole mapping for a call with no saga-scoped context to add: the server's {@code ErrorInfo}
+   * when it sent one, otherwise transport-status dispatch — the same two primitives {@link
+   * #mapMutation} composes with its own handling slotted between them.
+   */
   private static RuntimeException mapCommon(StatusRuntimeException e) {
-    return GrpcClientSupport.mapWire(e);
+    SagaRuntimeException reconstructed = GrpcClientSupport.reconstruct(e);
+    return reconstructed != null ? reconstructed : GrpcClientSupport.mapTransport(e);
   }
 
   /** Builder for {@link GrpcSagaAdminClient}, mirroring the application client's builder. */

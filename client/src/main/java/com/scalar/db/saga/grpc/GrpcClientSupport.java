@@ -76,17 +76,6 @@ final class GrpcClientSupport {
   }
 
   /**
-   * Maps a wire failure to the api exception: the daemon's {@link ErrorInfo} when it sent one,
-   * otherwise transport-status dispatch. This is the whole mapping for a call with no saga-scoped
-   * context to add; the context-specific mappers call {@link #reconstruct} and {@link
-   * #mapTransport} separately so they can slot their own handling between the two.
-   */
-  static RuntimeException mapWire(StatusRuntimeException e) {
-    SagaRuntimeException reconstructed = reconstruct(e);
-    return reconstructed != null ? reconstructed : mapTransport(e);
-  }
-
-  /**
    * Rebuilds the typed exception the daemon's {@link ErrorInfo} describes, inverting what {@code
    * GrpcErrorMapper} put on the wire, or returns {@code null} when the response carried no {@code
    * ErrorInfo} — an older daemon, an intermediary that stripped it, or a transport failure that
