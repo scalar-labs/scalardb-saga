@@ -37,7 +37,7 @@ public final class ErrorMetadataSchema {
    *
    * @throws IllegalArgumentException if any key is null, blank, or duplicated
    */
-  public static ErrorMetadataSchema of(String... keys) {
+  static ErrorMetadataSchema of(String... keys) {
     Set<String> seen = new LinkedHashSet<>();
     for (String key : keys) {
       if (key == null || key.trim().isEmpty()) {
@@ -51,7 +51,7 @@ public final class ErrorMetadataSchema {
   }
 
   /** For codes whose failure carries no per-invocation context. */
-  public static ErrorMetadataSchema none() {
+  static ErrorMetadataSchema none() {
     return EMPTY;
   }
 

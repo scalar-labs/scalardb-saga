@@ -11,9 +11,9 @@ import org.junit.jupiter.api.Test;
 class ExceptionRegistryTest {
 
   @Test
-  void reconstruct_everyCode_roundTripsToItsOwnCode() {
+  void tryReconstruct_everyCode_roundTripsToItsOwnCode() {
     // Every enum constant must have a registry entry that preserves its code. Without this, a code
-    // can be added to the enum and silently degrade to UNRECOGNIZED_SERVER_ERROR, or — as
+    // can be added to the enum and silently fail to reconstruct, or — as
     // PERSISTENCE_STORE_UNAVAILABLE did — be reconstructed as an exception hardcoding a *different*
     // code, so the caller sees DB-SAGA-20003 for a DB-SAGA-20002 failure.
     for (SagaErrorCode code : SagaErrorCode.values()) {
@@ -22,7 +22,7 @@ class ExceptionRegistryTest {
         metadata.put(key, "x");
       }
 
-      SagaRuntimeException reconstructed = ExceptionRegistry.reconstruct(code.code(), metadata);
+      SagaRuntimeException reconstructed = reconstruct(code.code(), metadata);
 
       assertThat(reconstructed.getErrorCode())
           .as("reconstructed code of %s", code.name())
@@ -31,13 +31,12 @@ class ExceptionRegistryTest {
   }
 
   @Test
-  void reconstruct_persistenceCodes_produceSagaPersistenceExceptionWithItsRetryVerdict() {
+  void tryReconstruct_persistenceCodes_produceSagaPersistenceExceptionWithItsRetryVerdict() {
     // Arrange & Act — the transient code and one permanent code
     SagaRuntimeException transientFailure =
-        ExceptionRegistry.reconstruct(
-            SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE.code(), Collections.emptyMap());
+        reconstruct(SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE.code(), Collections.emptyMap());
     SagaRuntimeException permanent =
-        ExceptionRegistry.reconstruct(
+        reconstruct(
             SagaErrorCode.PERSISTENCE_DESERIALIZATION_FAILED.code(), Collections.emptyMap());
 
     // Assert — a remote caller gets the same type and the same isRetryable() an embedded one does
@@ -52,10 +51,10 @@ class ExceptionRegistryTest {
   }
 
   @Test
-  void reconstruct_knownCodeWithValidMetadata_producesTypedException() {
+  void tryReconstruct_knownCodeWithValidMetadata_producesTypedException() {
     // Arrange & Act
     SagaRuntimeException e =
-        ExceptionRegistry.reconstruct(
+        reconstruct(
             SagaErrorCode.SAGA_NOT_FOUND.code(), Collections.singletonMap("saga_id", "s-1"));
 
     // Assert — typed exception with the same code and metadata a server-side thrower produced
@@ -65,7 +64,7 @@ class ExceptionRegistryTest {
   }
 
   @Test
-  void reconstruct_invalidArgumentCode_keepsTheCodeDistinctFromInvalidRequest() {
+  void tryReconstruct_invalidArgumentCode_keepsTheCodeDistinctFromInvalidRequest() {
     // Arrange — the two bad-input codes are deliberately separate: INVALID_REQUEST is the wire
     // message failing validation at the daemon edge, INVALID_ARGUMENT a caller value the engine
     // rejected. A remote client must not collapse one into the other.
@@ -74,9 +73,8 @@ class ExceptionRegistryTest {
 
     // Act
     SagaRuntimeException argument =
-        ExceptionRegistry.reconstruct(SagaErrorCode.INVALID_ARGUMENT.code(), argumentMeta);
-    SagaRuntimeException request =
-        ExceptionRegistry.reconstruct(SagaErrorCode.INVALID_REQUEST.code(), requestMeta);
+        reconstruct(SagaErrorCode.INVALID_ARGUMENT.code(), argumentMeta);
+    SagaRuntimeException request = reconstruct(SagaErrorCode.INVALID_REQUEST.code(), requestMeta);
 
     // Assert — each round-trips to its own code, carrying its own detail
     assertThat(argument.getErrorCode()).isEqualTo(SagaErrorCode.INVALID_ARGUMENT);
@@ -86,15 +84,14 @@ class ExceptionRegistryTest {
   }
 
   @Test
-  void reconstruct_definitionCode_producesSagaDefinitionException() {
+  void tryReconstruct_definitionCode_producesSagaDefinitionException() {
     // Arrange
     Map<String, String> metadata = new HashMap<>();
     metadata.put("saga_name", "transfer");
     metadata.put("detail", "duplicate step name 'debit'");
 
     // Act
-    SagaRuntimeException e =
-        ExceptionRegistry.reconstruct(SagaErrorCode.INVALID_DEFINITION.code(), metadata);
+    SagaRuntimeException e = reconstruct(SagaErrorCode.INVALID_DEFINITION.code(), metadata);
 
     // Assert
     assertThat(e).isInstanceOf(SagaDefinitionException.class);
@@ -102,7 +99,7 @@ class ExceptionRegistryTest {
   }
 
   @Test
-  void reconstruct_preconditionCode_producesStatePreconditionException() {
+  void tryReconstruct_preconditionCode_producesStatePreconditionException() {
     // Arrange
     Map<String, String> metadata = new HashMap<>();
     metadata.put("saga_id", "s-1");
@@ -110,8 +107,7 @@ class ExceptionRegistryTest {
     metadata.put("requested_operation", "recover");
 
     // Act
-    SagaRuntimeException e =
-        ExceptionRegistry.reconstruct(SagaErrorCode.SAGA_WRONG_STATE.code(), metadata);
+    SagaRuntimeException e = reconstruct(SagaErrorCode.SAGA_WRONG_STATE.code(), metadata);
 
     // Assert
     assertThat(e).isInstanceOf(SagaStatePreconditionException.class);
@@ -119,10 +115,10 @@ class ExceptionRegistryTest {
   }
 
   @Test
-  void reconstruct_authCode_producesAuthException() {
+  void tryReconstruct_authCode_producesAuthException() {
     // Arrange & Act
     SagaRuntimeException e =
-        ExceptionRegistry.reconstruct(SagaErrorCode.UNAUTHENTICATED.code(), Collections.emptyMap());
+        reconstruct(SagaErrorCode.UNAUTHENTICATED.code(), Collections.emptyMap());
 
     // Assert
     assertThat(e).isInstanceOf(SagaUnauthenticatedException.class);
@@ -130,11 +126,10 @@ class ExceptionRegistryTest {
   }
 
   @Test
-  void reconstruct_unavailableCode_producesSagaUnavailableException() {
+  void tryReconstruct_unavailableCode_producesSagaUnavailableException() {
     // Arrange & Act
     SagaRuntimeException e =
-        ExceptionRegistry.reconstruct(
-            SagaErrorCode.SERVICE_UNAVAILABLE.code(), Collections.emptyMap());
+        reconstruct(SagaErrorCode.SERVICE_UNAVAILABLE.code(), Collections.emptyMap());
 
     // Assert
     assertThat(e).isInstanceOf(SagaUnavailableException.class);
@@ -142,13 +137,12 @@ class ExceptionRegistryTest {
   }
 
   @Test
-  void reconstruct_persistenceStoreUnavailableCode_producesSagaPersistenceException() {
+  void tryReconstruct_persistenceStoreUnavailableCode_producesSagaPersistenceException() {
     // Arrange & Act — the code must survive, and so must the type: a transient store failure is
     // what the engine threw, so a remote caller sees SagaPersistenceException with isRetryable()
     // working, not a SagaUnavailableException substituted for it.
     SagaRuntimeException e =
-        ExceptionRegistry.reconstruct(
-            SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE.code(), Collections.emptyMap());
+        reconstruct(SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE.code(), Collections.emptyMap());
 
     // Assert
     assertThat(e).isInstanceOf(SagaPersistenceException.class);
@@ -157,10 +151,10 @@ class ExceptionRegistryTest {
   }
 
   @Test
-  void reconstruct_codelessCode_producesRawSagaRuntimeException() {
+  void tryReconstruct_codelessCode_producesRawSagaRuntimeException() {
     // Arrange & Act — INTERNAL_ERROR has no dedicated exception type
     SagaRuntimeException e =
-        ExceptionRegistry.reconstruct(SagaErrorCode.INTERNAL_ERROR.code(), Collections.emptyMap());
+        reconstruct(SagaErrorCode.INTERNAL_ERROR.code(), Collections.emptyMap());
 
     // Assert — raw SagaRuntimeException carrying the code
     assertThat(e).isExactlyInstanceOf(SagaRuntimeException.class);
@@ -168,48 +162,12 @@ class ExceptionRegistryTest {
   }
 
   @Test
-  void reconstruct_unknownCode_degradesToUnrecognizedServerError() {
-    // Arrange & Act — a code this client SDK doesn't know
-    SagaRuntimeException e = ExceptionRegistry.reconstruct("DB-SAGA-99999", Collections.emptyMap());
-
-    // Assert — degrades to UNRECOGNIZED_SERVER_ERROR carrying the raw wire code
-    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.UNRECOGNIZED_SERVER_ERROR);
-    assertThat(e.getMetadata()).containsEntry("server_value", "DB-SAGA-99999");
-  }
-
-  @Test
-  void reconstruct_knownCodeButMissingMetadata_degradesToUnrecognizedServerError() {
-    // Arrange & Act — SAGA_NOT_FOUND requires "saga_id" but the wire lacks it
-    SagaRuntimeException e =
-        ExceptionRegistry.reconstruct(SagaErrorCode.SAGA_NOT_FOUND.code(), Collections.emptyMap());
-
-    // Assert — protocol drift; degrade rather than shim a partial exception
-    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.UNRECOGNIZED_SERVER_ERROR);
-    assertThat(e.getMetadata()).containsEntry("server_value", SagaErrorCode.SAGA_NOT_FOUND.code());
-  }
-
-  @Test
-  void reconstruct_knownCodeButWrongMetadataShape_degradesToUnrecognizedServerError() {
+  void tryReconstruct_knownCodeButWrongMetadataShape_returnsEmpty() {
     // Arrange & Act — SAGA_WRONG_STATE requires three keys; supply only one
-    SagaRuntimeException e =
-        ExceptionRegistry.reconstruct(
-            SagaErrorCode.SAGA_WRONG_STATE.code(), Collections.singletonMap("saga_id", "s-1"));
-
-    // Assert
-    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.UNRECOGNIZED_SERVER_ERROR);
-  }
-
-  @Test
-  void tryReconstruct_knownCodeWithValidMetadata_returnsTypedException() {
-    // Arrange & Act
-    SagaRuntimeException e =
-        ExceptionRegistry.tryReconstruct(
-                SagaErrorCode.SAGA_NOT_FOUND.code(), Collections.singletonMap("saga_id", "s-1"))
-            .orElseThrow(() -> new AssertionError("expected a reconstruction"));
-
-    // Assert
-    assertThat(e).isInstanceOf(SagaNotFoundException.class);
-    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.SAGA_NOT_FOUND);
+    assertThat(
+            ExceptionRegistry.tryReconstruct(
+                SagaErrorCode.SAGA_WRONG_STATE.code(), Collections.singletonMap("saga_id", "s-1")))
+        .isEmpty();
   }
 
   @Test
@@ -243,5 +201,14 @@ class ExceptionRegistryTest {
     // Assert
     assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.UNRECOGNIZED_SERVER_ERROR);
     assertThat(e.getMetadata()).containsEntry("server_value", "SOME_ENUM_VALUE");
+  }
+
+  /**
+   * Drives {@link ExceptionRegistry#tryReconstruct}, failing the test if the registry cannot
+   * resolve the code — the callers here all expect a successful reconstruction.
+   */
+  private static SagaRuntimeException reconstruct(String wireCode, Map<String, String> metadata) {
+    return ExceptionRegistry.tryReconstruct(wireCode, metadata)
+        .orElseThrow(() -> new AssertionError("expected a reconstruction for " + wireCode));
   }
 }

@@ -17,13 +17,11 @@ import java.util.Optional;
  * doesn't change. Codes with no dedicated exception type reconstruct as a raw {@link
  * SagaRuntimeException} carrying the same code and metadata.
  *
- * <p><b>Graceful degradation, in two flavors.</b> An unknown code (e.g. the server is newer than
- * this client) or wire metadata that doesn't satisfy the code's schema (protocol drift) never shims
- * the exception into a partial state. {@link #tryReconstruct} reports the condition as an empty
- * result, for callers with a better fallback of their own — the gRPC client falls back to
- * transport-status dispatch, which classifies by the status family the server did set correctly.
- * {@link #reconstruct} degrades to {@link SagaErrorCode#UNRECOGNIZED_SERVER_ERROR} carrying the raw
- * wire code, for callers with nothing better to fall back on.
+ * <p><b>Graceful degradation.</b> An unknown code (e.g. the server is newer than this client) or
+ * wire metadata that doesn't satisfy the code's schema (protocol drift) never shims the exception
+ * into a partial state: {@link #tryReconstruct} reports the condition as an empty result, and the
+ * caller classifies some other way — the gRPC client falls back to transport-status dispatch, which
+ * reads the status family the server did set correctly.
  *
  * <p><b>Not for every wire failure.</b> This handles the "server sent an ErrorInfo" path only. Wire
  * failures that carry no ErrorInfo (network error, deadline, unmapped gRPC status) route through
@@ -163,7 +161,7 @@ public final class ExceptionRegistry {
    * metadata, or returns empty when this registry cannot: the code is unknown (server newer than
    * this client), unregistered, or the metadata doesn't satisfy the code's schema (protocol drift).
    * Empty means "classify some other way", not "no error" — the gRPC client answers it with
-   * transport-status dispatch. Callers with no better fallback use {@link #reconstruct}.
+   * transport-status dispatch.
    */
   @SuppressFBWarnings(
       value = "DCN_NULLPOINTER_EXCEPTION",
@@ -193,22 +191,7 @@ public final class ExceptionRegistry {
     }
   }
 
-  /**
-   * Reconstructs the typed exception the server would have thrown, given the wire code and
-   * metadata. Where {@link #tryReconstruct} returns empty, this degrades to {@link
-   * SagaErrorCode#UNRECOGNIZED_SERVER_ERROR} carrying the raw wire code.
-   */
-  public static SagaRuntimeException reconstruct(String wireCode, Map<String, String> metadata) {
-    return tryReconstruct(wireCode, metadata).orElseGet(() -> unrecognized(wireCode));
-  }
-
   private static SagaRuntimeException raw(SagaErrorCode code, Map<String, String> metadata) {
     return new SagaRuntimeException(code, metadata);
-  }
-
-  private static SagaRuntimeException unrecognized(String wireCode) {
-    return new SagaRuntimeException(
-        SagaErrorCode.UNRECOGNIZED_SERVER_ERROR,
-        ErrorMetadata.of("server_value", wireCode == null ? "" : wireCode));
   }
 }
