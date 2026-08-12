@@ -21,8 +21,11 @@ import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import java.time.Instant;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -198,6 +201,10 @@ class GrpcErrorMapperTest {
             SagaPersistenceException.serializationFailed(new RuntimeException("bad json")),
             Status.Code.INTERNAL,
             SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED),
+        new Arm(
+            SagaPersistenceException.deserializationFailed(new RuntimeException("schema drift")),
+            Status.Code.INTERNAL,
+            SagaErrorCode.PERSISTENCE_DESERIALIZATION_FAILED),
         // The category fallback for an unmapped SagaRuntimeException subclass.
         new Arm(
             new SagaRuntimeException(SagaErrorCode.RATE_LIMIT_EXCEEDED, ErrorMetadata.of()),
@@ -247,6 +254,41 @@ class GrpcErrorMapperTest {
           .as("%s is numbered in sub-range %sxx", arm.code().name(), subRange)
           .isIn(statusesBySubRange.get(subRange));
     }
+  }
+
+  @Test
+  void allArms_coverEveryMapperProducibleCode() {
+    // Codes deliberately absent from the dispatch table; every entry says why. A new enum
+    // constant that lands in neither place fails here, so a forgotten mapper arm is a build
+    // failure instead of a silent category-fallback response contradicting its own sub-range.
+    EnumSet<SagaErrorCode> excluded =
+        EnumSet.of(
+            // Emitted on gRPC by the interceptors through GrpcErrorMapper.close, never by this
+            // dispatch; the interceptor tests pin their status and reason.
+            SagaErrorCode.UNAUTHENTICATED,
+            SagaErrorCode.PERMISSION_DENIED,
+            SagaErrorCode.SERVICE_UNAVAILABLE,
+            // REST-only: the unmatched-route 404 body.
+            SagaErrorCode.ENDPOINT_NOT_FOUND,
+            // Produced only by the client SDK; this server never emits them.
+            SagaErrorCode.SERVER_UNREACHABLE,
+            SagaErrorCode.REQUEST_TIMEOUT,
+            SagaErrorCode.REQUEST_ABORTED,
+            SagaErrorCode.UNRECOGNIZED_SERVER_ERROR,
+            // Reserved, produced nowhere yet (see SagaErrorCode).
+            SagaErrorCode.STEP_TIMEOUT,
+            SagaErrorCode.STEP_USER_FAILURE,
+            // Recorded into saga state as a timeline event, never a top-level error response.
+            SagaErrorCode.COMPENSATION_FAILED);
+
+    Set<SagaErrorCode> covered =
+        allArms().stream()
+            .map(Arm::code)
+            .collect(Collectors.toCollection(() -> EnumSet.noneOf(SagaErrorCode.class)));
+
+    assertThat(covered)
+        .as("every SagaErrorCode needs a dispatch-table row or a commented exclusion above")
+        .isEqualTo(EnumSet.complementOf(excluded));
   }
 
   @Test

@@ -17,6 +17,9 @@ import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import com.scalar.db.saga.server.security.SagaAuthUnavailableException;
+import com.scalar.db.saga.server.security.SagaAuthenticationException;
+import com.scalar.db.saga.server.security.SagaAuthorizationException;
+import com.scalar.db.saga.server.security.SagaRole;
 import io.javalin.Javalin;
 import io.javalin.http.BadRequestResponse;
 import io.javalin.http.NotFoundResponse;
@@ -26,8 +29,11 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.time.Instant;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -252,6 +258,21 @@ class ErrorMapperTest {
         // Javalin's unmatched-route signal; its handler must answer with a not-found-family code,
         // and this row is what puts the pairing under the sub-range guard below.
         new Arm(new NotFoundResponse(), 404, SagaErrorCode.ENDPOINT_NOT_FOUND),
+        new Arm(new CallbackAuthException("bad token"), 401, SagaErrorCode.UNAUTHENTICATED),
+        new Arm(
+            new SagaAuthenticationException("missing credential"),
+            401,
+            SagaErrorCode.UNAUTHENTICATED),
+        new Arm(
+            new SagaAuthorizationException("caller-1", SagaRole.ADMIN),
+            403,
+            SagaErrorCode.PERMISSION_DENIED),
+        new Arm(
+            new RateLimitExceededException("over limit"), 429, SagaErrorCode.RATE_LIMIT_EXCEEDED),
+        new Arm(
+            new SagaAuthUnavailableException("jwks unreachable", new RuntimeException()),
+            503,
+            SagaErrorCode.SERVICE_UNAVAILABLE),
         new Arm(
             new SagaAlreadyExistsException("s-1", existing),
             409,
@@ -273,6 +294,10 @@ class ErrorMapperTest {
             SagaPersistenceException.serializationFailed(new RuntimeException("bad json")),
             500,
             SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED),
+        new Arm(
+            SagaPersistenceException.deserializationFailed(new RuntimeException("schema drift")),
+            500,
+            SagaErrorCode.PERSISTENCE_DESERIALIZATION_FAILED),
         // The category fallback for an unmapped SagaRuntimeException subclass.
         new Arm(
             new SagaRuntimeException(SagaErrorCode.RATE_LIMIT_EXCEEDED, ErrorMetadata.of()),
@@ -323,6 +348,34 @@ class ErrorMapperTest {
           .as("%s is numbered in sub-range %sxx", arm.code().name(), subRange)
           .isIn(statusesBySubRange.get(subRange));
     }
+  }
+
+  @Test
+  void allArms_coverEveryServerProducibleCode() {
+    // Codes deliberately absent from the dispatch table; every entry says why. A new enum
+    // constant that lands in neither place fails here, so a forgotten mapper handler is a build
+    // failure instead of a silent category-fallback response contradicting its own sub-range.
+    EnumSet<SagaErrorCode> excluded =
+        EnumSet.of(
+            // Produced only by the client SDK; this server never emits them.
+            SagaErrorCode.SERVER_UNREACHABLE,
+            SagaErrorCode.REQUEST_TIMEOUT,
+            SagaErrorCode.REQUEST_ABORTED,
+            SagaErrorCode.UNRECOGNIZED_SERVER_ERROR,
+            // Reserved, produced nowhere yet (see SagaErrorCode).
+            SagaErrorCode.STEP_TIMEOUT,
+            SagaErrorCode.STEP_USER_FAILURE,
+            // Recorded into saga state as a timeline event, never a top-level error response.
+            SagaErrorCode.COMPENSATION_FAILED);
+
+    Set<SagaErrorCode> covered =
+        allArms().stream()
+            .map(Arm::code)
+            .collect(Collectors.toCollection(() -> EnumSet.noneOf(SagaErrorCode.class)));
+
+    assertThat(covered)
+        .as("every SagaErrorCode needs a dispatch-table row or a commented exclusion above")
+        .isEqualTo(EnumSet.complementOf(excluded));
   }
 
   private HttpResponse<String> get(String path) throws Exception {
