@@ -38,6 +38,12 @@ public class SagaDefinitionException extends SagaRuntimeException {
         ErrorMetadata.of("step_name", stepName, "detail", detail));
   }
 
+  /**
+   * The {@code detail} stays generic and the parser's diagnostic rides only the cause,
+   * deliberately: every thrower today is operator-local (inline strings, server-boot file loading),
+   * where the cause chain is visible, and echoing parser internals onto the wire is a leakage
+   * decision to make only if a remote registration route ever ships.
+   */
   public static SagaDefinitionException definitionMalformed(String format, Throwable cause) {
     return new SagaDefinitionException(
         SagaErrorCode.MALFORMED_DEFINITION,

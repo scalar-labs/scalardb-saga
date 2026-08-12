@@ -24,7 +24,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Maps exceptions to HTTP responses with a consistent JSON error body.
+ * Maps exceptions to HTTP responses with a consistent JSON error body — the REST analogue of the
+ * gRPC transport's {@code GrpcErrorMapper}. <b>Keep in sync with {@code GrpcErrorMapper}</b> — both
+ * translate the same exception hierarchy through the same {@link SagaErrorCode} vocabulary, and
+ * each mapper's golden-table test pins its half of the agreement.
  *
  * <p>Body shape:
  *
