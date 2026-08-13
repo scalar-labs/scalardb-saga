@@ -529,7 +529,9 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * <p>Passes never overlap: if a scheduled pass (see {@link #startBackgroundTasks()}) is already
    * in flight, this call blocks until that pass completes and then runs its own. The wait honors
    * thread interruption — an interrupted caller returns without having run a pass, with the
-   * interrupt flag set.
+   * interrupt flag set. A pass interrupted mid-run cancels its in-flight recovery tasks and drains
+   * their results before returning (their unknown outcomes are charged as errors), so no task
+   * outlives its pass.
    *
    * <p>A pass continues a budget-stopped bucket revolution rather than restarting it, so a saga
    * just marked via {@link SagaStore#markForRecovery} is not guaranteed to be reached by the next

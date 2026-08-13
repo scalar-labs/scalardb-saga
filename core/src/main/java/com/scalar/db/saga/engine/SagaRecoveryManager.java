@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -308,7 +309,9 @@ class SagaRecoveryManager {
    *
    * <p>Passes are serialized on an interruptible lock: a manually triggered pass and a scheduled
    * one never overlap (which also guards the resume cursors), and a caller blocked behind an
-   * in-flight pass returns without running one when interrupted, with the interrupt flag set.
+   * in-flight pass returns without running one when interrupted, with the interrupt flag set. A
+   * pass interrupted mid-run cancels its in-flight tasks and drains their results before releasing
+   * the lock, so no task of one pass runs alongside the next.
    */
   public void recover() {
     try {
@@ -494,26 +497,66 @@ class SagaRecoveryManager {
     return StopReason.ABORTED;
   }
 
-  /** Awaits one round's tasks for one sweep and folds their outcomes into its counters. */
+  /**
+   * Awaits one round's tasks for one sweep and folds their outcomes into its counters.
+   *
+   * <p>When the pass thread is interrupted mid-await, the remaining tasks are cancelled
+   * (interrupting their threads) and their results drained before returning, so the pass does not
+   * release its lock while its own work is still in flight — a following pass would race the
+   * leftovers over the same sagas and the summary would miss their outcomes. A cancelled task stops
+   * at its next interruptible point, and because it may have committed its claim before stopping,
+   * its unknown outcome is charged as an error (budget spent, conservatively). The interrupt flag
+   * is restored for the caller.
+   */
   private void awaitOutcomes(List<Future<RecoveryOutcome>> futures, SweepCounters counters) {
-    for (Future<RecoveryOutcome> future : futures) {
+    for (int i = 0; i < futures.size(); i++) {
       try {
-        switch (future.get()) {
-          case COMMITTED -> counters.committed++;
-          case COMMITTED_DRIVE_FAILED -> {
-            counters.committed++;
-            counters.driveFailures++;
-          }
-          case LOST_RACE -> counters.lostRaces++;
-          case ERROR -> counters.errors++;
-        }
+        count(futures.get(i).get(), counters);
       } catch (InterruptedException e) {
+        for (int j = i; j < futures.size(); j++) {
+          futures.get(j).cancel(true);
+        }
+        for (int j = i; j < futures.size(); j++) {
+          drainQuietly(futures.get(j), counters);
+        }
         Thread.currentThread().interrupt();
         return;
       } catch (ExecutionException e) {
         // Tasks report outcomes instead of throwing; anything escaping is unexpected.
         counters.errors++;
         logger.error("Recovery task failed unexpectedly", e.getCause());
+      }
+    }
+  }
+
+  private static void count(RecoveryOutcome outcome, SweepCounters counters) {
+    switch (outcome) {
+      case COMMITTED -> counters.committed++;
+      case COMMITTED_DRIVE_FAILED -> {
+        counters.committed++;
+        counters.driveFailures++;
+      }
+      case LOST_RACE -> counters.lostRaces++;
+      case ERROR -> counters.errors++;
+    }
+  }
+
+  /** Collects one cancelled or in-flight task's result without responding to further interrupts. */
+  private void drainQuietly(Future<RecoveryOutcome> future, SweepCounters counters) {
+    while (true) {
+      try {
+        count(future.get(), counters);
+        return;
+      } catch (CancellationException e) {
+        // The task was stopped with its outcome unknown; charge the budget conservatively.
+        counters.errors++;
+        return;
+      } catch (ExecutionException e) {
+        counters.errors++;
+        logger.error("Recovery task failed unexpectedly", e.getCause());
+        return;
+      } catch (InterruptedException e) {
+        // Re-interrupted while draining; keep draining — the caller restores the flag once.
       }
     }
   }

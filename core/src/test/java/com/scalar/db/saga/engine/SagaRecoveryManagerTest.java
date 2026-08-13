@@ -1399,6 +1399,49 @@ class SagaRecoveryManagerTest {
     }
 
     @Test
+    void recover_interruptedMidPass_cancelsInFlightTasksBeforeReturning() throws Exception {
+      // Arrange — the pass's single task blocks inside its claim; interrupting the pass thread
+      // must cancel that task (interrupting IT) and drain it before recover() returns, so no
+      // task of one pass can run alongside the next.
+      java.util.concurrent.CountDownLatch claimStarted = new java.util.concurrent.CountDownLatch(1);
+      java.util.concurrent.CountDownLatch taskObservedInterrupt =
+          new java.util.concurrent.CountDownLatch(1);
+      SagaStateSnapshot saga = namedSnapshot("saga-cancelled-with-pass");
+      when(store.findRecoverable(any(), any())).thenReturn(new Recoverables(List.of(saga), null));
+      when(store.claimForRecovery(saga, OWNER_ID))
+          .thenAnswer(
+              invocation -> {
+                claimStarted.countDown();
+                try {
+                  new java.util.concurrent.CountDownLatch(1).await(); // blocks until interrupted
+                } catch (InterruptedException e) {
+                  taskObservedInterrupt.countDown();
+                }
+                return Optional.empty();
+              });
+      java.util.concurrent.atomic.AtomicBoolean interruptFlagRestored =
+          new java.util.concurrent.atomic.AtomicBoolean();
+
+      // Act — run the pass, interrupt it mid-await
+      Thread passThread =
+          new Thread(
+              () -> {
+                manager.recover();
+                interruptFlagRestored.set(Thread.currentThread().isInterrupted());
+              });
+      passThread.start();
+      assertThat(claimStarted.await(5, TimeUnit.SECONDS)).isTrue();
+      passThread.interrupt();
+      passThread.join(5_000);
+
+      // Assert — the pass returned, its task was interrupted (not abandoned), and the pass
+      // thread's interrupt flag was restored
+      assertThat(passThread.isAlive()).isFalse();
+      assertThat(taskObservedInterrupt.await(5, TimeUnit.SECONDS)).isTrue();
+      assertThat(interruptFlagRestored).isTrue();
+    }
+
+    @Test
     void recover_interruptedWhileBlockedBehindInFlightPass_returnsWithoutRunning()
         throws Exception {
       // Arrange — thread A holds the pass lock (its task blocks on a latch); thread B calls
