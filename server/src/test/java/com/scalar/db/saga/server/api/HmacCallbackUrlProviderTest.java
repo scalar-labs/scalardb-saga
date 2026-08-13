@@ -18,7 +18,7 @@ class HmacCallbackUrlProviderTest {
     HmacCallbackUrlProvider provider =
         new HmacCallbackUrlProvider("http://daemon:8080", SECRET, FIXED);
 
-    String url = provider.callbackUrl("saga-1", "debit");
+    String url = java.util.Objects.requireNonNull(provider.callbackUrl("saga-1", "debit"));
 
     assertThat(url)
         .startsWith("http://daemon:8080/sagas/saga-1/steps/debit/complete?token=")
