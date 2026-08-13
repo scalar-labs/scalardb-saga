@@ -35,6 +35,7 @@ import io.grpc.inprocess.InProcessServerBuilder;
 import io.grpc.protobuf.StatusProto;
 import io.grpc.stub.StreamObserver;
 import java.io.IOException;
+import java.nio.file.Paths;
 import java.time.Instant;
 import java.util.Map;
 import org.jspecify.annotations.Nullable;
@@ -318,6 +319,29 @@ class GrpcSagaAdminClientTest {
             .setCode(code.value())
             .addDetails(Any.pack(info))
             .build());
+  }
+
+  @Test
+  void build_withTrustCaCertificateOnPlaintextChannel_throwsIllegalStateException() {
+    // The rule lives on the shared channel seam (GrpcClientSupport), so this pins that the admin
+    // builder routes through it rather than re-implementing it.
+    assertThatThrownBy(
+            () ->
+                GrpcSagaAdminClient.newBuilder()
+                    .target("localhost:12051")
+                    .trustCaCertificate(Paths.get("/etc/tls/ca.crt"))
+                    .build())
+        .isInstanceOf(IllegalStateException.class);
+  }
+
+  @Test
+  void build_withOverrideAuthorityOnPlaintextChannel_buildsChannel() throws Exception {
+    // No connection is attempted until an RPC, so building and closing needs no server.
+    GrpcSagaAdminClient.newBuilder()
+        .target("localhost:12051")
+        .overrideAuthority("saga.example.com")
+        .build()
+        .close();
   }
 
   /** A fake admin service with per-method response/error fields and captured requests. */

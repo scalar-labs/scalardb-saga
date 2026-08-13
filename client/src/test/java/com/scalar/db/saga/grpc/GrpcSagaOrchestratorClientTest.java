@@ -33,6 +33,8 @@ import io.grpc.inprocess.InProcessChannelBuilder;
 import io.grpc.inprocess.InProcessServerBuilder;
 import io.grpc.stub.StreamObserver;
 import java.io.IOException;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.Map;
@@ -48,6 +50,7 @@ import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class GrpcSagaOrchestratorClientTest {
 
@@ -503,6 +506,48 @@ class GrpcSagaOrchestratorClientTest {
         .setCreatedAt(Timestamp.newBuilder().setSeconds(1000L).build())
         .setUpdatedAt(Timestamp.newBuilder().setSeconds(2000L).build())
         .build();
+  }
+
+  @Test
+  void build_withTrustCaCertificateOnPlaintextChannel_throwsIllegalStateException() {
+    // A trust setting says the caller expects encryption; silently ignoring it on a plaintext
+    // channel would be worse than refusing.
+    assertThatThrownBy(
+            () ->
+                GrpcSagaOrchestratorClient.newBuilder()
+                    .target("localhost:12051")
+                    .trustCaCertificate(Paths.get("/etc/tls/ca.crt"))
+                    .build())
+        .isInstanceOf(IllegalStateException.class);
+  }
+
+  @Test
+  void build_withMissingTrustCaFile_throwsNamingThePath(@TempDir Path dir) {
+    // Eager failure at build(), naming the file — a lazy failure would surface at the first RPC
+    // as an opaque UNAVAILABLE deep inside application code.
+    Path missing = dir.resolve("missing-ca.crt");
+
+    assertThatThrownBy(
+            () ->
+                GrpcSagaOrchestratorClient.newBuilder()
+                    .target("localhost:12051")
+                    .useTransportSecurity()
+                    .trustCaCertificate(missing)
+                    .build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("missing-ca.crt");
+  }
+
+  @Test
+  void build_withOverrideAuthorityOnPlaintextChannel_buildsChannel() throws Exception {
+    // overrideAuthority is legitimate without TLS (gRPC routes on the authority too), so unlike
+    // the trust setting it must not force encryption. No connection is attempted until an RPC, so
+    // building and closing needs no server.
+    GrpcSagaOrchestratorClient.newBuilder()
+        .target("localhost:12051")
+        .overrideAuthority("saga.example.com")
+        .build()
+        .close();
   }
 
   private static final class FakeSagaService extends SagaServiceGrpc.SagaServiceImplBase {

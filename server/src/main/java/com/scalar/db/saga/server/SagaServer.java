@@ -30,6 +30,7 @@ import io.javalin.Javalin;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
@@ -37,12 +38,20 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Stream;
+import org.eclipse.jetty.http.HttpVersion;
+import org.eclipse.jetty.server.HttpConfiguration;
+import org.eclipse.jetty.server.HttpConnectionFactory;
+import org.eclipse.jetty.server.SecureRequestCustomizer;
+import org.eclipse.jetty.server.ServerConnector;
+import org.eclipse.jetty.server.SslConnectionFactory;
 import org.eclipse.jetty.util.BlockingArrayQueue;
+import org.eclipse.jetty.util.ssl.SslContextFactory;
 import org.eclipse.jetty.util.thread.QueuedThreadPool;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -83,6 +92,9 @@ public final class SagaServer implements AutoCloseable {
   // The shared per-principal saga-start limiter, or null when rate limiting is disabled. Shared by
   // both transports (REST before-handler and gRPC interceptor) so a caller's budget spans both.
   private final @Nullable RateLimiter rateLimiter;
+  // The validated TLS material, or null when TLS is disabled. Loaded before anything else is
+  // wired, so a bad certificate or key fails construction — long before either port could bind.
+  private final @Nullable TlsMaterial tlsMaterial;
   // Each transport is null when disabled; SagaServerConfig guarantees at least one is enabled.
   private final @Nullable Javalin httpServer;
   private final @Nullable ExecutorService grpcExecutor;
@@ -109,7 +121,23 @@ public final class SagaServer implements AutoCloseable {
   SagaServer(SagaServerConfig config, DefaultSagaOrchestrator orchestrator) {
     this.config = Objects.requireNonNull(config, "config must not be null");
     this.orchestrator = Objects.requireNonNull(orchestrator, "orchestrator must not be null");
-    Javalin httpServer = config.httpEnabled() ? createHttpServer(config) : null;
+    // TLS material is validated first, in its own guarded step: the orchestrator is the only
+    // resource alive yet, and both transports below consume the result.
+    TlsMaterial tlsMaterial = null;
+    if (config.tlsEnabled()) {
+      try {
+        tlsMaterial =
+            TlsMaterial.load(
+                config.tlsCertChainPath().orElseThrow(),
+                config.tlsPrivateKeyPath().orElseThrow(),
+                Clock.systemUTC());
+      } catch (RuntimeException e) {
+        orchestrator.close();
+        throw e;
+      }
+    }
+    this.tlsMaterial = tlsMaterial;
+    Javalin httpServer = config.httpEnabled() ? createHttpServer(config, tlsMaterial) : null;
     ExecutorService grpcExecutor =
         config.grpcEnabled() ? Executors.newVirtualThreadPerTaskExecutor() : null;
     this.httpServer = httpServer;
@@ -173,23 +201,34 @@ public final class SagaServer implements AutoCloseable {
             .addService(health.getHealthService())
             .executor(executor)
             .permitKeepAliveTime(1, TimeUnit.MINUTES);
-    applyGrpcTransportSettings(builder, config);
+    applyGrpcTransportSettings(builder, config, tlsMaterial);
     return builder.build();
   }
 
   /**
-   * Applies the two inbound caps to the gRPC transport. The message cap is the load-bearing one: it
-   * is derived from the store's payload cap, so dropping it would leave gRPC on its own 4 MiB
-   * default and the daemon would accept a message the store then refuses to persist, surfacing as a
-   * write error that names the store rather than the transport that let it in.
+   * Applies the transport settings: the two inbound caps and, when TLS material is present,
+   * transport security. The message cap is the load-bearing one: it is derived from the store's
+   * payload cap, so dropping it would leave gRPC on its own 4 MiB default and the daemon would
+   * accept a message the store then refuses to persist, surfacing as a write error that names the
+   * store rather than the transport that let it in.
    *
    * <p>Visible for testing, for the same reason as {@link #applyEngineSettings}: a builder does not
    * read its settings back, so the only way to observe the forwarding is to watch it receive them.
    */
-  static void applyGrpcTransportSettings(NettyServerBuilder builder, SagaServerConfig config) {
+  static void applyGrpcTransportSettings(
+      NettyServerBuilder builder, SagaServerConfig config, @Nullable TlsMaterial tls) {
     builder
         .maxInboundMessageSize(config.grpcMaxInboundMessageBytes())
         .maxInboundMetadataSize(config.grpcMaxInboundMetadataBytes());
+    if (tls != null) {
+      // The stable TLS API (GrpcSslContexts is still experimental in grpc 1.82), fed the validated
+      // material re-encoded as PEM rather than the file paths: Netty parses these streams instead
+      // of re-reading the files, so a rotation landing between validation and this build cannot
+      // make gRPC serve bytes TlsMaterial never vetted, or diverge from what Jetty serves. With no
+      // tcnative on the classpath, gRPC selects the JDK provider automatically; ALPN h2 and the
+      // TLS 1.3/1.2 defaults come with it.
+      builder.useTransportSecurity(tls.certChainPemStream(), tls.privateKeyPemStream());
+    }
   }
 
   /**
@@ -355,20 +394,65 @@ public final class SagaServer implements AutoCloseable {
    * maxThreads} caps concurrency; the idle timeout lets the pool shrink back toward {@code
    * minThreads} when quiet; and once all threads are busy, at most {@code maxQueuedRequests} more
    * requests wait before the server sheds load (fast failure) rather than queueing unboundedly.
+   * When TLS is enabled, the listener is the HTTPS connector built by {@link #tlsConnector}, which
+   * displaces Javalin's default plaintext one.
    */
-  private static Javalin createHttpServer(SagaServerConfig config) {
+  private static Javalin createHttpServer(SagaServerConfig config, @Nullable TlsMaterial tls) {
     int queueCap = config.httpMaxQueuedRequests();
     // A fixed-capacity queue (initial == growBy == max == cap): it never grows past the cap, so the
     // backlog is memory-bounded and the pool rejects further work once threads and queue are full.
     BlockingArrayQueue<Runnable> jobQueue = new BlockingArrayQueue<>(queueCap, queueCap, queueCap);
     return Javalin.create(
-        cfg ->
-            cfg.jetty.threadPool =
-                new QueuedThreadPool(
-                    config.httpMaxThreads(),
-                    config.httpMinThreads(),
-                    (int) THREAD_POOL_IDLE_TIMEOUT_MILLIS,
-                    jobQueue));
+        cfg -> {
+          cfg.jetty.threadPool =
+              new QueuedThreadPool(
+                  config.httpMaxThreads(),
+                  config.httpMinThreads(),
+                  (int) THREAD_POOL_IDLE_TIMEOUT_MILLIS,
+                  jobQueue);
+          if (tls != null) {
+            // Registering any connector suppresses Javalin's default plaintext one (it is created
+            // only when the connector list is empty), so TLS-on cannot leak a plaintext listener.
+            cfg.jetty.addConnector(
+                (server, httpConfig) -> tlsConnector(server, httpConfig, config, tls));
+          }
+        });
+  }
+
+  /**
+   * Builds the HTTPS connector from the validated material: an in-memory PKCS12 keystore (nothing
+   * touches disk) under a throwaway password behind Jetty's {@code SslContextFactory}, chained
+   * {@code SslConnectionFactory -> HttpConnectionFactory}. Host and port live on the connector
+   * because Javalin ignores {@code start(host, port)} arguments once a custom connector exists —
+   * see the TLS branch in {@link #start()}.
+   */
+  private static ServerConnector tlsConnector(
+      org.eclipse.jetty.server.Server server,
+      HttpConfiguration baseConfig,
+      SagaServerConfig config,
+      TlsMaterial tls) {
+    // The keystore never leaves memory, so the password protects nothing durable — but Jetty
+    // initializes its KeyManagerFactory with the keystore password, so the same value must go to
+    // both calls or key retrieval fails.
+    char[] password = UUID.randomUUID().toString().toCharArray();
+    SslContextFactory.Server sslContextFactory = new SslContextFactory.Server();
+    sslContextFactory.setKeyStore(tls.keyStore(password));
+    sslContextFactory.setKeyStorePassword(new String(password));
+    // Copy before mutating: Javalin hands the same HttpConfiguration instance to every connector
+    // callback and would back a default connector with it too.
+    HttpConfiguration httpsConfig = new HttpConfiguration(baseConfig);
+    // Populates isSecure() and the https scheme. sniHostCheck stays off: with it on, Jetty answers
+    // clients that dial by IP — Kubernetes probes, the smoke test, port-forwards — with a 400
+    // "Invalid SNI" instead of serving them.
+    httpsConfig.addCustomizer(new SecureRequestCustomizer(false));
+    ServerConnector connector =
+        new ServerConnector(
+            server,
+            new SslConnectionFactory(sslContextFactory, HttpVersion.HTTP_1_1.asString()),
+            new HttpConnectionFactory(httpsConfig));
+    connector.setHost(config.host());
+    connector.setPort(config.httpPort());
+    return connector;
   }
 
   private void registerRoutes(Javalin httpServer) {
@@ -475,6 +559,39 @@ public final class SagaServer implements AutoCloseable {
   }
 
   /**
+   * Warns when TLS is on but the async-callback base URL is plain {@code http} on a non-loopback
+   * host: participants would dial the daemon's TLS port over plaintext and die at handshake — at
+   * the first async step in production, not at startup. A warning rather than an error because the
+   * callback URL may legitimately point at separate plaintext infrastructure (an internal ingress
+   * that terminates TLS elsewhere); loopback stays quiet for the same local-dev reason as the other
+   * guards.
+   */
+  private void warnIfCallbackBaseUrlIsPlaintextUnderTls() {
+    if (!config.tlsEnabled() || config.callbackBaseUrl().isEmpty()) {
+      return;
+    }
+    URI baseUrl;
+    try {
+      baseUrl = URI.create(config.callbackBaseUrl().get());
+    } catch (IllegalArgumentException e) {
+      // Not parseable as a URI; the callback provider will surface that on its own terms.
+      return;
+    }
+    String host = baseUrl.getHost();
+    if ("http".equalsIgnoreCase(baseUrl.getScheme())
+        && host != null
+        && !LoopbackHost.isLoopback(host)) {
+      logger.warn(
+          "'{}' uses plain http while '{}' is true. If it points back at this server, participants"
+              + " will dial the TLS port over plaintext and fail at handshake on the first async"
+              + " step. Use an https URL, or make sure the URL terminates at separate plaintext"
+              + " infrastructure.",
+          SagaServerConfig.CALLBACK_BASE_URL_KEY,
+          SagaServerConfig.TLS_ENABLED_KEY);
+    }
+  }
+
+  /**
    * Starts background recovery/retention tasks, binds the HTTP port, and begins serving.
    *
    * @return this server
@@ -483,9 +600,17 @@ public final class SagaServer implements AutoCloseable {
     try {
       ensureSecureBindingOrAcknowledged();
       warnIfRateLimitGlobalUnderNoop();
+      warnIfCallbackBaseUrlIsPlaintextUnderTls();
       orchestrator.startBackgroundTasks();
       if (httpServer != null) {
-        httpServer.start(config.host(), config.httpPort());
+        if (config.tlsEnabled()) {
+          // The TLS connector registered in createHttpServer carries host and port itself, and
+          // Javalin silently ignores start(host, port) arguments once a custom connector exists —
+          // passing them here would suggest they do something.
+          httpServer.start();
+        } else {
+          httpServer.start(config.host(), config.httpPort());
+        }
       }
       if (grpcServer != null) {
         grpcServer.start();
@@ -501,6 +626,16 @@ public final class SagaServer implements AutoCloseable {
       // io.grpc.Server.start() throws IOException on a bind failure (e.g. the gRPC port is in use).
       close();
       throw new UncheckedIOException("Failed to start gRPC server on port " + config.grpcPort(), e);
+    }
+    if (tlsMaterial != null) {
+      // The positive confirmation an operator (and the smoke test) looks for at boot. No path:
+      // like every configured value, a path value is not provably a path — a secret reference
+      // mis-placed on a path key resolves to the secret itself (see TlsMaterial's javadoc).
+      logger.info(
+          "TLS enabled for {}",
+          httpServer != null && grpcServer != null
+              ? "HTTP and gRPC"
+              : httpServer != null ? "HTTP" : "gRPC");
     }
     logger.info(
         "SagaServer started ({}, {})",

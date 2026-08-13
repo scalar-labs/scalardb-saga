@@ -232,9 +232,105 @@ jobs:
             exit 1
           fi
 
+      # --- TLS boot ---------------------------------------------------------------------------
+      # The plaintext boot above proves the packaged image serves; this second boot proves the same
+      # image serves TLS on both transports when the tls.* keys are set. The material is generated
+      # here, never committed (committed keys expire and trip secret scanners), and the
+      # configuration is the shared fixture plus only the tls.* delta, so the two boots cannot
+      # drift apart. JDK SSL means nothing here is architecture-specific, so the arm64 job stays
+      # plaintext-only.
+      - name: Prepare the TLS boot fixture
+        run: |
+          set -euo pipefail
+          mkdir -p smoke-tls
+          cp -R .github/smoke/. smoke-tls/
+          openssl req -x509 -newkey rsa:2048 -noenc -days 2 \
+            -keyout smoke-tls/tls.key -out smoke-tls/tls.crt \
+            -subj "/CN=localhost" \
+            -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+          # Readable by the container's uid 201; a throwaway CI key on a read-only mount, so a
+          # permissive mode costs nothing.
+          chmod 0644 smoke-tls/tls.key smoke-tls/tls.crt
+          {
+            echo "scalar.db.saga.server.tls.enabled=true"
+            echo "scalar.db.saga.server.tls.cert_chain_path=/smoke/tls.crt"
+            echo "scalar.db.saga.server.tls.private_key_path=/smoke/tls.key"
+          } >> smoke-tls/server.properties
+
+      - name: Start the TLS container
+        run: |
+          docker run --detach --name saga-tls \
+            --publish 12080:12080 --publish 12051:12051 \
+            --volume "$PWD/smoke-tls:/smoke:ro" \
+            scalardb-saga-server:ci --config /smoke/server.properties
+
+      - name: Wait for the HTTPS health endpoint
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            # The substitution lives inside the `if` condition, same shape as the plaintext wait
+            # above: a refused connection or unfinished handshake (inevitable while the container
+            # boots) must read as a falsy poll, not a `set -e` exit. As a bare assignment, curl's
+            # nonzero exit would kill the step on the first poll.
+            if [ "$(curl -s --cacert smoke-tls/tls.crt -o /dev/null -w '%{http_code}' https://127.0.0.1:12080/health)" = "200" ]; then
+              echo "GET /health returned 200 over TLS"
+              exit 0
+            fi
+            if [ "$(docker inspect --format '{{.State.Running}}' saga-tls)" != "true" ]; then
+              echo "::error::TLS container exited before becoming healthy"
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "::error::https /health did not return 200 within 120s"
+          exit 1
+
+      # A real gRPC health call, unlike the plaintext boot's bare TCP connect: a TLS listener
+      # accepts any TCP connect, so only a completed handshake plus a served RPC proves the gRPC
+      # transport is actually serving TLS. The binary is checksum-verified before it runs: GitHub
+      # release assets are mutable, so the version pin alone proves nothing about the bytes.
+      # Version and checksum rotate together (Dependabot cannot bump this pair).
+      - name: Check gRPC health over TLS
+        run: |
+          set -euo pipefail
+          curl -sSL -o grpc-health-probe \
+            https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/v0.4.28/grpc_health_probe-linux-amd64
+          echo "4b818d540683b1b97256c84714a51a095e54f19792b3d7f02ac78814be645a96  grpc-health-probe" \
+            | sha256sum -c -
+          chmod +x grpc-health-probe
+          ./grpc-health-probe -addr 127.0.0.1:12051 \
+            -tls -tls-ca-cert smoke-tls/tls.crt -tls-server-name localhost
+
+      # The positive TLS confirmation the server logs at boot, plus the same DEBUG-flood guard as
+      # the plaintext boot — which under TLS also covers the handshake-noise policy.
+      - name: Check TLS startup logging
+        run: |
+          set -euo pipefail
+          logs=$(docker logs saga-tls 2>&1)
+          if ! grep -q "TLS enabled for HTTP and gRPC" <<<"${logs}"; then
+            echo "::error::TLS confirmation line missing from the container logs"
+            exit 1
+          fi
+          if grep -q " DEBUG " <<<"${logs}"; then
+            echo "::error::TLS container logged at DEBUG"
+            exit 1
+          fi
+
+      # close_notify/GOAWAY ride the same drain as plaintext; assert it stays clean under TLS.
+      - name: Check graceful shutdown over TLS
+        run: |
+          set -euo pipefail
+          docker stop --timeout 60 saga-tls
+          if ! docker logs saga-tls 2>&1 | grep -q "SagaServer stopped"; then
+            echo "::error::no clean shutdown line from the TLS container"
+            exit 1
+          fi
+
       - name: Container logs
         if: failure()
-        run: docker logs saga 2>&1 || true
+        run: |
+          docker logs saga 2>&1 || true
+          docker logs saga-tls 2>&1 || true
 
   # The defect this packaging is most exposed to is invisible to the job above: only the linux-x86_64
   # epoll native arrives transitively, so a missing linux-aarch_64 dependency produces an arm64 image

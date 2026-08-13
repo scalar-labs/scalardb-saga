@@ -293,7 +293,7 @@ To go further:
   place without bumping the version stops the server on its next start.
 - Switch a definition to `"mode": "TCC"` to reserve every step before confirming any of them.
 - [server/docker/README.md](../server/docker/README.md) — running the server for real: configuration,
-  authentication, health checks, and deployment.
+  authentication, TLS, health checks, and deployment.
 - Embedded mode, listed in the [root README](../README.md), runs the engine as a library inside your
   application, where steps can be Java code rather than service calls.
 

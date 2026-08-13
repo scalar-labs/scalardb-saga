@@ -23,6 +23,7 @@ import io.grpc.Metadata;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.protobuf.StatusProto;
+import java.nio.file.Path;
 import java.util.Objects;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
@@ -297,6 +298,8 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
 
     @Nullable private String target;
     private boolean useTls = false;
+    @Nullable private Path trustCaCertPath;
+    @Nullable private String overrideAuthority;
     private long defaultDeadlineMillis = 0L;
     @Nullable private CallCredentials callCredentials;
 
@@ -325,11 +328,45 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
     }
 
     /**
-     * Enables TLS. {@link #build()} fails fast if the JRE lacks ALPN (on Java 8, use 8u252+ or add
-     * {@code netty-tcnative-boringssl-static}).
+     * Enables TLS — against the daemon's native TLS ({@code scalar.db.saga.server.tls.enabled}) or
+     * a TLS-terminating mesh/proxy in front of it. The server certificate is validated against the
+     * JVM's default trust store unless {@link #trustCaCertificate(Path)} narrows it. {@link
+     * #build()} fails fast if the JRE lacks ALPN (on Java 8, use 8u252+ or add {@code
+     * netty-tcnative-boringssl-static}).
      */
     public Builder useTransportSecurity() {
       this.useTls = true;
+      return this;
+    }
+
+    /**
+     * Trusts only the CA certificate (PEM; concatenated certificates allowed) at {@code caCertPath}
+     * for this channel, replacing the JVM's default trust store. For servers whose certificate a
+     * public CA did not issue — a cert-manager or Vault private CA — where default trust rejects
+     * the handshake. Requires TLS: {@link #build()} fails if the channel is left plaintext, rather
+     * than silently ignoring a setting that says the caller expected encryption. The file is read
+     * at {@link #build()}, so a bad path fails there naming the file, not at the first RPC as an
+     * opaque {@code UNAVAILABLE}.
+     *
+     * @param caCertPath path to the PEM CA certificate to trust
+     * @return this builder
+     */
+    public Builder trustCaCertificate(Path caCertPath) {
+      this.trustCaCertPath = Objects.requireNonNull(caCertPath, "caCertPath must not be null");
+      return this;
+    }
+
+    /**
+     * Validates the server certificate against {@code authority} instead of the dialed address —
+     * for dialing by IP or through a port-forward while the certificate names the service's DNS
+     * name. Independent of {@link #trustCaCertificate(Path)}, and legitimate without TLS too (gRPC
+     * also routes on the authority).
+     *
+     * @param authority the name to validate the server certificate against
+     * @return this builder
+     */
+    public Builder overrideAuthority(String authority) {
+      this.overrideAuthority = Objects.requireNonNull(authority, "authority must not be null");
       return this;
     }
 
@@ -344,7 +381,8 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
 
     public GrpcSagaAdminClient build() {
       String resolvedTarget = Objects.requireNonNull(target, "target must be set");
-      ManagedChannel channel = GrpcClientSupport.openChannel(resolvedTarget, useTls);
+      ManagedChannel channel =
+          GrpcClientSupport.openChannel(resolvedTarget, useTls, trustCaCertPath, overrideAuthority);
       AdminServiceBlockingStub stub = AdminServiceGrpc.newBlockingStub(channel);
       if (callCredentials != null) {
         stub = stub.withCallCredentials(callCredentials);

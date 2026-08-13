@@ -24,6 +24,7 @@ import io.grpc.ManagedChannel;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
@@ -44,6 +45,21 @@ import org.jspecify.annotations.Nullable;
  * UnsupportedOperationException}: a local completion callback over a remote, fire-and-forget server
  * needs a server-streaming {@code WatchSaga} RPC, which is not yet supported. Start asynchronously
  * and poll {@link #getStateSnapshot(String)} for the outcome, or use the embedded orchestrator.
+ *
+ * <p>TLS against a private CA (e.g. a cert-manager-issued server certificate), dialing through a
+ * port-forward:
+ *
+ * <pre>{@code
+ * GrpcSagaOrchestratorClient client =
+ *     GrpcSagaOrchestratorClient.newBuilder()
+ *         .target("127.0.0.1:12051") // the port-forward
+ *         .useTransportSecurity()
+ *         .trustCaCertificate(Paths.get("/etc/saga/ca.crt"))
+ *         .overrideAuthority("saga-server.internal") // the name the certificate carries
+ *         .build();
+ * }</pre>
+ *
+ * <p>On Java 8, TLS needs ALPN: use 8u252 or later, or add {@code netty-tcnative-boringssl-static}.
  */
 @ThreadSafe
 public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
@@ -521,6 +537,8 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
 
     @Nullable private String target;
     private boolean useTls = false;
+    @Nullable private Path trustCaCertPath;
+    @Nullable private String overrideAuthority;
     private long defaultDeadlineMillis = 0L;
 
     private Builder() {}
@@ -537,13 +555,45 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
     }
 
     /**
-     * Enables TLS. Server-side TLS termination is not yet supported, so today this is
-     * forward-compat (e.g. connecting through a TLS-terminating mesh/proxy). {@link #build()} fails
-     * fast if the JRE lacks ALPN (on Java 8, use 8u252+ or add {@code
+     * Enables TLS — against the daemon's native TLS ({@code scalar.db.saga.server.tls.enabled}) or
+     * a TLS-terminating mesh/proxy in front of it. The server certificate is validated against the
+     * JVM's default trust store unless {@link #trustCaCertificate(Path)} narrows it. {@link
+     * #build()} fails fast if the JRE lacks ALPN (on Java 8, use 8u252+ or add {@code
      * netty-tcnative-boringssl-static}).
      */
     public Builder useTransportSecurity() {
       this.useTls = true;
+      return this;
+    }
+
+    /**
+     * Trusts only the CA certificate (PEM; concatenated certificates allowed) at {@code caCertPath}
+     * for this channel, replacing the JVM's default trust store. For servers whose certificate a
+     * public CA did not issue — a cert-manager or Vault private CA — where default trust rejects
+     * the handshake. Requires TLS: {@link #build()} fails if the channel is left plaintext, rather
+     * than silently ignoring a setting that says the caller expected encryption. The file is read
+     * at {@link #build()}, so a bad path fails there naming the file, not at the first RPC as an
+     * opaque {@code UNAVAILABLE}.
+     *
+     * @param caCertPath path to the PEM CA certificate to trust
+     * @return this builder
+     */
+    public Builder trustCaCertificate(Path caCertPath) {
+      this.trustCaCertPath = Objects.requireNonNull(caCertPath, "caCertPath must not be null");
+      return this;
+    }
+
+    /**
+     * Validates the server certificate against {@code authority} instead of the dialed address —
+     * for dialing by IP or through a port-forward while the certificate names the service's DNS
+     * name. Independent of {@link #trustCaCertificate(Path)}, and legitimate without TLS too (gRPC
+     * also routes on the authority).
+     *
+     * @param authority the name to validate the server certificate against
+     * @return this builder
+     */
+    public Builder overrideAuthority(String authority) {
+      this.overrideAuthority = Objects.requireNonNull(authority, "authority must not be null");
       return this;
     }
 
@@ -560,7 +610,8 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
 
     public GrpcSagaOrchestratorClient build() {
       String resolvedTarget = Objects.requireNonNull(target, "target must be set");
-      ManagedChannel channel = GrpcClientSupport.openChannel(resolvedTarget, useTls);
+      ManagedChannel channel =
+          GrpcClientSupport.openChannel(resolvedTarget, useTls, trustCaCertPath, overrideAuthority);
       return new GrpcSagaOrchestratorClient(
           SagaServiceGrpc.newBlockingStub(channel), channel, defaultDeadlineMillis);
     }
