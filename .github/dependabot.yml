@@ -55,7 +55,7 @@ updates:
   # --- Release branches: github-actions only ---
   # Gradle and Docker bumps deliberately have no target-branch copies: they land on main once and
   # reach the release lines as Auto-PR cherry-pick backports (.github/workflows/auto-pr.yml),
-  # driven by the "ScalarDB Saga <version>" projects attached to the merged PR — the same model the
+  # driven by the family-shared "ScalarDB <version>" projects attached to the merged PR — the same model the
   # other Scalar repositories use. One bump, one review, per-line backport PRs generated on merge.
   # Workflow files are the exception: they drift between lines (each branch's CI evolves
   # separately), so a cherry-pick of a workflow bump conflicts more often than it applies, and each
@@ -83,8 +83,8 @@ updates:
   # The entries without a `target-branch` cover the default branch; the github-actions blocks after
   # them cover one release branch each. A version branch receives no workflow updates until it is
   # named by a `target-branch`, so when a release branch is cut, add a copy of the github-actions
-  # entry naming it (and create the line's "ScalarDB Saga <version>" project so gradle and Docker
-  # bumps reach it as backports) — and delete the block again when the line reaches end of life.
+  # entry naming it (the family-shared "ScalarDB <version>" project for the line normally already
+  # exists, created by the ScalarDB release cycle, so gradle and Docker bumps reach it as backports) — and delete the block again when the line reaches end of life.
   # Entries naming a branch that does not yet exist produce errors, which is why they are not
   # written ahead of time. Re-indent as you paste: an off-by-two does not disable one entry, it
   # makes the whole file unparseable, which stops every update on every branch at once, silently.

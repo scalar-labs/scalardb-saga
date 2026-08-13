@@ -91,12 +91,14 @@ after it, live only on that branch and are unreachable from `main` by design.
 
    A newly cut branch also needs two pieces of update plumbing.
 
-   First, create the line's GitHub project, named `ScalarDB Saga <version>` for the next release the
-   line will produce (a `a.b.c` title with `c > 0` maps to branch `a.b`; `a.b.0` maps to the major
-   branch `a`; `a.0.0` maps to `main`). Gradle and Docker dependency bumps land on `main` only, and
-   the Auto-PR workflow ([.github/workflows/auto-pr.yml](.github/workflows/auto-pr.yml)) opens a
-   cherry-pick backport PR on every line whose project is attached to the merged PR — so a line
-   without a project silently receives no dependency backports, and a merged PR nobody attached a
+   First, the line needs its `ScalarDB <version>` GitHub project. The projects are shared across
+   the ScalarDB family — the same numbering, the same objects `scalardb` and `scalardb-cluster`
+   use — so the ScalarDB release cycle normally creates them and there is nothing to create here;
+   only confirm the project for the line's next release exists (a `a.b.c` title with `c > 0` maps
+   to branch `a.b`; `a.b.0` maps to the major branch `a`; `a.0.0` maps to `main`). Gradle and
+   Docker dependency bumps land on `main` only, and the Auto-PR workflow
+   ([.github/workflows/auto-pr.yml](.github/workflows/auto-pr.yml)) opens a cherry-pick backport
+   PR on every line whose project is attached to the merged PR — so a merged PR nobody attached a
    project to backports nowhere. A conflicting cherry-pick still opens a draft PR with resolution
    instructions rather than being dropped.
 
