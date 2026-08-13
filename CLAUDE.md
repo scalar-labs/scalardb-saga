@@ -16,6 +16,7 @@ Refer to `~/git/scalardb-saga-design/docs/scalardb-saga-design.md` for architect
 - Format apply: `./gradlew spotlessApply`
 - Check (test + format + static analysis): `./gradlew check`
 - Check for compiler warnings (hidden when cached): `./gradlew clean compileTestJava --no-build-cache`
+  - **Expected baseline: exactly 4 warnings** — `unknown enum constant ElementType.MODULE` twice each from `:api:compileJava` and `:client:compileJava`. The Java 8 modules carry jspecify annotations whose class files name the Java-9-only `MODULE` target, and javac has no switch to suppress the resulting note. They go away only if those modules ever leave Java 8. Any warning beyond these 4 is new and must be fixed.
 - **Always run all three in order (`spotlessApply` → `check` → `clean compileTestJava --no-build-cache`) before confirming code changes are OK**
 - **Convention plugins** in `build-logic/` — shared build logic lives here, not in `subprojects {}` / `allprojects {}`
 - **Version catalog** in `gradle/libs.versions.toml` — single source of truth for dependency versions
