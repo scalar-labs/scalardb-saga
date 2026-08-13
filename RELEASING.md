@@ -89,16 +89,27 @@ after it, live only on that branch and are unreachable from `main` by design.
    git switch -c <release-branch> && git push -u origin <release-branch>
    ```
 
-   A newly cut branch also needs its own Dependabot entries. Dependabot reads
-   [.github/dependabot.yml](.github/dependabot.yml) from the default branch only, and every entry
-   there targets that branch, so a newly cut line gets no dependency updates until an entry names it.
-   **On `main`, through a pull request**, copy the three `updates:` entries already in that file to the
-   end of it, adding `target-branch: "1.0"` to each — substituting the branch you just cut — and delete
-   the copies again when that line reaches end of life.
+   A newly cut branch also needs two pieces of update plumbing.
 
-   Copy whole entries rather than retyping them, so the `groups:` blocks come along. Without them each
-   build-tool bump arrives as its own pull request, and the five-PR limit fills with those before a
-   real dependency update can open.
+   First, the line needs its `ScalarDB <version>` GitHub project. The projects are shared across
+   the ScalarDB family — the same numbering, the same objects `scalardb` and `scalardb-cluster`
+   use — so the ScalarDB release cycle normally creates them and there is nothing to create here;
+   only confirm the project for the line's next release exists (a `a.b.c` title with `c > 0` maps
+   to branch `a.b`; `a.b.0` maps to the major branch `a`; `a.0.0` maps to `main`). Gradle and
+   Docker dependency bumps land on `main` only, and the Auto-PR workflow
+   ([.github/workflows/auto-pr.yml](.github/workflows/auto-pr.yml)) opens a cherry-pick backport
+   PR on every line whose project is attached to the merged PR — so a merged PR nobody attached a
+   project to backports nowhere. A conflicting cherry-pick still opens a draft PR with resolution
+   instructions rather than being dropped.
+
+   Second, workflow files drift between lines (each branch's CI evolves separately), so
+   `github-actions` bumps stay per-branch instead of being backported. **On `main`, through a pull
+   request**, copy the `github-actions` entry in
+   [.github/dependabot.yml](.github/dependabot.yml) to the release-branch section at the end of the
+   file, adding `target-branch: "1.0"` — substituting the branch you just cut — and delete the copy
+   again when that line reaches end of life. Dependabot reads the file from the default branch
+   only, so a line gets no workflow updates until an entry names it. Copy the whole entry rather
+   than retyping it, so the `groups:` block comes along.
 
    A repository ruleset covering version branches is worth having before one is cut, for the same
    reason `main` has one: a release is built from the commit the tag names, and the workflow's check

@@ -60,44 +60,14 @@ updates:
       - dependency-name: "eclipse-temurin"
         update-types: ["version-update:semver-major"]
 
-
-  # --- 3 ---
-  # The version catalog (gradle/libs.versions.toml) and the convention-plugin dependencies in
-  # build-logic. Dependabot understands the catalog format, so a bump lands in one place.
-  - package-ecosystem: gradle
-    directory: /
-    target-branch: "3"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    groups:
-      # These move together and are only ever exercised by the build itself, so reviewing them as one
-      # PR is both safer and less noise than one PR each. Every build tool belongs here: a plugin that
-      # matches nothing takes a slot of the limit above on its own, which is what the limit is meant to
-      # keep free for real dependency updates.
-      build-tooling:
-        patterns:
-          - "com.diffplug.spotless*"
-          - "com.github.jk1*"
-          - "com.github.spotbugs*"
-          - "com.google.errorprone*"
-          # The exact coordinate rather than a com.google.protobuf* glob, which would also take
-          # protobuf-java — a runtime dependency, and one that wants reviewing on its own.
-          - "com.google.protobuf:protobuf-gradle-plugin"
-          - "com.h3xstream.findsecbugs*"
-          - "com.uber.nullaway*"
-          - "com.vanniktech*"
-          - "net.ltgt.gradle*"
-      # gRPC ships its modules as a set and the BOM must match the stubs.
-      grpc:
-        patterns:
-          - "io.grpc*"
-      # Netty must stay on a single version across every module — see the netty entry in
-      # libs.versions.toml — so its BOM can only be bumped as a unit.
-      netty:
-        patterns:
-          - "io.netty*"
-
+  # --- Release branches: github-actions only ---
+  # Gradle and Docker bumps deliberately have no target-branch copies: they land on main once and
+  # reach the release lines as Auto-PR cherry-pick backports (.github/workflows/auto-pr.yml),
+  # driven by the family-shared "ScalarDB <version>" projects attached to the merged PR — the same model the
+  # other Scalar repositories use. One bump, one review, per-line backport PRs generated on merge.
+  # Workflow files are the exception: they drift between lines (each branch's CI evolves
+  # separately), so a cherry-pick of a workflow bump conflicts more often than it applies, and each
+  # line keeps its own github-actions entry instead.
   - package-ecosystem: github-actions
     directory: /
     target-branch: "3"
@@ -107,59 +77,6 @@ updates:
       actions:
         patterns:
           - "*"
-
-  # Keeps the digest-pinned base image in the server Dockerfile current. Without this the pin would
-  # quietly rot, and the image would ship an ever-older Ubuntu and JRE.
-  - package-ecosystem: docker
-    directory: /server/docker
-    target-branch: "3"
-    schedule:
-      interval: weekly
-    ignore:
-      # Only the LTS majors (21, 25, ...) keep receiving patches; the six-month interim releases die
-      # the moment the next one ships, so a major bump would usually land the image on an
-      # already-dead JRE. Moving to the next LTS is a deliberate manual change. The digest updates
-      # that deliver each security rebuild of the current tag are a different update type, which this
-      # rule does not touch.
-      - dependency-name: "eclipse-temurin"
-        update-types: ["version-update:semver-major"]
-
-  # --- 3.19 ---
-  # The version catalog (gradle/libs.versions.toml) and the convention-plugin dependencies in
-  # build-logic. Dependabot understands the catalog format, so a bump lands in one place.
-  - package-ecosystem: gradle
-    directory: /
-    target-branch: "3.19"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    groups:
-      # These move together and are only ever exercised by the build itself, so reviewing them as one
-      # PR is both safer and less noise than one PR each. Every build tool belongs here: a plugin that
-      # matches nothing takes a slot of the limit above on its own, which is what the limit is meant to
-      # keep free for real dependency updates.
-      build-tooling:
-        patterns:
-          - "com.diffplug.spotless*"
-          - "com.github.jk1*"
-          - "com.github.spotbugs*"
-          - "com.google.errorprone*"
-          # The exact coordinate rather than a com.google.protobuf* glob, which would also take
-          # protobuf-java — a runtime dependency, and one that wants reviewing on its own.
-          - "com.google.protobuf:protobuf-gradle-plugin"
-          - "com.h3xstream.findsecbugs*"
-          - "com.uber.nullaway*"
-          - "com.vanniktech*"
-          - "net.ltgt.gradle*"
-      # gRPC ships its modules as a set and the BOM must match the stubs.
-      grpc:
-        patterns:
-          - "io.grpc*"
-      # Netty must stay on a single version across every module — see the netty entry in
-      # libs.versions.toml — so its BOM can only be bumped as a unit.
-      netty:
-        patterns:
-          - "io.netty*"
 
   - package-ecosystem: github-actions
     directory: /
@@ -171,34 +88,15 @@ updates:
         patterns:
           - "*"
 
-  # Keeps the digest-pinned base image in the server Dockerfile current. Without this the pin would
-  # quietly rot, and the image would ship an ever-older Ubuntu and JRE.
-  - package-ecosystem: docker
-    directory: /server/docker
-    target-branch: "3.19"
-    schedule:
-      interval: weekly
-    ignore:
-      # Only the LTS majors (21, 25, ...) keep receiving patches; the six-month interim releases die
-      # the moment the next one ships, so a major bump would usually land the image on an
-      # already-dead JRE. Moving to the next LTS is a deliberate manual change. The digest updates
-      # that deliver each security rebuild of the current tag are a different update type, which this
-      # rule does not touch.
-      - dependency-name: "eclipse-temurin"
-        update-types: ["version-update:semver-major"]
-
-  # The entries without a `target-branch` cover the default branch; the blocks after them cover one
-  # release branch each. A version branch receives nothing until it is named by a `target-branch`, so
-  # a maintained line would otherwise sit on frozen dependencies for its whole life. When a release
-  # branch is cut, add a copy of each default-branch entry naming it, and delete that block when the
-  # line reaches end of life. Entries naming a branch that does not yet exist produce errors, which
-  # is why they are not written ahead of time.
+  # The entries without a `target-branch` cover the default branch; the github-actions blocks after
+  # them cover one release branch each. A version branch receives no workflow updates until it is
+  # named by a `target-branch`, so when a release branch is cut, add a copy of the github-actions
+  # entry naming it (the family-shared "ScalarDB <version>" project for the line normally already
+  # exists, created by the ScalarDB release cycle, so gradle and Docker bumps reach it as backports) — and delete the block again when the line reaches end of life.
+  # Entries naming a branch that does not yet exist produce errors, which is why they are not
+  # written ahead of time. Re-indent as you paste: an off-by-two does not disable one entry, it
+  # makes the whole file unparseable, which stops every update on every branch at once, silently.
   #
-  # Step 1 of RELEASING.md says how: copy the entries above on the default branch and give each copy a
-  # target-branch. There is deliberately no commented-out template here, and no second copy of these
-  # entries in RELEASING.md either. Both have to be re-indented as they are pasted, and an off-by-two
-  # leaves a block sequence whose items do not line up. That does not disable one entry; it makes the
-  # whole file unparseable, which stops every update on every branch at once, silently.
-  #
-  # Known limitation: Dependabot *security* updates only ever target the default branch. An entry with
-  # `target-branch` produces version updates alone, so a CVE fix still has to be backported by hand.
+  # Known limitation: Dependabot *security* updates only ever target the default branch. That is
+  # now the working model rather than a gap — the security bump merges on main and its backport PRs
+  # carry it to every line whose project is attached.
