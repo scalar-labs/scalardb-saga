@@ -55,7 +55,7 @@ import org.slf4j.LoggerFactory;
  * CRUD as {@link CrudConflictException} or at commit as {@link CommitConflictException}; retry can
  * be disabled per operation (e.g., {@code createSaga} treats a conflict as permanent).
  */
-public class ScalarDbSagaStore implements SagaStore {
+public final class ScalarDbSagaStore implements SagaStore {
 
   private static final Logger logger = LoggerFactory.getLogger(ScalarDbSagaStore.class);
 
@@ -623,17 +623,15 @@ public class ScalarDbSagaStore implements SagaStore {
     Instant endTs = updatedBefore != null ? updatedBefore : TimestampTZColumn.MAX_VALUE;
 
     // Which status slices to sweep, in a stable ascending order, and where a token resumes.
+    SagaStatus statusFilter = query.getStatus();
     int[] statusCodes =
-        query.getStatus() != null
-            ? new int[] {query.getStatus().getStatusCode()}
-            : ALL_STATUS_CODES;
+        statusFilter != null ? new int[] {statusFilter.getStatusCode()} : ALL_STATUS_CODES;
     // A token is bound to the filters that produced it; reusing it under different filters is
     // rejected rather than silently resuming against the wrong data.
     String filterKey = PageCursor.filterKey(query);
+    String pageToken = query.getPageToken();
     @Nullable PageCursor cursor =
-        query.getPageToken() == null
-            ? null
-            : PageCursor.decode(query.getPageToken(), numBuckets, statusCodes, filterKey);
+        pageToken == null ? null : PageCursor.decode(pageToken, numBuckets, statusCodes, filterKey);
 
     List<SagaStateSnapshot> items = new ArrayList<>();
     int startBucket = cursor != null ? cursor.bucket() : 0;
@@ -1639,14 +1637,13 @@ public class ScalarDbSagaStore implements SagaStore {
      * contain {@code "|"}.
      */
     static String filterKey(SagaQuery query) {
+      SagaStatus statusFilter = query.getStatus();
+      Instant updatedAfter = query.getUpdatedAfter();
+      Instant updatedBefore = query.getUpdatedBefore();
       String status =
-          query.getStatus() == null
-              ? ANY_STATUS
-              : Integer.toString(query.getStatus().getStatusCode());
-      String after =
-          query.getUpdatedAfter() == null ? NO_BOUND : query.getUpdatedAfter().toString();
-      String before =
-          query.getUpdatedBefore() == null ? NO_BOUND : query.getUpdatedBefore().toString();
+          statusFilter == null ? ANY_STATUS : Integer.toString(statusFilter.getStatusCode());
+      String after = updatedAfter == null ? NO_BOUND : updatedAfter.toString();
+      String before = updatedBefore == null ? NO_BOUND : updatedBefore.toString();
       return String.join(DELIMITER, status, after, before);
     }
 

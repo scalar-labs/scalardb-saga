@@ -51,6 +51,14 @@ updates:
     directory: /server/docker
     schedule:
       interval: weekly
+    ignore:
+      # Only the LTS majors (21, 25, ...) keep receiving patches; the six-month interim releases die
+      # the moment the next one ships, so a major bump would usually land the image on an
+      # already-dead JRE. Moving to the next LTS is a deliberate manual change. The digest updates
+      # that deliver each security rebuild of the current tag are a different update type, which this
+      # rule does not touch.
+      - dependency-name: "eclipse-temurin"
+        update-types: ["version-update:semver-major"]
 
   # --- Release branches: github-actions only ---
   # Gradle and Docker bumps deliberately have no target-branch copies: they land on main once and
