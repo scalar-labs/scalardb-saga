@@ -51,6 +51,14 @@ updates:
     directory: /server/docker
     schedule:
       interval: weekly
+    ignore:
+      # Only the LTS majors (21, 25, ...) keep receiving patches; the six-month interim releases die
+      # the moment the next one ships, so a major bump would usually land the image on an
+      # already-dead JRE. Moving to the next LTS is a deliberate manual change. The digest updates
+      # that deliver each security rebuild of the current tag are a different update type, which this
+      # rule does not touch.
+      - dependency-name: "eclipse-temurin"
+        update-types: ["version-update:semver-major"]
 
 
   # --- 3 ---
@@ -107,6 +115,14 @@ updates:
     target-branch: "3"
     schedule:
       interval: weekly
+    ignore:
+      # Only the LTS majors (21, 25, ...) keep receiving patches; the six-month interim releases die
+      # the moment the next one ships, so a major bump would usually land the image on an
+      # already-dead JRE. Moving to the next LTS is a deliberate manual change. The digest updates
+      # that deliver each security rebuild of the current tag are a different update type, which this
+      # rule does not touch.
+      - dependency-name: "eclipse-temurin"
+        update-types: ["version-update:semver-major"]
 
   # --- 3.19 ---
   # The version catalog (gradle/libs.versions.toml) and the convention-plugin dependencies in
@@ -162,6 +178,14 @@ updates:
     target-branch: "3.19"
     schedule:
       interval: weekly
+    ignore:
+      # Only the LTS majors (21, 25, ...) keep receiving patches; the six-month interim releases die
+      # the moment the next one ships, so a major bump would usually land the image on an
+      # already-dead JRE. Moving to the next LTS is a deliberate manual change. The digest updates
+      # that deliver each security rebuild of the current tag are a different update type, which this
+      # rule does not touch.
+      - dependency-name: "eclipse-temurin"
+        update-types: ["version-update:semver-major"]
 
   # The entries without a `target-branch` cover the default branch; the blocks after them cover one
   # release branch each. A version branch receives nothing until it is named by a `target-branch`, so
