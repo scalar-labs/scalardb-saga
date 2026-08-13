@@ -94,7 +94,7 @@ after it, live only on that branch and are unreachable from `main` by design.
    First, create the line's GitHub project, named `ScalarDB Saga <version>` for the next release the
    line will produce (a `a.b.c` title with `c > 0` maps to branch `a.b`; `a.b.0` maps to the major
    branch `a`; `a.0.0` maps to `main`). Gradle and Docker dependency bumps land on `main` only, and
-   the Auto-PR workflow ([.github/workflows/auto-pr.yaml](.github/workflows/auto-pr.yaml)) opens a
+   the Auto-PR workflow ([.github/workflows/auto-pr.yml](.github/workflows/auto-pr.yml)) opens a
    cherry-pick backport PR on every line whose project is attached to the merged PR — so a line
    without a project silently receives no dependency backports, and a merged PR nobody attached a
    project to backports nowhere. A conflicting cherry-pick still opens a draft PR with resolution

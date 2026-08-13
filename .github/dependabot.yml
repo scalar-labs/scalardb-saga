@@ -54,7 +54,7 @@ updates:
 
   # --- Release branches: github-actions only ---
   # Gradle and Docker bumps deliberately have no target-branch copies: they land on main once and
-  # reach the release lines as Auto-PR cherry-pick backports (.github/workflows/auto-pr.yaml),
+  # reach the release lines as Auto-PR cherry-pick backports (.github/workflows/auto-pr.yml),
   # driven by the "ScalarDB Saga <version>" projects attached to the merged PR — the same model the
   # other Scalar repositories use. One bump, one review, per-line backport PRs generated on merge.
   # Workflow files are the exception: they drift between lines (each branch's CI evolves
