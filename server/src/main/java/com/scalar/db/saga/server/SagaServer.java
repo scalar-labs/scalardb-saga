@@ -345,7 +345,12 @@ public final class SagaServer implements AutoCloseable {
   }
 
   private static boolean isDefinitionFile(Path path) {
-    String name = path.getFileName().toString().toLowerCase(Locale.ROOT);
+    Path fileName = path.getFileName();
+    if (fileName == null) {
+      // Only a filesystem root has no file name, and a root is never a definition file.
+      return false;
+    }
+    String name = fileName.toString().toLowerCase(Locale.ROOT);
     return name.endsWith(".json") || name.endsWith(".yaml") || name.endsWith(".yml");
   }
 
