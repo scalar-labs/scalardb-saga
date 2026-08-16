@@ -93,7 +93,9 @@ import org.jspecify.annotations.Nullable;
  *       #DEFAULT_TLS_ENABLED}). Requires both paths below. Setting either path without this key is
  *       rejected, so mounted certificates cannot sit unused behind a forgotten switch while the
  *       server silently serves plaintext; {@code tls.enabled=false} with paths set is legal and
- *       ignores them, which is how an operator toggles TLS off without unmounting the material
+ *       ignores them, which is how an operator toggles TLS off without unmounting the material.
+ *       Ignored values must still be well-formed: shape checks run regardless of the toggle, as for
+ *       every key here, so the file stays valid for the day the toggle flips back
  *   <li>{@code tls.cert_chain_path} — path to the PEM certificate chain, leaf first
  *   <li>{@code tls.private_key_path} — path to the matching PEM private key: unencrypted PKCS#8
  *       ({@code BEGIN PRIVATE KEY}), RSA or EC. PKCS#1/SEC1 ({@code BEGIN RSA/EC PRIVATE KEY}) and
@@ -104,9 +106,10 @@ import org.jspecify.annotations.Nullable;
  * <p>The keys take paths, never certificate or key contents, so the material stays re-readable for
  * a future reload. The files are read and validated at startup, before either port binds, and every
  * failure names the offending key — never the configured value, which like any value here could be
- * a mis-pasted secret (see {@code TlsMaterial}). Protocols and ciphers are the JDK defaults (TLS
- * 1.3 and 1.2 on Java 21) with no keys to tune; the rare compliance need is served by JVM flags
- * (e.g. {@code jdk.tls.server.protocols}).
+ * a mis-pasted secret (see {@code TlsMaterial}). Protocols default to TLS 1.3 and 1.2 with no keys
+ * to tune, and ciphers to each stack's hardened defaults (Jetty's standard exclusions over the JDK
+ * list; gRPC's HTTP-2-approved suites); the rare compliance need is served by JVM flags (e.g.
+ * {@code jdk.tls.server.protocols}).
  *
  * <h2>Synchronous starts ({@code sync.*})</h2>
  *

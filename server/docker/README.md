@@ -139,9 +139,10 @@ scalar.db.saga.server.tls.private_key_path=/scalardb-saga/tls/tls.key
 Both files are PEM; the paths are read and validated at startup, before either port binds, and every
 misconfiguration (missing file, unreadable file, malformed PEM, key/cert mismatch, wrong key format)
 fails boot with an error naming the key (the configured value is never echoed — like any value, it
-could be a mis-pasted secret). Protocols and ciphers are the JDK defaults (TLS 1.3
-and 1.2) with nothing to tune; the rare compliance need is served through `JAVA_OPTS` (e.g.
-`-Djdk.tls.server.protocols=TLSv1.3`). There is no mTLS, and no plaintext→HTTPS redirect listener:
+could be a mis-pasted secret). Protocols default to TLS 1.3 and 1.2 with nothing to
+tune; cipher policy is each stack's hardened default — Jetty applies its standard exclusions over
+the JDK list, gRPC restricts to the HTTP/2-approved suites — rather than a knob. The rare
+compliance need is served through `JAVA_OPTS` (e.g. `-Djdk.tls.server.protocols=TLSv1.3`). There is no mTLS, and no plaintext→HTTPS redirect listener:
 with TLS on, nothing serves plaintext.
 
 Mounting the material in Kubernetes — the mounted files must be readable by uid `201`, so set an

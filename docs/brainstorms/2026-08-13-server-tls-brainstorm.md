@@ -9,7 +9,8 @@ Native TLS support in SagaServer for both transports — HTTPS on the Javalin/Je
 
 - `scalar.db.saga.server.tls.enabled` (default `false`)
 - `scalar.db.saga.server.tls.cert_chain_path` — PEM certificate chain
-- `scalar.db.saga.server.tls.private_key_path` — PEM private key (unencrypted PKCS#8/PKCS#1)
+- `scalar.db.saga.server.tls.private_key_path` — PEM private key (unencrypted PKCS#8 only —
+  *amended during planning*: PKCS#1/SEC1 are rejected with conversion guidance)
 
 Plus client-side trust convenience in the Java 8 client SDK: builder methods for a custom CA certificate (PEM) and authority override, mirroring ScalarDB Cluster's day-one client surface (`tls.ca_root_cert_path` / `tls.override_authority` semantics).
 
@@ -17,7 +18,7 @@ This amends the recorded plaintext-only position (design doc "Transport Security
 
 ## Why This Approach
 
-- **PEM paths, not keystores or inline content** — what cert-manager/Vault/Let's Encrypt emit and what K8s Secret mounts contain; matches ScalarDB Cluster's `cert_chain_path`/`private_key_path` names exactly; paths keep future hot reload possible (re-readable) and redaction trivial (a path is not a secret; file contents must never be echoed).
+- **PEM paths, not keystores or inline content** — what cert-manager/Vault/Let's Encrypt emit and what K8s Secret mounts contain; matches ScalarDB Cluster's `cert_chain_path`/`private_key_path` names exactly; paths keep future hot reload possible (re-readable). *(Amended post-review: "a path is not a secret" proved wrong — a secret reference mis-pasted onto a path key resolves to the secret — so errors and logs name config keys only.)*
 - **One shared block** — both ports share one host, so one cert's SANs cover both; smallest surface; all-or-nothing avoids a half-secure server ambiguity.
 - **JDK SSL, no tuning knobs** — Java 21 defaults (TLS 1.2+/1.3, maintained cipher list) are correct without us; every knob costs parse/validate/redact/test on two stacks; JVM flags remain the compliance escape hatch; adding knobs or BoringSSL later is backward-compatible, removing them is not.
 - **Family consistency** — ScalarDB Cluster verified as precedent for key naming, client trust surface, and the PEM→PKCS12 conversion pattern Jetty needs (`TlsUtils` with BouncyCastle in scalardb-cluster).
@@ -30,7 +31,7 @@ This amends the recorded plaintext-only position (design doc "Transport Security
 4. **No protocol/cipher knobs.** TLS 1.2+/1.3 with JDK defaults. `tls.min_version` can be added compatibly if a real compliance need appears.
 5. **JDK SSL engine on the server** — no netty-tcnative natives, no new CI alignment burden. gRPC auto-selects JDK SSL when tcnative is absent, so a BoringSSL upgrade later is a dependency-line change. (Cluster's BoringSSL is a side effect of grpc-netty-shaded, not an explicit choice to copy.)
 6. **Client SDK trust API ships now**: trust-CA PEM + `overrideAuthority` builder methods on the gRPC client builders, matching Cluster's client trust surface. Default remains plaintext; `useTransportSecurity()` unchanged.
-7. **Unencrypted private keys only** (same as Cluster's PEM parser). Key protection is file permissions / K8s Secret mounts, not a passphrase.
+7. **Unencrypted private keys only.** Key protection is file permissions / K8s Secret mounts, not a passphrase. (*Amended during planning*: PKCS#8-only, stricter than Cluster's BouncyCastle-backed parser, so no crypto dependency is needed.)
 8. **Cert hot reload deferred** to the config hot-reload feature. Kept cheap by two guardrails in this iteration: path-based config keys, and a single internal cert-material component both transports consume (later: Jetty `SslContextFactory.reload()` / gRPC delegating key manager — an internal swap, no config-surface change).
 
 ## Constraints & Facts (from repo research)

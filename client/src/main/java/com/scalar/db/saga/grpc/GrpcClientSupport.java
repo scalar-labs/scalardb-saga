@@ -147,13 +147,23 @@ final class GrpcClientSupport {
   }
 
   private static boolean alpnAvailable() {
-    // SSLEngine.getApplicationProtocol exists from Java 9 and was backported to 8u252. Conservative
-    // — a bundled tcnative may provide ALPN where the JDK does not — but it gives a clear, early
-    // failure for the common pre-8u252 case.
+    // SSLEngine.getApplicationProtocol exists from Java 9 and was backported to 8u252; a bundled
+    // tcnative provides ALPN through Netty's OpenSSL engine even where the JDK does not. Checking
+    // both makes the failure message's own advice sufficient: following either branch of it (use
+    // 8u252+, or add netty-tcnative-boringssl-static) satisfies this guard.
     try {
       SSLEngine.class.getMethod("getApplicationProtocol");
       return true;
     } catch (NoSuchMethodException e) {
+      // Fall through to the tcnative check.
+    }
+    try {
+      // Reflective like the check above: Netty is a runtime dependency of this module, not a
+      // compile-time one, and this probe must not change that.
+      Class<?> openSsl = Class.forName("io.netty.handler.ssl.OpenSsl");
+      return (Boolean) openSsl.getMethod("isAvailable").invoke(null);
+    } catch (ReflectiveOperationException | LinkageError e) {
+      // No Netty on the classpath at all; without it there is no Netty TLS either way.
       return false;
     }
   }

@@ -30,7 +30,7 @@ Three new keys in the `scalar.db.saga.server.` namespace, names mirroring Scalar
 | `scalar.db.saga.server.tls.cert_chain_path` | — | Path to PEM certificate chain (leaf first) |
 | `scalar.db.saga.server.tls.private_key_path` | — | Path to **unencrypted PKCS#8** PEM private key |
 
-Paths, never contents: no `${file:}`-style inlining, no keystore support, no inline-PEM key. Paths keep future cert hot reload possible (re-read the same path) and are redaction-safe to name in errors.
+Paths, never contents: no `${file:}`-style inlining, no keystore support, no inline-PEM key. Paths keep future cert hot reload possible (re-read the same path). *(Amended post-review: path values are **not** redaction-safe to name in errors after all — a secret reference mis-pasted onto a path key resolves to the secret itself — so errors and logs name config keys only; see the error-matrix amendment below.)*
 
 **Validation truth table** (every cell gets a `SagaServerConfigTest` case):
 
@@ -99,7 +99,7 @@ The community `ssl-plugin` (`io.javalin.community.ssl:ssl-plugin:6.7.0`) was con
 ### Runtime policy
 
 - **Handshake-failure logging: DEBUG or below, decided up front.** Plaintext clients hitting a TLS port, LB TCP health checks, and bare-TCP probes are handshake-EOF generators; per-connection WARNs would flood logs and break the smoke test's log-cleanliness assertion. Pinned by integration test.
-- **One INFO line at startup**: `TLS enabled for HTTP and gRPC (cert chain: <path>)` — path is doctrine-safe; gives operators boot-time confirmation and the smoke test a positive assertion.
+- **One INFO line at startup**: `TLS enabled for HTTP and gRPC` — gives operators boot-time confirmation and the smoke test a positive assertion. *(Amended post-review: the line carries no cert path — configured values, paths included, are never logged; see the redaction amendment above.)*
 - **`callback.base_url` scheme check**: with `tls.enabled=true` and an `http://` callback base URL on a non-loopback host, every async completion would dial plaintext into a TLS port and die at the first async step in production. Startup **WARN** (not fatal — the callback endpoint may legitimately live behind separate plaintext infra).
 - **TLS does not relax the noop-on-non-loopback guard** (`ensureSecureBindingOrAcknowledged`, SagaServer.java:433-453): TLS is confidentiality, the guard is authentication. No code change — pinned with a test so nobody "improves" the guard later.
 
