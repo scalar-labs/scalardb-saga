@@ -16,9 +16,10 @@ import com.scalar.db.saga.exception.StepCompensationException;
 import com.scalar.db.saga.exception.StepExecutionException;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
@@ -332,8 +333,7 @@ class ReflectiveStepResolverTest {
       int threadCount = 10;
       CountDownLatch startLatch = new CountDownLatch(1);
       CountDownLatch doneLatch = new CountDownLatch(threadCount);
-      AtomicReference<Object> firstResult = new AtomicReference<>();
-      AtomicInteger mismatchCount = new AtomicInteger(0);
+      Queue<Object> results = new ConcurrentLinkedQueue<>();
 
       // Act
       for (int i = 0; i < threadCount; i++) {
@@ -342,13 +342,8 @@ class ReflectiveStepResolverTest {
                 () -> {
                   try {
                     startLatch.await();
-                    Object result =
-                        resolver.resolve("step1", CountingStep.class.getName(), NO_ENDPOINTS);
-                    if (!firstResult.compareAndSet(null, result)) {
-                      if (firstResult.get() != result) {
-                        mismatchCount.incrementAndGet();
-                      }
-                    }
+                    results.add(
+                        resolver.resolve("step1", CountingStep.class.getName(), NO_ENDPOINTS));
                   } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                   } finally {
@@ -359,8 +354,10 @@ class ReflectiveStepResolverTest {
       startLatch.countDown();
       doneLatch.await();
 
-      // Assert — all threads got the same instance
-      assertThat(mismatchCount.get()).isZero();
+      // Assert — every thread resolved, and all got the same instance
+      assertThat(results).hasSize(threadCount);
+      Object first = results.peek();
+      assertThat(results).allSatisfy(result -> assertThat(result).isSameAs(first));
       // CountingStep tracks how many times it was constructed
       assertThat(CountingStep.instanceCount.get()).isEqualTo(1);
     }
