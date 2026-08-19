@@ -7,6 +7,7 @@ import com.scalar.db.saga.api.SagaPage;
 import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -141,13 +142,13 @@ class ScalarDbSagaStoreListIntegrationTest {
   }
 
   @Test
-  void listStateSnapshots_malformedTokenGiven_throwsIllegalArgumentException() {
+  void listStateSnapshots_malformedTokenGiven_throwsSagaIllegalArgumentException() {
     // Act & Assert
     assertThatThrownBy(
             () ->
                 store.listStateSnapshots(
                     SagaQuery.newBuilder().pageToken("!!!not-base64!!!").build()))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class);
   }
 
   // --- helpers ---

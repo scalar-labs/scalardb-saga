@@ -21,6 +21,8 @@ import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.definition.SagaDefinition.RecoveryStrategy;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaErrorCode;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
@@ -126,8 +128,8 @@ class DefaultSagaAdminServiceTest {
     // Act & Assert
     assertThatThrownBy(() -> service.recoverSaga(SAGA_ID, "why"))
         .isInstanceOf(SagaStatePreconditionException.class)
-        .extracting(e -> ((SagaStatePreconditionException) e).getCode())
-        .isEqualTo(SagaStatePreconditionException.Code.SAGA_WRONG_STATE);
+        .extracting(e -> ((SagaStatePreconditionException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.SAGA_WRONG_STATE);
     verify(engine, never()).recover(any(), any(), any());
   }
 
@@ -139,8 +141,8 @@ class DefaultSagaAdminServiceTest {
     // Act & Assert
     assertThatThrownBy(() -> service.recoverSaga(SAGA_ID, "why"))
         .isInstanceOf(SagaStatePreconditionException.class)
-        .extracting(e -> ((SagaStatePreconditionException) e).getCode())
-        .isEqualTo(SagaStatePreconditionException.Code.SAGA_PARKED);
+        .extracting(e -> ((SagaStatePreconditionException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.SAGA_PARKED);
   }
 
   @Test
@@ -293,8 +295,8 @@ class DefaultSagaAdminServiceTest {
     // Act & Assert
     assertThatThrownBy(() -> service.forceComplete(SAGA_ID, "why"))
         .isInstanceOf(SagaStatePreconditionException.class)
-        .extracting(e -> ((SagaStatePreconditionException) e).getCode())
-        .isEqualTo(SagaStatePreconditionException.Code.SAGA_WRONG_STATE);
+        .extracting(e -> ((SagaStatePreconditionException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.SAGA_WRONG_STATE);
   }
 
   // ---------------------------------------------------------------------------
@@ -371,13 +373,13 @@ class DefaultSagaAdminServiceTest {
   // ---------------------------------------------------------------------------
 
   @Test
-  void resetEscalated_bulkConflictingStatusFilter_throwsIllegalArgument() {
+  void resetEscalated_bulkConflictingStatusFilter_throwsSagaIllegalArgument() {
     // Arrange
     SagaQuery query = SagaQuery.newBuilder().status(SagaStatus.RUNNING).build();
 
     // Act & Assert
     assertThatThrownBy(() -> service.resetEscalated(query, "why"))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class);
   }
 
   @Test
@@ -449,8 +451,7 @@ class DefaultSagaAdminServiceTest {
     when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(backwardDef());
     when(store.getEvents("bad"))
         .thenThrow(
-            SagaPersistenceException.nonRetryable(
-                "Unknown event type: SAGA_FROM_THE_FUTURE", new IllegalArgumentException("boom")));
+            SagaPersistenceException.deserializationFailed(new IllegalArgumentException("boom")));
     when(store.getEvents("ok"))
         .thenReturn(List.of(StatusEvent.started(null), StepEvent.completed(0, "debit", null)));
     when(store.recordStatusEvent(eq(ok), anyInt(), any(), any(), eq(Instant.EPOCH))).thenReturn(ok);
@@ -479,8 +480,7 @@ class DefaultSagaAdminServiceTest {
     when(store.listStateSnapshots(any())).thenReturn(new SagaPage<>(List.of(bad), null));
     when(registry.resolve(SAGA_NAME, DEF_VERSION))
         .thenThrow(
-            SagaPersistenceException.nonRetryable(
-                "Failed to deserialize definition", new IllegalArgumentException("boom")));
+            SagaPersistenceException.deserializationFailed(new IllegalArgumentException("boom")));
 
     // Act
     ResetResult result = service.resetEscalated(SagaQuery.newBuilder().build(), "sweep");
@@ -504,8 +504,7 @@ class DefaultSagaAdminServiceTest {
     when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(backwardDef());
     when(store.getEvents("down"))
         .thenThrow(
-            SagaPersistenceException.retryable(
-                "store unavailable", new IllegalStateException("conn refused")));
+            SagaPersistenceException.storeUnavailable(new IllegalStateException("conn refused")));
 
     // Act & Assert
     assertThatThrownBy(() -> service.resetEscalated(SagaQuery.newBuilder().build(), "sweep"))
@@ -517,20 +516,24 @@ class DefaultSagaAdminServiceTest {
   // ---------------------------------------------------------------------------
 
   @Test
-  void recoverSaga_blankReason_throwsIllegalArgument() {
-    // Act & Assert — validated before any store interaction
+  void recoverSaga_blankReason_throwsSagaIllegalArgument() {
+    // Act & Assert — validated before any store interaction. The point of the typed exception is
+    // that the embedded caller reaches the same error code a remote caller reconstructs from the
+    // wire, so assert the code and not just the type.
     assertThatThrownBy(() -> service.recoverSaga(SAGA_ID, "   "))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class)
+        .extracting(e -> ((SagaIllegalArgumentException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.INVALID_ARGUMENT);
   }
 
   @Test
-  void recoverSaga_tooLongReason_throwsIllegalArgument() {
+  void recoverSaga_tooLongReason_throwsSagaIllegalArgument() {
     // Arrange
     String longReason = "x".repeat(1025);
 
     // Act & Assert
     assertThatThrownBy(() -> service.recoverSaga(SAGA_ID, longReason))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class);
   }
 
   @Test
@@ -731,7 +734,7 @@ class DefaultSagaAdminServiceTest {
   void recoverSaga_withDriveDeadline_driveThrows_surfacesTheDrivesOwnException() {
     // Arrange
     arrangeDrivableSaga();
-    doThrow(SagaPersistenceException.retryable("store died", new RuntimeException("io")))
+    doThrow(SagaPersistenceException.storeUnavailable(new RuntimeException("io")))
         .when(engine)
         .recover(any(), any(), any());
 
@@ -739,7 +742,8 @@ class DefaultSagaAdminServiceTest {
     // cause is unwrapped from the ExecutionException the executor wraps it in
     assertThatThrownBy(() -> boundedService(5_000L).recoverSaga(SAGA_ID, "why"))
         .isInstanceOf(SagaPersistenceException.class)
-        .hasMessage("store died");
+        .extracting(e -> ((SagaPersistenceException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE);
   }
 
   @Test

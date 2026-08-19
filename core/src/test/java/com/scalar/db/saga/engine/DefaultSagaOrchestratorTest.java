@@ -21,8 +21,10 @@ import com.scalar.db.saga.api.SagaDetail;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.definition.SagaDefinition;
+import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
@@ -64,7 +66,13 @@ class DefaultSagaOrchestratorTest {
   void setUp() {
     orchestrator =
         new DefaultSagaOrchestrator(
-            engine, store, definitionRegistry, recoveryManager, retentionManager, 30_000);
+            engine,
+            store,
+            definitionRegistry,
+            recoveryManager,
+            retentionManager,
+            30_000,
+            Integer.MAX_VALUE);
   }
 
   @AfterEach
@@ -113,7 +121,9 @@ class DefaultSagaOrchestratorTest {
     void register_unresolvableStep_throwsSagaDefinitionException() {
       // Arrange
       SagaDefinition def = definition("transfer");
-      org.mockito.Mockito.doThrow(new SagaDefinitionException("Step class not found"))
+      org.mockito.Mockito.doThrow(
+              SagaDefinitionException.stepClassInvalid(
+                  "com.example.Foo", "not found on classpath", new ClassNotFoundException()))
           .when(engine)
           .getOrBuildPlan(def);
 
@@ -201,6 +211,34 @@ class DefaultSagaOrchestratorTest {
       assertThatThrownBy(() -> orchestrator.start("unknown", Map.of()))
           .isInstanceOf(SagaDefinitionNotFoundException.class);
       verify(definitionRegistry).resolve("unknown");
+    }
+
+    @Test
+    void start_clientSuppliedIdAlreadyExists_propagatesSagaAlreadyExists() {
+      // Arrange — the store raises this on the create; assert the orchestrator passes it through
+      // untouched, since SagaOrchestrator declares it on the client-supplied-id overloads.
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.execute(eq(def), eq("dup"), any()))
+          .thenThrow(new SagaAlreadyExistsException("dup", snapshot("dup", SagaStatus.RUNNING)));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.start("dup", "transfer", Map.of()))
+          .isInstanceOf(SagaAlreadyExistsException.class);
+    }
+
+    @Test
+    void start_malformedClientSuppliedId_propagatesSagaIllegalArgument() {
+      // Arrange — validateSagaId rejects it in the store (covered there end to end); this asserts
+      // the orchestrator does not wrap or swallow it, as the interface declaration promises.
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.execute(eq(def), eq("bad id!"), any()))
+          .thenThrow(new SagaIllegalArgumentException("Invalid saga ID format"));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.start("bad id!", "transfer", Map.of()))
+          .isInstanceOf(SagaIllegalArgumentException.class);
     }
 
     @Test
@@ -394,6 +432,7 @@ class DefaultSagaOrchestratorTest {
               recoveryManager,
               retentionManager,
               30_000,
+              Integer.MAX_VALUE,
               mockExecutor);
 
       SagaDefinition def = definition("transfer");
@@ -436,6 +475,7 @@ class DefaultSagaOrchestratorTest {
               recoveryManager,
               retentionManager,
               30_000,
+              Integer.MAX_VALUE,
               mockExecutor);
 
       SagaDefinition def = definition("transfer");
@@ -638,6 +678,7 @@ class DefaultSagaOrchestratorTest {
               recoveryManager,
               retentionManager,
               30_000,
+              Integer.MAX_VALUE,
               mockExecutor);
 
       SagaDefinition def = definition("transfer");
@@ -689,8 +730,8 @@ class DefaultSagaOrchestratorTest {
     void getSagaDetail_existingSaga_returnsStateAndTimeline() {
       // Arrange — the application read of its own saga's detail, backed by the store's atomic read
       SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.COMPENSATED);
-      when(store.getStateWithEvents("saga-1"))
-          .thenReturn(Optional.of(new SagaStateAndEvents(saga, List.of())));
+      when(store.getStateWithEvents("saga-1", Integer.MAX_VALUE))
+          .thenReturn(Optional.of(new SagaStateAndEvents(saga, List.of(), false)));
 
       // Act
       SagaDetail detail = orchestrator.getSagaDetail("saga-1");
@@ -698,12 +739,31 @@ class DefaultSagaOrchestratorTest {
       // Assert — the projection itself is covered by SagaDetailReaderTest; here just the wiring
       assertThat(detail.getSnapshot()).isSameAs(saga);
       assertThat(detail.getTimeline()).isEmpty();
+      assertThat(detail.isTruncated()).isFalse();
+    }
+
+    @Test
+    void getSagaDetail_withMaxTimelineEvents_passesBoundToStore() {
+      // Arrange — a bounded orchestrator (the daemon path) forwards its bound to the store read
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.ESCALATED);
+      when(store.getStateWithEvents("saga-1", 42))
+          .thenReturn(Optional.of(new SagaStateAndEvents(saga, List.of(), true)));
+      try (DefaultSagaOrchestrator bounded =
+          new DefaultSagaOrchestrator(
+              engine, store, definitionRegistry, recoveryManager, retentionManager, 30_000, 42)) {
+
+        // Act
+        SagaDetail detail = bounded.getSagaDetail("saga-1");
+
+        // Assert
+        assertThat(detail.isTruncated()).isTrue();
+      }
     }
 
     @Test
     void getSagaDetail_unknownSaga_throwsSagaNotFound() {
       // Arrange
-      when(store.getStateWithEvents("unknown")).thenReturn(Optional.empty());
+      when(store.getStateWithEvents("unknown", Integer.MAX_VALUE)).thenReturn(Optional.empty());
 
       // Act & Assert
       assertThatThrownBy(() -> orchestrator.getSagaDetail("unknown"))
@@ -811,6 +871,7 @@ class DefaultSagaOrchestratorTest {
               recoveryManager,
               retentionManager,
               30_000,
+              Integer.MAX_VALUE,
               mockExecutor);
 
       SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
@@ -852,6 +913,7 @@ class DefaultSagaOrchestratorTest {
               recoveryManager,
               retentionManager,
               30_000,
+              Integer.MAX_VALUE,
               mockExecutor);
 
       SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
@@ -960,6 +1022,7 @@ class DefaultSagaOrchestratorTest {
               recoveryManager,
               retentionManager,
               30_000,
+              Integer.MAX_VALUE,
               mockExecutor);
 
       // Act

@@ -8,18 +8,20 @@ import org.junit.jupiter.api.Test;
 class StepCompensationExceptionTest {
 
   @Test
-  void constructor_messageOnlyGiven_setsDefaultFields() {
+  void constructor_messageOnlyGiven_setsDefaultsAndNullCode() {
     // Arrange & Act
     StepCompensationException e = new StepCompensationException("failed");
 
-    // Assert
+    // Assert — user-thrown form leaves errorCode null and metadata empty
     assertThat(e.getMessage()).isEqualTo("failed");
     assertThat(e.getStepName()).isNull();
     assertThat(e.getStepIndex()).isEqualTo(-1);
+    assertThat(e.getErrorCode()).isNull();
+    assertThat(e.getMetadata()).isEmpty();
   }
 
   @Test
-  void constructor_causeOnlyGiven_setsDefaultFields() {
+  void constructor_causeOnlyGiven_setsDefaultsAndNullCode() {
     // Arrange
     RuntimeException cause = new RuntimeException("io error");
 
@@ -30,10 +32,12 @@ class StepCompensationExceptionTest {
     assertThat(e.getCause()).isSameAs(cause);
     assertThat(e.getStepName()).isNull();
     assertThat(e.getStepIndex()).isEqualTo(-1);
+    assertThat(e.getErrorCode()).isNull();
+    assertThat(e.getMetadata()).isEmpty();
   }
 
   @Test
-  void constructor_stepInfoGiven_setsAllFields() {
+  void constructor_stepInfoGiven_setsCompensationFailedCodeAndMetadata() {
     // Arrange
     RuntimeException cause = new RuntimeException("db error");
 
@@ -44,7 +48,13 @@ class StepCompensationExceptionTest {
     assertThat(e.getStepName()).isEqualTo("refund");
     assertThat(e.getStepIndex()).isEqualTo(2);
     assertThat(e.getCause()).isSameAs(cause);
-    assertThat(e.getMessage()).contains("refund").contains("2");
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.COMPENSATION_FAILED);
+    assertThat(e.getMetadata())
+        .containsEntry("step_name", "refund")
+        .containsEntry("step_index", "2")
+        .hasSize(2);
+    assertThat(e.getMessage())
+        .isEqualTo("DB-SAGA-30005: Compensation of step failed [step_name=refund, step_index=2]");
   }
 
   @SuppressWarnings("NullAway")
@@ -80,7 +90,7 @@ class StepCompensationExceptionTest {
 
   @Test
   void classHierarchy_always_isRuntimeException() {
-    // Assert — compensation exceptions are unchecked
+    // Assert — compensation exceptions are unchecked and outside the SagaRuntimeException tree
     assertThat(RuntimeException.class).isAssignableFrom(StepCompensationException.class);
   }
 }

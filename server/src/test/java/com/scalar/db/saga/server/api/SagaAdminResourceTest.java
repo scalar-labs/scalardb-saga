@@ -17,6 +17,7 @@ import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.engine.OperatorContext;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import com.scalar.db.saga.server.security.SagaAuthRequest;
 import com.scalar.db.saga.server.security.SagaAuthenticationException;
@@ -184,13 +185,11 @@ class SagaAdminResourceTest {
   @Test
   void recover_wrongState_returns422() throws Exception {
     when(adminService.recoverSaga(eq(SAGA_ID), any()))
-        .thenThrow(
-            new SagaStatePreconditionException(
-                SAGA_ID, SagaStatePreconditionException.Code.SAGA_WRONG_STATE, "wrong state"));
+        .thenThrow(SagaStatePreconditionException.wrongState(SAGA_ID, "RUNNING", "recover"));
     HttpResponse<String> response =
         send("POST", "/sagas/s1/recover", "admin", "{\"reason\":\"x\"}");
     assertThat(response.statusCode()).isEqualTo(422);
-    assertThat(response.body()).contains("SAGA_WRONG_STATE");
+    assertThat(response.body()).contains(SagaErrorCode.SAGA_WRONG_STATE.code());
   }
 
   @Test
@@ -223,12 +222,10 @@ class SagaAdminResourceTest {
   void reset_wrongState_returns422() throws Exception {
     // resetEscalated on a non-ESCALATED saga is a precondition failure, not transient
     when(adminService.resetEscalated(eq(SAGA_ID), any()))
-        .thenThrow(
-            new SagaStatePreconditionException(
-                SAGA_ID, SagaStatePreconditionException.Code.SAGA_WRONG_STATE, "not escalated"));
+        .thenThrow(SagaStatePreconditionException.wrongState(SAGA_ID, "RUNNING", "reset"));
     HttpResponse<String> response = send("POST", "/sagas/s1/reset", "admin", "{\"reason\":\"x\"}");
     assertThat(response.statusCode()).isEqualTo(422);
-    assertThat(response.body()).contains("SAGA_WRONG_STATE");
+    assertThat(response.body()).contains(SagaErrorCode.SAGA_WRONG_STATE.code());
   }
 
   @Test
@@ -283,6 +280,9 @@ class SagaAdminResourceTest {
     HttpResponse<String> response =
         send("POST", "/sagas/s1/recover", "admin", "{\"reason\":\"  \"}");
     assertThat(response.statusCode()).isEqualTo(400);
+    // INVALID_ARGUMENT, the enum's own example for a blank reason — the same code gRPC and
+    // embedded callers get, so the transports cannot drift apart on this input again.
+    assertThat(response.body()).contains(SagaErrorCode.INVALID_ARGUMENT.code());
   }
 
   @Test

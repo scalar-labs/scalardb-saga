@@ -14,8 +14,11 @@ import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaErrorCode;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaPermissionDeniedException;
+import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import com.scalar.db.saga.exception.SagaTimeoutException;
 import com.scalar.db.saga.exception.SagaUnauthenticatedException;
@@ -183,13 +186,13 @@ class GrpcSagaAdminClientTest {
   }
 
   @Test
-  void resetEscalated_bulk_conflictingStatusGiven_throwsIllegalArgumentBeforeRpc() {
+  void resetEscalated_bulk_conflictingStatusGiven_throwsSagaIllegalArgumentBeforeRpc() {
     // Arrange
     SagaQuery query = SagaQuery.newBuilder().status(SagaStatus.COMPLETED).build();
 
     // Act + Assert — rejected client-side, before the wire request is ever built or sent
     assertThatThrownBy(() -> client.resetEscalated(query, "sweep"))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class);
     assertThat(fake.lastBulk).isNull();
   }
 
@@ -211,7 +214,9 @@ class GrpcSagaAdminClientTest {
 
   @Test
   void recoverSaga_notFound_throwsSagaNotFound() {
-    fake.recoverError = statusWithReason(Status.Code.NOT_FOUND, "SAGA_NOT_FOUND", Map.of());
+    fake.recoverError =
+        statusWithReason(
+            Status.Code.NOT_FOUND, SagaErrorCode.SAGA_NOT_FOUND.code(), Map.of("saga_id", "gone"));
     assertThatThrownBy(() -> client.recoverSaga("gone", "x"))
         .isInstanceOf(SagaNotFoundException.class);
   }
@@ -223,8 +228,8 @@ class GrpcSagaAdminClientTest {
     fake.recoverError =
         statusWithReason(
             Status.Code.NOT_FOUND,
-            "SAGA_DEFINITION_NOT_FOUND",
-            Map.of("sagaName", "orders", "version", "v2"));
+            SagaErrorCode.SAGA_DEFINITION_VERSION_NOT_FOUND.code(),
+            Map.of("saga_name", "orders", "version", "v2"));
     assertThatThrownBy(() -> client.recoverSaga("s-1", "x"))
         .isInstanceOf(SagaDefinitionNotFoundException.class)
         .satisfies(
@@ -237,13 +242,20 @@ class GrpcSagaAdminClientTest {
 
   @Test
   void recoverSaga_failedPrecondition_reconstructsPreconditionWithCode() {
-    // The daemon sends the machine-readable code name as the ErrorInfo reason
+    // The daemon sends the SagaErrorCode.code() as the ErrorInfo reason and the exception's
+    // metadata (saga_id, current_state, requested_operation) as ErrorInfo.metadata; the client
+    // reconstructs the exception with the same code and metadata.
+    Map<String, String> metadata = new java.util.LinkedHashMap<>();
+    metadata.put("saga_id", "s-1");
+    metadata.put("current_state", "RUNNING");
+    metadata.put("requested_operation", "recover");
     fake.recoverError =
-        statusWithReason(Status.Code.FAILED_PRECONDITION, "SAGA_WRONG_STATE", Map.of());
+        statusWithReason(
+            Status.Code.FAILED_PRECONDITION, SagaErrorCode.SAGA_WRONG_STATE.code(), metadata);
     assertThatThrownBy(() -> client.recoverSaga("s-1", "x"))
         .isInstanceOf(SagaStatePreconditionException.class)
-        .extracting(e -> ((SagaStatePreconditionException) e).getCode())
-        .isEqualTo(SagaStatePreconditionException.Code.SAGA_WRONG_STATE);
+        .extracting(e -> ((SagaStatePreconditionException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.SAGA_WRONG_STATE);
   }
 
   @Test
@@ -254,11 +266,44 @@ class GrpcSagaAdminClientTest {
   }
 
   @Test
-  void listSagas_invalidArgument_throwsIllegalArgument() {
+  void listSagas_invalidArgumentWithoutErrorInfo_throwsSagaIllegalArgument() {
+    // No ErrorInfo, so there is nothing to reconstruct and the transport status decides. The
+    // daemon's description is the validation detail, so it is passed through.
     fake.listError = Status.INVALID_ARGUMENT.withDescription("bad page token").asRuntimeException();
     assertThatThrownBy(() -> client.listSagas(SagaQuery.newBuilder().build()))
-        .isInstanceOf(IllegalArgumentException.class)
+        .isInstanceOf(SagaIllegalArgumentException.class)
         .hasMessageContaining("bad page token");
+  }
+
+  @Test
+  void listSagas_internalWithErrorInfo_reconstructsTheServerCode() {
+    // Arrange — reads used to skip ErrorInfo reconstruction entirely, so an INTERNAL response fell
+    // to the transport catch-all and reported UNRECOGNIZED_SERVER_ERROR ("upgrade the client SDK")
+    // for a code this client understands. Mutations already reconstructed; the two paths disagreed
+    // on identical wire input.
+    fake.listError =
+        statusWithReason(
+            Status.Code.INTERNAL, SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED.code(), Map.of());
+
+    // Act + Assert
+    assertThatThrownBy(() -> client.listSagas(SagaQuery.newBuilder().build()))
+        .isInstanceOf(SagaRuntimeException.class)
+        .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED);
+  }
+
+  @Test
+  void recoverSaga_driftedMetadataWithNotFoundStatus_fallsBackToTypedNotFound() {
+    // Arrange — a known code whose wire metadata no longer fits its schema (a key renamed across
+    // versions). Reconstruction must report failure so the NOT_FOUND transport dispatch still
+    // produces the typed exception, instead of masking the drift as UNRECOGNIZED_SERVER_ERROR.
+    fake.recoverError =
+        statusWithReason(
+            Status.Code.NOT_FOUND, SagaErrorCode.SAGA_NOT_FOUND.code(), Map.of("sagaId", "s-1"));
+
+    // Act + Assert
+    assertThatThrownBy(() -> client.recoverSaga("s-1", "x"))
+        .isInstanceOf(SagaNotFoundException.class);
   }
 
   @Test
@@ -281,6 +326,63 @@ class GrpcSagaAdminClientTest {
         Status.UNAUTHENTICATED.withDescription("no credential").asRuntimeException();
     assertThatThrownBy(() -> client.recoverSaga("s-1", "x"))
         .isInstanceOf(SagaUnauthenticatedException.class);
+  }
+
+  @Test
+  void recoverSaga_cancelled_throwsRequestAborted() {
+    // Arrange — the blocking stub reports a caller interrupt (and an in-flight call killed by a
+    // concurrent shutdownNow) as CANCELLED.
+    fake.recoverError = Status.CANCELLED.withDescription("Thread interrupted").asRuntimeException();
+
+    // Act + Assert — a caller-side abort, not the version skew the catch-all would report.
+    assertThatThrownBy(() -> client.recoverSaga("s-1", "x"))
+        .isExactlyInstanceOf(SagaRuntimeException.class)
+        .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.REQUEST_ABORTED);
+  }
+
+  @Test
+  void recoverSaga_resourceExhaustedWithoutErrorInfo_throwsUnmappedServerStatus() {
+    // Arrange — every shipped server attaches an ErrorInfo to a rate-limit refusal, so a bare
+    // RESOURCE_EXHAUSTED most likely means the gRPC runtime rejected an oversized message.
+    fake.recoverError = Status.RESOURCE_EXHAUSTED.withDescription("too large").asRuntimeException();
+
+    // Act + Assert — not rate-limit backoff advice (retrying an oversized message never fits) and
+    // not the version-skew catch-all (no code was sent; upgrading changes nothing).
+    assertThatThrownBy(() -> client.recoverSaga("s-1", "x"))
+        .isExactlyInstanceOf(SagaRuntimeException.class)
+        .isInstanceOfSatisfying(
+            SagaRuntimeException.class,
+            e -> {
+              assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.UNMAPPED_SERVER_STATUS);
+              assertThat(e.getMetadata()).containsEntry("server_value", "RESOURCE_EXHAUSTED");
+            });
+  }
+
+  @Test
+  void recoverSaga_internalWithoutErrorInfo_throwsInternalError() {
+    // Arrange — an older daemon's security interceptor reports an unexpected server fault as a
+    // bare INTERNAL with no ErrorInfo.
+    fake.recoverError = Status.INTERNAL.withDescription("boom").asRuntimeException();
+
+    // Act + Assert — a server fault to escalate, not the version skew the catch-all would report.
+    assertThatThrownBy(() -> client.recoverSaga("s-1", "x"))
+        .isExactlyInstanceOf(SagaRuntimeException.class)
+        .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.INTERNAL_ERROR);
+  }
+
+  @Test
+  void recoverSaga_unknownWithoutErrorInfo_throwsInternalError() {
+    // Arrange — bare UNKNOWN is what the gRPC server runtime emits when a failure escapes the
+    // daemon's handlers entirely (an Error, or a fault in interceptor code).
+    fake.recoverError = Status.UNKNOWN.withDescription("app error").asRuntimeException();
+
+    // Act + Assert — a server fault to escalate, not the version skew the catch-all would report.
+    assertThatThrownBy(() -> client.recoverSaga("s-1", "x"))
+        .isExactlyInstanceOf(SagaRuntimeException.class)
+        .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.INTERNAL_ERROR);
   }
 
   @Test
@@ -312,7 +414,14 @@ class GrpcSagaAdminClientTest {
    */
   private static StatusRuntimeException statusWithReason(
       Status.Code code, String reason, Map<String, String> metadata) {
-    ErrorInfo info = ErrorInfo.newBuilder().setReason(reason).putAllMetadata(metadata).build();
+    // The saga domain is what the client's ErrorInfo filter matches on; without it the detail is
+    // treated as an intermediary's and ignored.
+    ErrorInfo info =
+        ErrorInfo.newBuilder()
+            .setReason(reason)
+            .setDomain(SagaErrorCode.WIRE_DOMAIN)
+            .putAllMetadata(metadata)
+            .build();
     return StatusProto.toStatusRuntimeException(
         com.google.rpc.Status.newBuilder()
             .setCode(code.value())

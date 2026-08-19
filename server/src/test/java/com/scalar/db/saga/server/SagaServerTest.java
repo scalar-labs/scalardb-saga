@@ -512,6 +512,7 @@ class SagaServerTest {
     props.setProperty(SagaServerConfig.OWNER_ID_KEY, "saga-daemon-7");
     props.setProperty(SagaServerConfig.SHUTDOWN_MODE_KEY, "WAIT_ALL_SAGAS");
     props.setProperty(SagaServerConfig.SHUTDOWN_TIMEOUT_MILLIS_KEY, "7001");
+    props.setProperty(SagaServerConfig.DETAIL_MAX_TIMELINE_EVENTS_KEY, "7005");
     props.setProperty(SagaServerConfig.SYNC_TIMEOUT_MILLIS_KEY, "7002");
     props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "7003");
     props.setProperty(SagaServerConfig.RECOVERY_TIMEOUT_MILLIS_KEY, "7004");
@@ -538,6 +539,7 @@ class SagaServerTest {
     verify(builder).ownerId("saga-daemon-7");
     verify(builder).shutdownMode(ShutdownMode.WAIT_ALL_SAGAS);
     verify(builder).shutdownTimeoutMillis(7001L);
+    verify(builder).maxTimelineEvents(7005);
     verify(builder).recoveryConfig(config.recoveryConfig());
     verify(builder).retentionConfig(config.retentionConfig());
   }

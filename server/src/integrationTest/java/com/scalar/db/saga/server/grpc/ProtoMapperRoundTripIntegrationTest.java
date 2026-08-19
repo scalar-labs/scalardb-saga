@@ -116,7 +116,9 @@ class ProtoMapperRoundTripIntegrationTest {
                     null,
                     SagaStatus.COMPENSATING,
                     "operator reset the saga",
-                    "alice")));
+                    "alice")),
+            // truncated=true so a flag wired in only one mapper direction fails equals().
+            true);
     when(orchestrator.getSagaDetail("s-1")).thenReturn(expected);
 
     assertThat(appClient.getSagaDetail("s-1")).isEqualTo(expected);
