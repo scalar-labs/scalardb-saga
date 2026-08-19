@@ -587,19 +587,22 @@ public final class ScalarDbSagaStore implements SagaStore {
    * #scanSlice} streams on just far enough to <b>complete</b> the cohort straddling the boundary,
    * then stops at the next cohort and sets the cursor to the completed cohort's timestamp.
    *
-   * <h4>Trade-off: {@code pageSize} is a target, and the memory bound is cohort size</h4>
+   * <h4>Trade-off: {@code pageSize} is a target, and the memory bound is {@code pageSize} plus
+   * cohort size</h4>
    *
    * Because a page never splits a cohort, {@code pageSize} is a <b>target</b>, not a cap: a full
    * page runs <b>over</b> it to finish the cohort straddling the limit, and a single cohort larger
-   * than {@code pageSize} is returned whole as one over-sized page. So the rows materialized for
-   * one page are bounded by the <b>largest cohort</b> (rows sharing one {@code updated_at} within a
-   * bucket), <b>not</b> by {@code pageSize}. That is the one unbounded quantity in this path:
-   * recovery caps its analogous per-status scan (see {@link
+   * than {@code pageSize} is returned whole as an over-sized page (a mass event spread across
+   * slices yields several such pages, not one). So the rows materialized for one page are bounded
+   * by {@code pageSize} plus the <b>largest cohort</b> (rows sharing one {@code updated_at} within
+   * one {@code (bucket, status)} slice): the page can already hold up to a full target of rows from
+   * earlier slices when the cohort that overflows it is completed. The cohort term is the one
+   * unbounded quantity in this path: recovery caps its analogous per-status scan (see {@link
    * ScalarDbSagaStoreConfig#getRecoveryScanLimit()}), but this listing does not. A pathological
    * cohort — e.g. a mass transition stamping many sagas with the same millisecond {@code
    * updated_at}, divided only across {@code numBuckets} — therefore drives peak memory for the
-   * call. Operators should provision heap and response limits for the largest expected cohort, not
-   * for {@code pageSize}. Listing is best-effort under concurrent mutation.
+   * call. Operators should provision heap and response limits for {@code pageSize} plus the largest
+   * expected cohort. Listing is best-effort under concurrent mutation.
    *
    * <h4>Future option: bound memory by splitting cohorts on {@code saga_id}</h4>
    *

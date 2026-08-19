@@ -16,7 +16,10 @@ import "saga.proto";
 // FAILED_PRECONDITION; a lost compare-and-set is ABORTED (the gRPC analogues of REST 422 / 409).
 service AdminService {
   // Lists sagas matching the filter, one page at a time. Drive pagination by the response's
-  // `next_page_token` until it is absent.
+  // `next_page_token` until it is absent. A page can exceed `page_size` — even the 1000 maximum:
+  // a page never splits a same-`updated_at` cohort (rows stamped in one millisecond, e.g. by a
+  // mass escalation), so the cohort straddling the boundary is completed whole on top of an
+  // almost-full page.
   rpc ListSagas (ListSagasRequest) returns (ListSagasResponse);
 
   // Recovers a stuck (RUNNING/COMPENSATING) saga by driving it in the direction the engine's pivot
@@ -30,7 +33,11 @@ service AdminService {
   rpc ResetEscalated (InterventionRequest) returns (SagaSnapshot);
 
   // Un-escalates a page of ESCALATED sagas, handing each drive to the recovery loop; returns the
-  // per-page counts and the token to continue the sweep.
+  // per-page counts and the token to continue the sweep. A caller deadline does not abort or undo
+  // the server-side sweep, but its outcome is unknown to the caller: the page may complete after
+  // DEADLINE_EXCEEDED, or a store failure may still abort it. Retrying is safe — reset rows leave
+  // the ESCALATED filter, so a retry (even without the lost token) resumes with what is still
+  // escalated.
   rpc ResetEscalatedBulk (ResetEscalatedBulkRequest) returns (ResetResult);
 }
 
@@ -47,7 +54,8 @@ message ListSagasRequest {
   optional google.protobuf.Timestamp updated_after = 2;   // inclusive lower bound on updated_at
   optional google.protobuf.Timestamp updated_before = 3;  // inclusive upper bound on updated_at
   // Target results per page; must be in [1, 1000], else INVALID_ARGUMENT (not clamped). It is a
-  // target, not an exact cap: a returned page may exceed it by a cohort. Absent = server default.
+  // target, not an exact cap: a returned page may exceed it by up to a whole same-`updated_at`
+  // cohort (rows sharing one timestamp) on top of a nearly full page. Absent = server default.
   optional int32 page_size = 4;
   optional string page_token = 5;                      // opaque continuation token
 }
@@ -62,7 +70,8 @@ message ResetEscalatedBulkRequest {
   optional google.protobuf.Timestamp updated_after = 2;
   optional google.protobuf.Timestamp updated_before = 3;
   // Target rows per page; must be in [1, 1000], else INVALID_ARGUMENT (not clamped). It is a
-  // target, not an exact cap: a swept page may exceed it by a cohort. Absent = server default.
+  // target, not an exact cap: a swept page may exceed it by up to a whole same-`updated_at`
+  // cohort (rows sharing one timestamp) on top of a nearly full page. Absent = server default.
   optional int32 page_size = 4;
   optional string page_token = 5;
   // No status filter: the sweep is defined as ESCALATED sagas, which the engine pins.
