@@ -126,19 +126,9 @@ public class SagaEngine implements AutoCloseable {
    * @param input the saga input data
    */
   void executeSaga(SagaDefinition def, SagaStateSnapshot saga, Map<String, Object> input) {
-    String sagaId = saga.getSagaId();
-    if (!registerActive(sagaId)) {
-      store.markForRecovery(sagaId);
-      return;
-    }
-    try {
-      ExecutionContext context = new ExecutionContext(sagaId, input, saga);
-      context.setNextEventSequence(1); // SAGA_STARTED was seq 0
-      List<StepWithPolicy> plan = getOrBuildPlan(def);
-      executeSteps(plan, context, 0, def.getPivotIndex(), def.getTimeoutMillis());
-    } finally {
-      unregisterActive(sagaId);
-    }
+    ExecutionContext context = new ExecutionContext(saga.getSagaId(), input, saga);
+    context.setNextEventSequence(1); // SAGA_STARTED was seq 0
+    resumeFrom(def, context, 0);
   }
 
   /**
@@ -533,7 +523,7 @@ public class SagaEngine implements AutoCloseable {
     RetryPolicy compensationPolicy = RetryPolicy.compensationDefault();
     List<StepWithPolicy> plan = new ArrayList<>();
     for (StepDefinition stepDef : def.getSteps()) {
-      Step step = resolveStep(stepDef, Step.class);
+      Step step = stepInstantiator.instantiate(stepDef, Step.class);
       RetryPolicy policy = resolveRetryPolicy(stepDef, def);
       plan.add(
           new StepWithPolicy(
@@ -553,7 +543,7 @@ public class SagaEngine implements AutoCloseable {
     RetryPolicy compensationPolicy = RetryPolicy.compensationDefault();
 
     for (StepDefinition stepDef : def.getSteps()) {
-      TccStep tccStep = resolveStep(stepDef, TccStep.class);
+      TccStep tccStep = stepInstantiator.instantiate(stepDef, TccStep.class);
       RetryPolicy reservePolicy = resolveRetryPolicy(stepDef, def);
       reserveSteps.add(
           new StepWithPolicy(
@@ -573,10 +563,6 @@ public class SagaEngine implements AutoCloseable {
 
     reserveSteps.addAll(confirmSteps);
     return reserveSteps;
-  }
-
-  private <T> T resolveStep(StepDefinition stepDef, Class<T> expectedType) {
-    return stepInstantiator.instantiate(stepDef, expectedType);
   }
 
   /**
