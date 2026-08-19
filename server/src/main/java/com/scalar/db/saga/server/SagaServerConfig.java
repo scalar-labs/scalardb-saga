@@ -110,10 +110,11 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code detail.max_timeline_events} — maximum timeline events one {@code getSagaDetail} read
  *       returns (default {@value #DEFAULT_DETAIL_MAX_TIMELINE_EVENTS}). A longer history is cut to
  *       the newest events and the response is flagged {@code truncated}; the full history remains
- *       in the store. The bound keeps a pathological saga's detail under a gRPC client's default 4
- *       MB inbound message cap, so the saga stays diagnosable. A window widened far beyond the
- *       default can exceed that cap again; the oversized detail still arrives over REST, which has
- *       no equivalent limit, but not through the Java client SDK
+ *       in the store. This bound, together with the reader's cap of 1024 chars on each entry's
+ *       detail text, keeps a pathological saga's detail under a gRPC client's default 4 MB inbound
+ *       message cap, so the saga stays diagnosable. A window widened far beyond the default can
+ *       exceed that cap again; the oversized detail still arrives over REST, which has no
+ *       equivalent limit, but not through the Java client SDK
  * </ul>
  *
  * <h2>Crash recovery ({@code recovery.*})</h2>
@@ -345,8 +346,10 @@ public final class SagaServerConfig {
   // Deliberately bounded here even though the embedded engine defaults to unbounded: the daemon
   // serves the detail over a network, where a pathological timeline exceeds the gRPC client's
   // default 4 MB inbound cap. 1000 events covers every realistic saga (a 100-step saga that fully
-  // compensated and was recovered a few times stays under ~500) while the worst all-interventions
-  // shape stays around 1.5 MB on the wire.
+  // compensated and was recovered a few times stays under ~500). The byte estimate needs the
+  // reader's per-entry cap as well; each entry's detail text is cut at 1024 chars on read (step
+  // failure messages are stored verbatim, bounded only by store.max_event_payload_bytes), so 1000
+  // capped entries stay around 1.5 MB on the wire.
   static final int DEFAULT_DETAIL_MAX_TIMELINE_EVENTS = 1000;
   static final String DEFAULT_SECURITY_PROVIDER =
       "noop"; // no authentication (see NoopSecurityProvider)

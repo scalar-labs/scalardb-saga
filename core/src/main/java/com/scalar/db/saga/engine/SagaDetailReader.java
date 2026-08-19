@@ -21,9 +21,26 @@ import org.jspecify.annotations.Nullable;
  * neither the application orchestrator nor the admin control plane specifically; it is the shared
  * projection both would otherwise duplicate. The timeline exposes each event's metadata plus its
  * failure error or intervention reason only, <b>never</b> a raw step input/output payload (business
- * data / PII).
+ * data / PII). Each detail string is capped at {@link #MAX_DETAIL_LENGTH}, so the timeline's byte
+ * size is bounded by its entry count.
  */
 final class SagaDetailReader {
+
+  /**
+   * The longest detail string a timeline entry carries. Admin reasons are already this short at
+   * write time (see the reason cap in {@link DefaultSagaAdminService}), but a step failure's error
+   * message is persisted verbatim and commonly embeds a downstream response body; without a read
+   * cap, a few such events blow past a gRPC client's default 4 MB inbound message cap no matter how
+   * few events the timeline keeps. The cut is a display bound only; the full message stays in the
+   * store.
+   */
+  static final int MAX_DETAIL_LENGTH = 1024;
+
+  /**
+   * Suffixed to a detail string cut at {@link #MAX_DETAIL_LENGTH}, so a capped message is
+   * distinguishable from a complete one.
+   */
+  static final String TRUNCATION_MARKER = "... (truncated)";
 
   private SagaDetailReader() {}
 
@@ -54,7 +71,9 @@ final class SagaDetailReader {
 
   /**
    * Projects one persisted event to a timeline entry. Exposes metadata plus the failure error /
-   * intervention reason only — never a raw step input/output payload (business data / PII).
+   * intervention reason only — never a raw step input/output payload (business data / PII). The
+   * detail string is capped at {@link #MAX_DETAIL_LENGTH} whatever its source, so the projection
+   * enforces the bound even for legacy events persisted before any write-side cap.
    */
   private static TimelineEvent toTimelineEvent(SagaEvent event) {
     Instant timestamp =
@@ -68,7 +87,7 @@ final class SagaDetailReader {
               step.getStepIndex(),
               step.getStepName(),
               null,
-              stepDetail(step),
+              truncateDetail(stepDetail(step)),
               null);
       case StatusEvent status ->
           new TimelineEvent(
@@ -77,9 +96,25 @@ final class SagaDetailReader {
               null,
               null,
               status.getTargetStatus(),
-              statusDetail(status),
+              truncateDetail(statusDetail(status)),
               statusOperator(status));
     };
+  }
+
+  /**
+   * Caps {@code detail} at {@link #MAX_DETAIL_LENGTH} chars, suffixing a cut string with {@link
+   * #TRUNCATION_MARKER}. The cut backs off one char rather than splitting a surrogate pair, which
+   * would leave an unencodable lone surrogate at the boundary.
+   */
+  private static @Nullable String truncateDetail(@Nullable String detail) {
+    if (detail == null || detail.length() <= MAX_DETAIL_LENGTH) {
+      return detail;
+    }
+    int cut = MAX_DETAIL_LENGTH;
+    if (Character.isHighSurrogate(detail.charAt(cut - 1))) {
+      cut--;
+    }
+    return detail.substring(0, cut) + TRUNCATION_MARKER;
   }
 
   private static @Nullable String stepDetail(StepEvent step) {

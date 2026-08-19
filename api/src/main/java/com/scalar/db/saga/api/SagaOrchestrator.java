@@ -217,7 +217,9 @@ public interface SagaOrchestrator extends AutoCloseable {
    *
    * <p>An orchestrator configured with a timeline bound cuts a longer history to the newest events
    * and reports the cut via {@link SagaDetail#isTruncated()}; the full history remains in the
-   * store.
+   * store. Independently of that bound, each entry's detail text is capped (see {@link
+   * TimelineEvent#getDetail()}), so the response's byte size is bounded by the entry count even
+   * when a step failure message embeds a large downstream response.
    *
    * @param sagaId the saga instance ID
    * @return the saga's state and timeline

@@ -36,6 +36,19 @@ class SagaDetailReaderTest {
     return new SagaStateSnapshot(SAGA_ID, "order-saga", status, "owner", "v1", TS, TS);
   }
 
+  /** Stubs the store with the given events and reads back the resulting timeline. */
+  private List<TimelineEvent> readTimeline(SagaEvent... events) {
+    when(store.getStateWithEvents(SAGA_ID, Integer.MAX_VALUE))
+        .thenReturn(
+            Optional.of(
+                new SagaStateAndEvents(snapshot(SagaStatus.RUNNING), List.of(events), false)));
+    return SagaDetailReader.read(store, SAGA_ID, Integer.MAX_VALUE).getTimeline();
+  }
+
+  private static String errorPayload(String message) {
+    return "{\"message\":\"" + message + "\"}";
+  }
+
   @Test
   void read_missingSaga_throwsNotFound() {
     // Arrange
@@ -110,5 +123,81 @@ class SagaDetailReaderTest {
     assertThat(timeline.get(4).getResultingStatus()).isEqualTo(SagaStatus.COMPENSATING);
     assertThat(timeline.get(4).getDetail()).isEqualTo("rolling back");
     assertThat(timeline.get(4).getOperator()).isEqualTo("bob");
+  }
+
+  @Test
+  void read_stepFailureMessageAtCap_returnsDetailUnchanged() {
+    // Arrange
+    String message = "x".repeat(SagaDetailReader.MAX_DETAIL_LENGTH);
+
+    // Act
+    List<TimelineEvent> timeline =
+        readTimeline(StepEvent.failed(0, "debit", errorPayload(message)).withTimestamp(TS));
+
+    // Assert — a message that fits the cap is passed through whole, with no marker
+    assertThat(timeline.get(0).getDetail()).isEqualTo(message);
+  }
+
+  @Test
+  void read_stepFailureMessageOverCap_cutsDetailAndAppendsMarker() {
+    // Arrange — the shape the cap exists for: a step failure embedding a large response body
+    String message = "x".repeat(SagaDetailReader.MAX_DETAIL_LENGTH + 5000);
+
+    // Act
+    List<TimelineEvent> timeline =
+        readTimeline(StepEvent.failed(0, "debit", errorPayload(message)).withTimestamp(TS));
+
+    // Assert
+    assertThat(timeline.get(0).getDetail())
+        .isEqualTo(
+            "x".repeat(SagaDetailReader.MAX_DETAIL_LENGTH) + SagaDetailReader.TRUNCATION_MARKER);
+  }
+
+  @Test
+  void read_compensationFailureMessageOverCap_cutsDetailAndAppendsMarker() {
+    // Arrange
+    String message = "y".repeat(SagaDetailReader.MAX_DETAIL_LENGTH + 1);
+
+    // Act
+    List<TimelineEvent> timeline =
+        readTimeline(
+            StepEvent.compensationFailed(1, "credit", errorPayload(message)).withTimestamp(TS));
+
+    // Assert
+    assertThat(timeline.get(0).getDetail())
+        .isEqualTo(
+            "y".repeat(SagaDetailReader.MAX_DETAIL_LENGTH) + SagaDetailReader.TRUNCATION_MARKER);
+  }
+
+  @Test
+  void read_escalationReasonOverCap_cutsDetailAndAppendsMarker() {
+    // Arrange — escalation reasons are engine-generated and short today; the cap still guards the
+    // projection if that ever changes or a legacy event carries a long one
+    String reason = "z".repeat(SagaDetailReader.MAX_DETAIL_LENGTH + 1);
+
+    // Act
+    List<TimelineEvent> timeline = readTimeline(StatusEvent.escalated(reason).withTimestamp(TS));
+
+    // Assert
+    assertThat(timeline.get(0).getDetail())
+        .isEqualTo(
+            "z".repeat(SagaDetailReader.MAX_DETAIL_LENGTH) + SagaDetailReader.TRUNCATION_MARKER);
+  }
+
+  @Test
+  void read_cutLandingInsideSurrogatePair_backsOffBeforeThePair() {
+    // Arrange — a supplementary char (two Java chars) straddles the cut index, so a naive cut
+    // would keep a lone high surrogate
+    String message = "x".repeat(SagaDetailReader.MAX_DETAIL_LENGTH - 1) + "😀" + "trailing";
+
+    // Act
+    List<TimelineEvent> timeline =
+        readTimeline(StepEvent.failed(0, "debit", errorPayload(message)).withTimestamp(TS));
+
+    // Assert — the cut backs off one char so no split pair reaches the wire
+    assertThat(timeline.get(0).getDetail())
+        .isEqualTo(
+            "x".repeat(SagaDetailReader.MAX_DETAIL_LENGTH - 1)
+                + SagaDetailReader.TRUNCATION_MARKER);
   }
 }
