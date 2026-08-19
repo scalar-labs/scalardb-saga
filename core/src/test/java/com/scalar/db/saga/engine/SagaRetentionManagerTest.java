@@ -1,6 +1,7 @@
 package com.scalar.db.saga.engine;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -12,6 +13,10 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.store.SagaStore;
@@ -27,8 +32,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.LoggerFactory;
 
 @ExtendWith(MockitoExtension.class)
 class SagaRetentionManagerTest {
@@ -59,6 +66,19 @@ class SagaRetentionManagerTest {
         "1.0",
         Instant.parse("2024-12-25T00:00:00Z"),
         Instant.parse("2024-12-25T00:00:00Z"));
+  }
+
+  // Captures the manager's log output so tests can assert an Error was logged, not just contained.
+  // Callers must detach the appender in a finally: retentionLogger().detachAppender(appender).
+  private static ListAppender<ILoggingEvent> attachLogCapture() {
+    ListAppender<ILoggingEvent> appender = new ListAppender<>();
+    appender.start();
+    retentionLogger().addAppender(appender);
+    return appender;
+  }
+
+  private static Logger retentionLogger() {
+    return (Logger) LoggerFactory.getLogger(SagaRetentionManager.class);
   }
 
   // =========================================================================
@@ -187,6 +207,48 @@ class SagaRetentionManagerTest {
       // Assert — saga-ok is still deleted despite saga-fail failure
       verify(store).deleteSaga("saga-fail");
       verify(store).deleteSaga("saga-ok");
+    }
+
+    @Test
+    void cleanup_deleteThrowsErrorForOneSaga_containedAndContinues() {
+      // Arrange — same shape as the RuntimeException case, but with an Error: purgeOneSafely's
+      // catch spans Throwable, so the pass neither throws nor counts the failed purge.
+      SagaStateSnapshot saga1 = snapshot("saga-fail", SagaStatus.COMPLETED);
+      SagaStateSnapshot saga2 = snapshot("saga-ok", SagaStatus.COMPLETED);
+      when(store.findByStatusOlderThan(
+              eq(SagaStatus.COMPLETED), eq(THRESHOLD), eq(100), eq(OWNER_ID), anyInt()))
+          .thenReturn(List.of(saga1, saga2));
+      when(store.findByStatusOlderThan(
+              eq(SagaStatus.COMPENSATED), eq(THRESHOLD), eq(99), eq(OWNER_ID), anyInt()))
+          .thenReturn(List.of());
+      doThrow(new Error("delete blew up")).when(store).deleteSaga("saga-fail");
+      when(store.deleteSaga("saga-ok")).thenReturn(true);
+
+      // Act
+      ListAppender<ILoggingEvent> logs = attachLogCapture();
+      try {
+        assertThatCode(() -> manager.cleanup()).doesNotThrowAnyException();
+      } finally {
+        retentionLogger().detachAppender(logs);
+      }
+
+      // Assert — the COMPENSATED budget of 99 pins that the errored purge refunded its budget
+      // (only saga-ok's success consumed any), and the Error was logged with saga context instead
+      // of surfacing at the await as a context-free ExecutionException.
+      verify(store).deleteSaga("saga-ok");
+      verify(store, atLeastOnce())
+          .findByStatusOlderThan(
+              eq(SagaStatus.COMPENSATED), eq(THRESHOLD), eq(99), eq(OWNER_ID), anyInt());
+      assertThat(logs.list)
+          .anySatisfy(
+              event -> {
+                assertThat(event.getLevel()).isEqualTo(Level.WARN);
+                assertThat(event.getFormattedMessage()).contains("saga-fail");
+                assertThat(event.getThrowableProxy()).isNotNull();
+                assertThat(event.getThrowableProxy().getClassName())
+                    .isEqualTo(Error.class.getName());
+                assertThat(event.getThrowableProxy().getMessage()).isEqualTo("delete blew up");
+              });
     }
 
     @Test
@@ -345,9 +407,9 @@ class SagaRetentionManagerTest {
 
     @Test
     void cleanup_purgeTaskThrowsError_otherPurgesStillCounted() {
-      // Arrange — purgeOneSafely catches Exception only, so an Error escapes the task and
-      // surfaces as an ExecutionException at the await: it must be logged and skipped, not
-      // propagated and not allowed to abort the surviving purges.
+      // Arrange — an Error thrown by a delete is contained inside purgeOneSafely (its catch spans
+      // Throwable): the pass must not throw, and the surviving purges must still be attempted and
+      // counted.
       SagaStateSnapshot bad = snapshot("saga-bad", SagaStatus.COMPLETED);
       SagaStateSnapshot ok = snapshot("saga-ok", SagaStatus.COMPLETED);
       when(store.findByStatusOlderThan(
@@ -439,6 +501,24 @@ class SagaRetentionManagerTest {
       verify(scheduler)
           .scheduleWithFixedDelay(
               any(Runnable.class), eq(3600L + offset), eq(3600L), eq(TimeUnit.SECONDS));
+    }
+
+    @Test
+    void start_cleanupPassThrowsError_scheduledTaskContainsIt() {
+      // Arrange — capture the periodic task and make the pass blow up with an Error. Only a catch
+      // on Throwable contains it; a Throwable escaping a scheduleWithFixedDelay task cancels all
+      // its future executions, silently stopping retention cleanup for the rest of the process.
+      when(store.findByStatusOlderThan(any(), any(), anyInt(), any(), anyInt()))
+          .thenThrow(new Error("scan blew up"));
+      manager.start();
+      long offset = SweepScatter.offsetSeconds(OWNER_ID, "retention", 3600);
+      ArgumentCaptor<Runnable> task = ArgumentCaptor.forClass(Runnable.class);
+      verify(scheduler)
+          .scheduleWithFixedDelay(
+              task.capture(), eq(3600L + offset), eq(3600L), eq(TimeUnit.SECONDS));
+
+      // Act & Assert
+      assertThatCode(() -> task.getValue().run()).doesNotThrowAnyException();
     }
 
     @Test

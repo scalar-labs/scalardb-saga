@@ -1,6 +1,7 @@
 package com.scalar.db.saga.engine;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -13,6 +14,10 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.definition.SagaDefinition;
@@ -42,6 +47,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.LoggerFactory;
 
 @ExtendWith(MockitoExtension.class)
 class SagaRecoveryManagerTest {
@@ -93,6 +99,19 @@ class SagaRecoveryManagerTest {
   private void setupSinglePageRecovery(SagaStateSnapshot saga) {
     when(store.findRecoverable(any(), any())).thenReturn(new Recoverables(List.of(saga), null));
     when(store.claimForRecovery(saga, OWNER_ID)).thenReturn(Optional.of(saga));
+  }
+
+  // Captures the manager's log output so tests can assert an Error was logged, not just contained.
+  // Callers must detach the appender in a finally: recoveryLogger().detachAppender(appender).
+  private static ListAppender<ILoggingEvent> attachLogCapture() {
+    ListAppender<ILoggingEvent> appender = new ListAppender<>();
+    appender.start();
+    recoveryLogger().addAppender(appender);
+    return appender;
+  }
+
+  private static Logger recoveryLogger() {
+    return (Logger) LoggerFactory.getLogger(SagaRecoveryManager.class);
   }
 
   // =========================================================================
@@ -258,6 +277,55 @@ class SagaRecoveryManagerTest {
       // Assert — saga2 was still recovered despite saga1 failure
       verify(engine).recover(eq(new RecoveryAction.Resume(0)), eq(def), eq(ctx2));
     }
+
+    @Test
+    void recover_errorOnOneSaga_containedAndNextStillRecovered() {
+      // Arrange — same shape as the exception case, but with an Error: the per-task catch spans
+      // Throwable, so the pass neither throws nor skips the next saga.
+      SagaStateSnapshot saga1 = snapshot(SagaStatus.RUNNING);
+      SagaStateSnapshot saga2 =
+          new SagaStateSnapshot(
+              "saga-002",
+              SAGA_NAME,
+              SagaStatus.RUNNING,
+              OWNER_ID,
+              DEF_VERSION,
+              NOW.minusSeconds(300),
+              NOW);
+      SagaDefinition def = definition();
+      ExecutionContext ctx2 = mock(ExecutionContext.class);
+
+      when(store.findRecoverable(any(), any()))
+          .thenReturn(new Recoverables(List.of(saga1, saga2), null));
+      when(store.claimForRecovery(saga1, OWNER_ID)).thenThrow(new Error("claim blew up"));
+      when(store.claimForRecovery(saga2, OWNER_ID)).thenReturn(Optional.of(saga2));
+      when(store.getEvents(saga2.getSagaId())).thenReturn(List.of());
+      when(engine.replayEvents(saga2, List.of())).thenReturn(ctx2);
+      when(ctx2.getCurrentState()).thenReturn(saga2);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(def);
+
+      // Act
+      ListAppender<ILoggingEvent> logs = attachLogCapture();
+      try {
+        assertThatCode(() -> manager.recover()).doesNotThrowAnyException();
+      } finally {
+        recoveryLogger().detachAppender(logs);
+      }
+
+      // Assert — the next saga was still recovered, and the Error was logged with saga context
+      // rather than surfacing in awaitOutcomes as a context-free ExecutionException.
+      verify(engine).recover(eq(new RecoveryAction.Resume(0)), eq(def), eq(ctx2));
+      assertThat(logs.list)
+          .anySatisfy(
+              event -> {
+                assertThat(event.getLevel()).isEqualTo(Level.ERROR);
+                assertThat(event.getFormattedMessage()).contains(SAGA_ID);
+                assertThat(event.getThrowableProxy()).isNotNull();
+                assertThat(event.getThrowableProxy().getClassName())
+                    .isEqualTo(Error.class.getName());
+                assertThat(event.getThrowableProxy().getMessage()).isEqualTo("claim blew up");
+              });
+    }
   }
 
   // =========================================================================
@@ -269,6 +337,37 @@ class SagaRecoveryManagerTest {
 
     private void noStaleRecoverables() {
       when(store.findRecoverable(any(), any())).thenReturn(new Recoverables(List.of(), null));
+    }
+
+    @Test
+    void recover_parkedSweepThrowsError_contained() {
+      // Arrange — the parked-timeout task blows up with an Error before doing any work; the
+      // per-task catch spans Throwable, so the pass must complete without throwing.
+      noStaleRecoverables();
+      when(store.findOverdueParkedSagas(any(), any()))
+          .thenReturn(new OverdueParked(List.of(SAGA_ID), null));
+      when(store.getStateSnapshot(SAGA_ID)).thenThrow(new Error("read blew up"));
+
+      // Act
+      ListAppender<ILoggingEvent> logs = attachLogCapture();
+      try {
+        assertThatCode(() -> manager.recover()).doesNotThrowAnyException();
+      } finally {
+        recoveryLogger().detachAppender(logs);
+      }
+
+      // Assert — the Error was logged with saga context rather than surfacing in awaitOutcomes as
+      // a context-free ExecutionException.
+      assertThat(logs.list)
+          .anySatisfy(
+              event -> {
+                assertThat(event.getLevel()).isEqualTo(Level.ERROR);
+                assertThat(event.getFormattedMessage()).contains(SAGA_ID);
+                assertThat(event.getThrowableProxy()).isNotNull();
+                assertThat(event.getThrowableProxy().getClassName())
+                    .isEqualTo(Error.class.getName());
+                assertThat(event.getThrowableProxy().getMessage()).isEqualTo("read blew up");
+              });
     }
 
     @Test
@@ -1132,6 +1231,22 @@ class SagaRecoveryManagerTest {
       verify(scheduler)
           .scheduleWithFixedDelay(
               any(Runnable.class), eq(30L + offset), eq(30L), eq(TimeUnit.SECONDS));
+    }
+
+    @Test
+    void start_recoveryPassThrowsError_scheduledTaskContainsIt() {
+      // Arrange — capture the periodic task and make the pass blow up with an Error. Only a catch
+      // on Throwable contains it; a Throwable escaping a scheduleWithFixedDelay task cancels all
+      // its future executions, silently stopping recovery for the rest of the process.
+      when(store.findRecoverable(any(), any())).thenThrow(new Error("scan blew up"));
+      manager.start();
+      long offset = SweepScatter.offsetSeconds(OWNER_ID, "recovery", 30);
+      ArgumentCaptor<Runnable> task = ArgumentCaptor.forClass(Runnable.class);
+      verify(scheduler)
+          .scheduleWithFixedDelay(task.capture(), eq(30L + offset), eq(30L), eq(TimeUnit.SECONDS));
+
+      // Act & Assert
+      assertThatCode(() -> task.getValue().run()).doesNotThrowAnyException();
     }
 
     @Test

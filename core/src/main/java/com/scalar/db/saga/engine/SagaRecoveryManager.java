@@ -180,12 +180,16 @@ class SagaRecoveryManager {
     }
   }
 
-  /** Wraps {@link #recover()} with exception handling so the scheduler never stops on failure. */
+  /**
+   * Wraps {@link #recover()} so nothing escapes to the scheduler: a {@code Throwable} escaping a
+   * periodic task cancels all its future executions, which would silently stop recovery for the
+   * rest of the process.
+   */
   private void recoverSafely() {
     try {
       recover();
-    } catch (Exception e) {
-      logger.error("Recovery pass failed unexpectedly", e);
+    } catch (Throwable t) {
+      logger.error("Recovery pass failed unexpectedly", t);
     }
   }
 
@@ -589,8 +593,10 @@ class SagaRecoveryManager {
       Optional<SagaStateSnapshot> claimed;
       try {
         claimed = store.claimForRecovery(saga, ownerId);
-      } catch (Exception e) {
-        logger.error("Failed to claim saga {} for recovery", saga.getSagaId(), e);
+      } catch (Throwable t) {
+        // Throwable, not Exception: an escape would surface in awaitOutcomes as a context-free
+        // ExecutionException instead of naming the saga here.
+        logger.error("Failed to claim saga {} for recovery", saga.getSagaId(), t);
         return RecoveryOutcome.ERROR;
       }
       if (claimed.isEmpty()) {
@@ -599,10 +605,12 @@ class SagaRecoveryManager {
       try {
         recoverOne(claimed.get());
         return RecoveryOutcome.COMMITTED;
-      } catch (Exception e) {
+      } catch (Throwable t) {
         // Log and continue — don't let one stuck saga block others. The claim committed, so the
         // budget is spent either way; the saga surfaces again after the staleness timeout.
-        logger.error("Failed to recover saga {}", saga.getSagaId(), e);
+        // Throwable, not Exception: an escape would be charged as ERROR despite the committed
+        // claim, and logged without the saga id.
+        logger.error("Failed to recover saga {}", saga.getSagaId(), t);
         return RecoveryOutcome.COMMITTED_DRIVE_FAILED;
       }
     } finally {
@@ -675,10 +683,11 @@ class SagaRecoveryManager {
       // A concurrent callback (or another replica's sweep) won the WAITING CK — nothing to do.
       logger.debug("Parked timeout for saga {} lost the WAITING race; skipping", sagaId);
       return RecoveryOutcome.LOST_RACE;
-    } catch (Exception e) {
+    } catch (Throwable t) {
       // Post-commit drive failures are handled inside recoverParkedTimeoutOne; anything escaping
-      // here failed before the WAITING transition committed.
-      logger.error("Failed to time out parked saga {}", sagaId, e);
+      // here failed before the WAITING transition committed. Throwable, not Exception: an escape
+      // would surface in awaitOutcomes without the saga id.
+      logger.error("Failed to time out parked saga {}", sagaId, t);
       return RecoveryOutcome.ERROR;
     } finally {
       recoverySemaphore.release();

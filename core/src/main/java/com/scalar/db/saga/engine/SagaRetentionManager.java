@@ -119,12 +119,16 @@ class SagaRetentionManager {
     }
   }
 
-  /** Wraps {@link #cleanup()} with exception handling so the scheduler never stops on failure. */
+  /**
+   * Wraps {@link #cleanup()} so nothing escapes to the scheduler: a {@code Throwable} escaping a
+   * periodic task cancels all its future executions, which would silently stop retention cleanup
+   * for the rest of the process.
+   */
   private void cleanupSafely() {
     try {
       cleanup();
-    } catch (Exception e) {
-      logger.error("Retention cleanup pass failed unexpectedly", e);
+    } catch (Throwable t) {
+      logger.error("Retention cleanup pass failed unexpectedly", t);
     }
   }
 
@@ -198,7 +202,8 @@ class SagaRetentionManager {
         Thread.currentThread().interrupt();
         return purged;
       } catch (ExecutionException e) {
-        // purgeOneSafely catches Exception, so only an Error reaches here; it must not vanish.
+        // purgeOneSafely catches Throwable, so nothing should reach here; a surprise that does
+        // still must not vanish.
         logger.error("Purge task failed unexpectedly", e.getCause());
       }
     }
@@ -236,9 +241,11 @@ class SagaRetentionManager {
       // False when the saga was already purged (a concurrent replica won the race); such no-ops
       // must not consume the batch budget, or intersecting sweeps would spend it deleting nothing.
       return store.deleteSaga(saga.getSagaId());
-    } catch (Exception e) {
-      // Log and continue — one failed purge shouldn't block others
-      logger.warn("Failed to purge saga {}", saga.getSagaId(), e);
+    } catch (Throwable t) {
+      // Log and continue — one failed purge shouldn't block others. Throwable, not Exception: an
+      // escape would surface at the await as a context-free ExecutionException instead of naming
+      // the saga here.
+      logger.warn("Failed to purge saga {}", saga.getSagaId(), t);
       return false;
     } finally {
       purgeSemaphore.release();
