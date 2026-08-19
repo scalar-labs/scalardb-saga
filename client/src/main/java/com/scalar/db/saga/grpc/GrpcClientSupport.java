@@ -222,6 +222,14 @@ final class GrpcClientSupport {
    * RESOURCE_EXHAUSTED} lands here deliberately: no shipped server sends it without a code (the
    * rate limiter attaches one), so it most likely means an oversized message, and rate-limit
    * backoff advice would have the caller retry a request that can never fit.
+   *
+   * <p>That inference is pinned to the server's transport settings: the inbound size caps in {@code
+   * SagaServer.applyGrpcTransportSettings} and its keepalive enforcement (whose GOAWAY surfaces
+   * here as a bare "Bandwidth exhausted") are the only sources today, and none of them clears on a
+   * plain retry. Whoever adds a server-side limit whose bare {@code RESOURCE_EXHAUSTED} could
+   * succeed on retry must revisit this arm before the category freezes. A per-connection
+   * concurrency cap is not such a limit; gRPC refuses the excess stream with REFUSED_STREAM, which
+   * surfaces as {@code UNAVAILABLE} and is already classified retryable.
    */
   private static SagaRuntimeException unresolvedOrBare(StatusRuntimeException e, Status status) {
     ErrorInfo unresolved = errorInfo(e);
