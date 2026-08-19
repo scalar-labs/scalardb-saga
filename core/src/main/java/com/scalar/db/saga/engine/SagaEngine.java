@@ -209,8 +209,8 @@ public class SagaEngine implements AutoCloseable {
   void recover(RecoveryAction action, SagaDefinition def, ExecutionContext context) {
     switch (action) {
       case RecoveryAction.Compensate compensate ->
-          compensateFrom(def, context, compensate.fromStep());
-      case RecoveryAction.Resume resume -> resumeFrom(def, context, resume.fromStep());
+          compensateFrom(def, context, compensate.fromStepIndex());
+      case RecoveryAction.Resume resume -> resumeFrom(def, context, resume.fromStepIndex());
     }
   }
 
