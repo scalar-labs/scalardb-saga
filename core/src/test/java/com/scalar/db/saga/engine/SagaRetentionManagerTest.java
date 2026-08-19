@@ -1,5 +1,6 @@
 package com.scalar.db.saga.engine;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -11,6 +12,10 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.store.SagaStore;
@@ -28,6 +33,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.LoggerFactory;
 
 @ExtendWith(MockitoExtension.class)
 class SagaRetentionManagerTest {
@@ -57,6 +63,19 @@ class SagaRetentionManagerTest {
         "1.0",
         Instant.parse("2024-12-25T00:00:00Z"),
         Instant.parse("2024-12-25T00:00:00Z"));
+  }
+
+  // Captures the manager's log output so tests can assert an Error was logged, not just contained.
+  // Callers must detach the appender in a finally: retentionLogger().detachAppender(appender).
+  private static ListAppender<ILoggingEvent> attachLogCapture() {
+    ListAppender<ILoggingEvent> appender = new ListAppender<>();
+    appender.start();
+    retentionLogger().addAppender(appender);
+    return appender;
+  }
+
+  private static Logger retentionLogger() {
+    return (Logger) LoggerFactory.getLogger(SagaRetentionManager.class);
   }
 
   // =========================================================================
@@ -184,11 +203,29 @@ class SagaRetentionManagerTest {
       doThrow(new Error("delete blew up")).when(store).deleteSaga("saga-fail");
       doNothing().when(store).deleteSaga("saga-ok");
 
-      // Act & Assert — the COMPENSATED budget of 99 also pins that the errored purge counted as a
-      // failure, not a success.
-      assertThatCode(() -> manager.cleanup()).doesNotThrowAnyException();
+      // Act
+      ListAppender<ILoggingEvent> logs = attachLogCapture();
+      try {
+        assertThatCode(() -> manager.cleanup()).doesNotThrowAnyException();
+      } finally {
+        retentionLogger().detachAppender(logs);
+      }
+
+      // Assert — the COMPENSATED budget of 99 pins that the errored purge counted as a failure,
+      // and the Error was logged with saga context rather than vanishing into the
+      // ExecutionException that purgeByStatus swallows.
       verify(store).deleteSaga("saga-ok");
       verify(store).findByStatusOlderThan(eq(SagaStatus.COMPENSATED), eq(THRESHOLD), eq(99));
+      assertThat(logs.list)
+          .anySatisfy(
+              event -> {
+                assertThat(event.getLevel()).isEqualTo(Level.WARN);
+                assertThat(event.getFormattedMessage()).contains("saga-fail");
+                assertThat(event.getThrowableProxy()).isNotNull();
+                assertThat(event.getThrowableProxy().getClassName())
+                    .isEqualTo(Error.class.getName());
+                assertThat(event.getThrowableProxy().getMessage()).isEqualTo("delete blew up");
+              });
     }
 
     @Test

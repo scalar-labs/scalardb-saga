@@ -13,6 +13,10 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.definition.SagaDefinition;
@@ -41,6 +45,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.LoggerFactory;
 
 @ExtendWith(MockitoExtension.class)
 class SagaRecoveryManagerTest {
@@ -89,6 +94,19 @@ class SagaRecoveryManagerTest {
   private void setupSinglePageRecovery(SagaStateSnapshot saga) {
     when(store.findRecoverable(any(), any())).thenReturn(new Recoverables(List.of(saga), null));
     when(store.claimForRecovery(saga, OWNER_ID)).thenReturn(Optional.of(saga));
+  }
+
+  // Captures the manager's log output so tests can assert an Error was logged, not just contained.
+  // Callers must detach the appender in a finally: recoveryLogger().detachAppender(appender).
+  private static ListAppender<ILoggingEvent> attachLogCapture() {
+    ListAppender<ILoggingEvent> appender = new ListAppender<>();
+    appender.start();
+    recoveryLogger().addAppender(appender);
+    return appender;
+  }
+
+  private static Logger recoveryLogger() {
+    return (Logger) LoggerFactory.getLogger(SagaRecoveryManager.class);
   }
 
   // =========================================================================
@@ -281,9 +299,27 @@ class SagaRecoveryManagerTest {
       when(ctx2.getCurrentState()).thenReturn(saga2);
       when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(def);
 
-      // Act & Assert
-      assertThatCode(() -> manager.recover()).doesNotThrowAnyException();
+      // Act
+      ListAppender<ILoggingEvent> logs = attachLogCapture();
+      try {
+        assertThatCode(() -> manager.recover()).doesNotThrowAnyException();
+      } finally {
+        recoveryLogger().detachAppender(logs);
+      }
+
+      // Assert — the next saga was still recovered, and the Error was logged with saga context
+      // rather than vanishing into the ExecutionException that awaitAll swallows.
       verify(engine).recover(eq(new RecoveryAction.Resume(0)), eq(def), eq(ctx2));
+      assertThat(logs.list)
+          .anySatisfy(
+              event -> {
+                assertThat(event.getLevel()).isEqualTo(Level.ERROR);
+                assertThat(event.getFormattedMessage()).contains(SAGA_ID);
+                assertThat(event.getThrowableProxy()).isNotNull();
+                assertThat(event.getThrowableProxy().getClassName())
+                    .isEqualTo(Error.class.getName());
+                assertThat(event.getThrowableProxy().getMessage()).isEqualTo("claim blew up");
+              });
     }
   }
 
@@ -307,8 +343,26 @@ class SagaRecoveryManagerTest {
           .thenReturn(new OverdueParked(List.of(SAGA_ID), null));
       when(store.getStateSnapshot(SAGA_ID)).thenThrow(new Error("read blew up"));
 
-      // Act & Assert
-      assertThatCode(() -> manager.recover()).doesNotThrowAnyException();
+      // Act
+      ListAppender<ILoggingEvent> logs = attachLogCapture();
+      try {
+        assertThatCode(() -> manager.recover()).doesNotThrowAnyException();
+      } finally {
+        recoveryLogger().detachAppender(logs);
+      }
+
+      // Assert — the Error was logged with saga context rather than vanishing into the
+      // ExecutionException that awaitAll swallows.
+      assertThat(logs.list)
+          .anySatisfy(
+              event -> {
+                assertThat(event.getLevel()).isEqualTo(Level.ERROR);
+                assertThat(event.getFormattedMessage()).contains(SAGA_ID);
+                assertThat(event.getThrowableProxy()).isNotNull();
+                assertThat(event.getThrowableProxy().getClassName())
+                    .isEqualTo(Error.class.getName());
+                assertThat(event.getThrowableProxy().getMessage()).isEqualTo("read blew up");
+              });
     }
 
     @Test

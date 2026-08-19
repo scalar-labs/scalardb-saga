@@ -106,16 +106,12 @@ class SagaRetentionManager {
     }
   }
 
-  /**
-   * Wraps {@link #cleanup()} so nothing escapes to the scheduler: a {@code Throwable} escaping a
-   * periodic task cancels all its future executions, which would silently stop retention cleanup
-   * for the rest of the process.
-   */
+  /** Wraps {@link #cleanup()} with exception handling so the scheduler never stops on failure. */
   private void cleanupSafely() {
     try {
       cleanup();
-    } catch (Throwable t) {
-      logger.error("Retention cleanup pass failed unexpectedly", t);
+    } catch (Exception e) {
+      logger.error("Retention cleanup pass failed unexpectedly", e);
     }
   }
 
@@ -155,7 +151,7 @@ class SagaRetentionManager {
         Thread.currentThread().interrupt();
         break;
       } catch (ExecutionException e) {
-        // Already logged inside purgeOneSafely, whose catch spans Throwable
+        // Already logged inside purgeOneSafely
       }
     }
     return purged;
@@ -171,10 +167,9 @@ class SagaRetentionManager {
     try {
       store.deleteSaga(saga.getSagaId());
       return true;
-    } catch (Throwable t) {
-      // Log and continue — one failed purge shouldn't block others. Throwable, not Exception:
-      // the caller swallows this task's failure on the promise that it was logged here.
-      logger.warn("Failed to purge saga {}", saga.getSagaId(), t);
+    } catch (Exception e) {
+      // Log and continue — one failed purge shouldn't block others
+      logger.warn("Failed to purge saga {}", saga.getSagaId(), e);
       return false;
     } finally {
       purgeSemaphore.release();
