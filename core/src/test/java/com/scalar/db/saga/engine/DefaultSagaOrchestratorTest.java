@@ -416,6 +416,89 @@ class DefaultSagaOrchestratorTest {
           .isInstanceOf(SagaDefinitionNotFoundException.class);
       verify(definitionRegistry).resolve("unknown");
     }
+
+    @Test
+    void startAsync_driveThrowsError_swallowedAndCallbackStillDispatched() {
+      // Arrange — a mocked executor so we can capture the drive Runnable and run it on the test
+      // thread. The detached drive throws an Error; only a catch on Throwable (not Exception)
+      // contains it, so running the captured Runnable must not throw, and the finally block must
+      // still dispatch the callback.
+      ExecutorService mockExecutor = mock(ExecutorService.class);
+      DefaultSagaOrchestrator orchestratorWithMockExecutor =
+          new DefaultSagaOrchestrator(
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              Integer.MAX_VALUE,
+              mockExecutor);
+
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
+      SagaStateSnapshot completedSaga = snapshot("saga-1", SagaStatus.COMPLETED);
+      SagaCallback callback = mock(SagaCallback.class);
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(saga);
+      doThrow(new Error("drive failed off-thread"))
+          .when(engine)
+          .executeSaga(eq(def), eq(saga), any());
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(completedSaga));
+
+      // Act — returns immediately; the drive Runnable is captured, not run.
+      String sagaId = orchestratorWithMockExecutor.startAsync("transfer", Map.of(), callback);
+
+      // Assert — running the captured drive swallows the Error (proving the catch is on
+      // Throwable, not Exception) and still dispatches the callback.
+      assertThat(sagaId).isEqualTo("saga-1");
+      ArgumentCaptor<Runnable> driveCaptor = ArgumentCaptor.forClass(Runnable.class);
+      verify(mockExecutor).execute(driveCaptor.capture());
+      assertThatCode(() -> driveCaptor.getValue().run()).doesNotThrowAnyException();
+      verify(engine).executeSaga(eq(def), eq(saga), any());
+      verify(callback).onCompleted(completedSaga);
+
+      orchestratorWithMockExecutor.close();
+    }
+
+    @Test
+    void startAsync_callbackDispatchThrowsError_swallowed() {
+      // Arrange — the drive succeeds but the user callback throws an Error from the finally
+      // block's dispatch. Only a catch on Throwable contains it, so running the captured drive
+      // Runnable must not throw.
+      ExecutorService mockExecutor = mock(ExecutorService.class);
+      DefaultSagaOrchestrator orchestratorWithMockExecutor =
+          new DefaultSagaOrchestrator(
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              Integer.MAX_VALUE,
+              mockExecutor);
+
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
+      SagaStateSnapshot completedSaga = snapshot("saga-1", SagaStatus.COMPLETED);
+      SagaCallback callback = mock(SagaCallback.class);
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(saga);
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(completedSaga));
+      doThrow(new Error("callback failed")).when(callback).onCompleted(completedSaga);
+
+      // Act
+      String sagaId = orchestratorWithMockExecutor.startAsync("transfer", Map.of(), callback);
+
+      // Assert — the callback's Error is logged, not propagated.
+      assertThat(sagaId).isEqualTo("saga-1");
+      ArgumentCaptor<Runnable> driveCaptor = ArgumentCaptor.forClass(Runnable.class);
+      verify(mockExecutor).execute(driveCaptor.capture());
+      assertThatCode(() -> driveCaptor.getValue().run()).doesNotThrowAnyException();
+      verify(callback).onCompleted(completedSaga);
+
+      orchestratorWithMockExecutor.close();
+    }
   }
 
   // =========================================================================
@@ -581,10 +664,11 @@ class DefaultSagaOrchestratorTest {
 
     @Test
     void startAsync_executorRejected_logsWarningAndDoesNotThrow() throws InterruptedException {
-      // Arrange — simulate race between close() and submit()
+      // Arrange — simulate race between close() and execute()
       ExecutorService mockExecutor = mock(ExecutorService.class);
-      when(mockExecutor.submit(any(Runnable.class)))
-          .thenThrow(new java.util.concurrent.RejectedExecutionException("shutting down"));
+      doThrow(new java.util.concurrent.RejectedExecutionException("shutting down"))
+          .when(mockExecutor)
+          .execute(any(Runnable.class));
       when(mockExecutor.awaitTermination(anyLong(), any())).thenReturn(true);
       DefaultSagaOrchestrator orchestratorWithMockExecutor =
           new DefaultSagaOrchestrator(
@@ -605,8 +689,9 @@ class DefaultSagaOrchestratorTest {
       // Act — should not throw; saga is already persisted, recovery will handle it
       String sagaId = orchestratorWithMockExecutor.startAsync("transfer", Map.of());
 
-      // Assert
+      // Assert — the ID is returned and the forward drive never ran.
       assertThat(sagaId).isEqualTo("saga-1");
+      verify(engine, never()).executeSaga(any(), any(), any());
       orchestratorWithMockExecutor.close();
     }
   }

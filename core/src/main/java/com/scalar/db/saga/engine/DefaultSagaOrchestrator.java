@@ -291,38 +291,40 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     // Persist synchronously — saga is recoverable from this point
     SagaStateSnapshot saga = engine.createSaga(def, sagaId, copiedInput);
 
-    // Submit execution to a virtual thread. The returned Future is intentionally unused:
-    // saga state is persisted, so recovery handles failures. Storing the future would require
-    // managing its lifecycle (fire-and-forget pattern).
+    // Dispatch execution to a virtual thread; fire-and-forget, saga state is persisted so
+    // recovery handles failures.
     submitAsync(def, saga, copiedInput, callback);
 
     return saga;
   }
 
-  @SuppressWarnings("FutureReturnValueIgnored") // fire-and-forget; recovery handles failures
   private void submitAsync(
       SagaDefinition def,
       SagaStateSnapshot saga,
       Map<String, Object> input,
       @Nullable SagaCallback callback) {
     try {
-      asyncExecutor.submit(
+      // execute() (not submit()) because the result is ignored: submit() would return a Future we
+      // drop, which both trips Error Prone and silently swallows failures. The inner catches handle
+      // failures instead, logging any Throwable (incl. Error); the saga is persisted, so recovery
+      // is the backstop.
+      asyncExecutor.execute(
           () -> {
             try {
               engine.executeSaga(def, saga, input);
-            } catch (Exception e) {
+            } catch (Throwable t) {
               // Saga state is persisted — recovery will pick it up
-              logger.error("Async saga {} failed unexpectedly", saga.getSagaId(), e);
+              logger.error("Async saga {} failed unexpectedly", saga.getSagaId(), t);
             } finally {
               try {
                 dispatchCallback(saga.getSagaId(), callback);
-              } catch (Exception e) {
-                logger.error("Failed to dispatch callback for saga {}", saga.getSagaId(), e);
+              } catch (Throwable t) {
+                logger.error("Failed to dispatch callback for saga {}", saga.getSagaId(), t);
               }
             }
           });
     } catch (RejectedExecutionException e) {
-      // Race between close() and submit — saga is already persisted, recovery will handle it
+      // Race between close() and execute() — saga is already persisted, recovery will handle it
       logger.warn(
           "Async executor rejected saga {} (shutting down); recovery will handle it",
           saga.getSagaId(),
@@ -429,7 +431,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     ResumedStep resumed = resumeParked(sagaId, stepName, output);
     try {
       // execute() (not submit()) because the result is ignored: submit() would return a Future we
-      // drop, which both trips SpotBugs and silently swallows failures. The inner catch handles
+      // drop, which both trips Error Prone and silently swallows failures. The inner catch handles
       // failures instead, logging any Throwable (incl. Error); the saga is persisted as RUNNING, so
       // recovery is the backstop.
       asyncExecutor.execute(
