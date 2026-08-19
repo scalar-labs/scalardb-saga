@@ -141,12 +141,16 @@ class SagaRecoveryManager {
     }
   }
 
-  /** Wraps {@link #recover()} with exception handling so the scheduler never stops on failure. */
+  /**
+   * Wraps {@link #recover()} so nothing escapes to the scheduler: a {@code Throwable} escaping a
+   * periodic task cancels all its future executions, which would silently stop recovery for the
+   * rest of the process.
+   */
   private void recoverSafely() {
     try {
       recover();
-    } catch (Exception e) {
-      logger.error("Recovery pass failed unexpectedly", e);
+    } catch (Throwable t) {
+      logger.error("Recovery pass failed unexpectedly", t);
     }
   }
 
@@ -210,9 +214,10 @@ class SagaRecoveryManager {
         return;
       }
       recoverOne(claimed.get());
-    } catch (Exception e) {
-      // Log and continue — don't let one stuck saga block others
-      logger.error("Failed to recover saga {}", saga.getSagaId(), e);
+    } catch (Throwable t) {
+      // Log and continue — don't let one stuck saga block others. Throwable, not Exception:
+      // awaitAll swallows this task's failure on the promise that it was logged here.
+      logger.error("Failed to recover saga {}", saga.getSagaId(), t);
     } finally {
       recoverySemaphore.release();
     }
@@ -226,7 +231,7 @@ class SagaRecoveryManager {
         Thread.currentThread().interrupt();
         break;
       } catch (ExecutionException e) {
-        // Already logged inside recoverOneSafely
+        // Already logged inside the task; both task bodies catch Throwable
       }
     }
   }
@@ -295,8 +300,9 @@ class SagaRecoveryManager {
     } catch (SagaConcurrentModificationException e) {
       // A concurrent callback (or another replica's sweep) won the WAITING CK — nothing to do.
       logger.debug("Parked timeout for saga {} lost the WAITING race; skipping", sagaId);
-    } catch (Exception e) {
-      logger.error("Failed to time out parked saga {}", sagaId, e);
+    } catch (Throwable t) {
+      // Throwable for the same reason as recoverOneSafely: awaitAll relies on this having logged.
+      logger.error("Failed to time out parked saga {}", sagaId, t);
     } finally {
       recoverySemaphore.release();
     }

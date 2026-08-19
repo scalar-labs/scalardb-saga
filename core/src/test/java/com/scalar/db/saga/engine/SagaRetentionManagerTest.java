@@ -1,5 +1,6 @@
 package com.scalar.db.saga.engine;
 
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -24,6 +25,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -170,6 +172,26 @@ class SagaRetentionManagerTest {
     }
 
     @Test
+    void cleanup_deleteThrowsErrorForOneSaga_containedAndContinues() {
+      // Arrange — same shape as the RuntimeException case, but with an Error: purgeOneSafely's
+      // catch spans Throwable, so the pass neither throws nor counts the failed purge.
+      SagaStateSnapshot saga1 = snapshot("saga-fail", SagaStatus.COMPLETED);
+      SagaStateSnapshot saga2 = snapshot("saga-ok", SagaStatus.COMPLETED);
+      when(store.findByStatusOlderThan(eq(SagaStatus.COMPLETED), eq(THRESHOLD), eq(100)))
+          .thenReturn(List.of(saga1, saga2));
+      when(store.findByStatusOlderThan(eq(SagaStatus.COMPENSATED), eq(THRESHOLD), eq(99)))
+          .thenReturn(List.of());
+      doThrow(new Error("delete blew up")).when(store).deleteSaga("saga-fail");
+      doNothing().when(store).deleteSaga("saga-ok");
+
+      // Act & Assert — the COMPENSATED budget of 99 also pins that the errored purge counted as a
+      // failure, not a success.
+      assertThatCode(() -> manager.cleanup()).doesNotThrowAnyException();
+      verify(store).deleteSaga("saga-ok");
+      verify(store).findByStatusOlderThan(eq(SagaStatus.COMPENSATED), eq(THRESHOLD), eq(99));
+    }
+
+    @Test
     void cleanup_escalatedSagasNotQueried() {
       // Arrange
       when(store.findByStatusOlderThan(eq(SagaStatus.COMPLETED), eq(THRESHOLD), eq(100)))
@@ -220,6 +242,22 @@ class SagaRetentionManagerTest {
       // Assert — first run is delayed (not immediate like recovery)
       verify(scheduler)
           .scheduleWithFixedDelay(any(Runnable.class), eq(3600L), eq(3600L), eq(TimeUnit.SECONDS));
+    }
+
+    @Test
+    void start_cleanupPassThrowsError_scheduledTaskContainsIt() {
+      // Arrange — capture the periodic task and make the pass blow up with an Error. Only a catch
+      // on Throwable contains it; a Throwable escaping a scheduleWithFixedDelay task cancels all
+      // its future executions, silently stopping retention cleanup for the rest of the process.
+      when(store.findByStatusOlderThan(any(), any(), anyInt()))
+          .thenThrow(new Error("scan blew up"));
+      manager.start();
+      ArgumentCaptor<Runnable> task = ArgumentCaptor.forClass(Runnable.class);
+      verify(scheduler)
+          .scheduleWithFixedDelay(task.capture(), eq(3600L), eq(3600L), eq(TimeUnit.SECONDS));
+
+      // Act & Assert
+      assertThatCode(() -> task.getValue().run()).doesNotThrowAnyException();
     }
 
     @Test

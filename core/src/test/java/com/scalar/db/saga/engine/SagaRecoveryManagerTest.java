@@ -1,6 +1,7 @@
 package com.scalar.db.saga.engine;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -253,6 +254,37 @@ class SagaRecoveryManagerTest {
       // Assert — saga2 was still recovered despite saga1 failure
       verify(engine).recover(eq(new RecoveryAction.Resume(0)), eq(def), eq(ctx2));
     }
+
+    @Test
+    void recover_errorOnOneSaga_containedAndNextStillRecovered() {
+      // Arrange — same shape as the exception case, but with an Error: the per-task catch spans
+      // Throwable, so the pass neither throws nor skips the next saga.
+      SagaStateSnapshot saga1 = snapshot(SagaStatus.RUNNING);
+      SagaStateSnapshot saga2 =
+          new SagaStateSnapshot(
+              "saga-002",
+              SAGA_NAME,
+              SagaStatus.RUNNING,
+              OWNER_ID,
+              DEF_VERSION,
+              NOW.minusSeconds(300),
+              NOW);
+      SagaDefinition def = definition();
+      ExecutionContext ctx2 = mock(ExecutionContext.class);
+
+      when(store.findRecoverable(any(), any()))
+          .thenReturn(new Recoverables(List.of(saga1, saga2), null));
+      when(store.claimForRecovery(saga1, OWNER_ID)).thenThrow(new Error("claim blew up"));
+      when(store.claimForRecovery(saga2, OWNER_ID)).thenReturn(Optional.of(saga2));
+      when(store.getEvents(saga2.getSagaId())).thenReturn(List.of());
+      when(engine.replayEvents(saga2, List.of())).thenReturn(ctx2);
+      when(ctx2.getCurrentState()).thenReturn(saga2);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(def);
+
+      // Act & Assert
+      assertThatCode(() -> manager.recover()).doesNotThrowAnyException();
+      verify(engine).recover(eq(new RecoveryAction.Resume(0)), eq(def), eq(ctx2));
+    }
   }
 
   // =========================================================================
@@ -264,6 +296,19 @@ class SagaRecoveryManagerTest {
 
     private void noStaleRecoverables() {
       when(store.findRecoverable(any(), any())).thenReturn(new Recoverables(List.of(), null));
+    }
+
+    @Test
+    void recover_parkedSweepThrowsError_contained() {
+      // Arrange — the parked-timeout task blows up with an Error before doing any work; the
+      // per-task catch spans Throwable, so the pass must complete without throwing.
+      noStaleRecoverables();
+      when(store.findOverdueParkedSagas(any(), any()))
+          .thenReturn(new OverdueParked(List.of(SAGA_ID), null));
+      when(store.getStateSnapshot(SAGA_ID)).thenThrow(new Error("read blew up"));
+
+      // Act & Assert
+      assertThatCode(() -> manager.recover()).doesNotThrowAnyException();
     }
 
     @Test
@@ -1121,6 +1166,21 @@ class SagaRecoveryManagerTest {
       verify(scheduler)
           .scheduleWithFixedDelay(
               any(Runnable.class), eq(0L), eq(30L), eq(java.util.concurrent.TimeUnit.SECONDS));
+    }
+
+    @Test
+    void start_recoveryPassThrowsError_scheduledTaskContainsIt() {
+      // Arrange — capture the periodic task and make the pass blow up with an Error. Only a catch
+      // on Throwable contains it; a Throwable escaping a scheduleWithFixedDelay task cancels all
+      // its future executions, silently stopping recovery for the rest of the process.
+      when(store.findRecoverable(any(), any())).thenThrow(new Error("scan blew up"));
+      manager.start();
+      ArgumentCaptor<Runnable> task = ArgumentCaptor.forClass(Runnable.class);
+      verify(scheduler)
+          .scheduleWithFixedDelay(task.capture(), eq(0L), eq(30L), eq(TimeUnit.SECONDS));
+
+      // Act & Assert
+      assertThatCode(() -> task.getValue().run()).doesNotThrowAnyException();
     }
 
     @Test
