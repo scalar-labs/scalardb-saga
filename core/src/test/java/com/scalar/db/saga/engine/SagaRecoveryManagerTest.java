@@ -1399,10 +1399,12 @@ class SagaRecoveryManagerTest {
     }
 
     @Test
-    void recover_interruptedMidPass_cancelsInFlightTasksBeforeReturning() throws Exception {
+    void recover_interruptedMidPass_cancelsInFlightTasksAndRestoresInterruptFlag()
+        throws Exception {
       // Arrange — the pass's single task blocks inside its claim; interrupting the pass thread
-      // must cancel that task (interrupting IT) and drain it before recover() returns, so no
-      // task of one pass can run alongside the next.
+      // must cancel that task (interrupting it) and charge its outcome. The task observes the
+      // interrupt at its next interruptible point, which may be after recover() has returned —
+      // cancellation is requested, not joined.
       java.util.concurrent.CountDownLatch claimStarted = new java.util.concurrent.CountDownLatch(1);
       java.util.concurrent.CountDownLatch taskObservedInterrupt =
           new java.util.concurrent.CountDownLatch(1);
