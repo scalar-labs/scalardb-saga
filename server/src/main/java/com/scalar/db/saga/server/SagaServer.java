@@ -244,6 +244,7 @@ public final class SagaServer implements AutoCloseable {
         .ownerId(config.ownerId())
         .shutdownMode(config.shutdownMode())
         .shutdownTimeoutMillis(config.shutdownTimeoutMillis())
+        .maxTimelineEvents(config.detailMaxTimelineEvents())
         .recoveryConfig(config.recoveryConfig())
         .retentionConfig(config.retentionConfig());
     config.services().forEach((name, service) -> addHttpEndpoint(builder, name, service));

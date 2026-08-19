@@ -265,6 +265,12 @@ public interface SagaOrchestrator extends AutoCloseable {
    * application that ran the saga uses this to diagnose why it failed, without an operator's
    * involvement; it is a read, so it needs no elevated privilege.
    *
+   * <p>An orchestrator configured with a timeline bound cuts a longer history to the newest events
+   * and reports the cut via {@link SagaDetail#isTruncated()}; the full history remains in the
+   * store. Independently of that bound, each entry's detail text is capped (see {@link
+   * TimelineEvent#getDetail()}), so the response's byte size is bounded by the entry count even
+   * when a step failure message embeds a large downstream response.
+   *
    * @param sagaId the saga instance ID
    * @return the saga's state and timeline
    * @throws SagaNotFoundException if no saga has that id

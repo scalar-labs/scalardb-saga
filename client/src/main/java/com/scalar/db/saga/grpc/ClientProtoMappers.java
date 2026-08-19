@@ -70,13 +70,13 @@ final class ClientProtoMappers {
     }
   }
 
-  /** Maps a wire detail (snapshot + timeline) back to an api detail. */
+  /** Maps a wire detail (snapshot + timeline + truncation flag) back to an api detail. */
   static SagaDetail fromProto(com.scalar.db.saga.rpc.SagaDetail detail) {
     List<TimelineEvent> timeline = new ArrayList<>(detail.getTimelineCount());
     for (com.scalar.db.saga.rpc.TimelineEvent event : detail.getTimelineList()) {
       timeline.add(fromProto(event));
     }
-    return new SagaDetail(fromProto(detail.getSaga()), timeline);
+    return new SagaDetail(fromProto(detail.getSaga()), timeline, detail.getTruncated());
   }
 
   /**

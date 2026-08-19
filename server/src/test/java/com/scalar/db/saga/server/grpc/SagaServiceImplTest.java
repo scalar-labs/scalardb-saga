@@ -155,7 +155,7 @@ class SagaServiceImplTest {
         new TimelineEvent(
             TS, "SAGA_RECOVERING", null, null, SagaStatus.COMPENSATING, "rolling back", "bob");
     when(orchestrator.getSagaDetail("s-7"))
-        .thenReturn(new SagaDetail(snap, List.of(stepFailed, recovering)));
+        .thenReturn(new SagaDetail(snap, List.of(stepFailed, recovering), true));
 
     // Act
     com.scalar.db.saga.rpc.SagaDetail response =
@@ -165,6 +165,7 @@ class SagaServiceImplTest {
     verify(orchestrator).getSagaDetail("s-7");
     assertThat(response.getSaga().getStatus())
         .isEqualTo(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_COMPENSATED);
+    assertThat(response.getTruncated()).isTrue();
     assertThat(response.getTimelineCount()).isEqualTo(2);
 
     com.scalar.db.saga.rpc.TimelineEvent step = response.getTimeline(0);

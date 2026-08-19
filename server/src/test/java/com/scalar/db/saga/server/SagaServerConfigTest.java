@@ -935,6 +935,40 @@ class SagaServerConfigTest {
   }
 
   @Test
+  void detailMaxTimelineEvents_unset_usesDefault() {
+    assertThat(SagaServerConfig.load(new Properties()).detailMaxTimelineEvents())
+        .isEqualTo(SagaServerConfig.DEFAULT_DETAIL_MAX_TIMELINE_EVENTS);
+  }
+
+  @Test
+  void detailMaxTimelineEvents_configured_isParsed() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.DETAIL_MAX_TIMELINE_EVENTS_KEY, "250");
+
+    assertThat(SagaServerConfig.load(props).detailMaxTimelineEvents()).isEqualTo(250);
+  }
+
+  @Test
+  void detailMaxTimelineEvents_zero_throwsIllegalArgumentException() {
+    // 0 would make every detail read return an empty timeline; an operator who wants the endpoint
+    // gone should gate it with RBAC instead, so the config rejects the value.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.DETAIL_MAX_TIMELINE_EVENTS_KEY, "0");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void detailMaxTimelineEvents_notANumber_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.DETAIL_MAX_TIMELINE_EVENTS_KEY, "many");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void grpcMaxInboundMetadataBytes_unset_usesDefault() {
     assertThat(SagaServerConfig.load(new Properties()).grpcMaxInboundMetadataBytes())
         .isEqualTo(SagaServerConfig.DEFAULT_GRPC_MAX_INBOUND_METADATA_BYTES);

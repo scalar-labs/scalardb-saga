@@ -104,6 +104,19 @@ import org.jspecify.annotations.Nullable;
  *       trades shutdown latency for reclaim latency on the next boot
  * </ul>
  *
+ * <h2>Saga detail reads ({@code detail.*})</h2>
+ *
+ * <ul>
+ *   <li>{@code detail.max_timeline_events} — maximum timeline events one {@code getSagaDetail} read
+ *       returns (default {@value #DEFAULT_DETAIL_MAX_TIMELINE_EVENTS}). A longer history is cut to
+ *       the newest events and the response is flagged {@code truncated}; the full history remains
+ *       in the store. This bound, together with the reader's cap of 1024 chars on each entry's
+ *       detail text, keeps a pathological saga's detail under a gRPC client's default 4 MB inbound
+ *       message cap, so the saga stays diagnosable. A window widened far beyond the default can
+ *       exceed that cap again; the oversized detail still arrives over REST, which has no
+ *       equivalent limit, but not through the Java client SDK
+ * </ul>
+ *
  * <h2>Crash recovery ({@code recovery.*})</h2>
  *
  * <p>Every replica scans for sagas abandoned by a crashed instance and resumes them. Defaults come
@@ -268,6 +281,9 @@ public final class SagaServerConfig {
   static final String SHUTDOWN_MODE_KEY = SHUTDOWN_PREFIX + "mode";
   static final String SHUTDOWN_TIMEOUT_MILLIS_KEY = SHUTDOWN_PREFIX + "timeout_millis";
 
+  static final String DETAIL_PREFIX = SERVER_PREFIX + "detail.";
+  static final String DETAIL_MAX_TIMELINE_EVENTS_KEY = DETAIL_PREFIX + "max_timeline_events";
+
   static final String RECOVERY_PREFIX = SERVER_PREFIX + "recovery.";
   static final String RECOVERY_TIMEOUT_MILLIS_KEY = RECOVERY_PREFIX + "timeout_millis";
   static final String RECOVERY_INTERVAL_SECONDS_KEY = RECOVERY_PREFIX + "interval_seconds";
@@ -327,6 +343,14 @@ public final class SagaServerConfig {
   static final ShutdownMode DEFAULT_SHUTDOWN_MODE = DefaultSagaOrchestrator.DEFAULT_SHUTDOWN_MODE;
   static final long DEFAULT_SHUTDOWN_TIMEOUT_MILLIS =
       DefaultSagaOrchestrator.DEFAULT_SHUTDOWN_TIMEOUT_MILLIS;
+  // Deliberately bounded here even though the embedded engine defaults to unbounded: the daemon
+  // serves the detail over a network, where a pathological timeline exceeds the gRPC client's
+  // default 4 MB inbound cap. 1000 events covers every realistic saga (a 100-step saga that fully
+  // compensated and was recovered a few times stays under ~500). The byte estimate needs the
+  // reader's per-entry cap as well; each entry's detail text is cut at 1024 chars on read (step
+  // failure messages are stored verbatim, bounded only by store.max_event_payload_bytes), so 1000
+  // capped entries stay around 1.5 MB on the wire.
+  static final int DEFAULT_DETAIL_MAX_TIMELINE_EVENTS = 1000;
   static final String DEFAULT_SECURITY_PROVIDER =
       "noop"; // no authentication (see NoopSecurityProvider)
   static final boolean DEFAULT_INSECURE_MODE_ENABLED = false; // must be enabled to run noop exposed
@@ -364,6 +388,7 @@ public final class SagaServerConfig {
           SYNC_MAX_WAIT_MILLIS_KEY,
           SHUTDOWN_MODE_KEY,
           SHUTDOWN_TIMEOUT_MILLIS_KEY,
+          DETAIL_MAX_TIMELINE_EVENTS_KEY,
           RECOVERY_TIMEOUT_MILLIS_KEY,
           RECOVERY_INTERVAL_SECONDS_KEY,
           RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY,
@@ -500,6 +525,7 @@ public final class SagaServerConfig {
   private final long syncMaxWaitMillis;
   private final ShutdownMode shutdownMode;
   private final long shutdownTimeoutMillis;
+  private final int detailMaxTimelineEvents;
   private final RecoveryConfig recoveryConfig;
   private final RetentionConfig retentionConfig;
   private final String securityProvider;
@@ -588,6 +614,12 @@ public final class SagaServerConfig {
             SHUTDOWN_TIMEOUT_MILLIS_KEY,
             DEFAULT_SHUTDOWN_TIMEOUT_MILLIS,
             0L);
+    this.detailMaxTimelineEvents =
+        parseBoundedInt(
+            resolved.getProperty(DETAIL_MAX_TIMELINE_EVENTS_KEY),
+            DETAIL_MAX_TIMELINE_EVENTS_KEY,
+            DEFAULT_DETAIL_MAX_TIMELINE_EVENTS,
+            1);
     this.recoveryConfig = parseRecoveryConfig(resolved);
     this.retentionConfig = parseRetentionConfig(resolved);
     this.securityProvider = parseSecurityProvider(resolved.getProperty(SECURITY_PROVIDER_KEY));
@@ -1177,6 +1209,16 @@ public final class SagaServerConfig {
    */
   public long shutdownTimeoutMillis() {
     return shutdownTimeoutMillis;
+  }
+
+  /**
+   * Returns the maximum number of timeline events a single {@code getSagaDetail} read returns
+   * (default {@value #DEFAULT_DETAIL_MAX_TIMELINE_EVENTS}). When a saga's history is longer, the
+   * newest events are returned and the detail is flagged truncated; the full history remains in the
+   * store.
+   */
+  public int detailMaxTimelineEvents() {
+    return detailMaxTimelineEvents;
   }
 
   /**

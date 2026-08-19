@@ -146,8 +146,8 @@ public final class CrashingStoreDecorator implements SagaStore {
   }
 
   @Override
-  public Optional<SagaStateAndEvents> getStateWithEvents(String sagaId) {
-    return delegate.getStateWithEvents(sagaId);
+  public Optional<SagaStateAndEvents> getStateWithEvents(String sagaId, int maxEvents) {
+    return delegate.getStateWithEvents(sagaId, maxEvents);
   }
 
   @Override

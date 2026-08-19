@@ -201,6 +201,7 @@ class GrpcSagaOrchestratorClientTest {
                     .setResultingStatus(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_COMPENSATING)
                     .setDetail("rolling back")
                     .setOperator("bob"))
+            .setTruncated(true)
             .build();
 
     // Act
@@ -208,6 +209,7 @@ class GrpcSagaOrchestratorClientTest {
 
     // Assert — snapshot maps, and set/unset optionals round-trip to value/null
     assertThat(detail.getSnapshot().getStatus()).isEqualTo(SagaStatus.COMPENSATED);
+    assertThat(detail.isTruncated()).isTrue();
     assertThat(detail.getTimeline()).hasSize(2);
 
     TimelineEvent step = detail.getTimeline().get(0);
