@@ -1418,6 +1418,7 @@ class ScalarDbSagaStoreTest {
     assertThat(stepEvent.getTimestamp()).isNotNull();
   }
 
+  @SuppressWarnings("NullAway")
   @Test
   void getEvents_stepPendingEvent_deserializesAsStepEvent() throws Exception {
     // Arrange
