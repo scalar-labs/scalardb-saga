@@ -2,6 +2,7 @@ package com.scalar.db.saga.server;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.RETURNS_SELF;
@@ -210,6 +211,45 @@ class SagaServerTest {
         .isInstanceOf(IllegalStateException.class);
     verify(orchestrator, never()).register(any(SagaDefinition.class));
     verify(orchestrator).close();
+  }
+
+  @Test
+  void constructor_nonexistentDefinitionsPath_throwsWithoutEchoingValue() {
+    // A secret reference pasted onto the definitions key resolves to plaintext that exists nowhere
+    // on disk, so the failure must name the key and keep the resolved "path" out of the message.
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
+
+    assertThatThrownBy(
+            () ->
+                new SagaServer(
+                    configWithDefinitionsPath(Path.of("s3cr3t-plaintext-not-a-path")),
+                    orchestrator))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.DEFINITIONS_PATH_KEY)
+        .hasMessageNotContaining("s3cr3t")
+        .hasNoCause();
+    verify(orchestrator, never()).register(any(SagaDefinition.class));
+    verify(orchestrator).close();
+  }
+
+  @Test
+  void constructor_unreadableDefinitionsDirectory_throwsWithoutEchoingPath(@TempDir Path dir) {
+    // An existing directory whose listing fails: the AccessDeniedException message is the path
+    // itself, so the failure must carry the exception class name instead of the cause. Skipped
+    // where the permission change does not take, for example when running as root.
+    assumeTrue(dir.toFile().setReadable(false) && !Files.isReadable(dir));
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
+    try {
+      assertThatThrownBy(() -> new SagaServer(configWithDefinitionsPath(dir), orchestrator))
+          .isInstanceOf(IllegalStateException.class)
+          .hasMessageContaining(SagaServerConfig.DEFINITIONS_PATH_KEY)
+          .hasMessageContaining("AccessDeniedException")
+          .hasMessageNotContaining(dir.toString())
+          .hasNoCause();
+      verify(orchestrator).close();
+    } finally {
+      boolean unused = dir.toFile().setReadable(true); // let the @TempDir cleanup walk the dir
+    }
   }
 
   @Test

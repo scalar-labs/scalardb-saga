@@ -1,6 +1,7 @@
 package com.scalar.db.saga.server.security;
 
 import com.scalar.db.saga.server.LoopbackHost;
+import com.scalar.db.saga.server.Redaction;
 import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -171,11 +172,11 @@ final class JwtConfig {
       parsed = Integer.parseInt(value);
     } catch (NumberFormatException e) {
       throw new IllegalArgumentException(
-          "Invalid value for '" + key + "': not a number " + redacted(value));
+          "Invalid value for '" + key + "': not a number " + Redaction.redacted(value));
     }
     if (parsed <= 0) {
       throw new IllegalArgumentException(
-          "'" + key + "' must be a positive integer " + redacted(value));
+          "'" + key + "' must be a positive integer " + Redaction.redacted(value));
     }
     return parsed;
   }
@@ -186,7 +187,7 @@ final class JwtConfig {
       url = new URI(value).toURL();
     } catch (URISyntaxException | MalformedURLException | IllegalArgumentException e) {
       throw new IllegalArgumentException(
-          "Invalid value for '" + JWKS_URL_KEY + "': not a valid URL " + redacted(value));
+          "Invalid value for '" + JWKS_URL_KEY + "': not a valid URL " + Redaction.redacted(value));
     }
     // The JWKS is the JWT trust anchor: every token signature is verified against keys fetched from
     // it, so a plaintext endpoint lets an on-path attacker swap the keys and forge tokens. Require
@@ -197,19 +198,9 @@ final class JwtConfig {
               + JWKS_URL_KEY
               + "' must use https (the JWKS is the JWT trust anchor; a plaintext endpoint can be"
               + " tampered with in transit). Use https, or a loopback host for local development "
-              + redacted(value));
+              + Redaction.redacted(value));
     }
     return url;
-  }
-
-  /**
-   * Describes a rejected value without echoing it: the security keys sit beside secret references
-   * in the same file, and a reference pasted onto the wrong key arrives here as the secret's
-   * plaintext. Parse failures also drop the parse exception as cause for the same reason — its
-   * message embeds the raw input.
-   */
-  private static String redacted(String value) {
-    return "(value redacted, " + value.length() + " chars)";
   }
 
   private static @Nullable String blankToNull(@Nullable String value) {

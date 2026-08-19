@@ -287,6 +287,18 @@ public final class SagaServer implements AutoCloseable {
   }
 
   private int registerDefinitions(Path path) {
+    // The path is a resolved config value, so a secret reference pasted onto the definitions key
+    // arrives here as the secret's plaintext; failures below name the key and describe the value
+    // via Redaction instead of echoing it. A missing path is refused up front because that is the
+    // failure a pasted secret actually produces; letting it fall through would echo the "path" in
+    // the definition parser's message and cause.
+    if (!Files.exists(path)) {
+      throw new IllegalArgumentException(
+          "Invalid value for '"
+              + SagaServerConfig.DEFINITIONS_PATH_KEY
+              + "': no such file or directory "
+              + Redaction.redacted(path.toString()));
+    }
     try {
       if (Files.isDirectory(path)) {
         try (Stream<Path> files = Files.list(path)) {
@@ -303,7 +315,16 @@ public final class SagaServer implements AutoCloseable {
       registerDefinition(path);
       return 1;
     } catch (IOException e) {
-      throw new UncheckedIOException("Failed to load saga definitions from " + path, e);
+      // Thrown without the cause: an IOException message here is the path itself, which is the
+      // resolved value. The class name keeps the diagnosis (permission denied or a path that
+      // disappeared) without the echo.
+      throw new IllegalStateException(
+          "Failed to load saga definitions from '"
+              + SagaServerConfig.DEFINITIONS_PATH_KEY
+              + "' ("
+              + e.getClass().getSimpleName()
+              + ") "
+              + Redaction.redacted(path.toString()));
     }
   }
 

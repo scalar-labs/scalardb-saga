@@ -320,6 +320,29 @@ class SagaServerConfigTest {
   }
 
   @Test
+  void load_definitionsPathGiven_isParsedTrimmed() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, "  /etc/saga/definitions  ");
+
+    assertThat(SagaServerConfig.load(props).definitionsPath())
+        .contains(Path.of("/etc/saga/definitions"));
+  }
+
+  @Test
+  void load_pathValueWithNulCharacter_throwsWithoutEchoingValue() {
+    // A NUL character makes Path.of throw InvalidPathException, whose message embeds the input —
+    // which is a resolved value — so the parse must remap it to the usual key-plus-redaction shape.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, "s3cr3t\0plaintext");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.DEFINITIONS_PATH_KEY)
+        .hasMessageNotContaining("s3cr3t")
+        .hasNoCause();
+  }
+
+  @Test
   void load_collidingPorts_throwsNamingKeysWithoutEchoingValue() {
     // The collision message needs no number: echoing it would confirm that a numeric secret on
     // one port key equals the other key's port.

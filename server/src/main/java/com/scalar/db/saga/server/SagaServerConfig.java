@@ -4,6 +4,7 @@ import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.engine.RecoveryConfig;
 import com.scalar.db.saga.engine.RetentionConfig;
 import com.scalar.db.saga.engine.ShutdownMode;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -623,9 +624,7 @@ public final class SagaServerConfig {
             MAX_START_REQUESTS_PER_MINUTE_KEY,
             DEFAULT_MAX_START_REQUESTS_PER_MINUTE,
             0);
-    String definitions = resolved.getProperty(DEFINITIONS_PATH_KEY);
-    this.definitionsPath =
-        (definitions == null || definitions.isBlank()) ? null : Path.of(definitions.trim());
+    this.definitionsPath = parseDefinitionsPath(resolved.getProperty(DEFINITIONS_PATH_KEY));
     this.services = parseServices(resolved);
     this.properties = applyStoreDefaults(copyOf(resolved));
     this.grpcMaxInboundMessageBytes = parseGrpcMaxInboundMessageBytes(this.properties);
@@ -1338,19 +1337,28 @@ public final class SagaServerConfig {
           "Invalid value for '"
               + SHUTDOWN_MODE_KEY
               + "' "
-              + redacted(value)
+              + Redaction.redacted(value)
               + ". Valid modes: WAIT_CURRENT_STEP, WAIT_ALL_SAGAS.");
     }
   }
 
   /**
-   * Describes a rejected value without echoing it. Secret references are resolved for every key
-   * before parsing, so a reference pasted onto the wrong key arrives at the parsers as the secret's
-   * plaintext; echoing it would write the secret to the log. The parsers also throw without the
-   * parse exception as cause for the same reason — its message embeds the raw input.
+   * Parses the definitions path; unset or blank ⇒ null. {@link InvalidPathException} is remapped
+   * because its message embeds the input, which is a resolved value.
    */
-  private static String redacted(String value) {
-    return "(value redacted, " + value.length() + " chars)";
+  private static @Nullable Path parseDefinitionsPath(@Nullable String value) {
+    if (value == null || value.isBlank()) {
+      return null;
+    }
+    try {
+      return Path.of(value.trim());
+    } catch (InvalidPathException e) {
+      throw new IllegalArgumentException(
+          "Invalid value for '"
+              + DEFINITIONS_PATH_KEY
+              + "': not a valid path "
+              + Redaction.redacted(value));
+    }
   }
 
   private static int parsePort(@Nullable String value, String key, int defaultPort) {
@@ -1362,11 +1370,11 @@ public final class SagaServerConfig {
       port = Integer.parseInt(value.trim());
     } catch (NumberFormatException e) {
       throw new IllegalArgumentException(
-          "Invalid value for '" + key + "': not a number " + redacted(value));
+          "Invalid value for '" + key + "': not a number " + Redaction.redacted(value));
     }
     if (port < 0 || port > 65535) {
       throw new IllegalArgumentException(
-          "'" + key + "' must be between 0 and 65535 " + redacted(value));
+          "'" + key + "' must be between 0 and 65535 " + Redaction.redacted(value));
     }
     return port;
   }
@@ -1388,7 +1396,7 @@ public final class SagaServerConfig {
       return false;
     }
     throw new IllegalArgumentException(
-        "'" + key + "' must be 'true' or 'false' " + redacted(value));
+        "'" + key + "' must be 'true' or 'false' " + Redaction.redacted(value));
   }
 
   /**
@@ -1406,11 +1414,11 @@ public final class SagaServerConfig {
       parsed = Long.parseLong(value.trim());
     } catch (NumberFormatException e) {
       throw new IllegalArgumentException(
-          "Invalid value for '" + key + "': not a number " + redacted(value));
+          "Invalid value for '" + key + "': not a number " + Redaction.redacted(value));
     }
     if (parsed < minInclusive) {
       throw new IllegalArgumentException(
-          "'" + key + "' must be >= " + minInclusive + " " + redacted(value));
+          "'" + key + "' must be >= " + minInclusive + " " + Redaction.redacted(value));
     }
     return parsed;
   }
@@ -1434,7 +1442,7 @@ public final class SagaServerConfig {
               + "' must be <= "
               + Integer.MAX_VALUE
               + " "
-              + redacted(Objects.requireNonNull(value)));
+              + Redaction.redacted(Objects.requireNonNull(value)));
     }
     return (int) parsed;
   }
@@ -1480,7 +1488,11 @@ public final class SagaServerConfig {
       String trimmed = element.trim();
       if (trimmed.isEmpty()) {
         throw new IllegalArgumentException(
-            "'" + key + "' has an empty element " + redacted(value) + ". Remove the stray comma.");
+            "'"
+                + key
+                + "' has an empty element "
+                + Redaction.redacted(value)
+                + ". Remove the stray comma.");
       }
       elements.add(trimmed);
     }
@@ -1505,11 +1517,14 @@ public final class SagaServerConfig {
           "Invalid value for '"
               + STORE_MAX_EVENT_PAYLOAD_BYTES_KEY
               + "': not a number "
-              + redacted(value));
+              + Redaction.redacted(value));
     }
     if (bytes < 0) {
       throw new IllegalArgumentException(
-          "'" + STORE_MAX_EVENT_PAYLOAD_BYTES_KEY + "' must not be negative " + redacted(value));
+          "'"
+              + STORE_MAX_EVENT_PAYLOAD_BYTES_KEY
+              + "' must not be negative "
+              + Redaction.redacted(value));
     }
     return bytes == 0 ? Integer.MAX_VALUE : bytes;
   }
