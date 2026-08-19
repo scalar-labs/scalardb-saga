@@ -291,7 +291,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       @Nullable SagaCallback callback) {
     try {
       // execute() (not submit()) because the result is ignored: submit() would return a Future we
-      // drop, which both trips SpotBugs and silently swallows failures. The inner catches handle
+      // drop, which both trips Error Prone and silently swallows failures. The inner catches handle
       // failures instead, logging any Throwable (incl. Error); the saga is persisted, so recovery
       // is the backstop.
       asyncExecutor.execute(
@@ -417,7 +417,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     ResumedStep resumed = resumeParked(sagaId, stepName, output);
     try {
       // execute() (not submit()) because the result is ignored: submit() would return a Future we
-      // drop, which both trips SpotBugs and silently swallows failures. The inner catch handles
+      // drop, which both trips Error Prone and silently swallows failures. The inner catch handles
       // failures instead, logging any Throwable (incl. Error); the saga is persisted as RUNNING, so
       // recovery is the backstop.
       asyncExecutor.execute(
