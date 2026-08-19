@@ -121,7 +121,7 @@ final class SagaDefinitionSerializer {
       SagaMode mode = parseEnum(root, MODE, SagaMode.class);
       return mode == SagaMode.TCC ? deserializeTcc(root) : deserializeSaga(root);
     } catch (JsonProcessingException | RuntimeException e) {
-      throw SagaPersistenceException.nonRetryable("Failed to deserialize definition", e);
+      throw SagaPersistenceException.deserializationFailed(e);
     }
   }
 

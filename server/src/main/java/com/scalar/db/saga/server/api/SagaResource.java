@@ -3,6 +3,7 @@ package com.scalar.db.saga.server.api;
 import com.scalar.db.saga.api.SagaCallback;
 import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
+import com.scalar.db.saga.exception.SagaInvalidRequestException;
 import com.scalar.db.saga.server.security.SagaOperation;
 import io.javalin.Javalin;
 import io.javalin.http.Context;
@@ -20,7 +21,8 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code POST /sagas} — start a saga with a server-generated ID (synchronous by default;
  *       {@code ?async=true} returns {@code 202} immediately)
  *   <li>{@code PUT /sagas/{id}} — start a saga with a client-supplied ID (idempotent; {@code 409}
- *       with the existing snapshot on conflict)
+ *       with the standard error body on conflict — deliberately without the existing snapshot,
+ *       which would let an ID-guessing caller read another caller's saga state)
  *   <li>{@code GET /sagas/{id}} — fetch a saga's current state
  * </ul>
  *
@@ -208,12 +210,12 @@ public final class SagaResource {
     try {
       request = ctx.bodyAsClass(StartSagaRequest.class);
     } catch (Exception e) {
-      throw new InvalidRequestException("malformed request body");
+      throw new SagaInvalidRequestException("malformed request body");
     }
     // A body of the JSON null literal deserializes to null without throwing; reject it cleanly here
     // rather than NPE-ing downstream. The check is outside the try so its message survives.
     if (request == null) {
-      throw new InvalidRequestException("request body must not be null");
+      throw new SagaInvalidRequestException("request body must not be null");
     }
     return request;
   }
@@ -233,6 +235,6 @@ public final class SagaResource {
     if ("false".equalsIgnoreCase(value)) {
       return false;
     }
-    throw new InvalidRequestException("query parameter 'async' must be 'true' or 'false'");
+    throw new SagaInvalidRequestException("query parameter 'async' must be 'true' or 'false'");
   }
 }

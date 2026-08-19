@@ -72,7 +72,9 @@ import com.scalar.db.saga.api.TccStep;
  *                 n ->
  *                     switch (n) {
  *                       case "debit" -> new DebitStep(ctx.httpClient(accountSvc));
- *                       default -> throw new SagaDefinitionException("unknown step: " + n);
+ *                       default ->
+ *                           throw SagaDefinitionException.stepClassInvalid(
+ *                               className, "unknown step '" + n + "'");
  *                     }))
  *     .build();
  * }</pre>

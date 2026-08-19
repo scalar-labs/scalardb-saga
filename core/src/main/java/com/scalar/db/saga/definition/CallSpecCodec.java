@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.scalar.db.saga.api.HttpMethod;
 import com.scalar.db.saga.exception.SagaDefinitionException;
-import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
@@ -75,21 +74,13 @@ public final class CallSpecCodec {
     try {
       transport = CallSpec.Transport.valueOf(value);
     } catch (IllegalArgumentException e) {
-      throw new SagaDefinitionException(
-          "Declarative service step '"
-              + stepName
-              + "' has invalid transport '"
-              + value
-              + "'; expected one of: "
-              + Arrays.toString(CallSpec.Transport.values()));
+      throw SagaDefinitionException.declarativeStepInvalid(
+          stepName, "invalid transport '" + value + "'");
     }
     if (transport != CallSpec.Transport.HTTP) {
-      throw new SagaDefinitionException(
-          "Declarative service step '"
-              + stepName
-              + "' transport '"
-              + transport
-              + "' is not yet supported");
+      throw SagaDefinitionException.declarativeStepInvalid(
+          stepName,
+          "transport '" + transport + "' not supported; expected " + CallSpec.Transport.HTTP);
     }
     return transport;
   }
@@ -99,29 +90,21 @@ public final class CallSpecCodec {
       CallSpec.Transport transport, JsonNode node, String stepName) {
     // Only HTTP is supported today; parseTransport rejects anything else first.
     if (transport != CallSpec.Transport.HTTP) {
-      throw new SagaDefinitionException(
-          "Declarative service step '"
-              + stepName
-              + "' transport '"
-              + transport
-              + "' is not yet supported");
+      throw SagaDefinitionException.declarativeStepInvalid(
+          stepName,
+          "transport '" + transport + "' not supported; expected " + CallSpec.Transport.HTTP);
     }
     node.fieldNames()
         .forEachRemaining(
             field -> {
               if (!KNOWN_HTTP_FIELDS.contains(field)) {
-                throw new SagaDefinitionException(
-                    "Declarative service step '"
-                        + stepName
-                        + "' call spec has unknown field '"
-                        + field
-                        + "'; expected one of: "
-                        + KNOWN_HTTP_FIELDS);
+                throw SagaDefinitionException.declarativeStepInvalid(
+                    stepName, "call spec has unknown field '" + field + "'");
               }
             });
     if (!isPresent(node, PATH)) {
-      throw new SagaDefinitionException(
-          "Declarative service step '" + stepName + "' call spec is missing 'path'");
+      throw SagaDefinitionException.declarativeStepInvalid(
+          stepName, "call spec is missing '" + PATH + "'");
     }
     HttpCall.Builder callBuilder = HttpCall.newBuilder(node.get(PATH).asText());
     if (isPresent(node, METHOD)) {
@@ -129,13 +112,8 @@ public final class CallSpecCodec {
       try {
         callBuilder.method(HttpMethod.valueOf(method));
       } catch (IllegalArgumentException e) {
-        throw new SagaDefinitionException(
-            "Declarative service step '"
-                + stepName
-                + "' has invalid HTTP method '"
-                + method
-                + "'; expected one of: "
-                + Arrays.toString(HttpMethod.values()));
+        throw SagaDefinitionException.declarativeStepInvalid(
+            stepName, "invalid HTTP method '" + method + "'");
       }
     }
     if (isPresent(node, QUERY)) {
@@ -163,11 +141,8 @@ public final class CallSpecCodec {
       return callBuilder.build();
     } catch (IllegalStateException e) {
       // e.g. a body-less verb (GET/DELETE) that declares a request body — a definition error.
-      throw new SagaDefinitionException(
-          "Declarative service step '"
-              + stepName
-              + "' has an invalid call spec: "
-              + e.getMessage());
+      throw SagaDefinitionException.declarativeStepInvalid(
+          stepName, "invalid call spec: " + (e.getMessage() != null ? e.getMessage() : "unknown"));
     }
   }
 
@@ -212,12 +187,8 @@ public final class CallSpecCodec {
 
   private static Map<String, String> readStringMap(JsonNode node, String stepName, String field) {
     if (!node.isObject()) {
-      throw new SagaDefinitionException(
-          "Declarative service step '"
-              + stepName
-              + "' field '"
-              + field
-              + "' must be a JSON object");
+      throw SagaDefinitionException.declarativeStepInvalid(
+          stepName, "field '" + field + "' must be a JSON object");
     }
     Map<String, String> map = new LinkedHashMap<>();
     node.fields().forEachRemaining(e -> map.put(e.getKey(), e.getValue().asText()));

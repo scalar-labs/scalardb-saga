@@ -25,6 +25,7 @@ import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionException;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -129,7 +130,7 @@ public final class ScalarDbSagaStore implements SagaStore {
     try {
       txManager.close();
     } catch (Exception e) {
-      throw SagaPersistenceException.retryable("Failed to close transaction manager", e);
+      throw SagaPersistenceException.storeUnavailable(e);
     }
   }
 
@@ -202,12 +203,7 @@ public final class ScalarDbSagaStore implements SagaStore {
             if (definition.equals(existingDef)) {
               return Boolean.TRUE; // idempotent no-op
             }
-            throw new SagaDefinitionException(
-                "Definition '"
-                    + name
-                    + "' version '"
-                    + version
-                    + "' is already registered with different content. Bump the version instead.");
+            throw SagaDefinitionException.versionContentConflict(name, version);
           }
 
           tx.insert(buildDefinitionInsert(name, version, json));
@@ -745,7 +741,7 @@ public final class ScalarDbSagaStore implements SagaStore {
     if (bound != null
         && (bound.isBefore(TimestampTZColumn.MIN_VALUE)
             || bound.isAfter(TimestampTZColumn.MAX_VALUE))) {
-      throw new IllegalArgumentException(
+      throw new SagaIllegalArgumentException(
           field
               + " must be in ["
               + TimestampTZColumn.MIN_VALUE
@@ -1141,9 +1137,7 @@ public final class ScalarDbSagaStore implements SagaStore {
               sleepForRetry(v);
               continue;
             }
-            throw SagaPersistenceException.retryable(
-                "Failed to " + operationName + ": commit status unknown and verification failed",
-                e);
+            throw SagaPersistenceException.storeUnavailable(e);
           }
         }
         lastException = e;
@@ -1152,7 +1146,10 @@ public final class ScalarDbSagaStore implements SagaStore {
         if (!retryOnConflict) {
           logger.debug(
               "Conflict for {} (txId={})", operationName, e.getTransactionId().orElse("unknown"));
-          throw SagaPersistenceException.retryable("Failed to " + operationName, e);
+          // #41 widened this catch from commit conflicts to CRUD conflicts too, hence the broader
+          // log wording. The message it passed to the retired retryable(message, cause) factory is
+          // now supplied by PERSISTENCE_STORE_UNAVAILABLE itself.
+          throw SagaPersistenceException.storeUnavailable(e);
         }
         logger.debug(
             "Conflict for {} (txId={}), retrying",
@@ -1172,7 +1169,7 @@ public final class ScalarDbSagaStore implements SagaStore {
         if (e instanceof RuntimeException re) {
           throw re;
         }
-        throw SagaPersistenceException.retryable("Failed to " + operationName, e);
+        throw SagaPersistenceException.storeUnavailable(e);
       }
     }
     logger.warn("All {} attempts exhausted for {}", maxAttempts, operationName, lastException);
@@ -1185,8 +1182,7 @@ public final class ScalarDbSagaStore implements SagaStore {
         return verified.get();
       }
     }
-    throw SagaPersistenceException.retryable(
-        "Failed to " + operationName + " after " + maxAttempts + " attempts", cause);
+    throw SagaPersistenceException.storeUnavailable(cause);
   }
 
   /**
@@ -1239,7 +1235,10 @@ public final class ScalarDbSagaStore implements SagaStore {
       Thread.sleep(delay);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
-      throw SagaPersistenceException.retryable("Interrupted during retry backoff", e);
+      // OPERATION_ABORTED, not storeUnavailable: the interrupt means this server is abandoning
+      // the operation (typically shutdown), and reporting it as a store outage would emit false
+      // store alarms on every deploy. Still retryable — the retry lands elsewhere.
+      throw SagaPersistenceException.operationAborted(e);
     }
   }
 
@@ -1471,7 +1470,7 @@ public final class ScalarDbSagaStore implements SagaStore {
     try {
       eventType = EventType.valueOf(eventTypeStr);
     } catch (IllegalArgumentException e) {
-      throw SagaPersistenceException.nonRetryable("Unknown event type: " + eventTypeStr, e);
+      throw SagaPersistenceException.deserializationFailed(e);
     }
 
     if (stepIndex >= 0) {
@@ -1485,9 +1484,8 @@ public final class ScalarDbSagaStore implements SagaStore {
             case STEP_COMPENSATED -> StepEvent.compensated(stepIndex, name);
             case STEP_COMPENSATION_FAILED -> StepEvent.compensationFailed(stepIndex, name, payload);
             default ->
-                throw SagaPersistenceException.nonRetryable(
-                    "Unknown step event type: " + eventType,
-                    new IllegalStateException(eventTypeStr));
+                throw SagaPersistenceException.deserializationFailed(
+                    new IllegalStateException("Unknown step event type: " + eventType));
           };
       return event.withTimestamp(createdAt);
     } else {
@@ -1503,9 +1501,8 @@ public final class ScalarDbSagaStore implements SagaStore {
             case SAGA_RECOVERING, SAGA_RESET ->
                 StatusEvent.reconstruct(eventType, AdminAuditPayload.target(payload), payload);
             default ->
-                throw SagaPersistenceException.nonRetryable(
-                    "Unknown saga event type: " + eventType,
-                    new IllegalStateException(eventTypeStr));
+                throw SagaPersistenceException.deserializationFailed(
+                    new IllegalStateException("Unknown saga event type: " + eventType));
           };
       return event.withTimestamp(createdAt);
     }
@@ -1534,7 +1531,7 @@ public final class ScalarDbSagaStore implements SagaStore {
 
   private void validateSagaId(String sagaId) {
     if (!SAGA_ID_PATTERN.matcher(sagaId).matches()) {
-      throw new IllegalArgumentException(
+      throw new SagaIllegalArgumentException(
           "Invalid saga ID format (must match [a-zA-Z0-9._-]{1,128})");
     }
   }
@@ -1544,7 +1541,10 @@ public final class ScalarDbSagaStore implements SagaStore {
     if (limit > 0 && payload != null) {
       int byteSize = payload.getBytes(StandardCharsets.UTF_8).length;
       if (byteSize > limit) {
-        throw new IllegalArgumentException(
+        // SagaIllegalArgumentException, not the bare stdlib type: the wire mappers replace a bare
+        // IllegalArgumentException with a fixed detail, and the limit is configurable, so the
+        // actual size and bound are exactly what a remote caller cannot guess.
+        throw new SagaIllegalArgumentException(
             "Event payload exceeds limit: " + byteSize + " bytes > " + limit);
       }
     }
@@ -1554,7 +1554,7 @@ public final class ScalarDbSagaStore implements SagaStore {
     try {
       return objectMapper.writeValueAsString(obj);
     } catch (JsonProcessingException e) {
-      throw SagaPersistenceException.nonRetryable("Failed to serialize JSON", e);
+      throw SagaPersistenceException.serializationFailed(e);
     }
   }
 
@@ -1666,22 +1666,22 @@ public final class ScalarDbSagaStore implements SagaStore {
       // Reject an oversized token before allocating its decoded bytes (defense in depth; the daemon
       // also bounds request size).
       if (token.length() > MAX_ENCODED_LENGTH) {
-        throw new IllegalArgumentException("Page token too long");
+        throw new SagaIllegalArgumentException("Page token too long");
       }
       String payload;
       try {
         payload = new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8);
       } catch (IllegalArgumentException e) {
-        throw new IllegalArgumentException("Malformed page token", e);
+        throw new SagaIllegalArgumentException("Malformed page token", e);
       }
       // version | status | after | before | bucket | statusCode | updatedAt
       String[] parts = payload.split(Pattern.quote(DELIMITER), 7);
       if (parts.length != 7 || !PAGE_TOKEN_VERSION.equals(parts[0])) {
-        throw new IllegalArgumentException("Unrecognized page token");
+        throw new SagaIllegalArgumentException("Unrecognized page token");
       }
       String filterKey = String.join(DELIMITER, parts[1], parts[2], parts[3]);
       if (!expectedFilterKey.equals(filterKey)) {
-        throw new IllegalArgumentException("Page token does not match the query");
+        throw new SagaIllegalArgumentException("Page token does not match the query");
       }
       int bucket;
       int statusCode;
@@ -1691,16 +1691,16 @@ public final class ScalarDbSagaStore implements SagaStore {
         statusCode = Integer.parseInt(parts[5]);
         updatedAt = Instant.parse(parts[6]);
       } catch (RuntimeException e) {
-        throw new IllegalArgumentException("Malformed page token", e);
+        throw new SagaIllegalArgumentException("Malformed page token", e);
       }
       if (bucket < 0 || bucket >= numBuckets) {
-        throw new IllegalArgumentException("Page token bucket out of range");
+        throw new SagaIllegalArgumentException("Page token bucket out of range");
       }
       // Defense in depth: even with a matching filter key the token is unsigned, so guard the
       // resume math against a tampered statusCode outside the swept set (would index out of
       // bounds).
       if (indexOfStatus(allowedStatusCodes, statusCode) < 0) {
-        throw new IllegalArgumentException("Page token does not match the query");
+        throw new SagaIllegalArgumentException("Page token does not match the query");
       }
       return new PageCursor(bucket, statusCode, updatedAt);
     }

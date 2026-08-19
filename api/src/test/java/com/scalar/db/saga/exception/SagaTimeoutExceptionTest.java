@@ -8,40 +8,38 @@ import org.junit.jupiter.api.Test;
 class SagaTimeoutExceptionTest {
 
   @Test
-  void constructor_messageGiven_setsMessage() {
-    // Arrange & Act
-    SagaTimeoutException e = new SagaTimeoutException("saga deadline exceeded");
+  void awaitExpired_always_carriesAwaitTimeoutCode() {
+    // Arrange & Act — the saga keeps running; only the caller's wait budget expired
+    SagaTimeoutException e = SagaTimeoutException.awaitExpired();
 
     // Assert
-    assertThat(e.getMessage()).isEqualTo("saga deadline exceeded");
-  }
-
-  @SuppressWarnings("NullAway")
-  @Test
-  void constructor_nullMessageGiven_throwsNullPointerException() {
-    // Arrange & Act & Assert
-    assertThatThrownBy(() -> new SagaTimeoutException(null))
-        .isInstanceOf(NullPointerException.class);
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.SAGA_AWAIT_TIMEOUT);
+    assertThat(e.getMetadata()).isEmpty();
+    assertThat(e.getMessage())
+        .isEqualTo("DB-SAGA-40005: The wait for the saga to finish timed out");
+    assertThat(e.getCause()).isNull();
   }
 
   @Test
-  void constructor_messageAndCauseGiven_setsBoth() {
+  void requestTimedOut_causeGiven_carriesRequestTimeoutCodeAndCause() {
     // Arrange
-    RuntimeException cause = new RuntimeException("interrupted");
+    RuntimeException cause = new RuntimeException("deadline exceeded");
 
     // Act
-    SagaTimeoutException e = new SagaTimeoutException("saga deadline exceeded", cause);
+    SagaTimeoutException e = SagaTimeoutException.requestTimedOut(cause);
 
     // Assert
-    assertThat(e.getMessage()).isEqualTo("saga deadline exceeded");
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.REQUEST_TIMEOUT);
+    assertThat(e.getMetadata()).isEmpty();
+    assertThat(e.getMessage()).isEqualTo("DB-SAGA-40002: The request to the saga server timed out");
     assertThat(e.getCause()).isSameAs(cause);
   }
 
   @SuppressWarnings("NullAway")
   @Test
-  void constructor_nullCauseGiven_throwsNullPointerException() {
+  void requestTimedOut_nullCauseGiven_throwsNullPointerException() {
     // Arrange & Act & Assert
-    assertThatThrownBy(() -> new SagaTimeoutException("timeout", null))
+    assertThatThrownBy(() -> SagaTimeoutException.requestTimedOut(null))
         .isInstanceOf(NullPointerException.class);
   }
 
