@@ -38,6 +38,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import org.jspecify.annotations.Nullable;
@@ -79,6 +80,11 @@ public final class ScalarDbSagaStore implements SagaStore {
 
   /** Format version prefix for the opaque list page token. */
   private static final String PAGE_TOKEN_VERSION = "1";
+
+  // Circuit breaker for the retention sweep in findByStatusOlderThan: this many consecutive
+  // bucket-scan failures are treated as the store being unavailable rather than poison buckets,
+  // and the failure propagates. Mirrors the recovery manager's consecutive-failed-pages guard.
+  private static final int MAX_CONSECUTIVE_FAILED_BUCKETS = 3;
 
   private final DistributedTransactionManager txManager;
   private final ObjectMapper objectMapper;
@@ -1006,14 +1012,23 @@ public final class ScalarDbSagaStore implements SagaStore {
     int numBuckets = schema.getNumBuckets();
     int[] order = SweepScatter.permutation(SweepScatter.seed(ownerId), numBuckets);
     List<SagaStateSnapshot> results = new ArrayList<>();
+    int breakerThreshold = Math.min(MAX_CONSECUTIVE_FAILED_BUCKETS, numBuckets);
+    int consecutiveFailures = 0;
     for (int i = 0; i < numBuckets && results.size() < maxResults; i++) {
       int bucket = order[Math.floorMod(i + rotation, numBuckets)];
       try {
         results.addAll(
             findByStatusInBucket(bucket, status, threshold, maxResults - results.size()));
+        consecutiveFailures = 0;
       } catch (RuntimeException e) {
         // One bucket's scan failure (e.g., a row that cannot be deserialized) must not abandon
-        // every bucket after it in the sweep order; skip it and let the next pass retry.
+        // every bucket after it in the sweep order; skip it and let the next pass retry. But
+        // consecutive failures mean the store itself is unavailable, not a poison bucket:
+        // rethrow so the pass ends with one ERROR from the caller instead of sweeping the whole
+        // ring of an outage at WARN level.
+        if (++consecutiveFailures >= breakerThreshold) {
+          throw e;
+        }
         logger.warn("Scan of bucket {} for status {} failed; skipping it", bucket, status, e);
       }
     }
@@ -1043,9 +1058,14 @@ public final class ScalarDbSagaStore implements SagaStore {
 
   @Override
   public boolean deleteSaga(String sagaId) {
+    // Written by every attempt of the transaction body and read by the commit verifier, so after
+    // an unknown commit it can tell "our attempt deleted the row" from "the row was already gone
+    // before this call ran" — post-state alone cannot distinguish the two.
+    AtomicBoolean sawStateRow = new AtomicBoolean();
     return runInTransaction(
         tx -> {
           Optional<Result> stateResult = tx.scan(buildStateIndexScan(sagaId)).stream().findFirst();
+          sawStateRow.set(stateResult.isPresent());
 
           if (stateResult.isPresent()) {
             Result r = stateResult.get();
@@ -1077,8 +1097,20 @@ public final class ScalarDbSagaStore implements SagaStore {
           return stateResult.isPresent();
         },
         () -> {
-          // Verify deletion after an unknown commit: state row absent means our delete (or an
-          // equivalent one) landed; report it as a real purge.
+          if (!sawStateRow.get()) {
+            // The attempt never saw a state row, so whatever the commit's fate, this call deleted
+            // nothing: an already-purged saga must not be reported as a purge, or budgeting
+            // callers would charge work that never happened.
+            return Optional.of(Boolean.FALSE);
+          }
+          // Verify deletion after an unknown commit: the attempt saw the row, so its absence now
+          // means our delete (or an equivalent one) landed; report it as a real purge. If the row
+          // is still present the commit did not land, and the transaction is retried. A deletion
+          // leaves no marker of who performed it, so a racer that also saw the row but lost the
+          // commit may reach here and report true as well, double charging one budget unit. That
+          // takes both rarities in one call: a lost race whose commit outcome is also unknown. A
+          // cleanly failed commit never gets here — it is retried, and the retry sees the row
+          // already gone and reports false.
           Optional<SagaStateSnapshot> state = loadStateSnapshot(sagaId);
           return state.isEmpty() ? Optional.of(Boolean.TRUE) : Optional.empty();
         },

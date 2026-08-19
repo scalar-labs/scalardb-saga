@@ -11,9 +11,11 @@ import java.util.Objects;
  *     purging
  * @param cleanupIntervalSeconds how often the cleanup job runs (in seconds)
  * @param batchSize maximum number of sagas actually purged per cleanup pass; deletes that turn out
- *     to be no-ops (another replica already purged the saga) do not consume it. Should be large
- *     enough to keep up with steady-state saga throughput over one cleanup interval. For example,
- *     at 100 TPS with a 60-second interval, roughly 6,000 sagas become purgeable per pass.
+ *     to be no-ops (another replica already purged the saga) do not consume it, and the pass
+ *     re-scans in rounds until the budget is spent or a round makes no progress, so with a backlog
+ *     the budget is achieved rather than merely bounded. Should be large enough to keep up with
+ *     steady-state saga throughput over one cleanup interval. For example, at 100 TPS with a
+ *     60-second interval, roughly 6,000 sagas become purgeable per pass.
  * @param maxConcurrentPurges maximum number of sagas purged concurrently within a single cleanup
  *     pass (limits database pressure from virtual threads)
  * @param clock clock for time-based decisions (inject a fixed clock for testing)

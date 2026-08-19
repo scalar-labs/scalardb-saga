@@ -370,7 +370,9 @@ public interface SagaStore extends AutoCloseable {
    * replicas surface different sagas first — and successive passes (a caller-incremented rotation)
    * give every bucket a turn at the front, so a sustained backlog cannot starve the buckets at the
    * tail of one fixed order. A bucket whose scan fails is skipped for this call rather than
-   * abandoning the buckets after it; the next call retries it.
+   * abandoning the buckets after it; the next call retries it. Consecutive scan failures are the
+   * signature of an unavailable store rather than a poison bucket, and propagate instead of being
+   * swept bucket by bucket, so the caller's pass fails loudly once.
    *
    * <p>This method may be removed once the Admin API's {@code listStateSnapshots} query is
    * available.

@@ -5,8 +5,10 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -130,6 +132,7 @@ class SagaRetentionManagerTest {
               eq(SagaStatus.COMPENSATED), eq(THRESHOLD), eq(99), eq(OWNER_ID), anyInt()))
           .thenReturn(List.of(compensated));
       when(store.deleteSaga("saga-c1")).thenReturn(true);
+      when(store.deleteSaga("saga-c2")).thenReturn(true);
 
       // Act
       manager.cleanup();
@@ -204,10 +207,14 @@ class SagaRetentionManagerTest {
       // Act
       manager.cleanup();
 
-      // Assert
-      verify(store)
+      // Assert — the refund keeps the remaining budget at 99, in the first round and again in the
+      // second round the pass runs before concluding no further progress is possible
+      verify(store, atLeastOnce())
           .findByStatusOlderThan(
               eq(SagaStatus.COMPENSATED), eq(THRESHOLD), eq(99), eq(OWNER_ID), anyInt());
+      verify(store, never())
+          .findByStatusOlderThan(
+              eq(SagaStatus.COMPENSATED), eq(THRESHOLD), eq(98), eq(OWNER_ID), anyInt());
     }
 
     @Test
@@ -271,9 +278,143 @@ class SagaRetentionManagerTest {
       manager.cleanup();
 
       // Assert — remaining budget for COMPENSATED is 100 - 3 = 97
-      verify(store)
+      verify(store, atLeastOnce())
           .findByStatusOlderThan(
               eq(SagaStatus.COMPENSATED), eq(THRESHOLD), eq(97), eq(OWNER_ID), anyInt());
+    }
+
+    @Test
+    void cleanup_lostRaceRefundsBudget_nextRoundRescansAndSpendsIt() {
+      // Arrange — batch budget 2. The first round scans two candidates but loses one to a racing
+      // replica (deleteSaga returns false), refunding its budget; the purged rows are physically
+      // gone, so the second round's re-scan surfaces a fresh candidate and the refunded budget is
+      // spent on it instead of being silently dropped.
+      RetentionConfig smallBatch =
+          new RetentionConfig(RETENTION_PERIOD, 3600, 2, 10, Clock.fixed(NOW, ZoneOffset.UTC));
+      SagaRetentionManager smallManager =
+          new SagaRetentionManager(store, OWNER_ID, smallBatch, scheduler);
+      SagaStateSnapshot lostRace = snapshot("saga-lost", SagaStatus.COMPLETED);
+      SagaStateSnapshot won = snapshot("saga-won", SagaStatus.COMPLETED);
+      SagaStateSnapshot fresh = snapshot("saga-fresh", SagaStatus.COMPLETED);
+      when(store.findByStatusOlderThan(
+              eq(SagaStatus.COMPLETED), eq(THRESHOLD), eq(2), eq(OWNER_ID), anyInt()))
+          .thenReturn(List.of(lostRace, won));
+      when(store.findByStatusOlderThan(
+              eq(SagaStatus.COMPLETED), eq(THRESHOLD), eq(1), eq(OWNER_ID), anyInt()))
+          .thenReturn(List.of(fresh));
+      when(store.findByStatusOlderThan(
+              eq(SagaStatus.COMPENSATED), eq(THRESHOLD), eq(1), eq(OWNER_ID), anyInt()))
+          .thenReturn(List.of());
+      when(store.deleteSaga("saga-lost")).thenReturn(false);
+      when(store.deleteSaga("saga-won")).thenReturn(true);
+      when(store.deleteSaga("saga-fresh")).thenReturn(true);
+
+      // Act
+      smallManager.cleanup();
+
+      // Assert — the second round purged the fresh candidate with the refunded budget
+      verify(store).deleteSaga("saga-fresh");
+    }
+
+    @Test
+    void cleanup_roundPurgesNothing_endsPassWithoutRescanning() {
+      // Arrange — every candidate is lost to racing replicas: the round makes no progress, so the
+      // pass must end instead of re-scanning (a round of failing deletes would refetch the same
+      // rows forever).
+      SagaStateSnapshot lost1 = snapshot("saga-lost-1", SagaStatus.COMPLETED);
+      SagaStateSnapshot lost2 = snapshot("saga-lost-2", SagaStatus.COMPLETED);
+      when(store.findByStatusOlderThan(
+              eq(SagaStatus.COMPLETED), eq(THRESHOLD), eq(100), eq(OWNER_ID), anyInt()))
+          .thenReturn(List.of(lost1, lost2));
+      when(store.findByStatusOlderThan(
+              eq(SagaStatus.COMPENSATED), eq(THRESHOLD), eq(100), eq(OWNER_ID), anyInt()))
+          .thenReturn(List.of());
+      when(store.deleteSaga(any())).thenReturn(false);
+
+      // Act
+      manager.cleanup();
+
+      // Assert — each status was scanned exactly once: no second round
+      verify(store, times(1))
+          .findByStatusOlderThan(
+              eq(SagaStatus.COMPLETED), eq(THRESHOLD), eq(100), eq(OWNER_ID), anyInt());
+      verify(store, times(1))
+          .findByStatusOlderThan(
+              eq(SagaStatus.COMPENSATED), eq(THRESHOLD), eq(100), eq(OWNER_ID), anyInt());
+    }
+
+    @Test
+    void cleanup_purgeTaskThrowsError_otherPurgesStillCounted() {
+      // Arrange — purgeOneSafely catches Exception only, so an Error escapes the task and
+      // surfaces as an ExecutionException at the await: it must be logged and skipped, not
+      // propagated and not allowed to abort the surviving purges.
+      SagaStateSnapshot bad = snapshot("saga-bad", SagaStatus.COMPLETED);
+      SagaStateSnapshot ok = snapshot("saga-ok", SagaStatus.COMPLETED);
+      when(store.findByStatusOlderThan(
+              eq(SagaStatus.COMPLETED), eq(THRESHOLD), eq(100), eq(OWNER_ID), anyInt()))
+          .thenReturn(List.of(bad, ok));
+      when(store.findByStatusOlderThan(
+              eq(SagaStatus.COMPENSATED), eq(THRESHOLD), eq(99), eq(OWNER_ID), anyInt()))
+          .thenReturn(List.of());
+      doThrow(new AssertionError("simulated Error escaping the purge task"))
+          .when(store)
+          .deleteSaga("saga-bad");
+      when(store.deleteSaga("saga-ok")).thenReturn(true);
+
+      // Act — must not throw
+      manager.cleanup();
+
+      // Assert — the surviving purge was still attempted and counted (COMPENSATED saw budget 99)
+      verify(store).deleteSaga("saga-ok");
+      verify(store, atLeastOnce())
+          .findByStatusOlderThan(
+              eq(SagaStatus.COMPENSATED), eq(THRESHOLD), eq(99), eq(OWNER_ID), anyInt());
+    }
+
+    @Test
+    void cleanup_interruptedMidAwait_cancelsRemainingPurgeTasks() throws Exception {
+      // Arrange — two purge tasks block inside their deletes; interrupting the pass thread must
+      // cancel both (interrupting them) and drain their outcomes instead of leaving them to run
+      // past the pass, and the interrupt flag must be restored.
+      java.util.concurrent.CountDownLatch bothStarted = new java.util.concurrent.CountDownLatch(2);
+      java.util.concurrent.CountDownLatch bothInterrupted =
+          new java.util.concurrent.CountDownLatch(2);
+      SagaStateSnapshot s1 = snapshot("saga-block-1", SagaStatus.COMPLETED);
+      SagaStateSnapshot s2 = snapshot("saga-block-2", SagaStatus.COMPLETED);
+      when(store.findByStatusOlderThan(
+              eq(SagaStatus.COMPLETED), eq(THRESHOLD), eq(100), eq(OWNER_ID), anyInt()))
+          .thenReturn(List.of(s1, s2));
+      when(store.deleteSaga(any()))
+          .thenAnswer(
+              invocation -> {
+                bothStarted.countDown();
+                try {
+                  new java.util.concurrent.CountDownLatch(1).await(); // blocks until interrupted
+                } catch (InterruptedException e) {
+                  bothInterrupted.countDown();
+                }
+                return false;
+              });
+      java.util.concurrent.atomic.AtomicBoolean interruptFlagRestored =
+          new java.util.concurrent.atomic.AtomicBoolean();
+
+      // Act — run the pass, interrupt it mid-await
+      Thread passThread =
+          new Thread(
+              () -> {
+                manager.cleanup();
+                interruptFlagRestored.set(Thread.currentThread().isInterrupted());
+              });
+      passThread.start();
+      assertThat(bothStarted.await(5, TimeUnit.SECONDS)).isTrue();
+      passThread.interrupt();
+      passThread.join(5_000);
+
+      // Assert — the pass returned, both tasks were interrupted (not abandoned), and the pass
+      // thread's interrupt flag was restored
+      assertThat(passThread.isAlive()).isFalse();
+      assertThat(bothInterrupted.await(5, TimeUnit.SECONDS)).isTrue();
+      assertThat(interruptFlagRestored).isTrue();
     }
   }
 

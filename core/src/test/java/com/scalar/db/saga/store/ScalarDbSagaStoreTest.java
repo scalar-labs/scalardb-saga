@@ -5,7 +5,6 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
-import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
@@ -1918,6 +1917,67 @@ class ScalarDbSagaStoreTest {
         .isInstanceOf(SagaPersistenceException.class);
   }
 
+  @Test
+  void deleteSaga_unknownCommitAfterSagaAlreadyPurged_returnsFalse() throws Exception {
+    // Arrange — no state row remains (another replica already purged the saga) and the resulting
+    // no-op transaction's commit status is unknown. The verifier must not mistake "row already
+    // gone before this call" for "our delete landed": this call deleted nothing, so budgeting
+    // callers must not be told a purge happened.
+    when(tx.scan(scanForTable(SagaSchema.STATE_TABLE))).thenReturn(List.of());
+    when(tx.scan(scanForTable(SagaSchema.EVENTS_TABLE))).thenReturn(List.of());
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+
+    // Act
+    boolean deleted = store.deleteSaga("saga-1");
+
+    // Assert — reported as a no-op, decided from the attempt's own evidence without another read
+    assertThat(deleted).isFalse();
+    verify(txManager, times(1)).begin();
+  }
+
+  @Test
+  void deleteSaga_unknownCommitAndStateRowGone_returnsTrue() throws Exception {
+    // Arrange — the attempt saw and deleted the state row, but the commit status is unknown; the
+    // verifier's fresh read finds the row gone, proving the delete (or an equivalent) landed.
+    Result stateRow = mockStateResult("saga-1", SagaStatus.COMPLETED);
+    DistributedTransaction txVerify = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(txVerify);
+    when(tx.scan(scanForTable(SagaSchema.STATE_TABLE))).thenReturn(List.of(stateRow));
+    when(tx.scan(scanForTable(SagaSchema.EVENTS_TABLE))).thenReturn(List.of());
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    when(txVerify.scan(any(Scan.class))).thenReturn(List.of());
+
+    // Act
+    boolean deleted = store.deleteSaga("saga-1");
+
+    // Assert
+    assertThat(deleted).isTrue();
+  }
+
+  @Test
+  void deleteSaga_unknownCommitAndStateRowStillPresent_retriesAndDeletes() throws Exception {
+    // Arrange — the attempt saw the state row but its unknown-status commit did not land (the
+    // verifier's read still finds the row), so the whole transaction is retried; the retry
+    // deletes the row and commits cleanly.
+    Result stateRow = mockStateResult("saga-1", SagaStatus.COMPLETED);
+    DistributedTransaction txVerify = mock(DistributedTransaction.class);
+    DistributedTransaction txRetry = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(txVerify).thenReturn(txRetry);
+    when(tx.scan(scanForTable(SagaSchema.STATE_TABLE))).thenReturn(List.of(stateRow));
+    when(tx.scan(scanForTable(SagaSchema.EVENTS_TABLE))).thenReturn(List.of());
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    when(txVerify.scan(any(Scan.class))).thenReturn(List.of(stateRow));
+    when(txRetry.scan(scanForTable(SagaSchema.STATE_TABLE))).thenReturn(List.of(stateRow));
+    when(txRetry.scan(scanForTable(SagaSchema.EVENTS_TABLE))).thenReturn(List.of());
+
+    // Act
+    boolean deleted = store.deleteSaga("saga-1");
+
+    // Assert
+    assertThat(deleted).isTrue();
+    verify(txRetry).commit();
+  }
+
   // ---------------------------------------------------------------------------
   // Definition serialization round-trip
   // ---------------------------------------------------------------------------
@@ -2083,19 +2143,42 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
-  void findByStatusOlderThan_allBucketScansFail_returnsEmptyListWithoutThrowing() throws Exception {
-    // Arrange — every bucket's scan fails (store outage). Per-bucket isolation means the sweep
-    // reports what it could read (nothing) instead of throwing: retention is not deadline-bound,
-    // and each skipped bucket is logged and retried next pass.
-    when(tx.scan(any(Scan.class))).thenThrow(mock(CrudException.class));
+  void findByStatusOlderThan_consecutiveBucketScansFail_throwsInsteadOfSweepingWholeRing()
+      throws Exception {
+    // Arrange — every bucket's scan fails: a store outage, not a poison bucket. The breaker must
+    // rethrow on the third consecutive failure so the caller's pass fails loudly once instead of
+    // hammering the rest of the ring at WARN level for as long as the outage lasts.
+    when(tx.scan(any(Scan.class))).thenThrow(new RuntimeException("store unavailable"));
+
+    // Act & Assert — the fourth bucket is never attempted
+    assertThatThrownBy(
+            () ->
+                store.findByStatusOlderThan(SagaStatus.COMPLETED, Instant.now(), 100, "owner-1", 0))
+        .isInstanceOf(RuntimeException.class);
+    verify(tx, times(3)).scan(any(Scan.class));
+  }
+
+  @Test
+  void findByStatusOlderThan_poisonBucketsBelowBreakerThreshold_sweepStillCompletes()
+      throws Exception {
+    // Arrange — two consecutive poison buckets, a healthy one (resetting the failure counter),
+    // then another poison bucket: no three failures are consecutive, so the sweep completes and
+    // keeps what it could read
+    Instant threshold = Instant.parse("2026-01-08T00:00:00Z");
+    Result r = mockStateResult("saga-1", SagaStatus.COMPLETED);
+    when(tx.scan(any(Scan.class)))
+        .thenThrow(new RuntimeException("poison bucket"))
+        .thenThrow(new RuntimeException("poison bucket"))
+        .thenReturn(List.of(r))
+        .thenThrow(new RuntimeException("poison bucket"));
 
     // Act
     List<SagaStateSnapshot> result =
-        store.findByStatusOlderThan(SagaStatus.COMPLETED, Instant.now(), 100, "owner-1", 0);
+        store.findByStatusOlderThan(SagaStatus.COMPLETED, threshold, 100, "owner-1", 0);
 
-    // Assert — all four buckets were attempted, none aborted the sweep
-    assertThat(result).isEmpty();
-    verify(tx, atLeast(4)).scan(any(Scan.class));
+    // Assert — all four buckets were attempted
+    assertThat(result).hasSize(1);
+    verify(tx, times(4)).scan(any(Scan.class));
   }
 
   @Test
