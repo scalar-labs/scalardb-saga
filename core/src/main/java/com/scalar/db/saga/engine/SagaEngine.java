@@ -184,7 +184,7 @@ public class SagaEngine implements AutoCloseable {
     }
     try {
       List<StepWithPolicy> plan = getOrBuildPlan(def);
-      compensateSaga(plan, context, fromStepIndex);
+      compensateSteps(plan, context, fromStepIndex);
     } finally {
       unregisterActive(sagaId);
     }
@@ -323,7 +323,7 @@ public class SagaEngine implements AutoCloseable {
       if (TimeoutPolicy.isSagaTimedOut(sagaDeadline, clock.millis())) {
         logger.info("Saga {} timed out before step {}", context.getSagaId(), i);
         if (i <= pivotIndex) {
-          compensateSaga(plan, context, i - 1);
+          compensateSteps(plan, context, i - 1);
         }
         return;
       }
@@ -359,7 +359,7 @@ public class SagaEngine implements AutoCloseable {
           // body, an in-doubt timeout, any non-HTTP class step). The honest default is to include
           // step i; skip it (compensate from i - 1) only when the failure proved non-delivery.
           int from = e.knownNotCommitted() ? i - 1 : i;
-          compensateSaga(plan, context, from);
+          compensateSteps(plan, context, from);
         }
         return;
       }
@@ -391,7 +391,7 @@ public class SagaEngine implements AutoCloseable {
               new StepExecutionException(
                   "Failed to record completion for step '" + stepName + "'", e, false);
           recordStepFailed(context, i, stepName, recordFailure);
-          compensateSaga(plan, context, i);
+          compensateSteps(plan, context, i);
         }
         return;
       }
@@ -618,65 +618,59 @@ public class SagaEngine implements AutoCloseable {
   // ---------------------------------------------------------------------------
 
   /**
-   * Compensates steps in reverse order (LIFO) from {@code fromStepIndex} down to 0.
+   * Compensates steps in reverse order (LIFO) from {@code fromStepIndex} down to 0, maintaining the
+   * saga status alongside the loop: transitions to COMPENSATING first (unless already there) and to
+   * COMPENSATED once every step is compensated. If a step's compensation fails after retries are
+   * exhausted, the saga stays COMPENSATING for recovery to retry. The backward mirror of {@link
+   * #executeSteps}, which likewise owns its direction's terminal transition.
+   *
+   * <p>Not an entry point; callers already hold the {@code registerActive} guard. The guarded entry
+   * is {@link #compensateFrom}.
    *
    * <p>Package-private for testing.
    *
    * @param plan the execution plan
    * @param context the execution context
    * @param fromStepIndex the highest step index to compensate (inclusive)
-   * @throws StepCompensationException if compensation fails after retries exhausted
    */
   void compensateSteps(List<StepWithPolicy> plan, ExecutionContext context, int fromStepIndex) {
-    for (int i = fromStepIndex; i >= 0; i--) {
-      if (context.isStepCompensated(i)) {
-        logger.debug("Skipping already-compensated step at index {}", i);
-        continue;
-      }
-
-      StepWithPolicy stepWithPolicy = plan.get(i);
-      Step step = stepWithPolicy.step();
-      String stepName = step.getName();
-
-      try {
-        long stepDeadline =
-            stepWithPolicy.stepTimeoutMillis() <= 0
-                ? 0
-                : clock.millis() + stepWithPolicy.stepTimeoutMillis();
-        compensateWithRetry(step, context, stepWithPolicy.compensationRetryPolicy(), stepDeadline);
-        recordStepCompensated(context, i, stepName);
-      } catch (StepCompensationException e) {
-        recordStepCompensationFailed(context, i, stepName);
-        throw new StepCompensationException(stepName, i, e);
-      }
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Private — compensation helpers
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Transitions to COMPENSATING (if not already), runs compensation, and transitions to COMPENSATED
-   * on success. On failure, the saga stays COMPENSATING for recovery to retry.
-   *
-   * <p>Despite the name, not the backward counterpart of {@link #executeSaga} (a guarded entry
-   * point, whose backward peer is {@link #compensateFrom}); this is the saga-status layer above
-   * {@link #compensateSteps}, called only from already-guarded contexts.
-   */
-  private void compensateSaga(
-      List<StepWithPolicy> plan, ExecutionContext context, int fromStepIndex) {
     if (context.getCurrentState().getStatus() != SagaStatus.COMPENSATING) {
       transition(context, StatusEvent.compensating());
     }
     try {
-      compensateSteps(plan, context, fromStepIndex);
+      for (int i = fromStepIndex; i >= 0; i--) {
+        if (context.isStepCompensated(i)) {
+          logger.debug("Skipping already-compensated step at index {}", i);
+          continue;
+        }
+
+        StepWithPolicy stepWithPolicy = plan.get(i);
+        Step step = stepWithPolicy.step();
+        String stepName = step.getName();
+
+        try {
+          long stepDeadline =
+              stepWithPolicy.stepTimeoutMillis() <= 0
+                  ? 0
+                  : clock.millis() + stepWithPolicy.stepTimeoutMillis();
+          compensateWithRetry(
+              step, context, stepWithPolicy.compensationRetryPolicy(), stepDeadline);
+          recordStepCompensated(context, i, stepName);
+        } catch (StepCompensationException e) {
+          recordStepCompensationFailed(context, i, stepName);
+          throw new StepCompensationException(stepName, i, e);
+        }
+      }
       transition(context, StatusEvent.compensated());
     } catch (StepCompensationException e) {
       // Saga stays COMPENSATING — recovery will retry
       logger.warn("Compensation incomplete for saga {}: {}", context.getSagaId(), e.getMessage());
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // Private — compensation helpers
+  // ---------------------------------------------------------------------------
 
   private void compensateWithRetry(
       Step step, ExecutionContext context, RetryPolicy retryPolicy, long stepDeadline)
