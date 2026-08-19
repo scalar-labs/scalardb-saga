@@ -150,9 +150,15 @@ public interface SagaAdminService extends AutoCloseable {
    * store failure may still abort it. Treat a timeout as an unknown outcome, not a failure.
    * Retrying is safe and cheap: every reset row leaves the {@code ESCALATED} filter, so a retry —
    * even from the start, without the lost continuation token — sweeps only what is still escalated.
-   * A mass escalation stamped into one {@code updated_at} millisecond makes over-sized pages (see
-   * {@link SagaQuery.Builder#pageSize(int)}), which are the sweeps most likely to outlive a short
-   * client deadline.
+   * Cheap assumes the timed-out attempt has drained: it is not cancelled, so an immediate retry
+   * runs concurrently with it — both re-materialize the still-escalated rows, and each contested
+   * row costs one attempt a lost CAS, reported in {@link ResetResult#getSkipped()} as {@link
+   * ResetResult.SkipReason#CONCURRENT_MODIFICATION}. That still converges (every reset commits in
+   * its own transaction), but it doubles the scan at the worst moment; prefer retrying after
+   * roughly the call's usual duration rather than immediately. A mass escalation stamped into one
+   * {@code updated_at} millisecond makes over-sized pages (see {@link
+   * SagaQuery.Builder#pageSize(int)}), which are the sweeps most likely to outlive a short client
+   * deadline.
    *
    * @param query the page of escalated sagas to sweep (status filter fixed to {@code ESCALATED})
    * @param reason why the operator is un-escalating (recorded per row for audit; must be non-blank)

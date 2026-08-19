@@ -144,13 +144,14 @@ public final class SagaQuery {
     /**
      * Sets the <b>target</b> page size. A returned {@link SagaPage} may exceed this target: results
      * are grouped by {@code updated_at} and a page never splits a cohort (rows sharing one
-     * timestamp), so a cohort straddling the limit is completed rather than cut. A single cohort
-     * larger than the target is returned whole as one over-sized page, so a page may exceed the
-     * target — and even {@link SagaQuery#MAX_PAGE_SIZE} — by the full cohort size; it is not an
-     * upper bound on the returned item count. Callers should provision memory and response limits
-     * for this target plus the largest expected cohort: a page can already hold up to a full target
-     * of rows from earlier scan slices when the cohort that overflows it is completed. This bounds
-     * the requested target only, in {@code [1, MAX_PAGE_SIZE]}.
+     * timestamp within one internal scan slice), so a cohort straddling the limit is completed
+     * rather than cut. A single cohort larger than the target is returned whole as an over-sized
+     * page (a mass event spread across slices yields several such pages, not one), so a page may
+     * exceed the target — and even {@link SagaQuery#MAX_PAGE_SIZE} — by the full cohort size; it is
+     * not an upper bound on the returned item count. Callers should provision memory and response
+     * limits for this target plus the largest expected cohort: a page can already hold up to a full
+     * target of rows from earlier scan slices when the cohort that overflows it is completed. This
+     * bounds the requested target only, in {@code [1, MAX_PAGE_SIZE]}.
      *
      * @param pageSize the target results per page, in {@code [1, MAX_PAGE_SIZE]}
      * @throws IllegalArgumentException if out of range
