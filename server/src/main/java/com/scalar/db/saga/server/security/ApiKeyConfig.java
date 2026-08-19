@@ -1,5 +1,6 @@
 package com.scalar.db.saga.server.security;
 
+import com.scalar.db.saga.server.Redaction;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -164,9 +165,9 @@ final class ApiKeyConfig {
               .orElseThrow(
                   () ->
                       new IllegalArgumentException(
-                          "Unknown role '"
-                              + token
-                              + "' in '"
+                          "Unknown role "
+                              + Redaction.redacted(token)
+                              + " in '"
                               + rolesKey
                               + "'. Valid roles: saga:read, saga:write, saga:admin."));
       roles.add(role);

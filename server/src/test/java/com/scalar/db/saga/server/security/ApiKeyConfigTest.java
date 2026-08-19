@@ -135,13 +135,17 @@ class ApiKeyConfigTest {
   }
 
   @Test
-  void from_unknownRole_throwsException() {
-    // Arrange
+  void from_unknownRole_throwsWithoutEchoingValue() {
+    // Arrange — the roles value is resolved before parsing, so an unknown token may be a pasted
+    // secret's plaintext; the message must name the key and never echo the token.
     Properties[] p = keyProps("svc", "${env:K}", "s3cr3t", "saga:superuser");
 
     // Act / Assert
     assertThatThrownBy(() -> ApiKeyConfig.from(p[0], p[1]))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(ApiKeyConfig.KEY_PREFIX + "svc" + ApiKeyConfig.ROLES_SUFFIX)
+        .hasMessageNotContaining("superuser")
+        .hasNoCause();
   }
 
   @Test

@@ -129,7 +129,7 @@ class SagaServerCommandTest {
   }
 
   @Test
-  void execute_configWithUnparsablePortGiven_reportsTheCauseOnTheSameLine(@TempDir Path dir)
+  void execute_configWithUnparsablePortGiven_reportsRedactedReasonWithoutTheValue(@TempDir Path dir)
       throws Exception {
     // Arrange — a value that fails in SagaServerConfig.load, before anything touches a database.
     Path config = dir.resolve("server.properties");
@@ -139,8 +139,10 @@ class SagaServerCommandTest {
     // Act
     int exitCode = executeCapturingErr(err, "--config", config.toString());
 
-    // Assert — the wrapper names the key, the cause names what was wrong with the value, and both
-    // reach the operator at the default level rather than only under SCALAR_DB_SAGA_LOG_LEVEL.
+    // Assert — the line names the key and what was wrong with the value at the default level, but
+    // never the value itself: it may be a resolved secret reference, so the parse error carries
+    // neither the value nor a NumberFormatException cause, whose message would embed it via
+    // describeChain.
     assertThat(exitCode).isEqualTo(CommandLine.ExitCode.SOFTWARE);
     assertThat(errorEvents())
         .singleElement()
@@ -148,7 +150,8 @@ class SagaServerCommandTest {
             event -> {
               assertThat(event.getFormattedMessage())
                   .contains("scalar.db.saga.server.http.port")
-                  .contains("NumberFormatException");
+                  .contains("not a number")
+                  .doesNotContain("notanumber");
               assertThat(event.getThrowableProxy()).isNull();
             });
   }

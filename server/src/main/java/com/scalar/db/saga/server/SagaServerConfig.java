@@ -4,6 +4,7 @@ import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.engine.RecoveryConfig;
 import com.scalar.db.saga.engine.RetentionConfig;
 import com.scalar.db.saga.engine.ShutdownMode;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -655,9 +656,7 @@ public final class SagaServerConfig {
             MAX_START_REQUESTS_PER_MINUTE_KEY,
             DEFAULT_MAX_START_REQUESTS_PER_MINUTE,
             0);
-    String definitions = resolved.getProperty(DEFINITIONS_PATH_KEY);
-    this.definitionsPath =
-        (definitions == null || definitions.isBlank()) ? null : Path.of(definitions.trim());
+    this.definitionsPath = parseDefinitionsPath(resolved.getProperty(DEFINITIONS_PATH_KEY));
     this.services = parseServices(resolved);
     this.properties = applyStoreDefaults(copyOf(resolved));
     this.grpcMaxInboundMessageBytes = parseGrpcMaxInboundMessageBytes(this.properties);
@@ -681,27 +680,19 @@ public final class SagaServerConfig {
     }
     // Port 0 is exempt: each transport then binds its own ephemeral port, so they cannot collide.
     if (httpEnabled && grpcEnabled && httpPort != 0 && httpPort == grpcPort) {
+      // The colliding number stays out of the message: echoing it would confirm that a numeric
+      // secret resolved onto one port key equals the other key's port.
       throw new IllegalArgumentException(
           "'"
               + HTTP_PORT_KEY
               + "' and '"
               + GRPC_PORT_KEY
-              + "' are both "
-              + httpPort
-              + ", but each transport binds its own listener. Give them different ports, or disable"
-              + " one transport.");
+              + "' are set to the same port, but each transport binds its own listener. Give them"
+              + " different ports, or disable one transport.");
     }
     if (httpMinThreads > httpMaxThreads) {
       throw new IllegalArgumentException(
-          "'"
-              + HTTP_MIN_THREADS_KEY
-              + "' ("
-              + httpMinThreads
-              + ") must not exceed '"
-              + HTTP_MAX_THREADS_KEY
-              + "' ("
-              + httpMaxThreads
-              + ").");
+          "'" + HTTP_MIN_THREADS_KEY + "' must not exceed '" + HTTP_MAX_THREADS_KEY + "'.");
     }
     // Provisioning a callback needs the URL to hand out; authenticating one needs the secret.
     // Either alone is a half-configured feature that fails only once an async saga runs.
@@ -1387,10 +1378,28 @@ public final class SagaServerConfig {
       throw new IllegalArgumentException(
           "Invalid value for '"
               + SHUTDOWN_MODE_KEY
-              + "': "
-              + value
-              + ". Valid modes: WAIT_CURRENT_STEP, WAIT_ALL_SAGAS.",
-          e);
+              + "' "
+              + Redaction.redacted(value)
+              + ". Valid modes: WAIT_CURRENT_STEP, WAIT_ALL_SAGAS.");
+    }
+  }
+
+  /**
+   * Parses the definitions path; unset or blank ⇒ null. {@link InvalidPathException} is remapped
+   * because its message embeds the input, which is a resolved value.
+   */
+  private static @Nullable Path parseDefinitionsPath(@Nullable String value) {
+    if (value == null || value.isBlank()) {
+      return null;
+    }
+    try {
+      return Path.of(value.trim());
+    } catch (InvalidPathException e) {
+      throw new IllegalArgumentException(
+          "Invalid value for '"
+              + DEFINITIONS_PATH_KEY
+              + "': not a valid path "
+              + Redaction.redacted(value));
     }
   }
 
@@ -1402,10 +1411,12 @@ public final class SagaServerConfig {
     try {
       port = Integer.parseInt(value.trim());
     } catch (NumberFormatException e) {
-      throw new IllegalArgumentException("Invalid value for '" + key + "': " + value, e);
+      throw new IllegalArgumentException(
+          "Invalid value for '" + key + "': not a number " + Redaction.redacted(value));
     }
     if (port < 0 || port > 65535) {
-      throw new IllegalArgumentException("'" + key + "' must be between 0 and 65535, got " + port);
+      throw new IllegalArgumentException(
+          "'" + key + "' must be between 0 and 65535 " + Redaction.redacted(value));
     }
     return port;
   }
@@ -1426,7 +1437,8 @@ public final class SagaServerConfig {
     if (trimmed.equalsIgnoreCase("false")) {
       return false;
     }
-    throw new IllegalArgumentException("'" + key + "' must be 'true' or 'false', got " + value);
+    throw new IllegalArgumentException(
+        "'" + key + "' must be 'true' or 'false' " + Redaction.redacted(value));
   }
 
   /**
@@ -1443,11 +1455,12 @@ public final class SagaServerConfig {
     try {
       parsed = Long.parseLong(value.trim());
     } catch (NumberFormatException e) {
-      throw new IllegalArgumentException("Invalid value for '" + key + "': " + value, e);
+      throw new IllegalArgumentException(
+          "Invalid value for '" + key + "': not a number " + Redaction.redacted(value));
     }
     if (parsed < minInclusive) {
       throw new IllegalArgumentException(
-          "'" + key + "' must be >= " + minInclusive + ", got " + parsed);
+          "'" + key + "' must be >= " + minInclusive + " " + Redaction.redacted(value));
     }
     return parsed;
   }
@@ -1463,8 +1476,15 @@ public final class SagaServerConfig {
       @Nullable String value, String key, int defaultValue, int minInclusive) {
     long parsed = parseBoundedLong(value, key, defaultValue, minInclusive);
     if (parsed > Integer.MAX_VALUE) {
+      // parsed can only exceed an int when an explicit value was parsed; the null-value path
+      // returns defaultValue, an int. requireNonNull records what NullAway cannot derive.
       throw new IllegalArgumentException(
-          "'" + key + "' must be <= " + Integer.MAX_VALUE + ", got " + parsed);
+          "'"
+              + key
+              + "' must be <= "
+              + Integer.MAX_VALUE
+              + " "
+              + Redaction.redacted(Objects.requireNonNull(value)));
     }
     return (int) parsed;
   }
@@ -1510,7 +1530,11 @@ public final class SagaServerConfig {
       String trimmed = element.trim();
       if (trimmed.isEmpty()) {
         throw new IllegalArgumentException(
-            "'" + key + "' has an empty element: " + value + ". Remove the stray comma.");
+            "'"
+                + key
+                + "' has an empty element "
+                + Redaction.redacted(value)
+                + ". Remove the stray comma.");
       }
       elements.add(trimmed);
     }
@@ -1532,11 +1556,17 @@ public final class SagaServerConfig {
       bytes = Integer.parseInt(value.trim());
     } catch (NumberFormatException e) {
       throw new IllegalArgumentException(
-          "Invalid value for '" + STORE_MAX_EVENT_PAYLOAD_BYTES_KEY + "': " + value, e);
+          "Invalid value for '"
+              + STORE_MAX_EVENT_PAYLOAD_BYTES_KEY
+              + "': not a number "
+              + Redaction.redacted(value));
     }
     if (bytes < 0) {
       throw new IllegalArgumentException(
-          "'" + STORE_MAX_EVENT_PAYLOAD_BYTES_KEY + "' must not be negative, got " + bytes);
+          "'"
+              + STORE_MAX_EVENT_PAYLOAD_BYTES_KEY
+              + "' must not be negative "
+              + Redaction.redacted(value));
     }
     return bytes == 0 ? Integer.MAX_VALUE : bytes;
   }
