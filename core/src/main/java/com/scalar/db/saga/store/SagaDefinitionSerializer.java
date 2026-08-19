@@ -76,8 +76,9 @@ final class SagaDefinitionSerializer {
       root.put(RECOVERY_STRATEGY, def.getRecoveryStrategy().name());
     }
     root.put(TIMEOUT_MILLIS, def.getTimeoutMillis());
-    if (def.getDefaultRetryPolicy() != null) {
-      root.set(DEFAULT_RETRY_POLICY, serializeRetryPolicy(def.getDefaultRetryPolicy()));
+    RetryPolicy defaultRetryPolicy = def.getDefaultRetryPolicy();
+    if (defaultRetryPolicy != null) {
+      root.set(DEFAULT_RETRY_POLICY, serializeRetryPolicy(defaultRetryPolicy));
     }
     ArrayNode steps = root.putArray(STEPS);
     for (SagaDefinition.StepDefinition step : def.getSteps()) {
@@ -98,8 +99,9 @@ final class SagaDefinitionSerializer {
       if (!tcc) {
         s.put(PIVOT, step.isPivot());
       }
-      if (step.getRetryPolicy() != null) {
-        s.set(RETRY_POLICY, serializeRetryPolicy(step.getRetryPolicy()));
+      RetryPolicy retryPolicy = step.getRetryPolicy();
+      if (retryPolicy != null) {
+        s.set(RETRY_POLICY, serializeRetryPolicy(retryPolicy));
       }
     }
     return root.toString();

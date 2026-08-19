@@ -286,7 +286,9 @@ final class HttpExchange {
 
     @Override
     public CompletionStage<byte[]> getBody() {
-      return body;
+      // A restricted view: the interface hands this stage to the HTTP client, which must not be
+      // able to complete the subscriber's own future.
+      return body.minimalCompletionStage();
     }
 
     @Override
