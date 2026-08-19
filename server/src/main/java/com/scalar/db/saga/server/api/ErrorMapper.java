@@ -92,10 +92,10 @@ public final class ErrorMapper {
     app.exception(SagaStatePreconditionException.class, (e, ctx) -> respond(ctx, 422, e));
 
     // ── Bad request (400) ────────────────────────────────────────────────
-    // One definition code is not a bad request: SAGA_DEFINITION_VERSION_CONTENT_CONFLICT sits in
-    // the
-    // conflict (103xx) sub-range, and the sub-range is a wire contract — the status must say 409
-    // where the code says conflict. The other six definition codes are genuinely bad requests.
+    // SAGA_DEFINITION_VERSION_CONTENT_CONFLICT is the one definition code that is not a bad
+    // request: it is numbered in the conflict (103xx) sub-range, and the sub-range is a wire
+    // contract, so the status must say 409 where the code says conflict. The other six definition
+    // codes are genuinely bad requests.
     app.exception(
         SagaDefinitionException.class,
         (e, ctx) ->

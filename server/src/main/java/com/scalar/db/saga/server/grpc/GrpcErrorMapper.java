@@ -81,11 +81,10 @@ final class GrpcErrorMapper {
       case SagaStatePreconditionException e -> respond(Status.Code.FAILED_PRECONDITION, e);
 
       // ── Bad request ────────────────────────────────────────────────
-      // One definition code is not a bad request: SAGA_DEFINITION_VERSION_CONTENT_CONFLICT sits in
-      // the
-      // conflict (103xx) sub-range, and the sub-range is a wire contract — the status must say 409
-      // where the code says conflict. The guard dispatches it ahead of the type arm; the other six
-      // definition codes are genuinely bad requests.
+      // SAGA_DEFINITION_VERSION_CONTENT_CONFLICT is the one definition code that is not a bad
+      // request: it is numbered in the conflict (103xx) sub-range, and the sub-range is a wire
+      // contract, so the status must say 409 where the code says conflict. The guard dispatches it
+      // ahead of the type arm; the other six definition codes are genuinely bad requests.
       case SagaDefinitionException e
           when e.getErrorCode() == SagaErrorCode.SAGA_DEFINITION_VERSION_CONTENT_CONFLICT ->
           respond(Status.Code.ALREADY_EXISTS, e);
