@@ -10,6 +10,7 @@ import com.scalar.db.saga.store.SagaStateAndEvents;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.StatusEvent;
 import com.scalar.db.saga.store.StepEvent;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -28,6 +29,12 @@ public abstract class ForwardingSagaStore implements SagaStore {
 
   private final SagaStore delegate;
 
+  @SuppressFBWarnings(
+      value = "CT_CONSTRUCTOR_THROW",
+      justification =
+          "The only state is the caller-supplied delegate and the constructor performs no security"
+              + " check, so a finalizer-captured partial instance grants the caller nothing they"
+              + " did not already pass in")
   protected ForwardingSagaStore(SagaStore delegate) {
     this.delegate = Objects.requireNonNull(delegate, "delegate must not be null");
   }
@@ -120,8 +127,8 @@ public abstract class ForwardingSagaStore implements SagaStore {
   }
 
   @Override
-  public Optional<SagaStateAndEvents> getStateWithEvents(String sagaId) {
-    return delegate.getStateWithEvents(sagaId);
+  public Optional<SagaStateAndEvents> getStateWithEvents(String sagaId, int maxEvents) {
+    return delegate.getStateWithEvents(sagaId, maxEvents);
   }
 
   @Override

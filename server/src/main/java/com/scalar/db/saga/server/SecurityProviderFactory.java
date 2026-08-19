@@ -33,9 +33,9 @@ final class SecurityProviderFactory {
       case "apikey" -> ApiKeySecurityProvider.create(config.properties(), config.rawProperties());
       default ->
           throw new IllegalArgumentException(
-              "Unknown security provider '"
-                  + name
-                  + "' for '"
+              "Unknown security provider "
+                  + Redaction.redacted(name)
+                  + " for '"
                   + SagaServerConfig.SECURITY_PROVIDER_KEY
                   + "'. Supported: noop, jwt, apikey.");
     };

@@ -41,6 +41,7 @@ import com.scalar.db.saga.definition.SagaDefinition.SagaMode;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionException;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.store.SagaStore.OverdueParked;
 import com.scalar.db.saga.store.SagaStore.Recoverables;
@@ -130,11 +131,11 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
-  void createSaga_invalidSagaIdGiven_throwsIllegalArgumentException() {
+  void createSaga_invalidSagaIdGiven_throwsSagaIllegalArgumentException() {
     // Act & Assert
     assertThatThrownBy(
             () -> store.createSaga("invalid id!", "order-saga", "engine-1", Map.of(), "v1"))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class);
   }
 
   @Test
@@ -185,7 +186,7 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
-  void createSaga_payloadExceedsLimit_throwsIllegalArgumentException() {
+  void createSaga_payloadExceedsLimit_throwsSagaIllegalArgumentException() {
     // Arrange — 5-byte limit is too small for any valid payload
     ScalarDbSagaStore limitedStore =
         new ScalarDbSagaStore(
@@ -194,10 +195,11 @@ class ScalarDbSagaStoreTest {
             schema,
             ScalarDbSagaStoreConfig.builder().maxEventPayloadBytes(5).build());
 
-    // Act & Assert
+    // Act & Assert — the typed exception, so the size and the configurable limit survive the wire
+    // instead of being replaced by the mappers' fixed bare-IllegalArgumentException detail
     assertThatThrownBy(
             () -> limitedStore.createSaga(null, "order", "engine-1", Map.of("k", "v"), "v1"))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class);
   }
 
   // ---------------------------------------------------------------------------
@@ -1417,6 +1419,7 @@ class ScalarDbSagaStoreTest {
     assertThat(stepEvent.getTimestamp()).isNotNull();
   }
 
+  @SuppressWarnings("NullAway")
   @Test
   void getEvents_stepPendingEvent_deserializesAsStepEvent() throws Exception {
     // Arrange
@@ -2372,11 +2375,14 @@ class ScalarDbSagaStoreTest {
     when(tx2.scan(any(Scan.class))).thenThrow(mock(CrudException.class));
     when(tx3.scan(any(Scan.class))).thenThrow(mock(CrudException.class));
 
-    // Act & Assert
+    // Act & Assert — the exhaustion path throws a retryable (store-unavailable) exception with
+    // the code's fixed message; the per-attempt cause chain carries the underlying UTSE and any
+    // suppressed verifier failures for debugging.
     assertThatThrownBy(
             () -> retryStore.createSaga("saga-1", "order-saga", "engine-1", Map.of(), "v1"))
         .isInstanceOf(SagaPersistenceException.class)
-        .hasMessageContaining("commit status unknown and verification failed");
+        .extracting(e -> ((SagaPersistenceException) e).isRetryable())
+        .isEqualTo(true);
   }
 
   @Test
@@ -2412,7 +2418,7 @@ class ScalarDbSagaStoreTest {
     // failure. It must propagate as-is, not be retried and masked as a retryable failure.
     doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
     SagaPersistenceException verifierError =
-        SagaPersistenceException.nonRetryable("bad payload", new RuntimeException("parse"));
+        SagaPersistenceException.deserializationFailed(new RuntimeException("parse"));
     ScalarDbSagaStore store2 =
         new ScalarDbSagaStore(
             txManager, objectMapper, schema, ScalarDbSagaStoreConfig.builder().build());
@@ -2555,7 +2561,7 @@ class ScalarDbSagaStoreTest {
 
     // Act & Assert
     assertThatThrownBy(() -> store.listStateSnapshots(query))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class);
   }
 
   @Test
@@ -2566,7 +2572,7 @@ class ScalarDbSagaStoreTest {
 
     // Act & Assert
     assertThatThrownBy(() -> store.listStateSnapshots(query))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class);
   }
 
   @Test
@@ -2805,50 +2811,50 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
-  void listStateSnapshots_malformedTokenGiven_throwsIllegalArgumentException() {
+  void listStateSnapshots_malformedTokenGiven_throwsSagaIllegalArgumentException() {
     // Act & Assert — not valid Base64URL; rejected before any scan
     assertThatThrownBy(
             () ->
                 store.listStateSnapshots(
                     SagaQuery.newBuilder().pageToken("!!!not-base64!!!").build()))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class);
   }
 
   @Test
-  void listStateSnapshots_tokenTooLongGiven_throwsIllegalArgumentException() {
+  void listStateSnapshots_tokenTooLongGiven_throwsSagaIllegalArgumentException() {
     // Arrange — far longer than any valid cursor; rejected before Base64 decoding
     String token = "A".repeat(1000);
 
     // Act & Assert
     assertThatThrownBy(
             () -> store.listStateSnapshots(SagaQuery.newBuilder().pageToken(token).build()))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class);
   }
 
   @Test
-  void listStateSnapshots_tokenBucketOutOfRangeGiven_throwsIllegalArgumentException() {
+  void listStateSnapshots_tokenBucketOutOfRangeGiven_throwsSagaIllegalArgumentException() {
     // Arrange — bucket 999 with a 4-bucket schema; filter key matches the unfiltered query
     String token = encodePageToken("1", "*|-|-", 999, 0, "2026-01-01T00:00:00Z");
 
     // Act & Assert
     assertThatThrownBy(
             () -> store.listStateSnapshots(SagaQuery.newBuilder().pageToken(token).build()))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class);
   }
 
   @Test
-  void listStateSnapshots_tokenUnknownVersionGiven_throwsIllegalArgumentException() {
+  void listStateSnapshots_tokenUnknownVersionGiven_throwsSagaIllegalArgumentException() {
     // Arrange — version "2" is not recognized
     String token = encodePageToken("2", "*|-|-", 0, 0, "2026-01-01T00:00:00Z");
 
     // Act & Assert
     assertThatThrownBy(
             () -> store.listStateSnapshots(SagaQuery.newBuilder().pageToken(token).build()))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class);
   }
 
   @Test
-  void listStateSnapshots_tokenStatusNotInFilterGiven_throwsIllegalArgumentException() {
+  void listStateSnapshots_tokenStatusNotInFilterGiven_throwsSagaIllegalArgumentException() {
     // Arrange — query filters RUNNING(0) and the filter key matches, but the cursor status is
     // COMPLETED(1), outside the swept set: the defense-in-depth membership check rejects it.
     String token = encodePageToken("1", "0|-|-", 0, 1, "2026-01-01T00:00:00Z");
@@ -2858,7 +2864,7 @@ class ScalarDbSagaStoreTest {
             () ->
                 store.listStateSnapshots(
                     SagaQuery.newBuilder().status(SagaStatus.RUNNING).pageToken(token).build()))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class);
   }
 
   @Test
@@ -2877,7 +2883,7 @@ class ScalarDbSagaStoreTest {
     // status slices; the filter-key mismatch rejects it instead.
     assertThatThrownBy(
             () -> store.listStateSnapshots(SagaQuery.newBuilder().pageToken(token).build()))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class);
   }
 
   @Test
@@ -2907,7 +2913,7 @@ class ScalarDbSagaStoreTest {
                         .updatedAfter(laterAfter)
                         .pageToken(token)
                         .build()))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class);
   }
 
   @Test

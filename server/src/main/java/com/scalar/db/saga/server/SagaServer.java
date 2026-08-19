@@ -183,6 +183,13 @@ public final class SagaServer implements AutoCloseable {
    * default and the daemon would accept a message the store then refuses to persist, surfacing as a
    * write error that names the store rather than the transport that let it in.
    *
+   * <p>These caps also anchor a client-side classification: the SDK maps a bare {@code
+   * RESOURCE_EXHAUSTED} carrying no error body to the non-retryable {@code UNMAPPED_SERVER_STATUS}
+   * on the premise that every transport-level source of that status (the two caps here, plus the
+   * keepalive enforcement in {@link #buildGrpcServer}) can never succeed on retry. Adding a
+   * transport limit that refuses work a retry could outlast means revisiting {@code
+   * GrpcClientSupport.unresolvedOrBare} first.
+   *
    * <p>Visible for testing, for the same reason as {@link #applyEngineSettings}: a builder does not
    * read its settings back, so the only way to observe the forwarding is to watch it receive them.
    */
@@ -237,6 +244,7 @@ public final class SagaServer implements AutoCloseable {
         .ownerId(config.ownerId())
         .shutdownMode(config.shutdownMode())
         .shutdownTimeoutMillis(config.shutdownTimeoutMillis())
+        .maxTimelineEvents(config.detailMaxTimelineEvents())
         .recoveryConfig(config.recoveryConfig())
         .retentionConfig(config.retentionConfig());
     config.services().forEach((name, service) -> addHttpEndpoint(builder, name, service));
@@ -287,6 +295,18 @@ public final class SagaServer implements AutoCloseable {
   }
 
   private int registerDefinitions(Path path) {
+    // The path is a resolved config value, so a secret reference pasted onto the definitions key
+    // arrives here as the secret's plaintext; failures below name the key and describe the value
+    // via Redaction instead of echoing it. A missing path is refused up front because that is the
+    // failure a pasted secret actually produces; letting it fall through would echo the "path" in
+    // the definition parser's message and cause.
+    if (!Files.exists(path)) {
+      throw new IllegalArgumentException(
+          "Invalid value for '"
+              + SagaServerConfig.DEFINITIONS_PATH_KEY
+              + "': no such file or directory "
+              + Redaction.redacted(path.toString()));
+    }
     try {
       if (Files.isDirectory(path)) {
         try (Stream<Path> files = Files.list(path)) {
@@ -303,7 +323,16 @@ public final class SagaServer implements AutoCloseable {
       registerDefinition(path);
       return 1;
     } catch (IOException e) {
-      throw new UncheckedIOException("Failed to load saga definitions from " + path, e);
+      // Thrown without the cause: an IOException message here is the path itself, which is the
+      // resolved value. The class name keeps the diagnosis (permission denied or a path that
+      // disappeared) without the echo.
+      throw new IllegalStateException(
+          "Failed to load saga definitions from '"
+              + SagaServerConfig.DEFINITIONS_PATH_KEY
+              + "' ("
+              + e.getClass().getSimpleName()
+              + ") "
+              + Redaction.redacted(path.toString()));
     }
   }
 
@@ -315,13 +344,8 @@ public final class SagaServer implements AutoCloseable {
     SagaDefinition definition = SagaDefinitionParser.parseFile(path);
     for (SagaDefinition.StepDefinition step : definition.getSteps()) {
       if (step instanceof SagaDefinition.ClassStep) {
-        throw new SagaDefinitionException(
-            "Saga '"
-                + definition.getName()
-                + "' step '"
-                + step.getName()
-                + "' is a code step (stepClass), which daemon mode does not support. Use a"
-                + " declarative service step, or run the engine in embedded mode for code steps.");
+        throw SagaDefinitionException.stepClassNotSupportedOnServer(
+            definition.getName(), step.getName());
       }
     }
     orchestrator.register(applyDefaultTimeout(definition));
@@ -345,7 +369,12 @@ public final class SagaServer implements AutoCloseable {
   }
 
   private static boolean isDefinitionFile(Path path) {
-    String name = path.getFileName().toString().toLowerCase(Locale.ROOT);
+    Path fileName = path.getFileName();
+    if (fileName == null) {
+      // Only a filesystem root has no file name, and a root is never a definition file.
+      return false;
+    }
+    String name = fileName.toString().toLowerCase(Locale.ROOT);
     return name.endsWith(".json") || name.endsWith(".yaml") || name.endsWith(".yml");
   }
 

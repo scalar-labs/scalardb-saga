@@ -89,7 +89,8 @@ final class HttpEndpointRegistry implements ResolutionContext, AutoCloseable {
   private HttpEndpoint endpoint(String service) {
     HttpEndpoint endpoint = endpoints.get(service);
     if (endpoint == null) {
-      throw new SagaDefinitionException("No HTTP endpoint registered under name '" + service + "'");
+      throw SagaDefinitionException.httpEndpointLookupFailed(
+          "no HTTP endpoint registered under name '" + service + "'");
     }
     return endpoint;
   }
@@ -103,7 +104,8 @@ final class HttpEndpointRegistry implements ResolutionContext, AutoCloseable {
   public SagaHttpClient httpClient(String name) {
     HttpEndpoint endpoint = endpoints.get(name);
     if (endpoint == null) {
-      throw new SagaDefinitionException("No HTTP endpoint registered under name '" + name + "'");
+      throw SagaDefinitionException.httpEndpointLookupFailed(
+          "no HTTP endpoint registered under name '" + name + "'");
     }
     return endpoint.sagaHttpClient();
   }
@@ -117,14 +119,15 @@ final class HttpEndpointRegistry implements ResolutionContext, AutoCloseable {
   @Override
   public SagaHttpClient httpClient() {
     if (endpoints.isEmpty()) {
-      throw new SagaDefinitionException(
-          "No HTTP endpoint is registered; call httpEndpoint(name, baseUrl) on the builder");
+      throw SagaDefinitionException.httpEndpointLookupFailed(
+          "no HTTP endpoint is registered; call httpEndpoint(name, baseUrl) on the builder");
     }
     if (endpoints.size() > 1) {
-      throw new SagaDefinitionException(
-          "Multiple HTTP endpoints are registered "
+      throw SagaDefinitionException.httpEndpointLookupFailed(
+          "multiple HTTP endpoints are registered "
               + endpoints.keySet()
-              + "; annotate the SagaHttpClient parameter with @Named(\"<endpoint>\") to select one");
+              + "; annotate the SagaHttpClient parameter with @Named(\"<endpoint>\") to select"
+              + " one");
     }
     return endpoints.values().iterator().next().sagaHttpClient();
   }

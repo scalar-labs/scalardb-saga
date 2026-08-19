@@ -286,7 +286,9 @@ final class HttpExchange {
 
     @Override
     public CompletionStage<byte[]> getBody() {
-      return body;
+      // A restricted view: the interface hands this stage to the HTTP client, which must not be
+      // able to complete the subscriber's own future.
+      return body.minimalCompletionStage();
     }
 
     @Override
@@ -355,6 +357,9 @@ final class HttpExchange {
   private static final class BodyTooLargeException extends IOException {}
 
   /** Returns whether {@code type} appears anywhere in {@code throwable}'s cause chain. */
+  // The self-cause guard wants object identity, not equality: it detects a throwable that is
+  // literally its own cause, which would otherwise spin the walk forever.
+  @SuppressWarnings("ReferenceEquality")
   private static boolean hasCause(Throwable throwable, Class<? extends Throwable> type) {
     for (Throwable cause = throwable; cause != null; cause = cause.getCause()) {
       if (type.isInstance(cause)) {

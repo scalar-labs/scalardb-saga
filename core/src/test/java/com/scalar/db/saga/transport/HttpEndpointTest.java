@@ -13,6 +13,7 @@ import com.scalar.db.saga.definition.CallSpec;
 import com.scalar.db.saga.definition.HttpCall;
 import com.scalar.db.saga.definition.SagaDefinition.ServiceStep.Phase;
 import com.scalar.db.saga.exception.SagaDefinitionException;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -56,11 +57,18 @@ class HttpEndpointTest {
   @Test
   void toStep_asyncPhaseWithoutCallbackProvider_throwsSagaDefinitionException() {
     // An async step with no callback URL provider configured cannot be provisioned — fail fast at
-    // plan build rather than parking a saga that could never be completed.
+    // plan build rather than parking a saga that could never be completed. The step-scoped code,
+    // with the step name as a real metadata field: this site knows the step but not the saga, so
+    // INVALID_DEFINITION would force it to fake the required saga_name.
     HttpEndpoint endpoint = HttpEndpoint.create(config("http://svc:8080"));
 
     assertThatThrownBy(() -> endpoint.toStep("debit", asyncSagaPhases()))
-        .isInstanceOf(SagaDefinitionException.class);
+        .isInstanceOfSatisfying(
+            SagaDefinitionException.class,
+            e -> {
+              assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.INVALID_STEP_DEFINITION);
+              assertThat(e.getMetadata()).containsEntry("step_name", "debit");
+            });
   }
 
   @Test

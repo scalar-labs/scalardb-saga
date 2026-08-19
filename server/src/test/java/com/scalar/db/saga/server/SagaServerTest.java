@@ -2,6 +2,7 @@ package com.scalar.db.saga.server;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.RETURNS_SELF;
@@ -210,6 +211,45 @@ class SagaServerTest {
         .isInstanceOf(IllegalStateException.class);
     verify(orchestrator, never()).register(any(SagaDefinition.class));
     verify(orchestrator).close();
+  }
+
+  @Test
+  void constructor_nonexistentDefinitionsPath_throwsWithoutEchoingValue() {
+    // A secret reference pasted onto the definitions key resolves to plaintext that exists nowhere
+    // on disk, so the failure must name the key and keep the resolved "path" out of the message.
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
+
+    assertThatThrownBy(
+            () ->
+                new SagaServer(
+                    configWithDefinitionsPath(Path.of("s3cr3t-plaintext-not-a-path")),
+                    orchestrator))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.DEFINITIONS_PATH_KEY)
+        .hasMessageNotContaining("s3cr3t")
+        .hasNoCause();
+    verify(orchestrator, never()).register(any(SagaDefinition.class));
+    verify(orchestrator).close();
+  }
+
+  @Test
+  void constructor_unreadableDefinitionsDirectory_throwsWithoutEchoingPath(@TempDir Path dir) {
+    // An existing directory whose listing fails: the AccessDeniedException message is the path
+    // itself, so the failure must carry the exception class name instead of the cause. Skipped
+    // where the permission change does not take, for example when running as root.
+    assumeTrue(dir.toFile().setReadable(false) && !Files.isReadable(dir));
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
+    try {
+      assertThatThrownBy(() -> new SagaServer(configWithDefinitionsPath(dir), orchestrator))
+          .isInstanceOf(IllegalStateException.class)
+          .hasMessageContaining(SagaServerConfig.DEFINITIONS_PATH_KEY)
+          .hasMessageContaining("AccessDeniedException")
+          .hasMessageNotContaining(dir.toString())
+          .hasNoCause();
+      verify(orchestrator).close();
+    } finally {
+      boolean unused = dir.toFile().setReadable(true); // let the @TempDir cleanup walk the dir
+    }
   }
 
   @Test
@@ -512,6 +552,7 @@ class SagaServerTest {
     props.setProperty(SagaServerConfig.OWNER_ID_KEY, "saga-daemon-7");
     props.setProperty(SagaServerConfig.SHUTDOWN_MODE_KEY, "WAIT_ALL_SAGAS");
     props.setProperty(SagaServerConfig.SHUTDOWN_TIMEOUT_MILLIS_KEY, "7001");
+    props.setProperty(SagaServerConfig.DETAIL_MAX_TIMELINE_EVENTS_KEY, "7005");
     props.setProperty(SagaServerConfig.SYNC_TIMEOUT_MILLIS_KEY, "7002");
     props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "7003");
     props.setProperty(SagaServerConfig.RECOVERY_TIMEOUT_MILLIS_KEY, "7004");
@@ -538,6 +579,7 @@ class SagaServerTest {
     verify(builder).ownerId("saga-daemon-7");
     verify(builder).shutdownMode(ShutdownMode.WAIT_ALL_SAGAS);
     verify(builder).shutdownTimeoutMillis(7001L);
+    verify(builder).maxTimelineEvents(7005);
     verify(builder).recoveryConfig(config.recoveryConfig());
     verify(builder).retentionConfig(config.retentionConfig());
   }

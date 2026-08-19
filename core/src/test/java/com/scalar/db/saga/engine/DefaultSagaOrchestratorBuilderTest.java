@@ -7,11 +7,17 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.scalar.db.saga.api.SagaDetail;
+import com.scalar.db.saga.api.SagaStateSnapshot;
+import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.store.SagaStateAndEvents;
 import com.scalar.db.saga.store.SagaStore;
 import java.net.http.HttpClient;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
+import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 class DefaultSagaOrchestratorBuilderTest {
@@ -43,6 +49,7 @@ class DefaultSagaOrchestratorBuilderTest {
             .ownerId("pod-1")
             .shutdownMode(ShutdownMode.WAIT_ALL_SAGAS)
             .shutdownTimeoutMillis(60_000)
+            .maxTimelineEvents(500)
             .clock(java.time.Clock.systemUTC())
             .resource(String.class, "account-channel", "account")
             .resource(Integer.class, 42)
@@ -161,6 +168,45 @@ class DefaultSagaOrchestratorBuilderTest {
     // Assert
     assertThat(orchestrator).isNotNull();
     orchestrator.close();
+  }
+
+  @Test
+  void build_withMaxTimelineEvents_boundReachesTheStoreOnGetSagaDetail() {
+    // Arrange — the only observable route for the builder's bound is the store read it configures,
+    // so drive a detail read through a fully built orchestrator rather than the constructor.
+    SagaStore store = mock(SagaStore.class);
+    Instant ts = Instant.parse("2026-08-10T10:00:00Z");
+    SagaStateSnapshot snapshot =
+        new SagaStateSnapshot("s1", "order", SagaStatus.RUNNING, "owner", "v1", ts, ts);
+    when(store.getStateWithEvents("s1", 250))
+        .thenReturn(Optional.of(new SagaStateAndEvents(snapshot, List.of(), true)));
+
+    // Act
+    try (DefaultSagaOrchestrator orchestrator =
+        DefaultSagaOrchestrator.newBuilder()
+            .storeFactory(() -> store)
+            .maxTimelineEvents(250)
+            .build()) {
+      SagaDetail detail = orchestrator.getSagaDetail("s1");
+
+      // Assert — the builder-configured bound is what reaches the store read
+      assertThat(detail.isTruncated()).isTrue();
+      verify(store).getStateWithEvents("s1", 250);
+    }
+  }
+
+  @Test
+  void maxTimelineEvents_zeroGiven_throwsIllegalArgumentException() {
+    // Act & Assert
+    assertThatThrownBy(() -> DefaultSagaOrchestrator.newBuilder().maxTimelineEvents(0))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void maxTimelineEvents_negativeGiven_throwsIllegalArgumentException() {
+    // Act & Assert
+    assertThatThrownBy(() -> DefaultSagaOrchestrator.newBuilder().maxTimelineEvents(-1))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
