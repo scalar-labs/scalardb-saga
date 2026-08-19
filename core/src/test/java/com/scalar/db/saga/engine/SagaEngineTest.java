@@ -1314,6 +1314,9 @@ class SagaEngineTest {
 
     private ExecutionContext createCompensatingContext() {
       SagaStateSnapshot state = compensatingSnapshot("saga-1");
+      // compensateSteps transitions to COMPENSATED on success; return the same snapshot for
+      // simplicity
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(state);
       return new ExecutionContext("saga-1", Map.of(), state);
     }
 
@@ -1371,7 +1374,8 @@ class SagaEngineTest {
     }
 
     @Test
-    void compensateSteps_allRetriesExhausted_appendsFailedEventAndThrows() throws Exception {
+    void compensateSteps_allRetriesExhausted_appendsFailedEventAndStaysCompensating()
+        throws Exception {
       // Arrange
       Step step0 = createStep("step0");
       doThrow(new StepCompensationException("persistent"))
@@ -1380,18 +1384,20 @@ class SagaEngineTest {
       List<StepWithPolicy> plan = createPlan(step0);
       ExecutionContext context = createCompensatingContext();
 
-      // Act & Assert
-      assertThatThrownBy(() -> engine.compensateSteps(plan, context, 0))
-          .isInstanceOf(StepCompensationException.class);
+      // Act
+      engine.compensateSteps(plan, context, 0);
 
-      // Verify all 3 retry attempts were made
+      // Assert — all 3 retry attempts were made
       verify(step0, times(3)).compensate(any(SagaContext.class));
 
-      // Verify STEP_COMPENSATION_FAILED event appended
+      // Assert — STEP_COMPENSATION_FAILED event appended
       ArgumentCaptor<StepEvent> eventCaptor = ArgumentCaptor.forClass(StepEvent.class);
       verify(store).recordStepEvent(eq("saga-1"), anyInt(), eventCaptor.capture());
       assertThat(eventCaptor.getValue().getEventType())
           .isEqualTo(EventType.STEP_COMPENSATION_FAILED);
+
+      // Assert — no SAGA_COMPENSATED transition (stays COMPENSATING for recovery to retry)
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any(StatusEvent.class), any());
     }
 
     @Test
@@ -1424,6 +1430,11 @@ class SagaEngineTest {
       // Assert
       verify(step0, never()).compensate(any(SagaContext.class));
       verify(store, never()).recordStepEvent(anyString(), anyInt(), any(StepEvent.class));
+
+      // Assert — even with nothing to compensate, the saga transitions to COMPENSATED
+      ArgumentCaptor<StatusEvent> statusCaptor = ArgumentCaptor.forClass(StatusEvent.class);
+      verify(store).recordStatusEvent(any(), anyInt(), statusCaptor.capture(), any());
+      assertThat(statusCaptor.getValue().getEventType()).isEqualTo(EventType.SAGA_COMPENSATED);
     }
 
     @Test
@@ -1557,8 +1568,7 @@ class SagaEngineTest {
   class RecordStepCompletedFailure {
 
     @Test
-    void executeSagaSteps_recordStepCompletedThrows_compensatesIncludingCurrentStep()
-        throws Exception {
+    void executeSteps_recordStepCompletedThrows_compensatesIncludingCurrentStep() throws Exception {
       // Arrange — 2 steps, both execute successfully
       Step step0 = successStep("s0");
       Step step1 = successStep("s1");
@@ -1613,7 +1623,7 @@ class SagaEngineTest {
 
     @Test
     void
-        executeSagaSteps_recordStepCompletedThrowsButCompletionPersisted_propagatesWithoutCompensating()
+        executeSteps_recordStepCompletedThrowsButCompletionPersisted_propagatesWithoutCompensating()
             throws Exception {
       // The committed-residual case: recordStepCompleted's ack was lost (the event IS persisted),
       // so
@@ -1668,7 +1678,7 @@ class SagaEngineTest {
     }
 
     @Test
-    void executeSagaSteps_executionFailureKnownNotCommitted_doesNotCompensateCurrentStep()
+    void executeSteps_executionFailureKnownNotCommitted_doesNotCompensateCurrentStep()
         throws Exception {
       // A forward failure the framework PROVED did not commit (knownNotCommitted) compensates from
       // i-1 (only step 0), skipping step 1 — it provably has no side effect to undo.
@@ -1691,7 +1701,7 @@ class SagaEngineTest {
     }
 
     @Test
-    void executeSagaSteps_executionFailureNotKnownNotCommitted_compensatesIncludingCurrentStep()
+    void executeSteps_executionFailureNotKnownNotCommitted_compensatesIncludingCurrentStep()
         throws Exception {
       // The core fix: a forward failure whose non-delivery is NOT proven (the default — e.g. any
       // non-HTTP class step throwing a bare StepExecutionException) may have committed step 1's
@@ -1751,7 +1761,7 @@ class SagaEngineTest {
     }
 
     @Test
-    void executeSagaSteps_recordStepCompletedThrowsPastPivot_noCompensation() throws Exception {
+    void executeSteps_recordStepCompletedThrowsPastPivot_noCompensation() throws Exception {
       // Arrange — MIXED strategy: s0, s1 (pivot), s2 (past pivot)
       Step step0 = successStep("s0");
       Step step1 = successStep("s1");
@@ -1797,7 +1807,7 @@ class SagaEngineTest {
     }
 
     @Test
-    void executeSagaSteps_recordStepCompletedThrowsAndCompensationFails_staysCompensating()
+    void executeSteps_recordStepCompletedThrowsAndCompensationFails_staysCompensating()
         throws Exception {
       // Arrange — 1 step: execution succeeds, recording fails, compensation also fails.
       // Saga should stay COMPENSATING for recovery to retry.

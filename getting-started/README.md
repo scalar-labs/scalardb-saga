@@ -217,13 +217,16 @@ You should see the saga's state followed by its timeline, abridged here for read
              {"timestamp":"...","type":"STEP_COMPENSATED","stepIndex":2,"stepName":"ship"},
              {"timestamp":"...","type":"STEP_COMPENSATED","stepIndex":1,"stepName":"reserve"},
              {"timestamp":"...","type":"STEP_COMPENSATED","stepIndex":0,"stepName":"charge"},
-             {"timestamp":"...","type":"SAGA_COMPENSATED","resultingStatus":"COMPENSATED"}]}
+             {"timestamp":"...","type":"SAGA_COMPENSATED","resultingStatus":"COMPENSATED"}],
+ "truncated":false}
 ```
 
 This record is what lets another server pick up a saga whose coordinator died mid-flight and finish
 it. A step interrupted between running and being recorded runs again on recovery, which is why steps
 must be idempotent. The timeline carries metadata and failure details only; raw step payloads are
-never returned.
+never returned. A history longer than the server's bound (default 1,000 events, configurable via
+`scalar.db.saga.server.detail.max_timeline_events`) is cut to the newest events, and
+`"truncated":true` marks the cut.
 
 ### Start a saga without waiting for it to finish
 

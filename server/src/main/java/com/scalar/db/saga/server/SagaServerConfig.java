@@ -134,6 +134,19 @@ import org.jspecify.annotations.Nullable;
  *       trades shutdown latency for reclaim latency on the next boot
  * </ul>
  *
+ * <h2>Saga detail reads ({@code detail.*})</h2>
+ *
+ * <ul>
+ *   <li>{@code detail.max_timeline_events} — maximum timeline events one {@code getSagaDetail} read
+ *       returns (default {@value #DEFAULT_DETAIL_MAX_TIMELINE_EVENTS}). A longer history is cut to
+ *       the newest events and the response is flagged {@code truncated}; the full history remains
+ *       in the store. This bound, together with the reader's cap of 1024 chars on each entry's
+ *       detail text, keeps a pathological saga's detail under a gRPC client's default 4 MB inbound
+ *       message cap, so the saga stays diagnosable. A window widened far beyond the default can
+ *       exceed that cap again; the oversized detail still arrives over REST, which has no
+ *       equivalent limit, but not through the Java client SDK
+ * </ul>
+ *
  * <h2>Crash recovery ({@code recovery.*})</h2>
  *
  * <p>Every replica scans for sagas abandoned by a crashed instance and resumes them. Defaults come
@@ -309,6 +322,9 @@ public final class SagaServerConfig {
   static final String SHUTDOWN_MODE_KEY = SHUTDOWN_PREFIX + "mode";
   static final String SHUTDOWN_TIMEOUT_MILLIS_KEY = SHUTDOWN_PREFIX + "timeout_millis";
 
+  static final String DETAIL_PREFIX = SERVER_PREFIX + "detail.";
+  static final String DETAIL_MAX_TIMELINE_EVENTS_KEY = DETAIL_PREFIX + "max_timeline_events";
+
   static final String RECOVERY_PREFIX = SERVER_PREFIX + "recovery.";
   static final String RECOVERY_TIMEOUT_MILLIS_KEY = RECOVERY_PREFIX + "timeout_millis";
   static final String RECOVERY_INTERVAL_SECONDS_KEY = RECOVERY_PREFIX + "interval_seconds";
@@ -369,6 +385,14 @@ public final class SagaServerConfig {
   static final ShutdownMode DEFAULT_SHUTDOWN_MODE = DefaultSagaOrchestrator.DEFAULT_SHUTDOWN_MODE;
   static final long DEFAULT_SHUTDOWN_TIMEOUT_MILLIS =
       DefaultSagaOrchestrator.DEFAULT_SHUTDOWN_TIMEOUT_MILLIS;
+  // Deliberately bounded here even though the embedded engine defaults to unbounded: the daemon
+  // serves the detail over a network, where a pathological timeline exceeds the gRPC client's
+  // default 4 MB inbound cap. 1000 events covers every realistic saga (a 100-step saga that fully
+  // compensated and was recovered a few times stays under ~500). The byte estimate needs the
+  // reader's per-entry cap as well; each entry's detail text is cut at 1024 chars on read (step
+  // failure messages are stored verbatim, bounded only by store.max_event_payload_bytes), so 1000
+  // capped entries stay around 1.5 MB on the wire.
+  static final int DEFAULT_DETAIL_MAX_TIMELINE_EVENTS = 1000;
   static final String DEFAULT_SECURITY_PROVIDER =
       "noop"; // no authentication (see NoopSecurityProvider)
   static final boolean DEFAULT_INSECURE_MODE_ENABLED = false; // must be enabled to run noop exposed
@@ -409,6 +433,7 @@ public final class SagaServerConfig {
           SYNC_MAX_WAIT_MILLIS_KEY,
           SHUTDOWN_MODE_KEY,
           SHUTDOWN_TIMEOUT_MILLIS_KEY,
+          DETAIL_MAX_TIMELINE_EVENTS_KEY,
           RECOVERY_TIMEOUT_MILLIS_KEY,
           RECOVERY_INTERVAL_SECONDS_KEY,
           RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY,
@@ -552,6 +577,7 @@ public final class SagaServerConfig {
   private final long syncMaxWaitMillis;
   private final ShutdownMode shutdownMode;
   private final long shutdownTimeoutMillis;
+  private final int detailMaxTimelineEvents;
   private final RecoveryConfig recoveryConfig;
   private final RetentionConfig retentionConfig;
   private final String securityProvider;
@@ -651,6 +677,12 @@ public final class SagaServerConfig {
             SHUTDOWN_TIMEOUT_MILLIS_KEY,
             DEFAULT_SHUTDOWN_TIMEOUT_MILLIS,
             0L);
+    this.detailMaxTimelineEvents =
+        parseBoundedInt(
+            resolved.getProperty(DETAIL_MAX_TIMELINE_EVENTS_KEY),
+            DETAIL_MAX_TIMELINE_EVENTS_KEY,
+            DEFAULT_DETAIL_MAX_TIMELINE_EVENTS,
+            1);
     this.recoveryConfig = parseRecoveryConfig(resolved);
     this.retentionConfig = parseRetentionConfig(resolved);
     this.securityProvider = parseSecurityProvider(resolved.getProperty(SECURITY_PROVIDER_KEY));
@@ -686,9 +718,8 @@ public final class SagaServerConfig {
             MAX_START_REQUESTS_PER_MINUTE_KEY,
             DEFAULT_MAX_START_REQUESTS_PER_MINUTE,
             0);
-    String definitions = resolved.getProperty(DEFINITIONS_PATH_KEY);
     this.definitionsPath =
-        (definitions == null || definitions.isBlank()) ? null : Path.of(definitions.trim());
+        parseOptionalPath(resolved.getProperty(DEFINITIONS_PATH_KEY), DEFINITIONS_PATH_KEY);
     this.services = parseServices(resolved);
     this.properties = applyStoreDefaults(copyOf(resolved));
     this.grpcMaxInboundMessageBytes = parseGrpcMaxInboundMessageBytes(this.properties);
@@ -1301,6 +1332,16 @@ public final class SagaServerConfig {
   }
 
   /**
+   * Returns the maximum number of timeline events a single {@code getSagaDetail} read returns
+   * (default {@value #DEFAULT_DETAIL_MAX_TIMELINE_EVENTS}). When a saga's history is longer, the
+   * newest events are returned and the detail is flagged truncated; the full history remains in the
+   * store.
+   */
+  public int detailMaxTimelineEvents() {
+    return detailMaxTimelineEvents;
+  }
+
+  /**
    * Returns the crash-recovery configuration: how stale a saga must be to be reclaimed, how often
    * the scan runs, and how much work one pass may do.
    */
@@ -1467,19 +1508,9 @@ public final class SagaServerConfig {
           "Invalid value for '"
               + SHUTDOWN_MODE_KEY
               + "' "
-              + redacted(value)
+              + Redaction.redacted(value)
               + ". Valid modes: WAIT_CURRENT_STEP, WAIT_ALL_SAGAS.");
     }
-  }
-
-  /**
-   * Describes a rejected value without echoing it. Secret references are resolved for every key
-   * before parsing, so a reference pasted onto the wrong key arrives at the parsers as the secret's
-   * plaintext; echoing it would write the secret to the log. The parsers also throw without the
-   * parse exception as cause for the same reason — its message embeds the raw input.
-   */
-  private static String redacted(String value) {
-    return "(value redacted, " + value.length() + " chars)";
   }
 
   /**
@@ -1495,7 +1526,10 @@ public final class SagaServerConfig {
       return Path.of(value.trim());
     } catch (InvalidPathException e) {
       throw new IllegalArgumentException(
-          "Invalid value for '" + key + "': not a valid file system path " + redacted(value));
+          "Invalid value for '"
+              + key
+              + "': not a valid file system path "
+              + Redaction.redacted(value));
     }
   }
 
@@ -1508,11 +1542,11 @@ public final class SagaServerConfig {
       port = Integer.parseInt(value.trim());
     } catch (NumberFormatException e) {
       throw new IllegalArgumentException(
-          "Invalid value for '" + key + "': not a number " + redacted(value));
+          "Invalid value for '" + key + "': not a number " + Redaction.redacted(value));
     }
     if (port < 0 || port > 65535) {
       throw new IllegalArgumentException(
-          "'" + key + "' must be between 0 and 65535 " + redacted(value));
+          "'" + key + "' must be between 0 and 65535 " + Redaction.redacted(value));
     }
     return port;
   }
@@ -1534,7 +1568,7 @@ public final class SagaServerConfig {
       return false;
     }
     throw new IllegalArgumentException(
-        "'" + key + "' must be 'true' or 'false' " + redacted(value));
+        "'" + key + "' must be 'true' or 'false' " + Redaction.redacted(value));
   }
 
   /**
@@ -1552,11 +1586,11 @@ public final class SagaServerConfig {
       parsed = Long.parseLong(value.trim());
     } catch (NumberFormatException e) {
       throw new IllegalArgumentException(
-          "Invalid value for '" + key + "': not a number " + redacted(value));
+          "Invalid value for '" + key + "': not a number " + Redaction.redacted(value));
     }
     if (parsed < minInclusive) {
       throw new IllegalArgumentException(
-          "'" + key + "' must be >= " + minInclusive + " " + redacted(value));
+          "'" + key + "' must be >= " + minInclusive + " " + Redaction.redacted(value));
     }
     return parsed;
   }
@@ -1580,7 +1614,7 @@ public final class SagaServerConfig {
               + "' must be <= "
               + Integer.MAX_VALUE
               + " "
-              + redacted(Objects.requireNonNull(value)));
+              + Redaction.redacted(Objects.requireNonNull(value)));
     }
     return (int) parsed;
   }
@@ -1626,7 +1660,11 @@ public final class SagaServerConfig {
       String trimmed = element.trim();
       if (trimmed.isEmpty()) {
         throw new IllegalArgumentException(
-            "'" + key + "' has an empty element " + redacted(value) + ". Remove the stray comma.");
+            "'"
+                + key
+                + "' has an empty element "
+                + Redaction.redacted(value)
+                + ". Remove the stray comma.");
       }
       elements.add(trimmed);
     }
@@ -1651,11 +1689,14 @@ public final class SagaServerConfig {
           "Invalid value for '"
               + STORE_MAX_EVENT_PAYLOAD_BYTES_KEY
               + "': not a number "
-              + redacted(value));
+              + Redaction.redacted(value));
     }
     if (bytes < 0) {
       throw new IllegalArgumentException(
-          "'" + STORE_MAX_EVENT_PAYLOAD_BYTES_KEY + "' must not be negative " + redacted(value));
+          "'"
+              + STORE_MAX_EVENT_PAYLOAD_BYTES_KEY
+              + "' must not be negative "
+              + Redaction.redacted(value));
     }
     return bytes == 0 ? Integer.MAX_VALUE : bytes;
   }

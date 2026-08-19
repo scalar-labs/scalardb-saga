@@ -229,126 +229,6 @@ class SagaServerConfigTest {
   }
 
   @Test
-  void load_secretFileReferenceOnNumericKey_throwsWithoutEchoingSecret(@TempDir Path dir)
-      throws IOException {
-    // The shipped template puts secret references and numeric keys a few lines apart, so a
-    // reference pasted onto the wrong key must fail without writing the resolved plaintext to
-    // the log; pod logs are readable far more widely than the secret itself. The message
-    // assertions are the behavior under test here: the key locates the bad line, the value
-    // stays out, and so does the NumberFormatException cause, whose own message embeds it.
-    Path secret = dir.resolve("api.token");
-    Files.writeString(secret, "s3cr3t-plaintext", StandardCharsets.UTF_8);
-    Properties props = new Properties();
-    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "${file:UTF-8:" + secret + "}");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining(SagaServerConfig.HTTP_PORT_KEY)
-        .hasMessageNotContaining("s3cr3t-plaintext")
-        .hasNoCause();
-  }
-
-  @ParameterizedTest
-  @ValueSource(
-      strings = {
-        SagaServerConfig.HTTP_PORT_KEY,
-        SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY,
-        SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY,
-        SagaServerConfig.SHUTDOWN_MODE_KEY,
-        SagaServerConfig.INSECURE_MODE_ENABLED_KEY
-      })
-  void load_unparseableValue_throwsNamingKeyWithoutEchoingValue(String key) {
-    // One key per parser family (port, bounded long, payload bytes, enum, boolean): every parse
-    // error names the key and never echoes the value, which may be a resolved secret.
-    Properties props = new Properties();
-    props.setProperty(key, "swordfish-like-a-secret");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining(key)
-        .hasMessageNotContaining("swordfish")
-        .hasNoCause();
-  }
-
-  @Test
-  void load_outOfRangeNumericPort_throwsWithoutEchoingValue() {
-    // A purely numeric secret parses successfully, so the semantic branches must redact too: the
-    // range check used to print the parsed number, which is the resolved value canonicalized.
-    Properties props = new Properties();
-    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "48291736");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining(SagaServerConfig.HTTP_PORT_KEY)
-        .hasMessageContaining("between 0 and 65535")
-        .hasMessageNotContaining("48291736");
-  }
-
-  @Test
-  void load_negativeNumericBoundedValue_throwsWithoutEchoingValue() {
-    Properties props = new Properties();
-    props.setProperty(SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY, "-7231946");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining(SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY)
-        .hasMessageContaining("must be >=")
-        .hasMessageNotContaining("7231946");
-  }
-
-  @Test
-  void load_intOverflowNumericValue_throwsWithoutEchoingValue() {
-    // Between int and long range: parses as a long, then fails the int narrowing check.
-    Properties props = new Properties();
-    props.setProperty(SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY, "99999999999");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining(SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY)
-        .hasMessageContaining("must be <=")
-        .hasMessageNotContaining("99999999999");
-  }
-
-  @Test
-  void load_negativeNumericPayloadBytes_throwsWithoutEchoingValue() {
-    Properties props = new Properties();
-    props.setProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY, "-424242");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY)
-        .hasMessageContaining("must not be negative")
-        .hasMessageNotContaining("424242");
-  }
-
-  @Test
-  void load_collidingPorts_throwsNamingKeysWithoutEchoingValue() {
-    // The collision message needs no number: echoing it would confirm that a numeric secret on
-    // one port key equals the other key's port.
-    Properties props = new Properties();
-    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "18080");
-    props.setProperty(SagaServerConfig.GRPC_PORT_KEY, "18080");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining(SagaServerConfig.HTTP_PORT_KEY)
-        .hasMessageContaining(SagaServerConfig.GRPC_PORT_KEY)
-        .hasMessageNotContaining("18080");
-  }
-
-  @Test
-  void load_minThreadsAboveMaxThreads_throwsNamingKeysWithoutEchoingValue() {
-    Properties props = new Properties();
-    props.setProperty(SagaServerConfig.HTTP_MIN_THREADS_KEY, "9999999");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining(SagaServerConfig.HTTP_MIN_THREADS_KEY)
-        .hasMessageContaining(SagaServerConfig.HTTP_MAX_THREADS_KEY)
-        .hasMessageNotContaining("9999999");
-  }
-
-  @Test
   void load_unsetTls_disabledWithNoPaths() {
     SagaServerConfig config = SagaServerConfig.load(new Properties());
 
@@ -488,6 +368,149 @@ class SagaServerConfigTest {
         .hasMessageContaining(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY)
         .hasMessageNotContaining("s3cr3t")
         .hasNoCause();
+  }
+
+  @Test
+  void load_secretFileReferenceOnNumericKey_throwsWithoutEchoingSecret(@TempDir Path dir)
+      throws IOException {
+    // The shipped template puts secret references and numeric keys a few lines apart, so a
+    // reference pasted onto the wrong key must fail without writing the resolved plaintext to
+    // the log; pod logs are readable far more widely than the secret itself. The message
+    // assertions are the behavior under test here: the key locates the bad line, the value
+    // stays out, and so does the NumberFormatException cause, whose own message embeds it.
+    Path secret = dir.resolve("api.token");
+    Files.writeString(secret, "s3cr3t-plaintext", StandardCharsets.UTF_8);
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "${file:UTF-8:" + secret + "}");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.HTTP_PORT_KEY)
+        .hasMessageNotContaining("s3cr3t-plaintext")
+        .hasNoCause();
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        SagaServerConfig.HTTP_PORT_KEY,
+        SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY,
+        SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY,
+        SagaServerConfig.SHUTDOWN_MODE_KEY,
+        SagaServerConfig.INSECURE_MODE_ENABLED_KEY
+      })
+  void load_unparseableValue_throwsNamingKeyWithoutEchoingValue(String key) {
+    // One key per parser family (port, bounded long, payload bytes, enum, boolean): every parse
+    // error names the key and never echoes the value, which may be a resolved secret.
+    Properties props = new Properties();
+    props.setProperty(key, "swordfish-like-a-secret");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(key)
+        .hasMessageNotContaining("swordfish")
+        .hasNoCause();
+  }
+
+  @Test
+  void load_outOfRangeNumericPort_throwsWithoutEchoingValue() {
+    // A purely numeric secret parses successfully, so the semantic branches must redact too: the
+    // range check used to print the parsed number, which is the resolved value canonicalized.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "48291736");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.HTTP_PORT_KEY)
+        .hasMessageContaining("between 0 and 65535")
+        .hasMessageNotContaining("48291736");
+  }
+
+  @Test
+  void load_negativeNumericBoundedValue_throwsWithoutEchoingValue() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY, "-7231946");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY)
+        .hasMessageContaining("must be >=")
+        .hasMessageNotContaining("7231946");
+  }
+
+  @Test
+  void load_intOverflowNumericValue_throwsWithoutEchoingValue() {
+    // Between int and long range: parses as a long, then fails the int narrowing check.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY, "99999999999");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY)
+        .hasMessageContaining("must be <=")
+        .hasMessageNotContaining("99999999999");
+  }
+
+  @Test
+  void load_negativeNumericPayloadBytes_throwsWithoutEchoingValue() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY, "-424242");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY)
+        .hasMessageContaining("must not be negative")
+        .hasMessageNotContaining("424242");
+  }
+
+  @Test
+  void load_definitionsPathGiven_isParsedTrimmed() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, "  /etc/saga/definitions  ");
+
+    assertThat(SagaServerConfig.load(props).definitionsPath())
+        .contains(Path.of("/etc/saga/definitions"));
+  }
+
+  @Test
+  void load_pathValueWithNulCharacter_throwsWithoutEchoingValue() {
+    // A NUL character makes Path.of throw InvalidPathException, whose message embeds the input —
+    // which is a resolved value — so the parse must remap it to the usual key-plus-redaction shape.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, "s3cr3t\0plaintext");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.DEFINITIONS_PATH_KEY)
+        .hasMessageNotContaining("s3cr3t")
+        .hasNoCause();
+  }
+
+  @Test
+  void load_collidingPorts_throwsNamingKeysWithoutEchoingValue() {
+    // The collision message needs no number: echoing it would confirm that a numeric secret on
+    // one port key equals the other key's port.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "18080");
+    props.setProperty(SagaServerConfig.GRPC_PORT_KEY, "18080");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.HTTP_PORT_KEY)
+        .hasMessageContaining(SagaServerConfig.GRPC_PORT_KEY)
+        .hasMessageNotContaining("18080");
+  }
+
+  @Test
+  void load_minThreadsAboveMaxThreads_throwsNamingKeysWithoutEchoingValue() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HTTP_MIN_THREADS_KEY, "9999999");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.HTTP_MIN_THREADS_KEY)
+        .hasMessageContaining(SagaServerConfig.HTTP_MAX_THREADS_KEY)
+        .hasMessageNotContaining("9999999");
   }
 
   @Test
@@ -1197,6 +1220,40 @@ class SagaServerConfigTest {
   void shutdownTimeoutMillis_negative_throwsIllegalArgumentException() {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.SHUTDOWN_TIMEOUT_MILLIS_KEY, "-1");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void detailMaxTimelineEvents_unset_usesDefault() {
+    assertThat(SagaServerConfig.load(new Properties()).detailMaxTimelineEvents())
+        .isEqualTo(SagaServerConfig.DEFAULT_DETAIL_MAX_TIMELINE_EVENTS);
+  }
+
+  @Test
+  void detailMaxTimelineEvents_configured_isParsed() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.DETAIL_MAX_TIMELINE_EVENTS_KEY, "250");
+
+    assertThat(SagaServerConfig.load(props).detailMaxTimelineEvents()).isEqualTo(250);
+  }
+
+  @Test
+  void detailMaxTimelineEvents_zero_throwsIllegalArgumentException() {
+    // 0 would make every detail read return an empty timeline; an operator who wants the endpoint
+    // gone should gate it with RBAC instead, so the config rejects the value.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.DETAIL_MAX_TIMELINE_EVENTS_KEY, "0");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void detailMaxTimelineEvents_notANumber_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.DETAIL_MAX_TIMELINE_EVENTS_KEY, "many");
 
     assertThatThrownBy(() -> SagaServerConfig.load(props))
         .isInstanceOf(IllegalArgumentException.class);

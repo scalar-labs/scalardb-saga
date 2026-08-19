@@ -16,7 +16,9 @@ Refer to `~/git/scalardb-saga-design/docs/scalardb-saga-design.md` for architect
 - Format apply: `./gradlew spotlessApply`
 - Check (test + format + static analysis): `./gradlew check`
 - Check for compiler warnings (hidden when cached): `./gradlew clean compileTestJava --no-build-cache`
+  - **Expected baseline: exactly 4 warnings** — `unknown enum constant ElementType.MODULE` twice each from `:api:compileJava` and `:client:compileJava`. The Java 8 modules carry jspecify annotations whose class files name the Java-9-only `MODULE` target, and javac has no switch to suppress the resulting note. They go away only if those modules ever leave Java 8. Any warning beyond these 4 is new and must be fixed.
 - **Always run all three in order (`spotlessApply` → `check` → `clean compileTestJava --no-build-cache`) before confirming code changes are OK**
+- Gradle's exit status is lost through a pipe (`./gradlew check | tail` reports tail's status, so `&&` chains continue past a failed build) — redirect to a file with `>|` (plain `>` is blocked by zsh noclobber) and test `$?` before committing
 - **Convention plugins** in `build-logic/` — shared build logic lives here, not in `subprojects {}` / `allprojects {}`
 - **Version catalog** in `gradle/libs.versions.toml` — single source of truth for dependency versions
 - **Configuration cache** enabled (`org.gradle.configuration-cache=true`)
@@ -46,6 +48,12 @@ Refer to `~/git/scalardb-saga-design/docs/scalardb-saga-design.md` for architect
 - Base package: `com.scalar.db.saga`
 - Public API classes use `Saga` prefix when the remainder is too generic to stand alone (e.g., `SagaManager`, `SagaContext`, `SagaStatus`). Domain-specific names that are already unambiguous within the package omit the prefix (e.g., `Step`, `StepResult`, `RetryPolicy`, `TccStep`).
 - Internal classes use domain-specific names without prefix (e.g., `CompensationManager`)
+
+## Error codes
+
+- `SagaErrorCode` (api) is the single wire vocabulary. Everything in it freezes at first release: code numbers, the USER_ERROR sub-ranges (`10Nxx` ↔ HTTP status family), and `WIRE_DOMAIN` (clients match it verbatim); metadata schemas may gain keys after release but never lose or rename one (clients drop unknown keys)
+- Adding a code: register it in `ExceptionRegistry` and add a row to the golden-table tests in both `GrpcErrorMapperTest` and `ErrorMapperTest` — the registry round-trip and sub-range guard tests fail the build otherwise
+- Every wire-facing error carries a code: gRPC interceptor refusals compose through `GrpcErrorMapper.close`, and REST's unmatched-route 404 goes through `ErrorMapper`'s `NotFoundResponse` handler — never close a call or write an error body outside the two mappers
 
 ## Design Principles
 
@@ -118,7 +126,8 @@ See [server/docker/README.md](server/docker/README.md) for running it.
   - `image-arm64-native-test` — the same boot under QEMU on `linux/arm64`, asserting the `aarch_64` epoll native loads; only `linux-x86_64` arrives transitively, so nothing else catches a dropped classifier
   - Both smoke jobs boot from the shared fixture in `.github/smoke/`
 - **Release** (`release.yml`, on `v<major>.<minor>.<patch>` tags, with or without a pre-release suffix) — asserts the tag matches `gradle.properties` and that the tagged commit is on the release branch its version names, then publishes to Maven Central, pushes the multi-arch image, signs it, and creates the GitHub release
-- **Dependabot** (`.github/dependabot.yml`) — gradle (incl. the version catalog), github-actions, and the Dockerfile base-image digest
+- **Dependabot** (`.github/dependabot.yml`) — gradle (incl. the version catalog), github-actions, and the Dockerfile base-image digest. Gradle and docker target `main` only; release lines receive those bumps as Auto-PR backports. Only github-actions has per-release-branch `target-branch` entries (workflow files drift between lines).
+- **Auto-PR** (`.github/workflows/auto-pr.yml`) — on merge into `main` or a version branch, opens cherry-pick backport PRs on every line named by a family-shared "ScalarDB <version>" GitHub project attached to the merged PR (projects are shared across the ScalarDB family; consumers scope by repository) (shared `scalar-labs/actions` reusable workflow; conflicting cherry-picks become draft PRs with instructions)
   - Dependabot resolves against Maven Central only: it reads repositories from the root build file and root settings, never from `build-logic`'s own block. The `repositories {}` block in `build.gradle.kts` is therefore load-bearing despite resolving nothing at build time — it is what makes the portal-only Error Prone, NullAway, SpotBugs, and license-report plugins visible. Deleting it freezes them silently.
   - Every `[versions]` key needs a `[libraries]` entry pointing at it with `version.ref`, even one nothing resolves (see `junit-jupiter`). Dependabot reads only `[libraries]` and `[plugins]`; a version consumed solely as `libs.versions.<name>.get()` interpolation is one it cannot map to a module, so it never bumps it. Consume plugin coordinates in `build-logic` through catalog accessors, not interpolated strings.
 

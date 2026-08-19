@@ -3,6 +3,7 @@ package com.scalar.db.saga.server;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.net.http.HttpResponse;
@@ -112,7 +113,7 @@ class SagaRestApiIntegrationTest extends ServerIntegrationTestSupport {
   }
 
   @Test
-  void startWithClientSuppliedIdTwice_returns409WithExisting() throws Exception {
+  void startWithClientSuppliedIdTwice_returns409WithSagaIdInMetadata() throws Exception {
     String body = "{\"sagaName\":\"" + SAGA_NAME + "\"}";
 
     HttpResponse<String> first = put("/sagas/order-1", body);
@@ -121,41 +122,48 @@ class SagaRestApiIntegrationTest extends ServerIntegrationTestSupport {
     HttpResponse<String> second = put("/sagas/order-1", body);
     assertThat(second.statusCode()).isEqualTo(409);
     JsonNode conflict = MAPPER.readTree(second.body());
-    assertThat(conflict.get("error").asText()).isEqualTo("SAGA_ALREADY_EXISTS");
+    assertThat(conflict.get("errorCode").asText())
+        .isEqualTo(SagaErrorCode.SAGA_ALREADY_EXISTS.code());
     assertThat(conflict.get("message").asText()).isNotBlank();
-    assertThat(conflict.get("sagaId").asText()).isEqualTo("order-1");
-    assertThat(conflict.get("existing").get("sagaId").asText()).isEqualTo("order-1");
+    assertThat(conflict.get("metadata").get("saga_id").asText()).isEqualTo("order-1");
   }
 
   @Test
   void getUnknownSaga_returns404() throws Exception {
     HttpResponse<String> get = get("/sagas/does-not-exist");
     assertThat(get.statusCode()).isEqualTo(404);
-    assertThat(MAPPER.readTree(get.body()).get("error").asText()).isEqualTo("SAGA_NOT_FOUND");
+    assertThat(MAPPER.readTree(get.body()).get("errorCode").asText())
+        .isEqualTo(SagaErrorCode.SAGA_NOT_FOUND.code());
   }
 
   @Test
   void putWithInvalidSagaId_returns400() throws Exception {
-    // A client-supplied id outside [a-zA-Z0-9._-]{1,128} is a client error (400), not a 500.
+    // A client-supplied id outside [a-zA-Z0-9._-]{1,128} is a client error (400), not a 500. The
+    // request itself parsed fine and a value inside it was rejected, so this is INVALID_ARGUMENT —
+    // contrast postWithoutSagaName_returns400 below, where the body is missing a required field and
+    // the code is INVALID_REQUEST.
     HttpResponse<String> put =
         put("/sagas/" + "a".repeat(129), "{\"sagaName\":\"" + SAGA_NAME + "\"}");
 
     assertThat(put.statusCode()).isEqualTo(400);
-    assertThat(MAPPER.readTree(put.body()).get("error").asText()).isEqualTo("BAD_REQUEST");
+    assertThat(MAPPER.readTree(put.body()).get("errorCode").asText())
+        .isEqualTo(SagaErrorCode.INVALID_ARGUMENT.code());
   }
 
   @Test
   void postWithoutSagaName_returns400() throws Exception {
     HttpResponse<String> post = post("/sagas", "{}");
     assertThat(post.statusCode()).isEqualTo(400);
-    assertThat(MAPPER.readTree(post.body()).get("error").asText()).isEqualTo("BAD_REQUEST");
+    assertThat(MAPPER.readTree(post.body()).get("errorCode").asText())
+        .isEqualTo(SagaErrorCode.INVALID_REQUEST.code());
   }
 
   @Test
   void postWithMalformedBody_returns400() throws Exception {
     HttpResponse<String> post = post("/sagas", "not-json");
     assertThat(post.statusCode()).isEqualTo(400);
-    assertThat(MAPPER.readTree(post.body()).get("error").asText()).isEqualTo("BAD_REQUEST");
+    assertThat(MAPPER.readTree(post.body()).get("errorCode").asText())
+        .isEqualTo(SagaErrorCode.INVALID_REQUEST.code());
   }
 
   @Test
@@ -163,7 +171,8 @@ class SagaRestApiIntegrationTest extends ServerIntegrationTestSupport {
     HttpResponse<String> post =
         post("/sagas?async=1", "{\"sagaName\":\"" + SAGA_NAME + "\",\"input\":{}}");
     assertThat(post.statusCode()).isEqualTo(400);
-    assertThat(MAPPER.readTree(post.body()).get("error").asText()).isEqualTo("BAD_REQUEST");
+    assertThat(MAPPER.readTree(post.body()).get("errorCode").asText())
+        .isEqualTo(SagaErrorCode.INVALID_REQUEST.code());
   }
 
   @Test

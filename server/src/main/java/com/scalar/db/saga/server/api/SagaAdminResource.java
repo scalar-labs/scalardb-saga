@@ -6,6 +6,7 @@ import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.engine.OperatorContext;
+import com.scalar.db.saga.exception.SagaInvalidRequestException;
 import com.scalar.db.saga.server.security.SagaIdentity;
 import com.scalar.db.saga.server.security.SagaOperation;
 import com.scalar.db.saga.server.security.SagaSecurityHandler;
@@ -156,11 +157,11 @@ public final class SagaAdminResource {
     try {
       request = ctx.bodyAsClass(type);
     } catch (Exception e) {
-      throw new InvalidRequestException("malformed request body");
+      throw new SagaInvalidRequestException("malformed request body");
     }
     // A body of the JSON null literal deserializes to null without throwing; reject it cleanly.
     if (request == null) {
-      throw new InvalidRequestException("request body must not be null");
+      throw new SagaInvalidRequestException("request body must not be null");
     }
     return request;
   }
@@ -194,7 +195,7 @@ public final class SagaAdminResource {
     try {
       return SagaStatus.valueOf(value);
     } catch (IllegalArgumentException e) {
-      throw new InvalidRequestException("'status' is not a valid saga status");
+      throw new SagaInvalidRequestException("'status' is not a valid saga status");
     }
   }
 
@@ -202,7 +203,7 @@ public final class SagaAdminResource {
     try {
       return Integer.parseInt(value);
     } catch (NumberFormatException e) {
-      throw new InvalidRequestException("'pageSize' is not an integer");
+      throw new SagaInvalidRequestException("'pageSize' is not an integer");
     }
   }
 }

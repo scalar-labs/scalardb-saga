@@ -266,14 +266,23 @@ abstract class ServerIntegrationTestSupport {
 
   /** Polls {@code GET /sagas/{id}} until the saga leaves a non-terminal state, then returns it. */
   protected final String pollUntilTerminal(String sagaId) throws Exception {
+    String lastBody = null;
     for (int i = 0; i < 50; i++) {
-      String status = MAPPER.readTree(get("/sagas/" + sagaId).body()).get("status").asText();
-      if (!status.equals("RUNNING") && !status.equals("COMPENSATING")) {
-        return status;
+      HttpResponse<String> response = get("/sagas/" + sagaId);
+      lastBody = response.body();
+      // A poll can transiently get an error body instead of a snapshot — e.g. a retryable 503
+      // while the asynchronous post-callback drive holds SQLite's single writer. An error body
+      // has no "status" field, so only a 200 is read; anything else means poll again.
+      if (response.statusCode() == 200) {
+        String status = MAPPER.readTree(response.body()).get("status").asText();
+        if (!status.equals("RUNNING") && !status.equals("COMPENSATING")) {
+          return status;
+        }
       }
       Thread.sleep(40);
     }
-    throw new AssertionError("Saga " + sagaId + " did not reach a terminal status in time");
+    throw new AssertionError(
+        "Saga " + sagaId + " did not reach a terminal status in time; last response: " + lastBody);
   }
 
   private HttpResponse<String> send(HttpRequest request) throws Exception {

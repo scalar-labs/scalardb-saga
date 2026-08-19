@@ -76,12 +76,8 @@ final class StepInstantiator {
     // registered transport endpoint. The SAGA/TCC phase set was already validated against the
     // saga's mode at definition build time, so the adapter is selected purely by expectedType.
     if (!httpEndpointRegistry.contains(service)) {
-      throw new SagaDefinitionException(
-          "Declarative service step '"
-              + name
-              + "' references unregistered service '"
-              + service
-              + "'");
+      throw SagaDefinitionException.declarativeStepInvalid(
+          name, "references unregistered HTTP endpoint '" + service + "'");
     }
     Object resolved =
         expectedType == TccStep.class
@@ -90,14 +86,13 @@ final class StepInstantiator {
     if (expectedType.isInstance(resolved)) {
       return expectedType.cast(resolved);
     }
-    throw new SagaDefinitionException(
-        "Declarative service step '"
-            + name
-            + "' (service '"
+    throw SagaDefinitionException.declarativeStepInvalid(
+        name,
+        "service '"
             + service
-            + "') does not produce "
+            + "' does not produce "
             + expectedType.getName()
-            + ". Found: "
+            + "; found "
             + resolved.getClass().getName());
   }
 
@@ -107,14 +102,11 @@ final class StepInstantiator {
     if (expectedType.isInstance(resolved)) {
       return expectedType.cast(resolved);
     }
-    throw new SagaDefinitionException(
-        "Step '"
-            + stepDef.getName()
-            + "' (class "
-            + stepDef.getStepClass()
-            + ") does not implement "
+    throw SagaDefinitionException.stepClassInvalid(
+        stepDef.getStepClass(),
+        "does not implement "
             + expectedType.getName()
-            + ". Found: "
+            + "; found "
             + resolved.getClass().getName());
   }
 }
