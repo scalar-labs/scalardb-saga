@@ -72,8 +72,11 @@ final class GrpcClientSupport {
     if (useTls) {
       if (!alpnAvailable()) {
         throw new IllegalStateException(
-            "TLS requested but ALPN is unavailable on this JRE. On Java 8, use 8u252+ or add "
-                + "netty-tcnative-boringssl-static; otherwise use plaintext (in-cluster).");
+            "TLS requested but neither the JRE nor a loaded tcnative provides ALPN. On Java 8, use"
+                + " 8u252+; the default grpc-netty-shaded transport already bundles tcnative, so"
+                + " this firing there means its native library failed to load on this platform."
+                + " With plain grpc-netty, add netty-tcnative-boringssl-static; otherwise use"
+                + " plaintext (in-cluster).");
       }
       channelBuilder =
           trustCaCertPath == null
@@ -313,24 +316,34 @@ final class GrpcClientSupport {
   }
 
   private static boolean alpnAvailable() {
-    // SSLEngine.getApplicationProtocol exists from Java 9 and was backported to 8u252; a bundled
-    // tcnative provides ALPN through Netty's OpenSSL engine even where the JDK does not. Checking
-    // both makes the failure message's own advice sufficient: following either branch of it (use
-    // 8u252+, or add netty-tcnative-boringssl-static) satisfies this guard.
+    // SSLEngine.getApplicationProtocol exists from Java 9 and was backported to 8u252; a loaded
+    // tcnative provides ALPN through Netty's OpenSSL engine even where the JDK does not.
     try {
       SSLEngine.class.getMethod("getApplicationProtocol");
       return true;
     } catch (NoSuchMethodException e) {
-      // Fall through to the tcnative check.
+      return tcnativeAvailable();
     }
-    try {
-      // Reflective like the check above: Netty is a runtime dependency of this module, not a
-      // compile-time one, and this probe must not change that.
-      Class<?> openSsl = Class.forName("io.netty.handler.ssl.OpenSsl");
-      return (Boolean) openSsl.getMethod("isAvailable").invoke(null);
-    } catch (ReflectiveOperationException | LinkageError e) {
-      // No Netty on the classpath at all; without it there is no Netty TLS either way.
-      return false;
+  }
+
+  /**
+   * Probes Netty's OpenSSL bridge for a loaded tcnative. The shaded name comes first because it is
+   * the SDK's shipped transport: grpc-netty-shaded relocates every Netty class, so the unshaded
+   * name is never present there. The unshaded name covers an embedder who swapped in plain
+   * grpc-netty. Reflective because Netty is a runtime dependency of this module, not a compile-time
+   * one, and this probe must not change that. Visible for testing.
+   */
+  static boolean tcnativeAvailable() {
+    for (String name :
+        new String[] {
+          "io.grpc.netty.shaded.io.netty.handler.ssl.OpenSsl", "io.netty.handler.ssl.OpenSsl"
+        }) {
+      try {
+        return (Boolean) Class.forName(name).getMethod("isAvailable").invoke(null);
+      } catch (ReflectiveOperationException | LinkageError e) {
+        // This Netty flavor is not on the classpath; try the next one.
+      }
     }
+    return false;
   }
 }

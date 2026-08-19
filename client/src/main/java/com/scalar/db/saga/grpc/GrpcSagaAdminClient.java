@@ -277,8 +277,8 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
      * Enables TLS — against the daemon's native TLS ({@code scalar.db.saga.server.tls.enabled}) or
      * a TLS-terminating mesh/proxy in front of it. The server certificate is validated against the
      * JVM's default trust store unless {@link #trustCaCertificate(Path)} narrows it. {@link
-     * #build()} fails fast if the JRE lacks ALPN (on Java 8, use 8u252+ or add {@code
-     * netty-tcnative-boringssl-static}).
+     * #build()} fails fast if neither the JRE nor a loaded tcnative provides ALPN (on Java 8, use
+     * 8u252+; the default grpc-netty-shaded transport bundles tcnative).
      */
     public Builder useTransportSecurity() {
       this.useTls = true;

@@ -61,7 +61,9 @@ import org.jspecify.annotations.Nullable;
  *         .build();
  * }</pre>
  *
- * <p>On Java 8, TLS needs ALPN: use 8u252 or later, or add {@code netty-tcnative-boringssl-static}.
+ * <p>On Java 8, TLS needs ALPN: use 8u252 or later. The SDK's default transport (grpc-netty-shaded)
+ * also bundles tcnative, which provides ALPN on older JREs; an embedder who swaps in plain
+ * grpc-netty needs {@code netty-tcnative-boringssl-static} instead.
  */
 @ThreadSafe
 public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
@@ -570,8 +572,8 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
      * Enables TLS — against the daemon's native TLS ({@code scalar.db.saga.server.tls.enabled}) or
      * a TLS-terminating mesh/proxy in front of it. The server certificate is validated against the
      * JVM's default trust store unless {@link #trustCaCertificate(Path)} narrows it. {@link
-     * #build()} fails fast if the JRE lacks ALPN (on Java 8, use 8u252+ or add {@code
-     * netty-tcnative-boringssl-static}).
+     * #build()} fails fast if neither the JRE nor a loaded tcnative provides ALPN (on Java 8, use
+     * 8u252+; the default grpc-netty-shaded transport bundles tcnative).
      */
     public Builder useTransportSecurity() {
       this.useTls = true;

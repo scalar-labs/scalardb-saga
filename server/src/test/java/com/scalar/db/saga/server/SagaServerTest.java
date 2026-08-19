@@ -938,4 +938,40 @@ class SagaServerTest {
                       .contains(SagaServerConfig.CALLBACK_BASE_URL_KEY));
     }
   }
+
+  @Test
+  void start_tlsWithUnparseableCallbackBaseUrl_warnsAtStartup(@TempDir Path dir) throws Exception {
+    // Arrange — a base URL URI.create rejects (space in the authority). Nothing downstream parses
+    // the value, so this startup warning is the only diagnostic the operator gets. The warning
+    // must name the key and never echo the value: like every configured value it can be a
+    // mis-pasted secret.
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, tls.certChainPath().toString());
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, tls.privateKeyPath().toString());
+    props.setProperty(SagaServerConfig.CALLBACK_BASE_URL_KEY, "http://sv c:8080/s3cr3t-value");
+    props.setProperty(SagaServerConfig.CALLBACK_SECRET_KEY, "s3cr3t-key");
+
+    // Act
+    try (LogCapture logs = LogCapture.of(SagaServer.class);
+        SagaServer server =
+            new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class))
+                .start()) {
+      // Assert
+      assertThat(logs.events())
+          .anySatisfy(
+              event -> {
+                assertThat(event.getLevel()).isEqualTo(Level.WARN);
+                assertThat(event.getFormattedMessage())
+                    .contains(SagaServerConfig.CALLBACK_BASE_URL_KEY)
+                    .contains("not a parseable URI");
+              })
+          .noneSatisfy(event -> assertThat(event.getFormattedMessage()).contains("s3cr3t-value"));
+    }
+  }
 }

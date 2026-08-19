@@ -593,7 +593,9 @@ public final class SagaServer implements AutoCloseable {
    * the first async step in production, not at startup. A warning rather than an error because the
    * callback URL may legitimately point at separate plaintext infrastructure (an internal ingress
    * that terminates TLS elsewhere); loopback stays quiet for the same local-dev reason as the other
-   * guards.
+   * guards. A base URL that does not parse as a URI draws a warning too: nothing downstream ever
+   * parses the value (the callback provider builds URLs by plain concatenation), so silence here
+   * would be silence everywhere.
    */
   private void warnIfCallbackBaseUrlIsPlaintextUnderTls() {
     if (!config.tlsEnabled() || config.callbackBaseUrl().isEmpty()) {
@@ -603,7 +605,14 @@ public final class SagaServer implements AutoCloseable {
     try {
       baseUrl = URI.create(config.callbackBaseUrl().get());
     } catch (IllegalArgumentException e) {
-      // Not parseable as a URI; the callback provider will surface that on its own terms.
+      // The value and the exception both stay out of the log: each embeds the raw value, which may
+      // be a mis-pasted resolved secret.
+      logger.warn(
+          "'{}' is not a parseable URI, so whether it uses plain http under '{}' could not be"
+              + " checked. An unparseable callback URL fails at the first async step either way;"
+              + " fix the value.",
+          SagaServerConfig.CALLBACK_BASE_URL_KEY,
+          SagaServerConfig.TLS_ENABLED_KEY);
       return;
     }
     String host = baseUrl.getHost();
