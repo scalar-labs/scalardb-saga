@@ -66,10 +66,6 @@ public class SagaRuntimeException extends RuntimeException {
   }
 
   /**
-   * The metadata attached to the error code, in schema-declared order. Always non-null; empty when
-   * the code has a schemaless (no-key) shape.
-   */
-  /**
    * Never {@code null}, unlike the {@link Throwable} contract: every constructor builds the message
    * from the code and metadata, and the wire mappers reuse it as the response message, so the
    * non-null return lets them do that without a check.
@@ -79,6 +75,10 @@ public class SagaRuntimeException extends RuntimeException {
     return Objects.requireNonNull(super.getMessage());
   }
 
+  /**
+   * The metadata attached to the error code, in schema-declared order. Always non-null; empty when
+   * the code has a schemaless (no-key) shape.
+   */
   public Map<String, String> getMetadata() {
     return metadata;
   }
