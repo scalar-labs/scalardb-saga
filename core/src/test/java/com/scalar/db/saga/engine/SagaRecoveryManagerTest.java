@@ -8,6 +8,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -25,6 +26,7 @@ import com.scalar.db.saga.store.SagaStore.Recoverables;
 import com.scalar.db.saga.store.SagaStore.ScanCursor;
 import com.scalar.db.saga.store.StatusEvent;
 import com.scalar.db.saga.store.StepEvent;
+import com.scalar.db.saga.store.SweepScatter;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -64,6 +66,9 @@ class SagaRecoveryManagerTest {
     config =
         new RecoveryConfig(60_000, 30, GRACE_PERIOD, 1000, 10, Clock.fixed(NOW, ZoneOffset.UTC));
     manager = new SagaRecoveryManager(store, engine, registry, OWNER_ID, config, scheduler);
+    // Both sweeps start from the owner's scattered cursor; without this stub the mock returns
+    // null and the sweeps end before scanning anything.
+    lenient().when(store.initialSweepCursor(OWNER_ID)).thenReturn(mock(ScanCursor.class));
     // Default: no overdue parked sagas — the recover() staleness-scan tests don't exercise pass 2.
     lenient()
         .when(store.findOverdueParkedSagas(any(), any()))
@@ -1113,14 +1118,20 @@ class SagaRecoveryManagerTest {
   class Lifecycle {
 
     @Test
-    void start_schedulesPeriodicRecovery() {
+    void start_schedulesImmediateFirstPassAndDePhasedPeriodicPasses() {
+      // Arrange — the periodic train is shifted by the owner's deterministic offset; the startup
+      // pass stays immediate so a restart recovers interrupted sagas right away.
+      long offset = SweepScatter.offsetSeconds(OWNER_ID, "recovery", 30);
+
       // Act
       manager.start();
 
       // Assert
+      assertThat(offset).isBetween(0L, 29L);
+      verify(scheduler).schedule(any(Runnable.class), eq(0L), eq(TimeUnit.SECONDS));
       verify(scheduler)
           .scheduleWithFixedDelay(
-              any(Runnable.class), eq(0L), eq(30L), eq(java.util.concurrent.TimeUnit.SECONDS));
+              any(Runnable.class), eq(30L + offset), eq(30L), eq(TimeUnit.SECONDS));
     }
 
     @Test
@@ -1150,6 +1161,357 @@ class SagaRecoveryManagerTest {
       // Assert
       verify(scheduler).shutdown();
       verify(scheduler).shutdownNow();
+    }
+  }
+
+  // =========================================================================
+  // recover() — success-counted budget, page isolation, cross-pass resume
+  // =========================================================================
+
+  @Nested
+  class ScatteredSweepBudget {
+
+    /** A manager whose per-sweep budget is {@code batchSize}, on the standard fixed clock. */
+    private SagaRecoveryManager managerWithBatchSize(int batchSize) {
+      RecoveryConfig config =
+          new RecoveryConfig(
+              60_000, 30, GRACE_PERIOD, batchSize, 10, Clock.fixed(NOW, ZoneOffset.UTC));
+      return new SagaRecoveryManager(store, engine, registry, OWNER_ID, config, scheduler);
+    }
+
+    private SagaStateSnapshot namedSnapshot(String sagaId) {
+      return new SagaStateSnapshot(
+          sagaId, SAGA_NAME, SagaStatus.RUNNING, OWNER_ID, DEF_VERSION, NOW.minusSeconds(300), NOW);
+    }
+
+    private void setupSuccessfulRecovery(SagaStateSnapshot saga) {
+      SagaDefinition def = definition();
+      ExecutionContext ctx = mock(ExecutionContext.class);
+      when(store.claimForRecovery(saga, OWNER_ID)).thenReturn(Optional.of(saga));
+      when(store.getEvents(saga.getSagaId())).thenReturn(List.of());
+      when(engine.replayEvents(saga, List.of())).thenReturn(ctx);
+      when(ctx.getCurrentState()).thenReturn(saga);
+      lenient().when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(def);
+    }
+
+    @Test
+    void recover_claimLost_budgetNotConsumedAndScanContinues() {
+      // Arrange — batch size 1: the lost race on page 1 must not spend the budget, so the sweep
+      // reaches page 2 and recovers its saga. The attempts-counted budget stopped after page 1.
+      SagaRecoveryManager smallManager = managerWithBatchSize(1);
+
+      SagaStateSnapshot lost = namedSnapshot("saga-lost");
+      SagaStateSnapshot won = namedSnapshot("saga-won");
+      ScanCursor cursor = mock(ScanCursor.class);
+      when(store.findRecoverable(any(), any()))
+          .thenReturn(new Recoverables(List.of(lost), cursor))
+          .thenReturn(new Recoverables(List.of(won), null));
+      when(store.claimForRecovery(lost, OWNER_ID)).thenReturn(Optional.empty());
+      setupSuccessfulRecovery(won);
+
+      // Act
+      smallManager.recover();
+
+      // Assert
+      verify(store, times(2)).findRecoverable(any(), any());
+      verify(engine).recover(any(), any(), any());
+    }
+
+    @Test
+    void recover_driveFailsAfterClaim_budgetConsumed() {
+      // Arrange — batch size 1: the claim committed, so the failed drive still spends the budget
+      // and the sweep must NOT continue to the next page (that would be a claim spree).
+      SagaRecoveryManager smallManager = managerWithBatchSize(1);
+
+      SagaStateSnapshot saga = namedSnapshot("saga-drive-fails");
+      ScanCursor cursor = mock(ScanCursor.class);
+      when(store.findRecoverable(any(), any())).thenReturn(new Recoverables(List.of(saga), cursor));
+      when(store.claimForRecovery(saga, OWNER_ID)).thenReturn(Optional.of(saga));
+      when(store.getEvents(saga.getSagaId())).thenThrow(new RuntimeException("store down"));
+
+      // Act
+      smallManager.recover();
+
+      // Assert — one page scanned, budget spent by the claimed-but-failed saga
+      verify(store, times(1)).findRecoverable(any(), any());
+    }
+
+    @Test
+    void recover_scanPageFails_skipsBucketAndParkedSweepStillRuns() {
+      // Arrange — the first page's scan throws (poison row); the sweep skips past it via
+      // advanceSweepCursor and continues, and the parked sweep still runs afterwards.
+      ScanCursor afterPoison = mock(ScanCursor.class);
+      when(store.findRecoverable(any(), any()))
+          .thenThrow(new RuntimeException("row cannot be deserialized"))
+          .thenReturn(new Recoverables(List.of(), null));
+      when(store.advanceSweepCursor(any())).thenReturn(afterPoison);
+
+      // Act
+      manager.recover();
+
+      // Assert
+      verify(store).advanceSweepCursor(any());
+      verify(store, times(2)).findRecoverable(any(), any());
+      verify(store).findOverdueParkedSagas(any(), any());
+    }
+
+    @Test
+    void recover_budgetStop_nextPassResumesAtSameCursor() {
+      // Arrange — batch size 1: pass 1 stops on budget holding the next cursor; pass 2 must
+      // resume there instead of restarting at the permutation's first bucket.
+      SagaRecoveryManager smallManager = managerWithBatchSize(1);
+
+      ScanCursor initial = mock(ScanCursor.class);
+      ScanCursor next = mock(ScanCursor.class);
+      when(store.initialSweepCursor(OWNER_ID)).thenReturn(initial);
+      SagaStateSnapshot saga = namedSnapshot("saga-budget");
+      when(store.findRecoverable(any(), eq(initial)))
+          .thenReturn(new Recoverables(List.of(saga), next));
+      when(store.findRecoverable(any(), eq(next))).thenReturn(new Recoverables(List.of(), null));
+      setupSuccessfulRecovery(saga);
+
+      // Act
+      smallManager.recover();
+      smallManager.recover();
+
+      // Assert — the initial cursor page was scanned once (pass 1), the resume cursor page once
+      // (pass 2)
+      verify(store).findRecoverable(any(), eq(initial));
+      verify(store).findRecoverable(any(), eq(next));
+    }
+
+    @Test
+    void recover_claimThrows_budgetConsumedConservatively() {
+      // Arrange — batch size 1: a claim that throws may have committed without confirmation, so
+      // it must spend the budget; the sweep must NOT continue claiming across the ring.
+      SagaRecoveryManager smallManager = managerWithBatchSize(1);
+
+      SagaStateSnapshot saga = namedSnapshot("saga-claim-throws");
+      ScanCursor cursor = mock(ScanCursor.class);
+      when(store.findRecoverable(any(), any())).thenReturn(new Recoverables(List.of(saga), cursor));
+      when(store.claimForRecovery(saga, OWNER_ID))
+          .thenThrow(new RuntimeException("commit status unknown and verification failed"));
+
+      // Act
+      smallManager.recover();
+
+      // Assert — one page scanned, the error spent the budget, no further scanning
+      verify(store, times(1)).findRecoverable(any(), any());
+      verify(store, never()).getEvents(any());
+    }
+
+    @Test
+    void recover_threeConsecutivePageScansFail_sweepStopsAsStoreUnavailable() {
+      // Arrange — every staleness page scan fails (store outage, not a poison row)
+      when(store.findRecoverable(any(), any())).thenThrow(new RuntimeException("store down"));
+      when(store.advanceSweepCursor(any())).thenReturn(mock(ScanCursor.class));
+
+      // Act
+      manager.recover();
+
+      // Assert — the sweep gives up after exactly three consecutive failures instead of failing
+      // once per bucket through the whole ring; the failing page is not advanced past (the next
+      // pass retries it), and the parked sweep still runs independently
+      verify(store, times(3)).findRecoverable(any(), any());
+      verify(store, times(2)).advanceSweepCursor(any());
+      verify(store).findOverdueParkedSagas(any(), any());
+    }
+
+    @Test
+    void recover_pageFailuresInterleavedWithSuccesses_sweepCompletesTheRevolution() {
+      // Arrange — two failures, a success, two failures, then the final page: the consecutive
+      // counter resets on each success, so the sweep never trips the store-unavailable stop
+      ScanCursor c = mock(ScanCursor.class);
+      when(store.findRecoverable(any(), any()))
+          .thenThrow(new RuntimeException("blip 1"))
+          .thenThrow(new RuntimeException("blip 2"))
+          .thenReturn(new Recoverables(List.of(), c))
+          .thenThrow(new RuntimeException("blip 3"))
+          .thenThrow(new RuntimeException("blip 4"))
+          .thenReturn(new Recoverables(List.of(), null));
+      when(store.advanceSweepCursor(any())).thenReturn(mock(ScanCursor.class));
+
+      // Act
+      manager.recover();
+
+      // Assert — all six pages were attempted; the revolution completed
+      verify(store, times(6)).findRecoverable(any(), any());
+      verify(store, times(4)).advanceSweepCursor(any());
+    }
+
+    @Test
+    void recover_slowTaskInFirstBucket_laterBucketAndParkedSweepProceedConcurrently()
+        throws Exception {
+      // Arrange — the first bucket's saga blocks inside its task; the pass must still scan and
+      // process the second bucket AND the parked sweep while it blocks (rounds submit everything
+      // before awaiting; a per-page barrier would deadlock the latches below).
+      java.util.concurrent.CountDownLatch releaseSlowTask =
+          new java.util.concurrent.CountDownLatch(1);
+      java.util.concurrent.CountDownLatch fastSagaProcessed =
+          new java.util.concurrent.CountDownLatch(1);
+      java.util.concurrent.CountDownLatch parkedProcessed =
+          new java.util.concurrent.CountDownLatch(1);
+      SagaStateSnapshot slow = namedSnapshot("saga-slow");
+      SagaStateSnapshot fast = namedSnapshot("saga-fast");
+      ScanCursor cursor = mock(ScanCursor.class);
+      when(store.findRecoverable(any(), any()))
+          .thenReturn(new Recoverables(List.of(slow), cursor))
+          .thenReturn(new Recoverables(List.of(fast), null));
+      when(store.claimForRecovery(slow, OWNER_ID))
+          .thenAnswer(
+              invocation -> {
+                if (!releaseSlowTask.await(5, TimeUnit.SECONDS)) {
+                  throw new IllegalStateException("slow task was never released");
+                }
+                return Optional.empty();
+              });
+      when(store.claimForRecovery(fast, OWNER_ID))
+          .thenAnswer(
+              invocation -> {
+                fastSagaProcessed.countDown();
+                return Optional.empty();
+              });
+      when(store.findOverdueParkedSagas(any(), any()))
+          .thenReturn(new OverdueParked(List.of("saga-parked"), null));
+      when(store.getStateSnapshot("saga-parked"))
+          .thenAnswer(
+              invocation -> {
+                parkedProcessed.countDown();
+                return Optional.empty();
+              });
+
+      // Act — run the pass on another thread; it cannot finish until the slow task is released
+      java.util.concurrent.ExecutorService runner =
+          java.util.concurrent.Executors.newSingleThreadExecutor();
+      try {
+        java.util.concurrent.Future<?> pass = runner.submit(manager::recover);
+
+        // Assert — while the first bucket's task is blocked, the later bucket and the parked
+        // sweep both make progress
+        assertThat(fastSagaProcessed.await(5, TimeUnit.SECONDS)).isTrue();
+        assertThat(parkedProcessed.await(5, TimeUnit.SECONDS)).isTrue();
+        releaseSlowTask.countDown();
+        pass.get(5, TimeUnit.SECONDS);
+      } finally {
+        releaseSlowTask.countDown();
+        runner.shutdownNow();
+      }
+    }
+
+    @Test
+    void recover_interruptedMidPass_cancelsInFlightTasksAndRestoresInterruptFlag()
+        throws Exception {
+      // Arrange — the pass's single task blocks inside its claim; interrupting the pass thread
+      // must cancel that task (interrupting it) and charge its outcome. The task observes the
+      // interrupt at its next interruptible point, which may be after recover() has returned —
+      // cancellation is requested, not joined.
+      java.util.concurrent.CountDownLatch claimStarted = new java.util.concurrent.CountDownLatch(1);
+      java.util.concurrent.CountDownLatch taskObservedInterrupt =
+          new java.util.concurrent.CountDownLatch(1);
+      SagaStateSnapshot saga = namedSnapshot("saga-cancelled-with-pass");
+      when(store.findRecoverable(any(), any())).thenReturn(new Recoverables(List.of(saga), null));
+      when(store.claimForRecovery(saga, OWNER_ID))
+          .thenAnswer(
+              invocation -> {
+                claimStarted.countDown();
+                try {
+                  new java.util.concurrent.CountDownLatch(1).await(); // blocks until interrupted
+                } catch (InterruptedException e) {
+                  taskObservedInterrupt.countDown();
+                }
+                return Optional.empty();
+              });
+      java.util.concurrent.atomic.AtomicBoolean interruptFlagRestored =
+          new java.util.concurrent.atomic.AtomicBoolean();
+
+      // Act — run the pass, interrupt it mid-await
+      Thread passThread =
+          new Thread(
+              () -> {
+                manager.recover();
+                interruptFlagRestored.set(Thread.currentThread().isInterrupted());
+              });
+      passThread.start();
+      assertThat(claimStarted.await(5, TimeUnit.SECONDS)).isTrue();
+      passThread.interrupt();
+      passThread.join(5_000);
+
+      // Assert — the pass returned, its task was interrupted (not abandoned), and the pass
+      // thread's interrupt flag was restored
+      assertThat(passThread.isAlive()).isFalse();
+      assertThat(taskObservedInterrupt.await(5, TimeUnit.SECONDS)).isTrue();
+      assertThat(interruptFlagRestored).isTrue();
+    }
+
+    @Test
+    void recover_interruptedWhileBlockedBehindInFlightPass_returnsWithoutRunning()
+        throws Exception {
+      // Arrange — thread A holds the pass lock (its task blocks on a latch); thread B calls
+      // recover(), waits on the lock, and is interrupted: B must return without running a pass.
+      java.util.concurrent.CountDownLatch passAStarted = new java.util.concurrent.CountDownLatch(1);
+      java.util.concurrent.CountDownLatch releasePassA = new java.util.concurrent.CountDownLatch(1);
+      SagaStateSnapshot saga = namedSnapshot("saga-holding-the-lock");
+      when(store.findRecoverable(any(), any())).thenReturn(new Recoverables(List.of(saga), null));
+      when(store.claimForRecovery(saga, OWNER_ID))
+          .thenAnswer(
+              invocation -> {
+                passAStarted.countDown();
+                if (!releasePassA.await(5, TimeUnit.SECONDS)) {
+                  throw new IllegalStateException("pass A was never released");
+                }
+                return Optional.empty();
+              });
+
+      java.util.concurrent.ExecutorService runner =
+          java.util.concurrent.Executors.newFixedThreadPool(2);
+      try {
+        // Act — A enters the pass and blocks; B is interrupted while waiting for the lock
+        java.util.concurrent.Future<?> passA = runner.submit(manager::recover);
+        assertThat(passAStarted.await(5, TimeUnit.SECONDS)).isTrue();
+        java.util.concurrent.atomic.AtomicBoolean interruptedFlagSeen =
+            new java.util.concurrent.atomic.AtomicBoolean();
+        Thread passBThread =
+            new Thread(
+                () -> {
+                  manager.recover();
+                  interruptedFlagSeen.set(Thread.currentThread().isInterrupted());
+                });
+        passBThread.start();
+        passBThread.interrupt();
+        passBThread.join(5_000);
+
+        // Assert — B finished promptly (without waiting for A) and re-set the interrupt flag
+        assertThat(passBThread.isAlive()).isFalse();
+        assertThat(interruptedFlagSeen).isTrue();
+        releasePassA.countDown();
+        passA.get(5, TimeUnit.SECONDS);
+
+        // Only pass A ever scanned; B ran nothing
+        verify(store, times(1)).findRecoverable(any(), any());
+      } finally {
+        releasePassA.countDown();
+        runner.shutdownNow();
+      }
+    }
+
+    @Test
+    void recover_parkedRaceLost_budgetNotConsumedAndScanContinues() {
+      // Arrange — batch size 1: the parked saga on page 1 was already resolved by a callback
+      // (lost race), so the parked sweep must continue to page 2.
+      SagaRecoveryManager smallManager = managerWithBatchSize(1);
+
+      when(store.findRecoverable(any(), any())).thenReturn(new Recoverables(List.of(), null));
+      ScanCursor cursor = mock(ScanCursor.class);
+      when(store.findOverdueParkedSagas(any(), any()))
+          .thenReturn(new OverdueParked(List.of("saga-resolved"), cursor))
+          .thenReturn(new OverdueParked(List.of(), null));
+      when(store.getStateSnapshot("saga-resolved")).thenReturn(Optional.empty());
+
+      // Act
+      smallManager.recover();
+
+      // Assert
+      verify(store, times(2)).findOverdueParkedSagas(any(), any());
     }
   }
 }

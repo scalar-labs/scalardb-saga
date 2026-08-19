@@ -1022,6 +1022,29 @@ class SagaServerConfigTest {
   }
 
   @Test
+  void ownerId_controlCharactersGiven_throwsWithoutEchoingTheValue() {
+    // The owner id is echoed in log lines; a CRLF in it would forge log entries, so it is
+    // rejected — and the error must not echo the value it rejects.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.OWNER_ID_KEY, "pod-7\nFORGED LOG LINE");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.OWNER_ID_KEY)
+        .satisfies(e -> assertThat(e.getMessage()).doesNotContain("FORGED"));
+  }
+
+  @Test
+  void ownerId_overlongValueGiven_throws() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.OWNER_ID_KEY, "x".repeat(129));
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.OWNER_ID_KEY);
+  }
+
+  @Test
   void recoveryConfig_unset_matchesEngineDefaults() {
     RecoveryConfig config = SagaServerConfig.load(new Properties()).recoveryConfig();
     RecoveryConfig defaults = RecoveryConfig.defaults();

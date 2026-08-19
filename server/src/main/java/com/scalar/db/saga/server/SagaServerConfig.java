@@ -41,7 +41,10 @@ import org.jspecify.annotations.Nullable;
  *       (default: a random UUID per process). Set it to something an operator can trace back to a
  *       process — e.g. {@code ${env:HOSTNAME}} for the pod name — so a stuck saga names the replica
  *       holding it. Two live instances must never share a value: the claim is what stops two
- *       replicas from driving the same saga
+ *       replicas from driving the same saga. The value also seeds the instance's recovery and
+ *       retention sweep scatter (bucket order and schedule offset), so a stable value gives stable
+ *       sweep phases across restarts. Must match {@code [a-zA-Z0-9._-]{1,128}} — it is stamped on
+ *       claimed rows and echoed in log lines
  *   <li>{@code definitions_path} — path to a JSON/YAML saga definition file or directory
  *   <li>{@code default_saga_timeout_millis} — a default saga timeout applied to a loaded definition
  *       that set none ({@code 0} = unbounded); {@code 0} (default) disables it. A definition's own
@@ -159,9 +162,10 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code recovery.interval_seconds} — how often the scan runs
  *   <li>{@code recovery.compensation_grace_period_seconds} — how long a saga may stay stuck with
  *       failing compensation before it is escalated for manual intervention
- *   <li>{@code recovery.batch_size} — cap on sagas recovered per pass. Keep it well above {@code
- *       scalar.db.saga.store.recovery_scan_limit} × the number of recoverable statuses, so one hot
- *       bucket cannot consume the whole budget
+ *   <li>{@code recovery.batch_size} — per-pass recovery work budget. Claims lost to another replica
+ *       do not count against it (failed attempts do), and a pass stopped by the cap resumes where
+ *       it left off next pass, so a small value never skips sagas — it only spreads recovery over
+ *       more passes
  *   <li>{@code recovery.max_concurrent_recoveries} — how many of that batch are recovered at once,
  *       bounding the database pressure of a single pass
  * </ul>
@@ -175,8 +179,9 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code retention.period_seconds} — how long a terminal saga is kept before it is purgeable
  *       (default 7 days). This is the window in which a saga's history can still be inspected
  *   <li>{@code retention.cleanup_interval_seconds} — how often the purge runs
- *   <li>{@code retention.batch_size} — cap on sagas purged per pass; it must keep up with the
- *       terminal-saga rate over one interval or the backlog grows
+ *   <li>{@code retention.batch_size} — cap on sagas actually purged per pass (deletes that turn out
+ *       to be no-ops because another replica already purged the saga do not count); it must keep up
+ *       with the terminal-saga rate over one interval or the backlog grows
  *   <li>{@code retention.max_concurrent_purges} — how many of that batch are purged at once
  * </ul>
  *
@@ -282,6 +287,11 @@ public final class SagaServerConfig {
   // resolveSecrets).
   static final String PREFIX = "scalar.db.saga.";
   static final String SERVER_PREFIX = PREFIX + "server.";
+
+  // Mirrors the store's saga-ID discipline: the owner id lands in state rows and log lines, so it
+  // gets the same character set and length bound.
+  private static final java.util.regex.Pattern OWNER_ID_PATTERN =
+      java.util.regex.Pattern.compile("[a-zA-Z0-9._-]{1,128}");
 
   static final String HOST_KEY = SERVER_PREFIX + "host";
   static final String OWNER_ID_KEY = SERVER_PREFIX + "owner_id";
@@ -1464,10 +1474,20 @@ public final class SagaServerConfig {
   /**
    * Returns the configured owner id, or a fresh random UUID when unset — the same default the
    * engine builder applies, restated here so the value is fixed once at load and every consumer
-   * sees one identity for the process.
+   * sees one identity for the process. A configured value is validated like a saga ID: the owner id
+   * is stamped on claimed rows and echoed in log lines, so control characters or unbounded length
+   * must not pass (the error deliberately does not echo the value).
    */
   private static String parseOwnerId(@Nullable String value) {
-    return (value == null || value.isBlank()) ? UUID.randomUUID().toString() : value.trim();
+    if (value == null || value.isBlank()) {
+      return UUID.randomUUID().toString();
+    }
+    String ownerId = value.trim();
+    if (!OWNER_ID_PATTERN.matcher(ownerId).matches()) {
+      throw new IllegalArgumentException(
+          "'" + OWNER_ID_KEY + "' must match " + OWNER_ID_PATTERN.pattern());
+    }
+    return ownerId;
   }
 
   /**
