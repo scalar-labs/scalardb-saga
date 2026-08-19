@@ -3,10 +3,12 @@ package com.scalar.db.saga.engine;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.store.SagaStore;
+import com.scalar.db.saga.store.SweepScatter;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -36,13 +38,20 @@ class SagaRetentionManager {
       Arrays.stream(SagaStatus.values()).filter(SagaStatus::isPurgeable).toList();
 
   private final SagaStore store;
+  private final String ownerId;
   private final RetentionConfig config;
   private final ScheduledExecutorService scheduler;
   private final ExecutorService purgeExecutor;
   private final Semaphore purgeSemaphore;
 
-  SagaRetentionManager(SagaStore store, RetentionConfig config) {
+  // Rotates the sweep's starting bucket across passes; see cleanup(). Only the single scheduler
+  // thread runs passes, and losing the count on restart is harmless (rotation needs no
+  // continuity, only variety).
+  private int passCount;
+
+  SagaRetentionManager(SagaStore store, String ownerId, RetentionConfig config) {
     this.store = store;
+    this.ownerId = ownerId;
     this.config = config;
     this.scheduler =
         Executors.newSingleThreadScheduledExecutor(
@@ -57,8 +66,9 @@ class SagaRetentionManager {
 
   // Visible for testing
   SagaRetentionManager(
-      SagaStore store, RetentionConfig config, ScheduledExecutorService scheduler) {
+      SagaStore store, String ownerId, RetentionConfig config, ScheduledExecutorService scheduler) {
     this.store = store;
+    this.ownerId = ownerId;
     this.config = config;
     this.scheduler = scheduler;
     this.purgeExecutor = Executors.newVirtualThreadPerTaskExecutor();
@@ -66,15 +76,18 @@ class SagaRetentionManager {
   }
 
   /**
-   * Starts the periodic cleanup task. Unlike the recovery manager, the first run is delayed by the
-   * full interval — cleanup is not urgent at startup.
+   * Starts the periodic cleanup task. Unlike the recovery manager, the first run is delayed by at
+   * least the full interval — cleanup is not urgent at startup. On top of that, a deterministic
+   * per-replica offset de-phases replicas started together, so their cleanup passes stop hitting
+   * the store at the same moment.
    */
   @SuppressWarnings("FutureReturnValueIgnored") // fire-and-forget scheduled task
   public void start() {
+    long intervalSeconds = config.cleanupIntervalSeconds();
     scheduler.scheduleWithFixedDelay(
         this::cleanupSafely,
-        config.cleanupIntervalSeconds(),
-        config.cleanupIntervalSeconds(),
+        intervalSeconds + SweepScatter.offsetSeconds(ownerId, "retention", intervalSeconds),
+        intervalSeconds,
         TimeUnit.SECONDS);
   }
 
@@ -120,45 +133,101 @@ class SagaRetentionManager {
   }
 
   /**
-   * Single cleanup pass: scan purgeable statuses for entries older than the retention period, then
-   * delete each expired saga. Stops when the batch limit is reached.
+   * Single cleanup pass: scan purgeable statuses for entries older than the retention period and
+   * delete each expired saga, repeating in rounds until the batch budget is spent.
    *
-   * <p>Note: the batch budget counts <i>successful</i> purges only, so total attempted operations
-   * may exceed {@code batchSize} if many deletes fail. This is acceptable — widespread delete
-   * failures indicate a store-level issue, not a batch-sizing problem.
+   * <p>The batch budget counts <i>successful</i> purges only: a delete that turns out to be a no-op
+   * (another replica already purged the saga) refunds its budget, and because purged rows are
+   * physically gone, the next round's re-scan surfaces fresh candidates for the refunded budget
+   * instead of the same rows — so under multi-replica contention a pass still purges up to {@code
+   * batchSize} sagas when a backlog exists, instead of quietly under-delivering by its lost races.
+   * A round that purges nothing ends the pass: the backlog is drained, the round was lost to racing
+   * replicas entirely (the next pass re-scans), or the remaining candidates are failing their
+   * deletes — and failing rows stay in place, so re-scanning would refetch them forever. Failed
+   * deletes also refund budget, so total attempted operations may exceed {@code batchSize}; this is
+   * acceptable — widespread delete failures indicate a store-level issue, not a batch-sizing
+   * problem.
+   *
+   * <p>Each pass starts the bucket sweep one position further into the replica's scattered order
+   * (the rotation below), so when a sustained backlog lets the front buckets fill the whole budget,
+   * every bucket still gets a turn at the front within one revolution's worth of passes — a fixed
+   * starting point would starve the tail buckets for as long as the backlog persists.
    */
   void cleanup() {
     Instant threshold = config.clock().instant().minus(config.retentionPeriod());
     int purged = 0;
+    int rotation = passCount++;
 
-    for (SagaStatus status : PURGEABLE_STATUSES) {
-      purged += purgeByStatus(status, threshold, config.batchSize() - purged);
-      if (purged >= config.batchSize()) {
-        return; // batch limit reached — continue in next pass
+    while (purged < config.batchSize()) {
+      int purgedBeforeRound = purged;
+      for (SagaStatus status : PURGEABLE_STATUSES) {
+        purged += purgeByStatus(status, threshold, config.batchSize() - purged, rotation);
+        if (purged >= config.batchSize()) {
+          return; // batch limit reached — continue in next pass
+        }
+        if (Thread.currentThread().isInterrupted()) {
+          return; // pass interrupted mid-await; its remaining work was cancelled and drained
+        }
+      }
+      if (purged == purgedBeforeRound) {
+        return; // no progress this round — drained backlog, lost races only, or failing deletes
       }
     }
   }
 
-  private int purgeByStatus(SagaStatus status, Instant threshold, int remaining) {
-    List<SagaStateSnapshot> expired = store.findByStatusOlderThan(status, threshold, remaining);
+  private int purgeByStatus(SagaStatus status, Instant threshold, int remaining, int rotation) {
+    List<SagaStateSnapshot> expired =
+        store.findByStatusOlderThan(status, threshold, remaining, ownerId, rotation);
     List<Future<Boolean>> futures = new ArrayList<>();
     for (SagaStateSnapshot saga : expired) {
       futures.add(purgeExecutor.submit(() -> purgeOneSafely(saga)));
     }
     int purged = 0;
-    for (Future<Boolean> future : futures) {
+    for (int i = 0; i < futures.size(); i++) {
       try {
-        if (future.get()) {
+        if (futures.get(i).get()) {
           purged++;
         }
       } catch (InterruptedException e) {
+        // Cancel the rest (interrupting their threads) and drain their outcomes instead of
+        // leaving them to run on past the pass; the restored interrupt flag ends the pass in
+        // cleanup(). A task blocked in a non-interruptible store call may still be finishing
+        // that call when this returns.
+        for (int j = i; j < futures.size(); j++) {
+          futures.get(j).cancel(true);
+        }
+        for (int j = i; j < futures.size(); j++) {
+          purged += drainQuietly(futures.get(j));
+        }
         Thread.currentThread().interrupt();
-        break;
+        return purged;
       } catch (ExecutionException e) {
-        // Already logged inside purgeOneSafely, whose catch spans Throwable
+        // purgeOneSafely catches Throwable, so nothing should reach here; a surprise that does
+        // still must not vanish.
+        logger.error("Purge task failed unexpectedly", e.getCause());
       }
     }
     return purged;
+  }
+
+  /**
+   * Drains one purge future after the pass was interrupted, counting a purge that completed before
+   * its cancellation landed. A cancelled task's outcome is unknown and not counted — the pass is
+   * ending, so the count no longer drives further scanning.
+   */
+  private int drainQuietly(Future<Boolean> future) {
+    while (true) {
+      try {
+        return future.get() ? 1 : 0;
+      } catch (CancellationException e) {
+        return 0;
+      } catch (ExecutionException e) {
+        logger.error("Purge task failed unexpectedly", e.getCause());
+        return 0;
+      } catch (InterruptedException e) {
+        // Re-interrupted while draining; keep draining — the caller restores the flag once.
+      }
+    }
   }
 
   private boolean purgeOneSafely(SagaStateSnapshot saga) {
@@ -169,11 +238,13 @@ class SagaRetentionManager {
       return false;
     }
     try {
-      store.deleteSaga(saga.getSagaId());
-      return true;
+      // False when the saga was already purged (a concurrent replica won the race); such no-ops
+      // must not consume the batch budget, or intersecting sweeps would spend it deleting nothing.
+      return store.deleteSaga(saga.getSagaId());
     } catch (Throwable t) {
-      // Log and continue — one failed purge shouldn't block others. Throwable, not Exception:
-      // the caller swallows this task's failure on the promise that it was logged here.
+      // Log and continue — one failed purge shouldn't block others. Throwable, not Exception: an
+      // escape would surface at the await as a context-free ExecutionException instead of naming
+      // the saga here.
       logger.warn("Failed to purge saga {}", saga.getSagaId(), t);
       return false;
     } finally {

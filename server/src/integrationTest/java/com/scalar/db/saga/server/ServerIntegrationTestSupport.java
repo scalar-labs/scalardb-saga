@@ -98,6 +98,11 @@ abstract class ServerIntegrationTestSupport {
     return server.grpcPort();
   }
 
+  /** The actual bound HTTP port (ephemeral). Only meaningful after the server has started. */
+  protected final int httpPort() {
+    return server.port();
+  }
+
   /** Registers the participant's HTTP endpoints — the services a definition's steps call. */
   protected abstract void configureParticipant(HttpServer participant);
 

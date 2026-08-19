@@ -12,11 +12,16 @@ import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaTimeoutException;
 import com.scalar.db.saga.exception.SagaUnauthenticatedException;
 import com.scalar.db.saga.exception.SagaUnavailableException;
+import io.grpc.ChannelCredentials;
+import io.grpc.Grpc;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
+import io.grpc.TlsChannelCredentials;
 import io.grpc.protobuf.StatusProto;
+import java.io.IOException;
+import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
 import javax.net.ssl.SSLEngine;
 import org.jspecify.annotations.Nullable;
@@ -42,20 +47,65 @@ final class GrpcClientSupport {
    * Opens a channel to {@code target}. TLS uses the JRE's transport security and fails fast if ALPN
    * is unavailable (on Java 8, that means pre-8u252 without a bundled {@code tcnative}); plaintext
    * is appropriate for an isolated in-cluster network.
+   *
+   * <p>A non-null {@code trustCaCertPath} narrows this channel's trust to that CA (replacing the
+   * JVM's default trust store) — the private-CA case, e.g. a cert-manager- or Vault-issued server
+   * certificate. The file is read eagerly, so a bad path fails here naming the file rather than at
+   * the first RPC as an opaque {@code UNAVAILABLE}. A non-null {@code overrideAuthority} validates
+   * the server certificate against that name instead of the dialed address — for dialing by IP or
+   * through a port-forward while the certificate names the service's DNS name.
    */
-  static ManagedChannel openChannel(String target, boolean useTls) {
-    ManagedChannelBuilder<?> channelBuilder = ManagedChannelBuilder.forTarget(target);
+  static ManagedChannel openChannel(
+      String target,
+      boolean useTls,
+      @Nullable Path trustCaCertPath,
+      @Nullable String overrideAuthority) {
+    // Enforced here, on the shared seam, rather than in each builder: a trust setting says the
+    // caller expects encryption, and silently ignoring it on a plaintext channel would be worse
+    // than refusing.
+    if (trustCaCertPath != null && !useTls) {
+      throw new IllegalStateException(
+          "trustCaCertificate(...) is set but the channel is plaintext. Call"
+              + " useTransportSecurity() to enable TLS, or drop the trust setting.");
+    }
+    ManagedChannelBuilder<?> channelBuilder;
     if (useTls) {
       if (!alpnAvailable()) {
         throw new IllegalStateException(
-            "TLS requested but ALPN is unavailable on this JRE. On Java 8, use 8u252+ or add "
-                + "netty-tcnative-boringssl-static; otherwise use plaintext (in-cluster).");
+            "TLS requested but neither the JRE nor a loaded tcnative provides ALPN. On Java 8, use"
+                + " 8u252+; the default grpc-netty-shaded transport already bundles tcnative, so"
+                + " this firing there means its native library failed to load on this platform."
+                + " With plain grpc-netty, add netty-tcnative-boringssl-static; otherwise use"
+                + " plaintext (in-cluster).");
       }
-      channelBuilder.useTransportSecurity();
+      channelBuilder =
+          trustCaCertPath == null
+              ? ManagedChannelBuilder.forTarget(target).useTransportSecurity()
+              : Grpc.newChannelBuilder(target, tlsCredentials(trustCaCertPath));
     } else {
-      channelBuilder.usePlaintext();
+      channelBuilder = ManagedChannelBuilder.forTarget(target).usePlaintext();
+    }
+    if (overrideAuthority != null) {
+      channelBuilder.overrideAuthority(overrideAuthority);
     }
     return channelBuilder.build();
+  }
+
+  /**
+   * Builds TLS channel credentials trusting only the CA at {@code trustCaCertPath}. {@code
+   * TlsChannelCredentials} reads the file at build time, which is what gives the builders their
+   * fail-at-build() behavior; the {@code IOException} is rewrapped so the failure names the path.
+   */
+  private static ChannelCredentials tlsCredentials(Path trustCaCertPath) {
+    try {
+      return TlsChannelCredentials.newBuilder().trustManager(trustCaCertPath.toFile()).build();
+    } catch (IOException e) {
+      throw new IllegalArgumentException(
+          "Failed to read the trust CA certificate at '"
+              + trustCaCertPath
+              + "'. The file must be a readable PEM certificate collection.",
+          e);
+    }
   }
 
   /**
@@ -266,14 +316,34 @@ final class GrpcClientSupport {
   }
 
   private static boolean alpnAvailable() {
-    // SSLEngine.getApplicationProtocol exists from Java 9 and was backported to 8u252. Conservative
-    // — a bundled tcnative may provide ALPN where the JDK does not — but it gives a clear, early
-    // failure for the common pre-8u252 case.
+    // SSLEngine.getApplicationProtocol exists from Java 9 and was backported to 8u252; a loaded
+    // tcnative provides ALPN through Netty's OpenSSL engine even where the JDK does not.
     try {
       SSLEngine.class.getMethod("getApplicationProtocol");
       return true;
     } catch (NoSuchMethodException e) {
-      return false;
+      return tcnativeAvailable();
     }
+  }
+
+  /**
+   * Probes Netty's OpenSSL bridge for a loaded tcnative. The shaded name comes first because it is
+   * the SDK's shipped transport: grpc-netty-shaded relocates every Netty class, so the unshaded
+   * name is never present there. The unshaded name covers an embedder who swapped in plain
+   * grpc-netty. Reflective because Netty is a runtime dependency of this module, not a compile-time
+   * one, and this probe must not change that. Visible for testing.
+   */
+  static boolean tcnativeAvailable() {
+    for (String name :
+        new String[] {
+          "io.grpc.netty.shaded.io.netty.handler.ssl.OpenSsl", "io.netty.handler.ssl.OpenSsl"
+        }) {
+      try {
+        return (Boolean) Class.forName(name).getMethod("isAvailable").invoke(null);
+      } catch (ReflectiveOperationException | LinkageError e) {
+        // This Netty flavor is not on the classpath; try the next one.
+      }
+    }
+    return false;
   }
 }

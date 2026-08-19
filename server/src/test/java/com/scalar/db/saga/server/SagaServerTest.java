@@ -2,6 +2,7 @@ package com.scalar.db.saga.server;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.RETURNS_SELF;
@@ -12,6 +13,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import ch.qos.logback.classic.Level;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.engine.ShutdownMode;
@@ -24,15 +26,18 @@ import io.grpc.health.v1.HealthCheckResponse;
 import io.grpc.health.v1.HealthGrpc;
 import io.grpc.netty.NettyServerBuilder;
 import io.javalin.Javalin;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
@@ -45,6 +50,15 @@ import org.mockito.ArgumentCaptor;
  * needed.
  */
 class SagaServerTest {
+
+  // One keytool subprocess for the whole class: every TLS test consumes this same generated pair.
+  @TempDir static Path tlsDir;
+  private static TlsTestCerts.PemPair tls;
+
+  @BeforeAll
+  static void generateTlsMaterial() {
+    tls = TlsTestCerts.generateRsa(tlsDir, "tls");
+  }
 
   /** A minimal valid declarative (service-step) definition as JSON. */
   private static String declarativeJson(String name) {
@@ -210,6 +224,45 @@ class SagaServerTest {
         .isInstanceOf(IllegalStateException.class);
     verify(orchestrator, never()).register(any(SagaDefinition.class));
     verify(orchestrator).close();
+  }
+
+  @Test
+  void constructor_nonexistentDefinitionsPath_throwsWithoutEchoingValue() {
+    // A secret reference pasted onto the definitions key resolves to plaintext that exists nowhere
+    // on disk, so the failure must name the key and keep the resolved "path" out of the message.
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
+
+    assertThatThrownBy(
+            () ->
+                new SagaServer(
+                    configWithDefinitionsPath(Path.of("s3cr3t-plaintext-not-a-path")),
+                    orchestrator))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.DEFINITIONS_PATH_KEY)
+        .hasMessageNotContaining("s3cr3t")
+        .hasNoCause();
+    verify(orchestrator, never()).register(any(SagaDefinition.class));
+    verify(orchestrator).close();
+  }
+
+  @Test
+  void constructor_unreadableDefinitionsDirectory_throwsWithoutEchoingPath(@TempDir Path dir) {
+    // An existing directory whose listing fails: the AccessDeniedException message is the path
+    // itself, so the failure must carry the exception class name instead of the cause. Skipped
+    // where the permission change does not take, for example when running as root.
+    assumeTrue(dir.toFile().setReadable(false) && !Files.isReadable(dir));
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
+    try {
+      assertThatThrownBy(() -> new SagaServer(configWithDefinitionsPath(dir), orchestrator))
+          .isInstanceOf(IllegalStateException.class)
+          .hasMessageContaining(SagaServerConfig.DEFINITIONS_PATH_KEY)
+          .hasMessageContaining("AccessDeniedException")
+          .hasMessageNotContaining(dir.toString())
+          .hasNoCause();
+      verify(orchestrator).close();
+    } finally {
+      boolean unused = dir.toFile().setReadable(true); // let the @TempDir cleanup walk the dir
+    }
   }
 
   @Test
@@ -676,7 +729,7 @@ class SagaServerTest {
     NettyServerBuilder builder = mock(NettyServerBuilder.class, RETURNS_SELF);
 
     // Act
-    SagaServer.applyGrpcTransportSettings(builder, config);
+    SagaServer.applyGrpcTransportSettings(builder, config, null);
 
     // Assert
     verify(builder).maxInboundMessageSize(2_097_152);
@@ -694,7 +747,7 @@ class SagaServerTest {
     NettyServerBuilder builder = mock(NettyServerBuilder.class, RETURNS_SELF);
 
     // Act
-    SagaServer.applyGrpcTransportSettings(builder, SagaServerConfig.load(props));
+    SagaServer.applyGrpcTransportSettings(builder, SagaServerConfig.load(props), null);
 
     // Assert
     verify(builder).maxInboundMessageSize(524_288);
@@ -708,11 +761,217 @@ class SagaServerTest {
     NettyServerBuilder builder = mock(NettyServerBuilder.class, RETURNS_SELF);
 
     // Act
-    SagaServer.applyGrpcTransportSettings(builder, SagaServerConfig.load(new Properties()));
+    SagaServer.applyGrpcTransportSettings(builder, SagaServerConfig.load(new Properties()), null);
 
     // Assert
     verify(builder).maxInboundMessageSize(SagaServerConfig.DEFAULT_MAX_EVENT_PAYLOAD_BYTES);
     verify(builder)
         .maxInboundMetadataSize(SagaServerConfig.DEFAULT_GRPC_MAX_INBOUND_METADATA_BYTES);
+  }
+
+  @Test
+  void applyGrpcTransportSettings_withTlsMaterial_enablesTransportSecurityFromValidatedBytes() {
+    // Arrange — real material: the builder must receive the validated bytes re-encoded as PEM,
+    // never the file paths, so nothing re-reads the files after validation (a rotation landing
+    // mid-boot would otherwise hand gRPC material the validator never saw).
+    TlsMaterial material =
+        TlsMaterial.load(tls.certChainPath(), tls.privateKeyPath(), Clock.systemUTC());
+    NettyServerBuilder builder = mock(NettyServerBuilder.class, RETURNS_SELF);
+
+    // Act
+    SagaServer.applyGrpcTransportSettings(
+        builder, SagaServerConfig.load(new Properties()), material);
+
+    // Assert
+    verify(builder).useTransportSecurity(any(InputStream.class), any(InputStream.class));
+  }
+
+  @Test
+  void applyGrpcTransportSettings_withoutTlsMaterial_leavesTransportPlaintext() {
+    // Arrange
+    NettyServerBuilder builder = mock(NettyServerBuilder.class, RETURNS_SELF);
+
+    // Act
+    SagaServer.applyGrpcTransportSettings(builder, SagaServerConfig.load(new Properties()), null);
+
+    // Assert
+    verify(builder, never()).useTransportSecurity(any(InputStream.class), any(InputStream.class));
+  }
+
+  @Test
+  void constructor_tlsEnabledWithBadMaterial_throwsAndClosesOrchestrator(@TempDir Path dir)
+      throws Exception {
+    // Arrange — paths that pass config validation but fail TlsMaterial's file validation
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Path bogusCert = dir.resolve("bogus.crt");
+    Path bogusKey = dir.resolve("bogus.key");
+    Files.writeString(bogusCert, "not pem\n");
+    Files.writeString(bogusKey, "not pem\n");
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, bogusCert.toString());
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, bogusKey.toString());
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
+
+    // Act / Assert — fails in the constructor, long before any port could bind, and releases the
+    // only resource alive at that point
+    assertThatThrownBy(() -> new SagaServer(SagaServerConfig.load(props), orchestrator))
+        .isInstanceOf(IllegalArgumentException.class);
+    verify(orchestrator).close();
+  }
+
+  @Test
+  void start_tlsEnabledUnderNoopOnNonLoopback_stillRefusesToStart(@TempDir Path dir)
+      throws Exception {
+    // TLS is confidentiality; the guard is authentication. Encrypting the transport must not
+    // relax the refusal to serve unauthenticated on a network-reachable interface.
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "0.0.0.0");
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.GRPC_PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, tls.certChainPath().toString());
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, tls.privateKeyPath().toString());
+    SagaServer server =
+        new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class));
+
+    // Act / Assert
+    assertThatThrownBy(server::start).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void start_tlsEnabled_logsConfirmationAndReportsEphemeralPorts(@TempDir Path dir)
+      throws Exception {
+    // Arrange — TLS on both transports, ephemeral ports, loopback host so the noop guard passes
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.GRPC_PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, tls.certChainPath().toString());
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, tls.privateKeyPath().toString());
+
+    // Act / Assert — the custom TLS connector must not break ephemeral-port readback, and the
+    // positive INFO confirmation is what operators and the smoke test key on.
+    try (LogCapture logs = LogCapture.of(SagaServer.class)) {
+      try (SagaServer server =
+          new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class))
+              .start()) {
+        assertThat(server.port()).isGreaterThan(0);
+        assertThat(server.grpcPort()).isGreaterThan(0);
+      }
+      assertThat(logs.events())
+          .anySatisfy(
+              event ->
+                  assertThat(event.getFormattedMessage()).contains("TLS enabled for HTTP and gRPC"))
+          // No log line may echo the configured path value — like every configured value, it can
+          // be a mis-pasted secret.
+          .noneSatisfy(
+              event ->
+                  assertThat(event.getFormattedMessage()).contains(tls.certChainPath().toString()));
+    }
+  }
+
+  @Test
+  void start_tlsWithPlaintextCallbackBaseUrl_warnsAtStartup(@TempDir Path dir) throws Exception {
+    // Arrange — TLS on, callback base URL plain http on a non-loopback host: participants would
+    // dial the TLS port over plaintext and fail at handshake on the first async step.
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, tls.certChainPath().toString());
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, tls.privateKeyPath().toString());
+    props.setProperty(SagaServerConfig.CALLBACK_BASE_URL_KEY, "http://participants.example.com");
+    props.setProperty(SagaServerConfig.CALLBACK_SECRET_KEY, "s3cr3t-key");
+
+    // Act
+    try (LogCapture logs = LogCapture.of(SagaServer.class);
+        SagaServer server =
+            new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class))
+                .start()) {
+      // Assert
+      assertThat(logs.events())
+          .anySatisfy(
+              event -> {
+                assertThat(event.getLevel()).isEqualTo(Level.WARN);
+                assertThat(event.getFormattedMessage())
+                    .contains(SagaServerConfig.CALLBACK_BASE_URL_KEY);
+              });
+    }
+  }
+
+  @Test
+  void start_tlsWithHttpsCallbackBaseUrl_doesNotWarn(@TempDir Path dir) throws Exception {
+    // Arrange — the well-configured counterpart of the test above
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, tls.certChainPath().toString());
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, tls.privateKeyPath().toString());
+    props.setProperty(SagaServerConfig.CALLBACK_BASE_URL_KEY, "https://participants.example.com");
+    props.setProperty(SagaServerConfig.CALLBACK_SECRET_KEY, "s3cr3t-key");
+
+    // Act
+    try (LogCapture logs = LogCapture.of(SagaServer.class);
+        SagaServer server =
+            new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class))
+                .start()) {
+      // Assert
+      assertThat(logs.events())
+          .noneSatisfy(
+              event ->
+                  assertThat(event.getFormattedMessage())
+                      .contains(SagaServerConfig.CALLBACK_BASE_URL_KEY));
+    }
+  }
+
+  @Test
+  void start_tlsWithUnparseableCallbackBaseUrl_warnsAtStartup(@TempDir Path dir) throws Exception {
+    // Arrange — a base URL URI.create rejects (space in the authority). Nothing downstream parses
+    // the value, so this startup warning is the only diagnostic the operator gets. The warning
+    // must name the key and never echo the value: like every configured value it can be a
+    // mis-pasted secret.
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, tls.certChainPath().toString());
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, tls.privateKeyPath().toString());
+    props.setProperty(SagaServerConfig.CALLBACK_BASE_URL_KEY, "http://sv c:8080/s3cr3t-value");
+    props.setProperty(SagaServerConfig.CALLBACK_SECRET_KEY, "s3cr3t-key");
+
+    // Act
+    try (LogCapture logs = LogCapture.of(SagaServer.class);
+        SagaServer server =
+            new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class))
+                .start()) {
+      // Assert
+      assertThat(logs.events())
+          .anySatisfy(
+              event -> {
+                assertThat(event.getLevel()).isEqualTo(Level.WARN);
+                assertThat(event.getFormattedMessage())
+                    .contains(SagaServerConfig.CALLBACK_BASE_URL_KEY)
+                    .contains("not a parseable URI");
+              })
+          .noneSatisfy(event -> assertThat(event.getFormattedMessage()).contains("s3cr3t-value"));
+    }
   }
 }

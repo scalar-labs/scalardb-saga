@@ -196,15 +196,16 @@ class SagaServerConfigTest {
   }
 
   /**
-   * The two keys whose default leaves a protection off, so the general blank-is-unset rule would
-   * turn a templated value that resolved empty into a silently disabled control. Omitting the key
-   * remains the way to accept the default; only the empty spelling is refused.
+   * The keys whose default leaves a protection off, so the general blank-is-unset rule would turn a
+   * templated value that resolved empty into a silently disabled control. Omitting the key remains
+   * the way to accept the default; only the empty spelling is refused.
    */
   @ParameterizedTest
   @ValueSource(
       strings = {
         SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY,
-        SagaServerConfig.CALLBACK_MAX_AGE_SECONDS_KEY
+        SagaServerConfig.CALLBACK_MAX_AGE_SECONDS_KEY,
+        SagaServerConfig.TLS_ENABLED_KEY
       })
   void load_blankProtectionDisablingKey_throwsIllegalArgumentException(String key) {
     Properties props = new Properties();
@@ -224,6 +225,292 @@ class SagaServerConfigTest {
         .isEqualTo(SagaServerConfig.DEFAULT_MAX_START_REQUESTS_PER_MINUTE);
     assertThat(config.callbackMaxAgeSeconds())
         .isEqualTo(SagaServerConfig.DEFAULT_CALLBACK_MAX_AGE_SECONDS);
+    assertThat(config.tlsEnabled()).isEqualTo(SagaServerConfig.DEFAULT_TLS_ENABLED);
+  }
+
+  @Test
+  void load_unsetTls_disabledWithNoPaths() {
+    SagaServerConfig config = SagaServerConfig.load(new Properties());
+
+    assertThat(config.tlsEnabled()).isFalse();
+    assertThat(config.tlsCertChainPath()).isEmpty();
+    assertThat(config.tlsPrivateKeyPath()).isEmpty();
+  }
+
+  @Test
+  void load_tlsEnabledWithBothPaths_parsesTrimmedPaths() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "  /etc/tls/tls.crt  ");
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, "/etc/tls/tls.key");
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.tlsEnabled()).isTrue();
+    assertThat(config.tlsCertChainPath()).contains(Path.of("/etc/tls/tls.crt"));
+    assertThat(config.tlsPrivateKeyPath()).contains(Path.of("/etc/tls/tls.key"));
+  }
+
+  @Test
+  void load_tlsEnabledWithoutPrivateKeyPath_throwsNamingMissingKey() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "/etc/tls/tls.crt");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.TLS_ENABLED_KEY)
+        .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY);
+  }
+
+  @Test
+  void load_tlsEnabledWithoutCertChainPath_throwsNamingMissingKey() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, "/etc/tls/tls.key");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.TLS_ENABLED_KEY)
+        .hasMessageContaining(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY);
+  }
+
+  @Test
+  void load_tlsEnabledWithoutAnyPath_throwsNamingBothKeys() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY)
+        .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY);
+  }
+
+  @Test
+  void load_tlsEnabledWithBlankPrivateKeyPath_throwsAsMissingPair() {
+    // Blank-is-unset composes with the pairing rule: a blank path reports as the missing half of
+    // the pair, exactly as an absent key does.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "/etc/tls/tls.crt");
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, "   ");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY);
+  }
+
+  @Test
+  void load_tlsPathsWithExplicitFalse_ignoredAndDisabled() {
+    // The deliberate toggle-off move: material stays mounted and configured, the explicit false
+    // switches it off, and the getters hide the ignored paths so nothing downstream can serve
+    // them by accident.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "false");
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "/etc/tls/tls.crt");
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, "/etc/tls/tls.key");
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.tlsEnabled()).isFalse();
+    assertThat(config.tlsCertChainPath()).isEmpty();
+    assertThat(config.tlsPrivateKeyPath()).isEmpty();
+  }
+
+  @Test
+  void load_tlsCertChainPathWithoutEnabledKey_throwsForgottenSwitch() {
+    // Material without the switch is the forgot-the-switch hole: the operator mounted certificates
+    // expecting TLS, and the server would silently serve plaintext.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "/etc/tls/tls.crt");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY)
+        .hasMessageContaining(SagaServerConfig.TLS_ENABLED_KEY);
+  }
+
+  @Test
+  void load_tlsPrivateKeyPathAloneWithoutEnabledKey_throwsForgottenSwitch() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, "/etc/tls/tls.key");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY)
+        .hasMessageContaining(SagaServerConfig.TLS_ENABLED_KEY);
+  }
+
+  @Test
+  void load_blankTlsPathWithoutEnabledKey_isNoOp() {
+    // The other doctrine-composition cell: blank is unset, so a blank path with no tls.enabled is
+    // not the forgotten switch — it is a template variable that resolved empty, and the server
+    // starts on the plaintext default.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "");
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.tlsEnabled()).isFalse();
+  }
+
+  @Test
+  void load_tlsPathWithNulByte_throwsWithoutEchoingValue() {
+    // InvalidPathException's own message embeds the raw input, which for a mis-pasted secret
+    // reference would be the secret's plaintext; the parser must throw its own redacted message.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "s3cr3t\0plaintext");
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, "/etc/tls/tls.key");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY)
+        .hasMessageNotContaining("s3cr3t")
+        .hasNoCause();
+  }
+
+  @Test
+  void load_secretFileReferenceOnNumericKey_throwsWithoutEchoingSecret(@TempDir Path dir)
+      throws IOException {
+    // The shipped template puts secret references and numeric keys a few lines apart, so a
+    // reference pasted onto the wrong key must fail without writing the resolved plaintext to
+    // the log; pod logs are readable far more widely than the secret itself. The message
+    // assertions are the behavior under test here: the key locates the bad line, the value
+    // stays out, and so does the NumberFormatException cause, whose own message embeds it.
+    Path secret = dir.resolve("api.token");
+    Files.writeString(secret, "s3cr3t-plaintext", StandardCharsets.UTF_8);
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "${file:UTF-8:" + secret + "}");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.HTTP_PORT_KEY)
+        .hasMessageNotContaining("s3cr3t-plaintext")
+        .hasNoCause();
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        SagaServerConfig.HTTP_PORT_KEY,
+        SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY,
+        SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY,
+        SagaServerConfig.SHUTDOWN_MODE_KEY,
+        SagaServerConfig.INSECURE_MODE_ENABLED_KEY
+      })
+  void load_unparseableValue_throwsNamingKeyWithoutEchoingValue(String key) {
+    // One key per parser family (port, bounded long, payload bytes, enum, boolean): every parse
+    // error names the key and never echoes the value, which may be a resolved secret.
+    Properties props = new Properties();
+    props.setProperty(key, "swordfish-like-a-secret");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(key)
+        .hasMessageNotContaining("swordfish")
+        .hasNoCause();
+  }
+
+  @Test
+  void load_outOfRangeNumericPort_throwsWithoutEchoingValue() {
+    // A purely numeric secret parses successfully, so the semantic branches must redact too: the
+    // range check used to print the parsed number, which is the resolved value canonicalized.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "48291736");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.HTTP_PORT_KEY)
+        .hasMessageContaining("between 0 and 65535")
+        .hasMessageNotContaining("48291736");
+  }
+
+  @Test
+  void load_negativeNumericBoundedValue_throwsWithoutEchoingValue() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY, "-7231946");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY)
+        .hasMessageContaining("must be >=")
+        .hasMessageNotContaining("7231946");
+  }
+
+  @Test
+  void load_intOverflowNumericValue_throwsWithoutEchoingValue() {
+    // Between int and long range: parses as a long, then fails the int narrowing check.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY, "99999999999");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY)
+        .hasMessageContaining("must be <=")
+        .hasMessageNotContaining("99999999999");
+  }
+
+  @Test
+  void load_negativeNumericPayloadBytes_throwsWithoutEchoingValue() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY, "-424242");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY)
+        .hasMessageContaining("must not be negative")
+        .hasMessageNotContaining("424242");
+  }
+
+  @Test
+  void load_definitionsPathGiven_isParsedTrimmed() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, "  /etc/saga/definitions  ");
+
+    assertThat(SagaServerConfig.load(props).definitionsPath())
+        .contains(Path.of("/etc/saga/definitions"));
+  }
+
+  @Test
+  void load_pathValueWithNulCharacter_throwsWithoutEchoingValue() {
+    // A NUL character makes Path.of throw InvalidPathException, whose message embeds the input —
+    // which is a resolved value — so the parse must remap it to the usual key-plus-redaction shape.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, "s3cr3t\0plaintext");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.DEFINITIONS_PATH_KEY)
+        .hasMessageNotContaining("s3cr3t")
+        .hasNoCause();
+  }
+
+  @Test
+  void load_collidingPorts_throwsNamingKeysWithoutEchoingValue() {
+    // The collision message needs no number: echoing it would confirm that a numeric secret on
+    // one port key equals the other key's port.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "18080");
+    props.setProperty(SagaServerConfig.GRPC_PORT_KEY, "18080");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.HTTP_PORT_KEY)
+        .hasMessageContaining(SagaServerConfig.GRPC_PORT_KEY)
+        .hasMessageNotContaining("18080");
+  }
+
+  @Test
+  void load_minThreadsAboveMaxThreads_throwsNamingKeysWithoutEchoingValue() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HTTP_MIN_THREADS_KEY, "9999999");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.HTTP_MIN_THREADS_KEY)
+        .hasMessageContaining(SagaServerConfig.HTTP_MAX_THREADS_KEY)
+        .hasMessageNotContaining("9999999");
   }
 
   @Test
@@ -694,8 +981,12 @@ class SagaServerConfigTest {
     props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
     props.setProperty(serviceKey("account", ".allowed_hosts"), "account-svc,,other");
 
+    // The list itself stays out of the message: allowed_hosts takes secret references like any
+    // other key, so a misplaced one must not be echoed.
     assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("allowed_hosts")
+        .hasMessageNotContaining("account-svc");
   }
 
   @Test
@@ -728,6 +1019,29 @@ class SagaServerConfigTest {
     props.setProperty(SagaServerConfig.OWNER_ID_KEY, "  saga-daemon-0  ");
 
     assertThat(SagaServerConfig.load(props).ownerId()).isEqualTo("saga-daemon-0");
+  }
+
+  @Test
+  void ownerId_controlCharactersGiven_throwsWithoutEchoingTheValue() {
+    // The owner id is echoed in log lines; a CRLF in it would forge log entries, so it is
+    // rejected — and the error must not echo the value it rejects.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.OWNER_ID_KEY, "pod-7\nFORGED LOG LINE");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.OWNER_ID_KEY)
+        .satisfies(e -> assertThat(e.getMessage()).doesNotContain("FORGED"));
+  }
+
+  @Test
+  void ownerId_overlongValueGiven_throws() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.OWNER_ID_KEY, "x".repeat(129));
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.OWNER_ID_KEY);
   }
 
   @Test

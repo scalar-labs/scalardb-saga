@@ -30,4 +30,5 @@ dependencies {
     "integrationTestImplementation"(libs.jackson.databind)
     "integrationTestImplementation"(libs.scalardb)
     "integrationTestImplementation"(libs.sqlite.jdbc)
+    "integrationTestCompileOnly"(libs.jspecify)
 }

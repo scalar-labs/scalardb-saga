@@ -1746,6 +1746,37 @@ class ScalarDbSagaStoreTest {
         .isInstanceOf(SagaPersistenceException.class);
   }
 
+  @Test
+  void claimForRecovery_withPinnedNowSupplier_stampsClaimWithSuppliedTime() throws Exception {
+    // Arrange — the store's injected time source is pinned to a future instant. The claim stamp
+    // must come from it, not from wall time: tests that pin the manager's clock rely on row
+    // timestamps staying on the same timeline, or a just-claimed saga instantly looks stale
+    // again to a fast-forwarded staleness scan.
+    Instant pinned = Instant.parse("2030-06-01T00:00:00Z");
+    ScalarDbSagaStore pinnedStore =
+        new ScalarDbSagaStore(
+            txManager,
+            objectMapper,
+            schema,
+            ScalarDbSagaStoreConfig.builder().build(),
+            () -> OWN_APPEND_ID,
+            () -> pinned);
+    Instant createdAt = Instant.parse("2026-01-01T00:00:00Z");
+    SagaStateSnapshot saga =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.RUNNING, "old-owner", "v1", createdAt, createdAt);
+    Result currentRow = mock(Result.class);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(currentRow));
+
+    // Act
+    Optional<SagaStateSnapshot> claimed = pinnedStore.claimForRecovery(saga, "new-owner");
+
+    // Assert — the claimed snapshot, from which the new state row is built, carries the supplied
+    // time; a raw Instant.now() in the claim path would stamp wall time and fail this
+    assertThat(claimed).isPresent();
+    assertThat(claimed.get().getUpdatedAt()).isEqualTo(pinned);
+  }
+
   // ---------------------------------------------------------------------------
   // markForRecovery
   // ---------------------------------------------------------------------------
@@ -1801,10 +1832,26 @@ class ScalarDbSagaStoreTest {
     when(tx.scan(scanForTable(SagaSchema.EVENTS_TABLE))).thenReturn(List.of(eventRow1, eventRow2));
 
     // Act
-    store.deleteSaga("saga-1");
+    boolean deleted = store.deleteSaga("saga-1");
 
     // Assert
+    assertThat(deleted).isTrue();
     verify(tx, times(3)).delete(any(Delete.class)); // 1 state row + 2 event rows
+    verify(tx).commit();
+  }
+
+  @Test
+  void deleteSaga_alreadyPurgedSaga_returnsFalseWithoutDeleting() throws Exception {
+    // Arrange — no state row and no events remain (another replica already purged the saga)
+    when(tx.scan(scanForTable(SagaSchema.STATE_TABLE))).thenReturn(List.of());
+    when(tx.scan(scanForTable(SagaSchema.EVENTS_TABLE))).thenReturn(List.of());
+
+    // Act
+    boolean deleted = store.deleteSaga("saga-1");
+
+    // Assert — reported as a no-op so budgeting callers can tell it from a real purge
+    assertThat(deleted).isFalse();
+    verify(tx, never()).delete(any(Delete.class));
     verify(tx).commit();
   }
 
@@ -1868,6 +1915,67 @@ class ScalarDbSagaStoreTest {
     // Act & Assert
     assertThatThrownBy(() -> store.deleteSaga("saga-1"))
         .isInstanceOf(SagaPersistenceException.class);
+  }
+
+  @Test
+  void deleteSaga_unknownCommitAfterSagaAlreadyPurged_returnsFalse() throws Exception {
+    // Arrange — no state row remains (another replica already purged the saga) and the resulting
+    // no-op transaction's commit status is unknown. The verifier must not mistake "row already
+    // gone before this call" for "our delete landed": this call deleted nothing, so budgeting
+    // callers must not be told a purge happened.
+    when(tx.scan(scanForTable(SagaSchema.STATE_TABLE))).thenReturn(List.of());
+    when(tx.scan(scanForTable(SagaSchema.EVENTS_TABLE))).thenReturn(List.of());
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+
+    // Act
+    boolean deleted = store.deleteSaga("saga-1");
+
+    // Assert — reported as a no-op, decided from the attempt's own evidence without another read
+    assertThat(deleted).isFalse();
+    verify(txManager, times(1)).begin();
+  }
+
+  @Test
+  void deleteSaga_unknownCommitAndStateRowGone_returnsTrue() throws Exception {
+    // Arrange — the attempt saw and deleted the state row, but the commit status is unknown; the
+    // verifier's fresh read finds the row gone, proving the delete (or an equivalent) landed.
+    Result stateRow = mockStateResult("saga-1", SagaStatus.COMPLETED);
+    DistributedTransaction txVerify = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(txVerify);
+    when(tx.scan(scanForTable(SagaSchema.STATE_TABLE))).thenReturn(List.of(stateRow));
+    when(tx.scan(scanForTable(SagaSchema.EVENTS_TABLE))).thenReturn(List.of());
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    when(txVerify.scan(any(Scan.class))).thenReturn(List.of());
+
+    // Act
+    boolean deleted = store.deleteSaga("saga-1");
+
+    // Assert
+    assertThat(deleted).isTrue();
+  }
+
+  @Test
+  void deleteSaga_unknownCommitAndStateRowStillPresent_retriesAndDeletes() throws Exception {
+    // Arrange — the attempt saw the state row but its unknown-status commit did not land (the
+    // verifier's read still finds the row), so the whole transaction is retried; the retry
+    // deletes the row and commits cleanly.
+    Result stateRow = mockStateResult("saga-1", SagaStatus.COMPLETED);
+    DistributedTransaction txVerify = mock(DistributedTransaction.class);
+    DistributedTransaction txRetry = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(txVerify).thenReturn(txRetry);
+    when(tx.scan(scanForTable(SagaSchema.STATE_TABLE))).thenReturn(List.of(stateRow));
+    when(tx.scan(scanForTable(SagaSchema.EVENTS_TABLE))).thenReturn(List.of());
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    when(txVerify.scan(any(Scan.class))).thenReturn(List.of(stateRow));
+    when(txRetry.scan(scanForTable(SagaSchema.STATE_TABLE))).thenReturn(List.of(stateRow));
+    when(txRetry.scan(scanForTable(SagaSchema.EVENTS_TABLE))).thenReturn(List.of());
+
+    // Act
+    boolean deleted = store.deleteSaga("saga-1");
+
+    // Assert
+    assertThat(deleted).isTrue();
+    verify(txRetry).commit();
   }
 
   // ---------------------------------------------------------------------------
@@ -2014,7 +2122,7 @@ class ScalarDbSagaStoreTest {
 
     // Act
     List<SagaStateSnapshot> result =
-        store.findByStatusOlderThan(SagaStatus.COMPLETED, threshold, 100);
+        store.findByStatusOlderThan(SagaStatus.COMPLETED, threshold, 100, "owner-1", 0);
 
     // Assert
     assertThat(result).hasSize(2);
@@ -2028,20 +2136,218 @@ class ScalarDbSagaStoreTest {
 
     // Act
     List<SagaStateSnapshot> result =
-        store.findByStatusOlderThan(SagaStatus.COMPENSATED, threshold, 100);
+        store.findByStatusOlderThan(SagaStatus.COMPENSATED, threshold, 100, "owner-1", 0);
 
     // Assert
     assertThat(result).isEmpty();
   }
 
   @Test
-  void findByStatusOlderThan_transactionFails_throwsSagaPersistenceException() throws Exception {
+  void findByStatusOlderThan_consecutiveBucketScansFail_throwsInsteadOfSweepingWholeRing()
+      throws Exception {
+    // Arrange — every bucket's scan fails: a store outage, not a poison bucket. The breaker must
+    // rethrow on the third consecutive failure so the caller's pass fails loudly once instead of
+    // hammering the rest of the ring at WARN level for as long as the outage lasts.
+    when(tx.scan(any(Scan.class))).thenThrow(new RuntimeException("store unavailable"));
+
+    // Act & Assert — the fourth bucket is never attempted
+    assertThatThrownBy(
+            () ->
+                store.findByStatusOlderThan(SagaStatus.COMPLETED, Instant.now(), 100, "owner-1", 0))
+        .isInstanceOf(RuntimeException.class);
+    verify(tx, times(3)).scan(any(Scan.class));
+  }
+
+  @Test
+  void findByStatusOlderThan_poisonBucketsBelowBreakerThreshold_sweepStillCompletes()
+      throws Exception {
+    // Arrange — two consecutive poison buckets, a healthy one (resetting the failure counter),
+    // then another poison bucket: no three failures are consecutive, so the sweep completes and
+    // keeps what it could read
+    Instant threshold = Instant.parse("2026-01-08T00:00:00Z");
+    Result r = mockStateResult("saga-1", SagaStatus.COMPLETED);
+    when(tx.scan(any(Scan.class)))
+        .thenThrow(new RuntimeException("poison bucket"))
+        .thenThrow(new RuntimeException("poison bucket"))
+        .thenReturn(List.of(r))
+        .thenThrow(new RuntimeException("poison bucket"));
+
+    // Act
+    List<SagaStateSnapshot> result =
+        store.findByStatusOlderThan(SagaStatus.COMPLETED, threshold, 100, "owner-1", 0);
+
+    // Assert — all four buckets were attempted
+    assertThat(result).hasSize(1);
+    verify(tx, times(4)).scan(any(Scan.class));
+  }
+
+  @Test
+  void findByStatusOlderThan_maxResultsTruncates_scansOwnersFirstPermutationBucket()
+      throws Exception {
+    // Arrange — the first scanned bucket yields a row, filling maxResults = 1 immediately
+    Instant threshold = Instant.parse("2026-01-08T00:00:00Z");
+    Result r = mockStateResult("saga-1", SagaStatus.COMPLETED);
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(r));
+
+    // Act
+    List<SagaStateSnapshot> result =
+        store.findByStatusOlderThan(SagaStatus.COMPLETED, threshold, 1, "owner-1", 0);
+
+    // Assert — exactly one bucket scanned, and it is the owner permutation's first bucket, so
+    // concurrently purging replicas surface different sagas when the result is truncated
+    assertThat(result).hasSize(1);
+    ArgumentCaptor<Scan> scans = ArgumentCaptor.forClass(Scan.class);
+    verify(tx).scan(scans.capture());
+    int firstBucket = scans.getValue().getPartitionKey().getIntValue(0);
+    assertThat(firstBucket).isEqualTo(SweepScatter.permutation(SweepScatter.seed("owner-1"), 4)[0]);
+  }
+
+  @Test
+  void findByStatusOlderThan_rotationGiven_startsThatManyPositionsIntoTheSweepOrder()
+      throws Exception {
+    // Arrange — the first scanned bucket fills maxResults = 1 immediately
+    Instant threshold = Instant.parse("2026-01-08T00:00:00Z");
+    Result r = mockStateResult("saga-1", SagaStatus.COMPLETED);
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(r));
+
+    // Act — rotation 1: the sweep starts one position into the owner's permutation
+    List<SagaStateSnapshot> result =
+        store.findByStatusOlderThan(SagaStatus.COMPLETED, threshold, 1, "owner-1", 1);
+
+    // Assert
+    assertThat(result).hasSize(1);
+    ArgumentCaptor<Scan> scans = ArgumentCaptor.forClass(Scan.class);
+    verify(tx).scan(scans.capture());
+    assertThat(scans.getValue().getPartitionKey().getIntValue(0))
+        .isEqualTo(SweepScatter.permutation(SweepScatter.seed("owner-1"), 4)[1]);
+  }
+
+  @Test
+  void findByStatusOlderThan_oneBucketScanFails_otherBucketsStillScanned() throws Exception {
+    // Arrange — the first bucket's scan fails (e.g., a row that cannot be deserialized); the
+    // remaining buckets must still be swept instead of being abandoned
+    Instant threshold = Instant.parse("2026-01-08T00:00:00Z");
+    Result r = mockStateResult("saga-1", SagaStatus.COMPLETED);
+    when(tx.scan(any(Scan.class)))
+        .thenThrow(new RuntimeException("row cannot be deserialized"))
+        .thenReturn(List.of(r))
+        .thenReturn(List.of())
+        .thenReturn(List.of());
+
+    // Act
+    List<SagaStateSnapshot> result =
+        store.findByStatusOlderThan(SagaStatus.COMPLETED, threshold, 100, "owner-1", 0);
+
+    // Assert — the poison bucket was skipped, all four buckets were attempted, results kept
+    assertThat(result).hasSize(1);
+    verify(tx, times(4)).scan(any(Scan.class));
+  }
+
+  // ---------------------------------------------------------------------------
+  // initialSweepCursor — scattered bucket order
+  // ---------------------------------------------------------------------------
+
+  @Test
+  void findRecoverable_initialSweepCursorGiven_visitsBucketsInOwnersScatteredOrder()
+      throws Exception {
     // Arrange
-    when(tx.scan(any(Scan.class))).thenThrow(mock(CrudException.class));
+    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+
+    // Act — drive one full sweep from the owner's initial cursor
+    SagaStore.ScanCursor cursor = store.initialSweepCursor("owner-1");
+    int pages = 0;
+    while (cursor != null) {
+      Recoverables page = store.findRecoverable(Instant.now(), cursor);
+      cursor = page.nextCursor();
+      pages++;
+    }
+
+    // Assert — one page per bucket, visited in the owner's permutation order
+    assertThat(pages).isEqualTo(4);
+    ArgumentCaptor<Scan> scans = ArgumentCaptor.forClass(Scan.class);
+    verify(tx, times(8)).scan(scans.capture()); // 4 buckets x 2 recoverable statuses
+    int[] expected = SweepScatter.permutation(SweepScatter.seed("owner-1"), 4);
+    assertThat(distinctConsecutiveBuckets(scans.getAllValues()))
+        .containsExactly(expected[0], expected[1], expected[2], expected[3]);
+  }
+
+  @Test
+  void findOverdueParkedSagas_initialSweepCursorGiven_visitsBucketsInOwnersScatteredOrder()
+      throws Exception {
+    // Arrange
+    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+
+    // Act
+    SagaStore.ScanCursor cursor = store.initialSweepCursor("owner-1");
+    int pages = 0;
+    while (cursor != null) {
+      OverdueParked page = store.findOverdueParkedSagas(Instant.now(), cursor);
+      cursor = page.nextCursor();
+      pages++;
+    }
+
+    // Assert — the parked sweep follows the same owner permutation, one scan per bucket
+    assertThat(pages).isEqualTo(4);
+    ArgumentCaptor<Scan> scans = ArgumentCaptor.forClass(Scan.class);
+    verify(tx, times(4)).scan(scans.capture());
+    int[] expected = SweepScatter.permutation(SweepScatter.seed("owner-1"), 4);
+    assertThat(distinctConsecutiveBuckets(scans.getAllValues()))
+        .containsExactly(expected[0], expected[1], expected[2], expected[3]);
+  }
+
+  @Test
+  void findRecoverable_unknownCursorTypeGiven_throwsIllegalArgumentException() {
+    // Arrange — a cursor this store did not create (e.g., from another store implementation).
+    // Falling back silently would restart an un-scattered ascending sweep, so it must fail fast.
+    SagaStore.ScanCursor foreign = new SagaStore.ScanCursor() {};
 
     // Act & Assert
-    assertThatThrownBy(() -> store.findByStatusOlderThan(SagaStatus.COMPLETED, Instant.now(), 100))
-        .isInstanceOf(SagaPersistenceException.class);
+    assertThatThrownBy(() -> store.findRecoverable(Instant.now(), foreign))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> store.advanceSweepCursor(foreign))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void advanceSweepCursor_fullSweepByAdvancing_endsAfterOneRevolution() {
+    // Act — skip every page without scanning
+    SagaStore.ScanCursor cursor = store.initialSweepCursor("owner-1");
+    int advances = 0;
+    while (cursor != null) {
+      cursor = store.advanceSweepCursor(cursor);
+      advances++;
+    }
+
+    // Assert — one advance per bucket, then the sweep is exhausted
+    assertThat(advances).isEqualTo(4);
+  }
+
+  @Test
+  void advanceSweepCursor_pageSkipped_scanContinuesAtNextPermutationBucket() throws Exception {
+    // Arrange
+    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+
+    // Act — skip the first page (as the manager does for a failing page), then scan
+    SagaStore.ScanCursor afterSkip = store.advanceSweepCursor(store.initialSweepCursor("owner-1"));
+    store.findRecoverable(Instant.now(), afterSkip);
+
+    // Assert — the scan hits the owner permutation's second bucket
+    ArgumentCaptor<Scan> scans = ArgumentCaptor.forClass(Scan.class);
+    verify(tx, times(2)).scan(scans.capture()); // 2 recoverable statuses in one bucket
+    int[] expected = SweepScatter.permutation(SweepScatter.seed("owner-1"), 4);
+    assertThat(scans.getAllValues().get(0).getPartitionKey().getIntValue(0)).isEqualTo(expected[1]);
+  }
+
+  /** Bucket partition keys of the given scans, with consecutive duplicates collapsed. */
+  private static List<Integer> distinctConsecutiveBuckets(List<Scan> scans) {
+    List<Integer> buckets = new ArrayList<>();
+    for (Scan scan : scans) {
+      int bucket = scan.getPartitionKey().getIntValue(0);
+      if (buckets.isEmpty() || buckets.get(buckets.size() - 1) != bucket) {
+        buckets.add(bucket);
+      }
+    }
+    return buckets;
   }
 
   // ---------------------------------------------------------------------------
