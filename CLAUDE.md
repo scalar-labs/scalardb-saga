@@ -68,6 +68,7 @@ Refer to `~/git/scalardb-saga-design/docs/scalardb-saga-design.md` for architect
 - Never use PowerMock — needing it indicates a design problem. Refactor instead.
 - **Co-locate unit tests with implementation** — write tests in the same task as the classes they test. Do not defer tests to a separate bulk task. Integration tests that span multiple classes may be a separate task.
 - **Test all public methods** — every public method must have at least one test. Important private methods should also be tested (via public API or package-private access).
+- **A test that can only ever pass is not coverage** — asserting a getter returns its constructor argument proves nothing and disguises a member with no real consumer. Treat such a test as a signal to delete the member, not as coverage of it.
 - **Cover both success and failure cases** — test normal (success) paths and abnormal (failure) paths. Failure cases should be covered **extensively** — they are where bugs hide. Include edge cases, invalid inputs, exception paths, concurrency errors, and timeout scenarios.
 - Test method naming: `methodName_condition_expectedResult()`
   - The condition must read as a scenario, not a method-overload label

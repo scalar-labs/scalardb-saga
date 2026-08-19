@@ -83,6 +83,16 @@ readinessProbe:
     port: 12051
 ```
 
+With TLS enabled (see below), probing changes shape:
+
+- `httpGet` probes need `scheme: HTTPS`. The kubelet skips certificate verification, so a
+  private-CA or self-signed certificate works unmodified.
+- Kubernetes-native `grpc` probes speak **plaintext only** — they cannot probe a TLS listener. A
+  gRPC-only deployment therefore loses its probe under TLS: either keep the HTTP transport enabled
+  for probing (its `/health` needs no credential), or use an `exec` probe with a
+  `grpc_health_probe` binary you provide (`-tls -tls-ca-cert ...`), which this image deliberately
+  does not ship.
+
 `GET /health` and the `grpc.health.v1.Health` service are both reachable without a credential, by
 design — a probe cannot present one. Every other route is governed by the configured security
 provider: `jwt` and `apikey` authenticate them, `noop` does not, which is why the daemon refuses to
@@ -107,11 +117,71 @@ start under `noop` on a non-loopback interface.
   volumes:
     - { name: tmp, emptyDir: {} }
   ```
-- Serves **plaintext** on both ports — there is no TLS listener. Terminate TLS at an ingress or a
-  service mesh.
+- Serves **plaintext** on both ports by default. Terminating TLS at an ingress or a service mesh
+  remains the recommended setup; where no such layer exists, enable native TLS (below).
 - The default `noop` security provider authenticates nothing, and the daemon refuses to start under it
   on a non-loopback interface unless `insecure_mode.enabled=true` is set. Configure the `jwt` or
-  `apikey` provider instead of setting that flag.
+  `apikey` provider instead of setting that flag. TLS does not relax this guard: encrypting the
+  transport is confidentiality, not authentication.
+
+## TLS
+
+Native TLS covers **both** transports from one certificate, all-or-nothing (the two listeners share
+`host`, so one certificate's SANs cover both). Three keys, documented in the template and on
+`SagaServerConfig`:
+
+```properties
+scalar.db.saga.server.tls.enabled=true
+scalar.db.saga.server.tls.cert_chain_path=/scalardb-saga/tls/tls.crt
+scalar.db.saga.server.tls.private_key_path=/scalardb-saga/tls/tls.key
+```
+
+Both files are PEM; the paths are read and validated at startup, before either port binds, and every
+misconfiguration (missing file, unreadable file, malformed PEM, key/cert mismatch, wrong key format)
+fails boot with an error naming the key (the configured value is never echoed — like any value, it
+could be a mis-pasted secret). Protocols default to TLS 1.3 and 1.2 with nothing to
+tune; cipher policy is each stack's hardened default — Jetty applies its standard exclusions over
+the JDK list, gRPC restricts to the HTTP/2-approved suites — rather than a knob. The rare
+compliance need is served through `JAVA_OPTS` (e.g. `-Djdk.tls.server.protocols=TLSv1.3`). There is no mTLS, and no plaintext→HTTPS redirect listener:
+with TLS on, nothing serves plaintext.
+
+Mounting the material in Kubernetes — the mounted files must be readable by uid `201`, so set an
+explicit permissive `defaultMode` (a root-owned `0600` Secret is invisible to the daemon and fails
+boot with a permissions hint):
+
+```yaml
+volumeMounts:
+  - { name: tls, mountPath: /scalardb-saga/tls, readOnly: true }
+volumes:
+  - name: tls
+    secret:
+      secretName: saga-server-tls
+      defaultMode: 0444
+```
+
+The private key must be **unencrypted PKCS#8** (`BEGIN PRIVATE KEY`), RSA or EC. That is *not* what
+the common issuers emit by default:
+
+- **cert-manager** emits PKCS#1 unless the Certificate sets `spec.privateKey.encoding: PKCS8`
+- **Vault PKI** emits traditional encoding unless the request passes `private_key_format=pkcs8`
+- anything else converts with `openssl pkcs8 -topk8 -nocrypt`
+
+Certificate **rotation currently requires a restart** — the files are read once at startup. Hot
+reload is planned alongside the configuration hot-reload feature.
+
+Two operational notes:
+
+- **Async callbacks**: with TLS on, `callback.base_url` should be an `https` URL — participants dial
+  it, and a plain `http` URL pointing back at this server dies at the handshake on the first async
+  step. The daemon warns at startup about that combination.
+- **Outbound calls are unaffected**: participant calls (`service.<name>.base_url`) and JWKS fetches
+  verify against the JVM's default trust store. A participant behind a private CA needs that CA in
+  the daemon's trust store (`JAVA_OPTS=-Djavax.net.ssl.trustStore=...`); there is deliberately no
+  per-service trust knob.
+
+Java clients of the SDK enable TLS with `useTransportSecurity()`; against a private CA, add
+`trustCaCertificate(path)` (and `overrideAuthority(name)` when dialing by IP or through a
+port-forward). Non-Java REST consumers pass their CA the usual way (`curl --cacert ...`).
 
 ## Graceful shutdown
 

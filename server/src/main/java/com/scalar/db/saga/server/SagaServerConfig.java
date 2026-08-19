@@ -82,6 +82,35 @@ import org.jspecify.annotations.Nullable;
  * scalar.db.saga.store.max_event_payload_bytes} (see {@link #grpcMaxInboundMessageBytes()}) so no
  * transport can accept an input the store would then reject.
  *
+ * <h2>TLS ({@code tls.*})</h2>
+ *
+ * <p>Native TLS for <b>both</b> transports, all-or-nothing: one certificate covers the HTTP and
+ * gRPC listeners, which share {@code host}. Off by default — terminating TLS at a mesh, ingress, or
+ * load balancer remains the recommended deployment; enable this where no such layer exists.
+ *
+ * <ul>
+ *   <li>{@code tls.enabled} — serve TLS on both enabled transports (default {@value
+ *       #DEFAULT_TLS_ENABLED}). Requires both paths below. Setting either path without this key is
+ *       rejected, so mounted certificates cannot sit unused behind a forgotten switch while the
+ *       server silently serves plaintext; {@code tls.enabled=false} with paths set is legal and
+ *       ignores them, which is how an operator toggles TLS off without unmounting the material.
+ *       Ignored values must still be well-formed: shape checks run regardless of the toggle, as for
+ *       every key here, so the file stays valid for the day the toggle flips back
+ *   <li>{@code tls.cert_chain_path} — path to the PEM certificate chain, leaf first
+ *   <li>{@code tls.private_key_path} — path to the matching PEM private key: unencrypted PKCS#8
+ *       ({@code BEGIN PRIVATE KEY}), RSA or EC. PKCS#1/SEC1 ({@code BEGIN RSA/EC PRIVATE KEY}) and
+ *       encrypted keys are rejected with conversion guidance; note that cert-manager and Vault emit
+ *       those legacy encodings unless asked for PKCS#8
+ * </ul>
+ *
+ * <p>The keys take paths, never certificate or key contents, so the material stays re-readable for
+ * a future reload. The files are read and validated at startup, before either port binds, and every
+ * failure names the offending key — never the configured value, which like any value here could be
+ * a mis-pasted secret (see {@code TlsMaterial}). Protocols default to TLS 1.3 and 1.2 with no keys
+ * to tune, and ciphers to each stack's hardened defaults (Jetty's standard exclusions over the JDK
+ * list; gRPC's HTTP-2-approved suites); the rare compliance need is served by JVM flags (e.g.
+ * {@code jdk.tls.server.protocols}).
+ *
  * <h2>Synchronous starts ({@code sync.*})</h2>
  *
  * <ul>
@@ -231,13 +260,14 @@ import org.jspecify.annotations.Nullable;
  * Keys where that default would leave a protection <b>off</b> reject a blank value instead. Blank
  * is never a deliberate way to disable a control, since omitting the key already says that, so an
  * empty value there is far more likely a template that failed to resolve than an intent to run
- * without the protection. That covers {@code callback.max_age_seconds} and {@code
- * max_start_requests_per_minute}, whose defaults disable the check outright, plus the {@code
- * service.<name>} attributes whose blank fallback would be open ({@code allowed_hosts} would admit
- * any host; a {@code header.<Name>} would send an empty header, and an empty {@code Authorization}
- * is an unauthenticated call) or meaningless ({@code base_url} has no default to fall back to).
- * {@code service.<name>.max_body_bytes} sits on the other side of that line deliberately: unset
- * leaves the engine's own 1 MiB cap in place, so the body stays bounded either way.
+ * without the protection. That covers {@code callback.max_age_seconds}, {@code
+ * max_start_requests_per_minute}, and {@code tls.enabled}, whose defaults disable the check
+ * outright, plus the {@code service.<name>} attributes whose blank fallback would be open ({@code
+ * allowed_hosts} would admit any host; a {@code header.<Name>} would send an empty header, and an
+ * empty {@code Authorization} is an unauthenticated call) or meaningless ({@code base_url} has no
+ * default to fall back to). {@code service.<name>.max_body_bytes} sits on the other side of that
+ * line deliberately: unset leaves the engine's own 1 MiB cap in place, so the body stays bounded
+ * either way.
  *
  * <p>All other properties configure the saga engine's persistence (e.g. ScalarDB connection
  * settings and the {@code scalar.db.saga.store.*} keys documented on {@code
@@ -273,6 +303,16 @@ public final class SagaServerConfig {
   static final String GRPC_PORT_KEY = GRPC_PREFIX + "port";
   static final String GRPC_MAX_INBOUND_METADATA_BYTES_KEY =
       GRPC_PREFIX + "max_inbound_metadata_bytes";
+
+  // The TLS keys configure one feature (native TLS on both transports), so they share one group.
+  // They take paths, never contents: paths keep the material re-readable for a future reload and
+  // the operator's Secret mount the single source of the bytes. The path values themselves still
+  // follow the redaction rule — errors name the key only, since a mis-pasted secret reference
+  // arrives here as the resolved secret.
+  static final String TLS_PREFIX = SERVER_PREFIX + "tls.";
+  static final String TLS_ENABLED_KEY = TLS_PREFIX + "enabled";
+  static final String TLS_CERT_CHAIN_PATH_KEY = TLS_PREFIX + "cert_chain_path";
+  static final String TLS_PRIVATE_KEY_PATH_KEY = TLS_PREFIX + "private_key_path";
 
   static final String SYNC_PREFIX = SERVER_PREFIX + "sync.";
   static final String SYNC_TIMEOUT_MILLIS_KEY = SYNC_PREFIX + "timeout_millis";
@@ -336,6 +376,7 @@ public final class SagaServerConfig {
   static final int DEFAULT_GRPC_PORT = 12051;
   static final boolean DEFAULT_HTTP_ENABLED = true;
   static final boolean DEFAULT_GRPC_ENABLED = true;
+  static final boolean DEFAULT_TLS_ENABLED = false; // plaintext; a mesh/ingress terminates TLS
   static final int DEFAULT_GRPC_MAX_INBOUND_METADATA_BYTES = 8 * 1024;
   static final int DEFAULT_MAX_EVENT_PAYLOAD_BYTES = 1_048_576; // 1 MiB
   static final long DEFAULT_SYNC_TIMEOUT_MILLIS = 0L; // 0 = disabled (sync blocks to terminal)
@@ -385,6 +426,9 @@ public final class SagaServerConfig {
           GRPC_ENABLED_KEY,
           GRPC_PORT_KEY,
           GRPC_MAX_INBOUND_METADATA_BYTES_KEY,
+          TLS_ENABLED_KEY,
+          TLS_CERT_CHAIN_PATH_KEY,
+          TLS_PRIVATE_KEY_PATH_KEY,
           SYNC_TIMEOUT_MILLIS_KEY,
           SYNC_MAX_WAIT_MILLIS_KEY,
           SHUTDOWN_MODE_KEY,
@@ -522,6 +566,13 @@ public final class SagaServerConfig {
   private final int grpcPort;
   private final int grpcMaxInboundMetadataBytes;
   private final int grpcMaxInboundMessageBytes;
+  private final boolean tlsEnabled;
+  // Whether tls.enabled appeared in the properties at all. Consumed only by validateCombinations,
+  // which treats paths-with-absent-switch as a forgotten 'true' but paths-with-explicit-false as a
+  // deliberate toggle-off.
+  private final boolean tlsEnabledKeySet;
+  private final @Nullable Path tlsCertChainPath;
+  private final @Nullable Path tlsPrivateKeyPath;
   private final long syncTimeoutMillis;
   private final long syncMaxWaitMillis;
   private final ShutdownMode shutdownMode;
@@ -593,6 +644,17 @@ public final class SagaServerConfig {
             GRPC_MAX_INBOUND_METADATA_BYTES_KEY,
             DEFAULT_GRPC_MAX_INBOUND_METADATA_BYTES,
             1);
+    // tls.enabled rejects blank (its default leaves the protection off); the paths follow the
+    // ordinary blank-is-unset rule, so the pairing checks in validateCombinations see a blank path
+    // exactly as an absent one.
+    String tlsEnabledValue =
+        requireNonBlankIfSet(TLS_ENABLED_KEY, resolved.getProperty(TLS_ENABLED_KEY));
+    this.tlsEnabledKeySet = tlsEnabledValue != null;
+    this.tlsEnabled = parseBoolean(tlsEnabledValue, TLS_ENABLED_KEY, DEFAULT_TLS_ENABLED);
+    this.tlsCertChainPath =
+        parseOptionalPath(resolved.getProperty(TLS_CERT_CHAIN_PATH_KEY), TLS_CERT_CHAIN_PATH_KEY);
+    this.tlsPrivateKeyPath =
+        parseOptionalPath(resolved.getProperty(TLS_PRIVATE_KEY_PATH_KEY), TLS_PRIVATE_KEY_PATH_KEY);
     this.syncTimeoutMillis =
         parseBoundedLong(
             resolved.getProperty(SYNC_TIMEOUT_MILLIS_KEY),
@@ -656,7 +718,8 @@ public final class SagaServerConfig {
             MAX_START_REQUESTS_PER_MINUTE_KEY,
             DEFAULT_MAX_START_REQUESTS_PER_MINUTE,
             0);
-    this.definitionsPath = parseDefinitionsPath(resolved.getProperty(DEFINITIONS_PATH_KEY));
+    this.definitionsPath =
+        parseOptionalPath(resolved.getProperty(DEFINITIONS_PATH_KEY), DEFINITIONS_PATH_KEY);
     this.services = parseServices(resolved);
     this.properties = applyStoreDefaults(copyOf(resolved));
     this.grpcMaxInboundMessageBytes = parseGrpcMaxInboundMessageBytes(this.properties);
@@ -707,6 +770,45 @@ public final class SagaServerConfig {
               + "' is not. Async step completion needs both — the base URL to build the callback"
               + " URL handed to a participant, and the secret to authenticate the callback it sends"
               + " back. Set both, or neither to leave async completion disabled.");
+    }
+    // TLS needs both halves of the key pair; either alone is a half-configured feature that would
+    // otherwise surface only as handshake failures after the ports are already serving.
+    if (tlsEnabled && (tlsCertChainPath == null || tlsPrivateKeyPath == null)) {
+      boolean bothMissing = tlsCertChainPath == null && tlsPrivateKeyPath == null;
+      String missing =
+          bothMissing
+              ? "'" + TLS_CERT_CHAIN_PATH_KEY + "' and '" + TLS_PRIVATE_KEY_PATH_KEY + "' are"
+              : "'"
+                  + (tlsCertChainPath == null ? TLS_CERT_CHAIN_PATH_KEY : TLS_PRIVATE_KEY_PATH_KEY)
+                  + "' is";
+      throw new IllegalArgumentException(
+          "'"
+              + TLS_ENABLED_KEY
+              + "' is true but "
+              + missing
+              + " not set. Serving TLS needs both the certificate chain and its private key. Set"
+              + " both paths, or set '"
+              + TLS_ENABLED_KEY
+              + "=false' to serve plaintext.");
+    }
+    // Material without the switch: an operator who mounts certificates but forgets tls.enabled=true
+    // would silently serve plaintext. Explicit tls.enabled=false stays legal — that is the
+    // deliberate "toggle TLS off, leave the material mounted" move.
+    if (!tlsEnabledKeySet && (tlsCertChainPath != null || tlsPrivateKeyPath != null)) {
+      String present =
+          tlsCertChainPath != null ? TLS_CERT_CHAIN_PATH_KEY : TLS_PRIVATE_KEY_PATH_KEY;
+      throw new IllegalArgumentException(
+          "'"
+              + present
+              + "' is set but '"
+              + TLS_ENABLED_KEY
+              + "' is not. Set '"
+              + TLS_ENABLED_KEY
+              + "=true' to serve TLS with this material, or '"
+              + TLS_ENABLED_KEY
+              + "=false' to keep it unused and serve plaintext. The explicit switch is required so"
+              + " a forgotten 'true' cannot leave the server silently serving plaintext with"
+              + " certificates mounted.");
     }
   }
 
@@ -1162,6 +1264,33 @@ public final class SagaServerConfig {
   }
 
   /**
+   * Whether the daemon serves TLS on both enabled transports (the {@code tls.enabled} key; default
+   * {@value #DEFAULT_TLS_ENABLED}). When {@code true}, {@link #tlsCertChainPath()} and {@link
+   * #tlsPrivateKeyPath()} are both present — the combination is validated at load.
+   */
+  public boolean tlsEnabled() {
+    return tlsEnabled;
+  }
+
+  /**
+   * Returns the path to the PEM certificate chain (leaf first) served on both transports, or empty
+   * when TLS is disabled. A path configured alongside an explicit {@code tls.enabled=false} is
+   * deliberately not returned: the material is ignored, which is what lets an operator toggle TLS
+   * off without unmounting it.
+   */
+  public Optional<Path> tlsCertChainPath() {
+    return tlsEnabled ? Optional.ofNullable(tlsCertChainPath) : Optional.empty();
+  }
+
+  /**
+   * Returns the path to the PEM private key matching {@link #tlsCertChainPath()} — unencrypted
+   * PKCS#8, RSA or EC — or empty when TLS is disabled, under the same ignore-when-off rule.
+   */
+  public Optional<Path> tlsPrivateKeyPath() {
+    return tlsEnabled ? Optional.ofNullable(tlsPrivateKeyPath) : Optional.empty();
+  }
+
+  /**
    * Returns the synchronous-start timeout in milliseconds, or {@code 0} when disabled (the
    * default). When positive, a synchronous {@code POST}/{@code PUT} that has not reached a terminal
    * state within this bound returns {@code 202} and the saga keeps running on the engine's executor
@@ -1385,10 +1514,11 @@ public final class SagaServerConfig {
   }
 
   /**
-   * Parses the definitions path; unset or blank ⇒ null. {@link InvalidPathException} is remapped
-   * because its message embeds the input, which is a resolved value.
+   * Parses an optional path value: blank-is-unset, trimmed, and rejected without echoing when the
+   * platform refuses it as a path — {@link InvalidPathException}'s own message embeds the raw
+   * input, which for a mis-pasted secret reference would be the secret's plaintext.
    */
-  private static @Nullable Path parseDefinitionsPath(@Nullable String value) {
+  private static @Nullable Path parseOptionalPath(@Nullable String value, String key) {
     if (value == null || value.isBlank()) {
       return null;
     }
@@ -1397,8 +1527,8 @@ public final class SagaServerConfig {
     } catch (InvalidPathException e) {
       throw new IllegalArgumentException(
           "Invalid value for '"
-              + DEFINITIONS_PATH_KEY
-              + "': not a valid path "
+              + key
+              + "': not a valid file system path "
               + Redaction.redacted(value));
     }
   }

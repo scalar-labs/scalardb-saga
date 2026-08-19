@@ -196,15 +196,16 @@ class SagaServerConfigTest {
   }
 
   /**
-   * The two keys whose default leaves a protection off, so the general blank-is-unset rule would
-   * turn a templated value that resolved empty into a silently disabled control. Omitting the key
-   * remains the way to accept the default; only the empty spelling is refused.
+   * The keys whose default leaves a protection off, so the general blank-is-unset rule would turn a
+   * templated value that resolved empty into a silently disabled control. Omitting the key remains
+   * the way to accept the default; only the empty spelling is refused.
    */
   @ParameterizedTest
   @ValueSource(
       strings = {
         SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY,
-        SagaServerConfig.CALLBACK_MAX_AGE_SECONDS_KEY
+        SagaServerConfig.CALLBACK_MAX_AGE_SECONDS_KEY,
+        SagaServerConfig.TLS_ENABLED_KEY
       })
   void load_blankProtectionDisablingKey_throwsIllegalArgumentException(String key) {
     Properties props = new Properties();
@@ -224,6 +225,149 @@ class SagaServerConfigTest {
         .isEqualTo(SagaServerConfig.DEFAULT_MAX_START_REQUESTS_PER_MINUTE);
     assertThat(config.callbackMaxAgeSeconds())
         .isEqualTo(SagaServerConfig.DEFAULT_CALLBACK_MAX_AGE_SECONDS);
+    assertThat(config.tlsEnabled()).isEqualTo(SagaServerConfig.DEFAULT_TLS_ENABLED);
+  }
+
+  @Test
+  void load_unsetTls_disabledWithNoPaths() {
+    SagaServerConfig config = SagaServerConfig.load(new Properties());
+
+    assertThat(config.tlsEnabled()).isFalse();
+    assertThat(config.tlsCertChainPath()).isEmpty();
+    assertThat(config.tlsPrivateKeyPath()).isEmpty();
+  }
+
+  @Test
+  void load_tlsEnabledWithBothPaths_parsesTrimmedPaths() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "  /etc/tls/tls.crt  ");
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, "/etc/tls/tls.key");
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.tlsEnabled()).isTrue();
+    assertThat(config.tlsCertChainPath()).contains(Path.of("/etc/tls/tls.crt"));
+    assertThat(config.tlsPrivateKeyPath()).contains(Path.of("/etc/tls/tls.key"));
+  }
+
+  @Test
+  void load_tlsEnabledWithoutPrivateKeyPath_throwsNamingMissingKey() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "/etc/tls/tls.crt");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.TLS_ENABLED_KEY)
+        .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY);
+  }
+
+  @Test
+  void load_tlsEnabledWithoutCertChainPath_throwsNamingMissingKey() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, "/etc/tls/tls.key");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.TLS_ENABLED_KEY)
+        .hasMessageContaining(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY);
+  }
+
+  @Test
+  void load_tlsEnabledWithoutAnyPath_throwsNamingBothKeys() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY)
+        .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY);
+  }
+
+  @Test
+  void load_tlsEnabledWithBlankPrivateKeyPath_throwsAsMissingPair() {
+    // Blank-is-unset composes with the pairing rule: a blank path reports as the missing half of
+    // the pair, exactly as an absent key does.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "/etc/tls/tls.crt");
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, "   ");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY);
+  }
+
+  @Test
+  void load_tlsPathsWithExplicitFalse_ignoredAndDisabled() {
+    // The deliberate toggle-off move: material stays mounted and configured, the explicit false
+    // switches it off, and the getters hide the ignored paths so nothing downstream can serve
+    // them by accident.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "false");
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "/etc/tls/tls.crt");
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, "/etc/tls/tls.key");
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.tlsEnabled()).isFalse();
+    assertThat(config.tlsCertChainPath()).isEmpty();
+    assertThat(config.tlsPrivateKeyPath()).isEmpty();
+  }
+
+  @Test
+  void load_tlsCertChainPathWithoutEnabledKey_throwsForgottenSwitch() {
+    // Material without the switch is the forgot-the-switch hole: the operator mounted certificates
+    // expecting TLS, and the server would silently serve plaintext.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "/etc/tls/tls.crt");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY)
+        .hasMessageContaining(SagaServerConfig.TLS_ENABLED_KEY);
+  }
+
+  @Test
+  void load_tlsPrivateKeyPathAloneWithoutEnabledKey_throwsForgottenSwitch() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, "/etc/tls/tls.key");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY)
+        .hasMessageContaining(SagaServerConfig.TLS_ENABLED_KEY);
+  }
+
+  @Test
+  void load_blankTlsPathWithoutEnabledKey_isNoOp() {
+    // The other doctrine-composition cell: blank is unset, so a blank path with no tls.enabled is
+    // not the forgotten switch — it is a template variable that resolved empty, and the server
+    // starts on the plaintext default.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "");
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.tlsEnabled()).isFalse();
+  }
+
+  @Test
+  void load_tlsPathWithNulByte_throwsWithoutEchoingValue() {
+    // InvalidPathException's own message embeds the raw input, which for a mis-pasted secret
+    // reference would be the secret's plaintext; the parser must throw its own redacted message.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "s3cr3t\0plaintext");
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, "/etc/tls/tls.key");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY)
+        .hasMessageNotContaining("s3cr3t")
+        .hasNoCause();
   }
 
   @Test
