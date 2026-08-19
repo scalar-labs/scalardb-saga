@@ -1314,6 +1314,9 @@ class SagaEngineTest {
 
     private ExecutionContext createCompensatingContext() {
       SagaStateSnapshot state = compensatingSnapshot("saga-1");
+      // compensateSteps transitions to COMPENSATED on success; return the same snapshot for
+      // simplicity
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(state);
       return new ExecutionContext("saga-1", Map.of(), state);
     }
 
@@ -1371,7 +1374,8 @@ class SagaEngineTest {
     }
 
     @Test
-    void compensateSteps_allRetriesExhausted_appendsFailedEventAndThrows() throws Exception {
+    void compensateSteps_allRetriesExhausted_appendsFailedEventAndStaysCompensating()
+        throws Exception {
       // Arrange
       Step step0 = createStep("step0");
       doThrow(new StepCompensationException("persistent"))
@@ -1380,18 +1384,20 @@ class SagaEngineTest {
       List<StepWithPolicy> plan = createPlan(step0);
       ExecutionContext context = createCompensatingContext();
 
-      // Act & Assert
-      assertThatThrownBy(() -> engine.compensateSteps(plan, context, 0))
-          .isInstanceOf(StepCompensationException.class);
+      // Act
+      engine.compensateSteps(plan, context, 0);
 
-      // Verify all 3 retry attempts were made
+      // Assert — all 3 retry attempts were made
       verify(step0, times(3)).compensate(any(SagaContext.class));
 
-      // Verify STEP_COMPENSATION_FAILED event appended
+      // Assert — STEP_COMPENSATION_FAILED event appended
       ArgumentCaptor<StepEvent> eventCaptor = ArgumentCaptor.forClass(StepEvent.class);
       verify(store).recordStepEvent(eq("saga-1"), anyInt(), eventCaptor.capture());
       assertThat(eventCaptor.getValue().getEventType())
           .isEqualTo(EventType.STEP_COMPENSATION_FAILED);
+
+      // Assert — no SAGA_COMPENSATED transition (stays COMPENSATING for recovery to retry)
+      verify(store, never()).recordStatusEvent(any(), anyInt(), any(StatusEvent.class), any());
     }
 
     @Test
@@ -1424,6 +1430,11 @@ class SagaEngineTest {
       // Assert
       verify(step0, never()).compensate(any(SagaContext.class));
       verify(store, never()).recordStepEvent(anyString(), anyInt(), any(StepEvent.class));
+
+      // Assert — even with nothing to compensate, the saga transitions to COMPENSATED
+      ArgumentCaptor<StatusEvent> statusCaptor = ArgumentCaptor.forClass(StatusEvent.class);
+      verify(store).recordStatusEvent(any(), anyInt(), statusCaptor.capture(), any());
+      assertThat(statusCaptor.getValue().getEventType()).isEqualTo(EventType.SAGA_COMPENSATED);
     }
 
     @Test

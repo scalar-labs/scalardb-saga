@@ -2,6 +2,7 @@ package com.scalar.db.saga.api;
 
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaPermissionDeniedException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
@@ -12,6 +13,14 @@ import com.scalar.db.saga.exception.SagaUnauthenticatedException;
  * ones that need an operator. Implemented in-process by {@code DefaultSagaAdminService} and
  * remotely by {@code GrpcSagaAdminClient} (the Java 8 client SDK), so the same surface works
  * embedded or against a saga server.
+ *
+ * <p><b>Deciding what to retry.</b> Key on {@link
+ * com.scalar.db.saga.exception.SagaErrorCode.Category#RETRYABLE_SERVER_ERROR} via {@code
+ * e.getErrorCode().category()} rather than on a single exception type. A transient store failure
+ * reaches a remote caller as {@link com.scalar.db.saga.exception.SagaPersistenceException} (the
+ * type the engine threw, reconstructed from the wire) while a connectivity failure that never
+ * reached the server arrives as {@link com.scalar.db.saga.exception.SagaUnavailableException}. Both
+ * are retryable, and only the category covers both.
  *
  * <p><b>Direction-agnostic mutations.</b> The operator never chooses "compensate" vs. "resume
  * forward" — the engine decides from the saga's pivot, exactly as automatic recovery does. The
@@ -54,7 +63,8 @@ public interface SagaAdminService extends AutoCloseable {
    *
    * @param query the status/time filter, page size, and continuation token
    * @return a page of matching snapshots and a token for the next page
-   * @throws IllegalArgumentException if the page token is malformed (the daemon maps this to 400)
+   * @throws SagaIllegalArgumentException if the page token is malformed (the daemon maps this to
+   *     400); both implementations throw it, so the same handling works embedded and remote
    */
   SagaPage<SagaStateSnapshot> listSagas(SagaQuery query);
 
@@ -84,6 +94,8 @@ public interface SagaAdminService extends AutoCloseable {
    * @throws SagaDefinitionNotFoundException if the saga's definition is no longer registered, so
    *     the engine cannot drive it
    * @throws SagaConcurrentModificationException if a concurrent writer changed the saga first
+   * @throws SagaIllegalArgumentException if {@code reason} is blank or exceeds the audit length
+   *     limit
    */
   SagaStateSnapshot recoverSaga(String sagaId, String reason);
 
@@ -98,6 +110,8 @@ public interface SagaAdminService extends AutoCloseable {
    * @throws SagaNotFoundException if no such saga exists
    * @throws SagaStatePreconditionException if the saga is not {@code ESCALATED}
    * @throws SagaConcurrentModificationException if a concurrent writer changed the saga first
+   * @throws SagaIllegalArgumentException if {@code reason} is blank or exceeds the audit length
+   *     limit
    */
   SagaStateSnapshot forceComplete(String sagaId, String reason);
 
@@ -119,6 +133,8 @@ public interface SagaAdminService extends AutoCloseable {
    *     the engine cannot drive it — the single-saga counterpart of the bulk form's {@link
    *     ResetResult.SkipReason#DEFINITION_NOT_FOUND}
    * @throws SagaConcurrentModificationException if a concurrent writer changed the saga first
+   * @throws SagaIllegalArgumentException if {@code reason} is blank or exceeds the audit length
+   *     limit
    */
   SagaStateSnapshot resetEscalated(String sagaId, String reason);
 
@@ -138,8 +154,8 @@ public interface SagaAdminService extends AutoCloseable {
    * @param query the page of escalated sagas to sweep (status filter fixed to {@code ESCALATED})
    * @param reason why the operator is un-escalating (recorded per row for audit; must be non-blank)
    * @return the per-page counts and the token to continue the sweep
-   * @throws IllegalArgumentException if {@code query} sets a status other than {@code ESCALATED},
-   *     or its page token is malformed (the daemon maps this to 400)
+   * @throws SagaIllegalArgumentException if {@code query} sets a status other than {@code
+   *     ESCALATED}, or its page token is malformed (the daemon maps this to 400)
    */
   ResetResult resetEscalated(SagaQuery query, String reason);
 

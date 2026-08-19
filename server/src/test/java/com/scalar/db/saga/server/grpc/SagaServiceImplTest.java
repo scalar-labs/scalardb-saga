@@ -20,6 +20,7 @@ import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.api.TimelineEvent;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.rpc.AwaitSagaRequest;
@@ -154,7 +155,7 @@ class SagaServiceImplTest {
         new TimelineEvent(
             TS, "SAGA_RECOVERING", null, null, SagaStatus.COMPENSATING, "rolling back", "bob");
     when(orchestrator.getSagaDetail("s-7"))
-        .thenReturn(new SagaDetail(snap, List.of(stepFailed, recovering)));
+        .thenReturn(new SagaDetail(snap, List.of(stepFailed, recovering), true));
 
     // Act
     com.scalar.db.saga.rpc.SagaDetail response =
@@ -164,6 +165,7 @@ class SagaServiceImplTest {
     verify(orchestrator).getSagaDetail("s-7");
     assertThat(response.getSaga().getStatus())
         .isEqualTo(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_COMPENSATED);
+    assertThat(response.getTruncated()).isTrue();
     assertThat(response.getTimelineCount()).isEqualTo(2);
 
     com.scalar.db.saga.rpc.TimelineEvent step = response.getTimeline(0);
@@ -244,7 +246,7 @@ class SagaServiceImplTest {
   @Test
   void startSaga_definitionNotFound_returnsNotFound() {
     when(orchestrator.startAsync("unknown", Map.of()))
-        .thenThrow(new SagaDefinitionNotFoundException("unknown"));
+        .thenThrow(SagaDefinitionNotFoundException.byName("unknown"));
 
     assertCode(() -> stub(0).startSaga(startByName("unknown", true)), Status.Code.NOT_FOUND);
   }
@@ -256,7 +258,11 @@ class SagaServiceImplTest {
             StatusRuntimeException.class,
             e -> {
               assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
-              assertThat(e.getStatus().getDescription()).isEqualTo("'name' is required");
+              // INVALID_REQUEST wraps the daemon-authored detail; the exact message the daemon
+              // authored ("'name' is required") rides in the metadata detail.
+              assertThat(e.getStatus().getDescription())
+                  .contains(SagaErrorCode.INVALID_REQUEST.code())
+                  .contains("'name' is required");
             });
   }
 
@@ -270,8 +276,9 @@ class SagaServiceImplTest {
             StatusRuntimeException.class,
             e -> {
               assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
-              assertThat(e.getStatus().getDescription()).isEqualTo("Invalid request parameter");
-              assertThat(e.getStatus().getDescription()).doesNotContain("engine-internal");
+              assertThat(e.getStatus().getDescription())
+                  .contains(SagaErrorCode.INVALID_ARGUMENT.code())
+                  .doesNotContain("engine-internal");
             });
   }
 
@@ -294,8 +301,8 @@ class SagaServiceImplTest {
   void startSaga_retryablePersistenceError_returnsUnavailableWithoutLeakingMessage() {
     when(orchestrator.startAsync("transfer", Map.of()))
         .thenThrow(
-            SagaPersistenceException.retryable(
-                "DB write failed on secret_table host=10.0.0.5", new RuntimeException("io")));
+            SagaPersistenceException.storeUnavailable(
+                new RuntimeException("DB write failed on secret_table host=10.0.0.5")));
 
     assertThatThrownBy(() -> stub(0).startSaga(startByName("transfer", true)))
         .isInstanceOfSatisfying(
@@ -303,8 +310,8 @@ class SagaServiceImplTest {
             e -> {
               assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.UNAVAILABLE);
               assertThat(e.getStatus().getDescription())
-                  .isEqualTo("Service temporarily unavailable");
-              assertThat(e.getStatus().getDescription()).doesNotContain("secret_table", "10.0.0.5");
+                  .contains(SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE.code())
+                  .doesNotContain("secret_table", "10.0.0.5");
             });
   }
 
@@ -314,16 +321,17 @@ class SagaServiceImplTest {
     // UNAVAILABLE — the client would retry it futilely. It maps to INTERNAL instead.
     when(orchestrator.startAsync("transfer", Map.of()))
         .thenThrow(
-            SagaPersistenceException.nonRetryable(
-                "Failed to serialize payload for secret_table", new RuntimeException("bad json")));
+            SagaPersistenceException.serializationFailed(
+                new RuntimeException("Failed to serialize payload for secret_table")));
 
     assertThatThrownBy(() -> stub(0).startSaga(startByName("transfer", true)))
         .isInstanceOfSatisfying(
             StatusRuntimeException.class,
             e -> {
               assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INTERNAL);
-              assertThat(e.getStatus().getDescription()).isEqualTo("Internal server error");
-              assertThat(e.getStatus().getDescription()).doesNotContain("secret_table");
+              assertThat(e.getStatus().getDescription())
+                  .contains(SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED.code())
+                  .doesNotContain("secret_table");
             });
   }
 
@@ -337,8 +345,9 @@ class SagaServiceImplTest {
             StatusRuntimeException.class,
             e -> {
               assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INTERNAL);
-              assertThat(e.getStatus().getDescription()).isEqualTo("Internal server error");
-              assertThat(e.getStatus().getDescription()).doesNotContain("SECRET", "Engine.java");
+              assertThat(e.getStatus().getDescription())
+                  .contains(SagaErrorCode.INTERNAL_ERROR.code())
+                  .doesNotContain("SECRET", "Engine.java");
             });
   }
 

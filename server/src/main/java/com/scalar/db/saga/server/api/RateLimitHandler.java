@@ -60,9 +60,11 @@ public final class RateLimitHandler {
       // proceeds rather than being blocked by a limit it cannot attribute.
       return;
     }
-    if (!limiter.tryAcquire(identity.principal(), System.currentTimeMillis())) {
+    long now = System.currentTimeMillis();
+    if (!limiter.tryAcquire(identity.principal(), now)) {
       throw new RateLimitExceededException(
-          "Saga-start rate limit exceeded for principal '" + identity.principal() + "'");
+          "Saga-start rate limit exceeded for principal '" + identity.principal() + "'",
+          limiter.retryAfterMillis(identity.principal(), now));
     }
   }
 }

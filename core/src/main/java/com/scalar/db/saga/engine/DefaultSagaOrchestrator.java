@@ -61,6 +61,15 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    */
   public static final long DEFAULT_SHUTDOWN_TIMEOUT_MILLIS = 30_000L;
 
+  /**
+   * The timeline bound applied when {@link Builder#maxTimelineEvents(int)} is not called:
+   * effectively unbounded, so an in-process (embedded) caller always sees a saga's full timeline. A
+   * remote front end serving {@link #getSagaDetail} over a network should configure a real bound —
+   * an unbounded timeline of a pathological saga can exceed a wire message limit and make the saga
+   * undiagnosable exactly when it matters.
+   */
+  public static final int DEFAULT_MAX_TIMELINE_EVENTS = Integer.MAX_VALUE;
+
   private static final Logger logger = LoggerFactory.getLogger(DefaultSagaOrchestrator.class);
 
   // Embedded mode has no authenticated user, so admin interventions are attributed to this fixed
@@ -73,6 +82,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   private final SagaRecoveryManager recoveryManager;
   private final SagaRetentionManager retentionManager;
   private final long shutdownTimeoutMillis;
+  private final int maxTimelineEvents;
   private final ExecutorService asyncExecutor;
   private volatile boolean closed;
 
@@ -82,7 +92,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       SagaDefinitionRegistry definitionRegistry,
       SagaRecoveryManager recoveryManager,
       SagaRetentionManager retentionManager,
-      long shutdownTimeoutMillis) {
+      long shutdownTimeoutMillis,
+      int maxTimelineEvents) {
     this(
         engine,
         store,
@@ -90,6 +101,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
         recoveryManager,
         retentionManager,
         shutdownTimeoutMillis,
+        maxTimelineEvents,
         Executors.newVirtualThreadPerTaskExecutor());
   }
 
@@ -101,6 +113,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       SagaRecoveryManager recoveryManager,
       SagaRetentionManager retentionManager,
       long shutdownTimeoutMillis,
+      int maxTimelineEvents,
       ExecutorService asyncExecutor) {
     this.engine = engine;
     this.store = store;
@@ -108,6 +121,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     this.recoveryManager = recoveryManager;
     this.retentionManager = retentionManager;
     this.shutdownTimeoutMillis = shutdownTimeoutMillis;
+    this.maxTimelineEvents = maxTimelineEvents;
     this.asyncExecutor = asyncExecutor;
   }
 
@@ -360,7 +374,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   @Override
   public SagaDetail getSagaDetail(String sagaId) {
     // An application read of its own saga's state and timeline — no operator, no drive.
-    return SagaDetailReader.read(store, sagaId);
+    return SagaDetailReader.read(store, sagaId, maxTimelineEvents);
   }
 
   /**
@@ -586,7 +600,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   private SagaDefinition requireLatestDefinition(String sagaName) {
     SagaDefinition def = definitionRegistry.resolve(sagaName);
     if (def == null) {
-      throw new SagaDefinitionNotFoundException(sagaName);
+      throw SagaDefinitionNotFoundException.byName(sagaName);
     }
     return def;
   }
@@ -594,7 +608,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   private SagaDefinition requireVersionedDefinition(SagaDefinitionId id) {
     SagaDefinition def = definitionRegistry.resolve(id.name(), id.version());
     if (def == null) {
-      throw new SagaDefinitionNotFoundException(id);
+      throw SagaDefinitionNotFoundException.byId(id);
     }
     return def;
   }
@@ -603,7 +617,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     SagaDefinition def =
         definitionRegistry.resolve(saga.getSagaName(), saga.getDefinitionVersion());
     if (def == null) {
-      throw new SagaDefinitionNotFoundException(saga.getSagaName(), saga.getDefinitionVersion());
+      throw SagaDefinitionNotFoundException.byNameAndVersion(
+          saga.getSagaName(), saga.getDefinitionVersion());
     }
     return def;
   }
@@ -645,6 +660,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     private String ownerId = java.util.UUID.randomUUID().toString();
     private ShutdownMode shutdownMode = DEFAULT_SHUTDOWN_MODE;
     private long shutdownTimeoutMillis = DEFAULT_SHUTDOWN_TIMEOUT_MILLIS;
+    private int maxTimelineEvents = DEFAULT_MAX_TIMELINE_EVENTS;
     private Clock clock = Clock.systemUTC();
     private ResourceRegistry.@Nullable Builder resourceRegistryBuilder;
     private @Nullable StepResolver customStepResolver;
@@ -705,6 +721,26 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
      */
     public Builder shutdownTimeoutMillis(long shutdownTimeoutMillis) {
       this.shutdownTimeoutMillis = shutdownTimeoutMillis;
+      return this;
+    }
+
+    /**
+     * Bounds the timeline returned by {@link SagaOrchestrator#getSagaDetail(String)}: when a saga's
+     * history is longer, the newest {@code maxTimelineEvents} events are returned and the detail is
+     * flagged {@link SagaDetail#isTruncated() truncated}. The full history remains in the store.
+     * Defaults to {@link #DEFAULT_MAX_TIMELINE_EVENTS} (effectively unbounded, the embedded-mode
+     * behavior); a remote front end should set a real bound.
+     *
+     * @param maxTimelineEvents the maximum number of timeline events per detail read; must be
+     *     positive
+     * @return this builder
+     */
+    public Builder maxTimelineEvents(int maxTimelineEvents) {
+      if (maxTimelineEvents < 1) {
+        throw new IllegalArgumentException(
+            "maxTimelineEvents must be positive, got " + maxTimelineEvents);
+      }
+      this.maxTimelineEvents = maxTimelineEvents;
       return this;
     }
 
@@ -922,7 +958,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
             definitionRegistry,
             recoveryManager,
             retentionManager,
-            shutdownTimeoutMillis);
+            shutdownTimeoutMillis,
+            maxTimelineEvents);
       } catch (Throwable t) {
         // Roll back the resources that hold real external connections: the store (DB sessions) and
         // the HTTP endpoint registry (holds HTTP clients). Each is null if its own creation threw,

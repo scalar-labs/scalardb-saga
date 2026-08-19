@@ -1,5 +1,6 @@
 package com.scalar.db.saga.server.api;
 
+import com.scalar.db.saga.exception.SagaInvalidRequestException;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 
@@ -9,8 +10,8 @@ final class RequestParsing {
   private RequestParsing() {}
 
   /**
-   * Parses an ISO-8601 instant, throwing {@link InvalidRequestException} (mapped to {@code 400}) if
-   * {@code value} is not one.
+   * Parses an ISO-8601 instant, throwing {@link SagaInvalidRequestException} (mapped to {@code
+   * 400}) if {@code value} is not one.
    *
    * @param value the raw value
    * @param field the field name, for the error message
@@ -20,7 +21,7 @@ final class RequestParsing {
     try {
       return Instant.parse(value);
     } catch (DateTimeParseException e) {
-      throw new InvalidRequestException("'" + field + "' is not a valid ISO-8601 instant");
+      throw new SagaInvalidRequestException("'" + field + "' is not a valid ISO-8601 instant");
     }
   }
 }

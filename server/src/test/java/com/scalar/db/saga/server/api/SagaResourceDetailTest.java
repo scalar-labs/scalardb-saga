@@ -78,6 +78,25 @@ class SagaResourceDetailTest {
     assertThat(response.statusCode()).isEqualTo(200);
     assertThat(response.body()).contains("\"sagaId\":\"s1\"");
     assertThat(response.body()).contains("downstream broke");
+    assertThat(response.body()).contains("\"truncated\":false");
+  }
+
+  @Test
+  void detail_truncatedTimeline_surfacesFlagInResponse() throws Exception {
+    // Arrange — the orchestrator cut the timeline to its configured bound
+    SagaStateSnapshot snapshot =
+        new SagaStateSnapshot(SAGA_ID, "order-saga", SagaStatus.ESCALATED, "owner", "v1", TS, TS);
+    TimelineEvent event =
+        new TimelineEvent(TS, "SAGA_ESCALATED", null, null, SagaStatus.ESCALATED, "stuck", null);
+    when(orchestrator.getSagaDetail(SAGA_ID))
+        .thenReturn(new SagaDetail(snapshot, List.of(event), true));
+
+    // Act
+    HttpResponse<String> response = send("GET", "/sagas/s1/detail", "read");
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(200);
+    assertThat(response.body()).contains("\"truncated\":true");
   }
 
   @Test
