@@ -682,6 +682,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     private String ownerId = java.util.UUID.randomUUID().toString();
     private ShutdownMode shutdownMode = DEFAULT_SHUTDOWN_MODE;
     private long shutdownTimeoutMillis = DEFAULT_SHUTDOWN_TIMEOUT_MILLIS;
+    private long defaultSagaTimeoutMillis = 0;
     private int maxTimelineEvents = DEFAULT_MAX_TIMELINE_EVENTS;
     private Clock clock = Clock.systemUTC();
     private ResourceRegistry.@Nullable Builder resourceRegistryBuilder;
@@ -750,6 +751,27 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
      */
     public Builder shutdownTimeoutMillis(long shutdownTimeoutMillis) {
       this.shutdownTimeoutMillis = shutdownTimeoutMillis;
+      return this;
+    }
+
+    /**
+     * Sets a default saga timeout in milliseconds, applied at execution to any definition that
+     * specifies no timeout of its own ({@code timeoutMillis == 0}). The default is applied at every
+     * execution entry — start, recovery resume, and parked resume — by recomputing the deadline at
+     * each drive, so an in-flight saga's effective timeout follows the value configured at each
+     * resumption, and the stored definition never carries a baked-in copy of it. Defaults to {@code
+     * 0}: definitions without a timeout run without one.
+     *
+     * @param defaultSagaTimeoutMillis the default saga timeout; {@code 0} applies none
+     * @return this builder
+     * @throws IllegalArgumentException if the value is negative
+     */
+    public Builder defaultSagaTimeoutMillis(long defaultSagaTimeoutMillis) {
+      if (defaultSagaTimeoutMillis < 0) {
+        throw new IllegalArgumentException(
+            "defaultSagaTimeoutMillis must be >= 0, got " + defaultSagaTimeoutMillis);
+      }
+      this.defaultSagaTimeoutMillis = defaultSagaTimeoutMillis;
       return this;
     }
 
@@ -972,7 +994,9 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
         SagaEngine.ShutdownConfig shutdownConfig =
             new SagaEngine.ShutdownConfig(shutdownMode, shutdownTimeoutMillis);
         StepInstantiator stepInstantiator = new StepInstantiator(resolver, httpEndpointRegistry);
-        SagaEngine engine = new SagaEngine(store, stepInstantiator, ownerId, shutdownConfig, clock);
+        SagaEngine engine =
+            new SagaEngine(
+                store, stepInstantiator, ownerId, shutdownConfig, defaultSagaTimeoutMillis, clock);
         SagaDefinitionRegistry definitionRegistry = new SagaDefinitionRegistry(store);
 
         SagaRecoveryManager recoveryManager =

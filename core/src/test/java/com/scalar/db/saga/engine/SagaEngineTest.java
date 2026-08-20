@@ -74,6 +74,7 @@ class SagaEngineTest {
             new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
             OWNER_ID,
             new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
+            0,
             Clock.systemUTC());
   }
 
@@ -341,6 +342,7 @@ class SagaEngineTest {
               new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
               OWNER_ID,
               new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
+              0,
               fixedClock);
       Step step1 = mock(Step.class);
       when(step1.getName()).thenReturn("s1");
@@ -747,6 +749,7 @@ class SagaEngineTest {
               new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
               OWNER_ID,
               new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
+              0,
               mockClock);
 
       Step step0 = successStep("s0");
@@ -802,6 +805,7 @@ class SagaEngineTest {
               new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
               OWNER_ID,
               new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
+              0,
               mockClock);
 
       Step step0 = successStep("s0");
@@ -840,6 +844,147 @@ class SagaEngineTest {
       verify(store, never())
           .recordStatusEvent(any(), anyInt(), eq(StatusEvent.compensating()), any());
     }
+
+    @Test
+    void executeSaga_withDefaultSagaTimeout_definitionWithoutTimeoutTimesOut() throws Exception {
+      // Arrange — the definition sets no timeout; the engine-level default supplies the deadline.
+      Clock mockClock = mock(Clock.class);
+      // Timeline: saga starts at t=0, default deadline = 0+1000 = 1000ms
+      // t=100: timeout check for step 0 (not expired)
+      // t=200: step deadline calculation for step 0
+      // t=300: executeWithRetry for step 0
+      // t=1100: timeout check for step 1 (expired, 1100 > 1000)
+      when(mockClock.millis()).thenReturn(0L, 100L, 200L, 300L, 1100L);
+      SagaEngine clockEngine =
+          new SagaEngine(
+              store,
+              new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
+              OWNER_ID,
+              new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
+              1000,
+              mockClock);
+
+      Step step0 = successStep("s0");
+      Step step1 = successStep("s1");
+      registerStep("s0", step0);
+      registerStep("s1", step1);
+
+      // No timeoutMillis on the definition — only the engine default can bound this saga
+      SagaDefinition def =
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
+              .step("s0", "com.example.s0")
+              .add()
+              .step("s1", "com.example.s1")
+              .add()
+              .build();
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
+
+      // Act
+      clockEngine.executeSaga(def, saga, Map.of());
+      clockEngine.close();
+
+      // Assert — identical to a definition-level timeout: step 1 skipped, compensation ran
+      verify(step0).execute(any(SagaContext.class));
+      verify(step1, never()).execute(any(SagaContext.class));
+      ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
+      verify(store, times(2)).recordStatusEvent(any(), anyInt(), transitionCaptor.capture(), any());
+      assertThat(transitionCaptor.getAllValues().get(0).getEventType())
+          .isEqualTo(EventType.SAGA_COMPENSATING);
+      assertThat(transitionCaptor.getAllValues().get(1).getEventType())
+          .isEqualTo(EventType.SAGA_COMPENSATED);
+    }
+
+    @Test
+    void executeSaga_withDefaultSagaTimeout_definitionTimeoutWins() throws Exception {
+      // Arrange — the definition's own 5000ms timeout must win over a shorter 1000ms default: at
+      // t=1100 the saga is past the default but within its own deadline, so step 1 still runs.
+      Clock mockClock = mock(Clock.class);
+      when(mockClock.millis()).thenReturn(0L, 100L, 200L, 300L, 1100L, 1200L, 1300L);
+      SagaEngine clockEngine =
+          new SagaEngine(
+              store,
+              new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
+              OWNER_ID,
+              new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
+              1000,
+              mockClock);
+
+      Step step0 = successStep("s0");
+      Step step1 = successStep("s1");
+      registerStep("s0", step0);
+      registerStep("s1", step1);
+
+      SagaDefinition def =
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
+              .timeoutMillis(5000)
+              .step("s0", "com.example.s0")
+              .add()
+              .step("s1", "com.example.s1")
+              .add()
+              .build();
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
+
+      // Act
+      clockEngine.executeSaga(def, saga, Map.of());
+      clockEngine.close();
+
+      // Assert — both steps executed; no compensation
+      verify(step0).execute(any(SagaContext.class));
+      verify(step1).execute(any(SagaContext.class));
+      verify(store, never())
+          .recordStatusEvent(any(), anyInt(), eq(StatusEvent.compensating()), any());
+    }
+
+    @Test
+    void resumeFrom_withDefaultSagaTimeout_enforcesDefaultOnResume() throws Exception {
+      // Arrange — a recovery resume from step 1 with the default deadline already expired. The
+      // default is applied at deadline computation on every execution entry, so the resumed drive
+      // times out and compensates instead of running the step with no deadline at all.
+      Clock mockClock = mock(Clock.class);
+      // Timeline: resume at t=0, default deadline = 0+1000 = 1000ms; t=1100: step 1 check expired
+      when(mockClock.millis()).thenReturn(0L, 1100L);
+      SagaEngine clockEngine =
+          new SagaEngine(
+              store,
+              new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
+              OWNER_ID,
+              new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
+              1000,
+              mockClock);
+
+      Step step0 = successStep("s0");
+      Step step1 = successStep("s1");
+      registerStep("s0", step0);
+      registerStep("s1", step1);
+
+      SagaDefinition def =
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
+              .step("s0", "com.example.s0")
+              .add()
+              .step("s1", "com.example.s1")
+              .add()
+              .build();
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
+
+      // Act
+      clockEngine.resumeFrom(def, context, 1);
+      clockEngine.close();
+
+      // Assert — the resumed step never ran; the drive timed out on the default deadline
+      verify(step1, never()).execute(any(SagaContext.class));
+      ArgumentCaptor<StatusEvent> transitionCaptor = ArgumentCaptor.forClass(StatusEvent.class);
+      verify(store, atLeastOnce())
+          .recordStatusEvent(any(), anyInt(), transitionCaptor.capture(), any());
+      assertThat(transitionCaptor.getAllValues().get(0).getEventType())
+          .isEqualTo(EventType.SAGA_COMPENSATING);
+    }
   }
 
   // =========================================================================
@@ -876,6 +1021,7 @@ class SagaEngineTest {
               new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
               OWNER_ID,
               new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
+              0,
               Clock.systemUTC());
 
       // Act
@@ -1058,6 +1204,7 @@ class SagaEngineTest {
               new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
               OWNER_ID,
               new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_ALL_SAGAS, 50),
+              0,
               Clock.systemUTC()); // 50ms timeout
 
       // Start saga in background and wait until it's actively running
