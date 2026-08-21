@@ -15,6 +15,7 @@ import com.scalar.db.saga.definition.SagaDefinition.ServiceStep.Phase;
 import com.scalar.db.saga.exception.StepCompensationException;
 import com.scalar.db.saga.exception.StepExecutionException;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 class DeclarativeBindingTccStepTest {
@@ -27,7 +28,8 @@ class DeclarativeBindingTccStepTest {
   private static DeclarativeBindingTccStep adapter(TransportAdapter transport) {
     return new DeclarativeBindingTccStep(
         "seat",
-        transport,
+        service -> transport,
+        "booking",
         Map.of(
             Phase.RESERVATION, RESERVATION,
             Phase.CONFIRMATION, CONFIRMATION,
@@ -136,5 +138,61 @@ class DeclarativeBindingTccStepTest {
     // Act & Assert
     assertThat(catchThrowable(() -> adapter(transport).cancel(CTX)))
         .isInstanceOf(StepCompensationException.class);
+  }
+
+  @Test
+  void reserve_resolveMiss_throwsRetryableKnownNotCommittedStepExecutionException() {
+    // Arrange
+    DeclarativeBindingTccStep step =
+        new DeclarativeBindingTccStep(
+            "seat",
+            service -> {
+              throw new TransportException("no endpoint for " + service, true, true);
+            },
+            "booking",
+            Map.of(
+                Phase.RESERVATION, RESERVATION,
+                Phase.CONFIRMATION, CONFIRMATION,
+                Phase.CANCELLATION, CANCELLATION));
+
+    // Act
+    Throwable thrown = catchThrowable(() -> step.reserve(CTX));
+
+    // Assert
+    assertThat(thrown).isInstanceOf(StepExecutionException.class);
+    assertThat(((StepExecutionException) thrown).isRetryable()).isTrue();
+    assertThat(((StepExecutionException) thrown).knownNotCommitted()).isTrue();
+  }
+
+  @Test
+  void reserveThenConfirm_swapBetweenPhases_confirmResolvesTheNewAdapter() throws Exception {
+    // Arrange — the resolver's answer changes between reserve and confirm, as a configuration
+    // swap between TCC phases would make it: reserve lands on the old endpoint, confirm on its
+    // replacement (which is why endpoint changes must stay backward-compatible for in-flight
+    // sagas).
+    AtomicReference<TransportAdapter> current = new AtomicReference<>();
+    TransportAdapter oldAdapter = mock(TransportAdapter.class);
+    TransportAdapter newAdapter = mock(TransportAdapter.class);
+    when(oldAdapter.call(any(), any(), any())).thenReturn(StepResult.empty());
+    when(newAdapter.call(any(), any(), any())).thenReturn(StepResult.empty());
+    DeclarativeBindingTccStep step =
+        new DeclarativeBindingTccStep(
+            "seat",
+            service -> java.util.Objects.requireNonNull(current.get()),
+            "booking",
+            Map.of(
+                Phase.RESERVATION, RESERVATION,
+                Phase.CONFIRMATION, CONFIRMATION,
+                Phase.CANCELLATION, CANCELLATION));
+
+    // Act
+    current.set(oldAdapter);
+    step.reserve(CTX);
+    current.set(newAdapter);
+    step.confirm(CTX);
+
+    // Assert
+    verify(oldAdapter).call(eq(RESERVATION), any(), eq("seat.reserve"));
+    verify(newAdapter).call(eq(CONFIRMATION), any(), eq("seat.confirm"));
   }
 }

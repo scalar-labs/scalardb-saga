@@ -13,22 +13,28 @@ import java.util.Objects;
 
 /**
  * Realizes a TCC-mode declarative {@code ServiceStep} (Layer 2b) as a {@link TccStep}: the {@code
- * reserve}, {@code confirm}, and {@code cancel} {@link CallSpec}s are performed through a {@link
- * TransportAdapter}. A {@link TransportException} becomes a {@link StepExecutionException}
+ * reserve}, {@code confirm}, and {@code cancel} {@link CallSpec}s are performed through the {@link
+ * TransportAdapter} its service name resolves to at each phase call — late binding, so a
+ * configuration swap between phases means reserve may land on the old endpoint and confirm/cancel
+ * on its replacement (endpoint changes must stay backward-compatible for in-flight sagas). A {@link
+ * TransportException} (from the resolution or the call) becomes a {@link StepExecutionException}
  * (carrying the retryable flag) for reserve/confirm, or a {@link StepCompensationException} for
  * cancel. The SAGA counterpart is {@link DeclarativeBindingStep}.
  */
 final class DeclarativeBindingTccStep implements TccStep {
 
   private final String name;
-  private final TransportAdapter transport;
+  private final TransportResolver resolver;
+  private final String service;
   private final CallSpec reserve;
   private final CallSpec confirm;
   private final CallSpec cancel;
 
-  DeclarativeBindingTccStep(String name, TransportAdapter transport, Map<Phase, CallSpec> phases) {
+  DeclarativeBindingTccStep(
+      String name, TransportResolver resolver, String service, Map<Phase, CallSpec> phases) {
     this.name = name;
-    this.transport = transport;
+    this.resolver = resolver;
+    this.service = service;
     this.reserve =
         Objects.requireNonNull(
             phases.get(Phase.RESERVATION), "reservation call spec must not be null");
@@ -52,7 +58,7 @@ final class DeclarativeBindingTccStep implements TccStep {
   @Override
   public StepResult reserve(SagaContext context) throws StepExecutionException {
     try {
-      return transport.call(reserve, context, name + TccStepNaming.RESERVE_SUFFIX);
+      return resolver.resolve(service).call(reserve, context, name + TccStepNaming.RESERVE_SUFFIX);
     } catch (TransportException e) {
       throw new StepExecutionException(e, e.isRetryable(), e.knownNotCommitted());
     }
@@ -61,7 +67,7 @@ final class DeclarativeBindingTccStep implements TccStep {
   @Override
   public StepResult confirm(SagaContext context) throws StepExecutionException {
     try {
-      return transport.call(confirm, context, name + TccStepNaming.CONFIRM_SUFFIX);
+      return resolver.resolve(service).call(confirm, context, name + TccStepNaming.CONFIRM_SUFFIX);
     } catch (TransportException e) {
       throw new StepExecutionException(e, e.isRetryable());
     }
@@ -70,7 +76,7 @@ final class DeclarativeBindingTccStep implements TccStep {
   @Override
   public void cancel(SagaContext context) throws StepCompensationException {
     try {
-      transport.call(cancel, context, name + TccStepNaming.CANCEL_SUFFIX);
+      resolver.resolve(service).call(cancel, context, name + TccStepNaming.CANCEL_SUFFIX);
     } catch (TransportException e) {
       throw new StepCompensationException(e);
     }

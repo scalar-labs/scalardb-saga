@@ -8,7 +8,7 @@ import org.jspecify.annotations.Nullable;
 /**
  * Per-endpoint configuration for an HTTP transport endpoint, collected by {@code
  * DefaultSagaOrchestrator.Builder#httpEndpoint(...)} and consumed by {@code
- * HttpEndpointRegistry#create}/{@code HttpEndpoint#create}. It carries the base URL plus the
+ * HttpEndpointManager#create}/{@code HttpEndpoint#create}. It carries the base URL plus the
  * outbound-policy knobs (SSRF allowlist, max body size) and an optional caller-supplied {@link
  * HttpClient} (e.g. for a proxy or custom TLS); the endpoint turns these into the package-private
  * {@code OutboundHttpPolicy} and {@code HttpExchange}.

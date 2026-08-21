@@ -11,6 +11,7 @@ import com.scalar.db.saga.definition.HttpCall;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.definition.SagaDefinition.StepDefinition;
 import com.scalar.db.saga.exception.SagaDefinitionException;
+import com.scalar.db.saga.transport.HttpEndpointManager;
 import com.scalar.db.saga.transport.HttpServiceConfig;
 import java.util.List;
 import java.util.Map;
@@ -18,7 +19,7 @@ import org.junit.jupiter.api.Test;
 
 class StepInstantiatorTest {
 
-  private static final HttpEndpointRegistry EMPTY_ENDPOINTS = HttpEndpointRegistry.create(Map.of());
+  private static final HttpEndpointManager EMPTY_ENDPOINTS = HttpEndpointManager.create(Map.of());
 
   @Test
   void instantiate_classStep_resolvesViaStepResolver() {
@@ -49,8 +50,8 @@ class StepInstantiatorTest {
   @Test
   void instantiate_declarativeSagaStep_resolvesToStep() {
     // Arrange — an HTTP endpoint is registered for the step's service
-    HttpEndpointRegistry endpoints =
-        HttpEndpointRegistry.create(
+    HttpEndpointManager endpoints =
+        HttpEndpointManager.create(
             Map.of(
                 "account",
                 new HttpServiceConfig("http://account-svc:8080", List.of(), -1, null, Map.of())));
@@ -67,8 +68,8 @@ class StepInstantiatorTest {
   @Test
   void instantiate_declarativeTccStep_resolvesToTccStep() {
     // Arrange
-    HttpEndpointRegistry endpoints =
-        HttpEndpointRegistry.create(
+    HttpEndpointManager endpoints =
+        HttpEndpointManager.create(
             Map.of(
                 "booking",
                 new HttpServiceConfig("http://booking-svc:8080", List.of(), -1, null, Map.of())));
@@ -85,8 +86,8 @@ class StepInstantiatorTest {
   @Test
   void instantiate_declarativeStepNotExpectedType_throwsSagaDefinitionException() {
     // Arrange — the declarative adapter produces a Step, but an unexpected type is requested
-    HttpEndpointRegistry endpoints =
-        HttpEndpointRegistry.create(
+    HttpEndpointManager endpoints =
+        HttpEndpointManager.create(
             Map.of(
                 "account",
                 new HttpServiceConfig("http://account-svc:8080", List.of(), -1, null, Map.of())));

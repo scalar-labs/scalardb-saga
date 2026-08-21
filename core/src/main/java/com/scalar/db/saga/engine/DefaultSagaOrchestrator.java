@@ -18,6 +18,8 @@ import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.SagaStoreFactory;
 import com.scalar.db.saga.store.StepEvent;
 import com.scalar.db.saga.transport.CallbackUrlProvider;
+import com.scalar.db.saga.transport.HttpEndpointManager;
+import com.scalar.db.saga.transport.HttpEndpointRegistrar;
 import com.scalar.db.saga.transport.HttpServiceConfig;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -145,6 +147,16 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   public void register(Path definitionFile) {
     Objects.requireNonNull(definitionFile, "definitionFile must not be null");
     register(SagaDefinitionParser.parseFile(definitionFile));
+  }
+
+  /**
+   * The narrow seam for replacing the full HTTP endpoint set at runtime (configuration hot reload).
+   * See {@link HttpEndpointRegistrar} for the swap semantics — reuse on unchanged topology,
+   * in-place header rotation, graceful retirement — and the embedded-mode contract: a class step's
+   * injected {@code SagaHttpClient} is pinned when its plan is built and is NOT rebound by a swap.
+   */
+  public HttpEndpointRegistrar httpEndpointRegistrar() {
+    return engine.httpEndpointRegistrar();
   }
 
   // ---------------------------------------------------------------------------
@@ -976,14 +988,14 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       }
 
       SagaStore store = null;
-      HttpEndpointRegistry httpEndpointRegistry = null;
+      HttpEndpointManager endpointManager = null;
       try {
         store = storeFactory.createStore();
         // The orchestrator owns the HTTP endpoints created from httpEndpoint(...): they are closed
         // on close (or here if build fails) — mirroring the store's lifecycle. A code step's
         // SagaHttpClient and a declarative step against the same endpoint share one HttpExchange
         // (one client, one policy).
-        httpEndpointRegistry = HttpEndpointRegistry.create(httpEndpoints, callbackUrlProvider);
+        endpointManager = HttpEndpointManager.create(httpEndpoints, callbackUrlProvider);
         StepResolver resolver = buildStepResolver();
 
         RecoveryConfig resolvedRecoveryConfig =
@@ -993,7 +1005,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
 
         SagaEngine.ShutdownConfig shutdownConfig =
             new SagaEngine.ShutdownConfig(shutdownMode, shutdownTimeoutMillis);
-        StepInstantiator stepInstantiator = new StepInstantiator(resolver, httpEndpointRegistry);
+        StepInstantiator stepInstantiator = new StepInstantiator(resolver, endpointManager);
         SagaEngine engine =
             new SagaEngine(
                 store, stepInstantiator, ownerId, shutdownConfig, defaultSagaTimeoutMillis, clock);
@@ -1015,7 +1027,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
             maxTimelineEvents);
       } catch (Throwable t) {
         // Roll back the resources that hold real external connections: the store (DB sessions) and
-        // the HTTP endpoint registry (holds HTTP clients). Each is null if its own creation threw,
+        // the HTTP endpoint manager (holds HTTP clients). Each is null if its own creation threw,
         // so each close is null-guarded. The engine and the recovery/retention managers constructed
         // inside the try only hold executors that stay inert until started — their threads spin up
         // on start()/first task, never during build — so a failed build leaves them with no live
@@ -1028,9 +1040,9 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
         // client stack, or an OutOfMemoryError while building the clients or the engine's
         // executors. The resources are still released, and t is rethrown unchanged. Precise rethrow
         // keeps this compiling without a throws clause: the try body raises no checked exceptions.
-        if (httpEndpointRegistry != null) {
+        if (endpointManager != null) {
           try {
-            httpEndpointRegistry.close();
+            endpointManager.close();
           } catch (Throwable closeException) {
             t.addSuppressed(closeException);
           }

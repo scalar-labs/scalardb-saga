@@ -32,6 +32,7 @@ import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.StatusEvent;
 import com.scalar.db.saga.store.StepEvent;
+import com.scalar.db.saga.transport.HttpEndpointManager;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -71,7 +72,7 @@ class SagaEngineTest {
     engine =
         new SagaEngine(
             store,
-            new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
+            new StepInstantiator(stepResolver, HttpEndpointManager.create(Map.of())),
             OWNER_ID,
             new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
             0,
@@ -339,7 +340,7 @@ class SagaEngineTest {
       SagaEngine clockEngine =
           new SagaEngine(
               store,
-              new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
+              new StepInstantiator(stepResolver, HttpEndpointManager.create(Map.of())),
               OWNER_ID,
               new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
               0,
@@ -746,7 +747,7 @@ class SagaEngineTest {
       SagaEngine clockEngine =
           new SagaEngine(
               store,
-              new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
+              new StepInstantiator(stepResolver, HttpEndpointManager.create(Map.of())),
               OWNER_ID,
               new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
               0,
@@ -802,7 +803,7 @@ class SagaEngineTest {
       SagaEngine clockEngine =
           new SagaEngine(
               store,
-              new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
+              new StepInstantiator(stepResolver, HttpEndpointManager.create(Map.of())),
               OWNER_ID,
               new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
               0,
@@ -858,7 +859,7 @@ class SagaEngineTest {
       SagaEngine clockEngine =
           new SagaEngine(
               store,
-              new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
+              new StepInstantiator(stepResolver, HttpEndpointManager.create(Map.of())),
               OWNER_ID,
               new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
               1000,
@@ -905,7 +906,7 @@ class SagaEngineTest {
       SagaEngine clockEngine =
           new SagaEngine(
               store,
-              new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
+              new StepInstantiator(stepResolver, HttpEndpointManager.create(Map.of())),
               OWNER_ID,
               new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
               1000,
@@ -950,7 +951,7 @@ class SagaEngineTest {
       SagaEngine clockEngine =
           new SagaEngine(
               store,
-              new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
+              new StepInstantiator(stepResolver, HttpEndpointManager.create(Map.of())),
               OWNER_ID,
               new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
               1000,
@@ -1018,7 +1019,7 @@ class SagaEngineTest {
       engine =
           new SagaEngine(
               store,
-              new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
+              new StepInstantiator(stepResolver, HttpEndpointManager.create(Map.of())),
               OWNER_ID,
               new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
               0,
@@ -1201,7 +1202,7 @@ class SagaEngineTest {
       engine =
           new SagaEngine(
               store,
-              new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
+              new StepInstantiator(stepResolver, HttpEndpointManager.create(Map.of())),
               OWNER_ID,
               new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_ALL_SAGAS, 50),
               0,
