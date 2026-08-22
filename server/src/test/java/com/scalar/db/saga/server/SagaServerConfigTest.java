@@ -3,7 +3,6 @@ package com.scalar.db.saga.server;
 import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.assertj.core.api.Assertions.entry;
 
 import com.scalar.db.saga.engine.RecoveryConfig;
 import com.scalar.db.saga.engine.RetentionConfig;
@@ -13,10 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.util.List;
-import java.util.Map;
 import java.util.Properties;
-import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -514,12 +510,13 @@ class SagaServerConfigTest {
   }
 
   @Test
-  void load_blankMaxBodyBytes_isTreatedAsUnset() {
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
+  void load_blankMaxBodyBytes_isTreatedAsUnset(@TempDir Path dir) throws IOException {
     // Deliberately on the other side of the line from the two keys above: unset leaves the engine's
     // own cap in place, so a blank value still bounds the body rather than removing a protection.
-    props.setProperty(serviceKey("account", ".max_body_bytes"), "");
+    Files.writeString(
+        dir.resolve("account.properties"), "base_url=http://account-svc:8080\nmax_body_bytes=\n");
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, dir.toString());
 
     SagaServerConfig config = SagaServerConfig.load(props);
 
@@ -723,284 +720,86 @@ class SagaServerConfigTest {
   }
 
   @Test
-  void load_noServiceKeys_returnsEmptyServices() {
+  void load_noServicesPath_returnsEmptyServices() {
     assertThat(SagaServerConfig.load(new Properties()).services()).isEmpty();
   }
 
   @Test
-  void load_singleServiceBaseUrlGiven_parsesService() {
+  void load_servicesPathGiven_loadsServicesFromDirectory(@TempDir Path dir) throws IOException {
+    Files.writeString(dir.resolve("account.properties"), "base_url=http://account-svc:8080\n");
+    Files.writeString(dir.resolve("ledger.properties"), "base_url=http://ledger-svc:9000\n");
     Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-
-    SagaServerConfig config = SagaServerConfig.load(props);
-
-    assertThat(config.services())
-        .containsExactly(
-            entry(
-                "account",
-                new SagaServerConfig.ServiceConfig(
-                    "http://account-svc:8080", List.of(), 0L, Map.of())));
-  }
-
-  @Test
-  void load_multipleServiceBaseUrlsGiven_parsesAll() {
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-    props.setProperty(serviceKey("ledger", ".base_url"), "http://ledger-svc:9000");
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, dir.toString());
 
     SagaServerConfig config = SagaServerConfig.load(props);
 
     assertThat(config.services()).containsOnlyKeys("account", "ledger");
-    assertThat(requireNonNull(config.services().get("ledger")).baseUrl())
-        .isEqualTo("http://ledger-svc:9000");
+    assertThat(requireNonNull(config.services().get("account")).baseUrl())
+        .isEqualTo("http://account-svc:8080");
   }
 
   @Test
-  void load_blankServiceBaseUrlGiven_throwsIllegalArgumentException() {
+  void load_oldServiceKeyGiven_throwsWithMigrationHint() {
+    // The pre-services_path format is the one unknown-key family with a known history, so the
+    // rejection names the migration instead of reading as a typo.
     Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "   ");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void load_withFullServicePolicy_parsesEveryAttribute() {
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-    props.setProperty(serviceKey("account", ".allowed_hosts"), "account-svc, account-svc.internal");
-    props.setProperty(serviceKey("account", ".max_body_bytes"), "2000000");
-    props.setProperty(serviceKey("account", ".header.Authorization"), "Bearer token");
-    props.setProperty(serviceKey("account", ".header.X-Tenant"), "acme");
-
-    SagaServerConfig.ServiceConfig service =
-        requireNonNull(SagaServerConfig.load(props).services().get("account"));
-
-    assertThat(service.baseUrl()).isEqualTo("http://account-svc:8080");
-    assertThat(service.allowedHosts()).containsExactly("account-svc", "account-svc.internal");
-    assertThat(service.maxBodyBytes()).isEqualTo(2_000_000L);
-    assertThat(service.headers())
-        .containsOnly(entry("Authorization", "Bearer token"), entry("X-Tenant", "acme"));
-  }
-
-  @Test
-  void load_serviceHeaderSecretReference_isResolved(@TempDir Path dir) throws IOException {
-    // The header value is how a daemon authenticates to a downstream service, so it must accept a
-    // secret reference rather than force the credential inline in the properties file.
-    Path secret = dir.resolve("downstream.token");
-    Files.writeString(secret, "Bearer resolved-token", StandardCharsets.UTF_8);
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
     props.setProperty(
-        serviceKey("account", ".header.Authorization"), "${file:UTF-8:" + secret + "}");
+        SagaServerConfig.SERVICE_KEY_PREFIX + "account.base_url", "http://account-svc:8080");
 
-    SagaServerConfig.ServiceConfig service =
-        requireNonNull(SagaServerConfig.load(props).services().get("account"));
-
-    assertThat(service.headers()).containsExactly(entry("Authorization", "Bearer resolved-token"));
-  }
-
-  @Test
-  void load_serviceWithoutBaseUrl_throwsIllegalArgumentException() {
-    // A policy without a base URL configures a service no declarative step can call.
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".max_body_bytes"), "1000");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void load_unknownServiceAttribute_throwsIllegalArgumentException() {
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-    props.setProperty(serviceKey("account", ".timeout_millis"), "1000");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void load_serviceNameContainingDot_throwsIllegalArgumentException() {
-    // The name is split at the first '.', so a dotted name would silently become a different
-    // service with an unknown attribute; it is rejected rather than half-parsed.
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account.v2", ".base_url"), "http://account-svc:8080");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void load_serviceKeyWithoutAttribute_throwsIllegalArgumentException() {
-    Properties props = new Properties();
-    props.setProperty(SagaServerConfig.SERVICE_KEY_PREFIX + "account", "http://account-svc:8080");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void load_serviceHeaderWithoutName_throwsIllegalArgumentException() {
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-    props.setProperty(serviceKey("account", ".header."), "value");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void load_serviceHeaderNamedLikeCorrelationHeader_throwsIllegalArgumentException() {
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-    // The engine stamps this on every outbound request, so a configured value never reaches the
-    // participant. Reject it instead of accepting a key that silently does nothing.
-    props.setProperty(serviceKey("account", ".header.X-Saga-Id"), "spoofed");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void load_serviceHeaderNamedLikeCorrelationHeaderInAnotherCase_throwsIllegalArgumentException() {
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-    // Header names are case-insensitive, so a lower-cased spelling must be rejected too — it would
-    // collide with the engine's header just the same.
-    props.setProperty(serviceKey("account", ".header.x-saga-step"), "spoofed");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void load_serviceHeaderNamedLikeCallbackUrlHeader_throwsIllegalArgumentException() {
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-    // Injected per call for async steps; a configured value would leak to non-async steps as a
-    // callback URL the engine never issued.
-    props.setProperty(serviceKey("account", ".header.X-Saga-Callback-Url"), "http://evil/cb");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @ParameterizedTest
-  @ValueSource(strings = {"Connection", "Content-Length", "Expect", "Host", "Upgrade", "host"})
-  void load_serviceHeaderRestrictedByJdkGiven_throwsIllegalArgumentException(String header) {
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-    // HttpRequest.Builder.header() throws on these, so the engine cannot build the request at all
-    // and every call to the service fails permanently. Accepting the key would defer that to the
-    // first outbound call, long after startup reported healthy. The lower-cased spelling is in the
-    // list because the JDK's own check is case-insensitive.
-    props.setProperty(serviceKey("account", ".header." + header), "value");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void jdkRestrictedHeaders_nullGiven_returnsAllFiveRestrictedNames() {
-    Set<String> restricted = SagaServerConfig.jdkRestrictedHeaders(null);
-
-    assertThat(restricted)
-        .containsExactlyInAnyOrder("Connection", "Content-Length", "Expect", "Host", "Upgrade");
-  }
-
-  @Test
-  void jdkRestrictedHeaders_nameGiven_omitsThatNameCaseInsensitively() {
-    Set<String> restricted = SagaServerConfig.jdkRestrictedHeaders("HOST");
-
-    // The JDK removes from a case-insensitively ordered set, so the spelling in the property does
-    // not have to match the canonical one.
-    assertThat(restricted).doesNotContain("Host", "host");
-    assertThat(restricted).contains("Connection");
-  }
-
-  @Test
-  void jdkRestrictedHeaders_commaSeparatedNamesGiven_omitsAllOfThem() {
-    Set<String> restricted = SagaServerConfig.jdkRestrictedHeaders("host,connection");
-
-    assertThat(restricted).containsExactlyInAnyOrder("Content-Length", "Expect", "Upgrade");
-  }
-
-  @Test
-  void jdkRestrictedHeaders_spaceAfterCommaGiven_keepsTheNameFollowingTheSpace() {
-    Set<String> restricted = SagaServerConfig.jdkRestrictedHeaders("host, connection");
-
-    // Mirrors the JDK, which trims the whole value once and then splits on commas without trimming
-    // the tokens; " connection" therefore matches nothing. Trimming here instead would accept a
-    // config key that the JDK still rejects at send time, which is the failure this check prevents.
-    assertThat(restricted).doesNotContain("Host");
-    assertThat(restricted).contains("Connection");
-  }
-
-  @Test
-  void jdkRestrictedHeaders_unrelatedNameGiven_omitsNothing() {
-    Set<String> restricted = SagaServerConfig.jdkRestrictedHeaders("X-Nonsense");
-
-    assertThat(restricted)
-        .containsExactlyInAnyOrder("Connection", "Content-Length", "Expect", "Host", "Upgrade");
-  }
-
-  @Test
-  void load_serviceHeadersDifferingOnlyInCase_throwsIllegalArgumentException() {
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-    // Header names are case-insensitive, so these two collapse to one header downstream and which
-    // value survives is not deterministic across restarts. Reject the pair instead.
-    props.setProperty(serviceKey("account", ".header.Authorization"), "Bearer aaa");
-    props.setProperty(serviceKey("account", ".header.authorization"), "Bearer bbb");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void load_sameHeaderNameOnDifferentServices_isAccepted() {
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-    props.setProperty(serviceKey("ledger", ".base_url"), "http://ledger-svc:8080");
-    // The duplicate check is per service: two services may each carry their own Authorization.
-    props.setProperty(serviceKey("account", ".header.Authorization"), "Bearer account");
-    props.setProperty(serviceKey("ledger", ".header.authorization"), "Bearer ledger");
-
-    SagaServerConfig config = SagaServerConfig.load(props);
-
-    assertThat(requireNonNull(config.services().get("account")).headers())
-        .containsExactly(entry("Authorization", "Bearer account"));
-    assertThat(requireNonNull(config.services().get("ledger")).headers())
-        .containsExactly(entry("authorization", "Bearer ledger"));
-  }
-
-  @Test
-  void load_serviceAllowedHostsWithEmptyElement_throwsIllegalArgumentException() {
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-    props.setProperty(serviceKey("account", ".allowed_hosts"), "account-svc,,other");
-
-    // The list itself stays out of the message: allowed_hosts takes secret references like any
-    // other key, so a misplaced one must not be echoed.
     assertThatThrownBy(() -> SagaServerConfig.load(props))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("allowed_hosts")
-        .hasMessageNotContaining("account-svc");
+        .hasMessageContaining("services_path");
   }
 
   @Test
-  void load_serviceMaxBodyBytesZero_throwsIllegalArgumentException() {
+  void load_reloadKeysUnset_defaultsApply() {
+    ReloadConfig reload = SagaServerConfig.load(new Properties()).reloadConfig();
+
+    assertThat(reload.servicesPath()).isNull();
+    assertThat(reload.intervalSeconds())
+        .isEqualTo(SagaServerConfig.DEFAULT_RELOAD_INTERVAL_SECONDS);
+    assertThat(reload.secretsRoot().toString()).isEqualTo(SagaServerConfig.DEFAULT_SECRETS_ROOT);
+    assertThat(reload.allowedHostsCeiling()).isEmpty();
+  }
+
+  @Test
+  void load_reloadKeysGiven_parsesEach(@TempDir Path dir, @TempDir Path secretsRoot) {
     Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-    props.setProperty(serviceKey("account", ".max_body_bytes"), "0");
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.RELOAD_INTERVAL_SECONDS_KEY, "0");
+    props.setProperty(SagaServerConfig.SECRETS_ROOT_KEY, secretsRoot.toString());
+    props.setProperty(SagaServerConfig.EGRESS_ALLOWED_HOSTS_CEILING_KEY, "a-svc, b-svc");
+
+    ReloadConfig reload = SagaServerConfig.load(props).reloadConfig();
+
+    assertThat(reload.servicesPath()).isEqualTo(dir);
+    assertThat(reload.intervalSeconds()).isZero();
+    assertThat(reload.secretsRoot()).isEqualTo(secretsRoot);
+    assertThat(reload.allowedHostsCeiling()).containsExactly("a-svc", "b-svc");
+  }
+
+  @Test
+  void load_negativeReloadInterval_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.RELOAD_INTERVAL_SECONDS_KEY, "-1");
 
     assertThatThrownBy(() -> SagaServerConfig.load(props))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
-  private static String serviceKey(String name, String attribute) {
-    return SagaServerConfig.SERVICE_KEY_PREFIX + name + attribute;
+  @Test
+  void load_ceilingGiven_serviceOutsideItIsRejected(@TempDir Path dir) throws IOException {
+    // The end-to-end wiring of the ceiling: the per-case matrix lives in ServiceFileParserTest.
+    Files.writeString(
+        dir.resolve("account.properties"),
+        "base_url=http://account-svc:8080\nallowed_hosts=other-svc\n");
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.EGRESS_ALLOWED_HOSTS_CEILING_KEY, "account-svc");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("ceiling");
   }
 
   @Test

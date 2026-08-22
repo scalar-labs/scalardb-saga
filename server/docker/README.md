@@ -174,7 +174,7 @@ Two operational notes:
 - **Async callbacks**: with TLS on, `callback.base_url` should be an `https` URL — participants dial
   it, and a plain `http` URL pointing back at this server dies at the handshake on the first async
   step. The daemon warns at startup about that combination.
-- **Outbound calls are unaffected**: participant calls (`service.<name>.base_url`) and JWKS fetches
+- **Outbound calls are unaffected**: participant calls (each service file's `base_url`) and JWKS fetches
   verify against the JVM's default trust store. A participant behind a private CA needs that CA in
   the daemon's trust store (`JAVA_OPTS=-Djavax.net.ssl.trustStore=...`); there is deliberately no
   per-service trust knob.
