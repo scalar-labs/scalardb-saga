@@ -293,15 +293,20 @@ final class ServiceFileParser {
             key.replaceAll("[\r\n]", "_"));
       }
       String qualifiedKey = "service file '" + fileName + "' key '" + key + "'";
+      // Every setting's value goes through the resolver before validation, as every daemon
+      // property did in the prefixed format; only the unknown-key error fires on the raw value,
+      // since naming the typo helps more than resolving it.
       switch (key) {
         case BASE_URL_KEY ->
             baseUrl = SagaServerConfig.requireNonBlank(qualifiedKey, secrets.resolve(raw));
         case ALLOWED_HOSTS_KEY ->
             allowedHosts =
                 SagaServerConfig.parseCommaSeparated(
-                    qualifiedKey, SagaServerConfig.requireNonBlank(qualifiedKey, raw));
+                    qualifiedKey,
+                    SagaServerConfig.requireNonBlank(qualifiedKey, secrets.resolve(raw)));
         case MAX_BODY_BYTES_KEY ->
-            maxBodyBytes = SagaServerConfig.parseBoundedLong(raw, qualifiedKey, 0L, 1L);
+            maxBodyBytes =
+                SagaServerConfig.parseBoundedLong(secrets.resolve(raw), qualifiedKey, 0L, 1L);
         default -> {
           if (!key.startsWith(HEADER_KEY_PREFIX)) {
             throw new IllegalArgumentException(

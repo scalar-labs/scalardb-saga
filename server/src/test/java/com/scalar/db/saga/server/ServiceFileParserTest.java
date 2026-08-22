@@ -105,6 +105,38 @@ class ServiceFileParserTest {
     }
 
     @Test
+    void parseFile_allowedHostsSecretReference_isResolved() throws IOException {
+      // The prefixed format resolved references in every daemon property before parsing, so the
+      // file format keeps that for every setting, not just the credential-bearing ones.
+      Files.writeString(secretsDir.resolve("hosts"), "account-svc,account-svc.internal");
+      writeService(
+          "account.properties",
+          "base_url=http://account-svc:8080\n"
+              + "allowed_hosts=${file:UTF-8:"
+              + secretsDir.resolve("hosts")
+              + "}\n");
+
+      ServiceConfig service = requireNonNull(parse().get("account"));
+
+      assertThat(service.allowedHosts()).containsExactly("account-svc", "account-svc.internal");
+    }
+
+    @Test
+    void parseFile_maxBodyBytesSecretReference_isResolved() throws IOException {
+      Files.writeString(secretsDir.resolve("cap"), "2000000");
+      writeService(
+          "account.properties",
+          "base_url=http://account-svc:8080\n"
+              + "max_body_bytes=${file:UTF-8:"
+              + secretsDir.resolve("cap")
+              + "}\n");
+
+      ServiceConfig service = requireNonNull(parse().get("account"));
+
+      assertThat(service.maxBodyBytes()).isEqualTo(2_000_000L);
+    }
+
+    @Test
     void parseFile_withoutBaseUrl_throwsIllegalArgumentException() throws IOException {
       // A file without a base URL configures a service no declarative step can call.
       writeService("account.properties", "max_body_bytes=1000\n");
