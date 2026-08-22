@@ -997,7 +997,7 @@ class SagaEngineTest {
       SagaEngine clockEngine =
           new SagaEngine(
               store,
-              new StepInstantiator(stepResolver, HttpEndpointRegistry.create(Map.of())),
+              new StepInstantiator(stepResolver, HttpEndpointManager.create(Map.of())),
               OWNER_ID,
               new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
               60_000,
