@@ -115,6 +115,18 @@ class ServiceFileParserTest {
     }
 
     @Test
+    void parseFile_baseUrlWithUserInfo_throwsWithoutEchoingTheValue() throws IOException {
+      // The user-info SSRF shape; the message must not echo the value, which may have resolved
+      // from a secret reference.
+      writeService("account.properties", "base_url=http://payment@evil.example\n");
+
+      assertThatThrownBy(ServiceFileParserTest.this::parse)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("user-info")
+          .hasMessageNotContaining("evil.example");
+    }
+
+    @Test
     void parseFile_blankBaseUrl_throwsIllegalArgumentException() throws IOException {
       writeService("account.properties", "base_url=   \n");
 

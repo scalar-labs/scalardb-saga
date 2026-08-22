@@ -183,6 +183,37 @@ Java clients of the SDK enable TLS with `useTransportSecurity()`; against a priv
 `trustCaCertificate(path)` (and `overrideAuthority(name)` when dialing by IP or through a
 port-forward). Non-Java REST consumers pass their CA the usual way (`curl --cacert ...`).
 
+## Configuration reload
+
+With `reload.interval_seconds` > 0 (default 10), the daemon re-reads `services_path` and
+`definitions_path` on that interval, validates the **complete** candidate set, and applies it
+atomically — services first, then definition registrations. A rejected set changes nothing: the
+previously applied configuration keeps serving, the rejection is logged once at WARN (repeats at
+DEBUG until it changes), and the next pass retries. The applied INFO line carries the changed
+names and a SHA-256 over the raw file bytes — grep it across replicas to tell a lagging replica
+from a rejecting one. Secret **values** never appear in any log line.
+
+Operational notes, learned from how Kubernetes actually delivers files:
+
+- **Mount whole ConfigMaps/Secrets, never `subPath`**: a `subPath` mount pins the file's inode, so
+  updates never arrive. The kubelet's atomic-symlink layout (`..data`) is fully supported — the
+  daemon re-opens files through their symlink paths every pass.
+- **Multi-part credentials (cert + key) belong in ONE Secret volume**: kubelet updates are atomic
+  per volume, so splitting a pair across two Secrets invites a torn rotation.
+- **Rotate with dual validity**: a rotated downstream credential propagates within kubelet sync
+  plus one reload interval, and replicas do not rotate in lockstep — the downstream service must
+  accept old and new credentials for at least that window.
+- **Definition rollback is roll-forward only**: `helm rollback` reverts service files, but
+  re-registering an old definition version is an idempotent no-op — the store's latest version
+  keeps winning. To revert a definition, register the old content as a NEW, bumped version.
+- **Changing a service's `base_url` mid-saga is safe only if the endpoints are compatible**: an
+  in-flight step finishes against the endpoint it resolved; the saga's next step (or a TCC
+  confirm/cancel) resolves the new one.
+- **Trust model**: whoever can write the watched directories reshapes the daemon's egress within
+  one interval, no restart — treat write access to them as operator-equivalent. `${file:...}`
+  references in service files resolve only inside `secrets_root`, and
+  `egress.allowed_hosts_ceiling` bounds what any service file can authorize.
+
 ## Graceful shutdown
 
 The JVM is PID 1 and receives `SIGTERM` directly, which triggers a drain rather than dropping

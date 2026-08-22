@@ -17,7 +17,6 @@ import ch.qos.logback.classic.Level;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.engine.ShutdownMode;
-import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.server.api.HmacCallbackUrlProvider;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
@@ -85,10 +84,28 @@ class SagaServerTest {
         + "\",\"steps\":[{\"name\":\"s\",\"stepClass\":\"com.example.Foo\"}]}";
   }
 
-  private static SagaServerConfig configWithDefinitionsPath(Path path) {
+  /**
+   * Writes the service file for the {@code svc} service every test definition references (the boot
+   * pass cross-checks definition service references against the candidate service set), and returns
+   * the services directory. Nested inside the definitions dir; the definitions walk skips
+   * directories, so the nesting is invisible to it.
+   */
+  private static Path svcServices(Path dir) throws IOException {
+    Path services = Files.createDirectories(dir.resolve("services"));
+    Files.writeString(services.resolve("svc.properties"), "base_url=http://127.0.0.1:1\n");
+    return services;
+  }
+
+  private static SagaServerConfig configWithDefinitionsPath(Path path) throws IOException {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, path.toString());
+    // A nonexistent definitions path has no directory to host the services dir; those tests
+    // exercise the definitions failure alone, so no services are configured for them.
+    Path parent = Files.isDirectory(path) ? path : path.getParent();
+    if (parent != null) {
+      props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, svcServices(parent).toString());
+    }
     return SagaServerConfig.load(props);
   }
 
@@ -114,6 +131,7 @@ class SagaServerTest {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, svcServices(dir).toString());
     props.setProperty(SagaServerConfig.DEFAULT_SAGA_TIMEOUT_MILLIS_KEY, "30000");
     DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
 
@@ -134,6 +152,7 @@ class SagaServerTest {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, svcServices(dir).toString());
     props.setProperty(SagaServerConfig.DEFAULT_SAGA_TIMEOUT_MILLIS_KEY, "30000");
     DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
 
@@ -241,10 +260,13 @@ class SagaServerTest {
                 new SagaServer(
                     configWithDefinitionsPath(Path.of("s3cr3t-plaintext-not-a-path")),
                     orchestrator))
-        .isInstanceOf(IllegalArgumentException.class)
+        // The boot pass aggregates configuration errors, so the failure arrives as one
+        // IllegalStateException whose message (and whose cause's identical message) is redacted.
+        .isInstanceOf(IllegalStateException.class)
         .hasMessageContaining(SagaServerConfig.DEFINITIONS_PATH_KEY)
         .hasMessageNotContaining("s3cr3t")
-        .hasNoCause();
+        .rootCause()
+        .hasMessageNotContaining("s3cr3t");
     verify(orchestrator, never()).register(any(SagaDefinition.class));
     verify(orchestrator).close();
   }
@@ -262,7 +284,9 @@ class SagaServerTest {
           .hasMessageContaining(SagaServerConfig.DEFINITIONS_PATH_KEY)
           .hasMessageContaining("AccessDeniedException")
           .hasMessageNotContaining(dir.toString())
-          .hasNoCause();
+          // The aggregating pass carries its cause with the same redacted message.
+          .rootCause()
+          .hasMessageNotContaining(dir.toString());
       verify(orchestrator).close();
     } finally {
       boolean unused = dir.toFile().setReadable(true); // let the @TempDir cleanup walk the dir
@@ -276,7 +300,9 @@ class SagaServerTest {
     DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
 
     assertThatThrownBy(() -> new SagaServer(configWithDefinitionsPath(dir), orchestrator))
-        .isInstanceOf(SagaDefinitionException.class);
+        // Aggregated by the boot pass; the message names the offending file.
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("code.json");
     verify(orchestrator, never()).register(any(SagaDefinition.class));
     verify(orchestrator).close();
   }
@@ -305,6 +331,7 @@ class SagaServerTest {
       props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
       props.setProperty(SagaServerConfig.HTTP_PORT_KEY, Integer.toString(portHolder.port()));
       props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+      props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, svcServices(dir).toString());
       DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
       SagaServer server = new SagaServer(SagaServerConfig.load(props), orchestrator);
 
@@ -338,6 +365,7 @@ class SagaServerTest {
     props.setProperty(SagaServerConfig.HOST_KEY, "0.0.0.0");
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, svcServices(dir).toString());
     SagaServer server =
         new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class));
 
@@ -356,6 +384,7 @@ class SagaServerTest {
     props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
     props.setProperty(SagaServerConfig.INSECURE_MODE_ENABLED_KEY, "true");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, svcServices(dir).toString());
 
     // Act / Assert — the acknowledgement lets it bind
     try (SagaServer server =
@@ -372,6 +401,7 @@ class SagaServerTest {
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, svcServices(dir).toString());
     try (SagaServer server =
         new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class)).start()) {
       // HTTP is bound to an ephemeral port; gRPC is disabled, so grpcPort() reports the -1
@@ -390,6 +420,7 @@ class SagaServerTest {
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, svcServices(dir).toString());
     props.setProperty(SagaServerConfig.HTTP_MAX_QUEUED_REQUESTS_KEY, "16"); // small explicit cap
     try (SagaServer server =
         new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class)).start()) {
@@ -407,6 +438,7 @@ class SagaServerTest {
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, svcServices(dir).toString());
     // Both callback keys: the config layer requires them together, so this is the only shape in
     // which the callback route exists.
     props.setProperty(SagaServerConfig.CALLBACK_SECRET_KEY, "s3cr3t");
@@ -427,6 +459,7 @@ class SagaServerTest {
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, svcServices(dir).toString());
     // No callback secret configured → no callback route registered.
     try (SagaServer server =
         new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class)).start()) {
@@ -447,6 +480,7 @@ class SagaServerTest {
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, svcServices(dir).toString());
     props.setProperty(SagaServerConfig.SECURITY_PROVIDER_KEY, "apikey");
     props.setProperty(
         "scalar.db.saga.server.security.apikey.key.svc.secret", "${file:UTF-8:" + keyFile + "}");
@@ -492,6 +526,7 @@ class SagaServerTest {
     props.setProperty(SagaServerConfig.GRPC_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.HTTP_ENABLED_KEY, "false");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, svcServices(dir).toString());
     try (SagaServer server =
         new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class)).start()) {
       // gRPC is bound to an ephemeral port; HTTP is disabled, so port() reports the -1 sentinel.
@@ -508,6 +543,7 @@ class SagaServerTest {
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, svcServices(dir).toString());
     try (SagaServer server =
         new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class)).start()) {
       ManagedChannel channel =
@@ -530,6 +566,7 @@ class SagaServerTest {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, svcServices(dir).toString());
     props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, Long.toString(syncMaxWaitMillis));
     return new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class));
   }
@@ -796,6 +833,7 @@ class SagaServerTest {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, svcServices(dir).toString());
     props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
     props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, bogusCert.toString());
     props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, bogusKey.toString());
@@ -819,6 +857,7 @@ class SagaServerTest {
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, svcServices(dir).toString());
     props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
     props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, tls.certChainPath().toString());
     props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, tls.privateKeyPath().toString());
@@ -839,6 +878,7 @@ class SagaServerTest {
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, svcServices(dir).toString());
     props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
     props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, tls.certChainPath().toString());
     props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, tls.privateKeyPath().toString());
@@ -874,6 +914,7 @@ class SagaServerTest {
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, svcServices(dir).toString());
     props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
     props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, tls.certChainPath().toString());
     props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, tls.privateKeyPath().toString());
@@ -905,6 +946,7 @@ class SagaServerTest {
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, svcServices(dir).toString());
     props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
     props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, tls.certChainPath().toString());
     props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, tls.privateKeyPath().toString());
@@ -937,6 +979,7 @@ class SagaServerTest {
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, svcServices(dir).toString());
     props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
     props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, tls.certChainPath().toString());
     props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, tls.privateKeyPath().toString());

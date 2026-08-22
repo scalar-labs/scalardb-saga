@@ -21,7 +21,6 @@ import com.scalar.db.saga.transport.CallbackUrlProvider;
 import com.scalar.db.saga.transport.HttpEndpointManager;
 import com.scalar.db.saga.transport.HttpEndpointRegistrar;
 import com.scalar.db.saga.transport.HttpServiceConfig;
-import java.net.URI;
 import java.net.http.HttpClient;
 import java.nio.file.Path;
 import java.time.Clock;
@@ -900,36 +899,14 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       if (baseUrl.isBlank()) {
         throw new IllegalArgumentException("baseUrl must not be blank");
       }
-      validateBaseUrl(baseUrl);
-      return new HttpEndpointBuilder(name, baseUrl);
-    }
-
-    /**
-     * Fails fast on a malformed or misleading {@code baseUrl} at build time rather than at the
-     * first saga run: it must be a valid absolute {@code http}/{@code https} URL with a host and no
-     * user-info component (a {@code user@host} authority silently retargets the host — e.g. {@code
-     * http://svc@evil.com} resolves to {@code evil.com}).
-     */
-    private static void validateBaseUrl(String baseUrl) {
-      URI uri;
+      // Fail fast here at build time rather than at the first saga run. The endpoint name is
+      // safe context; the shared validator deliberately does not echo the URL (see its javadoc).
       try {
-        uri = URI.create(baseUrl);
+        HttpServiceConfig.validateBaseUrl(baseUrl);
       } catch (IllegalArgumentException e) {
-        throw new IllegalArgumentException("baseUrl is not a valid URI: " + baseUrl, e);
+        throw new IllegalArgumentException("endpoint '" + name + "': " + e.getMessage(), e);
       }
-      String scheme = uri.getScheme();
-      if (scheme == null
-          || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) {
-        throw new IllegalArgumentException("baseUrl must use the http or https scheme: " + baseUrl);
-      }
-      if (uri.getHost() == null) {
-        throw new IllegalArgumentException("baseUrl must have a host: " + baseUrl);
-      }
-      if (uri.getUserInfo() != null) {
-        throw new IllegalArgumentException(
-            "baseUrl must not contain a user-info component (it silently retargets the host): "
-                + baseUrl);
-      }
+      return new HttpEndpointBuilder(name, baseUrl);
     }
 
     /**

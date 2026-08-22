@@ -1,6 +1,7 @@
 package com.scalar.db.saga.server;
 
 import com.scalar.db.saga.server.SagaServerConfig.ServiceConfig;
+import com.scalar.db.saga.transport.HttpServiceConfig;
 import java.io.IOException;
 import java.io.Reader;
 import java.nio.charset.StandardCharsets;
@@ -147,11 +148,26 @@ final class ServiceFileParser {
    */
   static Map<String, ServiceConfig> parseDirectory(
       Path servicesPath, ServiceSecretResolver secrets, List<String> allowedHostsCeiling) {
+    Map<String, ServiceConfig> services = new LinkedHashMap<>();
+    for (Map.Entry<String, Path> entry : listServiceFiles(servicesPath).entrySet()) {
+      ServiceConfig service = parseFile(entry.getKey(), entry.getValue(), secrets);
+      requireWithinCeiling(entry.getKey(), service, allowedHostsCeiling);
+      services.put(entry.getKey(), service);
+    }
+    return services;
+  }
+
+  /**
+   * The hygiene walk alone: lists the directory's service files as {@code name → file}, in name
+   * order, applying the dot-entry / symlink / stray-entry / name-shape rules. Structural problems
+   * (an unreadable directory, a stray or symlinked entry) throw; per-file content problems are the
+   * caller's to surface, so a reload pass can aggregate them across files while boot fails fast.
+   */
+  static Map<String, Path> listServiceFiles(Path servicesPath) {
     if (!Files.isDirectory(servicesPath)) {
       throw new IllegalArgumentException(
           "services_path '" + servicesPath + "' is not a readable directory");
     }
-    Map<String, ServiceConfig> services = new LinkedHashMap<>();
     List<Path> entries;
     try (Stream<Path> stream = Files.list(servicesPath)) {
       entries = stream.sorted().toList();
@@ -159,6 +175,7 @@ final class ServiceFileParser {
       throw new IllegalArgumentException(
           "services_path '" + servicesPath + "' cannot be listed (" + e.getMessage() + ")", e);
     }
+    Map<String, Path> files = new LinkedHashMap<>();
     for (Path entry : entries) {
       String fileName = Objects.requireNonNull(entry.getFileName()).toString();
       if (fileName.startsWith(".")) {
@@ -194,11 +211,9 @@ final class ServiceFileParser {
                 + "' has an invalid service name; the base name must match "
                 + SERVICE_NAME_PATTERN.pattern());
       }
-      ServiceConfig service = parseFile(name, entry, secrets);
-      requireWithinCeiling(name, service, allowedHostsCeiling);
-      services.put(name, service);
+      files.put(name, entry);
     }
-    return services;
+    return files;
   }
 
   /**
@@ -247,8 +262,18 @@ final class ServiceFileParser {
       }
       String qualifiedKey = "service file '" + fileName + "' key '" + key + "'";
       switch (key) {
-        case BASE_URL_KEY ->
-            baseUrl = SagaServerConfig.requireNonBlank(qualifiedKey, secrets.resolve(raw));
+        case BASE_URL_KEY -> {
+          baseUrl = SagaServerConfig.requireNonBlank(qualifiedKey, secrets.resolve(raw));
+          try {
+            // The same rules every endpoint construction enforces, surfaced here so a bad URL is
+            // a per-file validation error instead of an apply-time one. The value is not echoed:
+            // it may have been resolved from a secret reference.
+            HttpServiceConfig.validateBaseUrl(baseUrl);
+          } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException(
+                qualifiedKey + ": " + e.getMessage() + " " + Redaction.redacted(baseUrl));
+          }
+        }
         case ALLOWED_HOSTS_KEY ->
             allowedHosts =
                 SagaServerConfig.parseCommaSeparated(
@@ -338,8 +363,7 @@ final class ServiceFileParser {
    * {@code allowed_hosts} that is a subset of it. Empty means allow-all, which is precisely what a
    * ceiling exists to forbid.
    */
-  private static void requireWithinCeiling(
-      String name, ServiceConfig service, List<String> ceiling) {
+  static void requireWithinCeiling(String name, ServiceConfig service, List<String> ceiling) {
     if (ceiling.isEmpty()) {
       return;
     }
