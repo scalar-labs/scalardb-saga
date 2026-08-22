@@ -16,6 +16,13 @@ import java.util.Map;
  * in flight complete against it, and new submissions fail pre-send as retryable, to be re-resolved
  * against the new set.
  *
+ * <p><b>Coverage is the caller's responsibility:</b> registered saga definitions reference services
+ * by name, and a swap is applied as given — it does not check the new set against them. Dropping a
+ * name that registered definitions (or sagas still recovering) reference converts the
+ * registration-time fail-fast into per-call failures: every resolution of that name fails as
+ * retryable until a later swap restores it. Validate a candidate set against the registered
+ * definitions before applying it.
+ *
  * <p><b>Embedded-mode contract:</b> only declarative steps re-resolve their endpoint per call. A
  * class step's {@code SagaHttpClient}, injected when its plan was built, is NOT rebound by a swap:
  * it keeps riding the endpoint it was built against, and if that endpoint is retired by a swap its
