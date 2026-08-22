@@ -3,7 +3,9 @@ package com.scalar.db.saga.transport;
 import com.scalar.db.saga.api.SagaHttpClient;
 import java.net.http.HttpClient;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -17,9 +19,9 @@ import org.slf4j.LoggerFactory;
  * status-classification path — the "one engine per endpoint" invariant.
  *
  * <p>Lifecycle is owned by the {@link HttpEndpointManager}, which creates endpoints from
- * configuration, reuses them across swaps while their topology is unchanged (absorbing header
- * rotation in place via {@link #updateDefaultHeaders}), and retires them gracefully via {@link
- * #shutdown()} on topology change or removal.
+ * configuration, reuses them across swaps while their topology is unchanged (diffed via {@link
+ * #sameTopology}; header rotation is absorbed in place via {@link #updateDefaultHeaders}), and
+ * retires them gracefully via {@link #shutdown()} on topology change or removal.
  *
  * <p>A framework-created {@link HttpClient} uses {@link HttpClient.Redirect#NEVER} (an allowed host
  * must not 302 to a disallowed one, bypassing the SSRF allowlist) and is shut down at retirement; a
@@ -45,19 +47,30 @@ final class HttpEndpoint implements AutoCloseable {
   private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
 
   private final HttpExchange exchange;
+
+  // The immutable topology this endpoint was built from: everything in its config except the
+  // default headers, whose single live copy mutates in place on the exchange. A swap diffs a
+  // candidate config against these fields (see sameTopology) to decide reuse; keeping them here,
+  // on the object they describe, is what spares the manager a parallel config map that could
+  // drift from the endpoints it shadows.
   private final String baseUrl;
+  private final List<String> allowedHosts;
+  private final long maxBodyBytes;
+
   private final HttpClient client;
   private final boolean ownsClient;
   private final TransportAdapter transportAdapter;
 
   private HttpEndpoint(
       HttpExchange exchange,
-      String baseUrl,
+      HttpServiceConfig config,
       HttpClient client,
       boolean ownsClient,
       @Nullable CallbackUrlProvider callbackUrlProvider) {
     this.exchange = exchange;
-    this.baseUrl = baseUrl;
+    this.baseUrl = config.baseUrl();
+    this.allowedHosts = config.allowedHosts();
+    this.maxBodyBytes = config.maxBodyBytes();
     this.client = client;
     this.ownsClient = ownsClient;
     // The declarative transport adapter rides the SAME exchange as the SagaHttpClient, so both
@@ -117,7 +130,7 @@ final class HttpEndpoint implements AutoCloseable {
       ownsClient = true;
     }
     HttpExchange exchange = new HttpExchange(client, policyOf(config), config.defaultHeaders());
-    return new HttpEndpoint(exchange, config.baseUrl(), client, ownsClient, callbackUrlProvider);
+    return new HttpEndpoint(exchange, config, client, ownsClient, callbackUrlProvider);
   }
 
   private static OutboundHttpPolicy policyOf(HttpServiceConfig config) {
@@ -150,6 +163,19 @@ final class HttpEndpoint implements AutoCloseable {
    */
   TransportAdapter transportAdapter() {
     return transportAdapter;
+  }
+
+  /**
+   * Whether {@code candidate} describes this endpoint's topology — everything in its config except
+   * the default headers, whose change is absorbed in place via {@link #updateDefaultHeaders}.
+   * {@code Objects.equals} on the supplied client is identity (it does not override equals), which
+   * is the intent: a different client instance is a different endpoint.
+   */
+  boolean sameTopology(HttpServiceConfig candidate) {
+    return baseUrl.equals(candidate.baseUrl())
+        && allowedHosts.equals(candidate.allowedHosts())
+        && maxBodyBytes == candidate.maxBodyBytes()
+        && Objects.equals(ownsClient ? null : client, candidate.httpClient());
   }
 
   /**
