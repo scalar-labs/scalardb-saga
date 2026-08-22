@@ -185,7 +185,7 @@ port-forward). Non-Java REST consumers pass their CA the usual way (`curl --cace
 
 ## Configuration reload
 
-With `reload.interval_seconds` > 0 (default 10), the daemon re-reads `services_path` and
+With `reload.interval_seconds` > 0 (default 30), the daemon re-reads `services_path` and
 `definitions_path` on that interval, validates the **complete** candidate set, and applies it
 atomically — services first, then definition registrations. A rejected set changes nothing: the
 previously applied configuration keeps serving, the rejection is logged once at WARN (repeats at

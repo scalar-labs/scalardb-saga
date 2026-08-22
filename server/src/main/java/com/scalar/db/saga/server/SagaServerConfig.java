@@ -402,7 +402,7 @@ public final class SagaServerConfig {
   static final String EGRESS_ALLOWED_HOSTS_CEILING_KEY =
       SERVER_PREFIX + "egress.allowed_hosts_ceiling";
 
-  static final long DEFAULT_RELOAD_INTERVAL_SECONDS = 10L;
+  static final long DEFAULT_RELOAD_INTERVAL_SECONDS = 30L;
   static final String DEFAULT_SECRETS_ROOT = "/run/secrets";
 
   static final String STORE_MAX_EVENT_PAYLOAD_BYTES_KEY = PREFIX + "store.max_event_payload_bytes";

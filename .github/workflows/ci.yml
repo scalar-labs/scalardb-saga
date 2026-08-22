@@ -228,14 +228,14 @@ jobs:
         run: |
           set -euo pipefail
           printf 'header.X-Smoke=rotated\n' >> .github/smoke/services/payment.properties
-          for _ in $(seq 1 30); do
+          for _ in $(seq 1 45); do
             if docker logs saga 2>&1 | grep -q 'services\[~payment\]'; then
               echo "reload audit line observed"
               exit 0
             fi
             sleep 2
           done
-          echo "::error::no reload audit line within 60s of mutating a service file"
+          echo "::error::no reload audit line within 90s of mutating a service file"
           docker logs saga | tail -50
           exit 1
 
