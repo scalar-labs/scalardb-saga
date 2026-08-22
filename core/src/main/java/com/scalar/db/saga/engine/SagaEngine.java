@@ -19,6 +19,7 @@ import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.StatusEvent;
 import com.scalar.db.saga.store.StepEvent;
+import com.scalar.db.saga.transport.HttpEndpointRegistrar;
 import com.scalar.db.saga.transport.SagaCorrelationContext;
 import java.time.Clock;
 import java.time.Instant;
@@ -99,6 +100,11 @@ public class SagaEngine implements AutoCloseable {
   /** The owner id this engine stamps on transitions it records (used by the admin service). */
   String ownerId() {
     return ownerId;
+  }
+
+  /** The swap seam for configuration hot reload, surfaced on the orchestrator. */
+  HttpEndpointRegistrar httpEndpointRegistrar() {
+    return stepInstantiator.httpEndpointRegistrar();
   }
 
   // ---------------------------------------------------------------------------
