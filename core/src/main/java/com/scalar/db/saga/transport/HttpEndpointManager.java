@@ -9,8 +9,10 @@ import com.scalar.db.saga.exception.SagaDefinitionException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import net.jcip.annotations.ThreadSafe;
 import org.jspecify.annotations.Nullable;
 
@@ -181,6 +183,20 @@ public final class HttpEndpointManager
 
   @Override
   public void swapHttpEndpoints(Map<String, HttpServiceConfig> services) {
+    // Defense in depth on the one user-reachable mutator (external callers may not be compiled
+    // with NullAway): reject a null map, name, or config before taking the swap lock, and copy so
+    // a caller mutating its map cannot race the swap. The copy keeps the caller's iteration
+    // order, so which endpoints a partial-build failure already created stays deterministic for a
+    // caller that supplied an ordered map.
+    Objects.requireNonNull(services, "services must not be null");
+    Map<String, HttpServiceConfig> candidate = new LinkedHashMap<>();
+    for (Map.Entry<String, HttpServiceConfig> entry : services.entrySet()) {
+      String name = Objects.requireNonNull(entry.getKey(), "service name must not be null");
+      candidate.put(
+          name,
+          Objects.requireNonNull(
+              entry.getValue(), "config for service '" + name + "' must not be null"));
+    }
     synchronized (swapLock) {
       if (closed) {
         throw new IllegalStateException("HTTP endpoint manager is closed");
@@ -190,7 +206,7 @@ public final class HttpEndpointManager
       List<HttpEndpoint> replaced = new ArrayList<>();
       List<HttpEndpoint> created = new ArrayList<>();
       try {
-        for (Map.Entry<String, HttpServiceConfig> entry : services.entrySet()) {
+        for (Map.Entry<String, HttpServiceConfig> entry : candidate.entrySet()) {
           String name = entry.getKey();
           HttpServiceConfig config = entry.getValue();
           HttpEndpoint existing = current.get(name);
@@ -223,7 +239,7 @@ public final class HttpEndpointManager
         throw e;
       }
       for (Map.Entry<String, HttpEndpoint> entry : current.entrySet()) {
-        if (!services.containsKey(entry.getKey())) {
+        if (!candidate.containsKey(entry.getKey())) {
           replaced.add(entry.getValue());
         }
       }

@@ -484,6 +484,34 @@ class HttpEndpointManagerTest {
     }
 
     @Test
+    @SuppressWarnings("NullAway") // deliberately passing null to exercise the runtime guard
+    void swapHttpEndpoints_nullServicesGiven_throwsNullPointerException() {
+      // Arrange
+      HttpEndpointManager manager = managerOf("svc", config("http://svc:8080", Map.of()));
+
+      // Act & Assert — the public seam fails fast, before the swap lock and before any build
+      assertThatThrownBy(() -> manager.swapHttpEndpoints(null))
+          .isInstanceOf(NullPointerException.class);
+      manager.close();
+    }
+
+    @Test
+    @SuppressWarnings("NullAway") // deliberately passing null to exercise the runtime guard
+    void swapHttpEndpoints_nullConfigValueGiven_throwsNullPointerException() {
+      // Arrange
+      HttpEndpointManager manager = managerOf("svc", config("http://svc:8080", Map.of()));
+      Map<String, HttpServiceConfig> services = new LinkedHashMap<>();
+      services.put("svc", null);
+
+      // Act & Assert — rejected up front: nothing was built, retired, or rotated
+      assertThatThrownBy(() -> manager.swapHttpEndpoints(services))
+          .isInstanceOf(NullPointerException.class);
+      assertThat(manager.contains("svc")).isTrue();
+      assertThat(manager.retiredCount()).isZero();
+      manager.close();
+    }
+
+    @Test
     void swapHttpEndpoints_afterClose_throwsIllegalStateException() {
       // Arrange
       HttpEndpointManager manager = managerOf("svc", config("http://svc:8080", Map.of()));
