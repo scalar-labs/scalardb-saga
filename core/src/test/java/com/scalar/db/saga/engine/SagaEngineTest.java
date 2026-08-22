@@ -986,6 +986,47 @@ class SagaEngineTest {
       assertThat(transitionCaptor.getAllValues().get(0).getEventType())
           .isEqualTo(EventType.SAGA_COMPENSATING);
     }
+
+    @Test
+    void executeSaga_stepReturnsPendingWithDefaultSagaTimeout_parksWithBoundedDeadline()
+        throws Exception {
+      // Arrange — a fixed clock so the parked deadline is deterministic. The definition sets no
+      // timeout; the engine-level default must bound the park deadline exactly like a
+      // definition-level timeout would, giving deadline = now + default timeout.
+      Clock fixedClock = Clock.fixed(NOW, ZoneOffset.UTC);
+      SagaEngine clockEngine =
+          new SagaEngine(
+              store,
+              new StepInstantiator(stepResolver, HttpEndpointManager.create(Map.of())),
+              OWNER_ID,
+              new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_CURRENT_STEP, 5000),
+              60_000,
+              fixedClock);
+      Step step1 = mock(Step.class);
+      when(step1.getName()).thenReturn("s1");
+      when(step1.execute(any(SagaContext.class))).thenReturn(StepResult.pending());
+      registerStep("s1", step1);
+      SagaDefinition def =
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
+              .defaultRetryPolicy(fastRetryPolicy())
+              .step("s1", "com.example.s1")
+              .add()
+              .build();
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      when(store.park(any(), anyInt(), any(StepEvent.class), any())).thenReturn(saga);
+
+      // Act
+      clockEngine.executeSaga(def, saga, Map.of());
+      clockEngine.close();
+
+      // Assert — parked with a deadline of exactly now + default timeout (the class step
+      // contributes no bound of its own)
+      ArgumentCaptor<Instant> deadlineCaptor = ArgumentCaptor.forClass(Instant.class);
+      verify(store).park(any(), anyInt(), any(StepEvent.class), deadlineCaptor.capture());
+      assertThat(deadlineCaptor.getValue())
+          .isEqualTo(Instant.ofEpochMilli(NOW.toEpochMilli() + 60_000));
+    }
   }
 
   // =========================================================================
