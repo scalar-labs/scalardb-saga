@@ -300,8 +300,25 @@ class ServiceFileParserTest {
     }
 
     @Test
-    void parseDirectory_symlinkedServiceFile_throwsIllegalArgumentException() throws IOException {
-      // A symlink under a service's name is a second route to reading an arbitrary file.
+    void parseDirectory_kubeletProjectedVolumeLayout_parsesServices() throws IOException {
+      // The layout kubelet mounts a ConfigMap as: the real files live in a ..<timestamp>
+      // directory, ..data symlinks to it, and every visible file is a symlink through ..data.
+      Path timestamped = Files.createDirectory(servicesDir.resolve("..2026_08_23_10_00_00"));
+      Files.writeString(timestamped.resolve("account.properties"), "base_url=http://a:1\n");
+      Files.createSymbolicLink(servicesDir.resolve("..data"), Path.of("..2026_08_23_10_00_00"));
+      Files.createSymbolicLink(
+          servicesDir.resolve("account.properties"), Path.of("..data", "account.properties"));
+
+      Map<String, ServiceConfig> services = parse();
+
+      assertThat(services).containsOnlyKeys("account");
+      assertThat(requireNonNull(services.get("account")).baseUrl()).isEqualTo("http://a:1");
+    }
+
+    @Test
+    void parseDirectory_symlinkEscapingServicesPath_throwsIllegalArgumentException()
+        throws IOException {
+      // A symlink out of the directory is a second route to reading an arbitrary file.
       Files.writeString(secretsDir.resolve("outside.properties"), "base_url=http://a:1\n");
       Files.createSymbolicLink(
           servicesDir.resolve("account.properties"), secretsDir.resolve("outside.properties"));
@@ -309,6 +326,44 @@ class ServiceFileParserTest {
       assertThatThrownBy(ServiceFileParserTest.this::parse)
           .isInstanceOf(IllegalArgumentException.class)
           .hasMessageContaining("symlink");
+    }
+
+    @Test
+    void parseDirectory_danglingSymlink_throwsIllegalArgumentException() throws IOException {
+      Files.createSymbolicLink(
+          servicesDir.resolve("account.properties"), servicesDir.resolve("gone.properties"));
+
+      assertThatThrownBy(ServiceFileParserTest.this::parse)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("cannot be resolved");
+    }
+
+    @Test
+    void parseDirectory_symlinkToDirectoryInsideServicesPath_throwsIllegalArgumentException()
+        throws IOException {
+      // Contained but not a regular file: resolving inside the directory is necessary, not
+      // sufficient.
+      Files.createDirectory(servicesDir.resolve("..subdir"));
+      Files.createSymbolicLink(
+          servicesDir.resolve("account.properties"), servicesDir.resolve("..subdir"));
+
+      assertThatThrownBy(ServiceFileParserTest.this::parse)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("regular file");
+    }
+
+    @Test
+    void parseDirectory_symlinkWithNonPropertiesName_throwsIllegalArgumentException()
+        throws IOException {
+      // The visible name carries the service name, so the extension rule applies to it even when
+      // the link target is a contained regular file.
+      Files.writeString(servicesDir.resolve("account.properties"), "base_url=http://a:1\n");
+      Files.createSymbolicLink(
+          servicesDir.resolve("stray.txt"), servicesDir.resolve("account.properties"));
+
+      assertThatThrownBy(ServiceFileParserTest.this::parse)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("stray.txt");
     }
 
     @Test

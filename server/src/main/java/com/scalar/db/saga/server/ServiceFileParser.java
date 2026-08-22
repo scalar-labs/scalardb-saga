@@ -30,9 +30,11 @@ import org.slf4j.LoggerFactory;
  *
  * <p>Directory hygiene, built for the mounted-ConfigMap layout this directory is expected to be:
  * entries whose name starts with {@code .} are ignored (kubelet's {@code ..data} indirection and
- * its timestamped directories), while any other entry that is not a regular {@code .properties}
- * file — including a symlinked one, which would be a second route to reading arbitrary files — is
- * an error. Files are size-capped so a mis-placed large file cannot stall loading.
+ * its timestamped directories), and a visible symlink — the shape kubelet publishes every key in,
+ * {@code account.properties -> ..data/account.properties} — must resolve to a regular file still
+ * inside the directory. Any other entry (a stray non-{@code .properties} file, or a symlink
+ * escaping the directory, which would be a second route to reading arbitrary files) is an error.
+ * Files are size-capped so a mis-placed large file cannot stall loading.
  *
  * <p>Every value guard the prefixed {@code service.<name>.*} format enforced lives here now: blank
  * rejection, the engine-reserved and JDK-restricted header names, case-colliding header names, and
@@ -151,6 +153,13 @@ final class ServiceFileParser {
       throw new IllegalArgumentException(
           "services_path '" + servicesPath + "' is not a readable directory");
     }
+    Path realServicesPath;
+    try {
+      realServicesPath = servicesPath.toRealPath();
+    } catch (IOException e) {
+      throw new IllegalArgumentException(
+          "services_path '" + servicesPath + "' cannot be resolved (" + e.getMessage() + ")", e);
+    }
     Map<String, ServiceConfig> services = new LinkedHashMap<>();
     List<Path> entries;
     try (Stream<Path> stream = Files.list(servicesPath)) {
@@ -166,23 +175,27 @@ final class ServiceFileParser {
         continue;
       }
       if (Files.isSymbolicLink(entry)) {
-        // A symlink is a second route to reading an arbitrary file under a service's name; the
-        // kubelet layout only ever symlinks dot-entries, which are already skipped above.
+        // Kubelet publishes every visible key of a projected volume as a symlink through its
+        // ..data indirection (account.properties -> ..data/account.properties), so a visible
+        // symlink is the expected shape of the mounted-ConfigMap layout, not an anomaly. It just
+        // must not become a second route to reading an arbitrary file under a service's name;
+        // requiring the resolved target to stay inside the directory forbids exactly that.
+        requireContainedRegularTarget(entry, fileName, realServicesPath);
+      } else if (!Files.isRegularFile(entry, LinkOption.NOFOLLOW_LINKS)) {
         throw new IllegalArgumentException(
             "services_path entry '"
                 + fileName
-                + "' is a symlink; only regular "
+                + "' is not a regular file. Every non-dot entry must be a <service-name>"
                 + PROPERTIES_EXTENSION
-                + " files are read");
+                + " file so a stray artifact cannot be silently skipped.");
       }
-      if (!Files.isRegularFile(entry, LinkOption.NOFOLLOW_LINKS)
-          || !fileName.endsWith(PROPERTIES_EXTENSION)) {
+      if (!fileName.endsWith(PROPERTIES_EXTENSION)) {
         throw new IllegalArgumentException(
             "services_path entry '"
                 + fileName
                 + "' is not a "
                 + PROPERTIES_EXTENSION
-                + " file. Every non-dot entry must be a regular <service-name>"
+                + " file. Every non-dot entry must be a <service-name>"
                 + PROPERTIES_EXTENSION
                 + " file so a stray artifact cannot be silently skipped.");
       }
@@ -199,6 +212,40 @@ final class ServiceFileParser {
       services.put(name, service);
     }
     return services;
+  }
+
+  /**
+   * Requires a visible symlink entry to resolve to a regular file still inside {@code
+   * realServicesPath} after full symlink resolution — the same containment {@link
+   * ServiceSecretResolver} applies to the secrets root. Kubelet's projected-volume chain ({@code
+   * account.properties -> ..data/account.properties -> ..<timestamp>/account.properties}) stays
+   * within the mount directory, so it passes; a link escaping the directory, dangling, or landing
+   * on anything but a regular file is the arbitrary-file route this check exists to forbid.
+   */
+  private static void requireContainedRegularTarget(
+      Path entry, String fileName, Path realServicesPath) {
+    Path target;
+    try {
+      target = entry.toRealPath();
+    } catch (IOException e) {
+      throw new IllegalArgumentException(
+          "services_path entry '"
+              + fileName
+              + "' is a symlink that cannot be resolved ("
+              + e.getMessage()
+              + ")",
+          e);
+    }
+    if (!target.startsWith(realServicesPath)
+        || !Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) {
+      throw new IllegalArgumentException(
+          "services_path entry '"
+              + fileName
+              + "' is a symlink that does not resolve to a regular file inside services_path,"
+              + " which would be a route to reading an arbitrary file under a service's name."
+              + " Only the mounted-volume indirection, a link resolving within the directory, is"
+              + " allowed.");
+    }
   }
 
   /**
