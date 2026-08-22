@@ -1,5 +1,6 @@
 package com.scalar.db.saga.transport;
 
+import java.net.URI;
 import java.net.http.HttpClient;
 import java.util.List;
 import java.util.Map;
@@ -35,7 +36,42 @@ public record HttpServiceConfig(
     Map<String, String> defaultHeaders) {
 
   public HttpServiceConfig {
+    // Every construction path flows through here — the orchestrator builder and every
+    // configuration swap — so a malformed or misleading base URL can never reach an endpoint,
+    // no matter which route configured it.
+    validateBaseUrl(baseUrl);
     allowedHosts = List.copyOf(allowedHosts);
     defaultHeaders = Map.copyOf(defaultHeaders);
+  }
+
+  /**
+   * Fails on a malformed or misleading {@code baseUrl}: it must be a valid absolute {@code
+   * http}/{@code https} URL with a host and no user-info component (a {@code user@host} authority
+   * silently retargets the host — e.g. {@code http://svc@evil.com} resolves to {@code evil.com}).
+   *
+   * <p>Messages deliberately do not echo the value: on the server's reload path a base URL may have
+   * been resolved from a secret reference, and these messages reach logs. Callers that know the
+   * value is safe to name add their own context.
+   *
+   * @throws IllegalArgumentException naming the violated rule
+   */
+  public static void validateBaseUrl(String baseUrl) {
+    URI uri;
+    try {
+      uri = URI.create(baseUrl);
+    } catch (IllegalArgumentException e) {
+      throw new IllegalArgumentException("baseUrl is not a valid URI", e);
+    }
+    String scheme = uri.getScheme();
+    if (scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) {
+      throw new IllegalArgumentException("baseUrl must use the http or https scheme");
+    }
+    if (uri.getHost() == null) {
+      throw new IllegalArgumentException("baseUrl must have a host");
+    }
+    if (uri.getUserInfo() != null) {
+      throw new IllegalArgumentException(
+          "baseUrl must not contain a user-info component (it silently retargets the host)");
+    }
   }
 }
