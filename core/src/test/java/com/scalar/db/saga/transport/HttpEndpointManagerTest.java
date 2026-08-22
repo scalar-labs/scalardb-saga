@@ -440,6 +440,50 @@ class HttpEndpointManagerTest {
     }
 
     @Test
+    void swapHttpEndpoints_rotationAppliedByFailedSwap_reapplyingPreviousConfigRestoresHeader()
+        throws Exception {
+      // Arrange — a server recording the Authorization header, and an endpoint on the last known
+      // good secret
+      AtomicReference<String> seenAuth = new AtomicReference<>();
+      HttpServer server =
+          startServer(
+              ex -> {
+                seenAuth.set(ex.getRequestHeaders().getFirst("Authorization"));
+                respondJson(ex);
+              });
+      try {
+        String baseUrl = baseUrlOf(server);
+        HttpServiceConfig lastKnownGood = config(baseUrl, Map.of("Authorization", "Bearer old"));
+        HttpEndpointManager manager = managerOf("svc", lastKnownGood);
+        HttpCall call = HttpCall.newBuilder("/x").method(HttpMethod.GET).build();
+
+        // A candidate set that rotates svc's secret and then fails on a later entry: the rotation
+        // is already live on the reused endpoint when the failure hits (LinkedHashMap fixes the
+        // build order)
+        Map<String, HttpServiceConfig> failedCandidate = new LinkedHashMap<>();
+        failedCandidate.put("svc", config(baseUrl, Map.of("Authorization", "Bearer rotated")));
+        failedCandidate.put("bad", unbuildableConfig());
+        assertThat(catchThrowable(() -> manager.swapHttpEndpoints(failedCandidate)))
+            .isInstanceOf(IllegalArgumentException.class);
+        manager.resolve("svc").call(call, CTX, "s");
+        assertThat(seenAuth.get()).isEqualTo("Bearer rotated");
+
+        // Act — the operator recovery the registrar contract promises: re-apply the last known
+        // good configuration
+        manager.swapHttpEndpoints(Map.of("svc", lastKnownGood));
+
+        // Assert — the rollback restored the previous header; a guard comparing the candidate
+        // against the recorded config would skip this rotation, because the record never saw the
+        // failed swap's rotation and still holds the old value
+        manager.resolve("svc").call(call, CTX, "s");
+        assertThat(seenAuth.get()).isEqualTo("Bearer old");
+        manager.close();
+      } finally {
+        server.stop(0);
+      }
+    }
+
+    @Test
     void swapHttpEndpoints_afterClose_throwsIllegalStateException() {
       // Arrange
       HttpEndpointManager manager = managerOf("svc", config("http://svc:8080", Map.of()));

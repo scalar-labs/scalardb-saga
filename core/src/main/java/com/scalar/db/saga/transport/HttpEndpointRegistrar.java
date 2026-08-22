@@ -25,9 +25,10 @@ import java.util.Map;
  * <p><b>Failure guarantee:</b> the published set flips in a single atomic step at the end of a
  * successful swap, so a resolution never observes a mix of old and new entries. When a swap throws
  * partway, nothing is published and the previous set keeps serving; header rotations already
- * applied to reused endpoints stick (they are validated values, so this is benign), and retrying
- * the swap converges on the intended set — last known good keeps serving until then. Endpoints the
- * failed attempt already created are shut down and tracked until their clients terminate, not
+ * applied to reused endpoints stick (they are validated values, so this is benign), and any
+ * subsequent successful swap — a retry of the intended set, or a rollback re-applying the last
+ * known good one — converges both the endpoint set and the live headers on its candidate. Endpoints
+ * the failed attempt already created are shut down and tracked until their clients terminate, not
  * leaked.
  */
 public interface HttpEndpointRegistrar {

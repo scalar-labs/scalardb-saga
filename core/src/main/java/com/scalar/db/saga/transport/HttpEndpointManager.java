@@ -204,11 +204,12 @@ public final class HttpEndpointManager
           HttpEndpoint existing = current.get(name);
           HttpServiceConfig existingConfig = currentConfigs.get(name);
           if (existing != null && existingConfig != null && sameTopology(existingConfig, config)) {
-            // Same client, exchange, and policy survive; a header change is a value swap the next
-            // request picks up — rotation without churn.
-            if (!existingConfig.defaultHeaders().equals(config.defaultHeaders())) {
-              existing.updateDefaultHeaders(config.defaultHeaders());
-            }
+            // Same client, exchange, and policy survive; the header set is applied unconditionally
+            // (an equal-value set is a free no-op) so every swap converges the live headers on its
+            // candidate. Guarding on the recorded headers would trust a record that a failed swap
+            // leaves stale: a rotation it already applied sticks while the record keeps the old
+            // value, so re-applying the last known good config would skip the restoring rotation.
+            existing.updateDefaultHeaders(config.defaultHeaders());
             next.put(name, existing);
           } else {
             HttpEndpoint fresh = HttpEndpoint.create(config, callbackUrlProvider);
