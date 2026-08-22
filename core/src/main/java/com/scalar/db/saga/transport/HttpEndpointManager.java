@@ -88,11 +88,12 @@ public final class HttpEndpointManager
   public static HttpEndpointManager create(
       Map<String, HttpServiceConfig> endpointConfigs,
       @Nullable CallbackUrlProvider callbackUrlProvider) {
-    Map<String, HttpEndpoint> endpoints = new HashMap<>();
-    for (Map.Entry<String, HttpServiceConfig> entry : endpointConfigs.entrySet()) {
-      endpoints.put(entry.getKey(), HttpEndpoint.create(entry.getValue(), callbackUrlProvider));
-    }
-    return new HttpEndpointManager(endpoints, endpointConfigs, callbackUrlProvider);
+    // Building the initial set is a swap from the empty set. Going through swapHttpEndpoints keeps
+    // one shared build path, so its rollback also covers a config that fails here: the endpoints
+    // already created are shut down rather than leaked.
+    HttpEndpointManager manager = new HttpEndpointManager(Map.of(), Map.of(), callbackUrlProvider);
+    manager.swapHttpEndpoints(endpointConfigs);
+    return manager;
   }
 
   @Override
@@ -185,24 +186,39 @@ public final class HttpEndpointManager
       Map<String, HttpServiceConfig> currentConfigs = this.configs;
       Map<String, HttpEndpoint> next = new HashMap<>();
       List<HttpEndpoint> replaced = new ArrayList<>();
-      for (Map.Entry<String, HttpServiceConfig> entry : services.entrySet()) {
-        String name = entry.getKey();
-        HttpServiceConfig config = entry.getValue();
-        HttpEndpoint existing = current.get(name);
-        HttpServiceConfig existingConfig = currentConfigs.get(name);
-        if (existing != null && existingConfig != null && sameTopology(existingConfig, config)) {
-          // Same client, exchange, and policy survive; a header change is a value swap the next
-          // request picks up — rotation without churn.
-          if (!existingConfig.defaultHeaders().equals(config.defaultHeaders())) {
-            existing.updateDefaultHeaders(config.defaultHeaders());
-          }
-          next.put(name, existing);
-        } else {
-          next.put(name, HttpEndpoint.create(config, callbackUrlProvider));
-          if (existing != null) {
-            replaced.add(existing);
+      List<HttpEndpoint> created = new ArrayList<>();
+      try {
+        for (Map.Entry<String, HttpServiceConfig> entry : services.entrySet()) {
+          String name = entry.getKey();
+          HttpServiceConfig config = entry.getValue();
+          HttpEndpoint existing = current.get(name);
+          HttpServiceConfig existingConfig = currentConfigs.get(name);
+          if (existing != null && existingConfig != null && sameTopology(existingConfig, config)) {
+            // Same client, exchange, and policy survive; a header change is a value swap the next
+            // request picks up — rotation without churn.
+            if (!existingConfig.defaultHeaders().equals(config.defaultHeaders())) {
+              existing.updateDefaultHeaders(config.defaultHeaders());
+            }
+            next.put(name, existing);
+          } else {
+            HttpEndpoint fresh = HttpEndpoint.create(config, callbackUrlProvider);
+            created.add(fresh);
+            next.put(name, fresh);
+            if (existing != null) {
+              replaced.add(existing);
+            }
           }
         }
+      } catch (RuntimeException e) {
+        // A later entry failed to build, so the snapshot will not be published and the endpoints
+        // this attempt already created are unreachable. Shut them down and track them on the
+        // retired list (swept by the next successful swap; force-stopped at close) instead of
+        // leaking their clients. Reused current endpoints are not touched.
+        for (HttpEndpoint endpoint : created) {
+          endpoint.shutdown();
+        }
+        retired.addAll(created);
+        throw e;
       }
       for (Map.Entry<String, HttpEndpoint> entry : current.entrySet()) {
         if (!services.containsKey(entry.getKey())) {

@@ -18,8 +18,10 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -53,6 +55,18 @@ class HttpEndpointManagerTest {
 
   private static HttpEndpointManager managerOf(String name, HttpServiceConfig config) {
     return HttpEndpointManager.create(Map.of(name, config), null);
+  }
+
+  /**
+   * A config whose endpoint cannot be built: a supplied redirect-following client combined with an
+   * allowlist is rejected by {@code HttpEndpoint.create} (SSRF-via-redirect), after config
+   * construction succeeds — the way to make an endpoint-set build fail partway.
+   */
+  private static HttpServiceConfig unbuildableConfig() {
+    HttpClient redirecting =
+        HttpClient.newBuilder().followRedirects(HttpClient.Redirect.ALWAYS).build();
+    return new HttpServiceConfig(
+        "http://bad:8080", List.of("allowed-host"), -1, redirecting, Map.of());
   }
 
   private static HttpServer startServer(com.sun.net.httpserver.HttpHandler handler)
@@ -179,6 +193,26 @@ class HttpEndpointManagerTest {
       assertThatCode(() -> manager.toStep("debit", "account", asyncSagaPhases()))
           .doesNotThrowAnyException();
       manager.close();
+    }
+  }
+
+  // =========================================================================
+  // Creation
+  // =========================================================================
+
+  @Nested
+  class Create {
+
+    @Test
+    void create_endpointCreationFailsPartway_throwsCreationError() {
+      // The initial build goes through the swap path, so its rollback covers a config that fails
+      // here too; from outside, the creation error propagates and no manager is returned.
+      Map<String, HttpServiceConfig> configs = new LinkedHashMap<>();
+      configs.put("good", config("http://good:8080", Map.of()));
+      configs.put("bad", unbuildableConfig());
+
+      assertThatThrownBy(() -> HttpEndpointManager.create(configs, null))
+          .isInstanceOf(IllegalArgumentException.class);
     }
   }
 
@@ -339,6 +373,46 @@ class HttpEndpointManagerTest {
 
         // Assert — graceful retirement: the in-flight exchange completed normally
         assertThat(inFlight.get(10, TimeUnit.SECONDS)).isNull();
+        manager.close();
+      } finally {
+        server.stop(0);
+      }
+    }
+
+    @Test
+    void swapHttpEndpoints_endpointCreationFailsPartway_rollsBackCreatedAndKeepsCurrentSet()
+        throws Exception {
+      // Arrange — a live endpoint, and a candidate set whose second entry cannot be built after
+      // the first already created a fresh endpoint (LinkedHashMap fixes the build order)
+      HttpServer server = startServer(HttpEndpointManagerTest::respondJson);
+      try {
+        String baseUrl = baseUrlOf(server);
+        HttpEndpointManager manager = managerOf("svc", config(baseUrl, Map.of()));
+        HttpEndpoint before = manager.endpointOrNull("svc");
+        Map<String, HttpServiceConfig> services = new LinkedHashMap<>();
+        services.put("fresh", config("http://fresh:8080", Map.of()));
+        services.put("bad", unbuildableConfig());
+
+        // Act
+        Throwable thrown = catchThrowable(() -> manager.swapHttpEndpoints(services));
+
+        // Assert — the creation failure propagates; nothing was published (the current set keeps
+        // serving, the attempt's entries are absent); the endpoint the attempt already built was
+        // shut down and joined the retired list rather than leaking
+        assertThat(thrown).isInstanceOf(IllegalArgumentException.class);
+        assertThat(manager.endpointOrNull("svc")).isSameAs(before);
+        assertThat(manager.contains("fresh")).isFalse();
+        HttpCall call = HttpCall.newBuilder("/x").method(HttpMethod.GET).build();
+        assertThatCode(() -> manager.resolve("svc").call(call, CTX, "s"))
+            .doesNotThrowAnyException();
+        assertThat(manager.retiredCount()).isEqualTo(1);
+
+        // A retry with the config fixed converges on the intended set
+        manager.swapHttpEndpoints(
+            Map.of(
+                "svc", config(baseUrl, Map.of()),
+                "fresh", config("http://fresh:8080", Map.of())));
+        assertThat(manager.contains("fresh")).isTrue();
         manager.close();
       } finally {
         server.stop(0);

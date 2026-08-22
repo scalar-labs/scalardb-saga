@@ -26,7 +26,9 @@ import java.util.Map;
  * successful swap, so a resolution never observes a mix of old and new entries. When a swap throws
  * partway, nothing is published and the previous set keeps serving; header rotations already
  * applied to reused endpoints stick (they are validated values, so this is benign), and retrying
- * the swap converges on the intended set — last known good keeps serving until then.
+ * the swap converges on the intended set — last known good keeps serving until then. Endpoints the
+ * failed attempt already created are shut down and tracked until their clients terminate, not
+ * leaked.
  */
 public interface HttpEndpointRegistrar {
 
