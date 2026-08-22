@@ -294,8 +294,10 @@ class HttpEndpointManagerTest {
       manager.swapHttpEndpoints(Map.of("svc", config("http://svc:8081", Map.of())));
       assertThat(manager.retiredCount()).isEqualTo(1);
 
-      // Act — an idle shut-down client terminates promptly; once it has, the next swap (even a
-      // no-op one) sweeps the entry
+      // Act — force the retiree's client to terminate (an idle client's graceful termination
+      // latency is a JDK implementation detail and flakes on CI), then the next swap — even a
+      // no-op one — sweeps the entry
+      before.shutdownNow();
       assertThat(before.awaitTermination(Duration.ofSeconds(10))).isTrue();
       manager.swapHttpEndpoints(Map.of("svc", config("http://svc:8081", Map.of())));
 
