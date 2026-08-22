@@ -4,7 +4,7 @@ import java.time.Instant;
 import org.jspecify.annotations.Nullable;
 
 /**
- * One immutable snapshot of the configuration-reload state, updated by {@link ConfigReloadPass}
+ * One immutable snapshot of the configuration-reload state, updated by {@link ConfigReconciler}
  * after every pass. Observability is logs-only in v1, so nothing serves this over the wire yet —
  * but the pass maintains it fully so a later admin status endpoint can expose it additively,
  * unchanged.

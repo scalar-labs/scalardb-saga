@@ -35,15 +35,16 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * One configuration-reload pass: snapshot the services and definitions directories, validate the
- * COMPLETE candidate set, and only then apply it — services swapped first (so the fleet-visible
- * definitions that name them can resolve everywhere), definitions registered second. Any validation
- * failure rejects the whole pass and the previously applied configuration keeps serving; per-file
- * errors are aggregated across files so one team's mistake never hides another's.
+ * Reconciles the watched configuration with the running engine. Each {@link #run()} is one pass:
+ * snapshot the services and definitions directories, validate the COMPLETE candidate set, and only
+ * then apply it — services swapped first (so the fleet-visible definitions that name them can
+ * resolve everywhere), definitions registered second. Any validation failure rejects the whole pass
+ * and the previously applied configuration keeps serving; per-file errors are aggregated across
+ * files so one team's mistake never hides another's.
  *
- * <p>The pass is policy-free: {@code SagaServer}'s constructor runs it synchronously and fatally
- * (boot keeps today's fail-fast), and {@link SagaConfigReloadManager} schedules it with failures
- * contained. Passes are externally serialized (boot runs before the scheduler starts; the
+ * <p>The reconciler is policy-free: {@code SagaServer}'s constructor runs a pass synchronously and
+ * fatally (boot keeps today's fail-fast), and {@link SagaConfigReloadManager} schedules it with
+ * failures contained. Passes are externally serialized (boot runs before the scheduler starts; the
  * scheduler's fixed-delay task never overlaps itself), with {@code synchronized} as a belt.
  *
  * <p>Bookkeeping is per artifact: the applied-services map advances only when a swap commits, and
@@ -60,9 +61,9 @@ import org.slf4j.LoggerFactory;
  * cold-boots a fresh replica.
  */
 @ThreadSafe
-final class ConfigReloadPass {
+final class ConfigReconciler {
 
-  private static final Logger logger = LoggerFactory.getLogger(ConfigReloadPass.class);
+  private static final Logger logger = LoggerFactory.getLogger(ConfigReconciler.class);
 
   /** Cap on one definition file, mirroring the services cap; see {@code ServiceFileParser}. */
   static final long MAX_DEFINITION_FILE_BYTES = 1024 * 1024;
@@ -106,7 +107,7 @@ final class ConfigReloadPass {
     }
   }
 
-  ConfigReloadPass(
+  ConfigReconciler(
       ReloadConfig reloadConfig,
       @Nullable Path definitionsPath,
       boolean asyncCallbacksConfigured,

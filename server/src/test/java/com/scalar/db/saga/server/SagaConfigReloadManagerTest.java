@@ -40,8 +40,8 @@ class SagaConfigReloadManagerTest {
         Clock.fixed(Instant.parse("2026-08-22T12:00:00Z"), ZoneOffset.UTC));
   }
 
-  private ConfigReloadPass pass(ReloadConfig config) {
-    return new ConfigReloadPass(
+  private ConfigReconciler pass(ReloadConfig config) {
+    return new ConfigReconciler(
         config, definitionsDir, false, Map.of(), () -> services -> {}, definition -> {});
   }
 
@@ -70,7 +70,7 @@ class SagaConfigReloadManagerTest {
             + "\"execution\":{\"method\":\"POST\",\"path\":\"/x\"},"
             + "\"compensation\":{\"method\":\"POST\",\"path\":\"/y\"}}]}");
     ReloadConfig config = reloadConfig(30);
-    ConfigReloadPass pass = pass(config);
+    ConfigReconciler pass = pass(config);
     SagaConfigReloadManager manager = new SagaConfigReloadManager(pass, config, scheduler);
     manager.start();
     ArgumentCaptor<Runnable> task = ArgumentCaptor.forClass(Runnable.class);
@@ -92,8 +92,8 @@ class SagaConfigReloadManagerTest {
     // A service file makes the diff non-empty, so the pass genuinely reaches the failing seam.
     Files.writeString(servicesDir.resolve("svc.properties"), "base_url=http://svc:1\n");
     ReloadConfig config = reloadConfig(30);
-    ConfigReloadPass pass =
-        new ConfigReloadPass(
+    ConfigReconciler pass =
+        new ConfigReconciler(
             config,
             definitionsDir,
             false,

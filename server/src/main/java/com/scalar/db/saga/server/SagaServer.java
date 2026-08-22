@@ -98,9 +98,9 @@ public final class SagaServer implements AutoCloseable {
   private final @Nullable HealthStatusManager grpcHealth;
   private final AtomicBoolean closed = new AtomicBoolean();
   private volatile boolean grpcStarted;
-  // The reload pipeline: the pass is also the boot loader; the manager is null when
+  // The reload pipeline: the reconciler is also the boot loader; the manager is null when
   // reload.interval_seconds is 0 (startup-only loading).
-  private ConfigReloadPass reloadPass;
+  private ConfigReconciler reconciler;
   private @Nullable SagaConfigReloadManager reloadManager;
 
   /**
@@ -156,28 +156,28 @@ public final class SagaServer implements AutoCloseable {
       // appliedServices is seeded with the endpoints the orchestrator was built from — parsed by
       // the same ServiceFileParser from the same directory — so the first pass verifies rather
       // than re-applies, and any set a reload accepted also cold-boots a fresh replica.
-      this.reloadPass =
-          new ConfigReloadPass(
+      this.reconciler =
+          new ConfigReconciler(
               config.reloadConfig(),
               config.definitionsPath().orElse(null),
               config.callbackBaseUrl().isPresent() && config.callbackSecret().isPresent(),
               config.services(),
               orchestrator::httpEndpointRegistrar,
               orchestrator::register);
-      reloadPass.runOrThrow();
+      reconciler.runOrThrow();
       // A daemon with no registered definitions cannot run any saga — fail fast rather than serve
       // a healthy but useless process. Reload cannot lift this later: the empty-transition guard
       // rejects a wind-down to zero, so a useful daemon always starts with at least one.
-      if (reloadPass.appliedDefinitionCount() == 0) {
+      if (reconciler.appliedDefinitionCount() == 0) {
         throw new IllegalStateException(
             "No saga definitions registered. Set '"
                 + SagaServerConfig.DEFINITIONS_PATH_KEY
                 + "' to a file or directory containing at least one saga definition.");
       }
-      logger.info("Registered {} saga definition(s)", reloadPass.appliedDefinitionCount());
+      logger.info("Registered {} saga definition(s)", reconciler.appliedDefinitionCount());
       this.reloadManager =
           config.reloadConfig().intervalSeconds() > 0
-              ? new SagaConfigReloadManager(reloadPass, config.reloadConfig())
+              ? new SagaConfigReloadManager(reconciler, config.reloadConfig())
               : null;
       if (httpServer != null) {
         registerRoutes(httpServer);
@@ -643,7 +643,7 @@ public final class SagaServer implements AutoCloseable {
    * @return whether the pass applied (or verified) cleanly
    */
   boolean reloadNow() {
-    return reloadPass.run();
+    return reconciler.run();
   }
 
   @Override

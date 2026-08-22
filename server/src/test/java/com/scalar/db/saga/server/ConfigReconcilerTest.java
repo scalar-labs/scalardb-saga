@@ -23,7 +23,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-class ConfigReloadPassTest {
+class ConfigReconcilerTest {
 
   private static final Instant NOW = Instant.parse("2026-08-22T12:00:00Z");
 
@@ -36,19 +36,19 @@ class ConfigReloadPassTest {
   private final List<SagaDefinition> registered = new ArrayList<>();
   private Consumer<SagaDefinition> definitionRegistrar = definition -> registered.add(definition);
 
-  private ConfigReloadPass pass() {
+  private ConfigReconciler pass() {
     return pass(Map.of());
   }
 
-  private ConfigReloadPass pass(Map<String, SagaServerConfig.ServiceConfig> seed) {
+  private ConfigReconciler pass(Map<String, SagaServerConfig.ServiceConfig> seed) {
     return pass(seed, false);
   }
 
-  private ConfigReloadPass pass(
+  private ConfigReconciler pass(
       Map<String, SagaServerConfig.ServiceConfig> seed, boolean asyncCallbacksConfigured) {
     ReloadConfig reloadConfig =
         new ReloadConfig(servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
-    return new ConfigReloadPass(
+    return new ConfigReconciler(
         reloadConfig,
         definitionsDir,
         asyncCallbacksConfigured,
@@ -131,7 +131,7 @@ class ConfigReloadPassTest {
       // Arrange
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("saga.json", "order-saga", "1.0", "account");
-      ConfigReloadPass pass = pass();
+      ConfigReconciler pass = pass();
       pass.run();
       swaps.clear();
       registered.clear();
@@ -150,7 +150,7 @@ class ConfigReloadPassTest {
       // Arrange
       writeService("account", "base_url=http://account:8080\nheader.Authorization=Bearer old\n");
       writeDefinition("saga.json", "order-saga", "1.0", "account");
-      ConfigReloadPass pass = pass();
+      ConfigReconciler pass = pass();
       pass.run();
       writeService("account", "base_url=http://account:8080\nheader.Authorization=Bearer new\n");
 
@@ -175,7 +175,7 @@ class ConfigReloadPassTest {
               + secretsDir.resolve("token")
               + "}\n");
       writeDefinition("saga.json", "order-saga", "1.0", "account");
-      ConfigReloadPass pass = pass();
+      ConfigReconciler pass = pass();
       pass.run();
       Files.writeString(secretsDir.resolve("token"), "Bearer new");
 
@@ -193,7 +193,7 @@ class ConfigReloadPassTest {
       // Arrange
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("saga.json", "order-saga", "1.0", "account");
-      ConfigReloadPass pass = pass();
+      ConfigReconciler pass = pass();
       pass.run();
       writeDefinition("saga.json", "order-saga", "2.0", "account", "/x2");
 
@@ -235,10 +235,10 @@ class ConfigReloadPassTest {
       writeService("account", "base_url=   \n");
       writeService("ledger", "base_url=http://ledger:9000\nbogus_key=x\n");
       writeDefinition("saga.json", "order-saga", "1.0", "account");
-      ConfigReloadPass pass = pass();
+      ConfigReconciler pass = pass();
 
       // Act & Assert — one WARN naming both files
-      try (LogCapture logs = LogCapture.of(ConfigReloadPass.class)) {
+      try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
         pass.run();
 
         assertThat(logs.events())
@@ -256,10 +256,10 @@ class ConfigReloadPassTest {
       // Arrange
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("saga.json", "order-saga", "1.0", "payment");
-      ConfigReloadPass pass = pass();
+      ConfigReconciler pass = pass();
 
       // Act & Assert
-      try (LogCapture logs = LogCapture.of(ConfigReloadPass.class)) {
+      try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
         boolean applied = pass.run();
 
         assertThat(applied).isFalse();
@@ -278,12 +278,12 @@ class ConfigReloadPassTest {
       // Arrange — same version, different content
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("saga.json", "order-saga", "1.0", "account");
-      ConfigReloadPass pass = pass();
+      ConfigReconciler pass = pass();
       pass.run();
       writeDefinition("saga.json", "order-saga", "1.0", "account", "/changed");
 
       // Act & Assert
-      try (LogCapture logs = LogCapture.of(ConfigReloadPass.class)) {
+      try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
         boolean applied = pass.run();
 
         assertThat(applied).isFalse();
@@ -300,7 +300,7 @@ class ConfigReloadPassTest {
       // Arrange
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("saga.json", "order-saga", "1.0", "payment"); // dangling
-      ConfigReloadPass pass = pass();
+      ConfigReconciler pass = pass();
       assertThat(pass.run()).isFalse();
       writeDefinition("saga.json", "order-saga", "1.0", "account"); // fixed
 
@@ -314,7 +314,7 @@ class ConfigReloadPassTest {
       // Arrange
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("saga.json", "order-saga", "1.0", "account");
-      ConfigReloadPass pass = pass();
+      ConfigReconciler pass = pass();
       pass.run();
       Files.delete(servicesDir.resolve("account.properties"));
 
@@ -328,7 +328,7 @@ class ConfigReloadPassTest {
       // Arrange
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("saga.json", "order-saga", "1.0", "account");
-      ConfigReloadPass pass = pass();
+      ConfigReconciler pass = pass();
       pass.run();
       Files.delete(definitionsDir.resolve("saga.json"));
 
@@ -341,7 +341,7 @@ class ConfigReloadPassTest {
       // Arrange — a service that restricted egress must not silently loosen to allow-all
       writeService("account", "base_url=http://account:8080\nallowed_hosts=account\n");
       writeDefinition("saga.json", "order-saga", "1.0", "account");
-      ConfigReloadPass pass = pass();
+      ConfigReconciler pass = pass();
       pass.run();
       writeService("account", "base_url=http://account:8080\n");
 
@@ -380,10 +380,10 @@ class ConfigReloadPassTest {
       // the message must not echo the URL (a base_url may resolve from a secret reference).
       writeService("account", "base_url=http://payment@evil.example\n");
       writeDefinition("saga.json", "order-saga", "1.0", "account");
-      ConfigReloadPass pass = pass();
+      ConfigReconciler pass = pass();
 
       // Act & Assert
-      try (LogCapture logs = LogCapture.of(ConfigReloadPass.class)) {
+      try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
         boolean applied = pass.run();
 
         assertThat(applied).isFalse();
@@ -463,7 +463,7 @@ class ConfigReloadPassTest {
             }
             registered.add(definition);
           };
-      ConfigReloadPass pass = pass();
+      ConfigReconciler pass = pass();
 
       // Act — first pass fails mid-apply, second retries
       boolean first = pass.run();
@@ -489,11 +489,11 @@ class ConfigReloadPassTest {
           definition -> {
             throw SagaDefinitionException.versionContentConflict("saga-a", "1.0");
           };
-      ConfigReloadPass pass = pass();
+      ConfigReconciler pass = pass();
 
       // Act & Assert — the status and the WARN distinguish the permanent case from a generic
       // rejection
-      try (LogCapture logs = LogCapture.of(ConfigReloadPass.class)) {
+      try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
         pass.run();
 
         assertThat(logs.events())
@@ -519,10 +519,10 @@ class ConfigReloadPassTest {
     void run_repeatedIdenticalFailure_warnsOnceThenDebug() throws IOException {
       // Arrange
       writeService("account", "base_url=   \n");
-      ConfigReloadPass pass = pass();
+      ConfigReconciler pass = pass();
 
       // Act & Assert — one WARN for the state change, DEBUG for the repeats
-      try (LogCapture logs = LogCapture.of(ConfigReloadPass.class)) {
+      try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
         pass.run();
         pass.run();
         pass.run();
@@ -536,12 +536,12 @@ class ConfigReloadPassTest {
       // Arrange
       writeService("account", "base_url=   \n");
       writeDefinition("saga.json", "order-saga", "1.0", "account");
-      ConfigReloadPass pass = pass();
+      ConfigReconciler pass = pass();
       pass.run();
       writeService("account", "base_url=http://account:8080\n");
 
       // Act & Assert
-      try (LogCapture logs = LogCapture.of(ConfigReloadPass.class)) {
+      try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
         pass.run();
 
         assertThat(logs.events())
@@ -559,7 +559,7 @@ class ConfigReloadPassTest {
       // Arrange
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("saga.json", "order-saga", "1.0", "account");
-      ConfigReloadPass pass = pass();
+      ConfigReconciler pass = pass();
 
       // Act
       pass.run();
@@ -579,12 +579,12 @@ class ConfigReloadPassTest {
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("a.json", "saga-a", "1.0", "account");
       writeDefinition("b.json", "saga-b", "1.0", "account");
-      ConfigReloadPass pass = pass();
+      ConfigReconciler pass = pass();
       pass.run();
       Files.delete(definitionsDir.resolve("b.json"));
 
       // Act & Assert — a warning, not a rejection: the saga remains registered and startable
-      try (LogCapture logs = LogCapture.of(ConfigReloadPass.class)) {
+      try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
         boolean applied = pass.run();
 
         assertThat(applied).isTrue();

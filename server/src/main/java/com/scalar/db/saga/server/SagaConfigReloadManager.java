@@ -8,7 +8,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Schedules the {@link ConfigReloadPass} on a fixed delay — the watcher half of configuration hot
+ * Schedules the {@link ConfigReconciler} on a fixed delay — the watcher half of configuration hot
  * reload, shaped like its living siblings {@code SagaRecoveryManager}/{@code SagaRetentionManager}:
  * a single-thread named daemon scheduler, a {@code reloadSafely()} wrapper so nothing escapes to
  * the scheduler, and a {@code stop(deadlineNanos)} that awaits the in-flight pass so no
@@ -23,13 +23,13 @@ final class SagaConfigReloadManager {
 
   private static final Logger logger = LoggerFactory.getLogger(SagaConfigReloadManager.class);
 
-  private final ConfigReloadPass pass;
+  private final ConfigReconciler reconciler;
   private final long intervalSeconds;
   private final ScheduledExecutorService scheduler;
 
-  SagaConfigReloadManager(ConfigReloadPass pass, ReloadConfig config) {
+  SagaConfigReloadManager(ConfigReconciler reconciler, ReloadConfig config) {
     this(
-        pass,
+        reconciler,
         config,
         Executors.newSingleThreadScheduledExecutor(
             runnable -> {
@@ -41,8 +41,8 @@ final class SagaConfigReloadManager {
 
   // Visible for testing
   SagaConfigReloadManager(
-      ConfigReloadPass pass, ReloadConfig config, ScheduledExecutorService scheduler) {
-    this.pass = pass;
+      ConfigReconciler reconciler, ReloadConfig config, ScheduledExecutorService scheduler) {
+    this.reconciler = reconciler;
     this.intervalSeconds = config.intervalSeconds();
     this.scheduler = scheduler;
   }
@@ -63,7 +63,7 @@ final class SagaConfigReloadManager {
    */
   private void reloadSafely() {
     try {
-      pass.run();
+      reconciler.run();
     } catch (Throwable t) {
       logger.error("Config reload pass failed unexpectedly", t);
     }
