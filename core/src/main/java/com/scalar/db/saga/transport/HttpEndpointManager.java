@@ -12,7 +12,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import net.jcip.annotations.ThreadSafe;
 import org.jspecify.annotations.Nullable;
 
@@ -118,11 +117,6 @@ public final class HttpEndpointManager
     return endpoints.get(name) != null;
   }
 
-  /** The currently registered endpoint names (an immutable snapshot). */
-  public Set<String> names() {
-    return endpoints.keySet();
-  }
-
   /** The endpoint currently registered under {@code name}, or {@code null} (for tests). */
   @Nullable HttpEndpoint endpointOrNull(String name) {
     return endpoints.get(name);
@@ -136,6 +130,22 @@ public final class HttpEndpointManager
   public @Nullable SagaHttpClient sagaHttpClient(String name) {
     HttpEndpoint endpoint = endpoints.get(name);
     return endpoint != null ? endpoint.sagaHttpClient() : null;
+  }
+
+  /**
+   * A name → {@link SagaHttpClient} view built from one snapshot of the current endpoint set, for a
+   * caller that decides on cardinality and then picks a client (the sole-endpoint code-step
+   * lookup): reading names and clients separately could straddle a concurrent swap and miss an
+   * endpoint that was registered at every instant. Each client is pinned to its endpoint like
+   * {@link #sagaHttpClient(String)}.
+   */
+  public Map<String, SagaHttpClient> sagaHttpClients() {
+    Map<String, HttpEndpoint> snapshot = endpoints;
+    Map<String, SagaHttpClient> clients = new HashMap<>();
+    for (Map.Entry<String, HttpEndpoint> entry : snapshot.entrySet()) {
+      clients.put(entry.getKey(), entry.getValue().sagaHttpClient());
+    }
+    return Map.copyOf(clients);
   }
 
   /**

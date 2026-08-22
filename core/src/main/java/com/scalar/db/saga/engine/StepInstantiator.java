@@ -9,6 +9,7 @@ import com.scalar.db.saga.engine.StepResolver.ResolutionContext;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.transport.HttpEndpointManager;
 import com.scalar.db.saga.transport.HttpEndpointRegistrar;
+import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -102,19 +103,22 @@ final class StepInstantiator implements ResolutionContext {
    */
   @Override
   public SagaHttpClient httpClient() {
-    var names = endpointManager.names();
-    if (names.isEmpty()) {
+    // One snapshot for the whole decision: judging cardinality on one endpoint set and looking the
+    // client up in another would let a concurrent swap (e.g. renaming the sole endpoint) fail a
+    // lookup that saw exactly one endpoint at every instant.
+    Map<String, SagaHttpClient> clients = endpointManager.sagaHttpClients();
+    if (clients.isEmpty()) {
       throw SagaDefinitionException.httpEndpointLookupFailed(
           "no HTTP endpoint is registered; call httpEndpoint(name, baseUrl) on the builder");
     }
-    if (names.size() > 1) {
+    if (clients.size() > 1) {
       throw SagaDefinitionException.httpEndpointLookupFailed(
           "multiple HTTP endpoints are registered "
-              + names
+              + clients.keySet()
               + "; annotate the SagaHttpClient parameter with @Named(\"<endpoint>\") to select"
               + " one");
     }
-    return httpClient(names.iterator().next());
+    return clients.values().iterator().next();
   }
 
   private <T> T resolveServiceStep(ServiceStep stepDef, Class<T> expectedType) {

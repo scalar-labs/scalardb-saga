@@ -7,6 +7,7 @@ import static org.assertj.core.api.Assertions.catchThrowable;
 
 import com.scalar.db.saga.api.HttpMethod;
 import com.scalar.db.saga.api.SagaContext;
+import com.scalar.db.saga.api.SagaHttpClient;
 import com.scalar.db.saga.api.Step;
 import com.scalar.db.saga.api.TccStep;
 import com.scalar.db.saga.definition.CallSpec;
@@ -108,6 +109,25 @@ class HttpEndpointManagerTest {
       // Assert — the adapter is the registered endpoint's own
       HttpEndpoint endpoint = java.util.Objects.requireNonNull(manager.endpointOrNull("account"));
       assertThat(adapter).isSameAs(endpoint.transportAdapter());
+      manager.close();
+    }
+
+    @Test
+    void sagaHttpClients_twoEndpointsRegistered_returnsOneClientPerEndpoint() {
+      // Arrange
+      HttpEndpointManager manager =
+          HttpEndpointManager.create(
+              Map.of(
+                  "account", config("http://account:8080", Map.of()),
+                  "payment", config("http://payment:8080", Map.of())),
+              null);
+
+      // Act
+      Map<String, SagaHttpClient> clients = manager.sagaHttpClients();
+
+      // Assert — one consistent snapshot: every registered name maps to a client
+      assertThat(clients).containsOnlyKeys("account", "payment");
+      assertThat(clients.values()).doesNotContainNull();
       manager.close();
     }
 
