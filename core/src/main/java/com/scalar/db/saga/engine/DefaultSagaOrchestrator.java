@@ -767,7 +767,11 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
      * specifies no timeout of its own ({@code timeoutMillis == 0}). The default is applied at every
      * execution entry — start, recovery resume, and parked resume — by recomputing the deadline at
      * each drive, so an in-flight saga's effective timeout follows the value configured at each
-     * resumption, and the stored definition never carries a baked-in copy of it. Defaults to
+     * resumption, and the stored definition never carries a baked-in copy of it. Disabling the
+     * default ({@code 0}) is one-way for parked sagas, though: a saga whose park deadline came only
+     * from this default re-parks with no deadline on its next drive, which does not merely widen
+     * its deadline but removes it from the parked-timeout sweep for good; raising the default again
+     * later cannot re-bound it, and only its callback or a forced completion moves it. Defaults to
      * {@value #DEFAULT_SAGA_TIMEOUT_MILLIS}: definitions without a timeout run without one.
      *
      * @param defaultSagaTimeoutMillis the default saga timeout; {@code 0} applies none
