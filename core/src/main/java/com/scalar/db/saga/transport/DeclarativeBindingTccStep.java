@@ -18,8 +18,8 @@ import java.util.Objects;
  * configuration swap between phases means reserve may land on the old endpoint and confirm/cancel
  * on its replacement (endpoint changes must stay backward-compatible for in-flight sagas). A {@link
  * TransportException} (from the resolution or the call) becomes a {@link StepExecutionException}
- * (carrying the retryable flag) for reserve/confirm, or a {@link StepCompensationException} for
- * cancel. The SAGA counterpart is {@link DeclarativeBindingStep}.
+ * (carrying the retryable and known-not-committed flags) for reserve/confirm, or a {@link
+ * StepCompensationException} for cancel. The SAGA counterpart is {@link DeclarativeBindingStep}.
  */
 final class DeclarativeBindingTccStep implements TccStep {
 
@@ -69,7 +69,7 @@ final class DeclarativeBindingTccStep implements TccStep {
     try {
       return resolver.resolve(service).call(confirm, context, name + TccStepNaming.CONFIRM_SUFFIX);
     } catch (TransportException e) {
-      throw new StepExecutionException(e, e.isRetryable());
+      throw new StepExecutionException(e, e.isRetryable(), e.knownNotCommitted());
     }
   }
 
