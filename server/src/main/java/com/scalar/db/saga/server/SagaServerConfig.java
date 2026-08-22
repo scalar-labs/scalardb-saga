@@ -415,7 +415,7 @@ public final class SagaServerConfig {
   // this many request service-times before the server sheds load.
   static final int DEFAULT_MAX_QUEUED_REQUESTS_PER_THREAD = 2;
   static final long DEFAULT_SAGA_TIMEOUT_MILLIS =
-      0L; // 0 = disabled (definition's own timeout wins)
+      DefaultSagaOrchestrator.DEFAULT_SAGA_TIMEOUT_MILLIS;
   static final int DEFAULT_MAX_START_REQUESTS_PER_MINUTE = 0; // 0 = disabled (no rate limiting)
 
   /**
