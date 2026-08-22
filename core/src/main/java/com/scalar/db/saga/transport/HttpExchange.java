@@ -241,9 +241,15 @@ final class HttpExchange {
         throw new HttpCallException("Response body exceeds limit (> " + maxBodyBytes + ")", false);
       }
       if (cause != null && hasCause(cause, RejectedExecutionException.class)) {
-        // As with the synchronous rejection above: a rejection is definitionally pre-send.
+        // Unlike the synchronous rejection above, a rejection surfacing through the future is not
+        // proof of pre-send: the client accepted the request, and an executor shut down (or a
+        // bounded queue overflowing) mid-exchange can reject continuation work such as response
+        // processing after the request was transmitted. Retryable, but in-doubt.
         throw new HttpCallException(
-            "HTTP client rejected the request (shut down): " + uri, cause, true, true);
+            "HTTP call rejected mid-exchange (client or executor shut down or saturated): " + uri,
+            cause,
+            true,
+            false);
       }
       if (cause != null && hasCause(cause, NumberFormatException.class)) {
         // A malformed Content-Length (e.g. "abc") makes the JDK reject the response while framing
