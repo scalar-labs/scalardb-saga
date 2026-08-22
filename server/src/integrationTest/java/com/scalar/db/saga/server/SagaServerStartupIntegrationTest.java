@@ -15,12 +15,11 @@ import org.junit.jupiter.api.Test;
  * Startup coverage for configurations {@link ServerIntegrationTestSupport} does not exercise.
  *
  * <ul>
- *   <li>A declarative definition that references a service with no configured {@code
- *       service.<name>.base_url} makes {@link SagaServer} fail to start — the engine rejects the
- *       unregistered service while registering the definition. This per-reference guard (together
- *       with fail-fast on zero definitions) is what makes a separate "zero endpoints configured"
- *       check unnecessary: any daemon that starts necessarily has every referenced service
- *       configured.
+ *   <li>A declarative definition that references a service with no service file in {@code
+ *       services_path} makes {@link SagaServer} fail to start — the engine rejects the unregistered
+ *       service while registering the definition. This per-reference guard (together with fail-fast
+ *       on zero definitions) is what makes a separate "zero endpoints configured" check
+ *       unnecessary: any daemon that starts necessarily has every referenced service configured.
  *   <li>Every engine setting the properties file exposes, from owner id through shutdown, recovery,
  *       and retention, is accepted by the orchestrator builder it is forwarded to. Parsing is
  *       unit-tested; this covers the forwarding, which a mocked orchestrator cannot.
@@ -28,7 +27,7 @@ import org.junit.jupiter.api.Test;
  */
 class SagaServerStartupIntegrationTest {
 
-  // References service "account", but the test configures no service.account.base_url.
+  // References service "account"; the unconfigured-service test writes no account.properties.
   private static final String DEFINITION =
       """
       { "name": "saga", "mode": "SAGA", "steps": [
@@ -39,24 +38,33 @@ class SagaServerStartupIntegrationTest {
 
   private Path tempDbPath;
   private Path definitionsDir;
+  private Path servicesDir;
 
   @BeforeEach
   void setUp() throws Exception {
     tempDbPath = Files.createTempFile("saga-daemon-startup-", ".db");
     definitionsDir = Files.createTempDirectory("saga-daemon-startup-defs-");
     Files.writeString(definitionsDir.resolve("saga.json"), DEFINITION);
+    servicesDir = Files.createTempDirectory("saga-daemon-startup-services-");
   }
 
   @AfterEach
   void tearDown() throws Exception {
     Files.deleteIfExists(definitionsDir.resolve("saga.json"));
     Files.deleteIfExists(definitionsDir);
+    Files.deleteIfExists(servicesDir.resolve("account.properties"));
+    Files.deleteIfExists(servicesDir);
     Files.deleteIfExists(tempDbPath);
+  }
+
+  /** Writes the "account" service file, pointing at a deliberately unreachable URL. */
+  private void writeAccountService() throws Exception {
+    Files.writeString(servicesDir.resolve("account.properties"), "base_url=http://127.0.0.1:1\n");
   }
 
   @Test
   void constructor_definitionReferencesUnconfiguredService_failsToStart() {
-    // Deliberately no scalar.db.saga.server.service.account.base_url.
+    // Deliberately no account.properties in services_path.
     Properties props = storeProperties();
 
     assertThatThrownBy(() -> new SagaServer(SagaServerConfig.load(props)))
@@ -68,9 +76,7 @@ class SagaServerStartupIntegrationTest {
     Properties props = storeProperties();
     // Deliberately unreachable: the saga is never started, and registration only has to resolve the
     // service name.
-    props.setProperty(
-        SagaServerConfig.SERVICE_KEY_PREFIX + "account" + SagaServerConfig.SERVICE_BASE_URL_SUFFIX,
-        "http://127.0.0.1:1");
+    writeAccountService();
     props.setProperty(SagaServerConfig.OWNER_ID_KEY, "saga-daemon-it-0");
     props.setProperty(SagaServerConfig.SHUTDOWN_MODE_KEY, "WAIT_ALL_SAGAS");
     props.setProperty(SagaServerConfig.SHUTDOWN_TIMEOUT_MILLIS_KEY, "5000");
@@ -95,9 +101,7 @@ class SagaServerStartupIntegrationTest {
   @Test
   void close_withZeroShutdownTimeout_drainsNothingAndReturns() throws Exception {
     Properties props = storeProperties();
-    props.setProperty(
-        SagaServerConfig.SERVICE_KEY_PREFIX + "account" + SagaServerConfig.SERVICE_BASE_URL_SUFFIX,
-        "http://127.0.0.1:1");
+    writeAccountService();
     // A drain of nothing: every deadline the close path computes has already passed. The managers
     // and the async executor must take their skip-the-wait branch rather than block or throw.
     props.setProperty(SagaServerConfig.SHUTDOWN_TIMEOUT_MILLIS_KEY, "0");
@@ -119,6 +123,7 @@ class SagaServerStartupIntegrationTest {
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, definitionsDir.toString());
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, servicesDir.toString());
     return props;
   }
 }
