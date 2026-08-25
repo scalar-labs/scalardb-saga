@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.function.Consumer;
@@ -90,6 +91,10 @@ final class ConfigReconciler {
   private final Map<String, AppliedDefinition> appliedDefinitions = new HashMap<>();
   // Parse cache keyed by file name: an unchanged file (same content hash) is not re-parsed.
   private final Map<String, CachedParse> definitionParseCache = new HashMap<>();
+  // Definitions whose files vanished while their registered version stays startable in the store,
+  // keyed by name → the services they reference. Deleting a file retires nothing, so these
+  // references outlive the file and must still be honored when a later pass removes a service.
+  private final Map<String, Set<String>> vanishedDefinitionServices = new HashMap<>();
   private @Nullable String lastFailureSignature;
   private volatile ReloadStatus status;
 
@@ -193,6 +198,7 @@ final class ConfigReconciler {
     }
 
     warnOnVanishedDefinitions(candidateDefinitions);
+    warnOnRemovedServicesStillReferenced(candidateServices);
 
     // 2. APPLY services first: definitions propagate fleet-wide through the store the moment they
     // register, so the services they name must be in place before any registration.
@@ -294,8 +300,9 @@ final class ConfigReconciler {
       appliedDefinitions.put(name, new AppliedDefinition(candidate.fileName(), definition));
       definitionChanges.add(name + ":" + definition.getVersion());
     }
-    // Drop applied entries whose names vanished from the snapshot (warned above): keeping them
-    // would re-fire the un-bumped-change check against files that no longer exist.
+    // Drop applied entries whose names vanished from the snapshot: they were warned about once
+    // above, and keeping them would repeat that warning every pass. What they referenced is
+    // retained in vanishedDefinitionServices, which outlives the entry.
     appliedDefinitions.keySet().removeIf(name -> !candidateDefinitions.containsKey(name));
   }
 
@@ -606,8 +613,16 @@ final class ConfigReconciler {
   }
 
   private void warnOnVanishedDefinitions(Map<String, CandidateDefinition> candidateDefinitions) {
-    for (String name : new TreeSet<>(appliedDefinitions.keySet())) {
+    // A file that came back is a candidate again, and validation covers it from here.
+    vanishedDefinitionServices.keySet().removeIf(candidateDefinitions::containsKey);
+    for (Map.Entry<String, AppliedDefinition> entry :
+        new TreeMap<>(appliedDefinitions).entrySet()) {
+      String name = entry.getKey();
       if (!candidateDefinitions.containsKey(name)) {
+        // Remember what it referenced before the applied entry is dropped below: the registered
+        // version stays startable, so removing one of its services later would break starts of it
+        // with nothing left to notice.
+        vanishedDefinitionServices.put(name, serviceNamesOf(entry.getValue().definition()));
         // Deleting a file retires nothing: the store's latest version keeps serving starts on
         // every replica. Delete-without-disable silently recreates the dangling-service hazard
         // validation exists to prevent, so it is the one flow that earns a loud warning.
@@ -618,6 +633,43 @@ final class ConfigReconciler {
             name);
       }
     }
+  }
+
+  /**
+   * Warns when a service about to be removed is still referenced by a definition whose file is gone
+   * but whose registered version remains startable. Deleting a definition file retires nothing, so
+   * this is the one flow that can strand a registered saga with nothing rejecting the change: the
+   * candidate cross-check only covers definitions that still have files.
+   *
+   * <p>It warns rather than rejects deliberately — refusing would leave no way to retire a service
+   * at all until a retirement marker exists — and the runbook's rule stays disable-then-delete.
+   * Once a definition can be marked retired, a retired one needs no warning here.
+   */
+  private void warnOnRemovedServicesStillReferenced(Map<String, ServiceConfig> candidateServices) {
+    for (Map.Entry<String, Set<String>> entry : vanishedDefinitionServices.entrySet()) {
+      for (String service : entry.getValue()) {
+        if (!candidateServices.containsKey(service) && appliedServices.containsKey(service)) {
+          logger.warn(
+              "Service '{}' is being removed, but saga '{}' still references it: that saga's"
+                  + " definition file is gone while its registered version remains startable, so"
+                  + " new starts of it will fail to resolve the service. Retire the saga before"
+                  + " deleting the services it names.",
+              service,
+              entry.getKey());
+        }
+      }
+    }
+  }
+
+  /** The distinct services a definition's declarative steps name. */
+  private static Set<String> serviceNamesOf(SagaDefinition definition) {
+    Set<String> services = new TreeSet<>();
+    for (SagaDefinition.StepDefinition step : definition.getSteps()) {
+      if (step instanceof SagaDefinition.ServiceStep serviceStep) {
+        services.add(serviceStep.getService());
+      }
+    }
+    return services;
   }
 
   // ── Apply helpers ────────────────────────────────────────────────────────

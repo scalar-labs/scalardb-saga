@@ -711,6 +711,57 @@ class ConfigReconcilerTest {
     }
 
     @Test
+    void run_serviceRemovedWhileAVanishedDefinitionStillNeedsIt_warnsNamingBoth()
+        throws IOException {
+      // Deleting a definition file retires nothing: the registered version stays startable. So a
+      // later pass removing one of its services strands it, and the candidate cross-check cannot
+      // see that — the definition has no file left to be a candidate.
+      writeService("account", "base_url=http://account:8080\n");
+      writeService("ledger", "base_url=http://ledger:9000\n");
+      writeDefinition("a.json", "saga-a", "1.0", "account");
+      writeDefinition("b.json", "saga-b", "1.0", "ledger");
+      ConfigReconciler pass = pass();
+      pass.run();
+      Files.delete(definitionsDir.resolve("a.json"));
+      pass.run(); // the vanish warning fires here
+      Files.delete(servicesDir.resolve("account.properties"));
+
+      // Act — removing the service the vanished saga still needs
+      try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
+        boolean applied = pass.run();
+
+        // Assert — allowed (refusing would leave no way to retire a service), but named
+        assertThat(applied).isTrue();
+        assertThat(logs.events())
+            .anySatisfy(
+                event -> {
+                  assertThat(event.getLevel()).isEqualTo(Level.WARN);
+                  assertThat(event.getFormattedMessage()).contains("account").contains("saga-a");
+                });
+      }
+    }
+
+    @Test
+    void run_serviceRemovedWithNoVanishedReference_doesNotWarn() throws IOException {
+      // A service removed while nothing registered needs it is an ordinary change.
+      writeService("account", "base_url=http://account:8080\n");
+      writeService("ledger", "base_url=http://ledger:9000\n");
+      writeDefinition("b.json", "saga-b", "1.0", "ledger");
+      ConfigReconciler pass = pass();
+      pass.run();
+      Files.delete(servicesDir.resolve("account.properties"));
+
+      // Act & Assert
+      try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
+        assertThat(pass.run()).isTrue();
+
+        assertThat(logs.events())
+            .noneSatisfy(
+                event -> assertThat(event.getFormattedMessage()).contains("still references it"));
+      }
+    }
+
+    @Test
     void run_noOpPass_keepsThePreviousAppliedTimestamp() throws IOException {
       // appliedAt answers "when did this replica last apply a change", so routine verification
       // must not masquerade as an apply.
