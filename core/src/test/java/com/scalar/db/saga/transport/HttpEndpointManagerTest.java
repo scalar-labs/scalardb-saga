@@ -314,35 +314,47 @@ class HttpEndpointManagerTest {
     // take effect — for allowedHosts that means a tightened SSRF allowlist being ignored.
 
     @Test
-    void swapHttpEndpoints_allowedHostsOnlyChange_replacesEndpointAndRetiresOld() {
+    void swapHttpEndpoints_allowedHostsOnlyChange_replacesEndpointAndRetiresOld() throws Exception {
       // Arrange — allow-all to start
       HttpEndpointManager manager = managerOf("svc", config("http://svc:8080", Map.of()));
       HttpEndpoint before = manager.endpointOrNull("svc");
+      TransportAdapter oldAdapter = manager.resolve("svc");
 
       // Act — tighten the SSRF allowlist; everything else unchanged
       manager.swapHttpEndpoints(
           Map.of(
               "svc", new HttpServiceConfig("http://svc:8080", List.of("svc"), -1, null, Map.of())));
 
-      // Assert
+      // Assert — a new endpoint serves the name and the old one was retired: a call through the
+      // stale adapter fails pre-send. retiredCount is deliberately not asserted; an idle owned
+      // client can terminate fast enough for the same swap's sweep to have already removed the
+      // retiree.
       assertThat(manager.endpointOrNull("svc")).isNotSameAs(before);
-      assertThat(manager.retiredCount()).isEqualTo(1);
+      HttpCall call = HttpCall.newBuilder("/x").method(HttpMethod.GET).build();
+      Throwable thrown = catchThrowable(() -> oldAdapter.call(call, CTX, "s"));
+      assertThat(thrown).isInstanceOf(TransportException.class);
+      assertThat(((TransportException) thrown).isRetryable()).isTrue();
       manager.close();
     }
 
     @Test
-    void swapHttpEndpoints_maxBodyBytesOnlyChange_replacesEndpointAndRetiresOld() {
+    void swapHttpEndpoints_maxBodyBytesOnlyChange_replacesEndpointAndRetiresOld() throws Exception {
       // Arrange — default body cap to start
       HttpEndpointManager manager = managerOf("svc", config("http://svc:8080", Map.of()));
       HttpEndpoint before = manager.endpointOrNull("svc");
+      TransportAdapter oldAdapter = manager.resolve("svc");
 
       // Act — change only the body cap
       manager.swapHttpEndpoints(
           Map.of("svc", new HttpServiceConfig("http://svc:8080", List.of(), 1024, null, Map.of())));
 
-      // Assert
+      // Assert — as above: replacement, and retirement proven by the stale adapter's pre-send
+      // failure
       assertThat(manager.endpointOrNull("svc")).isNotSameAs(before);
-      assertThat(manager.retiredCount()).isEqualTo(1);
+      HttpCall call = HttpCall.newBuilder("/x").method(HttpMethod.GET).build();
+      Throwable thrown = catchThrowable(() -> oldAdapter.call(call, CTX, "s"));
+      assertThat(thrown).isInstanceOf(TransportException.class);
+      assertThat(((TransportException) thrown).isRetryable()).isTrue();
       manager.close();
     }
 
