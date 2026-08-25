@@ -36,11 +36,11 @@ class ConfigReconcilerTest {
   private final List<SagaDefinition> registered = new ArrayList<>();
   private Consumer<SagaDefinition> definitionRegistrar = definition -> registered.add(definition);
 
-  private ConfigReconciler pass() {
-    return pass(false);
+  private ConfigReconciler reconciler() {
+    return reconciler(false);
   }
 
-  private ConfigReconciler pass(boolean asyncCallbacksConfigured) {
+  private ConfigReconciler reconciler(boolean asyncCallbacksConfigured) {
     ReloadConfig reloadConfig =
         new ReloadConfig(servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
     return new ConfigReconciler(
@@ -90,7 +90,7 @@ class ConfigReconcilerTest {
       writeDefinition("saga.json", "order-saga", "1.0", "account");
 
       // Act
-      boolean applied = pass().run();
+      boolean applied = reconciler().run();
 
       // Assert
       assertThat(applied).isTrue();
@@ -105,13 +105,13 @@ class ConfigReconcilerTest {
       // Arrange
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("saga.json", "order-saga", "1.0", "account");
-      ConfigReconciler pass = pass();
-      pass.run();
+      ConfigReconciler reconciler = reconciler();
+      reconciler.run();
       swaps.clear();
       registered.clear();
 
       // Act
-      boolean applied = pass.run();
+      boolean applied = reconciler.run();
 
       // Assert — no swap, no registration: unchanged files cost no store round-trip
       assertThat(applied).isTrue();
@@ -124,12 +124,12 @@ class ConfigReconcilerTest {
       // Arrange
       writeService("account", "base_url=http://account:8080\nheader.Authorization=Bearer old\n");
       writeDefinition("saga.json", "order-saga", "1.0", "account");
-      ConfigReconciler pass = pass();
-      pass.run();
+      ConfigReconciler reconciler = reconciler();
+      reconciler.run();
       writeService("account", "base_url=http://account:8080\nheader.Authorization=Bearer new\n");
 
       // Act
-      pass.run();
+      reconciler.run();
 
       // Assert — the second swap carries the rotated header (the endpoint manager decides that
       // this is an in-place value swap; the pass just hands it the full candidate set)
@@ -149,12 +149,12 @@ class ConfigReconcilerTest {
               + secretsDir.resolve("token")
               + "}\n");
       writeDefinition("saga.json", "order-saga", "1.0", "account");
-      ConfigReconciler pass = pass();
-      pass.run();
+      ConfigReconciler reconciler = reconciler();
+      reconciler.run();
       Files.writeString(secretsDir.resolve("token"), "Bearer new");
 
       // Act
-      pass.run();
+      reconciler.run();
 
       // Assert
       assertThat(swaps).hasSize(2);
@@ -166,6 +166,7 @@ class ConfigReconcilerTest {
     void run_yamlDefinitionFile_parsesAndApplies() throws IOException {
       // The reconciler dispatches json/yaml itself now (it parses the bytes it hashed rather than
       // re-opening the file), so both formats need pinning here.
+      // Arrange
       writeService("account", "base_url=http://account:8080\n");
       Files.writeString(
           definitionsDir.resolve("saga.yaml"),
@@ -184,7 +185,8 @@ class ConfigReconcilerTest {
                 path: /undo
           """);
 
-      assertThat(pass().run()).isTrue();
+      // Act & Assert
+      assertThat(reconciler().run()).isTrue();
       assertThat(registered).hasSize(1);
       assertThat(registered.get(0).getName()).isEqualTo("yaml-saga");
     }
@@ -194,12 +196,12 @@ class ConfigReconcilerTest {
       // Arrange
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("saga.json", "order-saga", "1.0", "account");
-      ConfigReconciler pass = pass();
-      pass.run();
+      ConfigReconciler reconciler = reconciler();
+      reconciler.run();
       writeDefinition("saga.json", "order-saga", "2.0", "account", "/x2");
 
       // Act
-      boolean applied = pass.run();
+      boolean applied = reconciler.run();
 
       // Assert
       assertThat(applied).isTrue();
@@ -222,7 +224,7 @@ class ConfigReconcilerTest {
       writeDefinition("saga.json", "order-saga", "1.0", "account");
 
       // Act
-      boolean applied = pass().run();
+      boolean applied = reconciler().run();
 
       // Assert
       assertThat(applied).isFalse();
@@ -236,11 +238,11 @@ class ConfigReconcilerTest {
       writeService("account", "base_url=   \n");
       writeService("ledger", "base_url=http://ledger:9000\nbogus_key=x\n");
       writeDefinition("saga.json", "order-saga", "1.0", "account");
-      ConfigReconciler pass = pass();
+      ConfigReconciler reconciler = reconciler();
 
       // Act & Assert — one WARN naming both files
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
-        pass.run();
+        reconciler.run();
 
         assertThat(logs.events())
             .anySatisfy(
@@ -257,11 +259,11 @@ class ConfigReconcilerTest {
       // Arrange
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("saga.json", "order-saga", "1.0", "payment");
-      ConfigReconciler pass = pass();
+      ConfigReconciler reconciler = reconciler();
 
       // Act & Assert
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
-        boolean applied = pass.run();
+        boolean applied = reconciler.run();
 
         assertThat(applied).isFalse();
         assertThat(registered).isEmpty();
@@ -279,13 +281,13 @@ class ConfigReconcilerTest {
       // Arrange — same version, different content
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("saga.json", "order-saga", "1.0", "account");
-      ConfigReconciler pass = pass();
-      pass.run();
+      ConfigReconciler reconciler = reconciler();
+      reconciler.run();
       writeDefinition("saga.json", "order-saga", "1.0", "account", "/changed");
 
       // Act & Assert
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
-        boolean applied = pass.run();
+        boolean applied = reconciler.run();
 
         assertThat(applied).isFalse();
         assertThat(registered).hasSize(1); // only the original registration
@@ -301,12 +303,12 @@ class ConfigReconcilerTest {
       // Arrange
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("saga.json", "order-saga", "1.0", "payment"); // dangling
-      ConfigReconciler pass = pass();
-      assertThat(pass.run()).isFalse();
+      ConfigReconciler reconciler = reconciler();
+      assertThat(reconciler.run()).isFalse();
       writeDefinition("saga.json", "order-saga", "1.0", "account"); // fixed
 
       // Act & Assert — self-heals without any state reset
-      assertThat(pass.run()).isTrue();
+      assertThat(reconciler.run()).isTrue();
       assertThat(registered).hasSize(1);
     }
 
@@ -315,13 +317,13 @@ class ConfigReconcilerTest {
       // Arrange
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("saga.json", "order-saga", "1.0", "account");
-      ConfigReconciler pass = pass();
-      pass.run();
+      ConfigReconciler reconciler = reconciler();
+      reconciler.run();
       Files.delete(servicesDir.resolve("account.properties"));
 
       // Act & Assert — the definition still references the service, but even without that, the
       // empty transition alone must reject
-      assertThat(pass.run()).isFalse();
+      assertThat(reconciler.run()).isFalse();
     }
 
     @Test
@@ -329,12 +331,12 @@ class ConfigReconcilerTest {
       // Arrange
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("saga.json", "order-saga", "1.0", "account");
-      ConfigReconciler pass = pass();
-      pass.run();
+      ConfigReconciler reconciler = reconciler();
+      reconciler.run();
       Files.delete(definitionsDir.resolve("saga.json"));
 
       // Act & Assert
-      assertThat(pass.run()).isFalse();
+      assertThat(reconciler.run()).isFalse();
     }
 
     @Test
@@ -342,12 +344,12 @@ class ConfigReconcilerTest {
       // Arrange — a service that restricted egress must not silently loosen to allow-all
       writeService("account", "base_url=http://account:8080\nallowed_hosts=account\n");
       writeDefinition("saga.json", "order-saga", "1.0", "account");
-      ConfigReconciler pass = pass();
-      pass.run();
+      ConfigReconciler reconciler = reconciler();
+      reconciler.run();
       writeService("account", "base_url=http://account:8080\n");
 
       // Act & Assert
-      assertThat(pass.run()).isFalse();
+      assertThat(reconciler.run()).isFalse();
     }
 
     @Test
@@ -358,7 +360,7 @@ class ConfigReconcilerTest {
       writeDefinition("b.json", "order-saga", "2.0", "account");
 
       // Act & Assert
-      assertThat(pass().run()).isFalse();
+      assertThat(reconciler().run()).isFalse();
       assertThat(registered).isEmpty();
     }
 
@@ -371,25 +373,26 @@ class ConfigReconcilerTest {
           definitionsDir.resolve("saga.json"), secretsDir.resolve("outside.json"));
 
       // Act & Assert
-      assertThat(pass().run()).isFalse();
+      assertThat(reconciler().run()).isFalse();
     }
 
     @Test
     void run_singleFileDefinitionsPathWithUnknownExtension_rejects() throws IOException {
       // The directory walk filters by extension, so a single configured file is the only way an
       // unknown extension reaches the parser. It must be refused, not guessed at as YAML.
+      // Arrange
       writeService("account", "base_url=http://account:8080\n");
       Path file = definitionsDir.resolve("defs.txt");
       Files.writeString(file, "{\"name\":\"x\",\"mode\":\"SAGA\",\"steps\":[]}");
       ReloadConfig reloadConfig =
           new ReloadConfig(
               servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
-      ConfigReconciler pass =
+      ConfigReconciler reconciler =
           new ConfigReconciler(
               reloadConfig, file, false, () -> registrar, d -> definitionRegistrar.accept(d));
 
       // Act & Assert
-      assertThat(pass.run()).isFalse();
+      assertThat(reconciler.run()).isFalse();
       assertThat(registered).isEmpty();
     }
 
@@ -397,6 +400,7 @@ class ConfigReconcilerTest {
     void run_singleFileDefinitionsPathThatIsASymlink_isRead() throws IOException {
       // definitions_path may name a single file, and a ConfigMap that mounts one key publishes it
       // as a symlink (kubelet's ..data indirection). Reading it must follow that link.
+      // Arrange
       writeService("account", "base_url=http://account:8080\n");
       Path data = Files.createDirectory(definitionsDir.resolve("data"));
       Files.writeString(
@@ -410,12 +414,12 @@ class ConfigReconcilerTest {
       ReloadConfig reloadConfig =
           new ReloadConfig(
               servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
-      ConfigReconciler pass =
+      ConfigReconciler reconciler =
           new ConfigReconciler(
               reloadConfig, link, false, () -> registrar, d -> definitionRegistrar.accept(d));
 
       // Act & Assert
-      assertThat(pass.run()).isTrue();
+      assertThat(reconciler.run()).isTrue();
       assertThat(registered).extracting(SagaDefinition::getName).containsExactly("linked-saga");
     }
 
@@ -434,7 +438,7 @@ class ConfigReconcilerTest {
       Files.createSymbolicLink(definitionsDir.resolve("saga.json"), data.resolve("saga.json"));
 
       // Act & Assert
-      assertThat(pass().run()).isTrue();
+      assertThat(reconciler().run()).isTrue();
       assertThat(registered).hasSize(1);
     }
 
@@ -445,11 +449,11 @@ class ConfigReconcilerTest {
       // the message must not echo the URL (a base_url may resolve from a secret reference).
       writeService("account", "base_url=http://payment@evil.example\n");
       writeDefinition("saga.json", "order-saga", "1.0", "account");
-      ConfigReconciler pass = pass();
+      ConfigReconciler reconciler = reconciler();
 
       // Act & Assert
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
-        boolean applied = pass.run();
+        boolean applied = reconciler.run();
 
         assertThat(applied).isFalse();
         assertThat(swaps).isEmpty();
@@ -469,6 +473,7 @@ class ConfigReconcilerTest {
       // allowed_hosts is resolved before it is checked, so a secret reference pasted onto it
       // arrives as plaintext. The rejection is logged every pass, and logs are readable far more
       // widely than the secret — so the value must never appear in one.
+      // Arrange
       Files.writeString(secretsDir.resolve("token"), "SUPER-SECRET-VALUE");
       writeService(
           "account",
@@ -479,7 +484,7 @@ class ConfigReconcilerTest {
       ReloadConfig withCeiling =
           new ReloadConfig(
               servicesDir, 10, secretsDir, List.of("account"), Clock.fixed(NOW, ZoneOffset.UTC));
-      ConfigReconciler pass =
+      ConfigReconciler reconciler =
           new ConfigReconciler(
               withCeiling,
               definitionsDir,
@@ -489,14 +494,68 @@ class ConfigReconcilerTest {
 
       // Act & Assert
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
-        assertThat(pass.run()).isFalse();
+        assertThat(reconciler.run()).isFalse();
 
         assertThat(logs.events())
             .noneSatisfy(
                 event -> assertThat(event.getFormattedMessage()).contains("SUPER-SECRET-VALUE"));
       }
-      assertThat(requireNonNull(pass.status().rejection()).reason())
+      assertThat(requireNonNull(reconciler.status().rejection()).reason())
           .doesNotContain("SUPER-SECRET-VALUE");
+    }
+
+    @Test
+    void run_servicesPathNotADirectory_rejectedWithoutEchoingThePath() throws IOException {
+      // services_path is a resolved value like any other, so a secret reference pasted onto that
+      // key arrives as plaintext — and the directory walk's own failures are the messages most
+      // likely to quote it back.
+      // Arrange
+      Path notADirectory = secretsDir.resolve("SUPER-SECRET-VALUE");
+      Files.writeString(notADirectory, "");
+      ReloadConfig misconfigured =
+          new ReloadConfig(
+              notADirectory, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
+      ConfigReconciler reconciler =
+          new ConfigReconciler(
+              misconfigured,
+              definitionsDir,
+              false,
+              () -> registrar,
+              d -> definitionRegistrar.accept(d));
+
+      // Act & Assert
+      try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
+        assertThat(reconciler.run()).isFalse();
+
+        assertThat(logs.events())
+            .noneSatisfy(
+                event -> assertThat(event.getFormattedMessage()).contains("SUPER-SECRET-VALUE"));
+      }
+      assertThat(requireNonNull(reconciler.status().rejection()).reason())
+          .contains(SagaServerConfig.SERVICES_PATH_KEY)
+          .doesNotContain("SUPER-SECRET-VALUE");
+    }
+
+    @Test
+    void run_propertyKeyContainingANewline_cannotForgeASeparateLogRecord() throws IOException {
+      // Properties.load performs escape processing on keys, so a key written as a\nb arrives
+      // carrying a real newline. The rejection quotes the key back, and an unflattened newline
+      // would render the rest of it as what reads as its own log record.
+      // Arrange — one bad key, so the rejection carries exactly one problem
+      writeService("account", "base_url=http://account:8080\nWARN\\nforged-record=x\n");
+
+      // Act & Assert — the header line plus the one problem, and nothing the key could add
+      try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
+        assertThat(reconciler().run()).isFalse();
+
+        assertThat(logs.events())
+            .anySatisfy(
+                event -> {
+                  assertThat(event.getLevel()).isEqualTo(Level.WARN);
+                  assertThat(event.getFormattedMessage()).contains("forged-record");
+                  assertThat(event.getFormattedMessage().lines()).hasSize(2);
+                });
+      }
     }
 
     @Test
@@ -505,6 +564,7 @@ class ConfigReconcilerTest {
       // The path that needs no ceiling at all: a secret containing a colon reads as a port
       // suffix. Validating the shape here is what stops it reaching the engine, whose own
       // rejection names the host and which this module cannot redact.
+      // Arrange
       Files.writeString(secretsDir.resolve("token"), "user:PASSWORD-hunter2");
       writeService(
           "account",
@@ -515,7 +575,7 @@ class ConfigReconcilerTest {
 
       // Act & Assert — no ceiling configured
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
-        assertThat(pass().run()).isFalse();
+        assertThat(reconciler().run()).isFalse();
 
         assertThat(logs.events())
             .noneSatisfy(
@@ -532,7 +592,7 @@ class ConfigReconcilerTest {
       writeAsyncDefinition();
 
       // Act & Assert
-      assertThat(pass().run()).isFalse();
+      assertThat(reconciler().run()).isFalse();
       assertThat(registered).isEmpty();
     }
 
@@ -543,7 +603,7 @@ class ConfigReconcilerTest {
       writeAsyncDefinition();
 
       // Act & Assert
-      assertThat(pass(true).run()).isTrue();
+      assertThat(reconciler(true).run()).isTrue();
       assertThat(registered).hasSize(1);
     }
 
@@ -560,12 +620,14 @@ class ConfigReconcilerTest {
     void run_oversizedDefinitionFile_rejects() throws IOException {
       // The cap is enforced on the bytes actually read. Before the single-read change the parse
       // re-opened the file and read it unbounded, so only a racy size check stood in the way.
+      // Arrange
       writeService("account", "base_url=http://account:8080\n");
       Files.writeString(
           definitionsDir.resolve("big.json"),
-          "{\"_pad\":\"" + "x".repeat((int) ConfigReconciler.MAX_DEFINITION_FILE_BYTES) + "\"}");
+          "{\"_pad\":\"" + "x".repeat((int) ServiceFileParser.MAX_FILE_BYTES) + "\"}");
 
-      assertThat(pass().run()).isFalse();
+      // Act & Assert
+      assertThat(reconciler().run()).isFalse();
       assertThat(registered).isEmpty();
     }
 
@@ -573,10 +635,12 @@ class ConfigReconcilerTest {
     void run_definitionFileWithInvalidUtf8_rejects() throws IOException {
       // The bytes are decoded strictly once; an undecodable file is a rejection, not a mangled
       // definition.
+      // Arrange
       writeService("account", "base_url=http://account:8080\n");
       Files.write(definitionsDir.resolve("bad.json"), new byte[] {(byte) 0xC3, (byte) 0x28});
 
-      assertThat(pass().run()).isFalse();
+      // Act & Assert
+      assertThat(reconciler().run()).isFalse();
       assertThat(registered).isEmpty();
     }
 
@@ -586,7 +650,7 @@ class ConfigReconcilerTest {
       writeService("account", "base_url=   \n");
 
       // Act & Assert — the boot entry rethrows instead of returning false
-      assertThatThrownBy(() -> pass().runOrThrow())
+      assertThatThrownBy(() -> reconciler().runOrThrow())
           .isInstanceOf(IllegalStateException.class)
           .hasMessageContaining("account.properties");
     }
@@ -613,12 +677,12 @@ class ConfigReconcilerTest {
             }
             registered.add(definition);
           };
-      ConfigReconciler pass = pass();
+      ConfigReconciler reconciler = reconciler();
 
       // Act — first pass fails mid-apply, second retries
-      boolean first = pass.run();
+      boolean first = reconciler.run();
       swaps.clear();
-      boolean second = pass.run();
+      boolean second = reconciler.run();
 
       // Assert — per-artifact bookkeeping: the already-registered definition is not re-registered,
       // the failed one is retried, and the service swap is not repeated
@@ -635,18 +699,19 @@ class ConfigReconcilerTest {
         throws IOException {
       // A rejected pass is not always a no-op: the endpoints are already live when a registration
       // fails, so the status must name the applied service set and the audit line must record it.
+      // Arrange
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("a.json", "saga-a", "1.0", "account");
       definitionRegistrar =
           definition -> {
             throw new IllegalStateException("store hiccup");
           };
-      ConfigReconciler pass = pass();
-      String beforeServicesSha = pass.status().appliedServicesSha256();
+      ConfigReconciler reconciler = reconciler();
+      String beforeServicesSha = reconciler.status().appliedServicesSha256();
 
       // Act
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
-        assertThat(pass.run()).isFalse();
+        assertThat(reconciler.run()).isFalse();
 
         // Assert — an audit line for the committed swap, alongside the rejection
         assertThat(logs.events())
@@ -659,7 +724,7 @@ class ConfigReconcilerTest {
                 });
       }
       // Assert — the status names the service set that is actually serving, plus the rejection
-      ReloadStatus status = pass.status();
+      ReloadStatus status = reconciler.status();
       assertThat(status.appliedServicesSha256()).isNotEqualTo(beforeServicesSha);
       assertThat(requireNonNull(status.rejection()).reason()).contains("saga-a");
     }
@@ -668,6 +733,7 @@ class ConfigReconcilerTest {
     void run_partialDefinitionApply_auditsTheRegistrationsThatCommitted() throws IOException {
       // The first definition registers, the second fails: the committed one is live fleet-wide,
       // so it belongs in the audit trail even though the pass is rejected.
+      // Arrange
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("a.json", "saga-a", "1.0", "account");
       writeDefinition("b.json", "saga-b", "1.0", "account");
@@ -678,11 +744,11 @@ class ConfigReconcilerTest {
             }
             registered.add(definition);
           };
-      ConfigReconciler pass = pass();
+      ConfigReconciler reconciler = reconciler();
 
       // Act & Assert
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
-        assertThat(pass.run()).isFalse();
+        assertThat(reconciler.run()).isFalse();
 
         assertThat(logs.events())
             .anySatisfy(
@@ -694,7 +760,7 @@ class ConfigReconcilerTest {
                 });
       }
       // The definitions hash stays behind: the candidate set is not what is applied.
-      assertThat(pass.status().appliedDefinitionsSha256()).isEqualTo("(not yet applied)");
+      assertThat(reconciler.status().appliedDefinitionsSha256()).isEqualTo("(not yet applied)");
     }
 
     @Test
@@ -703,6 +769,7 @@ class ConfigReconcilerTest {
       // file names decide iteration order, so "a-stuck" is attempted before "z-new": if the loop
       // abandons the pass on the first failure, the unrelated new saga never registers — not
       // "retried next pass" but skipped on every pass, for as long as the conflict persists.
+      // Arrange
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("a-stuck.json", "saga-stuck", "1.0", "account");
       writeDefinition("z-new.json", "saga-new", "1.0", "account");
@@ -713,11 +780,11 @@ class ConfigReconcilerTest {
             }
             registered.add(definition);
           };
-      ConfigReconciler pass = pass();
+      ConfigReconciler reconciler = reconciler();
 
       // Act — several passes, as the scheduler would run
-      pass.run();
-      pass.run();
+      reconciler.run();
+      reconciler.run();
 
       // Assert — the unrelated saga is live despite the stuck one
       assertThat(registered).extracting(SagaDefinition::getName).containsExactly("saga-new");
@@ -727,11 +794,12 @@ class ConfigReconcilerTest {
     void run_registrationFailsWhileAnotherDefinitionVanished_warnsOnlyOnce() throws IOException {
       // The vanished-name cleanup used to sit after the registration loop, so an unrelated
       // failure skipped it and the "deleting retires nothing" warning re-fired every pass.
+      // Arrange
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("a.json", "saga-a", "1.0", "account");
       writeDefinition("b.json", "saga-b", "1.0", "account");
-      ConfigReconciler pass = pass();
-      pass.run();
+      ConfigReconciler reconciler = reconciler();
+      reconciler.run();
       Files.delete(definitionsDir.resolve("a.json"));
       writeDefinition("c.json", "saga-c", "1.0", "account");
       definitionRegistrar =
@@ -744,13 +812,13 @@ class ConfigReconcilerTest {
 
       // Act — the pass that sees the vanish also fails an unrelated registration, then another
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
-        pass.run();
+        reconciler.run();
         long afterFirst =
             logs.events().stream()
                 .filter(e -> e.getFormattedMessage().contains("saga-a"))
                 .filter(e -> e.getFormattedMessage().contains("retires nothing"))
                 .count();
-        pass.run();
+        reconciler.run();
         long afterSecond =
             logs.events().stream()
                 .filter(e -> e.getFormattedMessage().contains("saga-a"))
@@ -772,12 +840,12 @@ class ConfigReconcilerTest {
           definition -> {
             throw SagaDefinitionException.versionContentConflict("saga-a", "1.0");
           };
-      ConfigReconciler pass = pass();
+      ConfigReconciler reconciler = reconciler();
 
       // Act & Assert — the status and the WARN distinguish the permanent case from a generic
       // rejection
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
-        pass.run();
+        reconciler.run();
 
         assertThat(logs.events())
             .anySatisfy(
@@ -786,7 +854,7 @@ class ConfigReconcilerTest {
                         .contains("permanent")
                         .contains("bump the version"));
       }
-      ReloadStatus.Rejection rejection = requireNonNull(pass.status().rejection());
+      ReloadStatus.Rejection rejection = requireNonNull(reconciler.status().rejection());
       assertThat(rejection.reason()).contains("permanent");
     }
   }
@@ -802,13 +870,13 @@ class ConfigReconcilerTest {
     void run_repeatedIdenticalFailure_warnsOnceThenDebug() throws IOException {
       // Arrange
       writeService("account", "base_url=   \n");
-      ConfigReconciler pass = pass();
+      ConfigReconciler reconciler = reconciler();
 
       // Act & Assert — one WARN for the state change, DEBUG for the repeats
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
-        pass.run();
-        pass.run();
-        pass.run();
+        reconciler.run();
+        reconciler.run();
+        reconciler.run();
 
         assertThat(logs.events().stream().filter(e -> e.getLevel() == Level.WARN)).hasSize(1);
       }
@@ -819,13 +887,13 @@ class ConfigReconcilerTest {
       // Arrange
       writeService("account", "base_url=   \n");
       writeDefinition("saga.json", "order-saga", "1.0", "account");
-      ConfigReconciler pass = pass();
-      pass.run();
+      ConfigReconciler reconciler = reconciler();
+      reconciler.run();
       writeService("account", "base_url=http://account:8080\n");
 
       // Act & Assert
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
-        pass.run();
+        reconciler.run();
 
         assertThat(logs.events())
             .anySatisfy(
@@ -834,7 +902,7 @@ class ConfigReconcilerTest {
                   assertThat(event.getFormattedMessage()).contains("recovered");
                 });
       }
-      assertThat(pass.status().rejection()).isNull();
+      assertThat(reconciler.status().rejection()).isNull();
     }
 
     @Test
@@ -842,13 +910,13 @@ class ConfigReconcilerTest {
       // Arrange
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("saga.json", "order-saga", "1.0", "account");
-      ConfigReconciler pass = pass();
+      ConfigReconciler reconciler = reconciler();
 
       // Act
-      pass.run();
-      ReloadStatus first = pass.status();
-      pass.run();
-      ReloadStatus second = pass.status();
+      reconciler.run();
+      ReloadStatus first = reconciler.status();
+      reconciler.run();
+      ReloadStatus second = reconciler.status();
 
       // Assert — the greppable fleet-comparison property: same files, same hashes
       assertThat(first.appliedServicesSha256()).isEqualTo(second.appliedServicesSha256());
@@ -862,19 +930,20 @@ class ConfigReconcilerTest {
       // Deleting a definition file retires nothing: the registered version stays startable. So a
       // later pass removing one of its services strands it, and the candidate cross-check cannot
       // see that — the definition has no file left to be a candidate.
+      // Arrange
       writeService("account", "base_url=http://account:8080\n");
       writeService("ledger", "base_url=http://ledger:9000\n");
       writeDefinition("a.json", "saga-a", "1.0", "account");
       writeDefinition("b.json", "saga-b", "1.0", "ledger");
-      ConfigReconciler pass = pass();
-      pass.run();
+      ConfigReconciler reconciler = reconciler();
+      reconciler.run();
       Files.delete(definitionsDir.resolve("a.json"));
-      pass.run(); // the vanish warning fires here
+      reconciler.run(); // the vanish warning fires here
       Files.delete(servicesDir.resolve("account.properties"));
 
       // Act — removing the service the vanished saga still needs
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
-        boolean applied = pass.run();
+        boolean applied = reconciler.run();
 
         // Assert — allowed (refusing would leave no way to retire a service), but named
         assertThat(applied).isTrue();
@@ -891,21 +960,22 @@ class ConfigReconcilerTest {
     void run_afterTheRemovalPass_theStrandedWarningDoesNotRepeat() throws IOException {
       // The warning is armed by the applied set still holding the service. Once the swap commits,
       // the condition can no longer hold, so the warning must not become a per-pass drumbeat.
+      // Arrange
       writeService("account", "base_url=http://account:8080\n");
       writeService("ledger", "base_url=http://ledger:9000\n");
       writeDefinition("a.json", "saga-a", "1.0", "account");
       writeDefinition("b.json", "saga-b", "1.0", "ledger");
-      ConfigReconciler pass = pass();
-      pass.run();
+      ConfigReconciler reconciler = reconciler();
+      reconciler.run();
       Files.delete(definitionsDir.resolve("a.json"));
-      pass.run();
+      reconciler.run();
       Files.delete(servicesDir.resolve("account.properties"));
-      pass.run(); // the removal pass — warns
+      reconciler.run(); // the removal pass — warns
 
       // Act — every later pass over the same, now-settled state
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
-        pass.run();
-        pass.run();
+        reconciler.run();
+        reconciler.run();
 
         // Assert
         assertThat(logs.events())
@@ -917,16 +987,17 @@ class ConfigReconcilerTest {
     @Test
     void run_serviceRemovedWithNoVanishedReference_doesNotWarn() throws IOException {
       // A service removed while nothing registered needs it is an ordinary change.
+      // Arrange
       writeService("account", "base_url=http://account:8080\n");
       writeService("ledger", "base_url=http://ledger:9000\n");
       writeDefinition("b.json", "saga-b", "1.0", "ledger");
-      ConfigReconciler pass = pass();
-      pass.run();
+      ConfigReconciler reconciler = reconciler();
+      reconciler.run();
       Files.delete(servicesDir.resolve("account.properties"));
 
       // Act & Assert
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
-        assertThat(pass.run()).isTrue();
+        assertThat(reconciler.run()).isTrue();
 
         assertThat(logs.events())
             .noneSatisfy(
@@ -938,17 +1009,18 @@ class ConfigReconcilerTest {
     void run_noOpPass_keepsThePreviousAppliedTimestamp() throws IOException {
       // appliedAt answers "when did this replica last apply a change", so routine verification
       // must not masquerade as an apply.
+      // Arrange
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("saga.json", "order-saga", "1.0", "account");
-      ConfigReconciler pass = pass();
-      pass.run();
-      Instant appliedAt = pass.status().appliedAt();
+      ConfigReconciler reconciler = reconciler();
+      reconciler.run();
+      Instant appliedAt = reconciler.status().appliedAt();
 
       // Act — a pass over unchanged files
-      pass.run();
+      reconciler.run();
 
       // Assert
-      assertThat(pass.status().appliedAt()).isEqualTo(appliedAt);
+      assertThat(reconciler.status().appliedAt()).isEqualTo(appliedAt);
     }
 
     @Test
@@ -957,13 +1029,13 @@ class ConfigReconcilerTest {
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("a.json", "saga-a", "1.0", "account");
       writeDefinition("b.json", "saga-b", "1.0", "account");
-      ConfigReconciler pass = pass();
-      pass.run();
+      ConfigReconciler reconciler = reconciler();
+      reconciler.run();
       Files.delete(definitionsDir.resolve("b.json"));
 
       // Act & Assert — a warning, not a rejection: the saga remains registered and startable
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
-        boolean applied = pass.run();
+        boolean applied = reconciler.run();
 
         assertThat(applied).isTrue();
         assertThat(logs.events())

@@ -40,7 +40,7 @@ class SagaConfigReloadManagerTest {
         Clock.fixed(Instant.parse("2026-08-22T12:00:00Z"), ZoneOffset.UTC));
   }
 
-  private ConfigReconciler pass(ReloadConfig config) {
+  private ConfigReconciler reconciler(ReloadConfig config) {
     return new ConfigReconciler(
         config, definitionsDir, false, () -> services -> {}, definition -> {});
   }
@@ -49,7 +49,8 @@ class SagaConfigReloadManagerTest {
   void start_schedulesFixedDelayPassesAtTheConfiguredInterval() {
     // Arrange
     ReloadConfig config = reloadConfig(30);
-    SagaConfigReloadManager manager = new SagaConfigReloadManager(pass(config), config, scheduler);
+    SagaConfigReloadManager manager =
+        new SagaConfigReloadManager(reconciler(config), config, scheduler);
 
     // Act
     manager.start();
@@ -70,8 +71,8 @@ class SagaConfigReloadManagerTest {
             + "\"execution\":{\"method\":\"POST\",\"path\":\"/x\"},"
             + "\"compensation\":{\"method\":\"POST\",\"path\":\"/y\"}}]}");
     ReloadConfig config = reloadConfig(30);
-    ConfigReconciler pass = pass(config);
-    SagaConfigReloadManager manager = new SagaConfigReloadManager(pass, config, scheduler);
+    ConfigReconciler reconciler = reconciler(config);
+    SagaConfigReloadManager manager = new SagaConfigReloadManager(reconciler, config, scheduler);
     manager.start();
     ArgumentCaptor<Runnable> task = ArgumentCaptor.forClass(Runnable.class);
     verify(scheduler)
@@ -81,7 +82,7 @@ class SagaConfigReloadManagerTest {
     task.getValue().run();
 
     // Assert — the pass ran and applied
-    assertThat(pass.appliedDefinitionCount()).isEqualTo(1);
+    assertThat(reconciler.appliedDefinitionCount()).isEqualTo(1);
   }
 
   @Test
@@ -92,7 +93,7 @@ class SagaConfigReloadManagerTest {
     // A service file makes the diff non-empty, so the pass genuinely reaches the failing seam.
     Files.writeString(servicesDir.resolve("svc.properties"), "base_url=http://svc:1\n");
     ReloadConfig config = reloadConfig(30);
-    ConfigReconciler pass =
+    ConfigReconciler reconciler =
         new ConfigReconciler(
             config,
             definitionsDir,
@@ -101,7 +102,7 @@ class SagaConfigReloadManagerTest {
               throw new Error("registrar blew up");
             },
             definition -> {});
-    SagaConfigReloadManager manager = new SagaConfigReloadManager(pass, config, scheduler);
+    SagaConfigReloadManager manager = new SagaConfigReloadManager(reconciler, config, scheduler);
     manager.start();
     ArgumentCaptor<Runnable> task = ArgumentCaptor.forClass(Runnable.class);
     verify(scheduler)
@@ -117,7 +118,8 @@ class SagaConfigReloadManagerTest {
     ReloadConfig config = reloadConfig(30);
     when(scheduler.awaitTermination(anyLong(), any())).thenReturn(true);
     when(scheduler.isTerminated()).thenReturn(true);
-    SagaConfigReloadManager manager = new SagaConfigReloadManager(pass(config), config, scheduler);
+    SagaConfigReloadManager manager =
+        new SagaConfigReloadManager(reconciler(config), config, scheduler);
 
     // Act
     manager.stop(System.nanoTime() + TimeUnit.SECONDS.toNanos(5));
@@ -135,7 +137,8 @@ class SagaConfigReloadManagerTest {
     ReloadConfig config = reloadConfig(30);
     when(scheduler.awaitTermination(anyLong(), any())).thenReturn(false);
     when(scheduler.isTerminated()).thenReturn(false);
-    SagaConfigReloadManager manager = new SagaConfigReloadManager(pass(config), config, scheduler);
+    SagaConfigReloadManager manager =
+        new SagaConfigReloadManager(reconciler(config), config, scheduler);
 
     // Act & Assert
     try (LogCapture logs = LogCapture.of(SagaConfigReloadManager.class)) {
@@ -157,7 +160,8 @@ class SagaConfigReloadManagerTest {
     // never started
     ReloadConfig config = reloadConfig(30);
     when(scheduler.isTerminated()).thenReturn(true);
-    SagaConfigReloadManager manager = new SagaConfigReloadManager(pass(config), config, scheduler);
+    SagaConfigReloadManager manager =
+        new SagaConfigReloadManager(reconciler(config), config, scheduler);
 
     // Act & Assert
     assertThatCode(() -> manager.stop(System.nanoTime())).doesNotThrowAnyException();

@@ -22,6 +22,7 @@ import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -69,9 +70,6 @@ import org.slf4j.LoggerFactory;
 final class ConfigReconciler {
 
   private static final Logger logger = LoggerFactory.getLogger(ConfigReconciler.class);
-
-  /** Cap on one definition file, mirroring the services cap; see {@code ServiceFileParser}. */
-  static final long MAX_DEFINITION_FILE_BYTES = 1024 * 1024;
 
   private final ReloadConfig reloadConfig;
   private final @Nullable Path definitionsPath;
@@ -190,10 +188,7 @@ final class ConfigReconciler {
 
     if (!errors.isEmpty()) {
       throw new PassRejectedException(
-          "Configuration rejected ("
-              + errors.size()
-              + " error(s)):\n - "
-              + String.join("\n - ", errors),
+          "Configuration rejected (" + errors.size() + " error(s)):" + describeProblems(errors),
           candidateSha);
     }
 
@@ -287,10 +282,7 @@ final class ConfigReconciler {
     appliedDefinitions.keySet().removeIf(name -> !candidateDefinitions.containsKey(name));
     if (!failures.isEmpty()) {
       throw new PassRejectedException(
-          "Registering "
-              + failures.size()
-              + " definition(s) failed:\n - "
-              + String.join("\n - ", failures),
+          "Registering " + failures.size() + " definition(s) failed:" + describeProblems(failures),
           candidateSha);
     }
   }
@@ -416,7 +408,8 @@ final class ConfigReconciler {
     Map<String, CandidateDefinition> candidates = new LinkedHashMap<>();
     for (DefinitionFile file : files) {
       String fileName = file.fileName();
-      byte[] content = readBounded(fileName, file.target(), MAX_DEFINITION_FILE_BYTES, errors);
+      byte[] content =
+          readBounded(fileName, file.target(), ServiceFileParser.MAX_FILE_BYTES, errors);
       if (content == null) {
         continue; // unreadable or oversized; already collected
       }
@@ -459,6 +452,13 @@ final class ConfigReconciler {
         errors.add("Definition file '" + fileName + "': " + e.getMessage());
       }
     }
+    // Keyed by file name, so a convention that puts a version or a content hash in the name would
+    // otherwise retain a parsed definition per name that ever existed.
+    Set<String> presentFiles = new HashSet<>();
+    for (DefinitionFile file : files) {
+      presentFiles.add(file.fileName());
+    }
+    definitionParseCache.keySet().retainAll(presentFiles);
     if (candidates.isEmpty() && !appliedDefinitions.isEmpty() && errors.isEmpty()) {
       errors.add(
           "The candidate definition set is empty while "
@@ -755,6 +755,20 @@ final class ConfigReconciler {
   }
 
   // ── Failure handling ─────────────────────────────────────────────────────
+
+  /**
+   * Renders collected problems as one indented block, each flattened to a single line. Property
+   * keys and file names reach these messages straight from the mounted files, so a newline inside
+   * one would render as what looks like a separate log record. Every collected problem is consumed
+   * here, which is what makes that hold for messages this class does not build itself.
+   */
+  private static String describeProblems(List<String> problems) {
+    StringBuilder rendered = new StringBuilder();
+    for (String problem : problems) {
+      rendered.append("\n - ").append(Redaction.oneLine(problem));
+    }
+    return rendered.toString();
+  }
 
   private void onFailure(PassRejectedException e) {
     // PassRejectedException is always constructed with a message; requireNonNull bridges the

@@ -57,8 +57,10 @@ final class ServiceFileParser {
   static final String PROPERTIES_EXTENSION = ".properties";
 
   /**
-   * Cap on one service file. A legitimate file is a handful of lines; anything near this cap is a
-   * mis-placed artifact, and reading it whole would only defer the failure to a confusing place.
+   * Cap on one config file, service or definition. A legitimate file is a handful of lines;
+   * anything near this cap is a mis-placed artifact, and reading it whole would only defer the
+   * failure to a confusing place. The reconciler bounds definition files by the same value: the two
+   * mounts are the same kind of thing, and one cap is one number for an operator to know.
    */
   static final long MAX_FILE_BYTES = 1024 * 1024;
 
@@ -377,7 +379,7 @@ final class ServiceFileParser {
             "Service file '{}' key '{}' uses ${{env:...}}; environment variables cannot change in"
                 + " a running process, so this value will not pick up rotation",
             fileName,
-            key.replaceAll("[\r\n]", "_"));
+            Redaction.oneLine(key));
       }
       // Unquoted: the delegated validators quote the whole key themselves, so quoting here would
       // double up in their messages.

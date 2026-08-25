@@ -109,8 +109,8 @@ public final class SagaServer implements AutoCloseable {
   private volatile boolean grpcStarted;
   // The reload pipeline: the reconciler is also the boot loader; the manager is null when
   // reload.interval_seconds is 0 (startup-only loading).
-  private ConfigReconciler reconciler;
-  private @Nullable SagaConfigReloadManager reloadManager;
+  private final ConfigReconciler reconciler;
+  private final @Nullable SagaConfigReloadManager reloadManager;
 
   /**
    * Builds the server, its underlying saga engine (connecting to ScalarDB), and registers
@@ -158,34 +158,39 @@ public final class SagaServer implements AutoCloseable {
     // Built before wiring the transports so both can share one provider (the gRPC interceptor uses
     // it too). A null placeholder lets the catch below close it only if it was built.
     @Nullable SagaSecurityProvider provider = null;
+    // Same placeholder idiom: the catch below stops the manager only if it was built, and cannot
+    // read the final field to find out.
+    @Nullable SagaConfigReloadManager manager = null;
     try {
       provider = SecurityProviderFactory.create(config);
       this.securityProvider = provider;
       // Boot goes through the same pass reload uses: snapshot, validate (aggregated), apply. It is
       // the only thing that installs endpoints, so "any set a reload accepted also cold-boots a
       // fresh replica" holds by construction rather than by two paths agreeing.
-      this.reconciler =
+      ConfigReconciler configReconciler =
           new ConfigReconciler(
               config.reloadConfig(),
               config.definitionsPath().orElse(null),
               config.callbackBaseUrl().isPresent() && config.callbackSecret().isPresent(),
               orchestrator::httpEndpointRegistrar,
               orchestrator::register);
-      reconciler.runOrThrow();
+      this.reconciler = configReconciler;
+      configReconciler.runOrThrow();
       // A daemon with no registered definitions cannot run any saga — fail fast rather than serve
       // a healthy but useless process. Reload cannot lift this later: the empty-transition guard
       // rejects a wind-down to zero, so a useful daemon always starts with at least one.
-      if (reconciler.appliedDefinitionCount() == 0) {
+      if (configReconciler.appliedDefinitionCount() == 0) {
         throw new IllegalStateException(
             "No saga definitions registered. Set '"
                 + SagaServerConfig.DEFINITIONS_PATH_KEY
                 + "' to a file or directory containing at least one saga definition.");
       }
-      logger.info("Registered {} saga definition(s)", reconciler.appliedDefinitionCount());
-      this.reloadManager =
+      logger.info("Registered {} saga definition(s)", configReconciler.appliedDefinitionCount());
+      manager =
           config.reloadConfig().intervalSeconds() > 0
-              ? new SagaConfigReloadManager(reconciler, config.reloadConfig())
+              ? new SagaConfigReloadManager(configReconciler, config.reloadConfig())
               : null;
+      this.reloadManager = manager;
       if (httpServer != null) {
         registerRoutes(httpServer);
       }
@@ -202,8 +207,8 @@ public final class SagaServer implements AutoCloseable {
       // orchestrator if startup wiring fails. The reload manager may already exist — it is built
       // before the routes are wired, and wiring them can throw — and close() is not reached on
       // this path, so it is stopped here rather than left behind.
-      if (reloadManager != null) {
-        reloadManager.stop(System.nanoTime());
+      if (manager != null) {
+        manager.stop(System.nanoTime());
       }
       if (grpcExecutor != null) {
         grpcExecutor.shutdown();
