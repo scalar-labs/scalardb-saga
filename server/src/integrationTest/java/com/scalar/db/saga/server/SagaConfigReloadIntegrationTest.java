@@ -133,6 +133,28 @@ class SagaConfigReloadIntegrationTest extends ServerIntegrationTestSupport {
   }
 
   @Test
+  void reload_thenColdBoot_servesTheSameConfiguration() throws Exception {
+    // The promise the whole design rests on: whatever a reload accepted must also come up on a
+    // replica that starts fresh from the same files. Boot and reload install endpoints through
+    // one path now, so this guards the wiring around it — a config that reloads happily but
+    // cannot boot would only surface days later, on the first pod that restarts.
+    Properties onboarded = new Properties();
+    onboarded.setProperty("base_url", participantBaseUrl());
+    writeService(ONBOARDED_SERVICE, onboarded);
+    writeDefinition(definitionsDir(), ONBOARDED_SAGA, ONBOARDED_DEF);
+    assertThat(reloadNow()).isTrue();
+    assertThat(startSaga(ONBOARDED_SAGA)).isEqualTo("COMPLETED");
+
+    // Act — a fresh server over the same directories and store
+    restartServer();
+
+    // Assert — both the pre-existing and the reload-onboarded saga still run
+    assertThat(startSaga(BASE_SAGA)).isEqualTo("COMPLETED");
+    assertThat(startSaga(ONBOARDED_SAGA)).isEqualTo("COMPLETED");
+    assertThat(hits("/onboarded")).isEqualTo(2);
+  }
+
+  @Test
   void reload_unBumpedDefinitionEdit_rejectedUntilVersionBumped() throws Exception {
     // Arrange — edit the base definition's path without bumping its version
     // "/base" -> "/v2" also rewrites "/base-undo" to "/v2-undo"; both routes exist.

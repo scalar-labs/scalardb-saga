@@ -53,6 +53,7 @@ abstract class ServerIntegrationTestSupport {
   private Path servicesDir;
   private Path secretsDir;
   private String participantBaseUrl;
+  private Properties serverProperties;
   private SagaServer server;
 
   @BeforeEach
@@ -81,7 +82,8 @@ abstract class ServerIntegrationTestSupport {
       }
     }
 
-    Properties props = new Properties();
+    serverProperties = new Properties();
+    Properties props = serverProperties;
     props.setProperty("scalar.db.storage", "jdbc");
     props.setProperty(
         "scalar.db.contact_points",
@@ -170,6 +172,15 @@ abstract class ServerIntegrationTestSupport {
             servicesDir.resolve(name + ".properties"), StandardCharsets.UTF_8)) {
       service.store(writer, null);
     }
+  }
+
+  /**
+   * Stops the running server and starts a fresh one against the same directories and store — a cold
+   * boot of whatever state the watched directories are in right now.
+   */
+  protected final void restartServer() {
+    server.close();
+    server = new SagaServer(SagaServerConfig.load(serverProperties)).start();
   }
 
   /**
