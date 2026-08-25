@@ -206,11 +206,49 @@ final class ConfigReconciler {
             servicesSha + ":" + definitionsSha);
       }
       appliedServices = Map.copyOf(candidateServices);
+      // The swap is live from here. Advance the applied-services hash immediately, before any
+      // registration is attempted: a registration failure below rejects the pass, and a rejection
+      // that still named the previous service set would describe endpoints this replica no longer
+      // has. Any rejection already on the status stays until this pass concludes.
+      status =
+          new ReloadStatus(servicesSha, status.appliedDefinitionsSha256(), now, status.rejection());
     }
 
     // 3. APPLY definitions, advancing the applied entry per definition so a mid-apply failure
     // retries only what remains.
     List<String> definitionChanges = new ArrayList<>();
+    try {
+      registerChangedDefinitions(
+          candidateDefinitions, definitionChanges, servicesSha, definitionsSha);
+    } catch (PassRejectedException e) {
+      // Whatever committed before the failure is live — swapped endpoints here, registered
+      // definitions fleet-wide — so the audit line records it. The rejection log alone would read
+      // as though the pass changed nothing.
+      logAppliedIfChanged(serviceChanges, definitionChanges);
+      throw e;
+    }
+
+    // 4. Status + audit. The INFO apply line is the audit record: names and versions only, never
+    // values.
+    status = new ReloadStatus(servicesSha, definitionsSha, now, null);
+    if (lastFailureSignature != null) {
+      logger.info("Config reload recovered; the candidate set applied cleanly");
+      lastFailureSignature = null;
+    }
+    logAppliedIfChanged(serviceChanges, definitionChanges);
+  }
+
+  /**
+   * Registers every candidate definition whose parsed form differs from the applied one, advancing
+   * the applied entry per definition so a mid-apply failure retries only what remains, and
+   * appending each committed registration to {@code definitionChanges} so the caller can audit a
+   * partial apply.
+   */
+  private void registerChangedDefinitions(
+      Map<String, CandidateDefinition> candidateDefinitions,
+      List<String> definitionChanges,
+      String servicesSha,
+      String definitionsSha) {
     for (CandidateDefinition candidate : candidateDefinitions.values()) {
       SagaDefinition definition = candidate.definition();
       String name = definition.getName();
@@ -256,23 +294,23 @@ final class ConfigReconciler {
     // Drop applied entries whose names vanished from the snapshot (warned above): keeping them
     // would re-fire the un-bumped-change check against files that no longer exist.
     appliedDefinitions.keySet().removeIf(name -> !candidateDefinitions.containsKey(name));
+  }
 
-    // 4. Status + audit. The INFO apply line is the audit record: names and versions only, never
-    // values.
-    boolean changed = !serviceChanges.isEmpty() || !definitionChanges.isEmpty();
-    status = new ReloadStatus(servicesSha, definitionsSha, now, null);
-    if (lastFailureSignature != null) {
-      logger.info("Config reload recovered; the candidate set applied cleanly");
-      lastFailureSignature = null;
+  /**
+   * The audit record for what this pass committed: changed service and definition names only, never
+   * values, with the hashes read from the status so the line always describes the state the status
+   * reports. Silent when nothing committed.
+   */
+  private void logAppliedIfChanged(List<String> serviceChanges, List<String> definitionChanges) {
+    if (serviceChanges.isEmpty() && definitionChanges.isEmpty()) {
+      return;
     }
-    if (changed) {
-      logger.info(
-          "Config applied: services[{}] definitions[{}] servicesSha256={} definitionsSha256={}",
-          serviceChanges.isEmpty() ? "unchanged" : String.join(", ", serviceChanges),
-          definitionChanges.isEmpty() ? "unchanged" : String.join(", ", definitionChanges),
-          servicesSha,
-          definitionsSha);
-    }
+    logger.info(
+        "Config applied: services[{}] definitions[{}] servicesSha256={} definitionsSha256={}",
+        serviceChanges.isEmpty() ? "unchanged" : String.join(", ", serviceChanges),
+        definitionChanges.isEmpty() ? "unchanged" : String.join(", ", definitionChanges),
+        status.appliedServicesSha256(),
+        status.appliedDefinitionsSha256());
   }
 
   // ── Snapshot ─────────────────────────────────────────────────────────────

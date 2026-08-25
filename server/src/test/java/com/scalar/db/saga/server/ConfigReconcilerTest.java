@@ -551,6 +551,73 @@ class ConfigReconcilerTest {
     }
 
     @Test
+    void run_serviceSwapCommitsThenRegistrationFails_statusAndAuditRecordTheSwap()
+        throws IOException {
+      // A rejected pass is not always a no-op: the endpoints are already live when a registration
+      // fails, so the status must name the applied service set and the audit line must record it.
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("a.json", "saga-a", "1.0", "account");
+      definitionRegistrar =
+          definition -> {
+            throw new IllegalStateException("store hiccup");
+          };
+      ConfigReconciler pass = pass();
+      String beforeServicesSha = pass.status().appliedServicesSha256();
+
+      // Act
+      try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
+        assertThat(pass.run()).isFalse();
+
+        // Assert — an audit line for the committed swap, alongside the rejection
+        assertThat(logs.events())
+            .anySatisfy(
+                event -> {
+                  assertThat(event.getLevel()).isEqualTo(Level.INFO);
+                  assertThat(event.getFormattedMessage())
+                      .contains("Config applied")
+                      .contains("+account");
+                });
+      }
+      // Assert — the status names the service set that is actually serving, plus the rejection
+      ReloadStatus status = pass.status();
+      assertThat(status.appliedServicesSha256()).isNotEqualTo(beforeServicesSha);
+      assertThat(requireNonNull(status.rejection()).reason()).contains("saga-a");
+    }
+
+    @Test
+    void run_partialDefinitionApply_auditsTheRegistrationsThatCommitted() throws IOException {
+      // The first definition registers, the second fails: the committed one is live fleet-wide,
+      // so it belongs in the audit trail even though the pass is rejected.
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("a.json", "saga-a", "1.0", "account");
+      writeDefinition("b.json", "saga-b", "1.0", "account");
+      definitionRegistrar =
+          definition -> {
+            if (definition.getName().equals("saga-b")) {
+              throw new IllegalStateException("store hiccup");
+            }
+            registered.add(definition);
+          };
+      ConfigReconciler pass = pass();
+
+      // Act & Assert
+      try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
+        assertThat(pass.run()).isFalse();
+
+        assertThat(logs.events())
+            .anySatisfy(
+                event -> {
+                  assertThat(event.getLevel()).isEqualTo(Level.INFO);
+                  assertThat(event.getFormattedMessage())
+                      .contains("Config applied")
+                      .contains("saga-a:1.0");
+                });
+      }
+      // The definitions hash stays behind: the candidate set is not what is applied.
+      assertThat(pass.status().appliedDefinitionsSha256()).isEqualTo("(not yet applied)");
+    }
+
+    @Test
     void run_permanentVersionConflict_namesItAsUnretryable() throws IOException {
       // Arrange — the store reports same-version-different-content: retrying cannot fix it
       writeService("account", "base_url=http://account:8080\n");
