@@ -30,7 +30,6 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.function.Consumer;
-import java.util.function.Supplier;
 import net.jcip.annotations.ThreadSafe;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -74,9 +73,7 @@ final class ConfigReconciler {
   // rather than letting registration fail every pass with a retry that can never succeed.
   private final boolean asyncCallbacksConfigured;
   private final ServiceSecretResolver secretResolver;
-  // Fetched lazily so constructing the pass never touches the orchestrator; only a pass that
-  // actually has a service diff to apply needs the registrar.
-  private final Supplier<HttpEndpointRegistrar> registrar;
+  private final HttpEndpointRegistrar registrar;
   private final Consumer<SagaDefinition> definitionRegistrar;
 
   // ── Inter-pass state (guarded by the pass serialization) ─────────────────
@@ -120,7 +117,7 @@ final class ConfigReconciler {
       ReloadConfig reloadConfig,
       @Nullable Path definitionsPath,
       boolean asyncCallbacksConfigured,
-      Supplier<HttpEndpointRegistrar> registrar,
+      HttpEndpointRegistrar registrar,
       Consumer<SagaDefinition> definitionRegistrar) {
     this.reloadConfig = reloadConfig;
     this.definitionsPath = definitionsPath;
@@ -207,7 +204,7 @@ final class ConfigReconciler {
     List<String> serviceChanges = diffServices(candidateServices);
     if (!serviceChanges.isEmpty()) {
       try {
-        registrar.get().swapHttpEndpoints(toHttpServiceConfigs(candidateServices));
+        registrar.swapHttpEndpoints(toHttpServiceConfigs(candidateServices));
       } catch (RuntimeException e) {
         throw new PassRejectedException(
             "Applying the service set failed (will retry next pass): " + e.getMessage(),

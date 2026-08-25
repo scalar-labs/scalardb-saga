@@ -172,7 +172,7 @@ public final class SagaServer implements AutoCloseable {
               config.reloadConfig(),
               config.definitionsPath().orElse(null),
               config.callbackBaseUrl().isPresent() && config.callbackSecret().isPresent(),
-              orchestrator::httpEndpointRegistrar,
+              orchestrator.httpEndpointRegistrar(),
               orchestrator::register);
       this.reconciler = configReconciler;
       configReconciler.runOrThrow();

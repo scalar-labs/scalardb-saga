@@ -49,7 +49,7 @@ class ConfigReconcilerTest {
         reloadConfig,
         definitionsDir,
         asyncCallbacksConfigured,
-        () -> registrar,
+        registrar,
         d -> definitionRegistrar.accept(d));
   }
 
@@ -82,7 +82,7 @@ class ConfigReconcilerTest {
         new ReloadConfig(servicesDir, 10, secretsDir, List.of(), clock),
         definitionsDir,
         false,
-        () -> registrar,
+        registrar,
         d -> definitionRegistrar.accept(d));
   }
 
@@ -424,7 +424,7 @@ class ConfigReconcilerTest {
               servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
       ConfigReconciler reconciler =
           new ConfigReconciler(
-              reloadConfig, file, false, () -> registrar, d -> definitionRegistrar.accept(d));
+              reloadConfig, file, false, registrar, d -> definitionRegistrar.accept(d));
 
       // Act & Assert
       assertThat(reconciler.run()).isFalse();
@@ -451,7 +451,7 @@ class ConfigReconcilerTest {
               servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
       ConfigReconciler reconciler =
           new ConfigReconciler(
-              reloadConfig, link, false, () -> registrar, d -> definitionRegistrar.accept(d));
+              reloadConfig, link, false, registrar, d -> definitionRegistrar.accept(d));
 
       // Act & Assert
       assertThat(reconciler.run()).isTrue();
@@ -521,11 +521,7 @@ class ConfigReconcilerTest {
               servicesDir, 10, secretsDir, List.of("account"), Clock.fixed(NOW, ZoneOffset.UTC));
       ConfigReconciler reconciler =
           new ConfigReconciler(
-              withCeiling,
-              definitionsDir,
-              false,
-              () -> registrar,
-              d -> definitionRegistrar.accept(d));
+              withCeiling, definitionsDir, false, registrar, d -> definitionRegistrar.accept(d));
 
       // Act & Assert
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
@@ -552,11 +548,7 @@ class ConfigReconcilerTest {
               notADirectory, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
       ConfigReconciler reconciler =
           new ConfigReconciler(
-              misconfigured,
-              definitionsDir,
-              false,
-              () -> registrar,
-              d -> definitionRegistrar.accept(d));
+              misconfigured, definitionsDir, false, registrar, d -> definitionRegistrar.accept(d));
 
       // Act & Assert
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
