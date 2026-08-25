@@ -185,6 +185,7 @@ final class ConfigReconciler {
         snapshotDefinitions(errors, definitionsDigest);
     String servicesSha = hex(servicesDigest);
     String definitionsSha = hex(definitionsDigest);
+    String candidateSha = servicesSha + ":" + definitionsSha;
 
     validateCrossChecks(candidateServices, candidateDefinitions, errors);
 
@@ -194,7 +195,7 @@ final class ConfigReconciler {
               + errors.size()
               + " error(s)):\n - "
               + String.join("\n - ", errors),
-          servicesSha + ":" + definitionsSha);
+          candidateSha);
     }
 
     warnOnVanishedDefinitions(candidateDefinitions);
@@ -213,7 +214,7 @@ final class ConfigReconciler {
       } catch (RuntimeException e) {
         throw new PassRejectedException(
             "Applying the service set failed (will retry next pass): " + e.getMessage(),
-            servicesSha + ":" + definitionsSha);
+            candidateSha);
       }
       appliedServices = Map.copyOf(candidateServices);
       // The swap is live from here. Advance the applied-services hash immediately, before any
@@ -228,8 +229,7 @@ final class ConfigReconciler {
     // retries only what remains.
     List<String> definitionChanges = new ArrayList<>();
     try {
-      registerChangedDefinitions(
-          candidateDefinitions, definitionChanges, servicesSha, definitionsSha);
+      registerChangedDefinitions(candidateDefinitions, definitionChanges, candidateSha);
     } catch (PassRejectedException e) {
       // Whatever committed before the failure is live — swapped endpoints here, registered
       // definitions fleet-wide — so the audit line records it. The rejection log alone would read
@@ -260,8 +260,8 @@ final class ConfigReconciler {
   private void registerChangedDefinitions(
       Map<String, CandidateDefinition> candidateDefinitions,
       List<String> definitionChanges,
-      String servicesSha,
-      String definitionsSha) {
+      String candidateSha) {
+    List<String> failures = new ArrayList<>();
     for (CandidateDefinition candidate : candidateDefinitions.values()) {
       SagaDefinition definition = candidate.definition();
       String name = definition.getName();
@@ -271,43 +271,54 @@ final class ConfigReconciler {
       }
       try {
         definitionRegistrar.accept(definition);
-      } catch (SagaDefinitionException e) {
-        boolean permanentConflict =
-            e.getErrorCode() == SagaErrorCode.SAGA_DEFINITION_VERSION_CONTENT_CONFLICT;
-        throw new PassRejectedException(
-            "Registering definition "
-                + name
-                + " "
-                + definition.getVersion()
-                + " (file '"
-                + candidate.fileName()
-                + "') failed: "
-                + e.getMessage()
-                + (permanentConflict
-                    ? " [permanent: the stored version differs; bump the version to resolve —"
-                        + " retrying cannot fix this]"
-                    : " [will retry next pass]"),
-            servicesSha + ":" + definitionsSha);
       } catch (RuntimeException e) {
-        throw new PassRejectedException(
-            "Registering definition "
-                + name
-                + " "
-                + definition.getVersion()
-                + " (file '"
-                + candidate.fileName()
-                + "') failed: "
-                + e.getMessage()
-                + " [will retry next pass]",
-            servicesSha + ":" + definitionsSha);
+        // Collect and carry on. Definitions are independent rows, so one that cannot register —
+        // above all one whose conflict is permanent — must not decide the fate of the rest:
+        // abandoning the loop here would let it block every definition that sorts after it, on
+        // every pass, for as long as the conflict lasts.
+        failures.add(describeRegistrationFailure(candidate, e));
+        continue;
       }
       appliedDefinitions.put(name, new AppliedDefinition(candidate.fileName(), definition));
       definitionChanges.add(name + ":" + definition.getVersion());
     }
-    // Drop applied entries whose names vanished from the snapshot: they were warned about once
-    // above, and keeping them would repeat that warning every pass. What they referenced is
-    // retained in vanishedDefinitionServices, which outlives the entry.
+    // Unconditional, so a failure above cannot strand this: a name whose file vanished has to be
+    // dropped even when an unrelated registration failed, or its warning re-fires every pass.
+    // What it referenced is retained in vanishedDefinitionServices, which outlives the entry.
     appliedDefinitions.keySet().removeIf(name -> !candidateDefinitions.containsKey(name));
+    if (!failures.isEmpty()) {
+      throw new PassRejectedException(
+          "Registering "
+              + failures.size()
+              + " definition(s) failed:\n - "
+              + String.join("\n - ", failures),
+          candidateSha);
+    }
+  }
+
+  /**
+   * One registration failure, naming the definition and the file it came from. A permanent
+   * version-content conflict is called out as such: every other failure is worth retrying next
+   * pass, while this one waits for an operator to bump the version.
+   */
+  private static String describeRegistrationFailure(
+      CandidateDefinition candidate, RuntimeException e) {
+    boolean permanent =
+        e instanceof SagaDefinitionException definitionException
+            && definitionException.getErrorCode()
+                == SagaErrorCode.SAGA_DEFINITION_VERSION_CONTENT_CONFLICT;
+    return "definition "
+        + candidate.definition().getName()
+        + " "
+        + candidate.definition().getVersion()
+        + " (file '"
+        + candidate.fileName()
+        + "'): "
+        + e.getMessage()
+        + (permanent
+            ? " [permanent: the stored version differs; bump the version to resolve — retrying"
+                + " cannot fix this]"
+            : " [will retry next pass]");
   }
 
   /**

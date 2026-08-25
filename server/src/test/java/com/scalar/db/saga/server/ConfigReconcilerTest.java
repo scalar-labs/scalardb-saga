@@ -401,6 +401,32 @@ class ConfigReconcilerTest {
     }
 
     @Test
+    void run_singleFileDefinitionsPathThatIsASymlink_isRead() throws IOException {
+      // definitions_path may name a single file, and a ConfigMap that mounts one key publishes it
+      // as a symlink (kubelet's ..data indirection). Reading it must follow that link.
+      writeService("account", "base_url=http://account:8080\n");
+      Path data = Files.createDirectory(definitionsDir.resolve("data"));
+      Files.writeString(
+          data.resolve("saga.json"),
+          "{\"name\":\"linked-saga\",\"version\":\"1.0\",\"mode\":\"SAGA\",\"steps\":"
+              + "[{\"name\":\"s\",\"service\":\"account\","
+              + "\"execution\":{\"method\":\"POST\",\"path\":\"/x\"},"
+              + "\"compensation\":{\"method\":\"POST\",\"path\":\"/undo\"}}]}");
+      Path link = definitionsDir.resolve("mounted.json");
+      Files.createSymbolicLink(link, data.resolve("saga.json"));
+      ReloadConfig reloadConfig =
+          new ReloadConfig(
+              servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
+      ConfigReconciler pass =
+          new ConfigReconciler(
+              reloadConfig, link, false, Map.of(), () -> registrar, definitionRegistrar::accept);
+
+      // Act & Assert
+      assertThat(pass.run()).isTrue();
+      assertThat(registered).extracting(SagaDefinition::getName).containsExactly("linked-saga");
+    }
+
+    @Test
     void run_definitionSymlinkResolvingInsideTheDirectory_isAccepted() throws IOException {
       // Arrange — kubelet publishes every visible file of a mounted volume as a symlink through
       // its ..data indirection, so a contained symlink is the expected shape, not an anomaly
@@ -618,6 +644,72 @@ class ConfigReconcilerTest {
     }
 
     @Test
+    void run_oneDefinitionFailsPermanently_othersStillRegister() throws IOException {
+      // A permanent conflict on one definition must not hold every other definition hostage. The
+      // file names decide iteration order, so "a-stuck" is attempted before "z-new": if the loop
+      // abandons the pass on the first failure, the unrelated new saga never registers — not
+      // "retried next pass" but skipped on every pass, for as long as the conflict persists.
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("a-stuck.json", "saga-stuck", "1.0", "account");
+      writeDefinition("z-new.json", "saga-new", "1.0", "account");
+      definitionRegistrar =
+          definition -> {
+            if (definition.getName().equals("saga-stuck")) {
+              throw SagaDefinitionException.versionContentConflict("saga-stuck", "1.0");
+            }
+            registered.add(definition);
+          };
+      ConfigReconciler pass = pass();
+
+      // Act — several passes, as the scheduler would run
+      pass.run();
+      pass.run();
+
+      // Assert — the unrelated saga is live despite the stuck one
+      assertThat(registered).extracting(SagaDefinition::getName).containsExactly("saga-new");
+    }
+
+    @Test
+    void run_registrationFailsWhileAnotherDefinitionVanished_warnsOnlyOnce() throws IOException {
+      // The vanished-name cleanup used to sit after the registration loop, so an unrelated
+      // failure skipped it and the "deleting retires nothing" warning re-fired every pass.
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("a.json", "saga-a", "1.0", "account");
+      writeDefinition("b.json", "saga-b", "1.0", "account");
+      ConfigReconciler pass = pass();
+      pass.run();
+      Files.delete(definitionsDir.resolve("a.json"));
+      writeDefinition("c.json", "saga-c", "1.0", "account");
+      definitionRegistrar =
+          definition -> {
+            if (definition.getName().equals("saga-c")) {
+              throw new IllegalStateException("store hiccup");
+            }
+            registered.add(definition);
+          };
+
+      // Act — the pass that sees the vanish also fails an unrelated registration, then another
+      try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
+        pass.run();
+        long afterFirst =
+            logs.events().stream()
+                .filter(e -> e.getFormattedMessage().contains("saga-a"))
+                .filter(e -> e.getFormattedMessage().contains("retires nothing"))
+                .count();
+        pass.run();
+        long afterSecond =
+            logs.events().stream()
+                .filter(e -> e.getFormattedMessage().contains("saga-a"))
+                .filter(e -> e.getFormattedMessage().contains("retires nothing"))
+                .count();
+
+        // Assert — warned once, not once per pass, despite the ongoing unrelated failure
+        assertThat(afterFirst).isEqualTo(1);
+        assertThat(afterSecond).isEqualTo(1);
+      }
+    }
+
+    @Test
     void run_permanentVersionConflict_namesItAsUnretryable() throws IOException {
       // Arrange — the store reports same-version-different-content: retrying cannot fix it
       writeService("account", "base_url=http://account:8080\n");
@@ -738,6 +830,33 @@ class ConfigReconcilerTest {
                   assertThat(event.getLevel()).isEqualTo(Level.WARN);
                   assertThat(event.getFormattedMessage()).contains("account").contains("saga-a");
                 });
+      }
+    }
+
+    @Test
+    void run_afterTheRemovalPass_theStrandedWarningDoesNotRepeat() throws IOException {
+      // The warning is armed by the applied set still holding the service. Once the swap commits,
+      // the condition can no longer hold, so the warning must not become a per-pass drumbeat.
+      writeService("account", "base_url=http://account:8080\n");
+      writeService("ledger", "base_url=http://ledger:9000\n");
+      writeDefinition("a.json", "saga-a", "1.0", "account");
+      writeDefinition("b.json", "saga-b", "1.0", "ledger");
+      ConfigReconciler pass = pass();
+      pass.run();
+      Files.delete(definitionsDir.resolve("a.json"));
+      pass.run();
+      Files.delete(servicesDir.resolve("account.properties"));
+      pass.run(); // the removal pass — warns
+
+      // Act — every later pass over the same, now-settled state
+      try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
+        pass.run();
+        pass.run();
+
+        // Assert
+        assertThat(logs.events())
+            .noneSatisfy(
+                event -> assertThat(event.getFormattedMessage()).contains("still references it"));
       }
     }
 
