@@ -9,10 +9,14 @@ import com.scalar.db.saga.server.SagaServerConfig.ServiceConfig;
 import com.scalar.db.saga.transport.HttpEndpointRegistrar;
 import com.scalar.db.saga.transport.HttpServiceConfig;
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
@@ -288,13 +292,19 @@ final class ConfigReconciler {
     Map<String, ServiceConfig> candidates = new TreeMap<>();
     for (Map.Entry<String, ServiceFileParser.ServiceFile> entry : files.entrySet()) {
       ServiceFileParser.ServiceFile file = entry.getValue();
-      // Hash and parse both read the resolved target the hygiene walk validated, never the
-      // visible entry: re-opening the entry would follow its symlink afresh.
-      digestFile(digest, file.fileName(), file.target(), errors);
+      // One read through the resolved target the hygiene walk validated (never the visible entry,
+      // which would follow its symlink afresh), feeding both the digest and the parse: hashing and
+      // parsing separate reads would let a writer change the file in between, so the hash this
+      // pass records could describe content it never applied.
+      byte[] content =
+          readBounded(file.fileName(), file.target(), ServiceFileParser.MAX_FILE_BYTES, errors);
+      if (content == null) {
+        continue; // unreadable or oversized; already collected
+      }
+      digestContent(digest, file.fileName(), content);
       try {
         ServiceConfig service =
-            ServiceFileParser.parseFile(
-                entry.getKey(), file.fileName(), file.target(), secretResolver);
+            ServiceFileParser.parseFile(entry.getKey(), file.fileName(), content, secretResolver);
         ServiceFileParser.requireWithinCeiling(
             entry.getKey(), service, reloadConfig.allowedHostsCeiling());
         candidates.put(entry.getKey(), service);
@@ -342,11 +352,12 @@ final class ConfigReconciler {
     Map<String, CandidateDefinition> candidates = new LinkedHashMap<>();
     for (DefinitionFile file : files) {
       String fileName = file.fileName();
+      byte[] content = readBounded(fileName, file.target(), MAX_DEFINITION_FILE_BYTES, errors);
+      if (content == null) {
+        continue; // unreadable or oversized; already collected
+      }
+      String contentSha = digestContent(digest, fileName, content);
       try {
-        String contentSha = digestFile(digest, fileName, file.target(), errors);
-        if (contentSha == null) {
-          continue; // unreadable; already collected
-        }
         CachedParse cached = definitionParseCache.get(fileName);
         SagaDefinition definition;
         // MessageDigest.isEqual is constant-time; these are cache-invalidation hashes, not
@@ -357,7 +368,9 @@ final class ConfigReconciler {
                 contentSha.getBytes(StandardCharsets.UTF_8))) {
           definition = cached.definition();
         } else {
-          definition = SagaDefinitionParser.parseFile(file.target());
+          // Parsed from the same bytes the hash covers, so a cache entry can never file one
+          // file's hash against another read's content.
+          definition = parseDefinition(fileName, content);
           definitionParseCache.put(fileName, new CachedParse(contentSha, definition));
         }
         for (SagaDefinition.StepDefinition step : definition.getSteps()) {
@@ -634,31 +647,59 @@ final class ConfigReconciler {
   }
 
   /**
-   * Feeds {@code name NUL content} into the running digest and returns the file's own content hash,
-   * or {@code null} (with an error collected) when the file cannot be read or exceeds the size cap.
+   * Reads one watched file through the target the hygiene walk validated, bounding the read at
+   * {@code cap}. The bound is enforced on the bytes actually read rather than on a prior size
+   * check: a file can grow between a stat and the read, and this pass repeats indefinitely against
+   * directories a writer keeps updating. Returns {@code null} with an error collected when the file
+   * cannot be read or exceeds the cap.
    */
-  private static @Nullable String digestFile(
-      MessageDigest digest, String name, Path file, List<String> errors) {
-    byte[] content;
-    try {
-      if (Files.size(file) > MAX_DEFINITION_FILE_BYTES) {
+  private static byte @Nullable [] readBounded(
+      String fileName, Path file, long cap, List<String> errors) {
+    try (InputStream in =
+        Files.newInputStream(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+      byte[] content = in.readNBytes((int) cap + 1);
+      if (content.length > cap) {
         errors.add(
             "File '"
-                + name
+                + fileName
                 + "' exceeds the "
-                + MAX_DEFINITION_FILE_BYTES
+                + cap
                 + "-byte cap on watched configuration files.");
         return null;
       }
-      content = Files.readAllBytes(file);
+      return content;
     } catch (IOException e) {
-      errors.add("File '" + name + "' cannot be read (" + e.getClass().getSimpleName() + ").");
+      errors.add("File '" + fileName + "' cannot be read (" + e.getClass().getSimpleName() + ").");
       return null;
     }
+  }
+
+  /**
+   * Folds {@code name NUL content} into the running set digest and returns that file's own content
+   * hash, which keys the parse cache.
+   */
+  private static String digestContent(MessageDigest digest, String name, byte[] content) {
     digest.update(name.getBytes(StandardCharsets.UTF_8));
     digest.update((byte) 0);
     digest.update(content);
     return hex(sha256Of(content));
+  }
+
+  /**
+   * Parses a definition from the bytes already read and hashed, dispatching on the file extension
+   * the hygiene walk admitted. {@code SagaDefinitionParser.parseFile} is deliberately not used
+   * here: it would re-open the file and read it unbounded, outside the cap above.
+   */
+  private static SagaDefinition parseDefinition(String fileName, byte[] content) {
+    String text;
+    try {
+      text = StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(content)).toString();
+    } catch (CharacterCodingException e) {
+      throw new IllegalArgumentException("is not valid UTF-8", e);
+    }
+    return fileName.toLowerCase(Locale.ROOT).endsWith(".json")
+        ? SagaDefinitionParser.parseJson(text)
+        : SagaDefinitionParser.parseYaml(text);
   }
 
   private static MessageDigest sha256Of(byte[] content) {

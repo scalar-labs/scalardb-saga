@@ -300,7 +300,15 @@ final class ServiceFileParser {
    */
   static ServiceConfig parseFile(
       String name, String fileName, Path file, ServiceSecretResolver secrets) {
-    Properties properties = new Properties();
+    return parseFile(name, fileName, readBounded(fileName, file), secrets);
+  }
+
+  /**
+   * Reads one service file through the resolved target, bounding the read at {@link
+   * #MAX_FILE_BYTES}. The bound is enforced on the bytes actually read rather than on a prior size
+   * check: the file can grow between a stat and the read.
+   */
+  private static byte[] readBounded(String fileName, Path file) {
     try (InputStream in =
         Files.newInputStream(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
       byte[] bytes = in.readNBytes((int) MAX_FILE_BYTES + 1);
@@ -312,9 +320,26 @@ final class ServiceFileParser {
                 + MAX_FILE_BYTES
                 + "-byte cap; a service file is a handful of lines");
       }
+      return bytes;
+    } catch (IOException e) {
+      throw new IllegalArgumentException(
+          "Service file '" + fileName + "' cannot be read (" + e.getMessage() + ")", e);
+    }
+  }
+
+  /**
+   * Parses one service file from bytes already read, so a caller that also hashes the file hashes
+   * and parses the very same snapshot. Reading twice would let a writer change the file in between,
+   * leaving the recorded hash describing content that was never applied — and the reconciler
+   * repeats this parse against a directory a writer keeps updating.
+   */
+  static ServiceConfig parseFile(
+      String name, String fileName, byte[] content, ServiceSecretResolver secrets) {
+    Properties properties = new Properties();
+    try {
       properties.load(
           new StringReader(
-              StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString()));
+              StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(content)).toString()));
     } catch (IOException e) {
       throw new IllegalArgumentException(
           "Service file '" + fileName + "' cannot be read (" + e.getMessage() + ")", e);

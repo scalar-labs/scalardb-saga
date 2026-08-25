@@ -189,6 +189,33 @@ class ConfigReconcilerTest {
     }
 
     @Test
+    void run_yamlDefinitionFile_parsesAndApplies() throws IOException {
+      // The reconciler dispatches json/yaml itself now (it parses the bytes it hashed rather than
+      // re-opening the file), so both formats need pinning here.
+      writeService("account", "base_url=http://account:8080\n");
+      Files.writeString(
+          definitionsDir.resolve("saga.yaml"),
+          """
+          name: yaml-saga
+          version: "1.0"
+          mode: SAGA
+          steps:
+            - name: s
+              service: account
+              execution:
+                method: POST
+                path: /x
+              compensation:
+                method: POST
+                path: /undo
+          """);
+
+      assertThat(pass().run()).isTrue();
+      assertThat(registered).hasSize(1);
+      assertThat(registered.get(0).getName()).isEqualTo("yaml-saga");
+    }
+
+    @Test
     void run_changedDefinitionWithBumpedVersion_registersIt() throws IOException {
       // Arrange
       writeService("account", "base_url=http://account:8080\n");
@@ -447,6 +474,30 @@ class ConfigReconcilerTest {
               + "\"service\":\"account\","
               + "\"execution\":{\"method\":\"POST\",\"path\":\"/x\",\"async\":true},"
               + "\"compensation\":{\"method\":\"POST\",\"path\":\"/undo\"}}]}");
+    }
+
+    @Test
+    void run_oversizedDefinitionFile_rejects() throws IOException {
+      // The cap is enforced on the bytes actually read. Before the single-read change the parse
+      // re-opened the file and read it unbounded, so only a racy size check stood in the way.
+      writeService("account", "base_url=http://account:8080\n");
+      Files.writeString(
+          definitionsDir.resolve("big.json"),
+          "{\"_pad\":\"" + "x".repeat((int) ConfigReconciler.MAX_DEFINITION_FILE_BYTES) + "\"}");
+
+      assertThat(pass().run()).isFalse();
+      assertThat(registered).isEmpty();
+    }
+
+    @Test
+    void run_definitionFileWithInvalidUtf8_rejects() throws IOException {
+      // The bytes are decoded strictly once; an undecodable file is a rejection, not a mangled
+      // definition.
+      writeService("account", "base_url=http://account:8080\n");
+      Files.write(definitionsDir.resolve("bad.json"), new byte[] {(byte) 0xC3, (byte) 0x28});
+
+      assertThat(pass().run()).isFalse();
+      assertThat(registered).isEmpty();
     }
 
     @Test
