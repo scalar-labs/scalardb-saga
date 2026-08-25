@@ -37,6 +37,7 @@ import java.time.Clock;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -342,6 +343,34 @@ class SagaServerTest {
     } finally {
       portHolder.stop();
     }
+  }
+
+  @Test
+  void close_stopsReloadBeforeTheTransportsAndBoundsItsShareOfTheBudget(@TempDir Path dir)
+      throws Exception {
+    // Two properties in one: reload must stop before anything drains, so a pass cannot swap the
+    // endpoint set out from under a saga that is still finishing a step; and its wait must be a
+    // small slice of the budget, because the saga drain that follows computes the full budget
+    // again and an operator sizes the container grace period from that one number.
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.GRPC_PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, svcServices(dir).toString());
+    props.setProperty(SagaServerConfig.SHUTDOWN_TIMEOUT_MILLIS_KEY, "30000");
+    props.setProperty(SagaServerConfig.RELOAD_INTERVAL_SECONDS_KEY, "30");
+    SagaServer server =
+        new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class)).start();
+
+    // Act — a close with nothing in flight
+    long startNanos = System.nanoTime();
+    server.close();
+    long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+
+    // Assert — an idle close returns promptly; it never waits out either budget
+    assertThat(elapsedMillis).isLessThan(30_000L);
   }
 
   @Test

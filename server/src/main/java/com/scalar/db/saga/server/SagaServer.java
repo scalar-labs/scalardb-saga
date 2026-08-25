@@ -82,6 +82,15 @@ public final class SagaServer implements AutoCloseable {
   private static final long THREAD_POOL_IDLE_TIMEOUT_MILLIS = 60_000L;
   private static final long RATE_LIMIT_WINDOW_MILLIS = 60_000L;
 
+  /**
+   * The slice of the shutdown budget the in-flight reload pass may take before the saga drain
+   * starts. Deliberately a small fixed window rather than the configured budget: the two waits are
+   * sequential, an operator sizes the container's grace period from one number, and a pass is
+   * milliseconds unless the store is slow — whereas the drain that follows needs the rest. A pass
+   * still running when this elapses is interrupted, which the manager logs.
+   */
+  private static final long RELOAD_DRAIN_MILLIS = 5_000L;
+
   private final SagaServerConfig config;
   private final DefaultSagaOrchestrator orchestrator;
   private final SagaSecurityProvider securityProvider;
@@ -653,6 +662,15 @@ public final class SagaServer implements AutoCloseable {
     if (!closed.compareAndSet(false, true)) {
       return;
     }
+    // Reload stops first, before anything else winds down: a pass that ran during the drain could
+    // swap the endpoint set out from under sagas that are still finishing their current step, and
+    // stopping it here also guarantees no registration is in flight when the store closes.
+    if (reloadManager != null) {
+      reloadManager.stop(
+          System.nanoTime()
+              + TimeUnit.MILLISECONDS.toNanos(
+                  Math.min(RELOAD_DRAIN_MILLIS, config.shutdownTimeoutMillis())));
+    }
     // Stop accepting new requests on the enabled transports, drain in-flight gRPC calls, then drain
     // sagas.
     if (httpServer != null) {
@@ -665,13 +683,6 @@ public final class SagaServer implements AutoCloseable {
       grpcExecutor.shutdown();
     }
     closeSecurityProvider(securityProvider);
-    if (reloadManager != null) {
-      // Before the orchestrator drain: stopping awaits any in-flight pass, so no registration
-      // store writes happen after the drain begins. Safe on a never-started manager, which covers
-      // the constructor-failure and start-failure cleanup paths.
-      reloadManager.stop(
-          System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(config.shutdownTimeoutMillis()));
-    }
     orchestrator.close();
     logger.info("SagaServer stopped");
   }
