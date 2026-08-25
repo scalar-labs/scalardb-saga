@@ -7,6 +7,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import ch.qos.logback.classic.Level;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.exception.SagaDefinitionException;
+import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.transport.HttpEndpointRegistrar;
 import com.scalar.db.saga.transport.HttpServiceConfig;
 import java.io.IOException;
@@ -1099,7 +1100,7 @@ class ConfigReconcilerTest {
       writeDefinition("saga.json", "order-saga", "1.0", "account");
       definitionRegistrar =
           definition -> {
-            throw new IllegalStateException("store unavailable");
+            throw SagaPersistenceException.storeUnavailable(new IOException("connection reset"));
           };
       ConfigReconciler reconciler = reconciler();
 
@@ -1109,6 +1110,74 @@ class ConfigReconcilerTest {
       // Assert
       assertThat(requireNonNull(reconciler.status().rejection()).operatorActionRequired())
           .isFalse();
+      assertThat(requireNonNull(reconciler.status().rejection()).reason())
+          .contains("will retry next pass");
+    }
+
+    @Test
+    void run_permanentStoreFailure_marksTheRejectionAsNeedingAnOperator() throws IOException {
+      // Same exception type as the outage above, opposite verdict: the code says whether it is
+      // retryable, so a serialization failure is not reported as a blip that will pass.
+      // Arrange
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      definitionRegistrar =
+          definition -> {
+            throw SagaPersistenceException.serializationFailed(new IOException("bad json"));
+          };
+      ConfigReconciler reconciler = reconciler();
+
+      // Act
+      assertThat(reconciler.run()).isFalse();
+
+      // Assert
+      assertThat(requireNonNull(reconciler.status().rejection()).operatorActionRequired()).isTrue();
+    }
+
+    @Test
+    void run_definitionTheEngineRefusesToBuild_marksTheRejectionAsNeedingAnOperator()
+        throws IOException {
+      // register() resolves the plan before it persists, so a definition the engine will not build
+      // fails here rather than at validation — and fails identically on every pass. Reporting it
+      // as "will retry" leaves an operator waiting for something that cannot happen.
+      // Arrange
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      definitionRegistrar =
+          definition -> {
+            throw SagaDefinitionException.definitionInvalid(definition.getName(), "unbuildable");
+          };
+      ConfigReconciler reconciler = reconciler();
+
+      // Act
+      assertThat(reconciler.run()).isFalse();
+
+      // Assert
+      ReloadStatus.Rejection rejection = requireNonNull(reconciler.status().rejection());
+      assertThat(rejection.operatorActionRequired()).isTrue();
+      assertThat(rejection.reason()).contains("permanent").doesNotContain("will retry");
+    }
+
+    @Test
+    void run_registrationFailsWithAnUnexpectedException_marksTheRejectionAsNeedingAnOperator()
+        throws IOException {
+      // A bug in this process is the case the old default got most wrong: it never clears, and
+      // "will retry next pass" told an operator to wait for it anyway.
+      // Arrange
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      definitionRegistrar =
+          definition -> {
+            throw new NullPointerException("bug");
+          };
+      ConfigReconciler reconciler = reconciler();
+
+      // Act
+      assertThat(reconciler.run()).isFalse();
+
+      // Assert — and the pass still collects rather than aborting, so other definitions are not
+      // held hostage by it
+      assertThat(requireNonNull(reconciler.status().rejection()).operatorActionRequired()).isTrue();
     }
 
     @Test

@@ -5,6 +5,7 @@ import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.definition.SagaDefinitionParser;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaErrorCode;
+import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.server.SagaServerConfig.ServiceConfig;
 import com.scalar.db.saga.transport.HttpEndpointRegistrar;
 import com.scalar.db.saga.transport.HttpServiceConfig;
@@ -51,10 +52,10 @@ import org.slf4j.LoggerFactory;
  * <p>Bookkeeping is per artifact: the applied-services map advances only when a swap commits, and
  * each definition's applied entry advances as its registration succeeds — so a pass that swaps
  * services but fails a store write records the services as applied and retries only the remaining
- * registrations next pass, instead of seeing "unchanged" and never retrying. A permanent
- * same-version-different-content store conflict (possible via the validation-read/apply-write race
- * between two replicas) is reported distinctly: it self-heals only when an operator bumps the
- * version.
+ * registrations next pass, instead of seeing "unchanged" and never retrying. A failure that another
+ * pass could clear is reported distinctly from one that needs someone to act — reaching the store
+ * is the only thing a later pass does differently, so everything else, a same-version-different-
+ * content conflict above all, waits for a human however long it retries.
  *
  * <p>Boot equivalence: boot is a pass. The orchestrator is built with no endpoints and the first
  * pass installs them, so this class is the only translation from a service file to a live endpoint,
@@ -267,7 +268,7 @@ final class ConfigReconciler {
       List<String> definitionChanges,
       String candidateSha) {
     List<String> failures = new ArrayList<>();
-    boolean anyPermanent = false;
+    boolean anyNeedsOperator = false;
     for (CandidateDefinition candidate : candidateDefinitions.values()) {
       SagaDefinition definition = candidate.definition();
       String name = definition.getName();
@@ -282,9 +283,9 @@ final class ConfigReconciler {
         // above all one whose conflict is permanent — must not decide the fate of the rest:
         // abandoning the loop here would let it block every definition that sorts after it, on
         // every pass, for as long as the conflict lasts.
-        boolean permanent = isPermanentConflict(e);
-        anyPermanent |= permanent;
-        failures.add(describeRegistrationFailure(candidate, e, permanent));
+        boolean needsOperator = needsOperatorAction(e);
+        anyNeedsOperator |= needsOperator;
+        failures.add(describeRegistrationFailure(candidate, e, needsOperator));
         continue;
       }
       appliedDefinitions.put(name, new AppliedDefinition(candidate.fileName(), definition));
@@ -298,17 +299,31 @@ final class ConfigReconciler {
       throw new PassRejectedException(
           "Registering " + failures.size() + " definition(s) failed:" + describeProblems(failures),
           candidateSha,
-          anyPermanent);
+          anyNeedsOperator);
     }
   }
 
   /**
-   * Whether a registration failure is one retrying cannot fix. A version whose stored content
-   * differs from the file's stays in conflict for as long as both stand, so only an operator
-   * bumping the version resolves it; every other failure — a store outage above all — is worth
-   * another pass.
+   * Whether clearing a registration failure needs someone to act, or whether another pass might
+   * clear it on its own.
+   *
+   * <p>Reaching the store is the only thing another pass does differently, so a store failure is
+   * the only transient one — and it says so itself: {@link SagaPersistenceException} carries
+   * whether its code is retryable, which keeps a permanent serialization failure from being
+   * reported as an outage. Everything else fails identically on every pass: a version whose stored
+   * content differs, a definition the engine refuses to build, a bug in this process. Telling an
+   * operator to wait for one of those is telling them to wait forever, so the default is that
+   * someone has to look.
    */
-  private static boolean isPermanentConflict(RuntimeException e) {
+  private static boolean needsOperatorAction(RuntimeException e) {
+    if (e instanceof SagaPersistenceException persistence) {
+      return !persistence.isRetryable();
+    }
+    return true;
+  }
+
+  /** Whether a failure is the store refusing to overwrite a version with different content. */
+  private static boolean isVersionContentConflict(RuntimeException e) {
     return e instanceof SagaDefinitionException definitionException
         && definitionException.getErrorCode()
             == SagaErrorCode.SAGA_DEFINITION_VERSION_CONTENT_CONFLICT;
@@ -320,7 +335,7 @@ final class ConfigReconciler {
    * prose is for the operator reading the log, not for anything to match on.
    */
   private static String describeRegistrationFailure(
-      CandidateDefinition candidate, RuntimeException e, boolean permanent) {
+      CandidateDefinition candidate, RuntimeException e, boolean needsOperator) {
     return "definition "
         + candidate.definition().getName()
         + " "
@@ -329,10 +344,20 @@ final class ConfigReconciler {
         + candidate.fileName()
         + "'): "
         + e.getMessage()
-        + (permanent
-            ? " [permanent: the stored version differs; bump the version to resolve — retrying"
-                + " cannot fix this]"
-            : " [will retry next pass]");
+        + registrationHint(e, needsOperator);
+  }
+
+  /** The operator-facing half of a registration failure: wait, or go and do something. */
+  private static String registrationHint(RuntimeException e, boolean needsOperator) {
+    if (!needsOperator) {
+      return " [will retry next pass]";
+    }
+    if (isVersionContentConflict(e)) {
+      return " [permanent: the stored version differs; bump the version to resolve — retrying"
+          + " cannot fix this]";
+    }
+    return " [permanent: this fails the same way on every pass; the definition has to change, or"
+        + " the failure itself needs looking at]";
   }
 
   /**
