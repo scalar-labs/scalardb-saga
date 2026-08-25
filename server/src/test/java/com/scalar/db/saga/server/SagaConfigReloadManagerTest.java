@@ -9,6 +9,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import ch.qos.logback.classic.Level;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -117,6 +118,7 @@ class SagaConfigReloadManagerTest {
     // Arrange
     ReloadConfig config = reloadConfig(30);
     when(scheduler.awaitTermination(anyLong(), any())).thenReturn(true);
+    when(scheduler.isTerminated()).thenReturn(true);
     SagaConfigReloadManager manager = new SagaConfigReloadManager(pass(config), config, scheduler);
 
     // Act
@@ -129,10 +131,34 @@ class SagaConfigReloadManagerTest {
   }
 
   @Test
+  void stop_passStillRunningAtDeadline_warnsThatItIsInterrupted() throws InterruptedException {
+    // Arrange — the wait expires with the pass still running. The drain is best effort, so the
+    // shutdown proceeds; a silent interrupt would leave a failed registration unexplained.
+    ReloadConfig config = reloadConfig(30);
+    when(scheduler.awaitTermination(anyLong(), any())).thenReturn(false);
+    when(scheduler.isTerminated()).thenReturn(false);
+    SagaConfigReloadManager manager = new SagaConfigReloadManager(pass(config), config, scheduler);
+
+    // Act & Assert
+    try (LogCapture logs = LogCapture.of(SagaConfigReloadManager.class)) {
+      manager.stop(System.nanoTime() + TimeUnit.SECONDS.toNanos(5));
+
+      assertThat(logs.events())
+          .anySatisfy(
+              event -> {
+                assertThat(event.getLevel()).isEqualTo(Level.WARN);
+                assertThat(event.getFormattedMessage()).contains("still running");
+              });
+    }
+    verify(scheduler).shutdownNow();
+  }
+
+  @Test
   void stop_neverStarted_completesWithoutError() {
     // Arrange — the constructor-failure and start-failure cleanup paths stop a manager that was
     // never started
     ReloadConfig config = reloadConfig(30);
+    when(scheduler.isTerminated()).thenReturn(true);
     SagaConfigReloadManager manager = new SagaConfigReloadManager(pass(config), config, scheduler);
 
     // Act & Assert

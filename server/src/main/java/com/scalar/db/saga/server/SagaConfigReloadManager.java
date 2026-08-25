@@ -70,8 +70,14 @@ final class SagaConfigReloadManager {
   }
 
   /**
-   * Stops the scheduler and waits for any in-flight pass to complete, respecting the deadline, so
-   * no registration writes race the drain that follows. Safe to call on a never-started manager.
+   * Stops the scheduler and waits, up to the deadline, for any in-flight pass to finish before the
+   * caller drains the orchestrator — so a registration does not race the store's close.
+   *
+   * <p>The wait is bounded by the deadline, so this is best effort, not a guarantee: a pass still
+   * running when the deadline passes is interrupted, and its registration may then fail against a
+   * closing store. That costs nothing durable — the registration is a single transaction that
+   * either committed or did not, and the next start re-applies it — but it is worth a line in the
+   * log, so the shutdown is not diagnosed as data loss. Safe to call on a never-started manager.
    *
    * @param deadlineNanos absolute {@link System#nanoTime()} deadline
    */
@@ -80,11 +86,17 @@ final class SagaConfigReloadManager {
     try {
       long remaining = deadlineNanos - System.nanoTime();
       if (remaining > 0) {
-        scheduler.awaitTermination(remaining, TimeUnit.NANOSECONDS);
+        boolean unused = scheduler.awaitTermination(remaining, TimeUnit.NANOSECONDS);
       }
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
     } finally {
+      if (!scheduler.isTerminated()) {
+        logger.warn(
+            "A config reload pass was still running at the shutdown deadline and is being"
+                + " interrupted. A registration in flight may fail against the closing store; it"
+                + " is re-applied on the next start.");
+      }
       scheduler.shutdownNow();
     }
   }
