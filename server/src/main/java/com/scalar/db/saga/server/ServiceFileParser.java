@@ -313,21 +313,26 @@ final class ServiceFileParser {
             fileName,
             key.replaceAll("[\r\n]", "_"));
       }
-      String qualifiedKey = "service file '" + fileName + "' key '" + key + "'";
+      // Unquoted: the delegated validators quote the whole key themselves, so quoting here would
+      // double up in their messages.
+      String qualifiedKey = "service file " + fileName + " key " + key;
       // Every setting's value goes through the resolver before validation, as every daemon
       // property did in the prefixed format; only the unknown-key error fires on the raw value,
       // since naming the typo helps more than resolving it.
       switch (key) {
         case BASE_URL_KEY ->
-            baseUrl = SagaServerConfig.requireNonBlank(qualifiedKey, secrets.resolve(raw));
+            baseUrl =
+                SagaServerConfig.requireNonBlank(qualifiedKey, resolve(secrets, raw, qualifiedKey));
         case ALLOWED_HOSTS_KEY ->
             allowedHosts =
                 SagaServerConfig.parseCommaSeparated(
                     qualifiedKey,
-                    SagaServerConfig.requireNonBlank(qualifiedKey, secrets.resolve(raw)));
+                    SagaServerConfig.requireNonBlank(
+                        qualifiedKey, resolve(secrets, raw, qualifiedKey)));
         case MAX_BODY_BYTES_KEY ->
             maxBodyBytes =
-                SagaServerConfig.parseBoundedLong(secrets.resolve(raw), qualifiedKey, 0L, 1L);
+                SagaServerConfig.parseBoundedLong(
+                    resolve(secrets, raw, qualifiedKey), qualifiedKey, 0L, 1L);
         default -> {
           if (!key.startsWith(HEADER_KEY_PREFIX)) {
             throw new IllegalArgumentException(
@@ -391,7 +396,9 @@ final class ServiceFileParser {
                     + " only one of the two would be sent, and which one is not deterministic."
                     + " Remove one of them.");
           }
-          headers.put(header, SagaServerConfig.requireNonBlank(qualifiedKey, secrets.resolve(raw)));
+          headers.put(
+              header,
+              SagaServerConfig.requireNonBlank(qualifiedKey, resolve(secrets, raw, qualifiedKey)));
         }
       }
     }
@@ -404,6 +411,21 @@ final class ServiceFileParser {
               + "', so there is nothing for a declarative step to call.");
     }
     return new ServiceConfig(baseUrl, allowedHosts, maxBodyBytes, headers);
+  }
+
+  /**
+   * Resolves {@code raw} through the confined resolver with failures attributed to {@code
+   * qualifiedKey}. The resolver knows only the reference it is handed, not which file and key it
+   * came from, and some of its failures (an invalid charset name, an unparsable path) escape its
+   * own message wrapping entirely — so the attribution this class promises is added here.
+   */
+  private static String resolve(ServiceSecretResolver secrets, String raw, String qualifiedKey) {
+    try {
+      return secrets.resolve(raw);
+    } catch (RuntimeException e) {
+      throw new IllegalArgumentException(
+          qualifiedKey + " cannot be resolved (" + e.getMessage() + ")", e);
+    }
   }
 
   /**

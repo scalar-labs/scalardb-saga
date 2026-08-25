@@ -137,6 +137,21 @@ class ServiceFileParserTest {
     }
 
     @Test
+    void parseFile_secretReferenceWithInvalidCharset_throwsNamingFileAndKey() throws IOException {
+      // Charset.forName throws outside the resolver's own message wrapping, so the parser must add
+      // the file-and-key attribution its contract promises. The message assertions are the
+      // behavior under test.
+      writeService(
+          "account.properties",
+          "base_url=http://a:1\nheader.Authorization=${file:UFT-8:/run/secrets/token}\n");
+
+      assertThatThrownBy(ServiceFileParserTest.this::parse)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("account.properties")
+          .hasMessageContaining("header.Authorization");
+    }
+
+    @Test
     void parseFile_withoutBaseUrl_throwsIllegalArgumentException() throws IOException {
       // A file without a base URL configures a service no declarative step can call.
       writeService("account.properties", "max_body_bytes=1000\n");
