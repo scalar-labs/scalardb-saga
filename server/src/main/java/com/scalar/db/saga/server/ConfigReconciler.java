@@ -490,8 +490,33 @@ final class ConfigReconciler {
               + Redaction.redacted(path.toString()));
     }
     if (!Files.isDirectory(path)) {
+      // A single configured file, resolved like a directory entry so the NOFOLLOW read that
+      // follows lands on a real file: a ConfigMap that mounts one key publishes it as a symlink
+      // through kubelet's ..data indirection. Containment does not apply here — it exists because
+      // entries INSIDE a watched directory are chosen by whoever writes that directory, whereas
+      // this path is named by the operator in server.properties, with no enclosing directory to
+      // be contained to.
+      Path target;
+      try {
+        target = path.toRealPath();
+      } catch (IOException e) {
+        throw new IllegalArgumentException(
+            "'"
+                + SagaServerConfig.DEFINITIONS_PATH_KEY
+                + "' cannot be resolved ("
+                + e.getClass().getSimpleName()
+                + ") "
+                + Redaction.redacted(path.toString()));
+      }
+      if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) {
+        throw new IllegalArgumentException(
+            "'"
+                + SagaServerConfig.DEFINITIONS_PATH_KEY
+                + "' does not resolve to a regular file "
+                + Redaction.redacted(path.toString()));
+      }
       return List.of(
-          new DefinitionFile(Objects.requireNonNull(path.getFileName()).toString(), path));
+          new DefinitionFile(Objects.requireNonNull(path.getFileName()).toString(), target));
     }
     Path realPath;
     try {
@@ -805,9 +830,18 @@ final class ConfigReconciler {
     } catch (CharacterCodingException e) {
       throw new IllegalArgumentException("is not valid UTF-8", e);
     }
-    return fileName.toLowerCase(Locale.ROOT).endsWith(".json")
-        ? SagaDefinitionParser.parseJson(text)
-        : SagaDefinitionParser.parseYaml(text);
+    String lower = fileName.toLowerCase(Locale.ROOT);
+    if (lower.endsWith(".json")) {
+      return SagaDefinitionParser.parseJson(text);
+    }
+    if (lower.endsWith(".yaml") || lower.endsWith(".yml")) {
+      return SagaDefinitionParser.parseYaml(text);
+    }
+    // Rejected rather than guessed, matching SagaDefinitionParser.parseFile. Only a single-file
+    // definitions_path can reach this — the directory walk filters by extension first — and
+    // defaulting it to YAML would silently accept a file the parser used to refuse.
+    throw new IllegalArgumentException(
+        "has no recognized definition extension (.json, .yaml, .yml)");
   }
 
   private static MessageDigest sha256Of(byte[] content) {

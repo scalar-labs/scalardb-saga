@@ -401,6 +401,25 @@ class ConfigReconcilerTest {
     }
 
     @Test
+    void run_singleFileDefinitionsPathWithUnknownExtension_rejects() throws IOException {
+      // The directory walk filters by extension, so a single configured file is the only way an
+      // unknown extension reaches the parser. It must be refused, not guessed at as YAML.
+      writeService("account", "base_url=http://account:8080\n");
+      Path file = definitionsDir.resolve("defs.txt");
+      Files.writeString(file, "{\"name\":\"x\",\"mode\":\"SAGA\",\"steps\":[]}");
+      ReloadConfig reloadConfig =
+          new ReloadConfig(
+              servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
+      ConfigReconciler pass =
+          new ConfigReconciler(
+              reloadConfig, file, false, Map.of(), () -> registrar, definitionRegistrar::accept);
+
+      // Act & Assert
+      assertThat(pass.run()).isFalse();
+      assertThat(registered).isEmpty();
+    }
+
+    @Test
     void run_singleFileDefinitionsPathThatIsASymlink_isRead() throws IOException {
       // definitions_path may name a single file, and a ConfigMap that mounts one key publishes it
       // as a symlink (kubelet's ..data indirection). Reading it must follow that link.
