@@ -2,11 +2,14 @@ package com.scalar.db.saga.server;
 
 import com.scalar.db.saga.server.SagaServerConfig.ServiceConfig;
 import java.io.IOException;
-import java.io.Reader;
+import java.io.InputStream;
+import java.io.StringReader;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -174,14 +177,23 @@ final class ServiceFileParser {
         // kubelet's ..data symlink and ..<timestamp> directories, and ordinary dotfiles.
         continue;
       }
+      Path target;
       if (Files.isSymbolicLink(entry)) {
         // Kubelet publishes every visible key of a projected volume as a symlink through its
         // ..data indirection (account.properties -> ..data/account.properties), so a visible
         // symlink is the expected shape of the mounted-ConfigMap layout, not an anomaly. It just
         // must not become a second route to reading an arbitrary file under a service's name;
         // requiring the resolved target to stay inside the directory forbids exactly that.
-        requireContainedRegularTarget(entry, fileName, realServicesPath);
-      } else if (!Files.isRegularFile(entry, LinkOption.NOFOLLOW_LINKS)) {
+        target = requireContainedRegularTarget(entry, fileName, realServicesPath);
+      } else if (Files.isRegularFile(entry, LinkOption.NOFOLLOW_LINKS)) {
+        try {
+          target = entry.toRealPath();
+        } catch (IOException e) {
+          throw new IllegalArgumentException(
+              "services_path entry '" + fileName + "' cannot be resolved (" + e.getMessage() + ")",
+              e);
+        }
+      } else {
         throw new IllegalArgumentException(
             "services_path entry '"
                 + fileName
@@ -207,7 +219,7 @@ final class ServiceFileParser {
                 + "' has an invalid service name; the base name must match "
                 + SERVICE_NAME_PATTERN.pattern());
       }
-      ServiceConfig service = parseFile(name, entry, secrets);
+      ServiceConfig service = parseFile(name, fileName, target, secrets);
       requireWithinCeiling(name, service, allowedHostsCeiling);
       services.put(name, service);
     }
@@ -221,8 +233,12 @@ final class ServiceFileParser {
    * account.properties -> ..data/account.properties -> ..<timestamp>/account.properties}) stays
    * within the mount directory, so it passes; a link escaping the directory, dangling, or landing
    * on anything but a regular file is the arbitrary-file route this check exists to forbid.
+   *
+   * @return the resolved target, which the caller must read instead of {@code entry}: re-opening
+   *     the entry would follow the symlink afresh, so a swap between this check and the read could
+   *     redirect the read to a file the containment never validated
    */
-  private static void requireContainedRegularTarget(
+  private static Path requireContainedRegularTarget(
       Path entry, String fileName, Path realServicesPath) {
     Path target;
     try {
@@ -246,16 +262,25 @@ final class ServiceFileParser {
               + " Only the mounted-volume indirection, a link resolving within the directory, is"
               + " allowed.");
     }
+    return target;
   }
 
   /**
    * Parses one service file. Fails fast on the first problem, with every message prefixed by the
-   * file name so the caller can aggregate across files without losing attribution.
+   * visible file name so the caller can aggregate across files without losing attribution.
+   *
+   * <p>{@code file} must be the fully resolved path the directory scan validated. It is opened once
+   * with {@code NOFOLLOW_LINKS} and the size cap is enforced on the bytes read through that handle:
+   * the directory can change between validation and read (the reload pass repeats this parse
+   * indefinitely), and no such change may redirect or unbound the read the validation vouched for.
    */
-  static ServiceConfig parseFile(String name, Path file, ServiceSecretResolver secrets) {
-    String fileName = Objects.requireNonNull(file.getFileName()).toString();
-    try {
-      if (Files.size(file) > MAX_FILE_BYTES) {
+  static ServiceConfig parseFile(
+      String name, String fileName, Path file, ServiceSecretResolver secrets) {
+    Properties properties = new Properties();
+    try (InputStream in =
+        Files.newInputStream(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+      byte[] bytes = in.readNBytes((int) MAX_FILE_BYTES + 1);
+      if (bytes.length > MAX_FILE_BYTES) {
         throw new IllegalArgumentException(
             "Service file '"
                 + fileName
@@ -263,13 +288,9 @@ final class ServiceFileParser {
                 + MAX_FILE_BYTES
                 + "-byte cap; a service file is a handful of lines");
       }
-    } catch (IOException e) {
-      throw new IllegalArgumentException(
-          "Service file '" + fileName + "' cannot be read (" + e.getMessage() + ")", e);
-    }
-    Properties properties = new Properties();
-    try (Reader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
-      properties.load(reader);
+      properties.load(
+          new StringReader(
+              StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString()));
     } catch (IOException e) {
       throw new IllegalArgumentException(
           "Service file '" + fileName + "' cannot be read (" + e.getMessage() + ")", e);
