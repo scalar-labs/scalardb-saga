@@ -1,5 +1,6 @@
 package com.scalar.db.saga.transport;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -11,7 +12,9 @@ import org.junit.jupiter.api.Test;
  * The constructor is the chokepoint every endpoint-construction path flows through (the
  * orchestrator builder and every configuration swap), so its base-URL validation is what guarantees
  * a malformed or misleading URL can never reach an endpoint. Messages must not echo the value: on
- * the server's reload path it may have resolved from a secret reference.
+ * the server's reload path it may have resolved from a secret reference. The same log hygiene
+ * applies to {@code toString}: {@code defaultHeaders} is the auth/secrets channel, so only header
+ * names may render.
  */
 class HttpServiceConfigTest {
 
@@ -53,5 +56,23 @@ class HttpServiceConfigTest {
   @Test
   void constructor_missingHost_throws() {
     assertThatThrownBy(() -> config("http://")).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void toString_withAuthorizationHeader_printsHeaderNameButNeverValue() {
+    // Arrange
+    HttpServiceConfig config =
+        new HttpServiceConfig(
+            "http://account-svc:8080",
+            List.of(),
+            -1,
+            null,
+            Map.of("Authorization", "Bearer secret-token"));
+
+    // Act
+    String rendered = config.toString();
+
+    // Assert — the header name stays visible for debugging; the secret value never renders
+    assertThat(rendered).contains("Authorization").doesNotContain("secret-token");
   }
 }

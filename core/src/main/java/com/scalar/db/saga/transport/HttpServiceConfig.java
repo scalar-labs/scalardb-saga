@@ -47,6 +47,26 @@ public record HttpServiceConfig(
   }
 
   /**
+   * Prints header names but never header values: {@code defaultHeaders} is the channel for
+   * auth/secrets, and the generated record {@code toString} would echo a bearer token into any log
+   * line, string concatenation, or failed assertion that renders this config.
+   */
+  @Override
+  public String toString() {
+    return "HttpServiceConfig[baseUrl="
+        + baseUrl
+        + ", allowedHosts="
+        + allowedHosts
+        + ", maxBodyBytes="
+        + maxBodyBytes
+        + ", httpClient="
+        + httpClient
+        + ", defaultHeaderNames="
+        + defaultHeaders.keySet()
+        + "]";
+  }
+
+  /**
    * Fails on a malformed or misleading {@code baseUrl}: it must be a valid absolute {@code
    * http}/{@code https} URL with a host and no user-info component (a {@code user@host} authority
    * silently retargets the host — e.g. {@code http://svc@evil.com} resolves to {@code evil.com}).
