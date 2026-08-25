@@ -362,8 +362,8 @@ class ConfigReconcilerTest {
     }
 
     @Test
-    void run_symlinkedDefinitionFile_rejects() throws IOException {
-      // Arrange — a symlink under a definition's name is a second route to arbitrary files
+    void run_definitionSymlinkEscapingTheDirectory_rejects() throws IOException {
+      // Arrange — a symlink escaping definitions_path is a second route to arbitrary files
       writeService("account", "base_url=http://account:8080\n");
       Files.writeString(secretsDir.resolve("outside.json"), "{}");
       Files.createSymbolicLink(
@@ -371,6 +371,25 @@ class ConfigReconcilerTest {
 
       // Act & Assert
       assertThat(pass().run()).isFalse();
+    }
+
+    @Test
+    void run_definitionSymlinkResolvingInsideTheDirectory_isAccepted() throws IOException {
+      // Arrange — kubelet publishes every visible file of a mounted volume as a symlink through
+      // its ..data indirection, so a contained symlink is the expected shape, not an anomaly
+      writeService("account", "base_url=http://account:8080\n");
+      Path data = Files.createDirectory(definitionsDir.resolve("..data"));
+      Files.writeString(
+          data.resolve("saga.json"),
+          "{\"name\":\"order-saga\",\"version\":\"1.0\",\"mode\":\"SAGA\",\"steps\":"
+              + "[{\"name\":\"s\",\"service\":\"account\","
+              + "\"execution\":{\"method\":\"POST\",\"path\":\"/x\"},"
+              + "\"compensation\":{\"method\":\"POST\",\"path\":\"/undo\"}}]}");
+      Files.createSymbolicLink(definitionsDir.resolve("saga.json"), data.resolve("saga.json"));
+
+      // Act & Assert
+      assertThat(pass().run()).isTrue();
+      assertThat(registered).hasSize(1);
     }
 
     @Test

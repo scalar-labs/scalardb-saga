@@ -7,6 +7,7 @@ import static org.assertj.core.api.Assertions.catchThrowable;
 
 import com.scalar.db.saga.api.HttpMethod;
 import com.scalar.db.saga.api.SagaContext;
+import com.scalar.db.saga.api.SagaHttpClient;
 import com.scalar.db.saga.api.Step;
 import com.scalar.db.saga.api.TccStep;
 import com.scalar.db.saga.definition.CallSpec;
@@ -18,8 +19,10 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -53,6 +56,18 @@ class HttpEndpointManagerTest {
 
   private static HttpEndpointManager managerOf(String name, HttpServiceConfig config) {
     return HttpEndpointManager.create(Map.of(name, config), null);
+  }
+
+  /**
+   * A config whose endpoint cannot be built: a supplied redirect-following client combined with an
+   * allowlist is rejected by {@code HttpEndpoint.create} (SSRF-via-redirect), after config
+   * construction succeeds — the way to make an endpoint-set build fail partway.
+   */
+  private static HttpServiceConfig unbuildableConfig() {
+    HttpClient redirecting =
+        HttpClient.newBuilder().followRedirects(HttpClient.Redirect.ALWAYS).build();
+    return new HttpServiceConfig(
+        "http://bad:8080", List.of("allowed-host"), -1, redirecting, Map.of());
   }
 
   private static HttpServer startServer(com.sun.net.httpserver.HttpHandler handler)
@@ -94,6 +109,25 @@ class HttpEndpointManagerTest {
       // Assert — the adapter is the registered endpoint's own
       HttpEndpoint endpoint = java.util.Objects.requireNonNull(manager.endpointOrNull("account"));
       assertThat(adapter).isSameAs(endpoint.transportAdapter());
+      manager.close();
+    }
+
+    @Test
+    void sagaHttpClients_twoEndpointsRegistered_returnsOneClientPerEndpoint() {
+      // Arrange
+      HttpEndpointManager manager =
+          HttpEndpointManager.create(
+              Map.of(
+                  "account", config("http://account:8080", Map.of()),
+                  "payment", config("http://payment:8080", Map.of())),
+              null);
+
+      // Act
+      Map<String, SagaHttpClient> clients = manager.sagaHttpClients();
+
+      // Assert — one consistent snapshot: every registered name maps to a client
+      assertThat(clients).containsOnlyKeys("account", "payment");
+      assertThat(clients.values()).doesNotContainNull();
       manager.close();
     }
 
@@ -183,6 +217,26 @@ class HttpEndpointManagerTest {
   }
 
   // =========================================================================
+  // Creation
+  // =========================================================================
+
+  @Nested
+  class Create {
+
+    @Test
+    void create_endpointCreationFailsPartway_throwsCreationError() {
+      // The initial build goes through the swap path, so its rollback covers a config that fails
+      // here too; from outside, the creation error propagates and no manager is returned.
+      Map<String, HttpServiceConfig> configs = new LinkedHashMap<>();
+      configs.put("good", config("http://good:8080", Map.of()));
+      configs.put("bad", unbuildableConfig());
+
+      assertThatThrownBy(() -> HttpEndpointManager.create(configs, null))
+          .isInstanceOf(IllegalArgumentException.class);
+    }
+  }
+
+  // =========================================================================
   // Swap semantics
   // =========================================================================
 
@@ -252,6 +306,88 @@ class HttpEndpointManagerTest {
       } finally {
         server.stop(0);
       }
+    }
+
+    // The next three tests hold baseUrl fixed and change exactly one other topology component, so
+    // each conjunct of HttpEndpoint.sameTopology is pinned as a swap trigger on its own. If one
+    // were dropped, the swap would silently reuse the old endpoint and the new value would never
+    // take effect — for allowedHosts that means a tightened SSRF allowlist being ignored.
+
+    @Test
+    void swapHttpEndpoints_allowedHostsOnlyChange_replacesEndpointAndRetiresOld() throws Exception {
+      // Arrange — allow-all to start
+      HttpEndpointManager manager = managerOf("svc", config("http://svc:8080", Map.of()));
+      HttpEndpoint before = manager.endpointOrNull("svc");
+      TransportAdapter oldAdapter = manager.resolve("svc");
+
+      // Act — tighten the SSRF allowlist; everything else unchanged
+      manager.swapHttpEndpoints(
+          Map.of(
+              "svc", new HttpServiceConfig("http://svc:8080", List.of("svc"), -1, null, Map.of())));
+
+      // Assert — a new endpoint serves the name and the old one was retired: a call through the
+      // stale adapter fails pre-send. retiredCount is deliberately not asserted; an idle owned
+      // client can terminate fast enough for the same swap's sweep to have already removed the
+      // retiree.
+      assertThat(manager.endpointOrNull("svc")).isNotSameAs(before);
+      HttpCall call = HttpCall.newBuilder("/x").method(HttpMethod.GET).build();
+      Throwable thrown = catchThrowable(() -> oldAdapter.call(call, CTX, "s"));
+      assertThat(thrown).isInstanceOf(TransportException.class);
+      assertThat(((TransportException) thrown).isRetryable()).isTrue();
+      manager.close();
+    }
+
+    @Test
+    void swapHttpEndpoints_maxBodyBytesOnlyChange_replacesEndpointAndRetiresOld() throws Exception {
+      // Arrange — default body cap to start
+      HttpEndpointManager manager = managerOf("svc", config("http://svc:8080", Map.of()));
+      HttpEndpoint before = manager.endpointOrNull("svc");
+      TransportAdapter oldAdapter = manager.resolve("svc");
+
+      // Act — change only the body cap
+      manager.swapHttpEndpoints(
+          Map.of("svc", new HttpServiceConfig("http://svc:8080", List.of(), 1024, null, Map.of())));
+
+      // Assert — as above: replacement, and retirement proven by the stale adapter's pre-send
+      // failure
+      assertThat(manager.endpointOrNull("svc")).isNotSameAs(before);
+      HttpCall call = HttpCall.newBuilder("/x").method(HttpMethod.GET).build();
+      Throwable thrown = catchThrowable(() -> oldAdapter.call(call, CTX, "s"));
+      assertThat(thrown).isInstanceOf(TransportException.class);
+      assertThat(((TransportException) thrown).isRetryable()).isTrue();
+      manager.close();
+    }
+
+    @Test
+    void swapHttpEndpoints_httpClientOnlyChange_replacesEndpointAndRetiresOld() throws Exception {
+      // Arrange — a caller-supplied client
+      HttpClient clientA = HttpClient.newBuilder().build();
+      HttpClient clientB = HttpClient.newBuilder().build();
+      HttpEndpointManager manager =
+          HttpEndpointManager.create(
+              Map.of(
+                  "svc",
+                  new HttpServiceConfig("http://svc:8080", List.of(), -1, clientA, Map.of())),
+              null);
+      HttpEndpoint before = manager.endpointOrNull("svc");
+      TransportAdapter oldAdapter = manager.resolve("svc");
+
+      // Act — an otherwise identical config carrying a different client instance; client equality
+      // is identity, so this is a topology change
+      manager.swapHttpEndpoints(
+          Map.of(
+              "svc", new HttpServiceConfig("http://svc:8080", List.of(), -1, clientB, Map.of())));
+
+      // Assert — the old endpoint was retired: a call through its stale adapter fails pre-send.
+      // The retired list is already empty, not still holding it: a caller-supplied client is
+      // never shut down here, so the retiree counts as terminated and the same swap sweeps it.
+      assertThat(manager.endpointOrNull("svc")).isNotSameAs(before);
+      HttpCall call = HttpCall.newBuilder("/x").method(HttpMethod.GET).build();
+      Throwable thrown = catchThrowable(() -> oldAdapter.call(call, CTX, "s"));
+      assertThat(thrown).isInstanceOf(TransportException.class);
+      assertThat(((TransportException) thrown).isRetryable()).isTrue();
+      assertThat(manager.retiredCount()).isZero();
+      manager.close();
     }
 
     @Test
@@ -343,6 +479,118 @@ class HttpEndpointManagerTest {
       } finally {
         server.stop(0);
       }
+    }
+
+    @Test
+    void swapHttpEndpoints_endpointCreationFailsPartway_rollsBackCreatedAndKeepsCurrentSet()
+        throws Exception {
+      // Arrange — a live endpoint, and a candidate set whose second entry cannot be built after
+      // the first already created a fresh endpoint (LinkedHashMap fixes the build order)
+      HttpServer server = startServer(HttpEndpointManagerTest::respondJson);
+      try {
+        String baseUrl = baseUrlOf(server);
+        HttpEndpointManager manager = managerOf("svc", config(baseUrl, Map.of()));
+        HttpEndpoint before = manager.endpointOrNull("svc");
+        Map<String, HttpServiceConfig> services = new LinkedHashMap<>();
+        services.put("fresh", config("http://fresh:8080", Map.of()));
+        services.put("bad", unbuildableConfig());
+
+        // Act
+        Throwable thrown = catchThrowable(() -> manager.swapHttpEndpoints(services));
+
+        // Assert — the creation failure propagates; nothing was published (the current set keeps
+        // serving, the attempt's entries are absent); the endpoint the attempt already built was
+        // shut down and joined the retired list rather than leaking
+        assertThat(thrown).isInstanceOf(IllegalArgumentException.class);
+        assertThat(manager.endpointOrNull("svc")).isSameAs(before);
+        assertThat(manager.contains("fresh")).isFalse();
+        HttpCall call = HttpCall.newBuilder("/x").method(HttpMethod.GET).build();
+        assertThatCode(() -> manager.resolve("svc").call(call, CTX, "s"))
+            .doesNotThrowAnyException();
+        assertThat(manager.retiredCount()).isEqualTo(1);
+
+        // A retry with the config fixed converges on the intended set
+        manager.swapHttpEndpoints(
+            Map.of(
+                "svc", config(baseUrl, Map.of()),
+                "fresh", config("http://fresh:8080", Map.of())));
+        assertThat(manager.contains("fresh")).isTrue();
+        manager.close();
+      } finally {
+        server.stop(0);
+      }
+    }
+
+    @Test
+    void swapHttpEndpoints_rotationAppliedByFailedSwap_reapplyingPreviousConfigRestoresHeader()
+        throws Exception {
+      // Arrange — a server recording the Authorization header, and an endpoint on the last known
+      // good secret
+      AtomicReference<String> seenAuth = new AtomicReference<>();
+      HttpServer server =
+          startServer(
+              ex -> {
+                seenAuth.set(ex.getRequestHeaders().getFirst("Authorization"));
+                respondJson(ex);
+              });
+      try {
+        String baseUrl = baseUrlOf(server);
+        HttpServiceConfig lastKnownGood = config(baseUrl, Map.of("Authorization", "Bearer old"));
+        HttpEndpointManager manager = managerOf("svc", lastKnownGood);
+        HttpCall call = HttpCall.newBuilder("/x").method(HttpMethod.GET).build();
+
+        // A candidate set that rotates svc's secret and then fails on a later entry: the rotation
+        // is already live on the reused endpoint when the failure hits (LinkedHashMap fixes the
+        // build order)
+        Map<String, HttpServiceConfig> failedCandidate = new LinkedHashMap<>();
+        failedCandidate.put("svc", config(baseUrl, Map.of("Authorization", "Bearer rotated")));
+        failedCandidate.put("bad", unbuildableConfig());
+        assertThat(catchThrowable(() -> manager.swapHttpEndpoints(failedCandidate)))
+            .isInstanceOf(IllegalArgumentException.class);
+        manager.resolve("svc").call(call, CTX, "s");
+        assertThat(seenAuth.get()).isEqualTo("Bearer rotated");
+
+        // Act — the operator recovery the registrar contract promises: re-apply the last known
+        // good configuration
+        manager.swapHttpEndpoints(Map.of("svc", lastKnownGood));
+
+        // Assert — the rollback restored the previous header; a guard comparing the candidate
+        // against the recorded config would skip this rotation, because the record never saw the
+        // failed swap's rotation and still holds the old value
+        manager.resolve("svc").call(call, CTX, "s");
+        assertThat(seenAuth.get()).isEqualTo("Bearer old");
+        manager.close();
+      } finally {
+        server.stop(0);
+      }
+    }
+
+    @Test
+    @SuppressWarnings("NullAway") // deliberately passing null to exercise the runtime guard
+    void swapHttpEndpoints_nullServicesGiven_throwsNullPointerException() {
+      // Arrange
+      HttpEndpointManager manager = managerOf("svc", config("http://svc:8080", Map.of()));
+
+      // Act & Assert — the public seam fails fast, before the swap lock and before any build
+      assertThatThrownBy(() -> manager.swapHttpEndpoints(null))
+          .isInstanceOf(NullPointerException.class);
+      manager.close();
+    }
+
+    @Test
+    @SuppressWarnings("NullAway") // deliberately passing null to exercise the runtime guard
+    void swapHttpEndpoints_nullConfigValueGiven_throwsNullPointerException() {
+      // Arrange
+      HttpEndpointManager manager = managerOf("svc", config("http://svc:8080", Map.of()));
+      Map<String, HttpServiceConfig> services = new LinkedHashMap<>();
+      services.put("svc", null);
+
+      // Act & Assert — rejected up front: nothing was built, retired, or rotated
+      assertThatThrownBy(() -> manager.swapHttpEndpoints(services))
+          .isInstanceOf(NullPointerException.class);
+      assertThat(manager.contains("svc")).isTrue();
+      assertThat(manager.retiredCount()).isZero();
+      manager.close();
     }
 
     @Test

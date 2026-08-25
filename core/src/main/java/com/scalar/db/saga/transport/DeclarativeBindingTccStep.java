@@ -18,8 +18,8 @@ import java.util.Objects;
  * configuration swap between phases means reserve may land on the old endpoint and confirm/cancel
  * on its replacement (endpoint changes must stay backward-compatible for in-flight sagas). A {@link
  * TransportException} (from the resolution or the call) becomes a {@link StepExecutionException}
- * (carrying the retryable flag) for reserve/confirm, or a {@link StepCompensationException} for
- * cancel. The SAGA counterpart is {@link DeclarativeBindingStep}.
+ * (carrying the retryable and known-not-committed flags) for reserve/confirm, or a {@link
+ * StepCompensationException} for cancel. The SAGA counterpart is {@link DeclarativeBindingStep}.
  */
 final class DeclarativeBindingTccStep implements TccStep {
 
@@ -57,19 +57,25 @@ final class DeclarativeBindingTccStep implements TccStep {
 
   @Override
   public StepResult reserve(SagaContext context) throws StepExecutionException {
-    try {
-      return resolver.resolve(service).call(reserve, context, name + TccStepNaming.RESERVE_SUFFIX);
-    } catch (TransportException e) {
-      throw new StepExecutionException(e, e.isRetryable(), e.knownNotCommitted());
-    }
+    return perform(reserve, context, TccStepNaming.RESERVE_SUFFIX);
   }
 
   @Override
   public StepResult confirm(SagaContext context) throws StepExecutionException {
+    return perform(confirm, context, TccStepNaming.CONFIRM_SUFFIX);
+  }
+
+  /**
+   * Performs a forward-phase call through one shared exception mapping, so reserve and confirm
+   * cannot drift apart in how they carry the retryable and known-not-committed flags. Cancel stays
+   * separate: it maps to {@link StepCompensationException}.
+   */
+  private StepResult perform(CallSpec spec, SagaContext context, String suffix)
+      throws StepExecutionException {
     try {
-      return resolver.resolve(service).call(confirm, context, name + TccStepNaming.CONFIRM_SUFFIX);
+      return resolver.resolve(service).call(spec, context, name + suffix);
     } catch (TransportException e) {
-      throw new StepExecutionException(e, e.isRetryable());
+      throw new StepExecutionException(e, e.isRetryable(), e.knownNotCommitted());
     }
   }
 

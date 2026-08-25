@@ -118,6 +118,46 @@ class DeclarativeBindingTccStepTest {
   }
 
   @Test
+  void confirm_resolveMiss_throwsRetryableKnownNotCommittedStepExecutionException() {
+    // Arrange — confirm resolves per call, so it can fail pre-send like reserve (the service
+    // removed or its configuration lagging a swap); the proven non-delivery must survive into the
+    // persisted failure classification.
+    DeclarativeBindingTccStep step =
+        new DeclarativeBindingTccStep(
+            "seat",
+            service -> {
+              throw new TransportException("no endpoint for " + service, true, true);
+            },
+            "booking",
+            Map.of(
+                Phase.RESERVATION, RESERVATION,
+                Phase.CONFIRMATION, CONFIRMATION,
+                Phase.CANCELLATION, CANCELLATION));
+
+    // Act
+    Throwable thrown = catchThrowable(() -> step.confirm(CTX));
+
+    // Assert
+    assertThat(thrown).isInstanceOf(StepExecutionException.class);
+    assertThat(((StepExecutionException) thrown).isRetryable()).isTrue();
+    assertThat(((StepExecutionException) thrown).knownNotCommitted()).isTrue();
+  }
+
+  @Test
+  void confirm_transportCommitted_flagIsFalse() throws Exception {
+    // Arrange — an unproven confirm failure (the default) stays possibly committed.
+    TransportAdapter transport = mock(TransportAdapter.class);
+    when(transport.call(any(), any(), any())).thenThrow(new TransportException("in-doubt", true));
+
+    // Act
+    Throwable thrown = catchThrowable(() -> adapter(transport).confirm(CTX));
+
+    // Assert
+    assertThat(thrown).isInstanceOf(StepExecutionException.class);
+    assertThat(((StepExecutionException) thrown).knownNotCommitted()).isFalse();
+  }
+
+  @Test
   void cancel_callsCancellationSpec() throws Exception {
     // Arrange
     TransportAdapter transport = mock(TransportAdapter.class);

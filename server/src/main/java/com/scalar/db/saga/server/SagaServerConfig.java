@@ -288,12 +288,12 @@ import org.jspecify.annotations.Nullable;
  * empty value there is far more likely a template that failed to resolve than an intent to run
  * without the protection. That covers {@code callback.max_age_seconds}, {@code
  * max_start_requests_per_minute}, and {@code tls.enabled}, whose defaults disable the check
- * outright, plus the {@code service.<name>} attributes whose blank fallback would be open ({@code
- * allowed_hosts} would admit any host; a {@code header.<Name>} would send an empty header, and an
- * empty {@code Authorization} is an unauthenticated call) or meaningless ({@code base_url} has no
- * default to fall back to). {@code service.<name>.max_body_bytes} sits on the other side of that
- * line deliberately: unset leaves the engine's own 1 MiB cap in place, so the body stays bounded
- * either way.
+ * outright, plus, inside a service file, the settings whose blank fallback would be open ({@code
+ * allowed_hosts} would admit any host; a {@code header.<HeaderName>} would send an empty header,
+ * and an empty {@code Authorization} is an unauthenticated call) or meaningless ({@code base_url}
+ * has no default to fall back to). A service file's {@code max_body_bytes} sits on the other side
+ * of that line deliberately: unset leaves the engine's own 1 MiB cap in place, so the body stays
+ * bounded either way.
  *
  * <p>All other properties configure the saga engine's persistence (e.g. ScalarDB connection
  * settings and the {@code scalar.db.saga.store.*} keys documented on {@code

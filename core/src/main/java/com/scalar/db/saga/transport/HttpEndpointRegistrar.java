@@ -16,6 +16,13 @@ import java.util.Map;
  * in flight complete against it, and new submissions fail pre-send as retryable, to be re-resolved
  * against the new set.
  *
+ * <p><b>Coverage is the caller's responsibility:</b> registered saga definitions reference services
+ * by name, and a swap is applied as given — it does not check the new set against them. Dropping a
+ * name that registered definitions (or sagas still recovering) reference converts the
+ * registration-time fail-fast into per-call failures: every resolution of that name fails as
+ * retryable until a later swap restores it. Validate a candidate set against the registered
+ * definitions before applying it.
+ *
  * <p><b>Embedded-mode contract:</b> only declarative steps re-resolve their endpoint per call. A
  * class step's {@code SagaHttpClient}, injected when its plan was built, is NOT rebound by a swap:
  * it keeps riding the endpoint it was built against, and if that endpoint is retired by a swap its
@@ -25,8 +32,11 @@ import java.util.Map;
  * <p><b>Failure guarantee:</b> the published set flips in a single atomic step at the end of a
  * successful swap, so a resolution never observes a mix of old and new entries. When a swap throws
  * partway, nothing is published and the previous set keeps serving; header rotations already
- * applied to reused endpoints stick (they are validated values, so this is benign), and retrying
- * the swap converges on the intended set — last known good keeps serving until then.
+ * applied to reused endpoints stick (they are validated values, so this is benign), and any
+ * subsequent successful swap — a retry of the intended set, or a rollback re-applying the last
+ * known good one — converges both the endpoint set and the live headers on its candidate. Endpoints
+ * the failed attempt already created are shut down and tracked until their clients terminate, not
+ * leaked.
  */
 public interface HttpEndpointRegistrar {
 
@@ -35,6 +45,11 @@ public interface HttpEndpointRegistrar {
    * reuse / rotate / retire semantics and the failure guarantee described on this interface.
    *
    * @param services the complete new endpoint set (not a delta)
+   * @throws IllegalStateException if the backing endpoint set is already closed — the case a
+   *     hot-reload caller racing engine shutdown (a config watcher firing while the orchestrator
+   *     closes) must expect; nothing is swapped
+   * @throws NullPointerException if {@code services}, a service name, or a config is {@code null};
+   *     rejected up front, before anything is built, retired, or rotated
    */
   void swapHttpEndpoints(Map<String, HttpServiceConfig> services);
 }

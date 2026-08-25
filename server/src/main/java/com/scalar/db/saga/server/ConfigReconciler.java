@@ -278,7 +278,7 @@ final class ConfigReconciler {
     if (servicesPath == null) {
       return Map.of();
     }
-    Map<String, Path> files;
+    Map<String, ServiceFileParser.ServiceFile> files;
     try {
       files = ServiceFileParser.listServiceFiles(servicesPath);
     } catch (RuntimeException e) {
@@ -286,11 +286,15 @@ final class ConfigReconciler {
       return Map.of();
     }
     Map<String, ServiceConfig> candidates = new TreeMap<>();
-    for (Map.Entry<String, Path> entry : files.entrySet()) {
-      digestFile(digest, entry.getKey(), entry.getValue(), errors);
+    for (Map.Entry<String, ServiceFileParser.ServiceFile> entry : files.entrySet()) {
+      ServiceFileParser.ServiceFile file = entry.getValue();
+      // Hash and parse both read the resolved target the hygiene walk validated, never the
+      // visible entry: re-opening the entry would follow its symlink afresh.
+      digestFile(digest, file.fileName(), file.target(), errors);
       try {
         ServiceConfig service =
-            ServiceFileParser.parseFile(entry.getKey(), entry.getValue(), secretResolver);
+            ServiceFileParser.parseFile(
+                entry.getKey(), file.fileName(), file.target(), secretResolver);
         ServiceFileParser.requireWithinCeiling(
             entry.getKey(), service, reloadConfig.allowedHostsCeiling());
         candidates.put(entry.getKey(), service);
@@ -328,7 +332,7 @@ final class ConfigReconciler {
     if (definitionsPath == null) {
       return Map.of();
     }
-    List<Path> files;
+    List<DefinitionFile> files;
     try {
       files = listDefinitionFiles(definitionsPath);
     } catch (RuntimeException e) {
@@ -336,10 +340,10 @@ final class ConfigReconciler {
       return Map.of();
     }
     Map<String, CandidateDefinition> candidates = new LinkedHashMap<>();
-    for (Path file : files) {
-      String fileName = Objects.requireNonNull(file.getFileName()).toString();
+    for (DefinitionFile file : files) {
+      String fileName = file.fileName();
       try {
-        String contentSha = digestFile(digest, fileName, file, errors);
+        String contentSha = digestFile(digest, fileName, file.target(), errors);
         if (contentSha == null) {
           continue; // unreadable; already collected
         }
@@ -353,7 +357,7 @@ final class ConfigReconciler {
                 contentSha.getBytes(StandardCharsets.UTF_8))) {
           definition = cached.definition();
         } else {
-          definition = SagaDefinitionParser.parseFile(file);
+          definition = SagaDefinitionParser.parseFile(file.target());
           definitionParseCache.put(fileName, new CachedParse(contentSha, definition));
         }
         for (SagaDefinition.StepDefinition step : definition.getSteps()) {
@@ -388,16 +392,21 @@ final class ConfigReconciler {
     return candidates;
   }
 
+  /** One admitted definition file: visible name for attribution, validated target for reads. */
+  private record DefinitionFile(String fileName, Path target) {}
+
   /**
-   * The definitions-side hygiene walk. Same shape as the services walk, with the historical
-   * differences kept: {@code definitions_path} may be a single file, and non-definition extensions
-   * in a directory are skipped rather than rejected (a README has always been legal there).
-   * Symlinked entries are rejected — a symlink is a second route to reading an arbitrary file —
-   * which is stricter than the pre-reload loader; kubelet's dot-entries are skipped before the
-   * check.
+   * The definitions-side hygiene walk. Same containment rules as the services walk — kubelet
+   * publishes every visible key of a mounted volume as a symlink through its {@code ..data}
+   * indirection, so a visible symlink is the expected shape and is admitted when it resolves to a
+   * regular file still inside the directory; a link escaping the directory is the arbitrary-file
+   * route the check forbids. The historical differences are kept: {@code definitions_path} may be a
+   * single file, and non-definition extensions in a directory are skipped rather than rejected (a
+   * README has always been legal there). Reads must go through the returned target, never re-open
+   * the visible entry.
    */
-  private static List<Path> listDefinitionFiles(Path path) {
-    if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
+  private static List<DefinitionFile> listDefinitionFiles(Path path) {
+    if (!Files.exists(path)) {
       throw new IllegalArgumentException(
           "Invalid value for '"
               + SagaServerConfig.DEFINITIONS_PATH_KEY
@@ -405,7 +414,20 @@ final class ConfigReconciler {
               + Redaction.redacted(path.toString()));
     }
     if (!Files.isDirectory(path)) {
-      return List.of(path);
+      return List.of(
+          new DefinitionFile(Objects.requireNonNull(path.getFileName()).toString(), path));
+    }
+    Path realPath;
+    try {
+      realPath = path.toRealPath();
+    } catch (IOException e) {
+      throw new IllegalArgumentException(
+          "'"
+              + SagaServerConfig.DEFINITIONS_PATH_KEY
+              + "' cannot be resolved ("
+              + e.getClass().getSimpleName()
+              + ") "
+              + Redaction.redacted(path.toString()));
     }
     List<Path> entries;
     try (Stream<Path> stream = Files.list(path)) {
@@ -419,22 +441,54 @@ final class ConfigReconciler {
               + ") "
               + Redaction.redacted(path.toString()));
     }
-    List<Path> files = new ArrayList<>();
+    List<DefinitionFile> files = new ArrayList<>();
     for (Path entry : entries) {
       String fileName = Objects.requireNonNull(entry.getFileName()).toString();
-      if (fileName.startsWith(".")) {
+      if (fileName.startsWith(".") || !isDefinitionFile(fileName)) {
         continue;
       }
+      Path target;
       if (Files.isSymbolicLink(entry)) {
-        throw new IllegalArgumentException(
-            "definitions_path entry '"
-                + fileName
-                + "' is a symlink; only regular definition files are read");
-      }
-      if (!Files.isRegularFile(entry, LinkOption.NOFOLLOW_LINKS) || !isDefinitionFile(fileName)) {
+        // Kubelet's visible-symlink layout: admitted only when it resolves to a regular file
+        // still inside the directory — a link escaping it would be a route to reading an
+        // arbitrary file under a definition's name.
+        try {
+          target = entry.toRealPath();
+        } catch (IOException e) {
+          throw new IllegalArgumentException(
+              "definitions_path entry '"
+                  + fileName
+                  + "' is a symlink that cannot be resolved ("
+                  + e.getClass().getSimpleName()
+                  + ")");
+        }
+        if (!target.startsWith(realPath)
+            || !Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) {
+          throw new IllegalArgumentException(
+              "definitions_path entry '"
+                  + fileName
+                  + "' is a symlink that does not resolve to a regular file inside"
+                  + " definitions_path, which would be a route to reading an arbitrary file under"
+                  + " a definition's name. Only the mounted-volume indirection, a link resolving"
+                  + " within the directory, is allowed.");
+        }
+      } else if (Files.isRegularFile(entry, LinkOption.NOFOLLOW_LINKS)) {
+        try {
+          target = entry.toRealPath();
+        } catch (IOException e) {
+          throw new IllegalArgumentException(
+              "definitions_path entry '"
+                  + fileName
+                  + "' cannot be resolved ("
+                  + e.getClass().getSimpleName()
+                  + ")");
+        }
+      } else {
+        // A directory or other non-regular entry whose name matches the extension has always
+        // been silently ignored here.
         continue;
       }
-      files.add(entry);
+      files.add(new DefinitionFile(fileName, target));
     }
     return files;
   }

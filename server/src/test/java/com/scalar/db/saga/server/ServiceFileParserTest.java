@@ -105,6 +105,53 @@ class ServiceFileParserTest {
     }
 
     @Test
+    void parseFile_allowedHostsSecretReference_isResolved() throws IOException {
+      // The prefixed format resolved references in every daemon property before parsing, so the
+      // file format keeps that for every setting, not just the credential-bearing ones.
+      Files.writeString(secretsDir.resolve("hosts"), "account-svc,account-svc.internal");
+      writeService(
+          "account.properties",
+          "base_url=http://account-svc:8080\n"
+              + "allowed_hosts=${file:UTF-8:"
+              + secretsDir.resolve("hosts")
+              + "}\n");
+
+      ServiceConfig service = requireNonNull(parse().get("account"));
+
+      assertThat(service.allowedHosts()).containsExactly("account-svc", "account-svc.internal");
+    }
+
+    @Test
+    void parseFile_maxBodyBytesSecretReference_isResolved() throws IOException {
+      Files.writeString(secretsDir.resolve("cap"), "2000000");
+      writeService(
+          "account.properties",
+          "base_url=http://account-svc:8080\n"
+              + "max_body_bytes=${file:UTF-8:"
+              + secretsDir.resolve("cap")
+              + "}\n");
+
+      ServiceConfig service = requireNonNull(parse().get("account"));
+
+      assertThat(service.maxBodyBytes()).isEqualTo(2_000_000L);
+    }
+
+    @Test
+    void parseFile_secretReferenceWithInvalidCharset_throwsNamingFileAndKey() throws IOException {
+      // Charset.forName throws outside the resolver's own message wrapping, so the parser must add
+      // the file-and-key attribution its contract promises. The message assertions are the
+      // behavior under test.
+      writeService(
+          "account.properties",
+          "base_url=http://a:1\nheader.Authorization=${file:UFT-8:/run/secrets/token}\n");
+
+      assertThatThrownBy(ServiceFileParserTest.this::parse)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("account.properties")
+          .hasMessageContaining("header.Authorization");
+    }
+
+    @Test
     void parseFile_withoutBaseUrl_throwsIllegalArgumentException() throws IOException {
       // A file without a base URL configures a service no declarative step can call.
       writeService("account.properties", "max_body_bytes=1000\n");
@@ -312,8 +359,25 @@ class ServiceFileParserTest {
     }
 
     @Test
-    void parseDirectory_symlinkedServiceFile_throwsIllegalArgumentException() throws IOException {
-      // A symlink under a service's name is a second route to reading an arbitrary file.
+    void parseDirectory_kubeletProjectedVolumeLayout_parsesServices() throws IOException {
+      // The layout kubelet mounts a ConfigMap as: the real files live in a ..<timestamp>
+      // directory, ..data symlinks to it, and every visible file is a symlink through ..data.
+      Path timestamped = Files.createDirectory(servicesDir.resolve("..2026_08_23_10_00_00"));
+      Files.writeString(timestamped.resolve("account.properties"), "base_url=http://a:1\n");
+      Files.createSymbolicLink(servicesDir.resolve("..data"), Path.of("..2026_08_23_10_00_00"));
+      Files.createSymbolicLink(
+          servicesDir.resolve("account.properties"), Path.of("..data", "account.properties"));
+
+      Map<String, ServiceConfig> services = parse();
+
+      assertThat(services).containsOnlyKeys("account");
+      assertThat(requireNonNull(services.get("account")).baseUrl()).isEqualTo("http://a:1");
+    }
+
+    @Test
+    void parseDirectory_symlinkEscapingServicesPath_throwsIllegalArgumentException()
+        throws IOException {
+      // A symlink out of the directory is a second route to reading an arbitrary file.
       Files.writeString(secretsDir.resolve("outside.properties"), "base_url=http://a:1\n");
       Files.createSymbolicLink(
           servicesDir.resolve("account.properties"), secretsDir.resolve("outside.properties"));
@@ -321,6 +385,44 @@ class ServiceFileParserTest {
       assertThatThrownBy(ServiceFileParserTest.this::parse)
           .isInstanceOf(IllegalArgumentException.class)
           .hasMessageContaining("symlink");
+    }
+
+    @Test
+    void parseDirectory_danglingSymlink_throwsIllegalArgumentException() throws IOException {
+      Files.createSymbolicLink(
+          servicesDir.resolve("account.properties"), servicesDir.resolve("gone.properties"));
+
+      assertThatThrownBy(ServiceFileParserTest.this::parse)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("cannot be resolved");
+    }
+
+    @Test
+    void parseDirectory_symlinkToDirectoryInsideServicesPath_throwsIllegalArgumentException()
+        throws IOException {
+      // Contained but not a regular file: resolving inside the directory is necessary, not
+      // sufficient.
+      Files.createDirectory(servicesDir.resolve("..subdir"));
+      Files.createSymbolicLink(
+          servicesDir.resolve("account.properties"), servicesDir.resolve("..subdir"));
+
+      assertThatThrownBy(ServiceFileParserTest.this::parse)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("regular file");
+    }
+
+    @Test
+    void parseDirectory_symlinkWithNonPropertiesName_throwsIllegalArgumentException()
+        throws IOException {
+      // The visible name carries the service name, so the extension rule applies to it even when
+      // the link target is a contained regular file.
+      Files.writeString(servicesDir.resolve("account.properties"), "base_url=http://a:1\n");
+      Files.createSymbolicLink(
+          servicesDir.resolve("stray.txt"), servicesDir.resolve("account.properties"));
+
+      assertThatThrownBy(ServiceFileParserTest.this::parse)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("stray.txt");
     }
 
     @Test
@@ -365,6 +467,23 @@ class ServiceFileParserTest {
     void parseDirectory_allowedHostOutsideCeiling_throwsIllegalArgumentException()
         throws IOException {
       writeService("a.properties", "base_url=http://a:1\nallowed_hosts=evil-svc\n");
+
+      assertThatThrownBy(() -> parseWithCeiling("a-svc"))
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("ceiling");
+    }
+
+    @Test
+    void parseDirectory_secretResolvedAllowedHostOutsideCeiling_throwsIllegalArgumentException()
+        throws IOException {
+      // Pins the ordering that makes the ceiling meaningful: allowed_hosts is resolved before the
+      // ceiling check, so a secret-sourced host cannot smuggle egress past the operator's ceiling.
+      // The message assertion distinguishes the ceiling firing from a resolution failure, which
+      // would throw the same type.
+      Files.writeString(secretsDir.resolve("hosts"), "evil-svc");
+      writeService(
+          "a.properties",
+          "base_url=http://a:1\nallowed_hosts=${file:UTF-8:" + secretsDir.resolve("hosts") + "}\n");
 
       assertThatThrownBy(() -> parseWithCeiling("a-svc"))
           .isInstanceOf(IllegalArgumentException.class)
