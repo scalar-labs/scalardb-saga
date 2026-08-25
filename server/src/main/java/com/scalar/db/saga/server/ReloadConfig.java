@@ -3,7 +3,6 @@ package com.scalar.db.saga.server;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.List;
-import java.util.Objects;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -35,8 +34,9 @@ public record ReloadConfig(
     Clock clock) {
 
   public ReloadConfig {
-    Objects.requireNonNull(secretsRoot, "secretsRoot must not be null");
-    Objects.requireNonNull(clock, "clock must not be null");
+    // No requireNonNull here: this record is internal to the unpublished server module, where
+    // @NullMarked + NullAway carry the null contract (unlike core's RecoveryConfig/RetentionConfig,
+    // whose callers may not be compiled with NullAway).
     if (intervalSeconds < 0) {
       throw new IllegalArgumentException("intervalSeconds must be >= 0, got " + intervalSeconds);
     }
