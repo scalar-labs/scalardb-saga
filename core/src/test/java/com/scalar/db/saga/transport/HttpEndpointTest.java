@@ -7,13 +7,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.scalar.db.saga.api.HttpMethod;
 import com.scalar.db.saga.api.SagaContext;
 import com.scalar.db.saga.api.SagaHttpClient;
-import com.scalar.db.saga.api.Step;
-import com.scalar.db.saga.api.TccStep;
-import com.scalar.db.saga.definition.CallSpec;
 import com.scalar.db.saga.definition.HttpCall;
-import com.scalar.db.saga.definition.SagaDefinition.ServiceStep.Phase;
-import com.scalar.db.saga.exception.SagaDefinitionException;
-import com.scalar.db.saga.exception.SagaErrorCode;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -27,56 +21,16 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for {@link HttpEndpoint}: the single per-endpoint owner of the shared {@link HttpExchange}
- * that produces both the code-step {@link SagaHttpClient} and the declarative {@link Step}/{@link
- * TccStep}. The key invariant is that both front-ends ride the SAME {@link HttpExchange} (one
- * client, one policy), verified directly via the package-private accessors.
+ * Tests for {@link HttpEndpoint}: the per-endpoint unit of the shared {@link HttpExchange} behind
+ * both the code-step {@link SagaHttpClient} and the declarative transport adapter. The key
+ * invariant is that both front-ends ride the SAME {@link HttpExchange} (one client, one policy),
+ * verified directly via the package-private accessors. Step construction and lifecycle live on the
+ * {@link HttpEndpointManager} and are tested there.
  */
 class HttpEndpointTest {
 
-  private static final Map<Phase, CallSpec> SAGA_PHASES =
-      Map.of(
-          Phase.EXECUTION, HttpCall.newBuilder("/do").build(),
-          Phase.COMPENSATION, HttpCall.newBuilder("/undo").build());
-  private static final Map<Phase, CallSpec> TCC_PHASES =
-      Map.of(
-          Phase.RESERVATION, HttpCall.newBuilder("/reserve").build(),
-          Phase.CONFIRMATION, HttpCall.newBuilder("/confirm").build(),
-          Phase.CANCELLATION, HttpCall.newBuilder("/cancel").build());
-
   private static HttpServiceConfig config(String baseUrl) {
     return new HttpServiceConfig(baseUrl, List.of(), -1, null, Map.of());
-  }
-
-  private static Map<Phase, CallSpec> asyncSagaPhases() {
-    return Map.of(
-        Phase.EXECUTION, HttpCall.newBuilder("/do").async(true).build(),
-        Phase.COMPENSATION, HttpCall.newBuilder("/undo").build());
-  }
-
-  @Test
-  void toStep_asyncPhaseWithoutCallbackProvider_throwsSagaDefinitionException() {
-    // An async step with no callback URL provider configured cannot be provisioned — fail fast at
-    // plan build rather than parking a saga that could never be completed. The step-scoped code,
-    // with the step name as a real metadata field: this site knows the step but not the saga, so
-    // INVALID_DEFINITION would force it to fake the required saga_name.
-    HttpEndpoint endpoint = HttpEndpoint.create(config("http://svc:8080"));
-
-    assertThatThrownBy(() -> endpoint.toStep("debit", asyncSagaPhases()))
-        .isInstanceOfSatisfying(
-            SagaDefinitionException.class,
-            e -> {
-              assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.INVALID_STEP_DEFINITION);
-              assertThat(e.getMetadata()).containsEntry("step_name", "debit");
-            });
-  }
-
-  @Test
-  void toStep_asyncPhaseWithCallbackProvider_succeeds() {
-    HttpEndpoint endpoint =
-        HttpEndpoint.create(config("http://svc:8080"), (sagaId, step) -> "http://cb/x");
-
-    assertThatCode(() -> endpoint.toStep("debit", asyncSagaPhases())).doesNotThrowAnyException();
   }
 
   @Test
@@ -122,7 +76,6 @@ class HttpEndpointTest {
     try (HttpEndpoint endpoint = HttpEndpoint.create(config("http://account-svc:8080"))) {
       // Act
       SagaHttpClient client = endpoint.sagaHttpClient();
-      endpoint.toStep("debit", SAGA_PHASES); // returns a step backed by the shared adapter
 
       // Assert — the SagaHttpClient, the declarative transport adapter, and the endpoint all ride
       // the very same HttpExchange instance (and therefore the same policy).
@@ -157,30 +110,6 @@ class HttpEndpointTest {
     try (HttpEndpoint endpoint = HttpEndpoint.create(config)) {
       // Assert
       assertThat(endpoint.exchange().policy().maxBodyBytes()).isEqualTo(4096);
-    }
-  }
-
-  @Test
-  void toStep_withSagaPhases_returnsNamedStep() {
-    // Arrange
-    try (HttpEndpoint endpoint = HttpEndpoint.create(config("http://account-svc:8080"))) {
-      // Act
-      Step step = endpoint.toStep("debit", SAGA_PHASES);
-
-      // Assert
-      assertThat(step.getName()).isEqualTo("debit");
-    }
-  }
-
-  @Test
-  void toTccStep_withTccPhases_returnsNamedTccStep() {
-    // Arrange
-    try (HttpEndpoint endpoint = HttpEndpoint.create(config("http://booking-svc:8080"))) {
-      // Act
-      TccStep step = endpoint.toTccStep("seat", TCC_PHASES);
-
-      // Assert
-      assertThat(step.getName()).isEqualTo("seat");
     }
   }
 

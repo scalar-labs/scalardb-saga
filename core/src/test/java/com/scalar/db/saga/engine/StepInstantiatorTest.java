@@ -11,6 +11,7 @@ import com.scalar.db.saga.definition.HttpCall;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.definition.SagaDefinition.StepDefinition;
 import com.scalar.db.saga.exception.SagaDefinitionException;
+import com.scalar.db.saga.transport.HttpEndpointManager;
 import com.scalar.db.saga.transport.HttpServiceConfig;
 import java.util.List;
 import java.util.Map;
@@ -18,7 +19,7 @@ import org.junit.jupiter.api.Test;
 
 class StepInstantiatorTest {
 
-  private static final HttpEndpointRegistry EMPTY_ENDPOINTS = HttpEndpointRegistry.create(Map.of());
+  private static final HttpEndpointManager EMPTY_ENDPOINTS = HttpEndpointManager.create(Map.of());
 
   @Test
   void instantiate_classStep_resolvesViaStepResolver() {
@@ -49,8 +50,8 @@ class StepInstantiatorTest {
   @Test
   void instantiate_declarativeSagaStep_resolvesToStep() {
     // Arrange — an HTTP endpoint is registered for the step's service
-    HttpEndpointRegistry endpoints =
-        HttpEndpointRegistry.create(
+    HttpEndpointManager endpoints =
+        HttpEndpointManager.create(
             Map.of(
                 "account",
                 new HttpServiceConfig("http://account-svc:8080", List.of(), -1, null, Map.of())));
@@ -67,8 +68,8 @@ class StepInstantiatorTest {
   @Test
   void instantiate_declarativeTccStep_resolvesToTccStep() {
     // Arrange
-    HttpEndpointRegistry endpoints =
-        HttpEndpointRegistry.create(
+    HttpEndpointManager endpoints =
+        HttpEndpointManager.create(
             Map.of(
                 "booking",
                 new HttpServiceConfig("http://booking-svc:8080", List.of(), -1, null, Map.of())));
@@ -85,8 +86,8 @@ class StepInstantiatorTest {
   @Test
   void instantiate_declarativeStepNotExpectedType_throwsSagaDefinitionException() {
     // Arrange — the declarative adapter produces a Step, but an unexpected type is requested
-    HttpEndpointRegistry endpoints =
-        HttpEndpointRegistry.create(
+    HttpEndpointManager endpoints =
+        HttpEndpointManager.create(
             Map.of(
                 "account",
                 new HttpServiceConfig("http://account-svc:8080", List.of(), -1, null, Map.of())));
@@ -108,6 +109,79 @@ class StepInstantiatorTest {
     // Act & Assert
     assertThatThrownBy(
             () -> instantiator.instantiate(declarativeSagaStep("debit", "missing"), Step.class))
+        .isInstanceOf(SagaDefinitionException.class);
+  }
+
+  @Test
+  void httpClient_soleEndpointRegistered_returnsClient() {
+    // Arrange — exactly one endpoint, so the unnamed lookup is unambiguous
+    HttpEndpointManager endpoints =
+        HttpEndpointManager.create(
+            Map.of(
+                "account",
+                new HttpServiceConfig("http://account-svc:8080", List.of(), -1, null, Map.of())));
+    StepInstantiator instantiator =
+        new StepInstantiator((name, className, ctx) -> noopStep(name), endpoints);
+
+    // Act & Assert
+    assertThat(instantiator.httpClient()).isNotNull();
+  }
+
+  @Test
+  void httpClient_noEndpointRegistered_throwsSagaDefinitionException() {
+    // Arrange
+    StepInstantiator instantiator =
+        new StepInstantiator((name, className, ctx) -> noopStep(name), EMPTY_ENDPOINTS);
+
+    // Act & Assert
+    assertThatThrownBy(instantiator::httpClient).isInstanceOf(SagaDefinitionException.class);
+  }
+
+  @Test
+  void httpClient_multipleEndpointsRegistered_throwsSagaDefinitionException() {
+    // Arrange — with two endpoints the unnamed lookup is ambiguous; @Named must select one
+    HttpEndpointManager endpoints =
+        HttpEndpointManager.create(
+            Map.of(
+                "account",
+                new HttpServiceConfig("http://account-svc:8080", List.of(), -1, null, Map.of()),
+                "payment",
+                new HttpServiceConfig("http://payment-svc:8080", List.of(), -1, null, Map.of())));
+    StepInstantiator instantiator =
+        new StepInstantiator((name, className, ctx) -> noopStep(name), endpoints);
+
+    // Act & Assert
+    assertThatThrownBy(instantiator::httpClient).isInstanceOf(SagaDefinitionException.class);
+  }
+
+  @Test
+  void httpClient_registeredNameGiven_returnsClient() {
+    // Arrange
+    HttpEndpointManager endpoints =
+        HttpEndpointManager.create(
+            Map.of(
+                "account",
+                new HttpServiceConfig("http://account-svc:8080", List.of(), -1, null, Map.of())));
+    StepInstantiator instantiator =
+        new StepInstantiator((name, className, ctx) -> noopStep(name), endpoints);
+
+    // Act & Assert
+    assertThat(instantiator.httpClient("account")).isNotNull();
+  }
+
+  @Test
+  void httpClient_unknownNameGiven_throwsSagaDefinitionException() {
+    // Arrange
+    HttpEndpointManager endpoints =
+        HttpEndpointManager.create(
+            Map.of(
+                "account",
+                new HttpServiceConfig("http://account-svc:8080", List.of(), -1, null, Map.of())));
+    StepInstantiator instantiator =
+        new StepInstantiator((name, className, ctx) -> noopStep(name), endpoints);
+
+    // Act & Assert
+    assertThatThrownBy(() -> instantiator.httpClient("payment"))
         .isInstanceOf(SagaDefinitionException.class);
   }
 
