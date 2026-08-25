@@ -224,8 +224,11 @@ final class HttpExchange {
     try {
       future = client.sendAsync(httpRequest, limitedBytes(maxBodyBytes));
     } catch (RejectedExecutionException e) {
-      // A submission rejected by a shut-down client (a retirement race: this exchange resolved
-      // before the swap, submitted after) never left the process — proven pre-send, retryable.
+      // A submission the client refused at the door: in practice a caller-supplied client whose
+      // executor is saturated or shut down. Retirement does not land here; a client shut down by
+      // a swap still accepts the submission and fails the future with IOException (observed on
+      // JDK 21), and the pre-send retired check above covers post-retirement submissions anyway.
+      // The rejected request never left the process — proven pre-send, retryable.
       throw new HttpCallException(
           "HTTP client rejected the request (shut down): " + uri, e, true, true);
     }
