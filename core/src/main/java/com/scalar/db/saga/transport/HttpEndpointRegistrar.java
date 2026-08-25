@@ -45,6 +45,11 @@ public interface HttpEndpointRegistrar {
    * reuse / rotate / retire semantics and the failure guarantee described on this interface.
    *
    * @param services the complete new endpoint set (not a delta)
+   * @throws IllegalStateException if the backing endpoint set is already closed — the case a
+   *     hot-reload caller racing engine shutdown (a config watcher firing while the orchestrator
+   *     closes) must expect; nothing is swapped
+   * @throws NullPointerException if {@code services}, a service name, or a config is {@code null};
+   *     rejected up front, before anything is built, retired, or rotated
    */
   void swapHttpEndpoints(Map<String, HttpServiceConfig> services);
 }

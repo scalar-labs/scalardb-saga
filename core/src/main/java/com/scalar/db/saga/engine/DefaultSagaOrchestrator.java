@@ -161,6 +161,10 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * See {@link HttpEndpointRegistrar} for the swap semantics — reuse on unchanged topology,
    * in-place header rotation, graceful retirement — and the embedded-mode contract: a class step's
    * injected {@code SagaHttpClient} is pinned when its plan is built and is NOT rebound by a swap.
+   *
+   * <p>The returned registrar shares this orchestrator's lifecycle: a swap applied after {@link
+   * #close()} throws {@link IllegalStateException}, so a hot-reload caller racing shutdown must be
+   * prepared for it.
    */
   public HttpEndpointRegistrar httpEndpointRegistrar() {
     return engine.httpEndpointRegistrar();
