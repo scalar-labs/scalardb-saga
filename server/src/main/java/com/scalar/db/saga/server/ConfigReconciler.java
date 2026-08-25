@@ -229,8 +229,11 @@ final class ConfigReconciler {
     }
 
     // 4. Status + audit. The INFO apply line is the audit record: names and versions only, never
-    // values.
-    status = new ReloadStatus(servicesSha, definitionsSha, now, null);
+    // values. A pass that found nothing to change keeps the previous applied timestamp: it
+    // verified the applied state, it did not apply anything.
+    Instant appliedAt =
+        serviceChanges.isEmpty() && definitionChanges.isEmpty() ? status.appliedAt() : now;
+    status = new ReloadStatus(servicesSha, definitionsSha, appliedAt, null);
     if (lastFailureSignature != null) {
       logger.info("Config reload recovered; the candidate set applied cleanly");
       lastFailureSignature = null;

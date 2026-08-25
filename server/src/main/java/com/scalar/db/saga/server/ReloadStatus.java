@@ -16,7 +16,8 @@ import org.jspecify.annotations.Nullable;
  *
  * @param appliedServicesSha256 hash of the applied service files (name-keyed, raw bytes)
  * @param appliedDefinitionsSha256 hash of the applied definition files (name-keyed, raw bytes)
- * @param appliedAt when the applied state last changed (or was verified at boot)
+ * @param appliedAt when the applied state last changed; a pass that finds nothing to change
+ *     verifies the applied state without advancing this
  * @param rejection the most recent rejection since the last successful apply, or {@code null}
  */
 record ReloadStatus(

@@ -711,6 +711,23 @@ class ConfigReconcilerTest {
     }
 
     @Test
+    void run_noOpPass_keepsThePreviousAppliedTimestamp() throws IOException {
+      // appliedAt answers "when did this replica last apply a change", so routine verification
+      // must not masquerade as an apply.
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      ConfigReconciler pass = pass();
+      pass.run();
+      Instant appliedAt = pass.status().appliedAt();
+
+      // Act — a pass over unchanged files
+      pass.run();
+
+      // Assert
+      assertThat(pass.status().appliedAt()).isEqualTo(appliedAt);
+    }
+
+    @Test
     void run_vanishedDefinitionFile_warnsThatDeletionRetiresNothing() throws IOException {
       // Arrange — two definitions so the empty-transition guard does not fire; one file vanishes
       writeService("account", "base_url=http://account:8080\n");
