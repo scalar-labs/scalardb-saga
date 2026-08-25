@@ -308,6 +308,76 @@ class HttpEndpointManagerTest {
       }
     }
 
+    // The next three tests hold baseUrl fixed and change exactly one other topology component, so
+    // each conjunct of HttpEndpoint.sameTopology is pinned as a swap trigger on its own. If one
+    // were dropped, the swap would silently reuse the old endpoint and the new value would never
+    // take effect — for allowedHosts that means a tightened SSRF allowlist being ignored.
+
+    @Test
+    void swapHttpEndpoints_allowedHostsOnlyChange_replacesEndpointAndRetiresOld() {
+      // Arrange — allow-all to start
+      HttpEndpointManager manager = managerOf("svc", config("http://svc:8080", Map.of()));
+      HttpEndpoint before = manager.endpointOrNull("svc");
+
+      // Act — tighten the SSRF allowlist; everything else unchanged
+      manager.swapHttpEndpoints(
+          Map.of(
+              "svc", new HttpServiceConfig("http://svc:8080", List.of("svc"), -1, null, Map.of())));
+
+      // Assert
+      assertThat(manager.endpointOrNull("svc")).isNotSameAs(before);
+      assertThat(manager.retiredCount()).isEqualTo(1);
+      manager.close();
+    }
+
+    @Test
+    void swapHttpEndpoints_maxBodyBytesOnlyChange_replacesEndpointAndRetiresOld() {
+      // Arrange — default body cap to start
+      HttpEndpointManager manager = managerOf("svc", config("http://svc:8080", Map.of()));
+      HttpEndpoint before = manager.endpointOrNull("svc");
+
+      // Act — change only the body cap
+      manager.swapHttpEndpoints(
+          Map.of("svc", new HttpServiceConfig("http://svc:8080", List.of(), 1024, null, Map.of())));
+
+      // Assert
+      assertThat(manager.endpointOrNull("svc")).isNotSameAs(before);
+      assertThat(manager.retiredCount()).isEqualTo(1);
+      manager.close();
+    }
+
+    @Test
+    void swapHttpEndpoints_httpClientOnlyChange_replacesEndpointAndRetiresOld() throws Exception {
+      // Arrange — a caller-supplied client
+      HttpClient clientA = HttpClient.newBuilder().build();
+      HttpClient clientB = HttpClient.newBuilder().build();
+      HttpEndpointManager manager =
+          HttpEndpointManager.create(
+              Map.of(
+                  "svc",
+                  new HttpServiceConfig("http://svc:8080", List.of(), -1, clientA, Map.of())),
+              null);
+      HttpEndpoint before = manager.endpointOrNull("svc");
+      TransportAdapter oldAdapter = manager.resolve("svc");
+
+      // Act — an otherwise identical config carrying a different client instance; client equality
+      // is identity, so this is a topology change
+      manager.swapHttpEndpoints(
+          Map.of(
+              "svc", new HttpServiceConfig("http://svc:8080", List.of(), -1, clientB, Map.of())));
+
+      // Assert — the old endpoint was retired: a call through its stale adapter fails pre-send.
+      // The retired list is already empty, not still holding it: a caller-supplied client is
+      // never shut down here, so the retiree counts as terminated and the same swap sweeps it.
+      assertThat(manager.endpointOrNull("svc")).isNotSameAs(before);
+      HttpCall call = HttpCall.newBuilder("/x").method(HttpMethod.GET).build();
+      Throwable thrown = catchThrowable(() -> oldAdapter.call(call, CTX, "s"));
+      assertThat(thrown).isInstanceOf(TransportException.class);
+      assertThat(((TransportException) thrown).isRetryable()).isTrue();
+      assertThat(manager.retiredCount()).isZero();
+      manager.close();
+    }
+
     @Test
     void swapHttpEndpoints_serviceRemoved_resolveMissesRetryably() {
       // Arrange
