@@ -61,10 +61,10 @@ import org.slf4j.LoggerFactory;
  * between two replicas) is reported distinctly: it self-heals only when an operator bumps the
  * version.
  *
- * <p>Boot equivalence: the boot caller seeds {@code appliedServices} from the endpoints the
- * orchestrator was built with — parsed by the same {@link ServiceFileParser} from the same
- * directory — so the first pass verifies rather than re-applies, and any set a reload accepted also
- * cold-boots a fresh replica.
+ * <p>Boot equivalence: boot is a pass. The orchestrator is built with no endpoints and the first
+ * pass installs them, so this class is the only translation from a service file to a live endpoint,
+ * and "any set a reload accepted also cold-boots a fresh replica" holds by construction rather than
+ * by two paths agreeing forever.
  */
 @ThreadSafe
 final class ConfigReconciler {
@@ -104,13 +104,19 @@ final class ConfigReconciler {
   /** A parsed candidate definition with its origin file, for error attribution. */
   private record CandidateDefinition(String fileName, SagaDefinition definition) {}
 
-  /** Thrown internally when a pass is rejected; carries the aggregated reason. */
+  /**
+   * Thrown internally when a pass is rejected; carries the aggregated reason and whether clearing
+   * it needs the mounted files to change (see {@link
+   * ReloadStatus.Rejection#operatorActionRequired}).
+   */
   private static final class PassRejectedException extends RuntimeException {
     final String candidateSha256;
+    final boolean operatorActionRequired;
 
-    PassRejectedException(String message, String candidateSha256) {
+    PassRejectedException(String message, String candidateSha256, boolean operatorActionRequired) {
       super(message);
       this.candidateSha256 = candidateSha256;
+      this.operatorActionRequired = operatorActionRequired;
     }
   }
 
@@ -127,7 +133,7 @@ final class ConfigReconciler {
     this.registrar = registrar;
     this.definitionRegistrar = definitionRegistrar;
     this.appliedServices = Map.of();
-    this.status = new ReloadStatus("(not yet applied)", "(not yet applied)", Instant.EPOCH, null);
+    this.status = ReloadStatus.initial();
   }
 
   /** The number of definitions currently applied; the boot caller's zero-definitions guard. */
@@ -189,7 +195,8 @@ final class ConfigReconciler {
     if (!errors.isEmpty()) {
       throw new PassRejectedException(
           "Configuration rejected (" + errors.size() + " error(s)):" + describeProblems(errors),
-          candidateSha);
+          candidateSha,
+          true);
     }
 
     warnOnVanishedDefinitions(candidateDefinitions);
@@ -208,7 +215,8 @@ final class ConfigReconciler {
       } catch (RuntimeException e) {
         throw new PassRejectedException(
             "Applying the service set failed (will retry next pass): " + e.getMessage(),
-            candidateSha);
+            candidateSha,
+            false);
       }
       appliedServices = Map.copyOf(candidateServices);
       // The swap is live from here. Advance the applied-services hash immediately, before any
@@ -216,7 +224,12 @@ final class ConfigReconciler {
       // that still named the previous service set would describe endpoints this replica no longer
       // has. Any rejection already on the status stays until this pass concludes.
       status =
-          new ReloadStatus(servicesSha, status.appliedDefinitionsSha256(), now, status.rejection());
+          new ReloadStatus(
+              servicesSha,
+              status.appliedDefinitionsSha256(),
+              now,
+              status.lastPassAt(),
+              status.rejection());
     }
 
     // 3. APPLY definitions, advancing the applied entry per definition so a mid-apply failure
@@ -237,7 +250,7 @@ final class ConfigReconciler {
     // verified the applied state, it did not apply anything.
     Instant appliedAt =
         serviceChanges.isEmpty() && definitionChanges.isEmpty() ? status.appliedAt() : now;
-    status = new ReloadStatus(servicesSha, definitionsSha, appliedAt, null);
+    status = new ReloadStatus(servicesSha, definitionsSha, appliedAt, now, null);
     if (lastFailureSignature != null) {
       logger.info("Config reload recovered; the candidate set applied cleanly");
       lastFailureSignature = null;
@@ -256,6 +269,7 @@ final class ConfigReconciler {
       List<String> definitionChanges,
       String candidateSha) {
     List<String> failures = new ArrayList<>();
+    boolean anyPermanent = false;
     for (CandidateDefinition candidate : candidateDefinitions.values()) {
       SagaDefinition definition = candidate.definition();
       String name = definition.getName();
@@ -270,7 +284,9 @@ final class ConfigReconciler {
         // above all one whose conflict is permanent — must not decide the fate of the rest:
         // abandoning the loop here would let it block every definition that sorts after it, on
         // every pass, for as long as the conflict lasts.
-        failures.add(describeRegistrationFailure(candidate, e));
+        boolean permanent = isPermanentConflict(e);
+        anyPermanent |= permanent;
+        failures.add(describeRegistrationFailure(candidate, e, permanent));
         continue;
       }
       appliedDefinitions.put(name, new AppliedDefinition(candidate.fileName(), definition));
@@ -283,21 +299,30 @@ final class ConfigReconciler {
     if (!failures.isEmpty()) {
       throw new PassRejectedException(
           "Registering " + failures.size() + " definition(s) failed:" + describeProblems(failures),
-          candidateSha);
+          candidateSha,
+          anyPermanent);
     }
   }
 
   /**
-   * One registration failure, naming the definition and the file it came from. A permanent
-   * version-content conflict is called out as such: every other failure is worth retrying next
-   * pass, while this one waits for an operator to bump the version.
+   * Whether a registration failure is one retrying cannot fix. A version whose stored content
+   * differs from the file's stays in conflict for as long as both stand, so only an operator
+   * bumping the version resolves it; every other failure — a store outage above all — is worth
+   * another pass.
+   */
+  private static boolean isPermanentConflict(RuntimeException e) {
+    return e instanceof SagaDefinitionException definitionException
+        && definitionException.getErrorCode()
+            == SagaErrorCode.SAGA_DEFINITION_VERSION_CONTENT_CONFLICT;
+  }
+
+  /**
+   * One registration failure, naming the definition and the file it came from, and saying in the
+   * text whether retrying can fix it. The status carries the same distinction as a field, so the
+   * prose is for the operator reading the log, not for anything to match on.
    */
   private static String describeRegistrationFailure(
-      CandidateDefinition candidate, RuntimeException e) {
-    boolean permanent =
-        e instanceof SagaDefinitionException definitionException
-            && definitionException.getErrorCode()
-                == SagaErrorCode.SAGA_DEFINITION_VERSION_CONTENT_CONFLICT;
+      CandidateDefinition candidate, RuntimeException e, boolean permanent) {
     return "definition "
         + candidate.definition().getName()
         + " "
@@ -782,10 +807,11 @@ final class ConfigReconciler {
       logger.warn("Config reload rejected: {}", signature);
       lastFailureSignature = signature;
     }
+    Instant now = Instant.now(reloadConfig.clock());
     status =
         status.withRejection(
-            new ReloadStatus.Rejection(
-                e.candidateSha256, signature, Instant.now(reloadConfig.clock())));
+            new ReloadStatus.Rejection(e.candidateSha256, signature, now, e.operatorActionRequired),
+            now);
   }
 
   // ── Hashing ──────────────────────────────────────────────────────────────

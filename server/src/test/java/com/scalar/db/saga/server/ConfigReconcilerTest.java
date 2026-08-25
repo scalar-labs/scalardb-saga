@@ -13,7 +13,9 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
@@ -47,6 +49,39 @@ class ConfigReconcilerTest {
         reloadConfig,
         definitionsDir,
         asyncCallbacksConfigured,
+        () -> registrar,
+        d -> definitionRegistrar.accept(d));
+  }
+
+  /** A clock a test can step, for the timestamps a fixed clock cannot tell apart. */
+  private static final class SteppingClock extends Clock {
+    private Instant instant = NOW;
+
+    void advance(Duration amount) {
+      instant = instant.plus(amount);
+    }
+
+    @Override
+    public ZoneId getZone() {
+      return ZoneOffset.UTC;
+    }
+
+    @Override
+    public Clock withZone(ZoneId zone) {
+      return this;
+    }
+
+    @Override
+    public Instant instant() {
+      return instant;
+    }
+  }
+
+  private ConfigReconciler reconciler(Clock clock) {
+    return new ConfigReconciler(
+        new ReloadConfig(servicesDir, 10, secretsDir, List.of(), clock),
+        definitionsDir,
+        false,
         () -> registrar,
         d -> definitionRegistrar.accept(d));
   }
@@ -760,7 +795,7 @@ class ConfigReconcilerTest {
                 });
       }
       // The definitions hash stays behind: the candidate set is not what is applied.
-      assertThat(reconciler.status().appliedDefinitionsSha256()).isEqualTo("(not yet applied)");
+      assertThat(reconciler.status().appliedDefinitionsSha256()).isNull();
     }
 
     @Test
@@ -856,6 +891,8 @@ class ConfigReconcilerTest {
       }
       ReloadStatus.Rejection rejection = requireNonNull(reconciler.status().rejection());
       assertThat(rejection.reason()).contains("permanent");
+      // The same distinction as a field, so an endpoint never has to match on the prose
+      assertThat(rejection.operatorActionRequired()).isTrue();
     }
   }
 
@@ -1006,21 +1043,80 @@ class ConfigReconcilerTest {
     }
 
     @Test
-    void run_noOpPass_keepsThePreviousAppliedTimestamp() throws IOException {
+    void run_noOpPass_keepsAppliedAtButAdvancesLastPassAt() throws IOException {
       // appliedAt answers "when did this replica last apply a change", so routine verification
-      // must not masquerade as an apply.
+      // must not masquerade as an apply. lastPassAt answers the other question — is anything still
+      // verifying? — and a wedged pass thread is exactly a replica where it stops advancing while
+      // everything else looks current.
       // Arrange
+      SteppingClock clock = new SteppingClock();
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("saga.json", "order-saga", "1.0", "account");
-      ConfigReconciler reconciler = reconciler();
+      ConfigReconciler reconciler = reconciler(clock);
       reconciler.run();
       Instant appliedAt = reconciler.status().appliedAt();
+      clock.advance(Duration.ofMinutes(5));
 
       // Act — a pass over unchanged files
       reconciler.run();
 
       // Assert
       assertThat(reconciler.status().appliedAt()).isEqualTo(appliedAt);
+      assertThat(reconciler.status().lastPassAt()).isEqualTo(NOW.plus(Duration.ofMinutes(5)));
+    }
+
+    @Test
+    void status_beforeTheFirstPass_isEmptyRatherThanSentinelled() {
+      // Act
+      ReloadStatus status = reconciler().status();
+
+      // Assert — an endpoint serializing this must not publish a hash or a timestamp that was
+      // never real
+      assertThat(status.appliedServicesSha256()).isNull();
+      assertThat(status.appliedDefinitionsSha256()).isNull();
+      assertThat(status.appliedAt()).isNull();
+      assertThat(status.lastPassAt()).isNull();
+      assertThat(status.rejection()).isNull();
+    }
+
+    @Test
+    void run_rejectedPass_advancesLastPassAtAndRecordsWhoMustAct() throws IOException {
+      // A rejection is a concluded pass: the thread came back. Nothing else on the status moves,
+      // so without lastPassAt a rejecting replica and a wedged one look alike.
+      // Arrange
+      SteppingClock clock = new SteppingClock();
+      writeService("account", "base_url=   \n");
+      ConfigReconciler reconciler = reconciler(clock);
+      clock.advance(Duration.ofMinutes(2));
+
+      // Act
+      assertThat(reconciler.run()).isFalse();
+
+      // Assert — a malformed file waits for an operator; retrying it forever changes nothing
+      ReloadStatus status = reconciler.status();
+      assertThat(status.lastPassAt()).isEqualTo(NOW.plus(Duration.ofMinutes(2)));
+      assertThat(requireNonNull(status.rejection()).operatorActionRequired()).isTrue();
+    }
+
+    @Test
+    void run_transientRegistrationFailure_marksTheRejectionAsSelfHealing() throws IOException {
+      // A store outage clears on its own, and the next pass retries the same candidate set. An
+      // alert that woke someone for this would be waking them for nothing.
+      // Arrange
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      definitionRegistrar =
+          definition -> {
+            throw new IllegalStateException("store unavailable");
+          };
+      ConfigReconciler reconciler = reconciler();
+
+      // Act
+      assertThat(reconciler.run()).isFalse();
+
+      // Assert
+      assertThat(requireNonNull(reconciler.status().rejection()).operatorActionRequired())
+          .isFalse();
     }
 
     @Test
