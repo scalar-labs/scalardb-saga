@@ -79,8 +79,13 @@ final class ConfigReconciler {
   // ── Inter-pass state (guarded by the pass serialization) ─────────────────
 
   private Map<String, ServiceConfig> appliedServices;
-  private final Map<String, AppliedDefinition> appliedDefinitions = new HashMap<>();
-  // Parse cache keyed by file name: an unchanged file (same content hash) is not re-parsed.
+  // Name-ordered so a pass that warns about several vanished definitions warns in a stable order.
+  private final Map<String, AppliedDefinition> appliedDefinitions = new TreeMap<>();
+  // Parse cache keyed by file name: an unchanged file (same content hash) is not re-parsed. It
+  // saves more than the parse — a hit returns the SAME SagaDefinition instance appliedDefinitions
+  // holds, so the steady-state comparison below settles on reference equality instead of deep
+  // walking the step and CallSpec graph of every definition, every pass. Anything that copies a
+  // cached definition on the way out would keep the cache and lose that.
   private final Map<String, CachedParse> definitionParseCache = new HashMap<>();
   // Definitions whose files vanished while their registered version stays startable in the store,
   // keyed by name → the services they reference. Deleting a file retires nothing, so these
@@ -610,11 +615,22 @@ final class ConfigReconciler {
     }
   }
 
+  /**
+   * Warns when a definition's file is gone while its registered version stays startable.
+   *
+   * <p>Best effort by construction, and worth knowing exactly how: the applied set is rebuilt from
+   * the directory at every boot, so only a process that observes both the definition and its
+   * deletion can notice one. A replica that starts after the file was already deleted sees a
+   * directory that simply never contained it, and never warns. Hot reload is what makes this the
+   * normal case rather than the exception — a config-only change no longer restarts anything — but
+   * a rolling restart between the two edits still silences the warning, and does so per replica.
+   * The retirement marker that makes deletion mean something replaces this mechanism rather than
+   * patching it.
+   */
   private void warnOnVanishedDefinitions(Map<String, CandidateDefinition> candidateDefinitions) {
     // A file that came back is a candidate again, and validation covers it from here.
     vanishedDefinitionServices.keySet().removeIf(candidateDefinitions::containsKey);
-    for (Map.Entry<String, AppliedDefinition> entry :
-        new TreeMap<>(appliedDefinitions).entrySet()) {
+    for (Map.Entry<String, AppliedDefinition> entry : appliedDefinitions.entrySet()) {
       String name = entry.getKey();
       if (!candidateDefinitions.containsKey(name)) {
         // Remember what it referenced before the applied entry is dropped below: the registered
