@@ -61,6 +61,21 @@ final class ServiceFileParser {
   private static final String BASE_URL_KEY = "base_url";
   private static final String ALLOWED_HOSTS_KEY = "allowed_hosts";
   private static final String MAX_BODY_BYTES_KEY = "max_body_bytes";
+
+  /**
+   * The largest {@code max_body_bytes} a service file may claim, 64 MiB against a 1 MiB default.
+   *
+   * <p>The knob raises a bound the coordinator holds on its own heap: a response is buffered whole
+   * before a step sees it, and every in-flight call to that service holds one. Without a ceiling a
+   * service file sets it to {@code Long.MAX_VALUE} and the coordinator's memory becomes whatever a
+   * participant chooses to return — a service file taking the daemon down for every saga, not only
+   * for its own. The ceiling is deliberately generous: it is there to keep the bound a bound, not
+   * to size responses. A participant with more than this to hand back should write it somewhere and
+   * return a reference, because 64 MiB times the calls in flight is already more heap than a
+   * coordinator should spend on bodies it only passes through.
+   */
+  static final long MAX_BODY_BYTES_CEILING = 64L * 1024 * 1024;
+
   private static final String HEADER_KEY_PREFIX = "header.";
 
   /**
@@ -200,6 +215,20 @@ final class ServiceFileParser {
     return files;
   }
 
+  /** Rejects a {@code max_body_bytes} above {@link #MAX_BODY_BYTES_CEILING}. */
+  private static long requireWithinBodyCeiling(long maxBodyBytes, String qualifiedKey) {
+    if (maxBodyBytes > MAX_BODY_BYTES_CEILING) {
+      throw new IllegalArgumentException(
+          "'"
+              + qualifiedKey
+              + "' must be <= "
+              + MAX_BODY_BYTES_CEILING
+              + "; the coordinator buffers a whole response per in-flight call, so this bound is"
+              + " the daemon's own memory, not the service's.");
+    }
+    return maxBodyBytes;
+  }
+
   /**
    * Parses one service file from bytes already read, so a caller that also hashes the file hashes
    * and parses the very same snapshot. Reading twice would let a writer change the file in between,
@@ -265,8 +294,10 @@ final class ServiceFileParser {
         }
         case MAX_BODY_BYTES_KEY ->
             maxBodyBytes =
-                SagaServerConfig.parseBoundedLong(
-                    resolve(secrets, raw, qualifiedKey), qualifiedKey, 0L, 1L);
+                requireWithinBodyCeiling(
+                    SagaServerConfig.parseBoundedLong(
+                        resolve(secrets, raw, qualifiedKey), qualifiedKey, 0L, 1L),
+                    qualifiedKey);
         default -> {
           if (!key.startsWith(HEADER_KEY_PREFIX)) {
             throw new IllegalArgumentException(

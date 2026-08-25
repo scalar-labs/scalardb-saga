@@ -245,6 +245,36 @@ class ServiceFileParserTest {
     }
 
     @Test
+    void parseFile_maxBodyBytesAboveTheCeiling_throwsIllegalArgumentException() throws IOException {
+      // Without a ceiling a service file sets this to Long.MAX_VALUE and the coordinator's heap
+      // becomes whatever a participant returns — one service file taking the daemon down for
+      // every saga, not only for its own.
+      // Arrange
+      writeService(
+          "account.properties",
+          "base_url=http://a:1\nmax_body_bytes="
+              + (ServiceFileParser.MAX_BODY_BYTES_CEILING + 1)
+              + "\n");
+
+      // Act & Assert
+      assertThatThrownBy(ServiceFileParserTest.this::parse)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("max_body_bytes");
+    }
+
+    @Test
+    void parseFile_maxBodyBytesAtTheCeiling_isAccepted() throws IOException {
+      // Arrange
+      writeService(
+          "account.properties",
+          "base_url=http://a:1\nmax_body_bytes=" + ServiceFileParser.MAX_BODY_BYTES_CEILING + "\n");
+
+      // Act & Assert
+      assertThat(requireNonNull(parse().get("account")).maxBodyBytes())
+          .isEqualTo(ServiceFileParser.MAX_BODY_BYTES_CEILING);
+    }
+
+    @Test
     void parseFile_maxBodyBytesZero_throwsIllegalArgumentException() throws IOException {
       writeService("account.properties", "base_url=http://account-svc:8080\nmax_body_bytes=0\n");
 

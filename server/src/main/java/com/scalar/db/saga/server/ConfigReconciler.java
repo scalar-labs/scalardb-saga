@@ -398,6 +398,13 @@ final class ConfigReconciler {
               + " service(s) are applied — a deliberate wind-down to zero goes through a restart,"
               + " so this is treated as a mount or packaging failure and rejected.");
     }
+    // A truncation detector, not an egress control. It compares against what is applied, so it
+    // catches the accident it is for — a file edited down to nothing, an allowed_hosts line lost in
+    // a merge — and not a service deleted in one pass and recreated allow-all in the next, which
+    // presents as a service that never had an allowlist. Retaining a removed service's allowlist
+    // forever would close that at the cost of trapping the reuse of a service name behind a
+    // restart. The control that holds regardless of pass sequence is the operator's
+    // egress.allowed_hosts_ceiling; this is the guard for operators who set no ceiling.
     for (Map.Entry<String, ServiceConfig> entry : candidates.entrySet()) {
       ServiceConfig applied = appliedServices.get(entry.getKey());
       if (applied != null

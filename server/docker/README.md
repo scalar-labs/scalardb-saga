@@ -225,7 +225,15 @@ Operational notes, learned from how Kubernetes actually delivers files:
 - **Trust model**: whoever can write the watched directories reshapes the daemon's egress within
   one interval, no restart — treat write access to them as operator-equivalent. `${file:...}`
   references in service files resolve only inside `secrets_root`, and
-  `egress.allowed_hosts_ceiling` bounds what any service file can authorize.
+  `egress.allowed_hosts_ceiling` bounds what any service file can authorize. Set the ceiling if
+  service files and `server.properties` have different authors: it is the only egress bound that
+  holds no matter what sequence of edits arrives. Without it, the reload rejects a service whose
+  `allowed_hosts` goes from restricted to empty — which catches the edit that loses the line, but
+  not a service deleted in one interval and recreated allow-all in the next.
+- **`max_body_bytes` is capped at 64 MiB per service**, against a 1 MiB default. The coordinator
+  buffers a whole response before a step sees it and holds one per in-flight call, so this is the
+  daemon's memory rather than the service's. A participant with more to hand back should write it
+  somewhere and return a reference.
 
 ## Graceful shutdown
 
