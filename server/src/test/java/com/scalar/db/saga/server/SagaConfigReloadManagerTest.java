@@ -17,7 +17,6 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
@@ -43,7 +42,7 @@ class SagaConfigReloadManagerTest {
 
   private ConfigReconciler pass(ReloadConfig config) {
     return new ConfigReconciler(
-        config, definitionsDir, false, Map.of(), () -> services -> {}, definition -> {});
+        config, definitionsDir, false, () -> services -> {}, definition -> {});
   }
 
   @Test
@@ -98,7 +97,6 @@ class SagaConfigReloadManagerTest {
             config,
             definitionsDir,
             false,
-            Map.of(),
             () -> {
               throw new Error("registrar blew up");
             },

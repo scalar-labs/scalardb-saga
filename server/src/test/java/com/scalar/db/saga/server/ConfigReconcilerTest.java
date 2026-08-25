@@ -37,22 +37,16 @@ class ConfigReconcilerTest {
   private Consumer<SagaDefinition> definitionRegistrar = definition -> registered.add(definition);
 
   private ConfigReconciler pass() {
-    return pass(Map.of());
+    return pass(false);
   }
 
-  private ConfigReconciler pass(Map<String, SagaServerConfig.ServiceConfig> seed) {
-    return pass(seed, false);
-  }
-
-  private ConfigReconciler pass(
-      Map<String, SagaServerConfig.ServiceConfig> seed, boolean asyncCallbacksConfigured) {
+  private ConfigReconciler pass(boolean asyncCallbacksConfigured) {
     ReloadConfig reloadConfig =
         new ReloadConfig(servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
     return new ConfigReconciler(
         reloadConfig,
         definitionsDir,
         asyncCallbacksConfigured,
-        seed,
         () -> registrar,
         d -> definitionRegistrar.accept(d));
   }
@@ -104,26 +98,6 @@ class ConfigReconcilerTest {
       assertThat(swaps.get(0)).containsOnlyKeys("account");
       assertThat(registered).hasSize(1);
       assertThat(registered.get(0).getName()).isEqualTo("order-saga");
-    }
-
-    @Test
-    void run_seededServicesUnchanged_swapsNothing() throws IOException {
-      // Arrange — the boot caller seeds the applied services with what the orchestrator was built
-      // from; a pass over the same files must verify, not re-apply.
-      writeService("account", "base_url=http://account:8080\n");
-      writeDefinition("saga.json", "order-saga", "1.0", "account");
-      Map<String, SagaServerConfig.ServiceConfig> seed =
-          Map.of(
-              "account",
-              new SagaServerConfig.ServiceConfig("http://account:8080", List.of(), 0L, Map.of()));
-
-      // Act
-      boolean applied = pass(seed).run();
-
-      // Assert — definitions registered, but no endpoint swap
-      assertThat(applied).isTrue();
-      assertThat(swaps).isEmpty();
-      assertThat(registered).hasSize(1);
     }
 
     @Test
@@ -412,12 +386,7 @@ class ConfigReconcilerTest {
               servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
       ConfigReconciler pass =
           new ConfigReconciler(
-              reloadConfig,
-              file,
-              false,
-              Map.of(),
-              () -> registrar,
-              d -> definitionRegistrar.accept(d));
+              reloadConfig, file, false, () -> registrar, d -> definitionRegistrar.accept(d));
 
       // Act & Assert
       assertThat(pass.run()).isFalse();
@@ -443,12 +412,7 @@ class ConfigReconcilerTest {
               servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
       ConfigReconciler pass =
           new ConfigReconciler(
-              reloadConfig,
-              link,
-              false,
-              Map.of(),
-              () -> registrar,
-              d -> definitionRegistrar.accept(d));
+              reloadConfig, link, false, () -> registrar, d -> definitionRegistrar.accept(d));
 
       // Act & Assert
       assertThat(pass.run()).isTrue();
@@ -520,7 +484,6 @@ class ConfigReconcilerTest {
               withCeiling,
               definitionsDir,
               false,
-              Map.of(),
               () -> registrar,
               d -> definitionRegistrar.accept(d));
 
@@ -580,7 +543,7 @@ class ConfigReconcilerTest {
       writeAsyncDefinition();
 
       // Act & Assert
-      assertThat(pass(Map.of(), true).run()).isTrue();
+      assertThat(pass(true).run()).isTrue();
       assertThat(registered).hasSize(1);
     }
 

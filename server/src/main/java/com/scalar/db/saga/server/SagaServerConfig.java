@@ -562,7 +562,6 @@ public final class SagaServerConfig {
   private final Properties rawProperties;
   private final @Nullable Path definitionsPath;
   private final ReloadConfig reloadConfig;
-  private final Map<String, ServiceConfig> services;
 
   /**
    * Parses every setting from the already secret-resolved {@code properties}, then cross-checks the
@@ -693,7 +692,6 @@ public final class SagaServerConfig {
     this.definitionsPath =
         parseOptionalPath(resolved.getProperty(DEFINITIONS_PATH_KEY), DEFINITIONS_PATH_KEY);
     this.reloadConfig = parseReloadConfig(resolved);
-    this.services = loadServices(reloadConfig);
     this.properties = applyStoreDefaults(copyOf(resolved));
     this.grpcMaxInboundMessageBytes = parseGrpcMaxInboundMessageBytes(this.properties);
     this.rawProperties = copyOf(raw);
@@ -1016,24 +1014,9 @@ public final class SagaServerConfig {
   }
 
   /**
-   * Loads the service set from {@code services_path} (one {@code <name>.properties} file per
-   * service), or none when the key is unset. Reading the directory here keeps {@code services()}
-   * the single source the server wires endpoints from, exactly as with the old prefixed keys.
-   */
-  private static Map<String, ServiceConfig> loadServices(ReloadConfig reloadConfig) {
-    Path servicesPath = reloadConfig.servicesPath();
-    if (servicesPath == null) {
-      return Map.of();
-    }
-    return ServiceFileParser.parseDirectory(
-        servicesPath,
-        new ServiceSecretResolver(reloadConfig.secretsRoot()),
-        reloadConfig.allowedHostsCeiling());
-  }
-
-  /**
    * One downstream service a declarative step can call: the base URL plus the outbound policy the
-   * engine applies to every request to it.
+   * engine applies to every request to it. Produced by {@link ServiceFileParser} from a service
+   * file; this class only points at the directory they live in.
    *
    * @param baseUrl the service base URL
    * @param allowedHosts the SSRF allowlist; empty allows any host
@@ -1332,18 +1315,6 @@ public final class SagaServerConfig {
   /** Returns the optional path to declarative saga definitions loaded at startup. */
   public Optional<Path> definitionsPath() {
     return Optional.ofNullable(definitionsPath);
-  }
-
-  /**
-   * Returns the configured {@code service name -> configuration} map, each registered as an HTTP
-   * endpoint a declarative step can call, loaded from the {@code services_path} directory (one
-   * {@code <name>.properties} file per service). Empty when {@code services_path} is unset. The map
-   * is unmodifiable and iterates in service-name order.
-   */
-  public Map<String, ServiceConfig> services() {
-    // An unmodifiable view rather than Map.copyOf: the keys were collected in sorted order, which
-    // copyOf would discard for an unspecified one.
-    return Collections.unmodifiableMap(services);
   }
 
   /**

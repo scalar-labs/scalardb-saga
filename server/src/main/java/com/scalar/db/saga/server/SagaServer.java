@@ -161,16 +161,14 @@ public final class SagaServer implements AutoCloseable {
     try {
       provider = SecurityProviderFactory.create(config);
       this.securityProvider = provider;
-      // Boot goes through the same pass reload uses: snapshot, validate (aggregated), apply.
-      // appliedServices is seeded with the endpoints the orchestrator was built from — parsed by
-      // the same ServiceFileParser from the same directory — so the first pass verifies rather
-      // than re-applies, and any set a reload accepted also cold-boots a fresh replica.
+      // Boot goes through the same pass reload uses: snapshot, validate (aggregated), apply. It is
+      // the only thing that installs endpoints, so "any set a reload accepted also cold-boots a
+      // fresh replica" holds by construction rather than by two paths agreeing.
       this.reconciler =
           new ConfigReconciler(
               config.reloadConfig(),
               config.definitionsPath().orElse(null),
               config.callbackBaseUrl().isPresent() && config.callbackSecret().isPresent(),
-              config.services(),
               orchestrator::httpEndpointRegistrar,
               orchestrator::register);
       reconciler.runOrThrow();
@@ -322,7 +320,9 @@ public final class SagaServer implements AutoCloseable {
         .maxTimelineEvents(config.detailMaxTimelineEvents())
         .recoveryConfig(config.recoveryConfig())
         .retentionConfig(config.retentionConfig());
-    config.services().forEach((name, service) -> addHttpEndpoint(builder, name, service));
+    // No endpoints here: the orchestrator is built with none, and the boot configuration pass
+    // installs them through the same swap a reload uses. One conversion from service file to live
+    // endpoint means a set that boots and a set that reloads cannot drift apart.
     // Enable async-callback provisioning only when both the callback base URL and secret are set;
     // otherwise no provider is wired and registering an async definition fails fast (in the
     // engine).
@@ -331,27 +331,6 @@ public final class SagaServer implements AutoCloseable {
           new HmacCallbackUrlProvider(
               config.callbackBaseUrl().get(), config.callbackSecret().get(), Clock.systemUTC()));
     }
-  }
-
-  /**
-   * Registers one configured service as an HTTP endpoint, applying the optional outbound policy.
-   * {@code allowedHosts} and {@code maxBodyBytes} are applied only when configured, so an unset key
-   * leaves the engine's own default in place rather than overwriting it with a sentinel. Visible
-   * for testing, like {@link #applyEngineSettings}.
-   */
-  static void addHttpEndpoint(
-      DefaultSagaOrchestrator.Builder builder,
-      String name,
-      SagaServerConfig.ServiceConfig service) {
-    DefaultSagaOrchestrator.Builder.HttpEndpointBuilder endpoint =
-        builder.httpEndpoint(name, service.baseUrl());
-    if (!service.allowedHosts().isEmpty()) {
-      endpoint.allowedHosts(service.allowedHosts().toArray(new String[0]));
-    }
-    if (service.maxBodyBytes() > 0) {
-      endpoint.maxBodyBytes(service.maxBodyBytes());
-    }
-    endpoint.defaultHeaders(service.headers()).add();
   }
 
   /**

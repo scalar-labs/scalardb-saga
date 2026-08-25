@@ -120,7 +120,6 @@ final class ConfigReconciler {
       ReloadConfig reloadConfig,
       @Nullable Path definitionsPath,
       boolean asyncCallbacksConfigured,
-      Map<String, ServiceConfig> seedAppliedServices,
       Supplier<HttpEndpointRegistrar> registrar,
       Consumer<SagaDefinition> definitionRegistrar) {
     this.reloadConfig = reloadConfig;
@@ -129,7 +128,7 @@ final class ConfigReconciler {
     this.secretResolver = new ServiceSecretResolver(reloadConfig.secretsRoot());
     this.registrar = registrar;
     this.definitionRegistrar = definitionRegistrar;
-    this.appliedServices = Map.copyOf(seedAppliedServices);
+    this.appliedServices = Map.of();
     this.status = new ReloadStatus("(not yet applied)", "(not yet applied)", Instant.EPOCH, null);
   }
 
