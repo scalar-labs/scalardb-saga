@@ -9,6 +9,7 @@ import com.scalar.db.saga.server.SagaServerConfig.ServiceConfig;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -27,8 +28,29 @@ class ServiceFileParserTest {
     return new ServiceSecretResolver(secretsDir);
   }
 
+  /**
+   * The live reading path, which is the reconciler's: walk the directory, read each file through
+   * the target the walk validated, parse those bytes. Going through it here is what keeps these
+   * hygiene tests covering the code that actually runs.
+   */
   private Map<String, ServiceConfig> parse() {
-    return ServiceFileParser.parseDirectory(servicesDir, secrets(), List.of());
+    return parse(servicesDir);
+  }
+
+  private Map<String, ServiceConfig> parse(Path directory) {
+    Map<String, ServiceConfig> services = new LinkedHashMap<>();
+    ServiceFileParser.listServiceFiles(directory)
+        .forEach(
+            (name, file) ->
+                services.put(
+                    name,
+                    ServiceFileParser.parseFile(
+                        name,
+                        file.fileName(),
+                        WatchedFiles.read(
+                            file.fileName(), file.target(), WatchedFiles.MAX_FILE_BYTES),
+                        secrets())));
+    return services;
   }
 
   private void writeService(String fileName, String content) throws IOException {
@@ -351,10 +373,7 @@ class ServiceFileParserTest {
 
     @Test
     void parseDirectory_missingDirectory_throwsIllegalArgumentException() {
-      assertThatThrownBy(
-              () ->
-                  ServiceFileParser.parseDirectory(
-                      servicesDir.resolve("nope"), secrets(), List.of()))
+      assertThatThrownBy(() -> parse(servicesDir.resolve("nope")))
           .isInstanceOf(IllegalArgumentException.class);
     }
 
@@ -450,7 +469,7 @@ class ServiceFileParserTest {
     void parseDirectory_oversizedServiceFile_throwsIllegalArgumentException() throws IOException {
       writeService(
           "account.properties",
-          "base_url=http://a:1\n# " + "x".repeat((int) ServiceFileParser.MAX_FILE_BYTES) + "\n");
+          "base_url=http://a:1\n# " + "x".repeat((int) WatchedFiles.MAX_FILE_BYTES) + "\n");
 
       assertThatThrownBy(ServiceFileParserTest.this::parse)
           .isInstanceOf(IllegalArgumentException.class)
@@ -474,7 +493,11 @@ class ServiceFileParserTest {
   class EgressCeiling {
 
     private Map<String, ServiceConfig> parseWithCeiling(String... ceiling) {
-      return ServiceFileParser.parseDirectory(servicesDir, secrets(), List.of(ceiling));
+      Map<String, ServiceConfig> services = parse();
+      services.forEach(
+          (name, service) ->
+              ServiceFileParser.requireWithinCeiling(name, service, List.of(ceiling)));
+      return services;
     }
 
     @Test

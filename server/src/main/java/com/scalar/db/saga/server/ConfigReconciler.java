@@ -8,15 +8,12 @@ import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.server.SagaServerConfig.ServiceConfig;
 import com.scalar.db.saga.transport.HttpEndpointRegistrar;
 import com.scalar.db.saga.transport.HttpServiceConfig;
-import java.io.IOException;
-import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
@@ -34,7 +31,6 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
-import java.util.stream.Stream;
 import net.jcip.annotations.ThreadSafe;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -376,7 +372,7 @@ final class ConfigReconciler {
       // parsing separate reads would let a writer change the file in between, so the hash this
       // pass records could describe content it never applied.
       byte[] content =
-          readBounded(file.fileName(), file.target(), ServiceFileParser.MAX_FILE_BYTES, errors);
+          readBounded(file.fileName(), file.target(), WatchedFiles.MAX_FILE_BYTES, errors);
       if (content == null) {
         continue; // unreadable or oversized; already collected
       }
@@ -433,8 +429,7 @@ final class ConfigReconciler {
     Map<String, CandidateDefinition> candidates = new LinkedHashMap<>();
     for (DefinitionFile file : files) {
       String fileName = file.fileName();
-      byte[] content =
-          readBounded(fileName, file.target(), ServiceFileParser.MAX_FILE_BYTES, errors);
+      byte[] content = readBounded(fileName, file.target(), WatchedFiles.MAX_FILE_BYTES, errors);
       if (content == null) {
         continue; // unreadable or oversized; already collected
       }
@@ -522,18 +517,7 @@ final class ConfigReconciler {
       // entries INSIDE a watched directory are chosen by whoever writes that directory, whereas
       // this path is named by the operator in server.properties, with no enclosing directory to
       // be contained to.
-      Path target;
-      try {
-        target = path.toRealPath();
-      } catch (IOException e) {
-        throw new IllegalArgumentException(
-            "'"
-                + SagaServerConfig.DEFINITIONS_PATH_KEY
-                + "' cannot be resolved ("
-                + e.getClass().getSimpleName()
-                + ") "
-                + Redaction.redacted(path.toString()));
-      }
+      Path target = WatchedFiles.realPathOf(path, SagaServerConfig.DEFINITIONS_PATH_KEY);
       if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) {
         throw new IllegalArgumentException(
             "'"
@@ -541,78 +525,22 @@ final class ConfigReconciler {
                 + "' does not resolve to a regular file "
                 + Redaction.redacted(path.toString()));
       }
-      return List.of(
-          new DefinitionFile(Objects.requireNonNull(path.getFileName()).toString(), target));
+      return List.of(new DefinitionFile(WatchedFiles.fileNameOf(path), target));
     }
-    Path realPath;
-    try {
-      realPath = path.toRealPath();
-    } catch (IOException e) {
-      throw new IllegalArgumentException(
-          "'"
-              + SagaServerConfig.DEFINITIONS_PATH_KEY
-              + "' cannot be resolved ("
-              + e.getClass().getSimpleName()
-              + ") "
-              + Redaction.redacted(path.toString()));
-    }
-    List<Path> entries;
-    try (Stream<Path> stream = Files.list(path)) {
-      entries = stream.sorted().toList();
-    } catch (IOException e) {
-      throw new IllegalArgumentException(
-          "'"
-              + SagaServerConfig.DEFINITIONS_PATH_KEY
-              + "' cannot be listed ("
-              + e.getClass().getSimpleName()
-              + ") "
-              + Redaction.redacted(path.toString()));
-    }
+    Path realPath = WatchedFiles.realPathOf(path, SagaServerConfig.DEFINITIONS_PATH_KEY);
+    List<Path> entries = WatchedFiles.listSorted(path, SagaServerConfig.DEFINITIONS_PATH_KEY);
     List<DefinitionFile> files = new ArrayList<>();
     for (Path entry : entries) {
-      String fileName = Objects.requireNonNull(entry.getFileName()).toString();
+      String fileName = WatchedFiles.fileNameOf(entry);
       if (fileName.startsWith(".") || !isDefinitionFile(fileName)) {
         continue;
       }
-      Path target;
-      if (Files.isSymbolicLink(entry)) {
-        // Kubelet's visible-symlink layout: admitted only when it resolves to a regular file
-        // still inside the directory — a link escaping it would be a route to reading an
-        // arbitrary file under a definition's name.
-        try {
-          target = entry.toRealPath();
-        } catch (IOException e) {
-          throw new IllegalArgumentException(
-              "definitions_path entry '"
-                  + fileName
-                  + "' is a symlink that cannot be resolved ("
-                  + e.getClass().getSimpleName()
-                  + ")");
-        }
-        if (!target.startsWith(realPath)
-            || !Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) {
-          throw new IllegalArgumentException(
-              "definitions_path entry '"
-                  + fileName
-                  + "' is a symlink that does not resolve to a regular file inside"
-                  + " definitions_path, which would be a route to reading an arbitrary file under"
-                  + " a definition's name. Only the mounted-volume indirection, a link resolving"
-                  + " within the directory, is allowed.");
-        }
-      } else if (Files.isRegularFile(entry, LinkOption.NOFOLLOW_LINKS)) {
-        try {
-          target = entry.toRealPath();
-        } catch (IOException e) {
-          throw new IllegalArgumentException(
-              "definitions_path entry '"
-                  + fileName
-                  + "' cannot be resolved ("
-                  + e.getClass().getSimpleName()
-                  + ")");
-        }
-      } else {
-        // A directory or other non-regular entry whose name matches the extension has always
-        // been silently ignored here.
+      // A directory or other non-regular entry whose name matches the extension has always been
+      // silently ignored here; unlike services_path, this directory has never owned every entry.
+      Path target =
+          WatchedFiles.resolveEntry(
+              entry, fileName, realPath, SagaServerConfig.DEFINITIONS_PATH_KEY);
+      if (target == null) {
         continue;
       }
       files.add(new DefinitionFile(fileName, target));
@@ -825,29 +753,15 @@ final class ConfigReconciler {
   }
 
   /**
-   * Reads one watched file through the target the hygiene walk validated, bounding the read at
-   * {@code cap}. The bound is enforced on the bytes actually read rather than on a prior size
-   * check: a file can grow between a stat and the read, and this pass repeats indefinitely against
-   * directories a writer keeps updating. Returns {@code null} with an error collected when the file
-   * cannot be read or exceeds the cap.
+   * Reads one watched file, collecting the failure instead of throwing so one unreadable file does
+   * not decide the fate of everything the rest of the directory says.
    */
   private static byte @Nullable [] readBounded(
       String fileName, Path file, long cap, List<String> errors) {
-    try (InputStream in =
-        Files.newInputStream(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
-      byte[] content = in.readNBytes((int) cap + 1);
-      if (content.length > cap) {
-        errors.add(
-            "File '"
-                + fileName
-                + "' exceeds the "
-                + cap
-                + "-byte cap on watched configuration files.");
-        return null;
-      }
-      return content;
-    } catch (IOException e) {
-      errors.add("File '" + fileName + "' cannot be read (" + e.getClass().getSimpleName() + ").");
+    try {
+      return WatchedFiles.read(fileName, file, cap);
+    } catch (IllegalArgumentException e) {
+      errors.add(e.getMessage());
       return null;
     }
   }

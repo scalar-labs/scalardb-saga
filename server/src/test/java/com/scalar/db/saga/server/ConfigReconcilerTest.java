@@ -659,7 +659,7 @@ class ConfigReconcilerTest {
       writeService("account", "base_url=http://account:8080\n");
       Files.writeString(
           definitionsDir.resolve("big.json"),
-          "{\"_pad\":\"" + "x".repeat((int) ServiceFileParser.MAX_FILE_BYTES) + "\"}");
+          "{\"_pad\":\"" + "x".repeat((int) WatchedFiles.MAX_FILE_BYTES) + "\"}");
 
       // Act & Assert
       assertThat(reconciler().run()).isFalse();
