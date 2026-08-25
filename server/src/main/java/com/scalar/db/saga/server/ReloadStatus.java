@@ -4,10 +4,11 @@ import java.time.Instant;
 import org.jspecify.annotations.Nullable;
 
 /**
- * One immutable snapshot of the configuration-reload state, updated by {@link ConfigReconciler}
- * after every pass. Observability is logs-only in v1, so nothing serves this over the wire yet —
- * but the pass maintains it fully so a later admin status endpoint can expose it additively,
- * unchanged.
+ * One immutable snapshot of the configuration-reload state, replaced by {@link ConfigReconciler} as
+ * a pass proceeds — including part-way through one, so a pass that applies services and then fails
+ * still reports the services it applied. Observability is logs-only in v1, so nothing serves this
+ * over the wire yet — but the pass maintains it fully so a later admin status endpoint can expose
+ * it additively, unchanged.
  *
  * <p>Hashes cover <b>raw file bytes only</b>, never resolved values: a hash over resolved content
  * would let anyone who can read the status confirm guesses about secret values. The applied hashes

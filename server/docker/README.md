@@ -210,6 +210,12 @@ Operational notes, learned from how Kubernetes actually delivers files:
 - **Rotate with dual validity**: a rotated downstream credential propagates within kubelet sync
   plus one reload interval, and replicas do not rotate in lockstep — the downstream service must
   accept old and new credentials for at least that window.
+- **Retire a saga before deleting its files — disable first, then delete.** Deleting a definition
+  file retires nothing: the version already registered stays in the store and stays startable on
+  every replica, so new starts of it keep arriving. The daemon warns when a definition's file
+  disappears, and warns again if you later remove a service that the vanished definition still
+  names — at which point starts of it fail to resolve an endpoint. (The `disabled` marker that
+  makes retirement real is not in this release; until then, keep the files in place.)
 - **Definition rollback is roll-forward only**: `helm rollback` reverts service files, but
   re-registering an old definition version is an idempotent no-op — the store's latest version
   keeps winning. To revert a definition, register the old content as a NEW, bumped version.

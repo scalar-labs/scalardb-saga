@@ -178,16 +178,28 @@ final class ServiceFileParser {
    * across files while boot fails fast.
    */
   static Map<String, ServiceFile> listServiceFiles(Path servicesPath) {
+    // The path value is redacted, and the cause is named by class rather than message:
+    // services_path is a resolved configuration value, so a secret reference pasted onto that key
+    // arrives here as its plaintext — and a filesystem exception's message is the path itself.
+    // These messages reach the reload WARN on every pass that rejects.
     if (!Files.isDirectory(servicesPath)) {
       throw new IllegalArgumentException(
-          "services_path '" + servicesPath + "' is not a readable directory");
+          "'"
+              + SagaServerConfig.SERVICES_PATH_KEY
+              + "' is not a readable directory "
+              + Redaction.redacted(servicesPath.toString()));
     }
     Path realServicesPath;
     try {
       realServicesPath = servicesPath.toRealPath();
     } catch (IOException e) {
       throw new IllegalArgumentException(
-          "services_path '" + servicesPath + "' cannot be resolved (" + e.getMessage() + ")", e);
+          "'"
+              + SagaServerConfig.SERVICES_PATH_KEY
+              + "' cannot be resolved ("
+              + e.getClass().getSimpleName()
+              + ") "
+              + Redaction.redacted(servicesPath.toString()));
     }
     Map<String, ServiceFile> files = new LinkedHashMap<>();
     List<Path> entries;
@@ -195,7 +207,12 @@ final class ServiceFileParser {
       entries = stream.sorted().toList();
     } catch (IOException e) {
       throw new IllegalArgumentException(
-          "services_path '" + servicesPath + "' cannot be listed (" + e.getMessage() + ")", e);
+          "'"
+              + SagaServerConfig.SERVICES_PATH_KEY
+              + "' cannot be listed ("
+              + e.getClass().getSimpleName()
+              + ") "
+              + Redaction.redacted(servicesPath.toString()));
     }
     for (Path entry : entries) {
       String fileName = Objects.requireNonNull(entry.getFileName()).toString();

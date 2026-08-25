@@ -374,8 +374,10 @@ final class ConfigReconciler {
         errors.add(e.getMessage());
       }
     }
-    // D8/D16 guards need the applied set for comparison; they run even when per-file errors were
-    // collected, to keep the aggregation complete.
+    // Suppressed when per-file errors were already collected: those errors explain the empty
+    // candidate set, and reporting a wind-down on top of them would be a second, misleading
+    // reason for the same rejection. The allowed_hosts check below runs regardless — a service
+    // that parsed cleanly can still be loosening its egress.
     if (candidates.isEmpty() && !appliedServices.isEmpty() && errors.isEmpty()) {
       errors.add(
           "The candidate service set is empty while "
@@ -713,7 +715,11 @@ final class ConfigReconciler {
 
   // ── Apply helpers ────────────────────────────────────────────────────────
 
-  /** Human-readable service diff (added/removed/updated names) for the audit line. */
+  /**
+   * The service diff as {@code +added}, {@code ~updated}, {@code -removed} names. It is both the
+   * audit line's content and the predicate that decides whether a swap happens at all: an empty
+   * diff means the applied endpoints already match the candidate set.
+   */
   private List<String> diffServices(Map<String, ServiceConfig> candidates) {
     List<String> changes = new ArrayList<>();
     for (Map.Entry<String, ServiceConfig> entry : candidates.entrySet()) {

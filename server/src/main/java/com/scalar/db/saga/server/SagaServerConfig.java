@@ -986,9 +986,9 @@ public final class SagaServerConfig {
   }
 
   /**
-   * Parses the services-directory settings into a {@link ReloadConfig}. All four keys are read even
-   * though only the static half is consumed today, so the surface (and its validation) is complete
-   * before the reload pass ships.
+   * Parses the services-directory settings into a {@link ReloadConfig}: where the service files
+   * live, how often they are re-read, where their secret references may resolve, and the optional
+   * egress ceiling. The files themselves are read by the reconciler, not here.
    */
   private static ReloadConfig parseReloadConfig(Properties resolved) {
     String secretsRoot = resolved.getProperty(SECRETS_ROOT_KEY);

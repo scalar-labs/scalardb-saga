@@ -199,7 +199,12 @@ public final class SagaServer implements AutoCloseable {
       }
     } catch (RuntimeException e) {
       // Release the executor, the security provider, and the store/DB connections held by the
-      // orchestrator if startup wiring fails.
+      // orchestrator if startup wiring fails. The reload manager may already exist — it is built
+      // before the routes are wired, and wiring them can throw — and close() is not reached on
+      // this path, so it is stopped here rather than left behind.
+      if (reloadManager != null) {
+        reloadManager.stop(System.nanoTime());
+      }
       if (grpcExecutor != null) {
         grpcExecutor.shutdown();
       }
