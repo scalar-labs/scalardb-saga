@@ -6,14 +6,15 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.net.http.HttpResponse;
 import java.nio.file.Path;
+import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 /**
- * End-to-end coverage of the per-service outbound policy configured under {@code
- * scalar.db.saga.server.service.<name>.*} — that a header and an SSRF allowlist set in the
- * properties file actually reach the outbound request the engine makes.
+ * End-to-end coverage of the per-service outbound policy configured in the {@code services_path}
+ * service files — that a header and an SSRF allowlist set in a service file actually reach the
+ * outbound request the engine makes.
  *
  * <p>The header case is the one that decides whether the daemon can call an <b>authenticated</b>
  * downstream service at all: daemon mode is declarative-only, so an operator cannot supply a code
@@ -76,15 +77,16 @@ class SagaServicePolicyIntegrationTest extends ServerIntegrationTestSupport {
   }
 
   @Override
-  protected void configureProperties(Properties props) {
-    props.setProperty(serviceKey(SERVICE, ".header.Authorization"), TOKEN);
-    props.setProperty(serviceKey(SERVICE, ".header.X-Tenant"), "acme");
-    props.setProperty(serviceKey(SERVICE, ".allowed_hosts"), "localhost");
+  protected void configureServices(Map<String, Properties> services) {
+    Properties account = services.get(SERVICE);
+    account.setProperty("header.Authorization", TOKEN);
+    account.setProperty("header.X-Tenant", "acme");
+    account.setProperty("allowed_hosts", "localhost");
     // The same participant, reached through a service whose allowlist does not name its host.
-    props.setProperty(
-        serviceKey(BLOCKED_SERVICE, ".base_url"),
-        props.getProperty(serviceKey(SERVICE, ".base_url")));
-    props.setProperty(serviceKey(BLOCKED_SERVICE, ".allowed_hosts"), "some-other-service");
+    Properties blocked = new Properties();
+    blocked.setProperty("base_url", account.getProperty("base_url"));
+    blocked.setProperty("allowed_hosts", "some-other-service");
+    services.put(BLOCKED_SERVICE, blocked);
   }
 
   @Test
@@ -105,9 +107,5 @@ class SagaServicePolicyIntegrationTest extends ServerIntegrationTestSupport {
     // participant is never reached — the evidence that the configured hosts are actually applied.
     assertThat(status(post)).isNotEqualTo("COMPLETED");
     assertThat(hits("/blocked")).isZero();
-  }
-
-  private static String serviceKey(String name, String attribute) {
-    return SagaServerConfig.SERVICE_KEY_PREFIX + name + attribute;
   }
 }
