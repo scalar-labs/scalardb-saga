@@ -190,12 +190,15 @@ port-forward). Non-Java REST consumers pass their CA the usual way (`curl --cace
 ## Configuration reload
 
 With `reload.interval_seconds` > 0 (default 30), the daemon re-reads `services_path` and
-`definitions_path` on that interval, validates the **complete** candidate set, and applies it
-atomically — services first, then definition registrations. A rejected set changes nothing: the
-previously applied configuration keeps serving, the rejection is logged once at WARN (repeats at
-DEBUG until it changes), and the next pass retries. The applied INFO line carries the changed
-names and a SHA-256 over the raw file bytes — grep it across replicas to tell a lagging replica
-from a rejecting one. Secret **values** never appear in any log line.
+`definitions_path` on that interval, validates the **complete** candidate set, and only then
+applies it — services first, then definition registrations. A set that fails **validation** changes
+nothing at all: the previously applied configuration keeps serving, the rejection is logged once at
+WARN (repeats at DEBUG until it changes), and the next pass retries. A failure while **applying**
+(the store is unreachable, say) can leave part of the set live — the swapped endpoints, or the
+definitions registered before the failure; those are named in an `INFO` apply line of their own,
+and the next pass retries only what is left. The applied INFO line carries the changed names and a
+SHA-256 over the raw file bytes — grep it across replicas to tell a lagging replica from a
+rejecting one. Secret **values** never appear in any log line.
 
 Operational notes, learned from how Kubernetes actually delivers files:
 

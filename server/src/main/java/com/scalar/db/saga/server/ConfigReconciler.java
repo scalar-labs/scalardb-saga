@@ -42,10 +42,10 @@ import org.slf4j.LoggerFactory;
 /**
  * Reconciles the watched configuration with the running engine. Each {@link #run()} is one pass:
  * snapshot the services and definitions directories, validate the COMPLETE candidate set, and only
- * then apply it — services swapped first (so the fleet-visible definitions that name them can
- * resolve everywhere), definitions registered second. Any validation failure rejects the whole pass
- * and the previously applied configuration keeps serving; per-file errors are aggregated across
- * files so one team's mistake never hides another's.
+ * then apply it — services swapped first, so this replica can serve every definition it publishes,
+ * definitions registered second. Any validation failure rejects the whole pass and the previously
+ * applied configuration keeps serving; per-file errors are aggregated across files so one team's
+ * mistake never hides another's.
  *
  * <p>The reconciler is policy-free: {@code SagaServer}'s constructor runs a pass synchronously and
  * fatally (boot keeps today's fail-fast), and {@link SagaConfigReloadManager} schedules it with
@@ -200,8 +200,12 @@ final class ConfigReconciler {
     warnOnVanishedDefinitions(candidateDefinitions);
     warnOnRemovedServicesStillReferenced(candidateServices);
 
-    // 2. APPLY services first: definitions propagate fleet-wide through the store the moment they
-    // register, so the services they name must be in place before any registration.
+    // 2. APPLY services first. A definition is startable fleet-wide the moment it registers, so
+    // this replica installs the services it names before publishing it. That orders the change
+    // within this replica, which is as far as ordering reaches: a replica whose files have not
+    // synced yet still sees the definition first, and its resolve fails retryably and self-heals
+    // on its next pass. That bounded skew is accepted by design — a fleet-wide barrier would need
+    // coordination this feature deliberately does not have.
     List<String> serviceChanges = diffServices(candidateServices);
     if (!serviceChanges.isEmpty()) {
       try {

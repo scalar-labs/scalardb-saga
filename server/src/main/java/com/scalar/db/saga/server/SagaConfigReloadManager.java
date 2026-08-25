@@ -86,7 +86,9 @@ final class SagaConfigReloadManager {
     try {
       long remaining = deadlineNanos - System.nanoTime();
       if (remaining > 0) {
-        boolean unused = scheduler.awaitTermination(remaining, TimeUnit.NANOSECONDS);
+        // The result is not the signal: isTerminated() below decides whether a pass was actually
+        // still running, which also covers an already-expired deadline (nothing was awaited).
+        scheduler.awaitTermination(remaining, TimeUnit.NANOSECONDS);
       }
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
