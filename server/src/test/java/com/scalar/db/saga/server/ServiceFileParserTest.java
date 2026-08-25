@@ -462,6 +462,23 @@ class ServiceFileParserTest {
     }
 
     @Test
+    void parseDirectory_secretResolvedAllowedHostOutsideCeiling_throwsIllegalArgumentException()
+        throws IOException {
+      // Pins the ordering that makes the ceiling meaningful: allowed_hosts is resolved before the
+      // ceiling check, so a secret-sourced host cannot smuggle egress past the operator's ceiling.
+      // The message assertion distinguishes the ceiling firing from a resolution failure, which
+      // would throw the same type.
+      Files.writeString(secretsDir.resolve("hosts"), "evil-svc");
+      writeService(
+          "a.properties",
+          "base_url=http://a:1\nallowed_hosts=${file:UTF-8:" + secretsDir.resolve("hosts") + "}\n");
+
+      assertThatThrownBy(() -> parseWithCeiling("a-svc"))
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("ceiling");
+    }
+
+    @Test
     void parseDirectory_emptyAllowedHostsUnderCeiling_throwsIllegalArgumentException()
         throws IOException {
       // Empty means allow-all, which is precisely what a ceiling exists to forbid.
