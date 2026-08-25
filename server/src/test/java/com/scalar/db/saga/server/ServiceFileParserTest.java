@@ -191,6 +191,27 @@ class ServiceFileParserTest {
     }
 
     @Test
+    void parseFile_allowedHostsEntryWithPort_throwsWithoutEchoingTheValue() throws IOException {
+      // A port suffix would silently never match (the allowlist is compared against the request
+      // URI's host), and the value is redacted because allowed_hosts is resolved before it is
+      // checked — a secret pasted onto this key must not reach the message.
+      writeService("account.properties", "base_url=http://a:1\nallowed_hosts=account-svc:8080\n");
+
+      assertThatThrownBy(ServiceFileParserTest.this::parse)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("not a host name")
+          .hasMessageNotContaining("account-svc:8080");
+    }
+
+    @Test
+    void parseFile_allowedHostsIpv6Literal_isAccepted() throws IOException {
+      // An IPv6 literal keeps its brackets, which is exactly what URI.getHost() returns.
+      writeService("account.properties", "base_url=http://a:1\nallowed_hosts=[::1]\n");
+
+      assertThat(requireNonNull(parse().get("account")).allowedHosts()).containsExactly("[::1]");
+    }
+
+    @Test
     void parseFile_allowedHostsWithEmptyElement_throwsIllegalArgumentException()
         throws IOException {
       writeService(

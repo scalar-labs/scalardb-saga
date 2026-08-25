@@ -412,7 +412,12 @@ class ConfigReconcilerTest {
               servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
       ConfigReconciler pass =
           new ConfigReconciler(
-              reloadConfig, file, false, Map.of(), () -> registrar, definitionRegistrar::accept);
+              reloadConfig,
+              file,
+              false,
+              Map.of(),
+              () -> registrar,
+              d -> definitionRegistrar.accept(d));
 
       // Act & Assert
       assertThat(pass.run()).isFalse();
@@ -438,7 +443,12 @@ class ConfigReconcilerTest {
               servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
       ConfigReconciler pass =
           new ConfigReconciler(
-              reloadConfig, link, false, Map.of(), () -> registrar, definitionRegistrar::accept);
+              reloadConfig,
+              link,
+              false,
+              Map.of(),
+              () -> registrar,
+              d -> definitionRegistrar.accept(d));
 
       // Act & Assert
       assertThat(pass.run()).isTrue();
@@ -487,6 +497,68 @@ class ConfigReconcilerTest {
                   assertThat(event.getFormattedMessage()).doesNotContain("evil.example");
                 });
       }
+    }
+
+    @Test
+    void run_secretValuedAllowedHostsUnderCeiling_rejectedWithoutEchoingTheValue()
+        throws IOException {
+      // allowed_hosts is resolved before it is checked, so a secret reference pasted onto it
+      // arrives as plaintext. The rejection is logged every pass, and logs are readable far more
+      // widely than the secret — so the value must never appear in one.
+      Files.writeString(secretsDir.resolve("token"), "SUPER-SECRET-VALUE");
+      writeService(
+          "account",
+          "base_url=http://account:8080\nallowed_hosts=${file:UTF-8:"
+              + secretsDir.resolve("token")
+              + "}\n");
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      ReloadConfig withCeiling =
+          new ReloadConfig(
+              servicesDir, 10, secretsDir, List.of("account"), Clock.fixed(NOW, ZoneOffset.UTC));
+      ConfigReconciler pass =
+          new ConfigReconciler(
+              withCeiling,
+              definitionsDir,
+              false,
+              Map.of(),
+              () -> registrar,
+              d -> definitionRegistrar.accept(d));
+
+      // Act & Assert
+      try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
+        assertThat(pass.run()).isFalse();
+
+        assertThat(logs.events())
+            .noneSatisfy(
+                event -> assertThat(event.getFormattedMessage()).contains("SUPER-SECRET-VALUE"));
+      }
+      assertThat(requireNonNull(pass.status().rejection()).reason())
+          .doesNotContain("SUPER-SECRET-VALUE");
+    }
+
+    @Test
+    void run_secretValuedAllowedHostsWithNoCeiling_rejectedAtValidationWithoutEchoingTheValue()
+        throws IOException {
+      // The path that needs no ceiling at all: a secret containing a colon reads as a port
+      // suffix. Validating the shape here is what stops it reaching the engine, whose own
+      // rejection names the host and which this module cannot redact.
+      Files.writeString(secretsDir.resolve("token"), "user:PASSWORD-hunter2");
+      writeService(
+          "account",
+          "base_url=http://account:8080\nallowed_hosts=${file:UTF-8:"
+              + secretsDir.resolve("token")
+              + "}\n");
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+
+      // Act & Assert — no ceiling configured
+      try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
+        assertThat(pass().run()).isFalse();
+
+        assertThat(logs.events())
+            .noneSatisfy(
+                event -> assertThat(event.getFormattedMessage()).contains("PASSWORD-hunter2"));
+      }
+      assertThat(swaps).isEmpty();
     }
 
     @Test

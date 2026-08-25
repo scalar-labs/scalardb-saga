@@ -382,12 +382,14 @@ final class ServiceFileParser {
                 qualifiedKey + ": " + e.getMessage() + " " + Redaction.redacted(baseUrl));
           }
         }
-        case ALLOWED_HOSTS_KEY ->
-            allowedHosts =
-                SagaServerConfig.parseCommaSeparated(
-                    qualifiedKey,
-                    SagaServerConfig.requireNonBlank(
-                        qualifiedKey, resolve(secrets, raw, qualifiedKey)));
+        case ALLOWED_HOSTS_KEY -> {
+          allowedHosts =
+              SagaServerConfig.parseCommaSeparated(
+                  qualifiedKey,
+                  SagaServerConfig.requireNonBlank(
+                      qualifiedKey, resolve(secrets, raw, qualifiedKey)));
+          allowedHosts.forEach(host -> requireHostShape(qualifiedKey, host));
+        }
         case MAX_BODY_BYTES_KEY ->
             maxBodyBytes =
                 SagaServerConfig.parseBoundedLong(
@@ -505,14 +507,42 @@ final class ServiceFileParser {
     }
     for (String host : service.allowedHosts()) {
       if (!ceiling.contains(host)) {
+        // Redacted like every other rejected value: allowed_hosts is resolved before it is
+        // checked, so a secret reference pasted onto this key arrives here as its plaintext, and
+        // this message is logged on every pass that rejects.
         throw new IllegalArgumentException(
             "Service '"
                 + name
-                + "' allows host '"
-                + host
-                + "', which is outside egress.allowed_hosts_ceiling. A service file cannot"
-                + " authorize egress beyond the operator ceiling.");
+                + "' allows a host outside egress.allowed_hosts_ceiling "
+                + Redaction.redacted(host)
+                + ". A service file cannot authorize egress beyond the operator ceiling.");
       }
+    }
+  }
+
+  /**
+   * Rejects an {@code allowed_hosts} entry that is not shaped like a host, mirroring exactly what
+   * the engine's outbound policy enforces: a port suffix would silently never match, since the
+   * allowlist is compared against {@code URI.getHost()}, and an IPv6 literal keeps its brackets.
+   *
+   * <p>Checking it HERE rather than letting the engine reject it at apply time is what keeps a
+   * resolved value out of the log. The engine's message names the offending host, and this module
+   * cannot redact a message the engine composes — so the rule is that nothing unvalidated is ever
+   * handed across that boundary. The same reasoning already applies to {@code base_url}.
+   */
+  private static void requireHostShape(String qualifiedKey, String host) {
+    String normalized = host.trim().toLowerCase(Locale.ROOT);
+    boolean bracketed = normalized.startsWith("[");
+    boolean malformed =
+        normalized.isEmpty()
+            || (bracketed ? !normalized.endsWith("]") : normalized.indexOf(':') >= 0);
+    if (malformed) {
+      throw new IllegalArgumentException(
+          qualifiedKey
+              + " has an entry that is not a host name "
+              + Redaction.redacted(host)
+              + ". Give a host without a port (an IPv6 literal keeps its brackets); the allowlist"
+              + " is matched against the request URI's host.");
     }
   }
 
