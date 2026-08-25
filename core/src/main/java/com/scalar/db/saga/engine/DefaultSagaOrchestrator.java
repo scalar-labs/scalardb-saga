@@ -62,6 +62,14 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   public static final long DEFAULT_SHUTDOWN_TIMEOUT_MILLIS = 30_000L;
 
   /**
+   * The default saga timeout in milliseconds applied when {@link
+   * Builder#defaultSagaTimeoutMillis(long)} is not called: {@code 0}, meaning no default is applied
+   * and definitions without a timeout of their own run without one. Exposed for the same reason as
+   * {@link #DEFAULT_SHUTDOWN_MODE}.
+   */
+  public static final long DEFAULT_SAGA_TIMEOUT_MILLIS = 0L;
+
+  /**
    * The timeline bound applied when {@link Builder#maxTimelineEvents(int)} is not called:
    * effectively unbounded, so an in-process (embedded) caller always sees a saga's full timeline. A
    * remote front end serving {@link #getSagaDetail} over a network should configure a real bound —
@@ -682,6 +690,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     private String ownerId = java.util.UUID.randomUUID().toString();
     private ShutdownMode shutdownMode = DEFAULT_SHUTDOWN_MODE;
     private long shutdownTimeoutMillis = DEFAULT_SHUTDOWN_TIMEOUT_MILLIS;
+    private long defaultSagaTimeoutMillis = DEFAULT_SAGA_TIMEOUT_MILLIS;
     private int maxTimelineEvents = DEFAULT_MAX_TIMELINE_EVENTS;
     private Clock clock = Clock.systemUTC();
     private ResourceRegistry.@Nullable Builder resourceRegistryBuilder;
@@ -750,6 +759,31 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
      */
     public Builder shutdownTimeoutMillis(long shutdownTimeoutMillis) {
       this.shutdownTimeoutMillis = shutdownTimeoutMillis;
+      return this;
+    }
+
+    /**
+     * Sets a default saga timeout in milliseconds, applied at execution to any definition that
+     * specifies no timeout of its own ({@code timeoutMillis == 0}). The default is applied at every
+     * execution entry — start, recovery resume, and parked resume — by recomputing the deadline at
+     * each drive, so an in-flight saga's effective timeout follows the value configured at each
+     * resumption, and the stored definition never carries a baked-in copy of it. Disabling the
+     * default ({@code 0}) is one-way for parked sagas, though: a saga whose park deadline came only
+     * from this default re-parks with no deadline on its next drive, which does not merely widen
+     * its deadline but removes it from the parked-timeout sweep for good; raising the default again
+     * later cannot re-bound it, and only its callback or a forced completion moves it. Defaults to
+     * {@value #DEFAULT_SAGA_TIMEOUT_MILLIS}: definitions without a timeout run without one.
+     *
+     * @param defaultSagaTimeoutMillis the default saga timeout; {@code 0} applies none
+     * @return this builder
+     * @throws IllegalArgumentException if the value is negative
+     */
+    public Builder defaultSagaTimeoutMillis(long defaultSagaTimeoutMillis) {
+      if (defaultSagaTimeoutMillis < 0) {
+        throw new IllegalArgumentException(
+            "defaultSagaTimeoutMillis must be >= 0, got " + defaultSagaTimeoutMillis);
+      }
+      this.defaultSagaTimeoutMillis = defaultSagaTimeoutMillis;
       return this;
     }
 
@@ -972,7 +1006,9 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
         SagaEngine.ShutdownConfig shutdownConfig =
             new SagaEngine.ShutdownConfig(shutdownMode, shutdownTimeoutMillis);
         StepInstantiator stepInstantiator = new StepInstantiator(resolver, httpEndpointRegistry);
-        SagaEngine engine = new SagaEngine(store, stepInstantiator, ownerId, shutdownConfig, clock);
+        SagaEngine engine =
+            new SagaEngine(
+                store, stepInstantiator, ownerId, shutdownConfig, defaultSagaTimeoutMillis, clock);
         SagaDefinitionRegistry definitionRegistry = new SagaDefinitionRegistry(store);
 
         SagaRecoveryManager recoveryManager =

@@ -46,9 +46,11 @@ import org.jspecify.annotations.Nullable;
  *       sweep phases across restarts. Must match {@code [a-zA-Z0-9._-]{1,128}} — it is stamped on
  *       claimed rows and echoed in log lines
  *   <li>{@code definitions_path} — path to a JSON/YAML saga definition file or directory
- *   <li>{@code default_saga_timeout_millis} — a default saga timeout applied to a loaded definition
- *       that set none ({@code 0} = unbounded); {@code 0} (default) disables it. A definition's own
- *       timeout always wins
+ *   <li>{@code default_saga_timeout_millis} — a default saga timeout enforced at execution for
+ *       definitions that set none ({@code 0} = unbounded); {@code 0} (default) disables it. A
+ *       definition's own timeout always wins. Applied at every execution entry (start, recovery
+ *       resume, parked resume) rather than baked into the stored definition, so changing it takes
+ *       effect for in-flight sagas at their next drive and never conflicts with stored content
  *   <li>{@code max_start_requests_per_minute} — per-principal rate limit on {@code POST}/{@code PUT
  *       /sagas}; {@code 0} (default) disables rate limiting. The limit is keyed on the
  *       authenticated principal, so it is only per-caller once a real provider (jwt or apikey) is
@@ -413,7 +415,7 @@ public final class SagaServerConfig {
   // this many request service-times before the server sheds load.
   static final int DEFAULT_MAX_QUEUED_REQUESTS_PER_THREAD = 2;
   static final long DEFAULT_SAGA_TIMEOUT_MILLIS =
-      0L; // 0 = disabled (definition's own timeout wins)
+      DefaultSagaOrchestrator.DEFAULT_SAGA_TIMEOUT_MILLIS;
   static final int DEFAULT_MAX_START_REQUESTS_PER_MINUTE = 0; // 0 = disabled (no rate limiting)
 
   /**
@@ -1417,10 +1419,12 @@ public final class SagaServerConfig {
   }
 
   /**
-   * Returns the server-wide default saga timeout (ms) applied to a loaded definition that specified
-   * none ({@code 0} = unbounded); {@code 0} (the default) disables it. A definition's own timeout
-   * always takes precedence — this only fills in for definitions that left it unset, so a
-   * daemon-hosted saga cannot run without a deadline.
+   * Returns the server-wide default saga timeout (ms) enforced at execution for definitions that
+   * specified none ({@code 0} = unbounded); {@code 0} (the default) disables it. A definition's own
+   * timeout always takes precedence — this only fills in for definitions that left it unset, so a
+   * daemon-hosted saga cannot run without a deadline. Forwarded to the engine (which applies it at
+   * deadline computation on every execution entry) instead of being baked into the stored
+   * definition, so changing it never conflicts with stored content.
    */
   public long defaultSagaTimeoutMillis() {
     return defaultSagaTimeoutMillis;

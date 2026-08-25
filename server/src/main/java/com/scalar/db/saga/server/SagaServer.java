@@ -283,6 +283,7 @@ public final class SagaServer implements AutoCloseable {
         .ownerId(config.ownerId())
         .shutdownMode(config.shutdownMode())
         .shutdownTimeoutMillis(config.shutdownTimeoutMillis())
+        .defaultSagaTimeoutMillis(config.defaultSagaTimeoutMillis())
         .maxTimelineEvents(config.detailMaxTimelineEvents())
         .recoveryConfig(config.recoveryConfig())
         .retentionConfig(config.retentionConfig());
@@ -387,24 +388,11 @@ public final class SagaServer implements AutoCloseable {
             definition.getName(), step.getName());
       }
     }
-    orchestrator.register(applyDefaultTimeout(definition));
-  }
-
-  /**
-   * Applies the server-wide default saga timeout to a definition that specified none ({@code
-   * timeoutMillis == 0}), so a daemon-hosted saga cannot run without a deadline. A definition's own
-   * timeout is left untouched, and when no default is configured this is a no-op.
-   */
-  private SagaDefinition applyDefaultTimeout(SagaDefinition definition) {
-    long defaultTimeout = config.defaultSagaTimeoutMillis();
-    if (defaultTimeout > 0 && definition.getTimeoutMillis() == 0) {
-      logger.info(
-          "Applying default timeout of {} ms to saga '{}' (no timeout set)",
-          defaultTimeout,
-          definition.getName());
-      return definition.withTimeoutMillis(defaultTimeout);
-    }
-    return definition;
+    // The server-wide default saga timeout is deliberately NOT baked into the definition here: it
+    // is applied by the engine at deadline computation (see Builder#defaultSagaTimeoutMillis), so
+    // the stored form always equals the parsed file and changing the default never turns an
+    // unchanged file into a same-version content conflict at boot.
+    orchestrator.register(definition);
   }
 
   private static boolean isDefinitionFile(Path path) {
