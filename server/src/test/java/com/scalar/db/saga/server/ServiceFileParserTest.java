@@ -245,6 +245,59 @@ class ServiceFileParserTest {
     }
 
     @Test
+    void parseFile_headerValueWithANewline_throwsWithoutEchoingTheValue() throws IOException {
+      // The realistic accident: a token pasted into a secret file with a line break in it. Only
+      // the ends of a header value are trimmed, so the break survives, the JDK's client then
+      // refuses every request, and each step calling this service fails permanently and
+      // compensates — after a reload that reported success.
+      // Arrange
+      Files.writeString(secretsDir.resolve("token"), "line-one\nSECRET-line-two");
+      writeService(
+          "account.properties",
+          "base_url=http://a:1\nheader.Authorization=${file:UTF-8:"
+              + secretsDir.resolve("token")
+              + "}\n");
+
+      // Act & Assert
+      assertThatThrownBy(ServiceFileParserTest.this::parse)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("Authorization")
+          .hasMessageContaining("control character")
+          .hasMessageNotContaining("SECRET-line-two");
+    }
+
+    @Test
+    void parseFile_headerNameWithAControlCharacter_throwsIllegalArgumentException()
+        throws IOException {
+      // Properties.load performs escape processing on keys, so the name half of the key can carry
+      // one too — and an unsendable name fails every call exactly as an unsendable value does.
+      // Arrange
+      writeService("account.properties", "base_url=http://a:1\nheader.X-A\\u0000B=v\n");
+
+      // Act & Assert
+      assertThatThrownBy(ServiceFileParserTest.this::parse)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("control character");
+    }
+
+    @Test
+    void parseFile_secretEndingInANewline_isStillAccepted() throws IOException {
+      // The trim stays: a secret file ending in a newline is the case it exists for, and the new
+      // check must not take it away.
+      // Arrange
+      Files.writeString(secretsDir.resolve("token"), "Bearer abc\n");
+      writeService(
+          "account.properties",
+          "base_url=http://a:1\nheader.Authorization=${file:UTF-8:"
+              + secretsDir.resolve("token")
+              + "}\n");
+
+      // Act & Assert
+      assertThat(requireNonNull(parse().get("account")).headers())
+          .containsEntry("Authorization", "Bearer abc");
+    }
+
+    @Test
     void parseFile_maxBodyBytesAboveTheCeiling_throwsIllegalArgumentException() throws IOException {
       // Without a ceiling a service file sets this to Long.MAX_VALUE and the coordinator's heap
       // becomes whatever a participant returns — one service file taking the daemon down for

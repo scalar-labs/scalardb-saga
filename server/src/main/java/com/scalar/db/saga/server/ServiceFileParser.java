@@ -215,6 +215,40 @@ final class ServiceFileParser {
     return files;
   }
 
+  /**
+   * Rejects a control character in a header name or value, the way the checks above reject a header
+   * name the JDK will not send: left in place, every call to the service fails permanently and
+   * compensates, and this module exists to catch that at validation rather than at the first
+   * request.
+   *
+   * <p>The realistic route is a secret, not a hostile file. A header value may be a {@code
+   * ${file:...}} reference and only its ends are trimmed, so a token pasted into a secret file with
+   * a line break in it resolves to a multi-line value and would otherwise be applied.
+   *
+   * <p>Neither the value nor the offending character is echoed: the value may be a resolved secret,
+   * and the position alone locates it.
+   */
+  private static String requireNoControlCharacters(
+      String fileName, String header, String text, String part) {
+    for (int i = 0; i < text.length(); i++) {
+      if (Character.isISOControl(text.charAt(i))) {
+        throw new IllegalArgumentException(
+            "Service file '"
+                + fileName
+                + "' header '"
+                + Redaction.oneLine(header)
+                + "' has a control character in its "
+                + part
+                + " at position "
+                + i
+                + ". No HTTP header may carry one, so the JDK's client would refuse every request"
+                + " this service is called with, failing each step permanently and compensating."
+                + " A secret file with a line break inside it is the usual cause.");
+      }
+    }
+    return text;
+  }
+
   /** Rejects a {@code max_body_bytes} above {@link #MAX_BODY_BYTES_CEILING}. */
   private static long requireWithinBodyCeiling(long maxBodyBytes, String qualifiedKey) {
     if (maxBodyBytes > MAX_BODY_BYTES_CEILING) {
@@ -362,8 +396,13 @@ final class ServiceFileParser {
                     + " Remove one of them.");
           }
           headers.put(
-              header,
-              SagaServerConfig.requireNonBlank(qualifiedKey, resolve(secrets, raw, qualifiedKey)));
+              requireNoControlCharacters(fileName, header, header, "name"),
+              requireNoControlCharacters(
+                  fileName,
+                  header,
+                  SagaServerConfig.requireNonBlank(
+                      qualifiedKey, resolve(secrets, raw, qualifiedKey)),
+                  "value"));
         }
       }
     }
