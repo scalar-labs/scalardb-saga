@@ -230,7 +230,7 @@ public final class ScalarDbSagaStore implements SagaStore {
             throw SagaDefinitionException.versionContentConflict(name, version);
           }
 
-          tx.insert(buildDefinitionInsert(name, version, json));
+          tx.insert(buildDefinitionInsert(name, version, json, monotonicStamp(tx, name)));
           return Boolean.TRUE;
         },
         () -> {
@@ -1503,14 +1503,44 @@ public final class ScalarDbSagaStore implements SagaStore {
 
   // -- saga_definitions builders --
 
-  private Insert buildDefinitionInsert(String name, String version, String json) {
+  /**
+   * Returns a {@code registered_at} strictly after every version already registered under {@code
+   * name}, so registration order is what the latest-version lookup reads.
+   *
+   * <p>The lookup picks the greatest {@code registered_at}, and the value comes from whichever
+   * replica happens to serve the registration. Wall clocks across replicas disagree — by seconds,
+   * routinely — so a replica running behind could register a NEWER version with an OLDER stamp and
+   * lose the selection race to the version it replaces. For a retirement that is the difference
+   * between a saga being retired and silently continuing to accept starts.
+   *
+   * <p>The scan runs inside the caller's transaction, which is what makes this safe rather than
+   * merely likely: two replicas registering different versions of the same saga at once now read
+   * the same rows, so one of them aborts instead of both computing the same stamp.
+   */
+  private Instant monotonicStamp(DistributedTransaction tx, String name) throws Exception {
+    Instant now = nowSupplier.get();
+    Instant latest = null;
+    for (Result row : tx.scan(buildDefinitionScan(name))) {
+      Instant registeredAt = row.getTimestampTZ("registered_at");
+      if (registeredAt != null && (latest == null || registeredAt.isAfter(latest))) {
+        latest = registeredAt;
+      }
+    }
+    if (latest == null || now.isAfter(latest)) {
+      return now;
+    }
+    // TIMESTAMPTZ stores milliseconds, so this is the smallest step that still compares greater.
+    return latest.plusMillis(1);
+  }
+
+  private Insert buildDefinitionInsert(String name, String version, String json, Instant stamp) {
     return Insert.newBuilder()
         .namespace(SagaSchema.NAMESPACE)
         .table(SagaSchema.DEFINITIONS_TABLE)
         .partitionKey(Key.ofText("saga_name", name))
         .clusteringKey(Key.ofText("definition_version", version))
         .textValue("definition_json", json)
-        .timestampTZValue("registered_at", nowSupplier.get())
+        .timestampTZValue("registered_at", stamp)
         .build();
   }
 
