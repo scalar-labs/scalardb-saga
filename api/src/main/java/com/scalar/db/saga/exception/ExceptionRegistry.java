@@ -215,7 +215,7 @@ public final class ExceptionRegistry {
   /**
    * Reads a metadata key the code's schema declares, failing as protocol drift when it is absent.
    *
-   * <p>{@link #reconstruct} already treats a missing declared key as drift and degrades — the
+   * <p>{@link #tryReconstruct} already treats a missing declared key as drift and degrades — the
    * factories reject null and the catch above turns that into an untyped reconstruction. Saying so
    * here rather than relying on the NPE keeps the null-safety checker satisfied at the call site;
    * the other entries pre-date this and read the map directly.

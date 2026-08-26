@@ -633,39 +633,59 @@ final class ConfigReconciler {
 
   // ── Validation ───────────────────────────────────────────────────────────
 
+  /**
+   * Checks one definition's declarative steps against the candidate service set: every service it
+   * names must be present, and an async phase needs a daemon configured to complete one.
+   */
+  private void validateStepReferences(
+      CandidateDefinition candidate,
+      Map<String, ServiceConfig> candidateServices,
+      List<String> errors) {
+    SagaDefinition definition = candidate.definition();
+    for (SagaDefinition.StepDefinition step : definition.getSteps()) {
+      if (!(step instanceof SagaDefinition.ServiceStep serviceStep)) {
+        continue;
+      }
+      // Definitions propagate fleet-wide through the store the moment they register, so
+      // registering one whose service is absent would strand it on every replica.
+      if (!candidateServices.containsKey(serviceStep.getService())) {
+        errors.add(
+            "Definition file '"
+                + candidate.fileName()
+                + "' step '"
+                + step.getName()
+                + "' references service '"
+                + serviceStep.getService()
+                + "', which has no service file in this candidate set.");
+      }
+      if (!asyncCallbacksConfigured
+          && serviceStep.getPhases().values().stream().anyMatch(CallSpec::isAsync)) {
+        errors.add(
+            "Definition file '"
+                + candidate.fileName()
+                + "' step '"
+                + step.getName()
+                + "' declares an async phase, but async completion is not configured on this"
+                + " daemon (missing callback URL / secret) — registration would fail on every"
+                + " pass.");
+      }
+    }
+  }
+
   private void validateCrossChecks(
       Map<String, ServiceConfig> candidateServices,
       Map<String, CandidateDefinition> candidateDefinitions,
       List<String> errors) {
     for (CandidateDefinition candidate : candidateDefinitions.values()) {
       SagaDefinition definition = candidate.definition();
-      // Every declarative step's service must exist in THIS candidate set: definitions propagate
-      // fleet-wide through the store the moment they register, so registering one whose service
-      // is absent would strand it on every replica.
-      for (SagaDefinition.StepDefinition step : definition.getSteps()) {
-        if (step instanceof SagaDefinition.ServiceStep serviceStep) {
-          if (!candidateServices.containsKey(serviceStep.getService())) {
-            errors.add(
-                "Definition file '"
-                    + candidate.fileName()
-                    + "' step '"
-                    + step.getName()
-                    + "' references service '"
-                    + serviceStep.getService()
-                    + "', which has no service file in this candidate set.");
-          }
-          if (!asyncCallbacksConfigured
-              && serviceStep.getPhases().values().stream().anyMatch(CallSpec::isAsync)) {
-            errors.add(
-                "Definition file '"
-                    + candidate.fileName()
-                    + "' step '"
-                    + step.getName()
-                    + "' declares an async phase, but async completion is not configured on this"
-                    + " daemon (missing callback URL / secret) — registration would fail on every"
-                    + " pass.");
-          }
-        }
+      // A retired definition is exempt from the service cross-check: it can never be started, so
+      // it cannot strand anything, and requiring its services to exist would make retirement a
+      // two-step deploy. Disabling a saga and deleting the services only it used is one change and
+      // has to converge as one — otherwise the pass that removes the service is rejected by the
+      // definition that no longer runs. The un-bumped-version check below still applies: a
+      // retirement is content like any other.
+      if (!definition.isDisabled()) {
+        validateStepReferences(candidate, candidateServices, errors);
       }
       // Un-bumped change: same name and version as the applied definition, different content.
       AppliedDefinition applied = appliedDefinitions.get(definition.getName());
@@ -702,6 +722,13 @@ final class ConfigReconciler {
     for (Map.Entry<String, AppliedDefinition> entry : appliedDefinitions.entrySet()) {
       String name = entry.getKey();
       if (!candidateDefinitions.containsKey(name)) {
+        // A saga that was retired before its file was deleted is the documented flow, not the
+        // hazard: it cannot be started, so nothing is stranded and there is nothing to warn about.
+        // Without this gate the runbook's own disable-then-delete sequence would warn on its happy
+        // path, and the warning would stop meaning anything.
+        if (entry.getValue().definition().isDisabled()) {
+          continue;
+        }
         // Remember what it referenced before the applied entry is dropped below: the registered
         // version stays startable, so removing one of its services later would break starts of it
         // with nothing left to notice.

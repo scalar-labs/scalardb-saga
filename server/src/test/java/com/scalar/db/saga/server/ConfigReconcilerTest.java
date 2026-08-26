@@ -97,6 +97,21 @@ class ConfigReconcilerTest {
     writeDefinition(fileName, sagaName, version, service, "/x");
   }
 
+  /** A retirement: the same saga, disabled, which is how an operator takes one out of service. */
+  private void writeDisabledDefinition(
+      String fileName, String sagaName, String version, String service) throws IOException {
+    Files.writeString(
+        definitionsDir.resolve(fileName),
+        "{\"name\":\""
+            + sagaName
+            + "\",\"version\":\""
+            + version
+            + "\",\"mode\":\"SAGA\",\"disabled\":true,\"steps\":[{\"name\":\"s\",\"service\":\""
+            + service
+            + "\",\"execution\":{\"method\":\"POST\",\"path\":\"/x\"},"
+            + "\"compensation\":{\"method\":\"POST\",\"path\":\"/undo\"}}]}");
+  }
+
   private void writeDefinition(
       String fileName, String sagaName, String version, String service, String path)
       throws IOException {
@@ -1239,6 +1254,53 @@ class ConfigReconcilerTest {
       // Assert — and the pass still collects rather than aborting, so other definitions are not
       // held hostage by it
       assertThat(requireNonNull(reconciler.status().rejection()).operatorActionRequired()).isTrue();
+    }
+
+    @Test
+    void run_retiredDefinitionReferencingARemovedService_applies() throws IOException {
+      // The single-PR retirement: disable the saga and delete the service only it used, in one
+      // change. A retired definition can never start, so it cannot strand anything — and requiring
+      // its services to still exist would reject the very pass that completes the retirement,
+      // making it a two-deploy dance.
+      // Arrange — a live saga on one service, and a retiring one on a service being removed
+      writeService("account", "base_url=http://account:8080\n");
+      writeService("legacy", "base_url=http://legacy:8080\n");
+      writeDefinition("live.json", "live-saga", "1.0", "account");
+      writeDefinition("old.json", "old-saga", "1.0", "legacy");
+      ConfigReconciler reconciler = reconciler();
+      assertThat(reconciler.run()).isTrue();
+
+      // Act — retire the saga and drop its service in the same change
+      writeDisabledDefinition("old.json", "old-saga", "2.0", "legacy");
+      Files.delete(servicesDir.resolve("legacy.properties"));
+
+      // Assert
+      assertThat(reconciler.run()).isTrue();
+      assertThat(registered).extracting(SagaDefinition::getVersion).contains("2.0");
+    }
+
+    @Test
+    void run_retiredDefinitionFileDeleted_doesNotWarn() throws IOException {
+      // The runbook's own sequence: disable, let it converge, then delete the file. The warning
+      // exists for delete-WITHOUT-disable; firing it on the happy path would teach operators to
+      // ignore it.
+      // Arrange — two sagas so the empty-transition guard does not fire; one is retired first
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("live.json", "live-saga", "1.0", "account");
+      writeDisabledDefinition("old.json", "old-saga", "2.0", "account");
+      ConfigReconciler reconciler = reconciler();
+      assertThat(reconciler.run()).isTrue();
+
+      // Act — now delete the retired saga's file
+      Files.delete(definitionsDir.resolve("old.json"));
+
+      // Assert
+      try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
+        assertThat(reconciler.run()).isTrue();
+
+        assertThat(logs.events())
+            .noneSatisfy(event -> assertThat(event.getFormattedMessage()).contains("vanished"));
+      }
     }
 
     @Test
