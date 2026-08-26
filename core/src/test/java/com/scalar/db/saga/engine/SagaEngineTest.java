@@ -1074,7 +1074,7 @@ class SagaEngineTest {
     }
 
     @Test
-    void executeSaga_alreadyActive_marksForRecoveryAndSkipsExecution() throws Exception {
+    void executeSaga_alreadyActive_skipsExecutionWithoutMarkingForRecovery() throws Exception {
       // Arrange — start saga-1 on a background thread and block it
       CountDownLatch stepStarted = new CountDownLatch(1);
       CountDownLatch stepRelease = new CountDownLatch(1);
@@ -1099,8 +1099,10 @@ class SagaEngineTest {
       // Act — attempt to execute the same saga again
       engine.executeSaga(def, saga, Map.of());
 
-      // Assert — duplicate was rejected and marked for recovery
-      verify(store).markForRecovery("saga-1");
+      // Assert — the duplicate was rejected, and the live drive was left alone. Marking here
+      // would stamp the epoch on a row the running drive owns, rewriting the clustering key it
+      // holds and killing it: a duplicate dispatch must not fail a healthy saga.
+      verify(store, never()).markForRecovery(any());
       // Only one step execution (the original, not the duplicate)
       verify(step1, times(1)).execute(any(SagaContext.class));
 
@@ -1110,7 +1112,40 @@ class SagaEngineTest {
     }
 
     @Test
-    void resumeFrom_alreadyActive_marksForRecoveryAndReturnsCurrentState() throws Exception {
+    void isLocallyActive_whileDriving_isTrueAndBecomesFalseWhenTheDriveEnds() throws Exception {
+      // Arrange — start saga-1 on a background thread and block it inside its step
+      CountDownLatch stepStarted = new CountDownLatch(1);
+      CountDownLatch stepRelease = new CountDownLatch(1);
+      Step step1 = mock(Step.class);
+      when(step1.getName()).thenReturn("s1");
+      when(step1.execute(any(SagaContext.class)))
+          .thenAnswer(
+              invocation -> {
+                stepStarted.countDown();
+                stepRelease.await();
+                return StepResult.empty();
+              });
+      registerStep("s1", step1);
+      SagaDefinition def = sagaDefinitionWithRetry("s1");
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
+
+      Thread sagaThread = new Thread(() -> engine.executeSaga(def, saga, Map.of()));
+      sagaThread.start();
+      stepStarted.await();
+
+      // Act & Assert — true only for the saga this instance is driving
+      assertThat(engine.isLocallyActive("saga-1")).isTrue();
+      assertThat(engine.isLocallyActive("saga-unknown")).isFalse();
+
+      // Act & Assert — the drive's finally clears it, so recovery stops skipping the saga
+      stepRelease.countDown();
+      sagaThread.join(5000);
+      assertThat(engine.isLocallyActive("saga-1")).isFalse();
+    }
+
+    @Test
+    void resumeFrom_alreadyActive_returnsCurrentStateWithoutMarkingForRecovery() throws Exception {
       // Arrange — start saga-1 on a background thread and block it
       CountDownLatch stepStarted = new CountDownLatch(1);
       CountDownLatch stepRelease = new CountDownLatch(1);
@@ -1136,8 +1171,9 @@ class SagaEngineTest {
       ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
       SagaStateSnapshot result = engine.resumeFrom(def, context, 0);
 
-      // Assert — duplicate was rejected, returns current state unchanged
-      verify(store).markForRecovery("saga-1");
+      // Assert — duplicate rejected and current state returned unchanged, with the live drive
+      // left alone (see executeSaga_alreadyActive_... for why marking would be harmful).
+      verify(store, never()).markForRecovery(any());
       assertThat(result).isEqualTo(saga);
 
       // Cleanup
@@ -1146,7 +1182,8 @@ class SagaEngineTest {
     }
 
     @Test
-    void compensateFrom_alreadyActive_marksForRecoveryAndSkipsCompensation() throws Exception {
+    void compensateFrom_alreadyActive_skipsCompensationWithoutMarkingForRecovery()
+        throws Exception {
       // Arrange — start saga-1 on a background thread and block it
       CountDownLatch stepStarted = new CountDownLatch(1);
       CountDownLatch stepRelease = new CountDownLatch(1);
@@ -1172,8 +1209,9 @@ class SagaEngineTest {
       ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
       engine.compensateFrom(def, context, 0);
 
-      // Assert — duplicate was rejected and marked for recovery
-      verify(store).markForRecovery("saga-1");
+      // Assert — duplicate rejected, live drive left alone (marking would rewrite the clustering
+      // key the running drive holds and kill it).
+      verify(store, never()).markForRecovery(any());
       // No compensation was triggered
       verify(step1, never()).compensate(any(SagaContext.class));
       // No status transitions recorded for the duplicate

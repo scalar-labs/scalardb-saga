@@ -159,8 +159,7 @@ public class SagaEngine implements AutoCloseable {
   public SagaStateSnapshot resumeFrom(
       SagaDefinition def, ExecutionContext context, int fromStepIndex) {
     String sagaId = context.getSagaId();
-    if (!registerActive(sagaId)) {
-      store.markForRecovery(sagaId);
+    if (!registerOrHandOff(sagaId)) {
       return context.getCurrentState();
     }
     try {
@@ -177,8 +176,7 @@ public class SagaEngine implements AutoCloseable {
    */
   public void compensateFrom(SagaDefinition def, ExecutionContext context, int fromStepIndex) {
     String sagaId = context.getSagaId();
-    if (!registerActive(sagaId)) {
-      store.markForRecovery(sagaId);
+    if (!registerOrHandOff(sagaId)) {
       return;
     }
     try {
@@ -805,13 +803,60 @@ public class SagaEngine implements AutoCloseable {
   // Private — shutdown coordination
   // ---------------------------------------------------------------------------
 
-  private boolean registerActive(String sagaId) {
+  /**
+   * Why a drive was or was not allowed to start. The two refusals are not interchangeable: only one
+   * of them means the saga has nobody to drive it.
+   */
+  private enum Registration {
+    REGISTERED,
+    /** Shutting down: nothing here will drive this saga, so it must be handed to the sweeper. */
+    REFUSED_SHUTTING_DOWN,
+    /** Another drive on this instance already owns it, and is still running. */
+    REFUSED_ALREADY_ACTIVE
+  }
+
+  private Registration registerActive(String sagaId) {
     synchronized (shutdownLock) {
       if (shuttingDown) {
-        return false;
+        return Registration.REFUSED_SHUTTING_DOWN;
       }
-      return activeSagas.add(sagaId);
+      return activeSagas.add(sagaId)
+          ? Registration.REGISTERED
+          : Registration.REFUSED_ALREADY_ACTIVE;
     }
+  }
+
+  /**
+   * Hands the saga to the sweeper when the refusal means nothing here will drive it, and does
+   * nothing when a live local drive already owns it.
+   *
+   * <p>The distinction matters because {@code markForRecovery} stamps {@code updated_at} with the
+   * epoch, which rewrites the row's clustering key — the token the owning drive holds. Marking a
+   * saga that is merely already active would therefore kill the healthy drive that is executing it,
+   * turning a duplicate dispatch into a failed saga.
+   *
+   * @return true when the caller should proceed to drive the saga
+   */
+  private boolean registerOrHandOff(String sagaId) {
+    Registration registration = registerActive(sagaId);
+    if (registration == Registration.REFUSED_SHUTTING_DOWN) {
+      store.markForRecovery(sagaId);
+    }
+    return registration == Registration.REGISTERED;
+  }
+
+  /**
+   * Returns whether this instance is currently driving the given saga.
+   *
+   * <p>Advisory and racy by design: the set is read without {@link #shutdownLock}, so the answer
+   * can be stale the moment it is returned. It is never a lock and must not be used to establish
+   * exclusion. Recovery uses it to avoid claiming a saga this instance is demonstrably executing —
+   * a false negative there costs at most one claim of a saga whose row was freshly stamped anyway,
+   * while a false positive is impossible: an id is in the set only between the drive registering
+   * and its {@code finally} removing it.
+   */
+  boolean isLocallyActive(String sagaId) {
+    return activeSagas.contains(sagaId);
   }
 
   private void unregisterActive(String sagaId) {
