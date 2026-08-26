@@ -1257,6 +1257,26 @@ class ConfigReconcilerTest {
     }
 
     @Test
+    void run_sameVersionDisableToggle_rejectedAsAnUnBumpedChange() throws IOException {
+      // Retirement is content, so it needs a version bump like any other change. Without the flag
+      // in equals this would compare equal to the enabled definition, the store would read it as
+      // already registered and no-op, and the saga would quietly stay startable.
+      // Arrange
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      ConfigReconciler reconciler = reconciler();
+      assertThat(reconciler.run()).isTrue();
+
+      // Act — flip the marker without bumping the version
+      writeDisabledDefinition("saga.json", "order-saga", "1.0", "account");
+
+      // Assert
+      assertThat(reconciler.run()).isFalse();
+      assertThat(requireNonNull(reconciler.status().rejection()).reason())
+          .contains("without bumping its version");
+    }
+
+    @Test
     void run_retiredDefinitionReferencingARemovedService_applies() throws IOException {
       // The single-PR retirement: disable the saga and delete the service only it used, in one
       // change. A retired definition can never start, so it cannot strand anything — and requiring

@@ -214,8 +214,24 @@ Operational notes, learned from how Kubernetes actually delivers files:
   file retires nothing: the version already registered stays in the store and stays startable on
   every replica, so new starts of it keep arriving. The daemon warns when a definition's file
   disappears, and warns again if you later remove a service that the vanished definition still
-  names — at which point starts of it fail to resolve an endpoint. (The `disabled` marker that
-  makes retirement real is not in this release; until then, keep the files in place.)
+  names — at which point starts of it fail to resolve an endpoint.
+
+  To retire a saga, register a **new version** with `"disabled": true`:
+
+  ```json
+  { "name": "order-saga", "version": "3.0", "mode": "SAGA", "disabled": true, "steps": [ ... ] }
+  ```
+
+  New starts of the name are then refused with `422` / `FAILED_PRECONDITION` and error code
+  `SAGA_DEFINITION_DISABLED`, including starts pinned to an older version that is itself enabled —
+  otherwise pinning would be a way around retiring. Sagas already running finish normally, and
+  admin recovery on them keeps working. Retirement is a property of a version, so it needs a
+  version bump like any other content change, and it cannot be undone in place: to bring a saga
+  back, register a later version without the marker.
+
+  Disabling and deleting the services that saga alone used can go in **one** change — a retired
+  definition is exempt from the service cross-check, since it can never start. Deleting its file
+  afterwards is then quiet, because there is nothing left to strand.
 - **Definition rollback is roll-forward only**: `helm rollback` reverts service files, but
   re-registering an old definition version is an idempotent no-op — the store's latest version
   keeps winning. To revert a definition, register the old content as a NEW, bumped version.

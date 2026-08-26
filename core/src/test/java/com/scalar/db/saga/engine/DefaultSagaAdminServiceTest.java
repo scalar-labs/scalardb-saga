@@ -235,6 +235,42 @@ class DefaultSagaAdminServiceTest {
   }
 
   @Test
+  void recoverSaga_retiredDefinition_stillRecovers() {
+    // Retiring a saga refuses NEW starts. A saga already running under a retired definition still
+    // has to be driveable to a conclusion, or retiring one would strand exactly the sagas an
+    // operator most needs to finish. Recovery resolves the definition by version and never goes
+    // through the start gate, which is what makes that hold.
+    // Arrange
+    SagaStateSnapshot running = snapshot(SagaStatus.RUNNING);
+    List<SagaEvent> events =
+        List.of(StatusEvent.started(null), StepEvent.completed(0, "debit", null));
+    SagaDefinition retired =
+        SagaDefinition.newBuilder(SAGA_NAME)
+            .saga()
+            .version(DEF_VERSION)
+            .disabled(true)
+            .step("debit", "com.example.DebitStep")
+            .add()
+            .step("credit", "com.example.CreditStep")
+            .add()
+            .build();
+    when(store.getStateSnapshot(SAGA_ID)).thenReturn(Optional.of(running));
+    when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(retired);
+    when(store.getEvents(SAGA_ID)).thenReturn(events);
+    stubDrive(running, events);
+
+    // Act
+    service.recoverSaga(SAGA_ID, "finish it despite the retirement");
+
+    // Assert
+    verify(engine)
+        .recover(
+            eq(new RecoveryAction.Resume(1)),
+            any(SagaDefinition.class),
+            any(ExecutionContext.class));
+  }
+
+  @Test
   void recoverSaga_compensatingSaga_continuesCompensation() {
     // Arrange — already COMPENSATING, step 1 compensated -> continue from step 0
     SagaStateSnapshot compensating = snapshot(SagaStatus.COMPENSATING);
