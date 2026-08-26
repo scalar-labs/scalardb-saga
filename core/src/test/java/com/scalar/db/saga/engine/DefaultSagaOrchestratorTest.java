@@ -22,6 +22,7 @@ import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
+import com.scalar.db.saga.exception.SagaDefinitionDisabledException;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaIllegalArgumentException;
@@ -82,6 +83,16 @@ class DefaultSagaOrchestratorTest {
 
   private static SagaDefinition definition(String name) {
     return SagaDefinition.newBuilder(name).saga().step("s1", "com.example.Step1").add().build();
+  }
+
+  private static SagaDefinition disabledDefinition(String name, String version) {
+    return SagaDefinition.newBuilder(name)
+        .saga()
+        .version(version)
+        .disabled(true)
+        .step("s1", "com.example.Step1")
+        .add()
+        .build();
   }
 
   private static SagaDefinition definition(String name, String version) {
@@ -200,6 +211,62 @@ class DefaultSagaOrchestratorTest {
       // Assert
       verify(definitionRegistry).resolve("transfer");
       verify(engine).execute(def, "my-id", Map.of());
+    }
+
+    @Test
+    void start_latestVersionDisabled_throwsSagaDefinitionDisabled() {
+      // Retirement blocks new starts of the name. The refusal names the disabled version, which is
+      // what an operator has to look at to understand it.
+      // Arrange
+      when(definitionRegistry.resolve("transfer"))
+          .thenReturn(disabledDefinition("transfer", "2.0"));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.start("transfer", Map.of()))
+          .isInstanceOf(SagaDefinitionDisabledException.class)
+          .satisfies(
+              e -> {
+                SagaDefinitionDisabledException disabled = (SagaDefinitionDisabledException) e;
+                assertThat(disabled.getSagaName()).isEqualTo("transfer");
+                assertThat(disabled.getVersion()).isEqualTo("2.0");
+              });
+      verify(engine, never()).execute(any(), any(), any());
+    }
+
+    @Test
+    void start_pinnedToAnEnabledVersionWhileTheLatestIsDisabled_throwsSagaDefinitionDisabled() {
+      // Pinning a version must not be a way around retiring a saga: the flag belongs to the name's
+      // latest version, not to the version being started. The reported version is the disabled
+      // latest, not the one that was asked for.
+      // Arrange
+      SagaDefinitionId pinned = new SagaDefinitionId("transfer", "1.0");
+      when(definitionRegistry.resolve("transfer", "1.0")).thenReturn(definition("transfer", "1.0"));
+      when(definitionRegistry.resolve("transfer"))
+          .thenReturn(disabledDefinition("transfer", "2.0"));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.start(pinned, Map.of()))
+          .isInstanceOf(SagaDefinitionDisabledException.class)
+          .satisfies(
+              e -> assertThat(((SagaDefinitionDisabledException) e).getVersion()).isEqualTo("2.0"));
+      verify(engine, never()).execute(any(), any(), any());
+    }
+
+    @Test
+    void start_pinnedToAnOlderVersionWhileTheLatestIsEnabled_starts() {
+      // The other side of the same rule: an enabled latest leaves a pinned older version startable.
+      // Arrange
+      SagaDefinitionId pinned = new SagaDefinitionId("transfer", "1.0");
+      SagaDefinition def = definition("transfer", "1.0");
+      when(definitionRegistry.resolve("transfer", "1.0")).thenReturn(def);
+      when(definitionRegistry.resolve("transfer")).thenReturn(definition("transfer", "2.0"));
+      when(engine.execute(eq(def), isNull(), any())).thenReturn("saga-1");
+
+      // Act
+      String sagaId = orchestrator.start(pinned, Map.of());
+
+      // Assert
+      assertThat(sagaId).isEqualTo("saga-1");
     }
 
     @Test

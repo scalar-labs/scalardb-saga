@@ -10,6 +10,7 @@ import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.definition.SagaDefinitionParser;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
+import com.scalar.db.saga.exception.SagaDefinitionDisabledException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.store.EventType;
@@ -642,6 +643,9 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     if (def == null) {
       throw SagaDefinitionNotFoundException.byName(sagaName);
     }
+    // This lookup already went to the store for the latest version, so the retirement check is
+    // free here.
+    requireNotRetired(def);
     return def;
   }
 
@@ -650,7 +654,27 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     if (def == null) {
       throw SagaDefinitionNotFoundException.byId(id);
     }
+    // Retirement belongs to the name's LATEST version, not to the version being started, so a
+    // start pinned to an older version that is itself enabled has to be refused as well —
+    // otherwise pinning a version would be a way around retiring a saga. The versioned lookup can
+    // be served from cache, so unlike the name path this costs one store read per start.
+    SagaDefinition latest = definitionRegistry.resolve(id.name());
+    if (latest != null) {
+      requireNotRetired(latest);
+    }
     return def;
+  }
+
+  /**
+   * Refuses a start when the name's latest version retires it. In-flight sagas are unaffected: they
+   * resume through {@link #resolveDefinition}, which does not come through here, so a retirement
+   * stops new work without stranding work already running — including the admin operations that
+   * drive it to a conclusion.
+   */
+  private static void requireNotRetired(SagaDefinition latest) {
+    if (latest.isDisabled()) {
+      throw SagaDefinitionDisabledException.of(latest.getName(), latest.getVersion());
+    }
   }
 
   private SagaDefinition resolveDefinition(SagaStateSnapshot saga) {
