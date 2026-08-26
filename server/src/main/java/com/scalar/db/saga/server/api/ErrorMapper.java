@@ -3,6 +3,7 @@ package com.scalar.db.saga.server.api;
 import com.scalar.db.saga.exception.ErrorMetadata;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
+import com.scalar.db.saga.exception.SagaDefinitionDisabledException;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaErrorCode;
@@ -90,6 +91,9 @@ public final class ErrorMapper {
 
     // ── Precondition failed (422) ────────────────────────────────────────
     app.exception(SagaStatePreconditionException.class, (e, ctx) -> respond(ctx, 422, e));
+    // A retired saga is a stable precondition failure, not a transient race: retrying the same
+    // start never succeeds, which is what separates 422 from the 409 the conflict codes carry.
+    app.exception(SagaDefinitionDisabledException.class, (e, ctx) -> respond(ctx, 422, e));
 
     // ── Bad request (400) ────────────────────────────────────────────────
     // SAGA_DEFINITION_VERSION_CONTENT_CONFLICT is the one definition code that is not a bad

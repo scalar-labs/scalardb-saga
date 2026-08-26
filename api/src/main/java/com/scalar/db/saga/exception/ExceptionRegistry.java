@@ -103,6 +103,11 @@ public final class ExceptionRegistry {
     m.put(
         SagaErrorCode.SAGA_PARKED,
         meta -> SagaStatePreconditionException.fromWire(SagaErrorCode.SAGA_PARKED, meta));
+    m.put(
+        SagaErrorCode.SAGA_DEFINITION_DISABLED,
+        meta ->
+            SagaDefinitionDisabledException.of(
+                requireDeclared(meta, "saga_name"), requireDeclared(meta, "version")));
 
     // ── RETRYABLE_SERVER_ERROR (2xxxx) ────────────────────────────────
     m.put(
@@ -205,6 +210,22 @@ public final class ExceptionRegistry {
       // Wire metadata doesn't satisfy the code's schema — protocol drift; degrade.
       return Optional.empty();
     }
+  }
+
+  /**
+   * Reads a metadata key the code's schema declares, failing as protocol drift when it is absent.
+   *
+   * <p>{@link #reconstruct} already treats a missing declared key as drift and degrades — the
+   * factories reject null and the catch above turns that into an untyped reconstruction. Saying so
+   * here rather than relying on the NPE keeps the null-safety checker satisfied at the call site;
+   * the other entries pre-date this and read the map directly.
+   */
+  private static String requireDeclared(Map<String, String> metadata, String key) {
+    String value = metadata.get(key);
+    if (value == null) {
+      throw new IllegalArgumentException("wire metadata is missing declared key '" + key + "'");
+    }
+    return value;
   }
 
   /**

@@ -214,6 +214,14 @@ public enum SagaErrorCode {
       "The saga is WAITING on an async callback and resolves via the callback or its timeout — not via admin action.",
       "Wait for the callback or the timeout; do not attempt to drive the saga manually."),
 
+  SAGA_DEFINITION_DISABLED(
+      "DB-SAGA-10403",
+      Category.USER_ERROR,
+      "Saga definition is disabled and cannot be started",
+      ErrorMetadataSchema.of("saga_name", "version"),
+      "The latest registered version of this saga is marked disabled, which retires it: new starts are refused while sagas already running finish normally. The version reported is the disabled latest, which is not necessarily the version that was requested.",
+      "Start a different saga, or register a new version that is not disabled — a disabled version cannot be un-disabled in place, because registered content is immutable."),
+
   // ── RETRYABLE_SERVER_ERROR (2xxxx) ───────────────────────────────────
   SAGA_CONCURRENT_MODIFICATION(
       "DB-SAGA-20001",

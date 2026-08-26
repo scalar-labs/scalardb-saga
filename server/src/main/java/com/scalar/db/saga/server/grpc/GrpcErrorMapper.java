@@ -7,6 +7,7 @@ import com.google.rpc.RetryInfo;
 import com.scalar.db.saga.exception.ErrorMetadata;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
+import com.scalar.db.saga.exception.SagaDefinitionDisabledException;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaErrorCode;
@@ -79,6 +80,11 @@ final class GrpcErrorMapper {
 
       // ── Precondition ───────────────────────────────────────────────
       case SagaStatePreconditionException e -> respond(Status.Code.FAILED_PRECONDITION, e);
+      // A retired saga is a stable precondition failure, not a transient race: retrying the same
+      // start never succeeds, which is what separates FAILED_PRECONDITION from ABORTED here. It
+      // is dispatched ahead of the SagaDefinitionException arms because it is a sibling type, not
+      // a SagaDefinitionException — a retired saga is not a malformed one.
+      case SagaDefinitionDisabledException e -> respond(Status.Code.FAILED_PRECONDITION, e);
 
       // ── Bad request ────────────────────────────────────────────────
       // SAGA_DEFINITION_VERSION_CONTENT_CONFLICT is the one definition code that is not a bad
