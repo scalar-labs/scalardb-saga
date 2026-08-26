@@ -53,6 +53,7 @@ public final class SagaDefinition {
   private final RecoveryStrategy recoveryStrategy;
   private final long timeoutMillis;
   private final @Nullable RetryPolicy defaultRetryPolicy;
+  private final boolean disabled;
   private final int pivotIndex;
 
   private SagaDefinition(AbstractSagaBuilder<?> builder) {
@@ -63,6 +64,7 @@ public final class SagaDefinition {
     this.recoveryStrategy = builder.recoveryStrategy;
     this.timeoutMillis = builder.timeoutMillis;
     this.defaultRetryPolicy = builder.defaultRetryPolicy;
+    this.disabled = builder.disabled;
     this.pivotIndex = computePivotIndex();
   }
 
@@ -266,11 +268,29 @@ public final class SagaDefinition {
     return defaultRetryPolicy;
   }
 
+  /**
+   * Whether this version retires the saga: new starts of the name are refused while sagas already
+   * running under it finish, and recovery on them stays available.
+   *
+   * <p>Retirement is a property of a version, not of a name, because the store is append-only and
+   * versions are immutable: retiring is registering a new version that says so, and un-retiring is
+   * registering a later one that does not. A name is retired when its LATEST version is, which is
+   * why the start paths ask the store rather than this object.
+   */
+  public boolean isDisabled() {
+    return disabled;
+  }
+
   @Override
   public boolean equals(@Nullable Object o) {
     if (this == o) return true;
     if (!(o instanceof SagaDefinition that)) return false;
     return timeoutMillis == that.timeoutMillis
+        // Part of identity, not incidental state: a version that only flips this flag is a
+        // different definition. Leaving it out would make disabling at the same version compare
+        // equal to the enabled one, which the store reads as "already registered" and no-ops —
+        // retirement would silently not happen.
+        && disabled == that.disabled
         && name.equals(that.name)
         && version.equals(that.version)
         && mode == that.mode
@@ -282,7 +302,7 @@ public final class SagaDefinition {
   @Override
   public int hashCode() {
     return Objects.hash(
-        name, version, mode, steps, recoveryStrategy, timeoutMillis, defaultRetryPolicy);
+        name, version, mode, steps, recoveryStrategy, timeoutMillis, defaultRetryPolicy, disabled);
   }
 
   @Override
@@ -297,6 +317,7 @@ public final class SagaDefinition {
         + recoveryStrategy
         + ", steps="
         + steps.size()
+        + (disabled ? ", disabled" : "")
         + '}';
   }
 
@@ -544,6 +565,7 @@ public final class SagaDefinition {
     final List<StepDefinition> steps = new ArrayList<>();
     long timeoutMillis;
     @Nullable RetryPolicy defaultRetryPolicy;
+    boolean disabled;
 
     private AbstractSagaBuilder(String name, SagaMode mode, RecoveryStrategy recoveryStrategy) {
       this.name = name;
@@ -569,6 +591,16 @@ public final class SagaDefinition {
     public SELF defaultRetryPolicy(RetryPolicy defaultRetryPolicy) {
       this.defaultRetryPolicy =
           Objects.requireNonNull(defaultRetryPolicy, "defaultRetryPolicy must not be null");
+      return self();
+    }
+
+    /**
+     * Retires the saga as of this version: new starts of the name are refused, sagas already
+     * running finish, and recovery on them stays available. Requires a version bump like any other
+     * content change.
+     */
+    public SELF disabled(boolean disabled) {
+      this.disabled = disabled;
       return self();
     }
 

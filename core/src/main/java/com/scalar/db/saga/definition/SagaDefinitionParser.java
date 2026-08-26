@@ -174,6 +174,9 @@ public final class SagaDefinitionParser {
     if (isPresent(root, "defaultRetryPolicy")) {
       builder.defaultRetryPolicy(parseRetryPolicy(root.get("defaultRetryPolicy")));
     }
+    if (isPresent(root, "disabled")) {
+      builder.disabled(root.get("disabled").asBoolean());
+    }
   }
 
   private static void addSagaStep(SagaDefinition.SagaBuilder builder, JsonNode stepNode) {
@@ -319,6 +322,7 @@ public final class SagaDefinitionParser {
             "recoveryStrategy",
             "timeoutMillis",
             "defaultRetryPolicy",
+            "disabled",
             "steps");
     Set<String> stepKnown =
         Set.of(

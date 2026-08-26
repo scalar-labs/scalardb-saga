@@ -32,6 +32,7 @@ final class SagaDefinitionSerializer {
   private static final String RECOVERY_STRATEGY = "recoveryStrategy";
   private static final String TIMEOUT_MILLIS = "timeoutMillis";
   private static final String DEFAULT_RETRY_POLICY = "defaultRetryPolicy";
+  private static final String DISABLED = "disabled";
   private static final String STEPS = "steps";
 
   // Step-level JSON keys
@@ -79,6 +80,11 @@ final class SagaDefinitionSerializer {
     RetryPolicy defaultRetryPolicy = def.getDefaultRetryPolicy();
     if (defaultRetryPolicy != null) {
       root.set(DEFAULT_RETRY_POLICY, serializeRetryPolicy(defaultRetryPolicy));
+    }
+    // Written only when set, so every definition stored before retirement existed round-trips to
+    // the same bytes it was stored with.
+    if (def.isDisabled()) {
+      root.put(DISABLED, true);
     }
     ArrayNode steps = root.putArray(STEPS);
     for (SagaDefinition.StepDefinition step : def.getSteps()) {
@@ -134,6 +140,7 @@ final class SagaDefinitionSerializer {
             .recoveryStrategy(parseEnum(root, RECOVERY_STRATEGY, RecoveryStrategy.class))
             .timeoutMillis(root.get(TIMEOUT_MILLIS).asLong());
     applyDefaultRetry(builder, root);
+    applyDisabled(builder, root);
     for (JsonNode stepNode : root.get(STEPS)) {
       addSagaStep(builder, stepNode);
     }
@@ -153,6 +160,7 @@ final class SagaDefinitionSerializer {
             .version(root.get(VERSION).asText())
             .timeoutMillis(root.get(TIMEOUT_MILLIS).asLong());
     applyDefaultRetry(builder, root);
+    applyDisabled(builder, root);
     for (JsonNode stepNode : root.get(STEPS)) {
       addTccStep(builder, stepNode);
     }
@@ -162,6 +170,13 @@ final class SagaDefinitionSerializer {
   private void applyDefaultRetry(SagaDefinition.AbstractSagaBuilder<?> builder, JsonNode root) {
     if (root.has(DEFAULT_RETRY_POLICY) && !root.get(DEFAULT_RETRY_POLICY).isNull()) {
       builder.defaultRetryPolicy(deserializeRetryPolicy(root.get(DEFAULT_RETRY_POLICY)));
+    }
+  }
+
+  /** Absent means enabled, which is how every definition stored before retirement existed reads. */
+  private static void applyDisabled(SagaDefinition.AbstractSagaBuilder<?> builder, JsonNode root) {
+    if (has(root, DISABLED)) {
+      builder.disabled(root.get(DISABLED).asBoolean());
     }
   }
 
