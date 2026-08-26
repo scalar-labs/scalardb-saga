@@ -20,10 +20,12 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -71,6 +73,11 @@ class SagaRecoveryManager {
   // bucket through the whole ring.
   private static final int MAX_CONSECUTIVE_FAILED_PAGES = 3;
 
+  // A drive still holding its saga after this many recovery timeouts is stuck rather than slow: a
+  // healthy one emits an event at every step boundary, and the timeout is already sized above a
+  // single step's worst case. Not a knob — it only decides when a log line appears.
+  private static final int HUNG_DRIVE_WARN_MULTIPLE = 10;
+
   private final SagaStore store;
   private final SagaEngine engine;
   private final SagaDefinitionRegistry registry;
@@ -88,6 +95,12 @@ class SagaRecoveryManager {
   // revolution. Guarded by passLock; a pass never overlaps another.
   private @Nullable ScanCursor staleResumeCursor;
   private @Nullable ScanCursor parkedResumeCursor;
+
+  // When each currently-skipped saga was first seen executing here, and which have already been
+  // warned about. Written by recovery tasks, so both are concurrent; pruned on the pass thread at
+  // the start of each pass, which bounds them to sagas this instance is actually driving.
+  private final Map<String, Instant> localActiveSince = new ConcurrentHashMap<>();
+  private final Set<String> hungDriveWarned = ConcurrentHashMap.newKeySet();
 
   SagaRecoveryManager(
       SagaStore store,
@@ -195,21 +208,38 @@ class SagaRecoveryManager {
 
   /**
    * Outcome of one dispatched recovery task, captured at the task's commit point: the claim for a
-   * stale saga, the WAITING transition for a parked one. Every outcome except {@code LOST_RACE}
-   * consumes batch budget. {@code COMMITTED*} spent the saga's availability even when the drive
-   * after the commit failed. {@code ERROR} is charged conservatively: the failed operation may have
-   * committed without the store being able to confirm it (an unknown-status commit whose
-   * verification read-back also failed leaves the saga claimed but undriven), and a failure means
-   * the store is struggling — the situation where a pass must wind down, not scan harder. Only a
-   * clean lost race — another actor verifiably did the work — keeps the sweep scanning for free.
-   * {@code ERROR} stays a separate counter so store trouble does not inflate the contention signal
-   * the pass summary exists to expose.
+   * stale saga, the WAITING transition for a parked one. {@code COMMITTED}, {@code DRIVE_FAILED}
+   * and {@code ERROR} consume batch budget; {@code LOST_RACE} and {@code SKIPPED} are free.
+   *
+   * <p>{@code DRIVE_FAILED} is a claim that committed and an execution that then threw. The saga is
+   * ours and its availability is spent either way, so it is charged exactly like {@code COMMITTED}
+   * and additionally counted in {@code driveFailures} — the number that says "we keep winning
+   * claims and the drives keep dying". It is not {@code ERROR}: there the claim itself failed and
+   * the saga was never ours.
+   *
+   * <p>{@code ERROR} is charged conservatively: the failed operation may have committed without the
+   * store being able to confirm it (an unknown-status commit whose verification read-back also
+   * failed leaves the saga claimed but undriven), and a failure means the store is struggling — the
+   * situation where a pass must wind down, not scan harder. A clean lost race — another actor
+   * verifiably did the work — keeps the sweep scanning for free.
+   *
+   * <p>{@code SKIPPED} is the deliberate non-claim: the saga looked stale by its state row, but
+   * something is still driving it — either a drive on this instance, or an event written recently
+   * enough that someone must be. It is free because charging it would let live sagas exhaust the
+   * budget and starve recovery of the genuinely dead ones. One value covers both checks because
+   * nothing downstream treats them differently; the cases an operator can act on carry their own
+   * log lines instead (a hung drive is named after {@value #HUNG_DRIVE_WARN_MULTIPLE} timeouts, a
+   * saga with no events is reported as {@code ERROR}).
+   *
+   * <p>{@code ERROR} stays a separate counter so store trouble does not inflate the contention
+   * signal the pass summary exists to expose.
    */
   private enum RecoveryOutcome {
     LOST_RACE,
     ERROR,
     COMMITTED,
-    COMMITTED_DRIVE_FAILED
+    DRIVE_FAILED,
+    SKIPPED
   }
 
   /** Why a sweep ended where it did, as rendered in the pass summary. */
@@ -241,11 +271,12 @@ class SagaRecoveryManager {
     int driveFailures;
     int failedPages;
     int consecutiveFailedPages;
+    int skipped;
     boolean aborted;
     boolean storeUnavailable;
     StopReason stopReason = StopReason.REVOLUTION;
 
-    /** Budget spent so far: committed work plus errors; lost races are free. */
+    /** Budget spent so far: committed work plus errors; lost races and skips are free. */
     int spent() {
       return committed + errors;
     }
@@ -256,7 +287,8 @@ class SagaRecoveryManager {
           && lostRaces == 0
           && errors == 0
           && driveFailures == 0
-          && failedPages == 0;
+          && failedPages == 0
+          && skipped == 0;
     }
 
     /** The counters as one log fragment; the single place the field list is spelled out. */
@@ -273,6 +305,8 @@ class SagaRecoveryManager {
           + driveFailures
           + " failedPages="
           + failedPages
+          + " skipped="
+          + skipped
           + " stop="
           + stopReason;
     }
@@ -340,6 +374,10 @@ class SagaRecoveryManager {
       // Compute the staleness cutoff once from the injected clock so every page this pass uses a
       // consistent threshold.
       Instant staleThreshold = config.clock().instant().minusMillis(config.recoveryTimeoutMillis());
+      // Drop bookkeeping for sagas this instance has stopped driving, so the two maps stay bounded
+      // by what is actually running. On the pass thread, before any task can touch them.
+      localActiveSince.keySet().removeIf(id -> !engine.isLocallyActive(id));
+      hungDriveWarned.retainAll(localActiveSince.keySet());
       SweepPageAction stalePage =
           (cursor, limit, futures) -> {
             Recoverables result = store.findRecoverable(staleThreshold, cursor);
@@ -348,7 +386,7 @@ class SagaRecoveryManager {
               if (limit-- <= 0) {
                 break;
               }
-              futures.add(recoveryExecutor.submit(() -> recoverOneSafely(saga)));
+              futures.add(recoveryExecutor.submit(() -> recoverOneSafely(saga, staleThreshold)));
             }
             return result.nextCursor();
           };
@@ -537,12 +575,13 @@ class SagaRecoveryManager {
   private static void count(RecoveryOutcome outcome, SweepCounters counters) {
     switch (outcome) {
       case COMMITTED -> counters.committed++;
-      case COMMITTED_DRIVE_FAILED -> {
+      case DRIVE_FAILED -> {
         counters.committed++;
         counters.driveFailures++;
       }
       case LOST_RACE -> counters.lostRaces++;
       case ERROR -> counters.errors++;
+      case SKIPPED -> counters.skipped++;
     }
   }
 
@@ -582,7 +621,33 @@ class SagaRecoveryManager {
     }
   }
 
-  private RecoveryOutcome recoverOneSafely(SagaStateSnapshot saga) {
+  /**
+   * Decides whether a stale-looking saga may be claimed, then claims and drives it.
+   *
+   * <p>A stale {@code updated_at} does not mean abandoned: {@code recordStepEvent} never touches
+   * the state row, so a saga executing a long step looks exactly like one whose process died. Two
+   * guards separate them, in this order.
+   *
+   * <p>The local-active check comes first and runs before a permit is acquired. It is free, and
+   * permits are held for the whole synchronous drive, so evaluating it inside the permit would
+   * queue skips behind long drives. It must also precede the EPOCH carve-out: a row can be
+   * EPOCH-stamped while a local drive still runs — the duplicate-registration path does exactly
+   * that — and claiming it would kill the drive this instance is running.
+   *
+   * <p>The progress probe then reads the newest event stamp for everything else, and skips the saga
+   * when it shows activity within the staleness window. A deliberate hand-off (the caller stamped
+   * {@code EPOCH} to give the saga to the sweeper) bypasses the probe, or a recent event would
+   * delay it by a whole timeout.
+   */
+  private RecoveryOutcome recoverOneSafely(SagaStateSnapshot saga, Instant staleThreshold) {
+    String sagaId = saga.getSagaId();
+    // Free and in-memory: keep it outside the permit.
+    if (engine.isLocallyActive(sagaId)) {
+      noteLocallyActive(sagaId);
+      return RecoveryOutcome.SKIPPED;
+    }
+    boolean deliberateHandoff = saga.getUpdatedAt().equals(Instant.EPOCH);
+
     try {
       recoverySemaphore.acquire();
     } catch (InterruptedException e) {
@@ -590,6 +655,31 @@ class SagaRecoveryManager {
       return RecoveryOutcome.ERROR;
     }
     try {
+      // Re-check inside the permit: the wait for it can be long, and this narrows the window in
+      // which a drive starts locally between the check above and the claim below.
+      if (engine.isLocallyActive(sagaId)) {
+        noteLocallyActive(sagaId);
+        return RecoveryOutcome.SKIPPED;
+      }
+      Optional<Instant> newestEvent = readNewestEventTime(sagaId);
+      if (newestEvent.isEmpty()) {
+        // createSaga writes SAGA_STARTED in the same transaction as the state row, so a row with
+        // no events behind it cannot come from the engine. Claiming would replay an empty history
+        // and restart the saga from step 0 with no input — SAGA_STARTED is what carries it —
+        // against a saga that may already hold committed side effects. Report it as an error: the
+        // store is damaged, which is exactly when a pass should wind down rather than scan harder.
+        logger.error(
+            "Saga {} has a recoverable state row but no events; refusing to recover it, because"
+                + " replaying an empty history would restart it from step 0 with no input."
+                + " Investigate the store: this cannot be produced by normal operation.",
+            sagaId);
+        return RecoveryOutcome.ERROR;
+      }
+      // A deliberate hand-off is stamped EPOCH precisely to have the saga taken now, so honouring
+      // recent events there would delay it by a whole timeout.
+      if (!deliberateHandoff && hasRecentEvent(sagaId, newestEvent.get(), staleThreshold)) {
+        return RecoveryOutcome.SKIPPED;
+      }
       Optional<SagaStateSnapshot> claimed;
       try {
         claimed = store.claimForRecovery(saga, ownerId);
@@ -611,10 +701,79 @@ class SagaRecoveryManager {
         // Throwable, not Exception: an escape would be charged as ERROR despite the committed
         // claim, and logged without the saga id.
         logger.error("Failed to recover saga {}", saga.getSagaId(), t);
-        return RecoveryOutcome.COMMITTED_DRIVE_FAILED;
+        return RecoveryOutcome.DRIVE_FAILED;
       }
     } finally {
       recoverySemaphore.release();
+    }
+  }
+
+  /**
+   * Reads the newest event's timestamp, reporting no events as an empty result and a failed read as
+   * the epoch.
+   *
+   * <p>Collapsing a failed read to the epoch is deliberate: the epoch reads as "no progress", which
+   * sends the saga on to be claimed — exactly how recovery behaved before this probe existed. An
+   * events table this instance cannot read is no reason to stop recovering. The substitution can
+   * only ever lower the observed progress, so it can cause a claim but never a wrongful skip.
+   */
+  private Optional<Instant> readNewestEventTime(String sagaId) {
+    try {
+      return store.getNewestEventTime(sagaId);
+    } catch (Throwable t) {
+      logger.warn(
+          "Progress probe failed for saga {}; claiming on state-row staleness alone", sagaId, t);
+      return Optional.of(Instant.EPOCH);
+    }
+  }
+
+  /**
+   * Whether the saga wrote an event within the staleness window, which means something is still
+   * driving it and it must not be claimed.
+   *
+   * <p>Only the event stamp is compared. The state row's own timestamp cannot matter here: {@link
+   * SagaStore#findRecoverable} returns nothing newer than {@code staleThreshold}, so every
+   * candidate already has an old row by construction.
+   */
+  private boolean hasRecentEvent(String sagaId, Instant newestEvent, Instant staleThreshold) {
+    if (newestEvent.isBefore(staleThreshold)) {
+      return false;
+    }
+    if (newestEvent.isAfter(staleThreshold.plusMillis(config.recoveryTimeoutMillis()))) {
+      // Further ahead than the whole staleness window: the writer's clock is ahead of ours by more
+      // than recovery tolerates, and this saga will never look stale to us while that holds.
+      logger.warn(
+          "Saga {} reports an event at {}, beyond the staleness window ending {}; a writer's clock"
+              + " is ahead of this instance's and the saga cannot be recovered here until it"
+              + " settles",
+          sagaId,
+          newestEvent,
+          staleThreshold);
+    }
+    return true;
+  }
+
+  /**
+   * Records that a saga was skipped because this instance is driving it, and warns once when that
+   * has been true for far longer than a drive should take.
+   *
+   * <p>Without this a hung drive is invisible: the skip is free and silent, so a saga whose drive
+   * never releases it is passed over on every pass forever, with nothing in the log naming it.
+   */
+  private void noteLocallyActive(String sagaId) {
+    Instant now = config.clock().instant();
+    Instant since = localActiveSince.computeIfAbsent(sagaId, id -> now);
+    long stuckMillis = Duration.between(since, now).toMillis();
+    if (stuckMillis > HUNG_DRIVE_WARN_MULTIPLE * config.recoveryTimeoutMillis()
+        && hungDriveWarned.add(sagaId)) {
+      logger.warn(
+          "Saga {} has been executing on this instance for {}ms, over {}x the recovery timeout."
+              + " Recovery skips it while it is active, so a wedged drive is never reclaimed here;"
+              + " if it is stuck rather than slow, restart this instance or hand the saga to the"
+              + " sweeper.",
+          sagaId,
+          stuckMillis,
+          HUNG_DRIVE_WARN_MULTIPLE);
     }
   }
 
@@ -754,7 +913,7 @@ class SagaRecoveryManager {
       } catch (Exception e) {
         logger.error(
             "Re-drive of parked saga {} failed after its WAITING transition committed", sagaId, e);
-        return RecoveryOutcome.COMMITTED_DRIVE_FAILED;
+        return RecoveryOutcome.DRIVE_FAILED;
       }
       return RecoveryOutcome.COMMITTED;
     }
@@ -783,7 +942,7 @@ class SagaRecoveryManager {
             "Compensation of parked saga {} failed after its WAITING transition committed",
             sagaId,
             e);
-        return RecoveryOutcome.COMMITTED_DRIVE_FAILED;
+        return RecoveryOutcome.DRIVE_FAILED;
       }
     } else {
       // Post-pivot: cannot roll back and the give-up floor does not re-drive forward — escalate.

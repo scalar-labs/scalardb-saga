@@ -23,6 +23,7 @@ import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.definition.SagaDefinition.RecoveryStrategy;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
+import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaStore;
@@ -53,6 +54,10 @@ import org.slf4j.LoggerFactory;
 class SagaRecoveryManagerTest {
 
   private static final Instant NOW = Instant.parse("2025-01-01T12:00:00Z");
+  // findRecoverable only ever returns rows older than the staleness threshold, so a fixture
+  // standing in for one of its results must be older too. Before the progress predicate existed
+  // nothing compared this field and the fixtures carried NOW, which now reads as "just updated".
+  private static final Instant STALE = NOW.minusSeconds(3600);
   private static final String OWNER_ID = "recovery-node-1";
   private static final String SAGA_ID = "saga-001";
   private static final String SAGA_NAME = "MoneyTransfer";
@@ -79,11 +84,17 @@ class SagaRecoveryManagerTest {
     lenient()
         .when(store.findOverdueParkedSagas(any(), any()))
         .thenReturn(new OverdueParked(List.of(), null));
+    // Default: the progress probe reports an event older than the staleness window, so a saga that
+    // looks stale by its state row is genuinely abandoned and stays claimable. Tests about the
+    // guards override this; every other test wants the pre-guard behaviour. An unstubbed mock
+    // would return Optional.empty(), which now means "no events at all" — a damaged saga the
+    // sweeper deliberately refuses to touch.
+    lenient().when(store.getNewestEventTime(any())).thenReturn(Optional.of(NOW.minusSeconds(3600)));
   }
 
   private static SagaStateSnapshot snapshot(SagaStatus status) {
     return new SagaStateSnapshot(
-        SAGA_ID, SAGA_NAME, status, OWNER_ID, DEF_VERSION, NOW.minusSeconds(300), NOW);
+        SAGA_ID, SAGA_NAME, status, OWNER_ID, DEF_VERSION, NOW.minusSeconds(300), STALE);
   }
 
   private static SagaDefinition definition() {
@@ -146,7 +157,7 @@ class SagaRecoveryManagerTest {
               OWNER_ID,
               DEF_VERSION,
               NOW.minusSeconds(300),
-              NOW);
+              STALE);
       ScanCursor cursor = mock(ScanCursor.class);
       SagaDefinition def = definition();
       ExecutionContext ctx1 = mock(ExecutionContext.class);
@@ -185,7 +196,10 @@ class SagaRecoveryManagerTest {
 
       // Assert
       verify(store, never()).getEvents(any());
-      verifyNoInteractions(engine);
+      // The guards ask the engine whether this instance is driving the saga, so "untouched" now
+      // means never asked to replay or recover — not zero interactions.
+      verify(engine, never()).replayEvents(any(), any());
+      verify(engine, never()).recover(any(), any(), any());
     }
 
     @Test
@@ -205,7 +219,7 @@ class SagaRecoveryManagerTest {
               OWNER_ID,
               DEF_VERSION,
               NOW.minusSeconds(300),
-              NOW);
+              STALE);
       SagaStateSnapshot saga3 =
           new SagaStateSnapshot(
               "saga-003",
@@ -214,7 +228,7 @@ class SagaRecoveryManagerTest {
               OWNER_ID,
               DEF_VERSION,
               NOW.minusSeconds(300),
-              NOW);
+              STALE);
       ScanCursor cursor = mock(ScanCursor.class);
       SagaDefinition def = definition();
       ExecutionContext ctx1 = mock(ExecutionContext.class);
@@ -256,7 +270,7 @@ class SagaRecoveryManagerTest {
               OWNER_ID,
               DEF_VERSION,
               NOW.minusSeconds(300),
-              NOW);
+              STALE);
       SagaDefinition def = definition();
       ExecutionContext ctx2 = mock(ExecutionContext.class);
 
@@ -291,7 +305,7 @@ class SagaRecoveryManagerTest {
               OWNER_ID,
               DEF_VERSION,
               NOW.minusSeconds(300),
-              NOW);
+              STALE);
       SagaDefinition def = definition();
       ExecutionContext ctx2 = mock(ExecutionContext.class);
 
@@ -325,6 +339,219 @@ class SagaRecoveryManagerTest {
                     .isEqualTo(Error.class.getName());
                 assertThat(event.getThrowableProxy().getMessage()).isEqualTo("claim blew up");
               });
+    }
+  }
+
+  // =========================================================================
+  // recover() — claim guards (progress-based staleness)
+  // =========================================================================
+
+  /**
+   * A stale {@code updated_at} does not mean abandoned: step events never touch the state row, so a
+   * saga in a long step is indistinguishable from a dead one by that field alone. These pin the two
+   * guards that tell them apart, and the cases where each must yield.
+   */
+  @Nested
+  class ClaimGuards {
+
+    private SagaStateSnapshot staleSaga() {
+      return snapshot(SagaStatus.RUNNING);
+    }
+
+    /** Only the scan: a skipped saga never reaches the claim, so stubbing it would be unused. */
+    private void scanReturns(SagaStateSnapshot saga) {
+      when(store.findRecoverable(any(), any())).thenReturn(new Recoverables(List.of(saga), null));
+    }
+
+    private SagaStateSnapshot handoffSaga() {
+      return new SagaStateSnapshot(
+          SAGA_ID,
+          SAGA_NAME,
+          SagaStatus.RUNNING,
+          OWNER_ID,
+          DEF_VERSION,
+          NOW.minusSeconds(300),
+          Instant.EPOCH);
+    }
+
+    @Test
+    void recover_sagaDrivenByThisInstance_isNotClaimed() {
+      // Arrange — the drive is alive here; its state row is stale only because steps do not touch
+      // it. Claiming would rewrite the clustering key and kill the very drive that is progressing.
+      SagaStateSnapshot saga = staleSaga();
+      scanReturns(saga);
+      when(engine.isLocallyActive(SAGA_ID)).thenReturn(true);
+
+      // Act
+      manager.recover();
+
+      // Assert
+      verify(store, never()).claimForRecovery(any(), any());
+    }
+
+    @Test
+    void recover_locallyActiveHandoffRow_isNotClaimed() {
+      // Arrange — an EPOCH row whose drive is still running locally. The local check must win over
+      // the hand-off carve-out, or the duplicate-registration path would kill a live drive.
+      SagaStateSnapshot saga = handoffSaga();
+      scanReturns(saga);
+      when(engine.isLocallyActive(SAGA_ID)).thenReturn(true);
+
+      // Act
+      manager.recover();
+
+      // Assert
+      verify(store, never()).claimForRecovery(any(), any());
+    }
+
+    @Test
+    void recover_recentEventFromAnotherInstance_isNotClaimed() {
+      // Arrange — nothing running here, but the event stream shows a step outcome inside the
+      // window: someone is driving it.
+      SagaStateSnapshot saga = staleSaga();
+      scanReturns(saga);
+      when(store.getNewestEventTime(SAGA_ID)).thenReturn(Optional.of(NOW.minusSeconds(5)));
+
+      // Act
+      manager.recover();
+
+      // Assert
+      verify(store, never()).claimForRecovery(any(), any());
+    }
+
+    @Test
+    void recover_recentEventOfAnyType_isNotClaimed() {
+      // Arrange — the probe reports the newest row whatever its type, so a saga that has only just
+      // transitioned (a status event, no step outcome yet) still counts as progressing. Filtering
+      // to step outcomes would falsely claim first-step and freshly-transitioned sagas.
+      SagaStateSnapshot saga = staleSaga();
+      scanReturns(saga);
+      when(store.getNewestEventTime(SAGA_ID)).thenReturn(Optional.of(NOW.minusSeconds(1)));
+
+      // Act
+      manager.recover();
+
+      // Assert
+      verify(store, never()).claimForRecovery(any(), any());
+    }
+
+    @Test
+    void recover_lastEventOlderThanTheWindow_isClaimed() {
+      // Arrange — no local drive and no recent event: genuinely abandoned.
+      SagaStateSnapshot saga = staleSaga();
+      setupSinglePageRecovery(saga);
+      when(store.getNewestEventTime(SAGA_ID)).thenReturn(Optional.of(NOW.minusSeconds(600)));
+
+      // Act
+      manager.recover();
+
+      // Assert
+      verify(store).claimForRecovery(saga, OWNER_ID);
+    }
+
+    @Test
+    void recover_handoffRowWithRecentEvents_isClaimedImmediately() {
+      // Arrange — an operator or a dying drive stamped EPOCH to hand the saga over. Honouring the
+      // probe here would delay a deliberate hand-off by a whole timeout.
+      SagaStateSnapshot saga = handoffSaga();
+      setupSinglePageRecovery(saga);
+      when(store.getNewestEventTime(SAGA_ID)).thenReturn(Optional.of(NOW.minusSeconds(1)));
+
+      // Act
+      manager.recover();
+
+      // Assert
+      verify(store).claimForRecovery(saga, OWNER_ID);
+    }
+
+    @Test
+    void recover_stateRowWithNoEvents_isNotClaimedAndReportsAnError() {
+      // Arrange — createSaga writes SAGA_STARTED in the same transaction as the state row, so this
+      // cannot come from the engine. Claiming would replay an empty history and restart the saga
+      // from step 0 with no input, since SAGA_STARTED is what carries it.
+      SagaStateSnapshot saga = staleSaga();
+      scanReturns(saga);
+      when(store.getNewestEventTime(SAGA_ID)).thenReturn(Optional.empty());
+
+      // Act
+      manager.recover();
+
+      // Assert
+      verify(store, never()).claimForRecovery(any(), any());
+    }
+
+    @Test
+    void recover_handoffRowWithNoEvents_isNotClaimedEitherAndReportsAnError() {
+      // Arrange — the carve-out skips the progress comparison but not the emptiness check: a
+      // hand-off is one of the likelier ways a damaged row reaches the sweeper, and no caller can
+      // vouch for a history that is not there.
+      SagaStateSnapshot saga = handoffSaga();
+      scanReturns(saga);
+      when(store.getNewestEventTime(SAGA_ID)).thenReturn(Optional.empty());
+
+      // Act
+      manager.recover();
+
+      // Assert
+      verify(store, never()).claimForRecovery(any(), any());
+    }
+
+    @Test
+    void recover_probeFails_claimsOnStateRowStalenessAlone() {
+      // Arrange — an events table this instance cannot read is no reason to stop recovering; the
+      // behaviour then is exactly what it was before the probe existed.
+      SagaStateSnapshot saga = staleSaga();
+      setupSinglePageRecovery(saga);
+      when(store.getNewestEventTime(SAGA_ID))
+          .thenThrow(SagaPersistenceException.storeUnavailable(new RuntimeException("boom")));
+
+      // Act
+      manager.recover();
+
+      // Assert
+      verify(store).claimForRecovery(saga, OWNER_ID);
+    }
+
+    @Test
+    void recover_skippedSagas_consumeNoBudgetAndDoNotStopTheScan() {
+      // Arrange — a budget of 1 and two pages, the first holding a saga that is skipped. Charging
+      // skips would let live sagas exhaust the budget and starve recovery of the dead ones.
+      config =
+          new RecoveryConfig(60_000, 30, GRACE_PERIOD, 1, 10, Clock.fixed(NOW, ZoneOffset.UTC));
+      manager = new SagaRecoveryManager(store, engine, registry, OWNER_ID, config, scheduler);
+      lenient()
+          .when(store.findOverdueParkedSagas(any(), any()))
+          .thenReturn(new OverdueParked(List.of(), null));
+
+      SagaStateSnapshot skipped = snapshot(SagaStatus.RUNNING);
+      SagaStateSnapshot claimable =
+          new SagaStateSnapshot(
+              "saga-002",
+              SAGA_NAME,
+              SagaStatus.RUNNING,
+              OWNER_ID,
+              DEF_VERSION,
+              NOW.minusSeconds(300),
+              STALE);
+      // The sweep starts from the owner's scattered cursor, not null, so page one is keyed on it.
+      ScanCursor first = mock(ScanCursor.class);
+      ScanCursor next = mock(ScanCursor.class);
+      when(store.initialSweepCursor(OWNER_ID)).thenReturn(first);
+      when(store.findRecoverable(any(), eq(first)))
+          .thenReturn(new Recoverables(List.of(skipped), next));
+      when(store.findRecoverable(any(), eq(next)))
+          .thenReturn(new Recoverables(List.of(claimable), null));
+      when(engine.isLocallyActive(SAGA_ID)).thenReturn(true);
+      lenient()
+          .when(store.getNewestEventTime(any()))
+          .thenReturn(Optional.of(NOW.minusSeconds(600)));
+      when(store.claimForRecovery(claimable, OWNER_ID)).thenReturn(Optional.empty());
+
+      // Act
+      manager.recover();
+
+      // Assert — the skip did not spend the single unit of budget, so the scan reached page two
+      verify(store).claimForRecovery(claimable, OWNER_ID);
     }
   }
 
@@ -1296,7 +1523,13 @@ class SagaRecoveryManagerTest {
 
     private SagaStateSnapshot namedSnapshot(String sagaId) {
       return new SagaStateSnapshot(
-          sagaId, SAGA_NAME, SagaStatus.RUNNING, OWNER_ID, DEF_VERSION, NOW.minusSeconds(300), NOW);
+          sagaId,
+          SAGA_NAME,
+          SagaStatus.RUNNING,
+          OWNER_ID,
+          DEF_VERSION,
+          NOW.minusSeconds(300),
+          STALE);
     }
 
     private void setupSuccessfulRecovery(SagaStateSnapshot saga) {
