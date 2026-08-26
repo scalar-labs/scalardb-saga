@@ -219,9 +219,11 @@ import org.jspecify.annotations.Nullable;
  * <ul>
  *   <li>{@code services_path} — the directory of service files; unset = no services
  *   <li>{@code reload.interval_seconds} — seconds between configuration reload passes (default
- *       {@value #DEFAULT_RELOAD_INTERVAL_SECONDS}): service files and definitions are re-read,
- *       validated as a complete set, and applied atomically, so changes land without a restart.
- *       {@code 0} disables reload (startup-only loading)
+ *       {@value #DEFAULT_RELOAD_INTERVAL_SECONDS}): service files and definitions are re-read and
+ *       validated as a complete set, so changes land without a restart. Validation is all or
+ *       nothing; applying is not — services swap before definitions register, one definition at a
+ *       time, so a failure part way through leaves what committed live and retries the rest next
+ *       pass. {@code 0} disables reload (startup-only loading)
  *   <li>{@code secrets_root} — the directory {@code ${file:...}} references in service files must
  *       resolve inside, after symlink resolution (default {@value #DEFAULT_SECRETS_ROOT}). Service
  *       files are a live trust boundary under reload, so their file references are confined to the
