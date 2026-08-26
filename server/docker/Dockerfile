@@ -12,7 +12,7 @@
 #
 # A JRE, not a JDK: the daemon runs a start script and needs no compiler, so shipping javac would add
 # tooling that is useful to an attacker inside the container and to nobody else.
-FROM eclipse-temurin:21-jre-noble@sha256:ca397720325ceefe39ce397f186759fc87d9efafb2dc4ce53315980844c2f4f2
+FROM eclipse-temurin:21-jre-noble@sha256:96975602e131485862eb8cd32927face8a06d7591a5e865944b634a701d9df72
 
 # Two things in one layer, since each `RUN` is a layer and neither is worth its own:
 #
