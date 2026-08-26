@@ -119,6 +119,19 @@ final class ConfigReconciler {
     }
   }
 
+  /**
+   * Thrown internally when the watched directories moved between the read and the re-check, so the
+   * candidate set may span two generations of a mount.
+   */
+  private static final class TornSnapshotException extends RuntimeException {
+    final String candidateSha256;
+
+    TornSnapshotException(String message, String candidateSha256) {
+      super(message);
+      this.candidateSha256 = candidateSha256;
+    }
+  }
+
   ConfigReconciler(
       ReloadConfig reloadConfig,
       @Nullable Path definitionsPath,
@@ -175,19 +188,47 @@ final class ConfigReconciler {
 
   // ── The pass ─────────────────────────────────────────────────────────────
 
+  /**
+   * One pass, retried once if the mounted directories moved while it was reading them.
+   *
+   * <p>A retry is safe because a torn snapshot is detected before anything is applied, and one is
+   * enough: kubelet flips a volume's {@code ..data} pointer once per update, so a second tear
+   * inside two consecutive walks would need a second update in the microseconds between them. If it
+   * happens anyway the pass is rejected as transient rather than retried again.
+   */
   private void executePass() {
+    try {
+      attemptPass();
+    } catch (TornSnapshotException first) {
+      logger.debug("Configuration snapshot was torn by a concurrent mount update; retrying");
+      try {
+        attemptPass();
+      } catch (TornSnapshotException second) {
+        throw new PassRejectedException(tornMessage(), second.candidateSha256, false);
+      }
+    }
+  }
+
+  private void attemptPass() {
     Instant now = Instant.now(reloadConfig.clock());
     List<String> errors = new ArrayList<>();
 
     // 1. SNAPSHOT + VALIDATE — no side effects on engine or store.
+    Map<String, Path> servicesRead = new TreeMap<>();
+    Map<String, Path> definitionsRead = new TreeMap<>();
     MessageDigest servicesDigest = sha256();
-    Map<String, ServiceConfig> candidateServices = snapshotServices(errors, servicesDigest);
+    Map<String, ServiceConfig> candidateServices =
+        snapshotServices(errors, servicesDigest, servicesRead);
     MessageDigest definitionsDigest = sha256();
     Map<String, CandidateDefinition> candidateDefinitions =
-        snapshotDefinitions(errors, definitionsDigest);
+        snapshotDefinitions(errors, definitionsDigest, definitionsRead);
     String servicesSha = hex(servicesDigest);
     String definitionsSha = hex(definitionsDigest);
     String candidateSha = servicesSha + ":" + definitionsSha;
+
+    // Before anything is judged: a set assembled across a mount update is not a set anyone wrote,
+    // and every file in it can still be individually valid.
+    requireUntornSnapshot(servicesRead, definitionsRead, candidateSha);
 
     validateCrossChecks(candidateServices, candidateDefinitions, errors);
 
@@ -379,7 +420,8 @@ final class ConfigReconciler {
 
   // ── Snapshot ─────────────────────────────────────────────────────────────
 
-  private Map<String, ServiceConfig> snapshotServices(List<String> errors, MessageDigest digest) {
+  private Map<String, ServiceConfig> snapshotServices(
+      List<String> errors, MessageDigest digest, Map<String, Path> targetsRead) {
     Path servicesPath = reloadConfig.servicesPath();
     if (servicesPath == null) {
       return Map.of();
@@ -404,6 +446,7 @@ final class ConfigReconciler {
         continue; // unreadable or oversized; already collected
       }
       digestContent(digest, file.fileName(), content);
+      targetsRead.put(file.fileName(), file.target());
       try {
         ServiceConfig service =
             ServiceFileParser.parseFile(entry.getKey(), file.fileName(), content, secretResolver);
@@ -449,7 +492,7 @@ final class ConfigReconciler {
   }
 
   private Map<String, CandidateDefinition> snapshotDefinitions(
-      List<String> errors, MessageDigest digest) {
+      List<String> errors, MessageDigest digest, Map<String, Path> targetsRead) {
     if (definitionsPath == null) {
       return Map.of();
     }
@@ -468,6 +511,7 @@ final class ConfigReconciler {
         continue; // unreadable or oversized; already collected
       }
       String contentSha = digestContent(digest, fileName, content);
+      targetsRead.put(fileName, file.target());
       try {
         CachedParse cached = definitionParseCache.get(fileName);
         SagaDefinition definition;
@@ -753,6 +797,58 @@ final class ConfigReconciler {
   }
 
   // ── Failure handling ─────────────────────────────────────────────────────
+
+  /**
+   * Requires that every file read during this pass still resolves where it did.
+   *
+   * <p>Kubelet publishes a ConfigMap update by writing a new timestamped directory and flipping one
+   * {@code ..data} symlink, which is atomic — but the walk resolves that symlink once per file, so
+   * a flip landing mid-walk pins one file from the old generation and another from the new. Every
+   * file in the result can be individually valid, so nothing downstream would notice: the pass
+   * would validate and apply a combination nobody wrote, and hold it until the next interval.
+   *
+   * <p>Re-resolving after the reads is what detects it. The comparison is over resolved targets, so
+   * an ordinary in-place edit — same path, new bytes — is not mistaken for a tear; only a file
+   * whose identity moved counts, which is exactly what a generation flip does to all of them.
+   */
+  private void requireUntornSnapshot(
+      Map<String, Path> servicesRead, Map<String, Path> definitionsRead, String candidateSha) {
+    if (!servicesRead.isEmpty()) {
+      Map<String, Path> now = new TreeMap<>();
+      Path servicesPath = reloadConfig.servicesPath();
+      try {
+        if (servicesPath != null) {
+          ServiceFileParser.listServiceFiles(servicesPath)
+              .forEach((name, file) -> now.put(file.fileName(), file.target()));
+        }
+      } catch (RuntimeException e) {
+        // The directory is changing under the pass; the retry reports whatever it settles into.
+        throw new TornSnapshotException(tornMessage(), candidateSha);
+      }
+      if (!now.equals(servicesRead)) {
+        throw new TornSnapshotException(tornMessage(), candidateSha);
+      }
+    }
+    if (!definitionsRead.isEmpty() && definitionsPath != null) {
+      Map<String, Path> now = new TreeMap<>();
+      try {
+        for (DefinitionFile file : listDefinitionFiles(definitionsPath)) {
+          now.put(file.fileName(), file.target());
+        }
+      } catch (RuntimeException e) {
+        throw new TornSnapshotException(tornMessage(), candidateSha);
+      }
+      if (!now.equals(definitionsRead)) {
+        throw new TornSnapshotException(tornMessage(), candidateSha);
+      }
+    }
+  }
+
+  private static String tornMessage() {
+    return "The watched directories changed while this pass was reading them, so the candidate set"
+        + " may span two generations of a mount and was not applied. The next pass reads a settled"
+        + " set.";
+  }
 
   /**
    * Renders collected problems as one indented block, each flattened to a single line. Property

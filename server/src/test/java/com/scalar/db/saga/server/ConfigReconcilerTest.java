@@ -13,6 +13,7 @@ import com.scalar.db.saga.transport.HttpServiceConfig;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -962,6 +963,37 @@ class ConfigReconcilerTest {
 
       // Assert
       assertThat(second.status().appliedServicesSha256()).isNotEqualTo(setA);
+    }
+
+    @Test
+    void run_kubeletGenerationFlipBetweenPasses_isNotMistakenForATornSnapshot() throws IOException {
+      // The torn-snapshot check compares where each file resolved, and under kubelet's layout
+      // every file resolves through ..data — so an ordinary ConfigMap update moves all of them.
+      // A check that could not tell that from a tear would reject every legitimate update.
+      // Arrange — the layout kubelet mounts a ConfigMap as, on its first generation
+      Path first = Files.createDirectory(servicesDir.resolve("..2026_08_26_10_00"));
+      Files.writeString(first.resolve("account.properties"), "base_url=http://account-v1:8080\n");
+      Files.createSymbolicLink(servicesDir.resolve("..data"), Path.of("..2026_08_26_10_00"));
+      Files.createSymbolicLink(
+          servicesDir.resolve("account.properties"), Path.of("..data", "account.properties"));
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      ConfigReconciler reconciler = reconciler();
+      assertThat(reconciler.run()).isTrue();
+      assertThat(requireNonNull(swaps.get(0).get("account")).baseUrl())
+          .isEqualTo("http://account-v1:8080");
+
+      // Act — a second generation, published the way kubelet does: write it, then flip ..data
+      Path second = Files.createDirectory(servicesDir.resolve("..2026_08_26_10_05"));
+      Files.writeString(second.resolve("account.properties"), "base_url=http://account-v2:8080\n");
+      Path staged = servicesDir.resolve("..data_tmp");
+      Files.createSymbolicLink(staged, Path.of("..2026_08_26_10_05"));
+      Files.move(staged, servicesDir.resolve("..data"), StandardCopyOption.REPLACE_EXISTING);
+
+      // Assert — the update applies; the new generation is not read as a torn read of the old
+      assertThat(reconciler.run()).isTrue();
+      assertThat(requireNonNull(swaps.get(swaps.size() - 1).get("account")).baseUrl())
+          .isEqualTo("http://account-v2:8080");
+      assertThat(reconciler.status().rejection()).isNull();
     }
 
     @Test
