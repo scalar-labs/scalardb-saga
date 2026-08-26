@@ -936,6 +936,35 @@ class ConfigReconcilerTest {
     }
 
     @Test
+    void run_contentEmbeddingAnotherFilesFraming_hashesDifferently() throws IOException {
+      // The digest is what an operator greps across replicas, so two different mounted sets must
+      // not report the same one. Without a length in the framing these two do: the stream carries
+      // no boundary between files, and set B's single file spells out set A's second file exactly
+      // — name, separator, content. It parses, because a key beginning "header." names a header,
+      // and the walk sorts account before header, so the two byte streams line up.
+      // Arrange — set A: two service files
+      String nul = String.valueOf((char) 0);
+      writeService("account", "base_url=http://a:1\n");
+      writeService("header", "base_url=http://p:1\n");
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      ConfigReconciler first = reconciler();
+      assertThat(first.run()).isTrue();
+      String setA = requireNonNull(first.status().appliedServicesSha256());
+
+      // Arrange — set B: one file whose content embeds the other's framing
+      Files.delete(servicesDir.resolve("header.properties"));
+      writeService(
+          "account", "base_url=http://a:1\nheader.properties" + nul + "base_url=http://p:1\n");
+
+      // Act
+      ConfigReconciler second = reconciler();
+      assertThat(second.run()).isTrue();
+
+      // Assert
+      assertThat(second.status().appliedServicesSha256()).isNotEqualTo(setA);
+    }
+
+    @Test
     void run_appliedStatus_hashesStableAcrossIdenticalPasses() throws IOException {
       // Arrange
       writeService("account", "base_url=http://account:8080\n");

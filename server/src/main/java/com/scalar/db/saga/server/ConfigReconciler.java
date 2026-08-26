@@ -812,12 +812,21 @@ final class ConfigReconciler {
   }
 
   /**
-   * Folds {@code name NUL content} into the running set digest and returns that file's own content
-   * hash, which keys the parse cache.
+   * Folds {@code name NUL length content} into the running set digest and returns that file's own
+   * content hash, which keys the parse cache.
+   *
+   * <p>The length is what makes the framing unambiguous. Name and content alone concatenate into a
+   * stream that does not say where one file ends, so one file whose content embedded {@code
+   * othername NUL othercontent} would hash identically to the two files it names — and this digest
+   * is what an operator compares across replicas to tell a lagging one from a rejecting one. It
+   * takes a deliberate NUL inside a config file, which only a service file could even carry (JSON
+   * and YAML reject a raw one), so this is not a reachable attack; it is a digest that should not
+   * need the caveat.
    */
   private static String digestContent(MessageDigest digest, String name, byte[] content) {
     digest.update(name.getBytes(StandardCharsets.UTF_8));
     digest.update((byte) 0);
+    digest.update(ByteBuffer.allocate(Long.BYTES).putLong(content.length).array());
     digest.update(content);
     return hex(sha256Of(content));
   }
