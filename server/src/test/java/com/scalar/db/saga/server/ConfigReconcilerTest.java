@@ -20,9 +20,12 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -40,6 +43,45 @@ class ConfigReconcilerTest {
   private final List<SagaDefinition> registered = new ArrayList<>();
   private Consumer<SagaDefinition> definitionRegistrar = definition -> registered.add(definition);
 
+  /**
+   * A store with the real one's two load-bearing properties: append-only, and latest means most
+   * recently FIRST registered. Re-registering a version that already exists is a no-op that does
+   * not move it to the front, which is what makes a rolled-back definition file leave the newer
+   * version serving. A LinkedHashSet models exactly that — adding an existing element does not
+   * change iteration order.
+   */
+  private final Map<String, LinkedHashSet<String>> stored = new LinkedHashMap<>();
+
+  private final DefinitionStore definitionStore =
+      new DefinitionStore() {
+        @Override
+        public void register(SagaDefinition definition) {
+          definitionRegistrar.accept(definition);
+          stored
+              .computeIfAbsent(definition.getName(), name -> new LinkedHashSet<>())
+              .add(definition.getVersion());
+        }
+
+        @Override
+        public boolean isRegistered(String sagaName, String version) {
+          LinkedHashSet<String> versions = stored.get(sagaName);
+          return versions != null && versions.contains(version);
+        }
+
+        @Override
+        public @Nullable String latestVersion(String sagaName) {
+          LinkedHashSet<String> versions = stored.get(sagaName);
+          if (versions == null || versions.isEmpty()) {
+            return null;
+          }
+          String latest = null;
+          for (String version : versions) {
+            latest = version;
+          }
+          return latest;
+        }
+      };
+
   private ConfigReconciler reconciler() {
     return reconciler(false);
   }
@@ -48,11 +90,7 @@ class ConfigReconcilerTest {
     ReloadConfig reloadConfig =
         new ReloadConfig(servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
     return new ConfigReconciler(
-        reloadConfig,
-        definitionsDir,
-        asyncCallbacksConfigured,
-        registrar,
-        d -> definitionRegistrar.accept(d));
+        reloadConfig, definitionsDir, asyncCallbacksConfigured, registrar, definitionStore);
   }
 
   /** A clock a test can step, for the timestamps a fixed clock cannot tell apart. */
@@ -85,7 +123,7 @@ class ConfigReconcilerTest {
         definitionsDir,
         false,
         registrar,
-        d -> definitionRegistrar.accept(d));
+        definitionStore);
   }
 
   private void writeService(String name, String content) throws IOException {
@@ -440,8 +478,7 @@ class ConfigReconcilerTest {
           new ReloadConfig(
               servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
       ConfigReconciler reconciler =
-          new ConfigReconciler(
-              reloadConfig, file, false, registrar, d -> definitionRegistrar.accept(d));
+          new ConfigReconciler(reloadConfig, file, false, registrar, definitionStore);
 
       // Act & Assert
       assertThat(reconciler.run()).isFalse();
@@ -467,8 +504,7 @@ class ConfigReconcilerTest {
           new ReloadConfig(
               servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
       ConfigReconciler reconciler =
-          new ConfigReconciler(
-              reloadConfig, link, false, registrar, d -> definitionRegistrar.accept(d));
+          new ConfigReconciler(reloadConfig, link, false, registrar, definitionStore);
 
       // Act & Assert
       assertThat(reconciler.run()).isTrue();
@@ -537,8 +573,7 @@ class ConfigReconcilerTest {
           new ReloadConfig(
               servicesDir, 10, secretsDir, List.of("account"), Clock.fixed(NOW, ZoneOffset.UTC));
       ConfigReconciler reconciler =
-          new ConfigReconciler(
-              withCeiling, definitionsDir, false, registrar, d -> definitionRegistrar.accept(d));
+          new ConfigReconciler(withCeiling, definitionsDir, false, registrar, definitionStore);
 
       // Act & Assert
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
@@ -564,8 +599,7 @@ class ConfigReconcilerTest {
           new ReloadConfig(
               notADirectory, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
       ConfigReconciler reconciler =
-          new ConfigReconciler(
-              misconfigured, definitionsDir, false, registrar, d -> definitionRegistrar.accept(d));
+          new ConfigReconciler(misconfigured, definitionsDir, false, registrar, definitionStore);
 
       // Act & Assert
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
@@ -1254,6 +1288,57 @@ class ConfigReconcilerTest {
       // Assert — and the pass still collects rather than aborting, so other definitions are not
       // held hostage by it
       assertThat(requireNonNull(reconciler.status().rejection()).operatorActionRequired()).isTrue();
+    }
+
+    @Test
+    void run_definitionFileRolledBack_rejectedRatherThanTrackedAsApplied() throws IOException {
+      // A rollback of the definitions directory reverts the file and not the store: registering
+      // older content is a no-op and the newer version keeps serving. Recording the file's version
+      // as applied would leave every check reasoning about a version nobody runs.
+      // Arrange — the real history: v1 shipped, then v2 replaced it. Re-registering v1 later is
+      // then a no-op, which is the whole reason a rollback does not take effect.
+      writeService("account", "base_url=http://account:8080\n");
+      writeService("legacy", "base_url=http://legacy:8080\n");
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      ConfigReconciler reconciler = reconciler();
+      assertThat(reconciler.run()).isTrue();
+      writeDefinition("saga.json", "order-saga", "2.0", "legacy");
+      assertThat(reconciler.run()).isTrue();
+
+      // Act — the file reverts to v1; the store still serves v2
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+
+      // Assert
+      assertThat(reconciler.run()).isFalse();
+      ReloadStatus.Rejection rejection = requireNonNull(reconciler.status().rejection());
+      assertThat(rejection.reason())
+          .contains("2.0 is what the store serves")
+          .contains("register it as a NEW, higher version");
+      assertThat(rejection.operatorActionRequired()).isTrue();
+    }
+
+    @Test
+    void run_rolledBackDefinitionThenServiceRemoval_removalIsNotApplied() throws IOException {
+      // The hazard the check exists for. With the file rolled back to v1, a pass that also drops
+      // the service only the SERVING v2 needs would sail through the cross-check — v1 does not
+      // reference it — and starts of v2 would then fail to resolve an endpoint on every replica.
+      // Arrange — v1 shipped, then v2 replaced it and moved the saga onto the legacy service
+      writeService("account", "base_url=http://account:8080\n");
+      writeService("legacy", "base_url=http://legacy:8080\n");
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      ConfigReconciler reconciler = reconciler();
+      assertThat(reconciler.run()).isTrue();
+      writeDefinition("saga.json", "order-saga", "2.0", "legacy");
+      assertThat(reconciler.run()).isTrue();
+      int swapsBefore = swaps.size();
+
+      // Act — roll the definition back to a version that does not name legacy, and drop legacy
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      Files.delete(servicesDir.resolve("legacy.properties"));
+
+      // Assert — the whole pass is rejected, so the service the serving version needs stays live
+      assertThat(reconciler.run()).isFalse();
+      assertThat(swaps).hasSize(swapsBefore);
     }
 
     @Test

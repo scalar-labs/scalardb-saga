@@ -234,7 +234,11 @@ Operational notes, learned from how Kubernetes actually delivers files:
   afterwards is then quiet, because there is nothing left to strand.
 - **Definition rollback is roll-forward only**: `helm rollback` reverts service files, but
   re-registering an old definition version is an idempotent no-op — the store's latest version
-  keeps winning. To revert a definition, register the old content as a NEW, bumped version.
+  keeps winning. To revert a definition, register the old content as a NEW, bumped version. The
+  reload now says so rather than letting it pass quietly: a definition file naming an
+  already-registered version that is not the one serving is rejected, because otherwise the daemon
+  would go on validating a version nobody runs — and could then accept the removal of a service
+  the serving version still needs.
 - **Changing a service's `base_url` mid-saga is safe only if the endpoints are compatible**: an
   in-flight step finishes against the endpoint it resolved; the saga's next step (or a TCC
   confirm/cancel) resolves the new one.

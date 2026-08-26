@@ -30,7 +30,6 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
-import java.util.function.Consumer;
 import net.jcip.annotations.ThreadSafe;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -75,7 +74,7 @@ final class ConfigReconciler {
   private final boolean asyncCallbacksConfigured;
   private final ServiceSecretResolver secretResolver;
   private final HttpEndpointRegistrar registrar;
-  private final Consumer<SagaDefinition> definitionRegistrar;
+  private final DefinitionStore definitionStore;
 
   // ── Inter-pass state (guarded by the pass serialization) ─────────────────
 
@@ -137,13 +136,13 @@ final class ConfigReconciler {
       @Nullable Path definitionsPath,
       boolean asyncCallbacksConfigured,
       HttpEndpointRegistrar registrar,
-      Consumer<SagaDefinition> definitionRegistrar) {
+      DefinitionStore definitionStore) {
     this.reloadConfig = reloadConfig;
     this.definitionsPath = definitionsPath;
     this.asyncCallbacksConfigured = asyncCallbacksConfigured;
     this.secretResolver = new ServiceSecretResolver(reloadConfig.secretsRoot());
     this.registrar = registrar;
-    this.definitionRegistrar = definitionRegistrar;
+    this.definitionStore = definitionStore;
     this.appliedServices = Map.of();
     this.status = ReloadStatus.initial();
   }
@@ -318,7 +317,7 @@ final class ConfigReconciler {
         continue; // unchanged — no store round-trip
       }
       try {
-        definitionRegistrar.accept(definition);
+        definitionStore.register(definition);
       } catch (RuntimeException e) {
         // Collect and carry on. Definitions are independent rows, so one that cannot register —
         // above all one whose conflict is permanent — must not decide the fate of the rest:
@@ -386,6 +385,26 @@ final class ConfigReconciler {
         + "'): "
         + e.getMessage()
         + registrationHint(e, needsOperator);
+  }
+
+  /**
+   * Describes a definition file that does not name the version currently serving. Almost always a
+   * rollback of the definitions directory: the file reverted, the store did not, and re-registering
+   * old content is a no-op.
+   */
+  private static String describeNotServing(CandidateDefinition candidate, String serving) {
+    return "definition "
+        + candidate.definition().getName()
+        + " (file '"
+        + candidate.fileName()
+        + "') is version "
+        + candidate.definition().getVersion()
+        + ", but version "
+        + serving
+        + " is what the store serves. Registered content is immutable, so re-registering an older"
+        + " version changes nothing and the newer one keeps running. To go back to the older"
+        + " content, register it as a NEW, higher version. [permanent: this fails the same way on"
+        + " every pass; the definition file has to change]";
   }
 
   /** The operator-facing half of a registration failure: wait, or go and do something. */
@@ -689,6 +708,22 @@ final class ConfigReconciler {
       }
       // Un-bumped change: same name and version as the applied definition, different content.
       AppliedDefinition applied = appliedDefinitions.get(definition.getName());
+      // A file that names an already-stored version which is NOT the one serving is a rollback of
+      // the definitions directory: registered content is immutable, so re-writing it registers
+      // nothing and the newer version keeps running. Left to apply, the pass would record a
+      // version nobody runs as applied, and the service cross-check would then reason about the
+      // wrong one — letting a later pass drop a service the serving version still needs. The
+      // check runs here rather than at registration because services swap first: by then the
+      // endpoint is already gone and a rejection only reports the damage. Only a changed candidate
+      // is checked, so a settled configuration costs no store reads.
+      if (applied == null || !applied.definition().equals(definition)) {
+        String serving = definitionStore.latestVersion(definition.getName());
+        if (serving != null
+            && !serving.equals(definition.getVersion())
+            && definitionStore.isRegistered(definition.getName(), definition.getVersion())) {
+          errors.add(describeNotServing(candidate, serving));
+        }
+      }
       if (applied != null
           && applied.definition().getVersion().equals(definition.getVersion())
           && !applied.definition().equals(definition)) {

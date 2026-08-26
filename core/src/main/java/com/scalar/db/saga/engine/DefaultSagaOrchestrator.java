@@ -160,6 +160,35 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     definitionRegistry.register(definition);
   }
 
+  /**
+   * The version of {@code sagaName} that a name-only start would run — the store's latest — or
+   * {@code null} when nothing is registered under that name.
+   *
+   * <p>For a caller that maintains definition files and needs to know whether they still describe
+   * what is serving. Registered content is immutable and the store is append-only, so re-writing an
+   * older version's file registers nothing and leaves the newer version winning; without asking,
+   * such a caller cannot tell that its files and the fleet disagree.
+   */
+  public @Nullable String latestDefinitionVersion(String sagaName) {
+    Objects.requireNonNull(sagaName, "sagaName must not be null");
+    SagaDefinition def = definitionRegistry.resolve(sagaName);
+    return def == null ? null : def.getVersion();
+  }
+
+  /**
+   * Whether {@code version} of {@code sagaName} is already registered.
+   *
+   * <p>With {@link #latestDefinitionVersion} this distinguishes the two ways a definition file can
+   * name a version that is not serving: a NEW version, which is an ordinary upgrade about to become
+   * the latest, and an OLDER one that is already stored, which is a rollback that will register
+   * nothing and leave the newer version running.
+   */
+  public boolean isDefinitionRegistered(String sagaName, String version) {
+    Objects.requireNonNull(sagaName, "sagaName must not be null");
+    Objects.requireNonNull(version, "version must not be null");
+    return definitionRegistry.resolve(sagaName, version) != null;
+  }
+
   public void register(Path definitionFile) {
     Objects.requireNonNull(definitionFile, "definitionFile must not be null");
     register(SagaDefinitionParser.parseFile(definitionFile));
