@@ -571,6 +571,40 @@ public final class ScalarDbSagaStore implements SagaStore {
         "get event count for saga " + sagaId);
   }
 
+  @Override
+  public Optional<Instant> getNewestEventTime(String sagaId) {
+    return runInTransaction(
+        tx -> {
+          // The events table clusters on the single INT key `sequence`, so a reverse ordered scan
+          // limited to one row is exactly the supported shape; the projection keeps the payload out
+          // of a read that only wants the stamp.
+          Scan scan =
+              Scan.newBuilder(buildEventScan(sagaId))
+                  .projections("sequence", "created_at")
+                  .ordering(Scan.Ordering.desc("sequence"))
+                  .limit(1)
+                  .build();
+          return tx.scan(scan).stream()
+              .findFirst()
+              .map(
+                  r -> {
+                    Instant createdAt = r.getTimestampTZ("created_at");
+                    if (createdAt == null) {
+                      // Unreachable through this store, which stamps created_at on every append.
+                      // Reporting the epoch rather than throwing keeps a damaged row claimable: a
+                      // saga that cannot report progress must not become permanently unclaimable.
+                      logger.warn(
+                          "Newest event of saga {} has no created_at; treating as no progress",
+                          sagaId);
+                      return Instant.EPOCH;
+                    }
+                    return createdAt;
+                  });
+        },
+        null, // read-only — retry the whole transaction on UTSE
+        "get newest event time for saga " + sagaId);
+  }
+
   // ---------------------------------------------------------------------------
   // Queries
   // ---------------------------------------------------------------------------

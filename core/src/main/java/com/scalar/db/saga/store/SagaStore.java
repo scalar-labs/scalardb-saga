@@ -221,6 +221,25 @@ public interface SagaStore extends AutoCloseable {
   /** Returns the event count for the given saga without materializing all events. */
   int getEventCount(String sagaId);
 
+  /**
+   * Returns the {@code created_at} stamp of this saga's newest event, or empty when the saga has no
+   * events at all. Reads only the timestamp, never the event payload.
+   *
+   * <p>Recovery uses this as a progress probe: a saga whose state row looks stale but whose event
+   * stream is recent is being driven by someone, so it must not be claimed. An empty result means a
+   * state row exists with no events behind it, which the store itself cannot produce — {@link
+   * #createSaga} writes the first event in the same transaction as the row — so the caller should
+   * treat it as damage rather than as an absence of progress.
+   *
+   * <p>"Newest" means highest {@code sequence}, not latest wall clock. Events are stamped by
+   * whichever replica appended them, so under cross-replica skew the highest-sequence row can carry
+   * an earlier stamp than the one before it; that is bounded by the same small-skew assumption the
+   * recovery staleness threshold already rests on.
+   *
+   * <p>Runs in its own read-only transaction.
+   */
+  Optional<Instant> getNewestEventTime(String sagaId);
+
   // ---------------------------------------------------------------------------
   // Queries
   // ---------------------------------------------------------------------------
