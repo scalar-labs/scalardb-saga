@@ -129,6 +129,30 @@ class DefaultSagaOrchestratorTest {
     }
 
     @Test
+    void register_disabledDefinitionWithUnresolvableStep_registersWithoutBuildingAPlan() {
+      // A retirement can never start, so there is no plan to be wrong — and the resources its
+      // steps name are exactly what an operator deletes in the same change that retires it.
+      // Building the plan would fail on the endpoint the retirement exists to stop using, so
+      // retiring a saga and removing its services could never be one deploy.
+      // Arrange
+      SagaDefinition retired =
+          SagaDefinition.newBuilder("transfer")
+              .saga()
+              .version("2.0")
+              .disabled(true)
+              .step("s1", "com.example.NoSuchStep")
+              .add()
+              .build();
+
+      // Act
+      orchestrator.register(retired);
+
+      // Assert
+      verify(engine, never()).getOrBuildPlan(any());
+      verify(definitionRegistry).register(retired);
+    }
+
+    @Test
     void register_unresolvableStep_throwsSagaDefinitionException() {
       // Arrange
       SagaDefinition def = definition("transfer");

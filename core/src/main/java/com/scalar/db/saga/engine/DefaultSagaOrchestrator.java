@@ -148,7 +148,15 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(definition, "definition must not be null");
     // Eagerly resolve all steps — fail fast on missing resources or unresolvable constructors.
     // This must happen before persisting to the store, so invalid definitions are never stored.
-    engine.getOrBuildPlan(definition);
+    //
+    // A retirement is exempt, and has to be: it can never be started, so there is no plan to be
+    // wrong, while the resources its steps name are exactly what an operator removes in the same
+    // change that retires it. Resolving them would make registering the retirement fail on the
+    // missing endpoint it was written to stop using, so retiring a saga and removing its services
+    // could never be one deploy. What remains is the parse, which the definition already passed.
+    if (!definition.isDisabled()) {
+      engine.getOrBuildPlan(definition);
+    }
     definitionRegistry.register(definition);
   }
 
