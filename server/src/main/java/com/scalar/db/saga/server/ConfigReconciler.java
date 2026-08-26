@@ -229,7 +229,7 @@ final class ConfigReconciler {
     // and every file in it can still be individually valid.
     requireUntornSnapshot(servicesRead, definitionsRead, candidateSha);
 
-    validateCrossChecks(candidateServices, candidateDefinitions, errors);
+    validateCrossChecks(candidateServices, candidateDefinitions, errors, candidateSha);
 
     if (!errors.isEmpty()) {
       throw new PassRejectedException(
@@ -385,6 +385,43 @@ final class ConfigReconciler {
         + "'): "
         + e.getMessage()
         + registrationHint(e, needsOperator);
+  }
+
+  /**
+   * Collects a rejection when {@code candidate} names an already-stored version that is not the one
+   * serving.
+   *
+   * <p>The two store reads are the only ones validation makes, and a failing one has to become a
+   * rejection rather than escape: {@code run()} contains a rejected pass and nothing else, so a
+   * routine store outage would otherwise surface as an unexpected scheduler failure, record no
+   * rejection, and leave {@code lastPassAt} frozen — which is the signal a wedged pass thread is
+   * supposed to have to itself.
+   */
+  private void requireCandidateIsServable(
+      CandidateDefinition candidate, List<String> errors, String candidateSha) {
+    SagaDefinition definition = candidate.definition();
+    String serving;
+    boolean alreadyStored;
+    try {
+      serving = definitionStore.latestVersion(definition.getName());
+      alreadyStored =
+          serving != null
+              && !serving.equals(definition.getVersion())
+              && definitionStore.isRegistered(definition.getName(), definition.getVersion());
+    } catch (RuntimeException e) {
+      throw new PassRejectedException(
+          "Could not read the registered versions of saga '"
+              + definition.getName()
+              + "' ("
+              + e.getClass().getSimpleName()
+              + "), so this pass cannot tell whether the definition files still describe what is"
+              + " serving (will retry next pass).",
+          candidateSha,
+          false);
+    }
+    if (alreadyStored) {
+      errors.add(describeNotServing(candidate, Objects.requireNonNull(serving)));
+    }
   }
 
   /**
@@ -694,7 +731,8 @@ final class ConfigReconciler {
   private void validateCrossChecks(
       Map<String, ServiceConfig> candidateServices,
       Map<String, CandidateDefinition> candidateDefinitions,
-      List<String> errors) {
+      List<String> errors,
+      String candidateSha) {
     for (CandidateDefinition candidate : candidateDefinitions.values()) {
       SagaDefinition definition = candidate.definition();
       // A retired definition is exempt from the service cross-check: it can never be started, so
@@ -717,12 +755,7 @@ final class ConfigReconciler {
       // endpoint is already gone and a rejection only reports the damage. Only a changed candidate
       // is checked, so a settled configuration costs no store reads.
       if (applied == null || !applied.definition().equals(definition)) {
-        String serving = definitionStore.latestVersion(definition.getName());
-        if (serving != null
-            && !serving.equals(definition.getVersion())
-            && definitionStore.isRegistered(definition.getName(), definition.getVersion())) {
-          errors.add(describeNotServing(candidate, serving));
-        }
+        requireCandidateIsServable(candidate, errors, candidateSha);
       }
       if (applied != null
           && applied.definition().getVersion().equals(definition.getVersion())

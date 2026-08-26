@@ -229,9 +229,20 @@ Operational notes, learned from how Kubernetes actually delivers files:
   version bump like any other content change, and it cannot be undone in place: to bring a saga
   back, register a later version without the marker.
 
-  Disabling and deleting the services that saga alone used can go in **one** change — a retired
-  definition is exempt from the service cross-check, since it can never start. Deleting its file
-  afterwards is then quiet, because there is nothing left to strand.
+  **Do not delete that saga's services in the same change if any of its sagas are still running.**
+  A retired definition is exempt from the service cross-check — it can never start, so the reload
+  accepts disabling it and removing its services together — but a declarative step resolves its
+  service on *every* call, including compensation and recovery. A saga still running under the
+  older, enabled version would then fail to resolve an endpoint mid-flight. Retire first, let the
+  in-flight sagas drain, and remove the services after. The one-change form is for a saga with
+  nothing left running.
+
+  Deleting the definition file afterwards is quiet: the retirement lives in the store, not in the
+  file, so nothing is left to strand. Two exceptions, both from the guards that treat an empty
+  directory as a failed mount rather than a deliberate wind-down: the **last** definition file and
+  the **last** service file cannot be removed while the daemon is running. Leave the retired
+  definition file in place — it also documents the retirement — or wind the daemon down through a
+  restart.
 - **Definition rollback is roll-forward only**: `helm rollback` reverts service files, but
   re-registering an old definition version is an idempotent no-op — the store's latest version
   keeps winning. To revert a definition, register the old content as a NEW, bumped version. The

@@ -138,7 +138,7 @@ public final class SagaDefinitionParser {
 
   private static SagaDefinition buildSaga(String name, JsonNode root) {
     SagaDefinition.SagaBuilder builder = SagaDefinition.newBuilder(name).saga();
-    applyCommon(builder, root);
+    applyCommon(name, builder, root);
     if (isPresent(root, "recoveryStrategy")) {
       builder.recoveryStrategy(
           parseEnum(root, name, "recoveryStrategy", RecoveryStrategy.class, null));
@@ -157,14 +157,15 @@ public final class SagaDefinitionParser {
               + " phase)");
     }
     SagaDefinition.TccBuilder builder = SagaDefinition.newBuilder(name).tcc();
-    applyCommon(builder, root);
+    applyCommon(name, builder, root);
     for (JsonNode stepNode : root.get("steps")) {
       addTccStep(name, builder, stepNode);
     }
     return builder.build();
   }
 
-  private static void applyCommon(SagaDefinition.AbstractSagaBuilder<?> builder, JsonNode root) {
+  private static void applyCommon(
+      String name, SagaDefinition.AbstractSagaBuilder<?> builder, JsonNode root) {
     if (isPresent(root, "version")) {
       builder.version(root.get("version").asText());
     }
@@ -175,7 +176,15 @@ public final class SagaDefinitionParser {
       builder.defaultRetryPolicy(parseRetryPolicy(root.get("defaultRetryPolicy")));
     }
     if (isPresent(root, "disabled")) {
-      builder.disabled(root.get("disabled").asBoolean());
+      JsonNode disabled = root.get("disabled");
+      // Strictly a JSON boolean. asBoolean() would coerce anything else silently — a misspelled
+      // "ture", a "yes", an object — to false, leaving a saga startable while the operator who
+      // wrote the marker believes it is retired. A retirement that quietly does not happen is the
+      // failure this whole field is defended against elsewhere.
+      if (!disabled.isBoolean()) {
+        throw SagaDefinitionException.definitionInvalid(name, "'disabled' must be true or false");
+      }
+      builder.disabled(disabled.booleanValue());
     }
   }
 

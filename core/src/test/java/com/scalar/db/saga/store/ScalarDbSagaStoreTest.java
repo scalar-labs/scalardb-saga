@@ -270,6 +270,49 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
+  void registerDefinition_clockAheadByLessThanAMillisecond_stillStampsStrictlyAfter()
+      throws Exception {
+    // The column does not keep sub-millisecond precision. A clock a fraction of a millisecond past
+    // the latest row looks strictly later, but persists as the SAME millisecond and ties it —
+    // leaving the latest-version scan free to pick either row, which for a retirement means the
+    // saga quietly stays startable.
+    // Arrange
+    Instant existingLatest = Instant.parse("2026-08-26T12:00:00.123Z");
+    Instant aFractionLater = existingLatest.plusNanos(500_000);
+    ScalarDbSagaStore store =
+        new ScalarDbSagaStore(
+            txManager,
+            objectMapper,
+            schema,
+            ScalarDbSagaStoreConfig.builder().build(),
+            () -> OWN_APPEND_ID,
+            () -> aFractionLater);
+    SagaDefinition def =
+        SagaDefinition.newBuilder("order-saga")
+            .saga()
+            .version("v2")
+            .disabled(true)
+            .step("debit", "com.example.DebitStep")
+            .add()
+            .build();
+    Result olderRow = mock(Result.class);
+    when(olderRow.getTimestampTZ("registered_at")).thenReturn(existingLatest);
+    when(tx.get(any(Get.class))).thenReturn(Optional.empty());
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(olderRow));
+
+    // Act
+    store.registerDefinition(def);
+
+    // Assert — a whole millisecond later, which is what the column can still tell apart
+    ArgumentCaptor<Insert> captor = ArgumentCaptor.forClass(Insert.class);
+    verify(tx).insert(captor.capture());
+    assertThat(
+            Objects.requireNonNull(captor.getValue().getColumns().get("registered_at"))
+                .getTimestampTZValue())
+        .isEqualTo(existingLatest.plusMillis(1));
+  }
+
+  @Test
   void registerDefinition_clockAheadOfTheLatestVersion_stampsWallTime() throws Exception {
     // The ordinary case must not drift forward: with no skew the stamp is the clock, not
     // latest + 1ms compounding over every registration.

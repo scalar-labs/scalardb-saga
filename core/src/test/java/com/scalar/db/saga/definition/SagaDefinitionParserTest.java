@@ -163,6 +163,84 @@ class SagaDefinitionParserTest {
     }
 
     @Test
+    void parseJson_disabledTrue_marksTheDefinitionRetired() {
+      // Arrange
+      String json =
+          """
+          {
+            "name": "retired",
+            "version": "2.0",
+            "disabled": true,
+            "steps": [ { "name": "s1", "stepClass": "com.example.Step1" } ]
+          }
+          """;
+
+      // Act
+      SagaDefinition def = SagaDefinitionParser.parseJson(json);
+
+      // Assert
+      assertThat(def.isDisabled()).isTrue();
+    }
+
+    @Test
+    void parseJson_definitionWithoutTheMarker_isNotRetired() {
+      // Absent reads as enabled, which is how every definition written before retirement existed
+      // has to read.
+      // Arrange
+      String json =
+          """
+          { "name": "plain", "steps": [ { "name": "s1", "stepClass": "com.example.Step1" } ] }
+          """;
+
+      // Act & Assert
+      assertThat(SagaDefinitionParser.parseJson(json).isDisabled()).isFalse();
+    }
+
+    @Test
+    void parseJson_disabledMisspelledAsAString_throwsSagaDefinitionException() {
+      // Jackson's asBoolean() would coerce "ture" — and "yes", and an object — to false, leaving
+      // the saga startable while the operator who wrote the marker believes it is retired. A
+      // retirement that quietly does not happen is the failure this field is defended against
+      // everywhere else.
+      // Arrange
+      String json =
+          """
+          {
+            "name": "retired",
+            "version": "2.0",
+            "disabled": "ture",
+            "steps": [ { "name": "s1", "stepClass": "com.example.Step1" } ]
+          }
+          """;
+
+      // Act & Assert
+      assertThatThrownBy(() -> SagaDefinitionParser.parseJson(json))
+          .isInstanceOf(SagaDefinitionException.class)
+          .hasMessageContaining("disabled");
+    }
+
+    @Test
+    void parseJson_disabledAsANumber_throwsSagaDefinitionException() {
+      // The coercion runs the other way too: 1 would read as true, so a definition could be
+      // retired by something that never said so.
+      // Arrange
+      String json =
+          """
+          {
+            "name": "retired",
+            "version": "2.0",
+            "disabled": 1,
+            "steps": [ { "name": "s1", "stepClass": "com.example.Step1" } ]
+          }
+          """;
+
+      // Act & Assert
+      assertThatThrownBy(() -> SagaDefinitionParser.parseJson(json))
+          .isInstanceOf(SagaDefinitionException.class)
+          .hasMessageContaining("disabled");
+    }
+
+    @Test
     void parseJson_serviceStepGiven_createsServiceStep() {
       // Arrange
       String json =

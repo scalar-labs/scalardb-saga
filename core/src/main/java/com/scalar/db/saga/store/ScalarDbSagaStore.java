@@ -29,6 +29,7 @@ import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
@@ -1513,12 +1514,20 @@ public final class ScalarDbSagaStore implements SagaStore {
    * lose the selection race to the version it replaces. For a retirement that is the difference
    * between a saga being retired and silently continuing to accept starts.
    *
-   * <p>The scan runs inside the caller's transaction, which is what makes this safe rather than
-   * merely likely: two replicas registering different versions of the same saga at once now read
-   * the same rows, so one of them aborts instead of both computing the same stamp.
+   * <p>The scan runs inside the caller's transaction, so two replicas registering different
+   * versions of the same saga at once read overlapping rows and the transaction layer has what it
+   * needs to make one of them lose. How far that goes is the store's to decide — whether a scan
+   * carries phantom protection is a property of the transaction implementation, and nothing here
+   * tests it. What is tested, and what the skew this method exists for actually needs, is the
+   * single-writer case: one replica's clock behind the latest row still stamps after it.
    */
   private Instant monotonicStamp(DistributedTransaction tx, String name) throws Exception {
-    Instant now = nowSupplier.get();
+    // Truncated to what the column stores. TIMESTAMPTZ does not keep sub-millisecond precision, so
+    // comparing the raw clock against a value read back from the store compares two different
+    // things: a clock reading a fraction of a millisecond past the latest row would look strictly
+    // later, then persist as the same millisecond and tie it — leaving the ordering this method
+    // exists to guarantee up to whichever row the latest-version scan happens to see first.
+    Instant now = nowSupplier.get().truncatedTo(ChronoUnit.MILLIS);
     Instant latest = null;
     for (Result row : tx.scan(buildDefinitionScan(name))) {
       Instant registeredAt = row.getTimestampTZ("registered_at");
@@ -1529,7 +1538,7 @@ public final class ScalarDbSagaStore implements SagaStore {
     if (latest == null || now.isAfter(latest)) {
       return now;
     }
-    // TIMESTAMPTZ stores milliseconds, so this is the smallest step that still compares greater.
+    // The smallest step the column can still tell apart.
     return latest.plusMillis(1);
   }
 
