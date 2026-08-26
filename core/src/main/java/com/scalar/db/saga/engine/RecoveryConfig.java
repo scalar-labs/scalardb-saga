@@ -10,8 +10,14 @@ import java.util.Objects;
 /**
  * Configuration for the saga recovery manager.
  *
- * @param recoveryTimeoutMillis staleness threshold — sagas with {@code updated_at} older than this
- *     are considered stale and eligible for recovery
+ * @param recoveryTimeoutMillis staleness threshold — a saga that has made no progress for this long
+ *     is considered abandoned and eligible for recovery. Progress means the later of the state
+ *     row's {@code updated_at} and the newest event: step execution appends events without touching
+ *     the state row, so the row alone would make every long-running saga look dead. Size it above
+ *     the longest a single step attempt sequence can take (worst-case attempts × step timeout plus
+ *     backoff), since a healthy saga emits an event only at step boundaries. Raising it delays
+ *     recovery of genuinely crashed sagas by the same amount — this value is the crash-recovery
+ *     MTTR
  * @param recoveryIntervalSeconds how often the recovery scan runs (in seconds); each replica shifts
  *     its schedule within this interval by a deterministic offset derived from its owner ID, so
  *     replicas started together do not scan in phase
