@@ -241,7 +241,7 @@ class RecoveryFalseClaimIntegrationTest {
 
       // Put B's threshold exactly at the newest event, so the saga's creation-time row is stale to
       // B while its event stream is not. Reading the stamp back also exercises the real scan.
-      Instant newestEvent = storeB.getNewestEventTime(sagaId.get()).orElseThrow();
+      Instant newestEvent = storeB.getNewestEvent(sagaId.get()).orElseThrow().createdAt();
       clockB.set(newestEvent.plusMillis(RECOVERY_TIMEOUT_MILLIS));
 
       // The saga really is a candidate at that threshold — the probe is what spares it, not the

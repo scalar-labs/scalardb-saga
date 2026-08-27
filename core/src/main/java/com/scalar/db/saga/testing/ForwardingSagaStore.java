@@ -122,8 +122,8 @@ public abstract class ForwardingSagaStore implements SagaStore {
   }
 
   @Override
-  public Optional<Instant> getNewestEventTime(String sagaId) {
-    return delegate.getNewestEventTime(sagaId);
+  public Optional<NewestEvent> getNewestEvent(String sagaId) {
+    return delegate.getNewestEvent(sagaId);
   }
 
   @Override

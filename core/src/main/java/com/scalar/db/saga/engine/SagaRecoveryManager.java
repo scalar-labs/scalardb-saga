@@ -10,6 +10,7 @@ import com.scalar.db.saga.exception.StepExecutionException;
 import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaStore;
+import com.scalar.db.saga.store.SagaStore.NewestEvent;
 import com.scalar.db.saga.store.SagaStore.OverdueParked;
 import com.scalar.db.saga.store.SagaStore.Recoverables;
 import com.scalar.db.saga.store.SagaStore.ScanCursor;
@@ -674,9 +675,9 @@ class SagaRecoveryManager {
     }
     boolean deliberateHandoff = saga.getUpdatedAt().equals(Instant.EPOCH);
 
-    Optional<Instant> newestEvent;
+    Optional<NewestEvent> newestEvent;
     try {
-      newestEvent = probeNewestEventTime(sagaId);
+      newestEvent = probeNewestEvent(sagaId);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       return RecoveryOutcome.ERROR;
@@ -705,7 +706,7 @@ class SagaRecoveryManager {
     }
     // A deliberate hand-off is stamped EPOCH precisely to have the saga taken now, so honouring
     // recent events there would delay it by a whole timeout.
-    if (!deliberateHandoff && hasRecentEvent(newestEvent.get(), staleThreshold)) {
+    if (!deliberateHandoff && isBeingDriven(newestEvent.get(), staleThreshold)) {
       return RecoveryOutcome.SKIPPED;
     }
 
@@ -754,25 +755,33 @@ class SagaRecoveryManager {
    * Reads the newest event stamp under the probe bound, which is separate from the drive bound so a
    * one-read question never waits behind a running saga.
    */
-  private Optional<Instant> probeNewestEventTime(String sagaId) throws InterruptedException {
+  private Optional<NewestEvent> probeNewestEvent(String sagaId) throws InterruptedException {
     probeSemaphore.acquire();
     try {
-      return store.getNewestEventTime(sagaId);
+      return store.getNewestEvent(sagaId);
     } finally {
       probeSemaphore.release();
     }
   }
 
   /**
-   * Whether the saga wrote an event within the staleness window, which means something is still
-   * driving it and it must not be claimed.
+   * Whether the newest event says something is still driving this saga.
    *
-   * <p>Only the event stamp is compared. The state row's own timestamp cannot matter here: {@link
-   * SagaStore#findRecoverable} returns nothing newer than {@code staleThreshold}, so every
-   * candidate already has an old row by construction.
+   * <p>Two things have to be true: the event is recent, and it is not a give-up. A compensation
+   * failure is written by a drive that then stops and hands the saga back to recovery, so reading
+   * it as liveness would make the give-up postpone the very retry it is asking for. Nothing else in
+   * the stream says "I stopped here" — that is why the graceful drain has to hand over explicitly
+   * rather than rely on this signal.
+   *
+   * <p>Only the event stamp is compared, never the state row's. {@link SagaStore#findRecoverable}
+   * returns nothing newer than {@code staleThreshold}, so every candidate already has an old row by
+   * construction.
    */
-  private static boolean hasRecentEvent(Instant newestEvent, Instant staleThreshold) {
-    return !newestEvent.isBefore(staleThreshold);
+  private static boolean isBeingDriven(NewestEvent newest, Instant staleThreshold) {
+    if (newest.type() == EventType.STEP_COMPENSATION_FAILED) {
+      return false;
+    }
+    return !newest.createdAt().isBefore(staleThreshold);
   }
 
   /**

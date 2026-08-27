@@ -119,7 +119,9 @@ class SagaRecoveryManagerTest {
     // guards override this; every other test wants the pre-guard behaviour. An unstubbed mock
     // would return Optional.empty(), which now means "no events at all" — a damaged saga the
     // sweeper deliberately refuses to touch.
-    lenient().when(store.getNewestEventTime(any())).thenReturn(Optional.of(NOW.minusSeconds(3600)));
+    lenient()
+        .when(store.getNewestEvent(any()))
+        .thenReturn(Optional.of(progressAt(NOW.minusSeconds(3600))));
   }
 
   private static SagaStateSnapshot snapshot(SagaStatus status) {
@@ -158,6 +160,11 @@ class SagaRecoveryManagerTest {
         .map(ILoggingEvent::getFormattedMessage)
         .filter(message -> message.contains(sagaId))
         .toList();
+  }
+
+  /** A newest-event stub standing for ordinary progress: a step that completed at this instant. */
+  private static SagaStore.NewestEvent progressAt(Instant createdAt) {
+    return new SagaStore.NewestEvent(EventType.STEP_COMPLETED, createdAt);
   }
 
   private static Logger recoveryLogger() {
@@ -451,7 +458,7 @@ class SagaRecoveryManagerTest {
       // window: someone is driving it.
       SagaStateSnapshot saga = staleSaga();
       scanReturns(saga);
-      when(store.getNewestEventTime(SAGA_ID)).thenReturn(Optional.of(NOW.minusSeconds(5)));
+      when(store.getNewestEvent(SAGA_ID)).thenReturn(Optional.of(progressAt(NOW.minusSeconds(5))));
 
       // Act
       manager.recover();
@@ -467,7 +474,7 @@ class SagaRecoveryManagerTest {
       // to step outcomes would falsely claim first-step and freshly-transitioned sagas.
       SagaStateSnapshot saga = staleSaga();
       scanReturns(saga);
-      when(store.getNewestEventTime(SAGA_ID)).thenReturn(Optional.of(NOW.minusSeconds(1)));
+      when(store.getNewestEvent(SAGA_ID)).thenReturn(Optional.of(progressAt(NOW.minusSeconds(1))));
 
       // Act
       manager.recover();
@@ -477,11 +484,32 @@ class SagaRecoveryManagerTest {
     }
 
     @Test
+    void recover_newestEventIsACompensationGiveUp_isClaimedDespiteBeingRecent() {
+      // A compensation failure is written by a drive that then stops and hands the saga back to
+      // recovery. Reading it as liveness would make the give-up postpone the very retry it asks
+      // for, so the saga would sit idle for a whole timeout with nobody driving it.
+      SagaStateSnapshot saga = staleSaga();
+      setupSinglePageRecovery(saga);
+      when(store.getNewestEvent(SAGA_ID))
+          .thenReturn(
+              Optional.of(
+                  new SagaStore.NewestEvent(
+                      EventType.STEP_COMPENSATION_FAILED, NOW.minusSeconds(1))));
+
+      // Act
+      manager.recover();
+
+      // Assert — claimed straight away, even though the event is one second old
+      verify(store).claimForRecovery(saga, OWNER_ID);
+    }
+
+    @Test
     void recover_lastEventOlderThanTheWindow_isClaimed() {
       // Arrange — no local drive and no recent event: genuinely abandoned.
       SagaStateSnapshot saga = staleSaga();
       setupSinglePageRecovery(saga);
-      when(store.getNewestEventTime(SAGA_ID)).thenReturn(Optional.of(NOW.minusSeconds(600)));
+      when(store.getNewestEvent(SAGA_ID))
+          .thenReturn(Optional.of(progressAt(NOW.minusSeconds(600))));
 
       // Act
       manager.recover();
@@ -496,7 +524,7 @@ class SagaRecoveryManagerTest {
       // probe here would delay a deliberate hand-off by a whole timeout.
       SagaStateSnapshot saga = handoffSaga();
       setupSinglePageRecovery(saga);
-      when(store.getNewestEventTime(SAGA_ID)).thenReturn(Optional.of(NOW.minusSeconds(1)));
+      when(store.getNewestEvent(SAGA_ID)).thenReturn(Optional.of(progressAt(NOW.minusSeconds(1))));
 
       // Act
       manager.recover();
@@ -512,7 +540,7 @@ class SagaRecoveryManagerTest {
       // from step 0 with no input, since SAGA_STARTED is what carries it.
       SagaStateSnapshot saga = staleSaga();
       scanReturns(saga);
-      when(store.getNewestEventTime(SAGA_ID)).thenReturn(Optional.empty());
+      when(store.getNewestEvent(SAGA_ID)).thenReturn(Optional.empty());
 
       // Act
       manager.recover();
@@ -528,7 +556,7 @@ class SagaRecoveryManagerTest {
       // vouch for a history that is not there.
       SagaStateSnapshot saga = handoffSaga();
       scanReturns(saga);
-      when(store.getNewestEventTime(SAGA_ID)).thenReturn(Optional.empty());
+      when(store.getNewestEvent(SAGA_ID)).thenReturn(Optional.empty());
 
       // Act
       manager.recover();
@@ -545,7 +573,7 @@ class SagaRecoveryManagerTest {
       // recovered.
       SagaStateSnapshot saga = staleSaga();
       scanReturns(saga);
-      when(store.getNewestEventTime(SAGA_ID))
+      when(store.getNewestEvent(SAGA_ID))
           .thenThrow(SagaPersistenceException.storeUnavailable(new RuntimeException("boom")));
 
       // Act
@@ -561,7 +589,8 @@ class SagaRecoveryManagerTest {
       // so the saga is left alone rather than claimed out from under whoever is driving it.
       SagaStateSnapshot saga = staleSaga();
       scanReturns(saga);
-      when(store.getNewestEventTime(SAGA_ID)).thenReturn(Optional.of(NOW.plusSeconds(3600)));
+      when(store.getNewestEvent(SAGA_ID))
+          .thenReturn(Optional.of(progressAt(NOW.plusSeconds(3600))));
 
       // Act
       manager.recover();
@@ -623,8 +652,8 @@ class SagaRecoveryManagerTest {
         when(engine.isLocallyActive(SAGA_ID)).thenReturn(false);
         when(engine.activeSince(SAGA_ID)).thenReturn(Optional.empty());
         lenient()
-            .when(store.getNewestEventTime(SAGA_ID))
-            .thenReturn(Optional.of(NOW.minusSeconds(3600)));
+            .when(store.getNewestEvent(SAGA_ID))
+            .thenReturn(Optional.of(progressAt(NOW.minusSeconds(3600))));
         lenient().when(store.claimForRecovery(any(), any())).thenReturn(Optional.empty());
         manager.recover();
 
@@ -674,8 +703,8 @@ class SagaRecoveryManagerTest {
           .thenReturn(new Recoverables(List.of(claimable), null));
       when(engine.isLocallyActive(SAGA_ID)).thenReturn(true);
       lenient()
-          .when(store.getNewestEventTime(any()))
-          .thenReturn(Optional.of(NOW.minusSeconds(600)));
+          .when(store.getNewestEvent(any()))
+          .thenReturn(Optional.of(progressAt(NOW.minusSeconds(600))));
       when(store.claimForRecovery(claimable, OWNER_ID)).thenReturn(Optional.empty());
 
       // Act
@@ -1512,7 +1541,8 @@ class SagaRecoveryManagerTest {
 
       setupSinglePageRecovery(saga);
       // Nothing has written an event for two hours: the saga is genuinely abandoned, not slow.
-      when(store.getNewestEventTime(SAGA_ID)).thenReturn(Optional.of(NOW.minusSeconds(7200)));
+      when(store.getNewestEvent(SAGA_ID))
+          .thenReturn(Optional.of(progressAt(NOW.minusSeconds(7200))));
       when(store.getEvents(SAGA_ID)).thenReturn(events);
       when(engine.replayEvents(saga, events)).thenReturn(ctx);
       when(ctx.getCurrentState()).thenReturn(saga);

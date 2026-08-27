@@ -222,17 +222,23 @@ public interface SagaStore extends AutoCloseable {
   int getEventCount(String sagaId);
 
   /**
-   * Returns the {@code created_at} stamp of this saga's newest event, or empty when the saga has no
-   * events at all. Reads only the timestamp, never the event payload.
+   * The newest event's type and stamp: everything recovery needs to judge whether a saga is being
+   * driven, without reading any payload.
+   */
+  record NewestEvent(EventType type, Instant createdAt) {}
+
+  /**
+   * Returns the newest event for this saga, or empty when it has none at all. Reads only the type
+   * and the timestamp, never the payload.
    *
    * <p>Recovery uses this as a progress probe: a saga whose state row looks stale but whose event
    * stream is recent was <em>recently driven</em>, so it must not be claimed on state-row age
-   * alone. Recently driven is not the same as still running — a drive can write an event and then
-   * stop, as a graceful drain or a compensation give-up does — which is why those paths hand the
-   * saga over explicitly instead of waiting for this signal to expire. An empty result means a
-   * state row exists with no events behind it, which the store itself cannot produce — {@link
-   * #createSaga} writes the first event in the same transaction as the row — so the caller should
-   * treat it as damage rather than as an absence of progress.
+   * alone. The type matters because some events say the opposite — a compensation failure is
+   * written by a drive that then gives up, so it marks the end of an attempt rather than progress.
+   *
+   * <p>An empty result means a state row exists with no events behind it, which the store itself
+   * cannot produce — {@link #createSaga} writes the first event in the same transaction as the row
+   * — so the caller should treat it as damage rather than as an absence of progress.
    *
    * <p>"Newest" means highest {@code sequence}, not latest wall clock. Events are stamped by
    * whichever replica appended them, so under cross-replica skew the highest-sequence row can carry
@@ -241,7 +247,7 @@ public interface SagaStore extends AutoCloseable {
    *
    * <p>Runs in its own read-only transaction.
    */
-  Optional<Instant> getNewestEventTime(String sagaId);
+  Optional<NewestEvent> getNewestEvent(String sagaId);
 
   // ---------------------------------------------------------------------------
   // Queries

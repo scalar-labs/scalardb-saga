@@ -572,15 +572,15 @@ public final class ScalarDbSagaStore implements SagaStore {
   }
 
   @Override
-  public Optional<Instant> getNewestEventTime(String sagaId) {
+  public Optional<NewestEvent> getNewestEvent(String sagaId) {
     return runInTransaction(
         tx -> {
           // The events table clusters on the single INT key `sequence`, so a reverse ordered scan
           // limited to one row is exactly the supported shape; the projection keeps the payload out
-          // of a read that only wants the stamp.
+          // of a read that only wants the type and the stamp.
           Scan scan =
               Scan.newBuilder(buildEventScan(sagaId))
-                  .projections("sequence", "created_at")
+                  .projections("sequence", "event_type", "created_at")
                   .ordering(Scan.Ordering.desc("sequence"))
                   .limit(1)
                   .build();
@@ -596,13 +596,15 @@ public final class ScalarDbSagaStore implements SagaStore {
                       logger.warn(
                           "Newest event of saga {} has no created_at; treating as no progress",
                           sagaId);
-                      return Instant.EPOCH;
+                      createdAt = Instant.EPOCH;
                     }
-                    return createdAt;
+                    return new NewestEvent(
+                        EventType.valueOf(Objects.requireNonNull(r.getText("event_type"))),
+                        createdAt);
                   });
         },
         null, // read-only — retry the whole transaction on UTSE
-        "get newest event time for saga " + sagaId);
+        "get newest event for saga " + sagaId);
   }
 
   // ---------------------------------------------------------------------------

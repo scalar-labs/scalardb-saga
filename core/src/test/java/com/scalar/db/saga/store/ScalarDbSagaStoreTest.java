@@ -1480,49 +1480,52 @@ class ScalarDbSagaStoreTest {
   }
 
   // ---------------------------------------------------------------------------
-  // getNewestEventTime
+  // getNewestEvent
   // ---------------------------------------------------------------------------
 
   @Test
-  void getNewestEventTime_noEvents_returnsEmpty() throws Exception {
+  void getNewestEvent_noEvents_returnsEmpty() throws Exception {
     // Arrange
     when(tx.scan(any(Scan.class))).thenReturn(List.of());
 
     // Act
-    Optional<Instant> newest = store.getNewestEventTime("saga-1");
+    Optional<SagaStore.NewestEvent> newest = store.getNewestEvent("saga-1");
 
     // Assert
     assertThat(newest).isEmpty();
   }
 
   @Test
-  void getNewestEventTime_eventsExist_returnsNewestStamp() throws Exception {
+  void getNewestEvent_eventsExist_returnsNewestStamp() throws Exception {
     // Arrange
     // The scan is ordered desc on sequence and limited to one row, so the store sees only the
     // newest event; the test asserts it reports that row's stamp rather than reducing over rows.
     Instant newestStamp = Instant.parse("2026-08-25T10:00:00Z");
     Result newestRow = mock(Result.class);
     when(newestRow.getTimestampTZ("created_at")).thenReturn(newestStamp);
+    when(newestRow.getText("event_type")).thenReturn("STEP_COMPLETED");
     when(tx.scan(any(Scan.class))).thenReturn(List.of(newestRow));
 
     // Act
-    Optional<Instant> newest = store.getNewestEventTime("saga-1");
+    Optional<SagaStore.NewestEvent> newest = store.getNewestEvent("saga-1");
 
     // Assert
-    assertThat(newest).contains(newestStamp);
+    assertThat(newest).map(SagaStore.NewestEvent::createdAt).contains(newestStamp);
+    assertThat(newest).map(SagaStore.NewestEvent::type).contains(EventType.STEP_COMPLETED);
   }
 
   @Test
-  void getNewestEventTime_scansNewestFirstLimitedToOneRow() throws Exception {
+  void getNewestEvent_scansNewestFirstLimitedToOneRow() throws Exception {
     // Arrange
     // The ordering and limit are the contract: "newest" means highest sequence, and recovery must
     // not pay for a full event scan on every probe.
     Result row = mock(Result.class);
     when(row.getTimestampTZ("created_at")).thenReturn(Instant.parse("2026-08-25T10:00:00Z"));
+    when(row.getText("event_type")).thenReturn("STEP_COMPLETED");
     when(tx.scan(any(Scan.class))).thenReturn(List.of(row));
 
     // Act
-    store.getNewestEventTime("saga-1");
+    store.getNewestEvent("saga-1");
 
     // Assert
     ArgumentCaptor<Scan> captor = ArgumentCaptor.forClass(Scan.class);
@@ -1530,32 +1533,34 @@ class ScalarDbSagaStoreTest {
     Scan scan = captor.getValue();
     assertThat(scan.getLimit()).isEqualTo(1);
     assertThat(scan.getOrderings()).containsExactly(Scan.Ordering.desc("sequence"));
-    assertThat(scan.getProjections()).containsExactlyInAnyOrder("sequence", "created_at");
+    assertThat(scan.getProjections())
+        .containsExactlyInAnyOrder("sequence", "event_type", "created_at");
   }
 
   @Test
-  void getNewestEventTime_newestEventHasNoTimestamp_returnsEpoch() throws Exception {
+  void getNewestEvent_newestEventHasNoTimestamp_returnsEpoch() throws Exception {
     // Arrange
     // Unreachable through this store, which stamps created_at on every append. Reporting the epoch
     // keeps the saga claimable: one that cannot report progress must not become unclaimable.
     Result row = mock(Result.class);
     when(row.getTimestampTZ("created_at")).thenReturn(null);
+    when(row.getText("event_type")).thenReturn("STEP_COMPLETED");
     when(tx.scan(any(Scan.class))).thenReturn(List.of(row));
 
     // Act
-    Optional<Instant> newest = store.getNewestEventTime("saga-1");
+    Optional<SagaStore.NewestEvent> newest = store.getNewestEvent("saga-1");
 
     // Assert
-    assertThat(newest).contains(Instant.EPOCH);
+    assertThat(newest).map(SagaStore.NewestEvent::createdAt).contains(Instant.EPOCH);
   }
 
   @Test
-  void getNewestEventTime_storageFailureGiven_throwsSagaPersistenceException() throws Exception {
+  void getNewestEvent_storageFailureGiven_throwsSagaPersistenceException() throws Exception {
     // Arrange
     when(tx.scan(any(Scan.class))).thenThrow(mock(CrudException.class));
 
     // Act & Assert
-    assertThatThrownBy(() -> store.getNewestEventTime("saga-1"))
+    assertThatThrownBy(() -> store.getNewestEvent("saga-1"))
         .isInstanceOf(SagaPersistenceException.class);
   }
 
