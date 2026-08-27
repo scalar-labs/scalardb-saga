@@ -575,9 +575,9 @@ public final class ScalarDbSagaStore implements SagaStore {
   public Optional<NewestEvent> getNewestEvent(String sagaId) {
     return runInTransaction(
         tx -> {
-          // The events table clusters on the single INT key `sequence`, so a reverse ordered scan
-          // limited to one row is exactly the supported shape; the projection keeps the payload out
-          // of a read that only wants the type and the stamp.
+          // The same reverse-ordered, limited shape getStateWithEvents uses, and supported for the
+          // same reason. What is specific here is the projection: recovery wants the type and the
+          // stamp, so the payload never leaves the store.
           Scan scan =
               Scan.newBuilder(buildEventScan(sagaId))
                   .projections("sequence", "event_type", "created_at")

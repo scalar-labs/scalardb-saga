@@ -202,7 +202,7 @@ class RecoveryFalseClaimIntegrationTest {
   }
 
   @Test
-  void recover_fromAnotherReplica_driverWroteRecently_isNotClaimed() throws Exception {
+  void recover_driverOnAnotherReplicaWroteRecently_isNotClaimed() throws Exception {
     // The local-active check cannot help here: to a second replica the saga is simply a stale row
     // it is not driving, so only the progress probe stands between it and a destructive claim.
     // This is the path the single-replica test above never reaches, and the only coverage of the

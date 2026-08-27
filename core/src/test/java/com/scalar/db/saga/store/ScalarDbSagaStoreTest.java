@@ -1515,7 +1515,7 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
-  void getNewestEvent_scansNewestFirstLimitedToOneRow() throws Exception {
+  void getNewestEvent_eventsExist_scansNewestFirstLimitedToOneRow() throws Exception {
     // Arrange
     // The ordering and limit are the contract: "newest" means highest sequence, and recovery must
     // not pay for a full event scan on every probe.
