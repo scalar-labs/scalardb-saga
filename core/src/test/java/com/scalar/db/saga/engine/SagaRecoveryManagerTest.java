@@ -468,13 +468,17 @@ class SagaRecoveryManagerTest {
     }
 
     @Test
-    void recover_recentEventOfAnyType_isNotClaimed() {
-      // Arrange — the probe reports the newest row whatever its type, so a saga that has only just
-      // transitioned (a status event, no step outcome yet) still counts as progressing. Filtering
-      // to step outcomes would falsely claim first-step and freshly-transitioned sagas.
+    void recover_recentStatusEvent_isNotClaimed() {
+      // Arrange — only a give-up marker is excluded; every other type counts as progress, including
+      // a status event. A saga that has only just transitioned has no step outcome yet, so
+      // narrowing the check to step outcomes would falsely claim it — as it would a saga still in
+      // its first step.
       SagaStateSnapshot saga = staleSaga();
       scanReturns(saga);
-      when(store.getNewestEvent(SAGA_ID)).thenReturn(Optional.of(progressAt(NOW.minusSeconds(1))));
+      when(store.getNewestEvent(SAGA_ID))
+          .thenReturn(
+              Optional.of(
+                  new SagaStore.NewestEvent(EventType.SAGA_COMPENSATING, NOW.minusSeconds(1))));
 
       // Act
       manager.recover();
