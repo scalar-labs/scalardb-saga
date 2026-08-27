@@ -320,6 +320,12 @@ public class SagaEngine implements AutoCloseable {
       // Check graceful shutdown between steps
       if (shouldStopBetweenSteps()) {
         logger.info("Stopping saga {} between steps due to shutdown", context.getSagaId());
+        // Hand it over explicitly. The drive returns cleanly, so its finally unregisters the saga
+        // before shutdown()'s marking loop runs and that loop never sees it — leaving a RUNNING row
+        // with a freshly written step event. Recovery reads a recent event as "recently driven" and
+        // skips the saga for a whole timeout, which is the opposite of what draining is for. The
+        // epoch stamp is the deliberate hand-off the sweeper takes immediately.
+        store.markForRecovery(context.getSagaId());
         return;
       }
 

@@ -430,9 +430,10 @@ class SagaRecoveryManagerTest {
 
     @Test
     void recover_locallyActiveHandoffRow_isNotClaimed() {
-      // Arrange — an EPOCH row whose drive is still running locally, as an operator reset or
-      // force-recovery of a saga this instance happens to be executing leaves it. The local
-      // check must win over the hand-off carve-out, or the claim would kill that live drive.
+      // Arrange — an EPOCH row whose drive is still running locally. shutdown() leaves exactly
+      // this when its drain times out, marking every saga still in the active set; an operator
+      // reset can too. The local check must win over the hand-off carve-out, or the claim would
+      // kill that live drive.
       SagaStateSnapshot saga = handoffSaga();
       scanReturns(saga);
       when(engine.isLocallyActive(SAGA_ID)).thenReturn(true);
@@ -1488,6 +1489,40 @@ class SagaRecoveryManagerTest {
       // Assert — failure resolved, resumes compensation from step 0 (before last compensated at 1)
       verify(engine).recover(new RecoveryAction.Compensate(0), def, ctx);
       verify(store, never()).recordStatusEvent(any(), anyInt(), any(), any());
+    }
+
+    @Test
+    void recover_stuckPastGraceWithStaleEvents_isStillClaimedAndEscalates() {
+      // Escalation runs only after a committed claim, so both new guards now sit in front of it.
+      // The other escalation tests reach it through the shared lenient stub, which states no
+      // intent; this one stubs the probe explicitly so the guard interaction is what is pinned.
+      SagaStateSnapshot saga = snapshot(SagaStatus.COMPENSATING);
+      ExecutionContext ctx = mock(ExecutionContext.class);
+      SagaStateSnapshot escalated = snapshot(SagaStatus.ESCALATED);
+      List<SagaEvent> events =
+          List.of(
+              StepEvent.completed(0, "debit", null).withTimestamp(NOW.minusSeconds(7200)),
+              StepEvent.compensationFailed(0, "debit", null).withTimestamp(NOW.minusSeconds(7200)));
+
+      setupSinglePageRecovery(saga);
+      // Nothing has written an event for two hours: the saga is genuinely abandoned, not slow.
+      when(store.getNewestEventTime(SAGA_ID)).thenReturn(Optional.of(NOW.minusSeconds(7200)));
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(engine.replayEvents(saga, events)).thenReturn(ctx);
+      when(ctx.getCurrentState()).thenReturn(saga);
+      when(ctx.nextSequence()).thenReturn(2);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(definition());
+      when(store.recordStatusEvent(eq(saga), eq(2), any(StatusEvent.class), any()))
+          .thenReturn(escalated);
+
+      // Act
+      manager.recover();
+
+      // Assert — the guards let it through and it still escalates
+      verify(store).claimForRecovery(saga, OWNER_ID);
+      ArgumentCaptor<StatusEvent> captor = ArgumentCaptor.forClass(StatusEvent.class);
+      verify(store).recordStatusEvent(eq(saga), eq(2), captor.capture(), any());
+      assertThat(captor.getValue().getTargetStatus()).isEqualTo(SagaStatus.ESCALATED);
     }
 
     @Test

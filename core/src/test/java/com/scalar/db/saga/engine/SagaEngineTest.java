@@ -1071,6 +1071,17 @@ class SagaEngineTest {
 
       // Assert — step2 never executed (stopped between steps)
       verify(step2, never()).execute(any(SagaContext.class));
+      // ...and the saga was handed to the sweeper. A drive that drains cleanly unregisters itself
+      // before shutdown()'s marking loop runs, so that loop never sees it; without this hand-off it
+      // would sit RUNNING with a freshly written step event, which recovery reads as recently
+      // driven and skips for a whole timeout — stalling exactly the long-running sagas a graceful
+      // drain exists to hand over promptly.
+      //
+      // atLeastOnce, not once: this test calls shutdown() from inside the step, on the drive's own
+      // thread, so the drain cannot complete and its marking loop stamps the saga as well. Both
+      // writes stamp the epoch, so the overlap is harmless; what matters is that the hand-off
+      // happens even when the loop misses it.
+      verify(store, atLeastOnce()).markForRecovery(saga.getSagaId());
     }
 
     @Test

@@ -226,7 +226,10 @@ public interface SagaStore extends AutoCloseable {
    * events at all. Reads only the timestamp, never the event payload.
    *
    * <p>Recovery uses this as a progress probe: a saga whose state row looks stale but whose event
-   * stream is recent is being driven by someone, so it must not be claimed. An empty result means a
+   * stream is recent was <em>recently driven</em>, so it must not be claimed on state-row age
+   * alone. Recently driven is not the same as still running — a drive can write an event and then
+   * stop, as a graceful drain or a compensation give-up does — which is why those paths hand the
+   * saga over explicitly instead of waiting for this signal to expire. An empty result means a
    * state row exists with no events behind it, which the store itself cannot produce — {@link
    * #createSaga} writes the first event in the same transaction as the row — so the caller should
    * treat it as damage rather than as an absence of progress.

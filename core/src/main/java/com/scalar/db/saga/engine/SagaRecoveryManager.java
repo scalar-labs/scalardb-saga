@@ -45,7 +45,17 @@ import org.slf4j.LoggerFactory;
  *
  * <p>On each recovery pass, sweeps the {@code saga_state} buckets for sagas in {@link
  * SagaStatus#RUNNING} or {@link SagaStatus#COMPENSATING} whose {@code updated_at} is older than
- * {@link RecoveryConfig#recoveryTimeoutMillis()}. For each recoverable saga:
+ * {@link RecoveryConfig#recoveryTimeoutMillis()}.
+ *
+ * <p><b>A swept saga is a candidate, not a claim.</b> The state row is written only at status
+ * transitions and claims, never by step execution, so a saga that is merely running for a long time
+ * looks exactly like one whose process died. Each candidate is therefore screened first — skipped
+ * when this instance is driving it, or when its newest event lands inside the staleness window —
+ * and only what survives both is claimed. A row deliberately stamped {@link
+ * java.time.Instant#EPOCH} is a hand-off and bypasses the event check; a row with no events at all
+ * is damage and is refused. See {@code recoverOneSafely} for the ordering and why it is that way.
+ *
+ * <p>For a saga that is claimed:
  *
  * <ol>
  *   <li>Claims via {@link SagaStore#claimForRecovery} (optimistic concurrency).
@@ -54,6 +64,9 @@ import org.slf4j.LoggerFactory;
  *   <li>Resumes forward ({@code RUNNING}) or compensation ({@code COMPENSATING}).
  *   <li>Escalates to {@link SagaStatus#ESCALATED} if stuck longer than the grace period.
  * </ol>
+ *
+ * <p>Escalation therefore sits behind a claim: a saga that keeps emitting events is skipped, so its
+ * grace-period check does not run while that continues.
  *
  * <p><b>Multi-replica de-collision (best effort).</b> Concurrently sweeping replicas would
  * otherwise do each other's work: the claim protocol guarantees one winner per saga, but losers
@@ -631,9 +644,9 @@ class SagaRecoveryManager {
    * <p>The local-active check comes first and runs before a permit is acquired. It is free, and
    * permits are held for the whole synchronous drive, so evaluating it inside the permit would
    * queue skips behind long drives. It must also precede the EPOCH carve-out: a row can be
-   * EPOCH-stamped while a local drive still runs — an operator resetting or force-recovering a saga
-   * this instance happens to be executing does exactly that — and claiming it would kill the drive
-   * this instance is running.
+   * EPOCH-stamped while a local drive still runs — {@code SagaEngine.shutdown()} marks every saga
+   * left in its active set when the drain times out, and an operator reset or force-recovery can do
+   * the same to a saga this instance is executing — and claiming it would kill that drive.
    *
    * <p>The progress probe then reads the newest event stamp for everything else, and skips the saga
    * when it shows activity within the staleness window. A deliberate hand-off (the caller stamped
