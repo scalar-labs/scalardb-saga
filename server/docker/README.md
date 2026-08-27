@@ -218,7 +218,9 @@ Operational notes, learned from how Kubernetes actually delivers files:
   makes retirement real is not in this release; until then, keep the files in place.)
 - **Definition rollback is roll-forward only**: `helm rollback` reverts service files, but
   re-registering an old definition version is an idempotent no-op — the store's latest version
-  keeps winning. To revert a definition, register the old content as a NEW, bumped version. The
+  keeps winning. "Latest" means the version registered most recently, not the highest-numbered one;
+  versions are opaque strings and nothing compares them. To revert a definition, register the old
+  content as a NEW version, which then serves because it was registered last. The
   reload now says so rather than letting it pass quietly: a definition file naming an
   already-registered version that is not the one serving draws a WARN naming both versions, and the
   pass goes on validating the version that actually serves. It is not rejected — the rollback has
