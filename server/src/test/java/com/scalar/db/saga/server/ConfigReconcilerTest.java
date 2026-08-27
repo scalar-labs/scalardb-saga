@@ -1276,6 +1276,51 @@ class ConfigReconcilerTest {
     }
 
     @Test
+    void run_storeUnreachableDuringValidation_isATransientRejectionNotAnEscape()
+        throws IOException {
+      // The validation lookups are the only store reads a pass makes, and run() contains a
+      // rejected pass and nothing else. An escaping store outage would surface as an unexpected
+      // scheduler failure, record no rejection, and leave lastPassAt frozen — which is exactly the
+      // signal a wedged pass thread is supposed to have to itself.
+      // Arrange
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      DefinitionStore unreachable =
+          new DefinitionStore() {
+            @Override
+            public void register(SagaDefinition definition) {}
+
+            @Override
+            public @Nullable String latestVersion(String sagaName) {
+              throw SagaPersistenceException.storeUnavailable(new IOException("connection reset"));
+            }
+
+            @Override
+            public boolean isRegistered(String sagaName, String version) {
+              throw new AssertionError("not reached: the latest lookup fails first");
+            }
+          };
+      ConfigReconciler reconciler =
+          new ConfigReconciler(
+              new ReloadConfig(
+                  servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC)),
+              definitionsDir,
+              false,
+              registrar,
+              unreachable);
+
+      // Act — contained, not thrown
+      boolean applied = reconciler.run();
+
+      // Assert — reported as transient, and the pass is recorded as having concluded
+      assertThat(applied).isFalse();
+      ReloadStatus.Rejection rejection = requireNonNull(reconciler.status().rejection());
+      assertThat(rejection.operatorActionRequired()).isFalse();
+      assertThat(rejection.reason()).contains("will retry next pass");
+      assertThat(reconciler.status().lastPassAt()).isEqualTo(NOW);
+    }
+
+    @Test
     void run_definitionFileRolledBack_rejectedRatherThanTrackedAsApplied() throws IOException {
       // A rollback of the definitions directory reverts the file and not the store: registering
       // older content is a no-op and the newer version keeps serving. Recording the file's version
