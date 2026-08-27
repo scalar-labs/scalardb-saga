@@ -14,10 +14,11 @@ import java.util.Objects;
  *     is considered abandoned and eligible for recovery. Progress means the later of the state
  *     row's {@code updated_at} and the newest event: step execution appends events without touching
  *     the state row, so the row alone would make every long-running saga look dead. Size it above
- *     the longest a single step attempt sequence can take (worst-case attempts × step timeout plus
- *     backoff), since a healthy saga emits an event only at step boundaries. Raising it delays
- *     recovery of genuinely crashed sagas by the same amount — this value is the crash-recovery
- *     MTTR
+ *     the longest a single step can take, which is its step timeout: {@code stepDeadline} is an
+ *     absolute instant computed once before the retry loop, so it caps the whole attempt sequence —
+ *     every retry and all backoff — not each attempt. A healthy saga emits an event only at step
+ *     boundaries, so that timeout is the longest silence to expect. Raising it delays recovery of
+ *     genuinely crashed sagas by the same amount — this value is the crash-recovery MTTR
  * @param recoveryIntervalSeconds how often the recovery scan runs (in seconds); each replica shifts
  *     its schedule within this interval by a deterministic offset derived from its owner ID, so
  *     replicas started together do not scan in phase

@@ -162,9 +162,11 @@ import org.jspecify.annotations.Nullable;
  *       longer is considered abandoned and eligible for recovery. Progress is the later of the
  *       state row's timestamp and the saga's newest event, so a saga executing a long step is not
  *       mistaken for a dead one. Set it above the longest a <b>single step attempt sequence</b> can
- *       take — worst-case retry attempts × step timeout, plus the backoff between them — because a
- *       healthy saga emits an event only at step boundaries. Raising it delays recovery of
- *       genuinely crashed sagas by the same amount: this value is your crash-recovery MTTR.
+ *       take, which is simply its step timeout: that deadline is an absolute instant computed once
+ *       before the retry loop, so it bounds the entire attempt sequence — every retry and all
+ *       backoff — rather than each attempt. A healthy saga emits an event only at step boundaries,
+ *       so that is the longest silence to expect. Raising it delays recovery of genuinely crashed
+ *       sagas by the same amount: this value is your crash-recovery MTTR.
  *       <p>Recovery is at-least-once across replicas. A step whose attempt sequence outlives this
  *       threshold produces no events while it runs, so another replica can begin recovering the
  *       saga while the first is still executing it; the loser is fenced on its next state write,

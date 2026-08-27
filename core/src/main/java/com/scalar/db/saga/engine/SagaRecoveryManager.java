@@ -631,8 +631,9 @@ class SagaRecoveryManager {
    * <p>The local-active check comes first and runs before a permit is acquired. It is free, and
    * permits are held for the whole synchronous drive, so evaluating it inside the permit would
    * queue skips behind long drives. It must also precede the EPOCH carve-out: a row can be
-   * EPOCH-stamped while a local drive still runs — the duplicate-registration path does exactly
-   * that — and claiming it would kill the drive this instance is running.
+   * EPOCH-stamped while a local drive still runs — an operator resetting or force-recovering a saga
+   * this instance happens to be executing does exactly that — and claiming it would kill the drive
+   * this instance is running.
    *
    * <p>The progress probe then reads the newest event stamp for everything else, and skips the saga
    * when it shows activity within the staleness window. A deliberate hand-off (the caller stamped
@@ -661,7 +662,19 @@ class SagaRecoveryManager {
         noteLocallyActive(sagaId);
         return RecoveryOutcome.SKIPPED;
       }
-      Optional<Instant> newestEvent = readNewestEventTime(sagaId);
+      Optional<Instant> newestEvent;
+      try {
+        newestEvent = store.getNewestEventTime(sagaId);
+      } catch (Throwable t) {
+        // Do not fall through to the claim. A failed read is not evidence that the saga stopped
+        // progressing, and claiming would rewrite the concurrency token of a drive that may well be
+        // alive. The drive that follows a claim reads the same events table anyway, so it would
+        // fail too: we would kill a live saga and recover nothing. Report the store trouble, leave
+        // the row untouched, and let a later pass decide with real evidence.
+        logger.warn(
+            "Progress probe failed for saga {}; leaving it untouched for a later pass", sagaId, t);
+        return RecoveryOutcome.ERROR;
+      }
       if (newestEvent.isEmpty()) {
         // createSaga writes SAGA_STARTED in the same transaction as the state row, so a row with
         // no events behind it cannot come from the engine. Claiming would replay an empty history
@@ -677,7 +690,7 @@ class SagaRecoveryManager {
       }
       // A deliberate hand-off is stamped EPOCH precisely to have the saga taken now, so honouring
       // recent events there would delay it by a whole timeout.
-      if (!deliberateHandoff && hasRecentEvent(sagaId, newestEvent.get(), staleThreshold)) {
+      if (!deliberateHandoff && hasRecentEvent(newestEvent.get(), staleThreshold)) {
         return RecoveryOutcome.SKIPPED;
       }
       Optional<SagaStateSnapshot> claimed;
@@ -709,25 +722,6 @@ class SagaRecoveryManager {
   }
 
   /**
-   * Reads the newest event's timestamp, reporting no events as an empty result and a failed read as
-   * the epoch.
-   *
-   * <p>Collapsing a failed read to the epoch is deliberate: the epoch reads as "no progress", which
-   * sends the saga on to be claimed — exactly how recovery behaved before this probe existed. An
-   * events table this instance cannot read is no reason to stop recovering. The substitution can
-   * only ever lower the observed progress, so it can cause a claim but never a wrongful skip.
-   */
-  private Optional<Instant> readNewestEventTime(String sagaId) {
-    try {
-      return store.getNewestEventTime(sagaId);
-    } catch (Throwable t) {
-      logger.warn(
-          "Progress probe failed for saga {}; claiming on state-row staleness alone", sagaId, t);
-      return Optional.of(Instant.EPOCH);
-    }
-  }
-
-  /**
    * Whether the saga wrote an event within the staleness window, which means something is still
    * driving it and it must not be claimed.
    *
@@ -735,22 +729,8 @@ class SagaRecoveryManager {
    * SagaStore#findRecoverable} returns nothing newer than {@code staleThreshold}, so every
    * candidate already has an old row by construction.
    */
-  private boolean hasRecentEvent(String sagaId, Instant newestEvent, Instant staleThreshold) {
-    if (newestEvent.isBefore(staleThreshold)) {
-      return false;
-    }
-    if (newestEvent.isAfter(staleThreshold.plusMillis(config.recoveryTimeoutMillis()))) {
-      // Further ahead than the whole staleness window: the writer's clock is ahead of ours by more
-      // than recovery tolerates, and this saga will never look stale to us while that holds.
-      logger.warn(
-          "Saga {} reports an event at {}, beyond the staleness window ending {}; a writer's clock"
-              + " is ahead of this instance's and the saga cannot be recovered here until it"
-              + " settles",
-          sagaId,
-          newestEvent,
-          staleThreshold);
-    }
-    return true;
+  private static boolean hasRecentEvent(Instant newestEvent, Instant staleThreshold) {
+    return !newestEvent.isBefore(staleThreshold);
   }
 
   /**

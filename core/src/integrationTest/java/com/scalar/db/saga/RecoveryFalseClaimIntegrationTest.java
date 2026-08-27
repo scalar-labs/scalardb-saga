@@ -53,6 +53,7 @@ class RecoveryFalseClaimIntegrationTest {
 
   private static final String SAGA_NAME = "long-step-saga";
   private static final String OWNER_ID = "owner";
+  private static final String OWNER_ID_B = "owner-b";
   private static final Duration GRACE = Duration.ofHours(1);
   private static final long RECOVERY_TIMEOUT_MILLIS = 60_000;
 
@@ -80,11 +81,12 @@ class RecoveryFalseClaimIntegrationTest {
     }
   }
 
-  /** A step that parks on a latch, so the saga can be caught mid-execution. */
-  private static final class BlockingStep implements Step {
-    static final List<String> EXECUTIONS = Collections.synchronizedList(new ArrayList<>());
-    static final CountDownLatch STARTED = new CountDownLatch(1);
-    static final CountDownLatch RELEASE = new CountDownLatch(1);
+  /**
+   * A step that parks on a latch, so the saga can be caught mid-execution. An inner class, not a
+   * static one: JUnit builds a fresh test instance per test, so per-instance latches cannot leak
+   * between tests the way static ones silently did.
+   */
+  private final class BlockingStep implements Step {
 
     private final String name;
 
@@ -99,11 +101,26 @@ class RecoveryFalseClaimIntegrationTest {
 
     @Override
     public StepResult execute(SagaContext context) {
-      EXECUTIONS.add(name);
-      if ("slow".equals(name)) {
-        STARTED.countDown();
+      executions.add(name);
+      // start() only returns once the saga finishes, so a test inspecting a parked saga cannot get
+      // its id from that call. The step running inside it can.
+      runningSagaId.set(context.getSagaId());
+      if ("first".equals(name)) {
+        // Stored timestamps are millisecond-granular, and creating the saga plus completing a
+        // trivial step lands inside one millisecond — leaving no threshold that can make the state
+        // row stale while the event stream is fresh, which is the whole point of the probe. A short
+        // real delay separates them.
         try {
-          if (!RELEASE.await(30, TimeUnit.SECONDS)) {
+          Thread.sleep(50);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          throw new IllegalStateException(e);
+        }
+      }
+      if ("slow".equals(name)) {
+        stepStarted.countDown();
+        try {
+          if (!stepRelease.await(30, TimeUnit.SECONDS)) {
             throw new IllegalStateException("step was never released");
           }
         } catch (InterruptedException e) {
@@ -116,11 +133,16 @@ class RecoveryFalseClaimIntegrationTest {
 
     @Override
     public void compensate(SagaContext context) {
-      EXECUTIONS.add("compensate:" + name);
+      executions.add("compensate:" + name);
     }
   }
 
   @TempDir Path tempDir;
+
+  private final List<String> executions = Collections.synchronizedList(new ArrayList<>());
+  private final AtomicReference<String> runningSagaId = new AtomicReference<>();
+  private CountDownLatch stepStarted;
+  private CountDownLatch stepRelease;
 
   private Path dbPath;
   private SagaStore store;
@@ -129,15 +151,12 @@ class RecoveryFalseClaimIntegrationTest {
 
   @BeforeEach
   void setUp() {
-    BlockingStep.EXECUTIONS.clear();
+    executions.clear();
+    runningSagaId.set(null);
+    stepStarted = new CountDownLatch(1);
+    stepRelease = new CountDownLatch(1);
     dbPath = tempDir.resolve("recovery-false-claim-it.db");
-    Properties props = new Properties();
-    props.setProperty("scalar.db.storage", "jdbc");
-    props.setProperty(
-        "scalar.db.contact_points",
-        "jdbc:sqlite:" + dbPath.toAbsolutePath() + "?busy_timeout=10000");
-    props.setProperty("scalar.db.saga.store.num_buckets", "1");
-    store = ScalarDbSagaStoreFactory.create(props).createStore();
+    store = ScalarDbSagaStoreFactory.create(storeProps()).createStore();
     clock = new SettableClock();
 
     orchestrator =
@@ -148,21 +167,111 @@ class RecoveryFalseClaimIntegrationTest {
             .stepResolver((name, cls, ctx) -> new BlockingStep(name))
             .build();
 
-    orchestrator.register(
-        SagaDefinition.newBuilder(SAGA_NAME)
-            .saga()
-            .step("slow", "com.example.SlowStep")
-            .add()
-            .step("after", "com.example.AfterStep")
-            .add()
-            .build());
+    orchestrator.register(definition());
+  }
+
+  private static SagaDefinition definition() {
+    // "first" completes at once, so a real step event exists in the store before "slow" blocks —
+    // which is what a second replica's progress probe has to find.
+    return SagaDefinition.newBuilder(SAGA_NAME)
+        .saga()
+        .step("first", "com.example.FirstStep")
+        .add()
+        .step("slow", "com.example.SlowStep")
+        .add()
+        .step("after", "com.example.AfterStep")
+        .add()
+        .build();
+  }
+
+  private Properties storeProps() {
+    Properties props = new Properties();
+    props.setProperty("scalar.db.storage", "jdbc");
+    props.setProperty(
+        "scalar.db.contact_points",
+        "jdbc:sqlite:" + dbPath.toAbsolutePath() + "?busy_timeout=10000");
+    props.setProperty("scalar.db.saga.store.num_buckets", "1");
+    return props;
   }
 
   @AfterEach
   void tearDown() throws Exception {
-    BlockingStep.RELEASE.countDown(); // never leave a drive parked
+    stepRelease.countDown(); // never leave a drive parked
     orchestrator.close(); // owns and closes the shared store
     Files.deleteIfExists(dbPath);
+  }
+
+  @Test
+  void recover_fromAnotherReplica_driverWroteRecently_isNotClaimed() throws Exception {
+    // The local-active check cannot help here: to a second replica the saga is simply a stale row
+    // it is not driving, so only the progress probe stands between it and a destructive claim.
+    // This is the path the single-replica test above never reaches, and the only coverage of the
+    // real store's descending, projected event scan.
+
+    // Arrange — replica A starts the saga and blocks in "slow", after "first" has written an event.
+    AtomicReference<String> sagaId = new AtomicReference<>();
+    AtomicReference<Throwable> driveFailure = new AtomicReference<>();
+    Thread drive =
+        new Thread(
+            () -> {
+              try {
+                sagaId.set(orchestrator.start(SAGA_NAME, Map.of()));
+              } catch (Throwable t) {
+                driveFailure.set(t);
+              }
+            });
+    drive.start();
+    assertThat(stepStarted.await(30, TimeUnit.SECONDS)).isTrue();
+    sagaId.set(runningSagaId.get());
+    assertThat(sagaId.get()).isNotNull();
+
+    // Replica B: its own store on the same database, its own owner id and clock.
+    SagaStore storeB = ScalarDbSagaStoreFactory.create(storeProps()).createStore();
+    SettableClock clockB = new SettableClock();
+    DefaultSagaOrchestrator replicaB =
+        DefaultSagaOrchestrator.newBuilder()
+            .storeFactory(() -> storeB)
+            .ownerId(OWNER_ID_B)
+            .recoveryConfig(
+                new RecoveryConfig(RECOVERY_TIMEOUT_MILLIS, 30, GRACE, 1000, 10, clockB))
+            .stepResolver((name, cls, ctx) -> new BlockingStep(name))
+            .build();
+    try {
+      replicaB.register(definition());
+
+      // Put B's threshold exactly at the newest event, so the saga's creation-time row is stale to
+      // B while its event stream is not. Reading the stamp back also exercises the real scan.
+      Instant newestEvent = storeB.getNewestEventTime(sagaId.get()).orElseThrow();
+      clockB.set(newestEvent.plusMillis(RECOVERY_TIMEOUT_MILLIS));
+
+      // The saga really is a candidate at that threshold — the probe is what spares it, not the
+      // scan failing to reach it. Without this the test could pass for the wrong reason.
+      Instant stateUpdatedAt = storeB.getStateSnapshot(sagaId.get()).orElseThrow().getUpdatedAt();
+      assertThat(storeB.findRecoverable(newestEvent, storeB.initialSweepCursor(OWNER_ID_B)).sagas())
+          .as("newestEvent=%s stateUpdatedAt=%s", newestEvent, stateUpdatedAt)
+          .extracting(SagaStateSnapshot::getSagaId)
+          .contains(sagaId.get());
+
+      // Act — a full recovery pass from the other replica
+      replicaB.recover();
+
+      // Assert — B left it alone; the row still belongs to A
+      assertThat(storeB.getStateSnapshot(sagaId.get()).orElseThrow().getOwnerId())
+          .isEqualTo(OWNER_ID);
+      assertThat(driveFailure.get()).isNull();
+
+      // Act — release A and let it finish
+      stepRelease.countDown();
+      drive.join(30_000);
+
+      // Assert — A completed normally, each step once, with no redrive from B
+      assertThat(driveFailure.get()).isNull();
+      assertThat(orchestrator.getStateSnapshot(sagaId.get()).getStatus())
+          .isEqualTo(SagaStatus.COMPLETED);
+      assertThat(executions).containsExactly("first", "slow", "after");
+    } finally {
+      replicaB.close();
+    }
   }
 
   @Test
@@ -181,7 +290,7 @@ class RecoveryFalseClaimIntegrationTest {
               }
             });
     drive.start();
-    assertThat(BlockingStep.STARTED.await(30, TimeUnit.SECONDS)).isTrue();
+    assertThat(stepStarted.await(30, TimeUnit.SECONDS)).isTrue();
 
     // Push the recovery clock an hour past wall time: every row written by the live drive is now
     // far older than the staleness threshold, so nothing but the guards keeps this saga safe.
@@ -192,10 +301,10 @@ class RecoveryFalseClaimIntegrationTest {
 
     // Assert — the pass left the row alone, so the drive is still alive and its step ran once.
     assertThat(driveFailure.get()).isNull();
-    assertThat(BlockingStep.EXECUTIONS).containsExactly("slow");
+    assertThat(executions).containsExactly("first", "slow");
 
     // Act — release the step and let the saga finish.
-    BlockingStep.RELEASE.countDown();
+    stepRelease.countDown();
     drive.join(30_000);
 
     // Assert — it completed normally, with no step executed twice. Before the guards, the pass
@@ -204,6 +313,6 @@ class RecoveryFalseClaimIntegrationTest {
     assertThat(driveFailure.get()).isNull();
     SagaStateSnapshot result = orchestrator.getStateSnapshot(sagaId.get());
     assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPLETED);
-    assertThat(BlockingStep.EXECUTIONS).containsExactly("slow", "after");
+    assertThat(executions).containsExactly("first", "slow", "after");
   }
 }

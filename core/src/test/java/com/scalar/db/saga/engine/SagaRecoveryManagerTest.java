@@ -36,6 +36,7 @@ import com.scalar.db.saga.store.SweepScatter;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
@@ -71,11 +72,40 @@ class SagaRecoveryManagerTest {
 
   private RecoveryConfig config;
   private SagaRecoveryManager manager;
+  private MutableClock clock;
+
+  /** Starts at {@link #NOW} and only moves when a test advances it. */
+  private static final class MutableClock extends Clock {
+    private Instant instant;
+
+    MutableClock(Instant start) {
+      this.instant = start;
+    }
+
+    @Override
+    public ZoneId getZone() {
+      return ZoneOffset.UTC;
+    }
+
+    @Override
+    public Clock withZone(ZoneId zone) {
+      return this;
+    }
+
+    @Override
+    public Instant instant() {
+      return instant;
+    }
+
+    void advance(Duration amount) {
+      instant = instant.plus(amount);
+    }
+  }
 
   @BeforeEach
   void setUp() {
-    config =
-        new RecoveryConfig(60_000, 30, GRACE_PERIOD, 1000, 10, Clock.fixed(NOW, ZoneOffset.UTC));
+    clock = new MutableClock(NOW);
+    config = new RecoveryConfig(60_000, 30, GRACE_PERIOD, 1000, 10, clock);
     manager = new SagaRecoveryManager(store, engine, registry, OWNER_ID, config, scheduler);
     // Both sweeps start from the owner's scattered cursor; without this stub the mock returns
     // null and the sweeps end before scanning anything.
@@ -119,6 +149,15 @@ class SagaRecoveryManagerTest {
     appender.start();
     recoveryLogger().addAppender(appender);
     return appender;
+  }
+
+  /** The captured WARN lines naming this saga — the hung-drive signal is the only one here. */
+  private static List<String> warningsNaming(ListAppender<ILoggingEvent> logs, String sagaId) {
+    return logs.list.stream()
+        .filter(event -> event.getLevel() == Level.WARN)
+        .map(ILoggingEvent::getFormattedMessage)
+        .filter(message -> message.contains(sagaId))
+        .toList();
   }
 
   private static Logger recoveryLogger() {
@@ -391,8 +430,9 @@ class SagaRecoveryManagerTest {
 
     @Test
     void recover_locallyActiveHandoffRow_isNotClaimed() {
-      // Arrange — an EPOCH row whose drive is still running locally. The local check must win over
-      // the hand-off carve-out, or the duplicate-registration path would kill a live drive.
+      // Arrange — an EPOCH row whose drive is still running locally, as an operator reset or
+      // force-recovery of a saga this instance happens to be executing leaves it. The local
+      // check must win over the hand-off carve-out, or the claim would kill that live drive.
       SagaStateSnapshot saga = handoffSaga();
       scanReturns(saga);
       when(engine.isLocallyActive(SAGA_ID)).thenReturn(true);
@@ -497,11 +537,13 @@ class SagaRecoveryManagerTest {
     }
 
     @Test
-    void recover_probeFails_claimsOnStateRowStalenessAlone() {
-      // Arrange — an events table this instance cannot read is no reason to stop recovering; the
-      // behaviour then is exactly what it was before the probe existed.
+    void recover_probeFails_leavesTheSagaUntouched() {
+      // Arrange — a failed read is not evidence that the saga stopped progressing. Claiming on it
+      // would rewrite the token of a drive that may be alive, and the drive that follows a claim
+      // reads the same events table, so it would fail too: a live saga killed and nothing
+      // recovered.
       SagaStateSnapshot saga = staleSaga();
-      setupSinglePageRecovery(saga);
+      scanReturns(saga);
       when(store.getNewestEventTime(SAGA_ID))
           .thenThrow(SagaPersistenceException.storeUnavailable(new RuntimeException("boom")));
 
@@ -509,7 +551,89 @@ class SagaRecoveryManagerTest {
       manager.recover();
 
       // Assert
-      verify(store).claimForRecovery(saga, OWNER_ID);
+      verify(store, never()).claimForRecovery(any(), any());
+    }
+
+    @Test
+    void recover_eventStampInTheFuture_isNotClaimed() {
+      // Arrange — a writer whose clock runs ahead of ours. The stamp is "recent" by any comparison,
+      // so the saga is left alone rather than claimed out from under whoever is driving it.
+      SagaStateSnapshot saga = staleSaga();
+      scanReturns(saga);
+      when(store.getNewestEventTime(SAGA_ID)).thenReturn(Optional.of(NOW.plusSeconds(3600)));
+
+      // Act
+      manager.recover();
+
+      // Assert
+      verify(store, never()).claimForRecovery(any(), any());
+    }
+
+    @Test
+    void recover_locallyActivePastTenTimeouts_namesTheSagaOnceInAWarning() {
+      // Arrange — a drive that never releases its saga is skipped silently on every pass, so
+      // without this warning a wedged drive is invisible. The clock moves between passes while the
+      // saga stays active here.
+      SagaStateSnapshot saga = staleSaga();
+      scanReturns(saga);
+      when(engine.isLocallyActive(SAGA_ID)).thenReturn(true);
+      ListAppender<ILoggingEvent> logs = attachLogCapture();
+      try {
+        // Act — the first pass only records when the saga was first seen; nothing is wrong yet.
+        manager.recover();
+        assertThat(warningsNaming(logs, SAGA_ID)).isEmpty();
+
+        // Act — a later pass, past ten timeouts on the same continuously-active saga
+        clock.advance(Duration.ofMinutes(11));
+        manager.recover();
+
+        // Assert — named once
+        assertThat(warningsNaming(logs, SAGA_ID)).hasSize(1);
+
+        // Act — and not again every pass afterwards, which would drown the signal
+        clock.advance(Duration.ofMinutes(11));
+        manager.recover();
+
+        // Assert
+        assertThat(warningsNaming(logs, SAGA_ID)).hasSize(1);
+      } finally {
+        recoveryLogger().detachAppender(logs);
+      }
+    }
+
+    @Test
+    void recover_sagaFinishesAndRunsLongAgain_warnsAfresh() {
+      // Arrange — the bookkeeping is pruned each pass against what the engine is really driving, so
+      // a saga that completes and later runs long again must be reported again rather than being
+      // silenced forever by the first warning.
+      SagaStateSnapshot saga = staleSaga();
+      scanReturns(saga);
+      when(engine.isLocallyActive(SAGA_ID)).thenReturn(true);
+      lenient()
+          .when(store.getNewestEventTime(SAGA_ID))
+          .thenReturn(Optional.of(NOW.minusSeconds(3600)));
+      ListAppender<ILoggingEvent> logs = attachLogCapture();
+      try {
+        manager.recover();
+        clock.advance(Duration.ofMinutes(11));
+        manager.recover();
+        assertThat(warningsNaming(logs, SAGA_ID)).hasSize(1);
+
+        // Act — the drive ends, so the next pass forgets it
+        when(engine.isLocallyActive(SAGA_ID)).thenReturn(false);
+        manager.recover();
+
+        // Act — it becomes active again and ages past the threshold a second time
+        when(engine.isLocallyActive(SAGA_ID)).thenReturn(true);
+        manager.recover();
+        clock.advance(Duration.ofMinutes(11));
+        manager.recover();
+
+        // Assert — warned again, because the first stint was forgotten when the drive ended
+        assertThat(warningsNaming(logs, SAGA_ID)).hasSize(2);
+      } finally {
+        recoveryLogger().detachAppender(logs);
+      }
     }
 
     @Test
