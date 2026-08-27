@@ -11,6 +11,7 @@ import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.definition.SagaDefinitionParser;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaDefinitionNotServedException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
@@ -30,6 +31,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
@@ -95,6 +97,21 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   private final ExecutorService asyncExecutor;
   private volatile boolean closed;
 
+  /**
+   * The saga names this deployment currently serves, or {@code null} to serve everything
+   * registered.
+   *
+   * <p>Null is the embedded default: an application that registers a definition means to run it,
+   * and has its own call sites to stop calling. A front end whose configuration decides what is
+   * served — the daemon, whose definition files do — publishes a snapshot here after each
+   * configuration pass, which is what makes removing a definition file retire the saga.
+   *
+   * <p>Pushed rather than pulled, and an immutable snapshot rather than a live view: a start reads
+   * it without a lock, so it cannot contend with a configuration pass on the hot path. A rejected
+   * pass publishes nothing, so the previously served set keeps serving.
+   */
+  private volatile @Nullable Set<String> servedDefinitions;
+
   DefaultSagaOrchestrator(
       SagaEngine engine,
       SagaStore store,
@@ -149,6 +166,24 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     // This must happen before persisting to the store, so invalid definitions are never stored.
     engine.getOrBuildPlan(definition);
     definitionRegistry.register(definition);
+  }
+
+  /**
+   * Publishes the set of saga names this deployment serves; every other registered saga is refused
+   * at start with {@link SagaDefinitionNotServedException}.
+   *
+   * <p>For a front end whose configuration decides what runs. The store is append-only, so a
+   * definition stays registered long after the configuration that introduced it is gone; without
+   * this, nothing could ever be taken out of service. Sagas already running are unaffected — they
+   * resume by version and never come through the start check.
+   *
+   * <p>Call it after each configuration change, with the complete set. Passing {@code null}
+   * restores the default of serving everything registered.
+   *
+   * @param sagaNames the saga names to serve, copied defensively, or {@code null} to serve all
+   */
+  public void servedDefinitions(@Nullable Set<String> sagaNames) {
+    this.servedDefinitions = sagaNames == null ? null : Set.copyOf(sagaNames);
   }
 
   /**
@@ -672,6 +707,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     if (def == null) {
       throw SagaDefinitionNotFoundException.byName(sagaName);
     }
+    requireServed(sagaName);
     return def;
   }
 
@@ -680,7 +716,29 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     if (def == null) {
       throw SagaDefinitionNotFoundException.byId(id);
     }
+    // Whether a saga is served is a property of the NAME, so pinning a version is refused on the
+    // same basis as a name-only start rather than being a way around it.
+    requireServed(id.name());
     return def;
+  }
+
+  /**
+   * Refuses a start of a saga this deployment does not serve.
+   *
+   * <p>Checked after the definition resolves, so a name nobody ever registered stays a not-found
+   * rather than becoming this: the two are different problems with different fixes. Resolving first
+   * also means the check costs nothing — the served set is an in-memory snapshot and the store read
+   * had to happen anyway.
+   *
+   * <p>Only new starts come through here. In-flight sagas resume through {@link
+   * #resolveDefinition}, so ceasing to serve a saga stops new work without stranding work already
+   * running, or the admin operations that drive it to a conclusion.
+   */
+  private void requireServed(String sagaName) {
+    Set<String> served = servedDefinitions;
+    if (served != null && !served.contains(sagaName)) {
+      throw SagaDefinitionNotServedException.of(sagaName);
+    }
   }
 
   private SagaDefinition resolveDefinition(SagaStateSnapshot saga) {

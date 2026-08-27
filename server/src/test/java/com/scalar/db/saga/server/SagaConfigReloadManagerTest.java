@@ -68,7 +68,8 @@ class SagaConfigReloadManagerTest {
   }
 
   private ConfigReconciler reconciler(ReloadConfig config) {
-    return new ConfigReconciler(config, definitionsDir, false, services -> {}, acceptingStore());
+    return new ConfigReconciler(
+        config, definitionsDir, false, services -> {}, acceptingStore(), names -> {});
   }
 
   @Test
@@ -127,7 +128,8 @@ class SagaConfigReloadManagerTest {
             services -> {
               throw new Error("registrar blew up");
             },
-            acceptingStore());
+            acceptingStore(),
+            names -> {});
     SagaConfigReloadManager manager = new SagaConfigReloadManager(reconciler, config, scheduler);
     manager.start();
     ArgumentCaptor<Runnable> task = ArgumentCaptor.forClass(Runnable.class);

@@ -189,7 +189,11 @@ public final class SagaServer implements AutoCloseable {
                 public boolean isRegistered(String sagaName, String version) {
                   return orchestrator.isDefinitionRegistered(sagaName, version);
                 }
-              });
+              },
+              // What this replica's files describe is what it serves. The store keeps every
+              // definition ever registered, so without this a saga could never be taken out of
+              // service: removing its file would leave it startable here forever.
+              orchestrator::servedDefinitions);
       this.reconciler = configReconciler;
       configReconciler.runOrThrow();
       // A daemon with no registered definitions cannot run any saga — fail fast rather than serve

@@ -24,6 +24,7 @@ import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaDefinitionNotServedException;
 import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.store.EventType;
@@ -38,6 +39,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
@@ -211,6 +213,66 @@ class DefaultSagaOrchestratorTest {
       assertThatThrownBy(() -> orchestrator.start("unknown", Map.of()))
           .isInstanceOf(SagaDefinitionNotFoundException.class);
       verify(definitionRegistry).resolve("unknown");
+    }
+
+    @Test
+    void start_withServedSetExcludingTheName_throwsDefinitionNotServed() {
+      // The store is append-only, so a definition stays registered after the configuration that
+      // introduced it is gone. The served set is what says a saga is no longer startable here.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      orchestrator.servedDefinitions(Set.of("other-saga"));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.start("transfer", Map.of()))
+          .isInstanceOf(SagaDefinitionNotServedException.class);
+      verify(engine, never()).execute(any(), any(), any());
+    }
+
+    @Test
+    void start_withServedSetIncludingTheName_starts() {
+      // The other half of the gate: publishing a served set must not block what it contains.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.execute(def, null, Map.of())).thenReturn("saga-1");
+      orchestrator.servedDefinitions(Set.of("transfer"));
+
+      // Act
+      String sagaId = orchestrator.start("transfer", Map.of());
+
+      // Assert
+      assertThat(sagaId).isEqualTo("saga-1");
+    }
+
+    @Test
+    void start_unknownDefinitionWithServedSetExcludingIt_throwsDefinitionNotFoundNotNotServed() {
+      // A name nobody ever registered is a different problem with a different fix, so it must stay
+      // a not-found rather than being reported as something this daemon declines to serve.
+      // Arrange
+      when(definitionRegistry.resolve("unknown")).thenReturn(null);
+      orchestrator.servedDefinitions(Set.of("transfer"));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.start("unknown", Map.of()))
+          .isInstanceOf(SagaDefinitionNotFoundException.class);
+    }
+
+    @Test
+    void start_pinnedToAVersionOfANameNotServed_throwsDefinitionNotServed() {
+      // Being served is a property of the NAME, so pinning a version is refused on the same basis
+      // rather than being a way around it.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer", "1.0")).thenReturn(def);
+      orchestrator.servedDefinitions(Set.of("other-saga"));
+
+      // Act & Assert
+      assertThatThrownBy(
+              () -> orchestrator.start(new SagaDefinitionId("transfer", "1.0"), Map.of()))
+          .isInstanceOf(SagaDefinitionNotServedException.class);
+      verify(engine, never()).execute(any(), any(), any());
     }
 
     @Test

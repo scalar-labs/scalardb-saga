@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Consumer;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Nested;
@@ -41,6 +42,8 @@ class ConfigReconcilerTest {
   private final List<Map<String, HttpServiceConfig>> swaps = new ArrayList<>();
   private final HttpEndpointRegistrar registrar = services -> swaps.add(services);
   private final List<SagaDefinition> registered = new ArrayList<>();
+  // What the pass published as this replica's served set, or null if it never published.
+  private @Nullable Set<String> served;
   private Consumer<SagaDefinition> definitionRegistrar = definition -> registered.add(definition);
 
   /**
@@ -92,7 +95,12 @@ class ConfigReconcilerTest {
     ReloadConfig reloadConfig =
         new ReloadConfig(servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
     return new ConfigReconciler(
-        reloadConfig, definitionsDir, asyncCallbacksConfigured, registrar, definitionStore);
+        reloadConfig,
+        definitionsDir,
+        asyncCallbacksConfigured,
+        registrar,
+        definitionStore,
+        names -> served = names);
   }
 
   /** A clock a test can step, for the timestamps a fixed clock cannot tell apart. */
@@ -125,7 +133,8 @@ class ConfigReconcilerTest {
         definitionsDir,
         false,
         registrar,
-        definitionStore);
+        definitionStore,
+        names -> served = names);
   }
 
   private void writeService(String name, String content) throws IOException {
@@ -465,7 +474,8 @@ class ConfigReconcilerTest {
           new ReloadConfig(
               servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
       ConfigReconciler reconciler =
-          new ConfigReconciler(reloadConfig, file, false, registrar, definitionStore);
+          new ConfigReconciler(
+              reloadConfig, file, false, registrar, definitionStore, names -> served = names);
 
       // Act & Assert
       assertThat(reconciler.run()).isFalse();
@@ -491,7 +501,8 @@ class ConfigReconcilerTest {
           new ReloadConfig(
               servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
       ConfigReconciler reconciler =
-          new ConfigReconciler(reloadConfig, link, false, registrar, definitionStore);
+          new ConfigReconciler(
+              reloadConfig, link, false, registrar, definitionStore, names -> served = names);
 
       // Act & Assert
       assertThat(reconciler.run()).isTrue();
@@ -560,7 +571,13 @@ class ConfigReconcilerTest {
           new ReloadConfig(
               servicesDir, 10, secretsDir, List.of("account"), Clock.fixed(NOW, ZoneOffset.UTC));
       ConfigReconciler reconciler =
-          new ConfigReconciler(withCeiling, definitionsDir, false, registrar, definitionStore);
+          new ConfigReconciler(
+              withCeiling,
+              definitionsDir,
+              false,
+              registrar,
+              definitionStore,
+              names -> served = names);
 
       // Act & Assert
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
@@ -586,7 +603,13 @@ class ConfigReconcilerTest {
           new ReloadConfig(
               notADirectory, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
       ConfigReconciler reconciler =
-          new ConfigReconciler(misconfigured, definitionsDir, false, registrar, definitionStore);
+          new ConfigReconciler(
+              misconfigured,
+              definitionsDir,
+              false,
+              registrar,
+              definitionStore,
+              names -> served = names);
 
       // Act & Assert
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
@@ -1309,7 +1332,8 @@ class ConfigReconcilerTest {
               definitionsDir,
               false,
               registrar,
-              unreachable);
+              unreachable,
+              names -> served = names);
 
       // Act — contained, not thrown
       boolean applied = reconciler.run();
@@ -1320,6 +1344,47 @@ class ConfigReconcilerTest {
       assertThat(rejection.operatorActionRequired()).isFalse();
       assertThat(rejection.reason()).contains("will retry next pass");
       assertThat(reconciler.status().lastPassAt()).isEqualTo(NOW);
+    }
+
+    @Test
+    void run_definitionFileDeleted_stopsServingThatSaga() throws IOException {
+      // Retiring a saga is deleting its definition file. The store keeps the registration, so what
+      // the pass publishes as served is the only thing that stops new starts.
+      // Arrange — two definitions, so the empty-transition guard does not fire on the deletion
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("keep.json", "keep-saga", "1.0", "account");
+      writeDefinition("retire.json", "retire-saga", "1.0", "account");
+      ConfigReconciler reconciler = reconciler();
+      assertThat(reconciler.run()).isTrue();
+      assertThat(served).containsExactlyInAnyOrder("keep-saga", "retire-saga");
+
+      // Act
+      Files.delete(definitionsDir.resolve("retire.json"));
+
+      // Assert — still registered in the store, no longer served here
+      assertThat(reconciler.run()).isTrue();
+      assertThat(served).containsExactly("keep-saga");
+      assertThat(definitionStore.latest("retire-saga")).isNotNull();
+    }
+
+    @Test
+    void run_passRejected_leavesThePreviouslyServedSetInPlace() throws IOException {
+      // A rejected pass keeps the previous configuration serving, so it must not publish a served
+      // set either — publishing a half-built one would retire sagas the rejection did not touch.
+      // Arrange
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("keep.json", "keep-saga", "1.0", "account");
+      writeDefinition("other.json", "other-saga", "1.0", "account");
+      ConfigReconciler reconciler = reconciler();
+      assertThat(reconciler.run()).isTrue();
+      served = null;
+
+      // Act — a definition naming a service that does not exist rejects the whole pass
+      writeDefinition("other.json", "other-saga", "2.0", "missing");
+
+      // Assert
+      assertThat(reconciler.run()).isFalse();
+      assertThat(served).isNull();
     }
 
     @Test

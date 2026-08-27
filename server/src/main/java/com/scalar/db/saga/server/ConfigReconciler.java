@@ -30,6 +30,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.function.Consumer;
 import net.jcip.annotations.ThreadSafe;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -75,6 +76,8 @@ final class ConfigReconciler {
   private final ServiceSecretResolver secretResolver;
   private final HttpEndpointRegistrar registrar;
   private final DefinitionStore definitionStore;
+  // Where this replica publishes the saga names it serves, after every pass that concluded.
+  private final Consumer<Set<String>> servedDefinitions;
 
   // ── Inter-pass state (guarded by the pass serialization) ─────────────────
 
@@ -138,13 +141,15 @@ final class ConfigReconciler {
       @Nullable Path definitionsPath,
       boolean asyncCallbacksConfigured,
       HttpEndpointRegistrar registrar,
-      DefinitionStore definitionStore) {
+      DefinitionStore definitionStore,
+      Consumer<Set<String>> servedDefinitions) {
     this.reloadConfig = reloadConfig;
     this.definitionsPath = definitionsPath;
     this.asyncCallbacksConfigured = asyncCallbacksConfigured;
     this.secretResolver = new ServiceSecretResolver(reloadConfig.secretsRoot());
     this.registrar = registrar;
     this.definitionStore = definitionStore;
+    this.servedDefinitions = servedDefinitions;
     this.appliedServices = Map.of();
     this.status = ReloadStatus.initial();
   }
@@ -289,6 +294,13 @@ final class ConfigReconciler {
     // 4. Status + audit. The INFO apply line is the audit record: names and versions only, never
     // values. A pass that found nothing to change keeps the previous applied timestamp: it
     // verified the applied state, it did not apply anything.
+    // 4. PUBLISH what this replica serves. The store keeps every definition ever registered, so
+    // what is startable has to be said separately — and this set is the saying of it: a name whose
+    // file is gone is no longer here, which is how removing a definition file retires a saga.
+    // Published only on a pass that concluded, so a rejected pass leaves the previous set serving
+    // alongside the previous configuration.
+    servedDefinitions.accept(Set.copyOf(appliedDefinitions.keySet()));
+
     Instant appliedAt =
         serviceChanges.isEmpty() && definitionChanges.isEmpty() ? status.appliedAt() : now;
     status = new ReloadStatus(servicesSha, definitionsSha, appliedAt, now, null);
