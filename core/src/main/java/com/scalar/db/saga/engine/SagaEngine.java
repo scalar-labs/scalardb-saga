@@ -810,6 +810,35 @@ public class SagaEngine implements AutoCloseable {
   }
 
   // ---------------------------------------------------------------------------
+  // Package-private — what recovery may ask about local drives
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Returns whether this instance is currently driving the given saga.
+   *
+   * <p>Advisory and racy by design: the set is read without {@link #shutdownLock}, so the answer
+   * can be stale the moment it is returned. It is never a lock and must not be used to establish
+   * exclusion. Recovery uses it to avoid claiming a saga this instance is demonstrably executing —
+   * a false negative there costs at most one claim of a saga whose row was freshly stamped anyway,
+   * while a false positive is impossible: an id is in the set only between the drive registering
+   * and its {@code finally} removing it.
+   */
+  boolean isLocallyActive(String sagaId) {
+    return activeSagas.containsKey(sagaId);
+  }
+
+  /**
+   * When this instance's current drive of the saga began, or empty if it is not driving it.
+   *
+   * <p>Advisory in the same way as {@link #isLocallyActive}. The instant is this episode's start: a
+   * saga that parks and is later resumed gets a fresh entry, so the value never folds in an earlier
+   * episode or the idle time between them.
+   */
+  Optional<Instant> activeSince(String sagaId) {
+    return Optional.ofNullable(activeSagas.get(sagaId));
+  }
+
+  // ---------------------------------------------------------------------------
   // Private — shutdown coordination
   // ---------------------------------------------------------------------------
 
@@ -840,31 +869,6 @@ public class SagaEngine implements AutoCloseable {
     }
     store.markForRecovery(sagaId);
     return false;
-  }
-
-  /**
-   * Returns whether this instance is currently driving the given saga.
-   *
-   * <p>Advisory and racy by design: the set is read without {@link #shutdownLock}, so the answer
-   * can be stale the moment it is returned. It is never a lock and must not be used to establish
-   * exclusion. Recovery uses it to avoid claiming a saga this instance is demonstrably executing —
-   * a false negative there costs at most one claim of a saga whose row was freshly stamped anyway,
-   * while a false positive is impossible: an id is in the set only between the drive registering
-   * and its {@code finally} removing it.
-   */
-  boolean isLocallyActive(String sagaId) {
-    return activeSagas.containsKey(sagaId);
-  }
-
-  /**
-   * When this instance's current drive of the saga began, or empty if it is not driving it.
-   *
-   * <p>Advisory in the same way as {@link #isLocallyActive}. The instant is this episode's start: a
-   * saga that parks and is later resumed gets a fresh entry, so the value never folds in an earlier
-   * episode or the idle time between them.
-   */
-  Optional<Instant> activeSince(String sagaId) {
-    return Optional.ofNullable(activeSagas.get(sagaId));
   }
 
   private void unregisterActive(String sagaId) {

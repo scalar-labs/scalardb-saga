@@ -11,14 +11,21 @@ import java.util.Objects;
  * Configuration for the saga recovery manager.
  *
  * @param recoveryTimeoutMillis staleness threshold — a saga that has made no progress for this long
- *     is considered abandoned and eligible for recovery. Progress means the later of the state
- *     row's {@code updated_at} and the newest event: step execution appends events without touching
- *     the state row, so the row alone would make every long-running saga look dead. Size it above
- *     the longest a single step can take, which is its step timeout: {@code stepDeadline} is an
- *     absolute instant computed once before the retry loop, so it caps the whole attempt sequence —
- *     every retry and all backoff — not each attempt. A healthy saga emits an event only at step
- *     boundaries, so that timeout is the longest silence to expect. Raising it delays recovery of
- *     genuinely crashed sagas by the same amount — this value is the crash-recovery MTTR
+ *     is considered abandoned and eligible for recovery. Progress is judged from the saga's newest
+ *     event, because step execution appends events without touching the state row: the row alone
+ *     would make every long-running saga look dead. Size it above the longest a single step can
+ *     take, which is its step timeout — {@code stepDeadline} is an absolute instant computed once
+ *     before the retry loop, so it caps the whole attempt sequence, every retry and all backoff,
+ *     not each attempt. A healthy saga emits an event only at step boundaries, so that timeout is
+ *     the longest silence to expect. <b>With neither a step timeout nor a saga timeout configured
+ *     there is no such bound</b> — the step runs until it returns — and no value of this setting is
+ *     safe; set one of those timeouts if you rely on recovery leaving long steps alone. Raising
+ *     this value delays recovery of genuinely crashed sagas by the same amount, so it is also the
+ *     crash-recovery MTTR. Recovery is at-least-once across replicas: a step whose attempt sequence
+ *     outlives this threshold emits no events while it runs, so another replica can begin
+ *     recovering a saga the first is still executing — the loser is fenced at its next state write,
+ *     but the participant call has already gone out, so participants must tolerate a duplicate
+ *     invocation
  * @param recoveryIntervalSeconds how often the recovery scan runs (in seconds); each replica shifts
  *     its schedule within this interval by a deterministic offset derived from its owner ID, so
  *     replicas started together do not scan in phase

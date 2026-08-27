@@ -675,38 +675,10 @@ class SagaRecoveryManager {
     }
     boolean deliberateHandoff = saga.getUpdatedAt().equals(Instant.EPOCH);
 
-    Optional<NewestEvent> newestEvent;
-    try {
-      newestEvent = probeNewestEvent(sagaId);
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-      return RecoveryOutcome.ERROR;
-    } catch (Throwable t) {
-      // Do not fall through to the claim. A failed read is not evidence that the saga stopped
-      // progressing, and claiming would rewrite the concurrency token of a drive that may well be
-      // alive. The drive that follows a claim reads the same events table anyway, so it would fail
-      // too: we would kill a live saga and recover nothing. Report the store trouble, leave the row
-      // untouched, and let a later pass decide with real evidence.
-      logger.warn(
-          "Progress probe failed for saga {}; leaving it untouched for a later pass", sagaId, t);
-      return RecoveryOutcome.ERROR;
-    }
-    if (newestEvent.isEmpty()) {
-      // createSaga writes SAGA_STARTED in the same transaction as the state row, so a row with no
-      // events behind it cannot come from the engine. Claiming would replay an empty history and
-      // restart the saga from step 0 with no input — SAGA_STARTED is what carries it — against a
-      // saga that may already hold committed side effects. Report it as an error: the store is
-      // damaged, which is exactly when a pass should wind down rather than scan harder.
-      logger.error(
-          "Saga {} has a recoverable state row but no events; refusing to recover it, because"
-              + " replaying an empty history would restart it from step 0 with no input."
-              + " Investigate the store: this cannot be produced by normal operation.",
-          sagaId);
-      return RecoveryOutcome.ERROR;
-    }
-    // A deliberate hand-off is stamped EPOCH precisely to have the saga taken now, so honouring
-    // recent events there would delay it by a whole timeout.
-    if (!deliberateHandoff && isBeingDriven(newestEvent.get(), staleThreshold)) {
+    // A cheap filter, so a saga that is obviously being driven never takes a recovery permit and
+    // never queues behind one. It can only skip: any doubt falls through to the authoritative check
+    // under the permit, where the error handling lives.
+    if (!deliberateHandoff && looksAlive(sagaId, staleThreshold)) {
       return RecoveryOutcome.SKIPPED;
     }
 
@@ -717,10 +689,55 @@ class SagaRecoveryManager {
       return RecoveryOutcome.ERROR;
     }
     try {
+      // A cancelled pass must not start new work on its way out: awaitOutcomes cancels with
+      // interrupt, and a claim plus drive from here would issue writes and run participant calls
+      // after the pass was told to stop.
+      if (Thread.currentThread().isInterrupted()) {
+        return RecoveryOutcome.ERROR;
+      }
       // Re-check under the permit: the wait for one can be long, and a drive may have started here
       // since the screening above. Claiming then would kill it.
       if (engine.isLocallyActive(sagaId)) {
         noteLocallyActive(sagaId);
+        return RecoveryOutcome.SKIPPED;
+      }
+      // Probe again, and let this reading decide. The filter above ran before the wait for a
+      // permit, and that wait is unbounded — permits are held for whole drives, so it is longest
+      // exactly when recovery matters most. In that gap another replica can finish a step and write
+      // an event, and nothing fences it: the claim matches the scanned row's clustering key, which
+      // step events never touch. Claiming on evidence that old would kill the very drive the guard
+      // exists to protect.
+      Optional<NewestEvent> newestEvent;
+      try {
+        newestEvent = probeNewestEvent(sagaId);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        return RecoveryOutcome.ERROR;
+      } catch (Throwable t) {
+        // Do not fall through to the claim. A failed read is not evidence that the saga stopped
+        // progressing, and claiming would rewrite the concurrency token of a drive that may well be
+        // alive. The drive that follows a claim reads the same events table anyway, so it would
+        // fail too: we would kill a live saga and recover nothing.
+        logger.warn(
+            "Progress probe failed for saga {}; leaving it untouched for a later pass", sagaId, t);
+        return RecoveryOutcome.ERROR;
+      }
+      if (newestEvent.isEmpty()) {
+        // createSaga writes SAGA_STARTED in the same transaction as the state row, so a row with no
+        // events behind it cannot come from the engine. Claiming would replay an empty history and
+        // restart the saga from step 0 with no input — SAGA_STARTED is what carries it — against a
+        // saga that may already hold committed side effects. Report it as an error: the store is
+        // damaged, which is exactly when a pass should wind down rather than scan harder.
+        logger.error(
+            "Saga {} has a recoverable state row but no events; refusing to recover it, because"
+                + " replaying an empty history would restart it from step 0 with no input."
+                + " Investigate the store: this cannot be produced by normal operation.",
+            sagaId);
+        return RecoveryOutcome.ERROR;
+      }
+      // A deliberate hand-off is stamped EPOCH precisely to have the saga taken now, so honouring
+      // recent events there would delay it by a whole timeout.
+      if (!deliberateHandoff && isBeingDriven(newestEvent.get(), staleThreshold)) {
         return RecoveryOutcome.SKIPPED;
       }
       Optional<SagaStateSnapshot> claimed;
@@ -748,6 +765,27 @@ class SagaRecoveryManager {
       }
     } finally {
       recoverySemaphore.release();
+    }
+  }
+
+  /**
+   * Whether the saga looks like something is driving it, best effort.
+   *
+   * <p>Only an optimization: it keeps a saga that is obviously alive from taking a recovery permit
+   * and queueing behind a running drive. Every uncertainty — a failed read, no events at all, an
+   * interrupt — answers false, so the decision falls through to the authoritative probe under the
+   * permit rather than being made on a guess here. Nothing is logged; that path logs.
+   */
+  private boolean looksAlive(String sagaId, Instant staleThreshold) {
+    try {
+      return probeNewestEvent(sagaId)
+          .map(newest -> isBeingDriven(newest, staleThreshold))
+          .orElse(false);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return false;
+    } catch (Throwable t) {
+      return false;
     }
   }
 

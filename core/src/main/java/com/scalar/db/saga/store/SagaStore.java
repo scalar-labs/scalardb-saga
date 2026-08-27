@@ -246,6 +246,11 @@ public interface SagaStore extends AutoCloseable {
    * recovery staleness threshold already rests on.
    *
    * <p>Runs in its own read-only transaction.
+   *
+   * @param sagaId the saga instance ID
+   * @return the newest event's type and stamp, or empty when the saga has no events
+   * @throws com.scalar.db.saga.exception.SagaPersistenceException if the read fails, or if the
+   *     stored event type is not one this version knows — which a rolling upgrade can produce
    */
   Optional<NewestEvent> getNewestEvent(String sagaId);
 

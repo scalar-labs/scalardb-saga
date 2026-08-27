@@ -598,9 +598,20 @@ public final class ScalarDbSagaStore implements SagaStore {
                           sagaId);
                       createdAt = Instant.EPOCH;
                     }
-                    return new NewestEvent(
-                        EventType.valueOf(Objects.requireNonNull(r.getText("event_type"))),
-                        createdAt);
+                    String eventTypeStr =
+                        Objects.requireNonNull(
+                            r.getText("event_type"), "event_type must not be null");
+                    EventType eventType;
+                    try {
+                      eventType = EventType.valueOf(eventTypeStr);
+                    } catch (IllegalArgumentException e) {
+                      // Same conversion the full row mapper does. A raw IllegalArgumentException
+                      // would escape this public method unwrapped, and during a rolling upgrade an
+                      // older replica reading a type only the newer one writes would surface it on
+                      // every pass for that saga.
+                      throw SagaPersistenceException.deserializationFailed(e);
+                    }
+                    return new NewestEvent(eventType, createdAt);
                   });
         },
         null, // read-only — retry the whole transaction on UTSE

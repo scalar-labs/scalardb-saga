@@ -488,6 +488,26 @@ class SagaRecoveryManagerTest {
     }
 
     @Test
+    void recover_eventArrivesWhileWaitingForAPermit_isNotClaimed() {
+      // Screening happens before a recovery permit is taken, and that wait is unbounded — permits
+      // are held for whole drives. If the decision rested on the screening read, another replica
+      // could finish a step in the gap and be claimed out from under: the claim matches the scanned
+      // row's clustering key, which step events never touch, so nothing else fences it. The reading
+      // taken under the permit is the one that decides.
+      SagaStateSnapshot saga = staleSaga();
+      scanReturns(saga);
+      when(store.getNewestEvent(SAGA_ID))
+          .thenReturn(Optional.of(progressAt(NOW.minusSeconds(600)))) // screening: looks abandoned
+          .thenReturn(Optional.of(progressAt(NOW.minusSeconds(1)))); // under the permit: alive
+
+      // Act
+      manager.recover();
+
+      // Assert
+      verify(store, never()).claimForRecovery(any(), any());
+    }
+
+    @Test
     void recover_newestEventIsACompensationGiveUp_isClaimedDespiteBeingRecent() {
       // A compensation failure is written by a drive that then stops and hands the saga back to
       // recovery. Reading it as liveness would make the give-up postpone the very retry it asks
