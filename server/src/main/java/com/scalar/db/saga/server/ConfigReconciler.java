@@ -248,12 +248,24 @@ final class ConfigReconciler {
     warnOnVanishedDefinitions(candidateDefinitions);
     warnOnRemovedServicesStillReferenced(candidateServices);
 
-    // 2. APPLY services first. A definition is startable fleet-wide the moment it registers, so
-    // this replica installs the services it names before publishing it. That orders the change
-    // within this replica, which is as far as ordering reaches: a replica whose files have not
-    // synced yet still sees the definition first, and its resolve fails retryably and self-heals
-    // on its next pass. That bounded skew is accepted by design — a fleet-wide barrier would need
-    // coordination this feature deliberately does not have.
+    // 2. STOP SERVING what this pass drops, BEFORE its endpoints go. The mirror of applying
+    // services first: a replica installs endpoints before publishing the definitions that need
+    // them, so it must stop offering a definition before removing the endpoints it needs. Doing it
+    // the other way round leaves a saga startable against an endpoint already gone, and a
+    // registration failure below would strand that state until some later pass concludes — the
+    // swap has committed by then, so the previous configuration is no longer serving to fall back
+    // on. Additions wait until step 4, once their definitions are actually registered.
+    Set<String> stillServed = new TreeSet<>(appliedDefinitions.keySet());
+    if (stillServed.retainAll(candidateDefinitions.keySet())) {
+      servedDefinitions.accept(Set.copyOf(stillServed));
+    }
+
+    // 3. APPLY services. A definition is startable fleet-wide the moment it registers, so this
+    // replica installs the services it names before publishing it. That orders the change within
+    // this replica, which is as far as ordering reaches: a replica whose files have not synced yet
+    // still sees the definition first, and its resolve fails retryably and self-heals on its next
+    // pass. That bounded skew is accepted by design — a fleet-wide barrier would need coordination
+    // this feature deliberately does not have.
     List<String> serviceChanges = diffServices(candidateServices);
     if (!serviceChanges.isEmpty()) {
       try {
@@ -291,16 +303,15 @@ final class ConfigReconciler {
       throw e;
     }
 
-    // 4. Status + audit. The INFO apply line is the audit record: names and versions only, never
-    // values. A pass that found nothing to change keeps the previous applied timestamp: it
-    // verified the applied state, it did not apply anything.
-    // 4. PUBLISH what this replica serves. The store keeps every definition ever registered, so
-    // what is startable has to be said separately — and this set is the saying of it: a name whose
-    // file is gone is no longer here, which is how removing a definition file retires a saga.
-    // Published only on a pass that concluded, so a rejected pass leaves the previous set serving
-    // alongside the previous configuration.
+    // 4. PUBLISH the full served set. The store keeps every definition ever registered, so what is
+    // startable has to be said separately, and this set is the saying of it. Step 2 already
+    // withdrew everything this pass drops; what this adds is the definitions registered since,
+    // which could not be offered before they existed.
     servedDefinitions.accept(Set.copyOf(appliedDefinitions.keySet()));
 
+    // 5. Status + audit. The INFO apply line is the audit record: names and versions only, never
+    // values. A pass that found nothing to change keeps the previous applied timestamp: it
+    // verified the applied state, it did not apply anything.
     Instant appliedAt =
         serviceChanges.isEmpty() && definitionChanges.isEmpty() ? status.appliedAt() : now;
     status = new ReloadStatus(servicesSha, definitionsSha, appliedAt, now, null);
@@ -414,8 +425,8 @@ final class ConfigReconciler {
    * <p>Adopting it is also what keeps the guards pointed at the right version. Every check
    * downstream reads the candidate, so substituting here is what makes the service cross-check
    * protect the endpoints the SERVING version needs rather than the ones the reverted file happens
-   * to name. Once adopted the applied entry equals the candidate, so a settled rollback costs no
-   * further store reads.
+   * to name. An outstanding rollback costs these two reads every pass, because the candidate is
+   * rebuilt from the unchanged file while the applied entry holds what was adopted.
    *
    * <p>The two store reads are the only ones validation makes, and a failing one has to become a
    * rejection rather than escape: {@code run()} contains a rejected pass and nothing else, so a
@@ -435,15 +446,23 @@ final class ConfigReconciler {
               && !serving.getVersion().equals(definition.getVersion())
               && definitionStore.isRegistered(definition.getName(), definition.getVersion());
     } catch (RuntimeException e) {
+      // Classified, not assumed transient. A store outage clears on its own, but a stored
+      // definition that cannot be deserialized fails identically forever — reporting that as a
+      // retry would leave it repeating with nobody told to look at it.
+      boolean needsOperator = needsOperatorAction(e);
       throw new PassRejectedException(
           "Could not read the registered versions of saga '"
               + definition.getName()
               + "' ("
               + e.getClass().getSimpleName()
               + "), so this pass cannot tell whether the definition files still describe what is"
-              + " serving (will retry next pass).",
+              + " serving."
+              + (needsOperator
+                  ? " [permanent: retrying fails the same way; the stored definition needs looking"
+                      + " at]"
+                  : " [will retry next pass]"),
           candidateSha,
-          false);
+          needsOperator);
     }
     if (!rolledBack) {
       return null;
@@ -759,8 +778,13 @@ final class ConfigReconciler {
       // pointed at the version that actually runs: they all read the candidate, so without this
       // the service cross-check would protect the reverted file's endpoints and let a later pass
       // drop one the serving version still needs. It happens at validation rather than at
-      // registration because services swap first; by then the endpoint is already gone. Only a
-      // changed candidate is looked up, so a settled configuration costs no store reads.
+      // registration because services swap first; by then the endpoint is already gone. A settled
+      // configuration costs no store reads, but a settled ROLLBACK does: the candidate is rebuilt
+      // from the file every pass while the applied entry holds the adopted serving definition, so
+      // the two never compare equal and both lookups run every interval until the file changes.
+      // That is the price of the applied set describing what actually serves — caching the
+      // adoption against the file would stop noticing a version another replica registers, which
+      // is the stale-applied-version bug this check exists to prevent.
       if (applied == null || !applied.definition().equals(candidate.definition())) {
         CandidateDefinition serving = servingInsteadOf(candidate, rollbacks, candidateSha);
         if (serving != null) {

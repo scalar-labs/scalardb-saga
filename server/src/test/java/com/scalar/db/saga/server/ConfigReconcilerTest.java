@@ -1368,6 +1368,89 @@ class ConfigReconcilerTest {
     }
 
     @Test
+    void run_definitionAndItsServiceRemovedTogether_stopsServingBeforeTheEndpointGoes()
+        throws IOException {
+      // Ordering, not just outcome: the endpoint swap must not land while the saga is still
+      // offered, or a start in that window creates a saga whose first call cannot resolve. The
+      // withdrawal is published before the swap, so the served set never names a saga whose
+      // endpoints this pass has already taken away.
+      // Arrange
+      writeService("account", "base_url=http://account:8080\n");
+      writeService("legacy", "base_url=http://legacy:8080\n");
+      writeDefinition("keep.json", "keep-saga", "1.0", "account");
+      writeDefinition("retire.json", "retire-saga", "1.0", "legacy");
+      List<Set<String>> servedWhenSwapped = new ArrayList<>();
+      ConfigReconciler reconciler =
+          new ConfigReconciler(
+              new ReloadConfig(
+                  servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC)),
+              definitionsDir,
+              false,
+              services -> {
+                swaps.add(services);
+                servedWhenSwapped.add(served);
+              },
+              definitionStore,
+              names -> served = names);
+      assertThat(reconciler.run()).isTrue();
+      servedWhenSwapped.clear();
+
+      // Act — the retirement and its service leave in one change
+      Files.delete(definitionsDir.resolve("retire.json"));
+      Files.delete(servicesDir.resolve("legacy.properties"));
+
+      // Assert — by the time the endpoints were swapped, the saga was already withdrawn
+      assertThat(reconciler.run()).isTrue();
+      assertThat(servedWhenSwapped).isNotEmpty();
+      assertThat(servedWhenSwapped.get(0)).containsExactly("keep-saga");
+      assertThat(served).containsExactly("keep-saga");
+    }
+
+    @Test
+    void run_storeReadFailsPermanently_isReportedAsNeedingAnOperator() throws IOException {
+      // A store outage clears on its own; a stored definition that cannot be deserialized fails
+      // identically forever. Reporting the second as a retry would leave it repeating every
+      // interval with nobody told to look at it.
+      // Arrange
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      DefinitionStore corrupt =
+          new DefinitionStore() {
+            @Override
+            public void register(SagaDefinition definition) {}
+
+            @Override
+            public @Nullable SagaDefinition latest(String sagaName) {
+              throw SagaPersistenceException.deserializationFailed(
+                  new IOException("stored definition is not valid JSON"));
+            }
+
+            @Override
+            public boolean isRegistered(String sagaName, String version) {
+              throw new AssertionError("not reached: the latest lookup fails first");
+            }
+          };
+      ConfigReconciler reconciler =
+          new ConfigReconciler(
+              new ReloadConfig(
+                  servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC)),
+              definitionsDir,
+              false,
+              registrar,
+              corrupt,
+              names -> served = names);
+
+      // Act
+      boolean applied = reconciler.run();
+
+      // Assert
+      assertThat(applied).isFalse();
+      ReloadStatus.Rejection rejection = requireNonNull(reconciler.status().rejection());
+      assertThat(rejection.operatorActionRequired()).isTrue();
+      assertThat(rejection.reason()).contains("permanent");
+    }
+
+    @Test
     void run_passRejected_leavesThePreviouslyServedSetInPlace() throws IOException {
       // A rejected pass keeps the previous configuration serving, so it must not publish a served
       // set either — publishing a half-built one would retire sagas the rejection did not touch.
