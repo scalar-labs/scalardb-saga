@@ -92,6 +92,8 @@ final class ConfigReconciler {
   // references outlive the file and must still be honored when a later pass removes a service.
   private final Map<String, Set<String>> vanishedDefinitionServices = new HashMap<>();
   private @Nullable String lastFailureSignature;
+
+  private @Nullable String lastRollbackSignature;
   private volatile ReloadStatus status;
 
   /** One applied definition: the file it came from and its parsed (raw, un-defaulted) form. */
@@ -388,8 +390,20 @@ final class ConfigReconciler {
   }
 
   /**
-   * Collects a rejection when {@code candidate} names an already-stored version that is not the one
-   * serving.
+   * The definition this pass should reason about in place of {@code candidate}, or {@code null}
+   * when the file and the store agree and the candidate stands.
+   *
+   * <p>A file naming an already-stored version that is not the one serving is a rollback of the
+   * definitions directory: the file reverted, the store did not, and re-registering old content is
+   * a no-op. The rollback simply does not take, whatever this pass decides — so the pass adopts
+   * what serves and carries on. Refusing instead would refuse the only configuration the daemon can
+   * actually run, and at boot that means refusing to start over a state no restart can improve.
+   *
+   * <p>Adopting it is also what keeps the guards pointed at the right version. Every check
+   * downstream reads the candidate, so substituting here is what makes the service cross-check
+   * protect the endpoints the SERVING version needs rather than the ones the reverted file happens
+   * to name. Once adopted the applied entry equals the candidate, so a settled rollback costs no
+   * further store reads.
    *
    * <p>The two store reads are the only ones validation makes, and a failing one has to become a
    * rejection rather than escape: {@code run()} contains a rejected pass and nothing else, so a
@@ -397,16 +411,16 @@ final class ConfigReconciler {
    * rejection, and leave {@code lastPassAt} frozen — which is the signal a wedged pass thread is
    * supposed to have to itself.
    */
-  private void requireCandidateIsServable(
-      CandidateDefinition candidate, List<String> errors, String candidateSha) {
+  private @Nullable CandidateDefinition servingInsteadOf(
+      CandidateDefinition candidate, List<String> rollbacks, String candidateSha) {
     SagaDefinition definition = candidate.definition();
-    String serving;
-    boolean alreadyStored;
+    @Nullable SagaDefinition serving;
+    boolean rolledBack;
     try {
-      serving = definitionStore.latestVersion(definition.getName());
-      alreadyStored =
+      serving = definitionStore.latest(definition.getName());
+      rolledBack =
           serving != null
-              && !serving.equals(definition.getVersion())
+              && !serving.getVersion().equals(definition.getVersion())
               && definitionStore.isRegistered(definition.getName(), definition.getVersion());
     } catch (RuntimeException e) {
       throw new PassRejectedException(
@@ -419,15 +433,16 @@ final class ConfigReconciler {
           candidateSha,
           false);
     }
-    if (alreadyStored) {
-      errors.add(describeNotServing(candidate, Objects.requireNonNull(serving)));
+    if (!rolledBack) {
+      return null;
     }
+    rollbacks.add(describeNotServing(candidate, Objects.requireNonNull(serving).getVersion()));
+    return new CandidateDefinition(candidate.fileName(), serving);
   }
 
   /**
-   * Describes a definition file that does not name the version currently serving. Almost always a
-   * rollback of the definitions directory: the file reverted, the store did not, and re-registering
-   * old content is a no-op.
+   * Describes a definition file that does not name the version currently serving, for the warning
+   * that says so.
    */
   private static String describeNotServing(CandidateDefinition candidate, String serving) {
     return "definition "
@@ -439,9 +454,35 @@ final class ConfigReconciler {
         + ", but version "
         + serving
         + " is what the store serves. Registered content is immutable, so re-registering an older"
-        + " version changes nothing and the newer one keeps running. To go back to the older"
-        + " content, register it as a NEW, higher version. [permanent: this fails the same way on"
-        + " every pass; the definition file has to change]";
+        + " version changes nothing and the newer one keeps running; this daemon goes on serving"
+        + " and validating "
+        + serving
+        + ". To go back to the older content, register it as a NEW version";
+  }
+
+  /**
+   * Warns about the rollbacks this pass adopted, once per distinct set.
+   *
+   * <p>A rolled-back file stays rolled back until an operator edits it, so the finding repeats
+   * every interval. It is a warning rather than a rejection, which means nothing else in the log
+   * marks it as still-open; repeating it every pass would bury the log exactly as a repeated
+   * rejection would, so it follows the same state-change rule those use.
+   */
+  private void noteRollbacks(List<String> rollbacks) {
+    if (rollbacks.isEmpty()) {
+      lastRollbackSignature = null;
+      return;
+    }
+    String signature = String.join("; ", rollbacks);
+    if (signature.equals(lastRollbackSignature)) {
+      logger.debug("Definition files still name versions that are not serving: {}", signature);
+    } else {
+      logger.warn(
+          "Definition files name versions that are not serving, so the stored versions keep"
+              + " running: {}",
+          signature);
+      lastRollbackSignature = signature;
+    }
   }
 
   /** The operator-facing half of a registration failure: wait, or go and do something. */
@@ -694,7 +735,27 @@ final class ConfigReconciler {
       Map<String, CandidateDefinition> candidateDefinitions,
       List<String> errors,
       String candidateSha) {
-    for (CandidateDefinition candidate : candidateDefinitions.values()) {
+    List<String> rollbacks = new ArrayList<>();
+    for (Map.Entry<String, CandidateDefinition> entry : candidateDefinitions.entrySet()) {
+      CandidateDefinition candidate = entry.getValue();
+      AppliedDefinition applied = appliedDefinitions.get(entry.getKey());
+      // A file that names an already-stored version which is NOT the one serving is a rollback of
+      // the definitions directory: registered content is immutable, so re-writing it registers
+      // nothing and the newer version keeps running. The rollback does not take whatever this pass
+      // decides, so the pass adopts what serves and warns, rather than refusing the only
+      // configuration the daemon can run. Substituting it here is also what keeps the checks below
+      // pointed at the version that actually runs: they all read the candidate, so without this
+      // the service cross-check would protect the reverted file's endpoints and let a later pass
+      // drop one the serving version still needs. It happens at validation rather than at
+      // registration because services swap first; by then the endpoint is already gone. Only a
+      // changed candidate is looked up, so a settled configuration costs no store reads.
+      if (applied == null || !applied.definition().equals(candidate.definition())) {
+        CandidateDefinition serving = servingInsteadOf(candidate, rollbacks, candidateSha);
+        if (serving != null) {
+          candidate = serving;
+          entry.setValue(serving);
+        }
+      }
       SagaDefinition definition = candidate.definition();
       // Every declarative step's service must exist in THIS candidate set: definitions propagate
       // fleet-wide through the store the moment they register, so registering one whose service
@@ -725,18 +786,6 @@ final class ConfigReconciler {
         }
       }
       // Un-bumped change: same name and version as the applied definition, different content.
-      AppliedDefinition applied = appliedDefinitions.get(definition.getName());
-      // A file that names an already-stored version which is NOT the one serving is a rollback of
-      // the definitions directory: registered content is immutable, so re-writing it registers
-      // nothing and the newer version keeps running. Left to apply, the pass would record a
-      // version nobody runs as applied, and the service cross-check would then reason about the
-      // wrong one — letting a later pass drop a service the serving version still needs. The
-      // check runs here rather than at registration because services swap first: by then the
-      // endpoint is already gone and a rejection only reports the damage. Only a changed candidate
-      // is checked, so a settled configuration costs no store reads.
-      if (applied == null || !applied.definition().equals(definition)) {
-        requireCandidateIsServable(candidate, errors, candidateSha);
-      }
       if (applied != null
           && applied.definition().getVersion().equals(definition.getVersion())
           && !applied.definition().equals(definition)) {
@@ -750,6 +799,7 @@ final class ConfigReconciler {
                 + "). Registered content is immutable: bump the version, never amend.");
       }
     }
+    noteRollbacks(rollbacks);
   }
 
   /**

@@ -152,27 +152,28 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   }
 
   /**
-   * The version of {@code sagaName} that a name-only start would run — the store's latest — or
+   * The definition of {@code sagaName} that a name-only start would run — the store's latest — or
    * {@code null} when nothing is registered under that name.
    *
    * <p>For a caller that maintains definition files and needs to know whether they still describe
    * what is serving. Registered content is immutable and the store is append-only, so re-writing an
    * older version's file registers nothing and leaves the newer version winning; without asking,
-   * such a caller cannot tell that its files and the fleet disagree.
+   * such a caller cannot tell that its files and the fleet disagree. It gets the whole definition
+   * rather than the version alone because, on finding them disagreeing, what serves is the only
+   * thing left worth validating.
    */
-  public @Nullable String latestDefinitionVersion(String sagaName) {
+  public @Nullable SagaDefinition latestDefinition(String sagaName) {
     Objects.requireNonNull(sagaName, "sagaName must not be null");
-    SagaDefinition def = definitionRegistry.resolve(sagaName);
-    return def == null ? null : def.getVersion();
+    return definitionRegistry.resolve(sagaName);
   }
 
   /**
    * Whether {@code version} of {@code sagaName} is already registered.
    *
-   * <p>With {@link #latestDefinitionVersion} this distinguishes the two ways a definition file can
-   * name a version that is not serving: a NEW version, which is an ordinary upgrade about to become
-   * the latest, and an OLDER one that is already stored, which is a rollback that will register
-   * nothing and leave the newer version running.
+   * <p>With {@link #latestDefinition} this distinguishes the two ways a definition file can name a
+   * version that is not serving: a NEW version, which is an ordinary upgrade about to become the
+   * latest, and an OLDER one that is already stored, which is a rollback that will register nothing
+   * and leave the newer version running.
    */
   public boolean isDefinitionRegistered(String sagaName, String version) {
     Objects.requireNonNull(sagaName, "sagaName must not be null");

@@ -220,9 +220,12 @@ Operational notes, learned from how Kubernetes actually delivers files:
   re-registering an old definition version is an idempotent no-op — the store's latest version
   keeps winning. To revert a definition, register the old content as a NEW, bumped version. The
   reload now says so rather than letting it pass quietly: a definition file naming an
-  already-registered version that is not the one serving is rejected, because otherwise the daemon
-  would go on validating a version nobody runs — and could then accept the removal of a service
-  the serving version still needs.
+  already-registered version that is not the one serving draws a WARN naming both versions, and the
+  pass goes on validating the version that actually serves. It is not rejected — the rollback has
+  already failed to take by the time the daemon sees it, and refusing the only configuration it can
+  run would stop a replica from starting over a disagreement no restart can settle. Validating what
+  serves is also what keeps the service checks honest: removing a service the serving version still
+  needs is caught, even while the file names an older version that does not.
 - **Changing a service's `base_url` mid-saga is safe only if the endpoints are compatible**: an
   in-flight step finishes against the endpoint it resolved; the saga's next step (or a TCC
   confirm/cancel) resolves the new one.

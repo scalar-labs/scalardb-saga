@@ -181,8 +181,8 @@ public final class SagaServer implements AutoCloseable {
                 }
 
                 @Override
-                public @Nullable String latestVersion(String sagaName) {
-                  return orchestrator.latestDefinitionVersion(sagaName);
+                public @Nullable SagaDefinition latest(String sagaName) {
+                  return orchestrator.latestDefinition(sagaName);
                 }
 
                 @Override

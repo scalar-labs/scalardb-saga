@@ -47,21 +47,22 @@ class SagaConfigReloadManagerTest {
   /** A store that accepts everything and reports each registration as the serving version. */
   private static DefinitionStore acceptingStore() {
     return new DefinitionStore() {
-      private final Map<String, String> serving = new HashMap<>();
+      private final Map<String, SagaDefinition> serving = new HashMap<>();
 
       @Override
       public void register(SagaDefinition definition) {
-        serving.put(definition.getName(), definition.getVersion());
+        serving.put(definition.getName(), definition);
       }
 
       @Override
-      public @Nullable String latestVersion(String sagaName) {
+      public @Nullable SagaDefinition latest(String sagaName) {
         return serving.get(sagaName);
       }
 
       @Override
       public boolean isRegistered(String sagaName, String version) {
-        return version.equals(serving.get(sagaName));
+        SagaDefinition latest = serving.get(sagaName);
+        return latest != null && version.equals(latest.getVersion());
       }
     };
   }

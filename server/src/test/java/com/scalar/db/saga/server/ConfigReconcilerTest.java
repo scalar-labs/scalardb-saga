@@ -2,6 +2,7 @@ package com.scalar.db.saga.server;
 
 import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import ch.qos.logback.classic.Level;
@@ -21,7 +22,6 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
@@ -47,36 +47,38 @@ class ConfigReconcilerTest {
    * A store with the real one's two load-bearing properties: append-only, and latest means most
    * recently FIRST registered. Re-registering a version that already exists is a no-op that does
    * not move it to the front, which is what makes a rolled-back definition file leave the newer
-   * version serving. A LinkedHashSet models exactly that — adding an existing element does not
+   * version serving. A LinkedHashMap models exactly that — putIfAbsent on an existing key does not
    * change iteration order.
    */
-  private final Map<String, LinkedHashSet<String>> stored = new LinkedHashMap<>();
+  private final Map<String, LinkedHashMap<String, SagaDefinition>> stored = new LinkedHashMap<>();
 
   private final DefinitionStore definitionStore =
       new DefinitionStore() {
         @Override
         public void register(SagaDefinition definition) {
           definitionRegistrar.accept(definition);
+          // putIfAbsent, not put: registered content is immutable, so re-registering a version
+          // that is already there keeps the stored content and its place in the order.
           stored
-              .computeIfAbsent(definition.getName(), name -> new LinkedHashSet<>())
-              .add(definition.getVersion());
+              .computeIfAbsent(definition.getName(), name -> new LinkedHashMap<>())
+              .putIfAbsent(definition.getVersion(), definition);
         }
 
         @Override
         public boolean isRegistered(String sagaName, String version) {
-          LinkedHashSet<String> versions = stored.get(sagaName);
-          return versions != null && versions.contains(version);
+          LinkedHashMap<String, SagaDefinition> versions = stored.get(sagaName);
+          return versions != null && versions.containsKey(version);
         }
 
         @Override
-        public @Nullable String latestVersion(String sagaName) {
-          LinkedHashSet<String> versions = stored.get(sagaName);
+        public @Nullable SagaDefinition latest(String sagaName) {
+          LinkedHashMap<String, SagaDefinition> versions = stored.get(sagaName);
           if (versions == null || versions.isEmpty()) {
             return null;
           }
-          String latest = null;
-          for (String version : versions) {
-            latest = version;
+          SagaDefinition latest = null;
+          for (SagaDefinition definition : versions.values()) {
+            latest = definition;
           }
           return latest;
         }
@@ -1291,7 +1293,7 @@ class ConfigReconcilerTest {
             public void register(SagaDefinition definition) {}
 
             @Override
-            public @Nullable String latestVersion(String sagaName) {
+            public @Nullable SagaDefinition latest(String sagaName) {
               throw SagaPersistenceException.storeUnavailable(new IOException("connection reset"));
             }
 
@@ -1321,10 +1323,12 @@ class ConfigReconcilerTest {
     }
 
     @Test
-    void run_definitionFileRolledBack_rejectedRatherThanTrackedAsApplied() throws IOException {
+    void run_definitionFileRolledBack_adoptsTheServingVersionInsteadOfRejecting()
+        throws IOException {
       // A rollback of the definitions directory reverts the file and not the store: registering
-      // older content is a no-op and the newer version keeps serving. Recording the file's version
-      // as applied would leave every check reasoning about a version nobody runs.
+      // older content is a no-op and the newer version keeps serving. The rollback does not take
+      // whatever the pass decides, so the pass adopts what serves rather than refusing the only
+      // configuration the daemon can run.
       // Arrange — the real history: v1 shipped, then v2 replaced it. Re-registering v1 later is
       // then a no-op, which is the whole reason a rollback does not take effect.
       writeService("account", "base_url=http://account:8080\n");
@@ -1338,13 +1342,55 @@ class ConfigReconcilerTest {
       // Act — the file reverts to v1; the store still serves v2
       writeDefinition("saga.json", "order-saga", "1.0", "account");
 
+      // Assert — the pass applies and records nothing as broken
+      assertThat(reconciler.run()).isTrue();
+      assertThat(reconciler.status().rejection()).isNull();
+    }
+
+    @Test
+    void runOrThrow_definitionFileRolledBack_stillBoots() throws IOException {
+      // A replica booting on a rolled-back definitions directory has to start. Its applied set is
+      // empty, so every definition looks changed and every one is compared against the store —
+      // the state a running daemon reaches after a rollback is the state a restarting one boots
+      // into. Refusing here is refusing to run over a disagreement no restart can settle, which
+      // turns a bad definition rollback into a fleet that cannot come back up.
+      // Arrange — v1 shipped, then v2 replaced it, then the directory was rolled back to v1
+      writeService("account", "base_url=http://account:8080\n");
+      writeService("legacy", "base_url=http://legacy:8080\n");
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      assertThat(reconciler().run()).isTrue();
+      writeDefinition("saga.json", "order-saga", "2.0", "legacy");
+      assertThat(reconciler().run()).isTrue();
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+
+      // Act & Assert — a fresh reconciler is a fresh process: nothing applied, everything compared
+      ConfigReconciler booting = reconciler();
+      assertThatCode(booting::runOrThrow).doesNotThrowAnyException();
+      assertThat(booting.appliedDefinitionCount()).isEqualTo(1);
+    }
+
+    @Test
+    void runOrThrow_rolledBackDefinitionThenServiceRemoval_bootRejectsTheRemoval()
+        throws IOException {
+      // Booting must not be a way around the guard. The reverted file does not name legacy, so
+      // adopting the file's version would let a boot accept the removal of the service the
+      // serving version needs — the same hazard as on a running daemon, reached by restarting.
+      // Arrange
+      writeService("account", "base_url=http://account:8080\n");
+      writeService("legacy", "base_url=http://legacy:8080\n");
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      assertThat(reconciler().run()).isTrue();
+      writeDefinition("saga.json", "order-saga", "2.0", "legacy");
+      assertThat(reconciler().run()).isTrue();
+
+      // Act — roll the definition back and drop the service only the serving version names
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      Files.delete(servicesDir.resolve("legacy.properties"));
+
       // Assert
-      assertThat(reconciler.run()).isFalse();
-      ReloadStatus.Rejection rejection = requireNonNull(reconciler.status().rejection());
-      assertThat(rejection.reason())
-          .contains("2.0 is what the store serves")
-          .contains("register it as a NEW, higher version");
-      assertThat(rejection.operatorActionRequired()).isTrue();
+      assertThatThrownBy(reconciler()::runOrThrow)
+          .isInstanceOf(IllegalStateException.class)
+          .hasMessageContaining("legacy");
     }
 
     @Test
@@ -1366,8 +1412,10 @@ class ConfigReconcilerTest {
       writeDefinition("saga.json", "order-saga", "1.0", "account");
       Files.delete(servicesDir.resolve("legacy.properties"));
 
-      // Assert — the whole pass is rejected, so the service the serving version needs stays live
+      // Assert — the pass adopts the serving v2, whose step still names legacy, so the removal is
+      // caught by the ordinary service cross-check and the endpoint stays live
       assertThat(reconciler.run()).isFalse();
+      assertThat(requireNonNull(reconciler.status().rejection()).reason()).contains("legacy");
       assertThat(swaps).hasSize(swapsBefore);
     }
 
