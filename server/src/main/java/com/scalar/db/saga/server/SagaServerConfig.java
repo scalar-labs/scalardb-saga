@@ -179,8 +179,11 @@ import org.jspecify.annotations.Nullable;
  *       do not count against it (failed attempts do), and a pass stopped by the cap resumes where
  *       it left off next pass, so a small value never skips sagas — it only spreads recovery over
  *       more passes
- *   <li>{@code recovery.max_concurrent_recoveries} — how many of that batch are recovered at once,
- *       bounding the database pressure of a single pass
+ *   <li>{@code recovery.max_concurrent_recoveries} — how many sagas are <b>recovered</b> at once:
+ *       claimed and driven, participant calls included. It bounds the expensive half of a pass. The
+ *       cheap screening that decides whether a saga needs recovering at all runs outside this
+ *       limit, under its own fixed bound, so a pass is never held up waiting for a running saga to
+ *       finish before it can answer a one-read question
  * </ul>
  *
  * <h2>Retention ({@code retention.*})</h2>

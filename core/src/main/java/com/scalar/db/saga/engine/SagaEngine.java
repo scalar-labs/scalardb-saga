@@ -27,7 +27,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -77,7 +77,11 @@ public class SagaEngine implements AutoCloseable {
   private final Clock clock;
   private volatile boolean shuttingDown = false;
   private final Object shutdownLock = new Object();
-  private final Set<String> activeSagas = ConcurrentHashMap.newKeySet();
+  // Saga id -> when this instance's current drive of it began. A map rather than a set because
+  // recovery needs the start time to tell a wedged drive from a merely slow one, and the drive is
+  // the only thing that knows it: registration creates the entry and the drive's finally removes
+  // it, so the value is always this episode's, never a stale earlier one.
+  private final ConcurrentHashMap<String, Instant> activeSagas = new ConcurrentHashMap<>();
   private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
   private final ConcurrentHashMap<String, List<StepWithPolicy>> planCache =
       new ConcurrentHashMap<>();
@@ -275,7 +279,7 @@ public class SagaEngine implements AutoCloseable {
     }
 
     // Mark remaining active sagas for immediate recovery pickup
-    for (String sagaId : activeSagas) {
+    for (String sagaId : activeSagas.keySet()) {
       try {
         store.markForRecovery(sagaId);
         logger.info("Marked saga {} for recovery during shutdown", sagaId);
@@ -810,45 +814,32 @@ public class SagaEngine implements AutoCloseable {
   // ---------------------------------------------------------------------------
 
   /**
-   * Why a drive was or was not allowed to start. The two refusals are not interchangeable: only one
-   * of them means the saga has nobody to drive it.
-   */
-  private enum Registration {
-    REGISTERED,
-    /** Shutting down: nothing here will drive this saga, so it must be handed to the sweeper. */
-    REFUSED_SHUTTING_DOWN,
-    /** Another drive on this instance already owns it, and is still running. */
-    REFUSED_ALREADY_ACTIVE
-  }
-
-  private Registration registerActive(String sagaId) {
-    synchronized (shutdownLock) {
-      if (shuttingDown) {
-        return Registration.REFUSED_SHUTTING_DOWN;
-      }
-      return activeSagas.add(sagaId)
-          ? Registration.REGISTERED
-          : Registration.REFUSED_ALREADY_ACTIVE;
-    }
-  }
-
-  /**
-   * Hands the saga to the sweeper when the refusal means nothing here will drive it, and does
-   * nothing when a live local drive already owns it.
+   * Registers this instance as the driver of the saga, or hands it to the sweeper when nothing here
+   * will drive it.
    *
-   * <p>The distinction matters because {@code markForRecovery} stamps {@code updated_at} with the
-   * epoch, which rewrites the row's clustering key — the token the owning drive holds. Marking a
-   * saga that is merely already active would therefore kill the healthy drive that is executing it,
-   * turning a duplicate dispatch into a failed saga.
+   * <p>The two refusals are not interchangeable and the difference must be decided under {@link
+   * #shutdownLock}. Shutting down means nobody here will run this saga, so it has to be marked.
+   * Already active means a healthy drive owns it, and marking would stamp the epoch on that drive's
+   * row — rewriting the clustering key it holds and killing it, turning a duplicate dispatch into a
+   * failed saga. Deciding outside the lock would reopen exactly that race: {@code putIfAbsent}
+   * could fail because a live drive owns the saga, shutdown could flip, and the caller would mark
+   * it.
+   *
+   * <p>The store write is deliberately outside the lock; only the decision needs to be inside.
    *
    * @return true when the caller should proceed to drive the saga
    */
   private boolean registerOrHandOff(String sagaId) {
-    Registration registration = registerActive(sagaId);
-    if (registration == Registration.REFUSED_SHUTTING_DOWN) {
-      store.markForRecovery(sagaId);
+    synchronized (shutdownLock) {
+      if (!shuttingDown) {
+        // false: another drive on this instance already owns it and is still running.
+        // millis(), not instant(): every other clock read in this class goes through millis(),
+        // and stored timestamps are millisecond-granular anyway.
+        return activeSagas.putIfAbsent(sagaId, Instant.ofEpochMilli(clock.millis())) == null;
+      }
     }
-    return registration == Registration.REGISTERED;
+    store.markForRecovery(sagaId);
+    return false;
   }
 
   /**
@@ -862,7 +853,18 @@ public class SagaEngine implements AutoCloseable {
    * and its {@code finally} removing it.
    */
   boolean isLocallyActive(String sagaId) {
-    return activeSagas.contains(sagaId);
+    return activeSagas.containsKey(sagaId);
+  }
+
+  /**
+   * When this instance's current drive of the saga began, or empty if it is not driving it.
+   *
+   * <p>Advisory in the same way as {@link #isLocallyActive}. The instant is this episode's start: a
+   * saga that parks and is later resumed gets a fresh entry, so the value never folds in an earlier
+   * episode or the idle time between them.
+   */
+  Optional<Instant> activeSince(String sagaId) {
+    return Optional.ofNullable(activeSagas.get(sagaId));
   }
 
   private void unregisterActive(String sagaId) {

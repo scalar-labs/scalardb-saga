@@ -573,18 +573,19 @@ class SagaRecoveryManagerTest {
     @Test
     void recover_locallyActivePastTenTimeouts_namesTheSagaOnceInAWarning() {
       // Arrange — a drive that never releases its saga is skipped silently on every pass, so
-      // without this warning a wedged drive is invisible. The clock moves between passes while the
-      // saga stays active here.
+      // without this warning a wedged drive is invisible. How long it has been driving comes from
+      // the engine, which recorded it when the drive registered.
       SagaStateSnapshot saga = staleSaga();
       scanReturns(saga);
       when(engine.isLocallyActive(SAGA_ID)).thenReturn(true);
+      when(engine.activeSince(SAGA_ID)).thenReturn(Optional.of(NOW));
       ListAppender<ILoggingEvent> logs = attachLogCapture();
       try {
-        // Act — the first pass only records when the saga was first seen; nothing is wrong yet.
+        // Act — a drive that started just now is not yet suspicious.
         manager.recover();
         assertThat(warningsNaming(logs, SAGA_ID)).isEmpty();
 
-        // Act — a later pass, past ten timeouts on the same continuously-active saga
+        // Act — the same drive, still holding the saga past ten timeouts
         clock.advance(Duration.ofMinutes(11));
         manager.recover();
 
@@ -604,15 +605,13 @@ class SagaRecoveryManagerTest {
 
     @Test
     void recover_sagaFinishesAndRunsLongAgain_warnsAfresh() {
-      // Arrange — the bookkeeping is pruned each pass against what the engine is really driving, so
-      // a saga that completes and later runs long again must be reported again rather than being
-      // silenced forever by the first warning.
+      // Arrange — a saga that completes and later runs long again must be reported again rather
+      // than being silenced forever by the first warning. The engine reports a fresh start time for
+      // the second episode, so the elapsed time never folds in the first one or the gap between.
       SagaStateSnapshot saga = staleSaga();
       scanReturns(saga);
       when(engine.isLocallyActive(SAGA_ID)).thenReturn(true);
-      lenient()
-          .when(store.getNewestEventTime(SAGA_ID))
-          .thenReturn(Optional.of(NOW.minusSeconds(3600)));
+      when(engine.activeSince(SAGA_ID)).thenReturn(Optional.of(NOW));
       ListAppender<ILoggingEvent> logs = attachLogCapture();
       try {
         manager.recover();
@@ -620,12 +619,19 @@ class SagaRecoveryManagerTest {
         manager.recover();
         assertThat(warningsNaming(logs, SAGA_ID)).hasSize(1);
 
-        // Act — the drive ends, so the next pass forgets it
+        // Act — the drive ends, so the next pass forgets the saga
         when(engine.isLocallyActive(SAGA_ID)).thenReturn(false);
+        when(engine.activeSince(SAGA_ID)).thenReturn(Optional.empty());
+        lenient()
+            .when(store.getNewestEventTime(SAGA_ID))
+            .thenReturn(Optional.of(NOW.minusSeconds(3600)));
+        lenient().when(store.claimForRecovery(any(), any())).thenReturn(Optional.empty());
         manager.recover();
 
-        // Act — it becomes active again and ages past the threshold a second time
+        // Act — a second, separate episode starts now and runs long in its turn
+        Instant secondEpisodeStart = clock.instant();
         when(engine.isLocallyActive(SAGA_ID)).thenReturn(true);
+        when(engine.activeSince(SAGA_ID)).thenReturn(Optional.of(secondEpisodeStart));
         manager.recover();
         clock.advance(Duration.ofMinutes(11));
         manager.recover();

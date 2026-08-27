@@ -743,7 +743,7 @@ class SagaEngineTest {
       // t=200: step deadline calculation for step 0
       // t=300: executeWithRetry for step 0
       // t=1100: timeout check for step 1 (expired, 1100 > 1000)
-      when(mockClock.millis()).thenReturn(0L, 100L, 200L, 300L, 1100L);
+      when(mockClock.millis()).thenReturn(0L, 0L, 100L, 200L, 300L, 1100L);
       SagaEngine clockEngine =
           new SagaEngine(
               store,
@@ -792,6 +792,7 @@ class SagaEngineTest {
       // Arrange — clock advances past saga deadline after the pivot
       Clock mockClock = mock(Clock.class);
       // Timeline: saga starts at t=0, deadline = 0+1000 = 1000ms
+      // t=0:   registering the drive (records when this instance started it)
       // t=100: timeout check for step 0 (OK)
       // t=200: step deadline for step 0
       // t=300: executeWithRetry for step 0
@@ -799,7 +800,7 @@ class SagaEngineTest {
       // t=500: step deadline for step 1
       // t=600: executeWithRetry for step 1
       // t=1100: timeout check for step 2 (expired, 1100 > 1000)
-      when(mockClock.millis()).thenReturn(0L, 100L, 200L, 300L, 400L, 500L, 600L, 1100L);
+      when(mockClock.millis()).thenReturn(0L, 0L, 100L, 200L, 300L, 400L, 500L, 600L, 1100L);
       SagaEngine clockEngine =
           new SagaEngine(
               store,
@@ -855,7 +856,7 @@ class SagaEngineTest {
       // t=200: step deadline calculation for step 0
       // t=300: executeWithRetry for step 0
       // t=1100: timeout check for step 1 (expired, 1100 > 1000)
-      when(mockClock.millis()).thenReturn(0L, 100L, 200L, 300L, 1100L);
+      when(mockClock.millis()).thenReturn(0L, 0L, 100L, 200L, 300L, 1100L);
       SagaEngine clockEngine =
           new SagaEngine(
               store,
@@ -902,7 +903,7 @@ class SagaEngineTest {
       // Arrange — the definition's own 5000ms timeout must win over a shorter 1000ms default: at
       // t=1100 the saga is past the default but within its own deadline, so step 1 still runs.
       Clock mockClock = mock(Clock.class);
-      when(mockClock.millis()).thenReturn(0L, 100L, 200L, 300L, 1100L, 1200L, 1300L);
+      when(mockClock.millis()).thenReturn(0L, 0L, 100L, 200L, 300L, 1100L, 1200L, 1300L);
       SagaEngine clockEngine =
           new SagaEngine(
               store,
@@ -947,7 +948,7 @@ class SagaEngineTest {
       // times out and compensates instead of running the step with no deadline at all.
       Clock mockClock = mock(Clock.class);
       // Timeline: resume at t=0, default deadline = 0+1000 = 1000ms; t=1100: step 1 check expired
-      when(mockClock.millis()).thenReturn(0L, 1100L);
+      when(mockClock.millis()).thenReturn(0L, 0L, 1100L);
       SagaEngine clockEngine =
           new SagaEngine(
               store,
