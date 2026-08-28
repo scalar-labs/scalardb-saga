@@ -8,11 +8,14 @@ import com.scalar.db.saga.exception.SagaDefinitionNotServedException;
 import com.scalar.db.saga.grpc.GrpcSagaOrchestratorClient;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -39,6 +42,12 @@ class SagaDefinitionRetirementIntegrationTest extends ServerIntegrationTestSuppo
 
   private static final String RETIRING_VERSION = "1.0";
 
+  /**
+   * A service NOTHING else names, so removing it is rejected only by the version this pass adopts.
+   * Sharing {@code legacy} would let the retiring saga's own cross-check cause the rejection.
+   */
+  private static final String ROLLBACK_ONLY_SERVICE = "rollback-only";
+
   private static final String RETIRING_DEF =
       """
       { "name": "$name", "version": "$ver", "mode": "SAGA", "steps": [
@@ -61,8 +70,53 @@ class SagaDefinitionRetirementIntegrationTest extends ServerIntegrationTestSuppo
           """
               .replace("$name", KEEPER_SAGA));
 
+  private static final String SLOW_SAGA = "slow-saga";
+
+  private static final String ROLLED_BACK_SAGA = "rolled-back-saga";
+
+  private static final String SLOW_DEF =
+      """
+      { "name": "$name", "version": "1.0", "mode": "SAGA", "steps": [
+        { "name": "call", "service": "$svc",
+          "execution":    { "method": "POST", "path": "/slow" },
+          "compensation": { "method": "POST", "path": "/legacy-undo" } } ] }
+      """
+          .replace("$name", SLOW_SAGA)
+          .replace("$svc", LEGACY_SERVICE);
+
+  /** The rolled-back saga on the shared service, which outlives the rollback. */
+  private static String rolledBackDefOnSharedService(String version) {
+    return withService(
+        """
+        { "name": "$name", "version": "$ver", "mode": "SAGA", "steps": [
+          { "name": "call", "service": "$svc",
+            "execution":    { "method": "POST", "path": "/keep" },
+            "compensation": { "method": "POST", "path": "/keep-undo" } } ] }
+        """
+            .replace("$name", ROLLED_BACK_SAGA)
+            .replace("$ver", version));
+  }
+
+  /** The same saga moved onto a service only it names, which the rollback then tries to drop. */
+  private static String rolledBackDefOnLegacy(String version) {
+    return """
+      { "name": "$name", "version": "$ver", "mode": "SAGA", "steps": [
+        { "name": "call", "service": "$svc",
+          "execution":    { "method": "POST", "path": "/legacy" },
+          "compensation": { "method": "POST", "path": "/legacy-undo" } } ] }
+      """
+        .replace("$name", ROLLED_BACK_SAGA)
+        .replace("$ver", version)
+        .replace("$svc", ROLLBACK_ONLY_SERVICE);
+  }
+
   /** The wire code string, kept here so the test states it literally rather than deriving it. */
   private static final String NOT_SERVED_CODE = "DB-SAGA-10403";
+
+  /** Held to keep a saga genuinely in flight while its definition file is deleted. */
+  private final CountDownLatch releaseSlowStep = new CountDownLatch(1);
+
+  private final CountDownLatch slowStepEntered = new CountDownLatch(1);
 
   private GrpcSagaOrchestratorClient client;
 
@@ -72,6 +126,22 @@ class SagaDefinitionRetirementIntegrationTest extends ServerIntegrationTestSuppo
     route(participant, "/legacy-undo", 200);
     route(participant, "/keep", 200);
     route(participant, "/keep-undo", 200);
+    // A route that blocks until the test releases it, so a saga can be held mid-step across a
+    // retirement. The runbook's promise is that such a saga finishes; nothing else can show it.
+    participant.createContext(
+        "/slow",
+        exchange -> {
+          slowStepEntered.countDown();
+          try {
+            releaseSlowStep.await(30, TimeUnit.SECONDS);
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+          exchange.sendResponseHeaders(200, 0);
+          try (OutputStream body = exchange.getResponseBody()) {
+            body.write("{}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+          }
+        });
   }
 
   @Override
@@ -85,11 +155,19 @@ class SagaDefinitionRetirementIntegrationTest extends ServerIntegrationTestSuppo
     Properties legacy = new Properties();
     legacy.setProperty("base_url", participantBaseUrl());
     services.put(LEGACY_SERVICE, legacy);
+    Properties rollbackOnly = new Properties();
+    rollbackOnly.setProperty("base_url", participantBaseUrl());
+    services.put(ROLLBACK_ONLY_SERVICE, rollbackOnly);
   }
 
   @BeforeEach
   void createClient() {
     client = GrpcSagaOrchestratorClient.create("localhost:" + grpcPort());
+  }
+
+  @AfterEach
+  void releaseAnyHeldStep() {
+    releaseSlowStep.countDown();
   }
 
   @AfterEach
@@ -216,6 +294,54 @@ class SagaDefinitionRetirementIntegrationTest extends ServerIntegrationTestSuppo
     HttpResponse<String> fetched = get("/sagas/" + sagaId);
     assertThat(fetched.statusCode()).isEqualTo(200);
     assertThat(status(fetched)).isEqualTo("COMPLETED");
+  }
+
+  @Test
+  void sagaInFlightWhenItsFileIsDeleted_finishesAndStaysRecoverable() throws Exception {
+    // The promise the exception javadoc, the start gate and the runbook all make: retirement stops
+    // NEW starts and leaves work already running alone. It holds because a running saga resolves
+    // its definition by the version recorded at its start, never through the served-set gate — so
+    // only a saga genuinely mid-step across the deletion can show it.
+    // Arrange — a saga whose step blocks in the participant
+    writeDefinition(definitionsDir(), SLOW_SAGA, SLOW_DEF);
+    assertThat(reloadNow()).isTrue();
+    HttpResponse<String> accepted =
+        post("/sagas?async=true", "{\"sagaName\":\"" + SLOW_SAGA + "\"}");
+    assertThat(accepted.statusCode()).isEqualTo(202);
+    String sagaId = MAPPER.readTree(accepted.body()).get("sagaId").asText();
+    assertThat(slowStepEntered.await(30, TimeUnit.SECONDS)).isTrue();
+
+    // Act — retire it while that step is still in the participant
+    Files.delete(definitionsDir().resolve(SLOW_SAGA + ".json"));
+    assertThat(reloadNow()).isTrue();
+    assertThat(post("/sagas", "{\"sagaName\":\"" + SLOW_SAGA + "\"}").statusCode()).isEqualTo(422);
+    releaseSlowStep.countDown();
+
+    // Assert — the in-flight saga runs to a terminal state despite the retirement
+    assertThat(pollUntilTerminal(sagaId)).isEqualTo("COMPLETED");
+  }
+
+  @Test
+  void definitionFileRolledBack_guardsTheServingVersionsServices() throws Exception {
+    // Rollback adoption against the REAL store. Re-registering older content is a no-op, so the
+    // newer version keeps serving whatever the pass tracks — which is why asserting on what runs
+    // proves nothing. What adoption changes is which version the guards reason about: it must be
+    // the one serving, or removing a service only that version needs sails through.
+    // Arrange — v1 uses the shared service, v2 moved the saga onto a service only it names
+    writeDefinition(definitionsDir(), ROLLED_BACK_SAGA, rolledBackDefOnSharedService("1.0"));
+    assertThat(reloadNow()).isTrue();
+    writeDefinition(definitionsDir(), ROLLED_BACK_SAGA, rolledBackDefOnLegacy("2.0"));
+    assertThat(reloadNow()).isTrue();
+
+    // Act — roll back to a version that does not name that service, and drop it
+    writeDefinition(definitionsDir(), ROLLED_BACK_SAGA, rolledBackDefOnSharedService("1.0"));
+    Files.delete(servicesDir().resolve(ROLLBACK_ONLY_SERVICE + ".properties"));
+
+    // Assert — rejected, because the adopted v2 still names it. Tracking the file's v1 instead
+    // would accept this and strand the version that actually runs.
+    assertThat(reloadNow()).isFalse();
+    assertThat(post("/sagas", "{\"sagaName\":\"" + ROLLED_BACK_SAGA + "\"}").statusCode())
+        .isEqualTo(200);
   }
 
   @Test

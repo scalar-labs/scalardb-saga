@@ -1450,6 +1450,40 @@ class ConfigReconcilerTest {
     }
 
     @Test
+    void run_definitionFileRolledBack_warnsOnceRatherThanEveryPass() throws IOException {
+      // A rolled-back file stays rolled back until an operator edits it, so the finding repeats
+      // every interval. It is a warning rather than a rejection, so nothing else in the log marks
+      // it as still open — which is why it follows the same state-change rule repeated rejections
+      // use rather than being logged every pass.
+      // Arrange
+      writeService("account", "base_url=http://account:8080\n");
+      writeService("legacy", "base_url=http://legacy:8080\n");
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      ConfigReconciler reconciler = reconciler();
+      assertThat(reconciler.run()).isTrue();
+      writeDefinition("saga.json", "order-saga", "2.0", "legacy");
+      assertThat(reconciler.run()).isTrue();
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+
+      // Act & Assert
+      try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
+        assertThat(reconciler.run()).isTrue();
+        assertThat(logs.events())
+            .anySatisfy(
+                event -> {
+                  assertThat(event.getLevel()).isEqualTo(Level.WARN);
+                  assertThat(event.getFormattedMessage())
+                      .contains("order-saga")
+                      .contains("1.0")
+                      .contains("2.0");
+                });
+
+        assertThat(reconciler.run()).isTrue();
+        assertThat(logs.events().stream().filter(e -> e.getLevel() == Level.WARN)).hasSize(1);
+      }
+    }
+
+    @Test
     void run_passRejected_leavesThePreviouslyServedSetInPlace() throws IOException {
       // A rejected pass keeps the previous configuration serving, so it must not publish a served
       // set either — publishing a half-built one would retire sagas the rejection did not touch.
@@ -1489,9 +1523,16 @@ class ConfigReconcilerTest {
       // Act — the file reverts to v1; the store still serves v2
       writeDefinition("saga.json", "order-saga", "1.0", "account");
 
-      // Assert — the pass applies and records nothing as broken
+      // Assert — the pass applies, and the adopted candidate is the SERVING version: it equals the
+      // applied entry, so nothing is re-registered. Without adoption the file's v1.0 would be
+      // registered again, which is the no-op the whole check exists to stop being tracked as real.
+      int registeredBefore = registered.size();
       assertThat(reconciler.run()).isTrue();
       assertThat(reconciler.status().rejection()).isNull();
+      assertThat(registered).hasSize(registeredBefore);
+      assertThat(definitionStore.latest("order-saga")).isNotNull();
+      assertThat(requireNonNull(definitionStore.latest("order-saga")).getVersion())
+          .isEqualTo("2.0");
     }
 
     @Test
@@ -1510,10 +1551,13 @@ class ConfigReconcilerTest {
       assertThat(reconciler().run()).isTrue();
       writeDefinition("saga.json", "order-saga", "1.0", "account");
 
-      // Act & Assert — a fresh reconciler is a fresh process: nothing applied, everything compared
+      // Act & Assert — a fresh reconciler is a fresh process: nothing applied, everything compared.
+      // What it adopts is the serving 2.0, not the 1.0 its file names, which is what keeps the
+      // checks below it pointed at the version that actually runs.
       ConfigReconciler booting = reconciler();
       assertThatCode(booting::runOrThrow).doesNotThrowAnyException();
       assertThat(booting.appliedDefinitionCount()).isEqualTo(1);
+      assertThat(registered).last().satisfies(d -> assertThat(d.getVersion()).isEqualTo("2.0"));
     }
 
     @Test

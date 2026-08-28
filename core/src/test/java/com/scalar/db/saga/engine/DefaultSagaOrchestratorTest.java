@@ -276,6 +276,62 @@ class DefaultSagaOrchestratorTest {
     }
 
     @Test
+    void latestDefinition_registeredName_returnsWhatANameOnlyStartWouldRun() {
+      // The daemon asks this to find out whether its definition files still describe what serves.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+
+      // Act & Assert
+      assertThat(orchestrator.latestDefinition("transfer")).isSameAs(def);
+    }
+
+    @Test
+    void latestDefinition_unregisteredName_returnsNull() {
+      // Arrange
+      when(definitionRegistry.resolve("unknown")).thenReturn(null);
+
+      // Act & Assert
+      assertThat(orchestrator.latestDefinition("unknown")).isNull();
+    }
+
+    @Test
+    @SuppressWarnings("NullAway") // deliberately passing null: the guard is what is under test
+    void latestDefinition_nullSagaNameGiven_throwsNullPointer() {
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.latestDefinition(null))
+          .isInstanceOf(NullPointerException.class);
+    }
+
+    @Test
+    void isDefinitionRegistered_storedVersion_returnsTrue() {
+      // This is what separates a rollback from an ordinary upgrade: both name a version that is
+      // not the latest, and only a rollback names one the store already has.
+      // Arrange
+      when(definitionRegistry.resolve("transfer", "1.0")).thenReturn(definition("transfer"));
+
+      // Act & Assert
+      assertThat(orchestrator.isDefinitionRegistered("transfer", "1.0")).isTrue();
+    }
+
+    @Test
+    void isDefinitionRegistered_versionNeverStored_returnsFalse() {
+      // Arrange
+      when(definitionRegistry.resolve("transfer", "9.9")).thenReturn(null);
+
+      // Act & Assert
+      assertThat(orchestrator.isDefinitionRegistered("transfer", "9.9")).isFalse();
+    }
+
+    @Test
+    @SuppressWarnings("NullAway") // deliberately passing null: the guard is what is under test
+    void isDefinitionRegistered_nullVersionGiven_throwsNullPointer() {
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.isDefinitionRegistered("transfer", null))
+          .isInstanceOf(NullPointerException.class);
+    }
+
+    @Test
     void start_clientSuppliedIdAlreadyExists_propagatesSagaAlreadyExists() {
       // Arrange — the store raises this on the create; assert the orchestrator passes it through
       // untouched, since SagaOrchestrator declares it on the client-supplied-id overloads.
