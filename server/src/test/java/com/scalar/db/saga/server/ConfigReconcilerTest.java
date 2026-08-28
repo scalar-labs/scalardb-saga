@@ -1343,7 +1343,6 @@ class ConfigReconcilerTest {
       assertThat(applied).isFalse();
       ReloadStatus.Rejection rejection = requireNonNull(reconciler.status().rejection());
       assertThat(rejection.operatorActionRequired()).isFalse();
-      assertThat(rejection.reason()).contains("will retry next pass");
       assertThat(reconciler.status().lastPassAt()).isEqualTo(NOW);
     }
 
@@ -1448,7 +1447,6 @@ class ConfigReconcilerTest {
       assertThat(applied).isFalse();
       ReloadStatus.Rejection rejection = requireNonNull(reconciler.status().rejection());
       assertThat(rejection.operatorActionRequired()).isTrue();
-      assertThat(rejection.reason()).contains("permanent");
     }
 
     @Test

@@ -26,7 +26,7 @@ class SagaDefinitionNotServedExceptionTest {
 
   @Test
   @SuppressWarnings("NullAway") // deliberately passing null: the guard is what is under test
-  void of_nullSagaName_throwsNullPointer() {
+  void of_nullSagaNameGiven_throwsNullPointer() {
     // Act & Assert
     assertThatThrownBy(() -> SagaDefinitionNotServedException.of(null))
         .isInstanceOf(NullPointerException.class);

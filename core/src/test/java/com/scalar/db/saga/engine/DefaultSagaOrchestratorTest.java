@@ -222,7 +222,7 @@ class DefaultSagaOrchestratorTest {
       // Arrange
       SagaDefinition def = definition("transfer");
       when(definitionRegistry.resolve("transfer")).thenReturn(def);
-      orchestrator.servedDefinitions(Set.of("other-saga"));
+      orchestrator.serve(Set.of("other-saga"));
 
       // Act & Assert
       assertThatThrownBy(() -> orchestrator.start("transfer", Map.of()))
@@ -237,7 +237,7 @@ class DefaultSagaOrchestratorTest {
       SagaDefinition def = definition("transfer");
       when(definitionRegistry.resolve("transfer")).thenReturn(def);
       when(engine.execute(def, null, Map.of())).thenReturn("saga-1");
-      orchestrator.servedDefinitions(Set.of("transfer"));
+      orchestrator.serve(Set.of("transfer"));
 
       // Act
       String sagaId = orchestrator.start("transfer", Map.of());
@@ -247,12 +247,12 @@ class DefaultSagaOrchestratorTest {
     }
 
     @Test
-    void start_unknownDefinitionWithServedSetExcludingIt_throwsDefinitionNotFoundNotNotServed() {
+    void start_unknownDefinitionWithServedSetExcludingIt_throwsDefinitionNotFound() {
       // A name nobody ever registered is a different problem with a different fix, so it must stay
       // a not-found rather than being reported as something this daemon declines to serve.
       // Arrange
       when(definitionRegistry.resolve("unknown")).thenReturn(null);
-      orchestrator.servedDefinitions(Set.of("transfer"));
+      orchestrator.serve(Set.of("transfer"));
 
       // Act & Assert
       assertThatThrownBy(() -> orchestrator.start("unknown", Map.of()))
@@ -266,7 +266,7 @@ class DefaultSagaOrchestratorTest {
       // Arrange
       SagaDefinition def = definition("transfer");
       when(definitionRegistry.resolve("transfer", "1.0")).thenReturn(def);
-      orchestrator.servedDefinitions(Set.of("other-saga"));
+      orchestrator.serve(Set.of("other-saga"));
 
       // Act & Assert
       assertThatThrownBy(

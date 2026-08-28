@@ -455,7 +455,7 @@ final class ConfigReconciler {
       boolean needsOperator = needsOperatorAction(e);
       throw new PassRejectedException(
           "Could not read the registered versions of saga '"
-              + definition.getName()
+              + Redaction.oneLine(definition.getName())
               + "' ("
               + e.getClass().getSimpleName()
               + "), so this pass cannot tell whether the definition files still describe what is"
@@ -470,7 +470,9 @@ final class ConfigReconciler {
     if (!rolledBack) {
       return null;
     }
-    rollbacks.add(describeNotServing(candidate, Objects.requireNonNull(serving).getVersion()));
+    rollbacks.add(
+        Redaction.oneLine(
+            describeNotServing(candidate, Objects.requireNonNull(serving).getVersion())));
     return new CandidateDefinition(candidate.fileName(), serving);
   }
 
@@ -773,21 +775,10 @@ final class ConfigReconciler {
     for (Map.Entry<String, CandidateDefinition> entry : candidateDefinitions.entrySet()) {
       CandidateDefinition candidate = entry.getValue();
       AppliedDefinition applied = appliedDefinitions.get(entry.getKey());
-      // A file that names an already-stored version which is NOT the one serving is a rollback of
-      // the definitions directory: registered content is immutable, so re-writing it registers
-      // nothing and the newer version keeps running. The rollback does not take whatever this pass
-      // decides, so the pass adopts what serves and warns, rather than refusing the only
-      // configuration the daemon can run. Substituting it here is also what keeps the checks below
-      // pointed at the version that actually runs: they all read the candidate, so without this
-      // the service cross-check would protect the reverted file's endpoints and let a later pass
-      // drop one the serving version still needs. It happens at validation rather than at
-      // registration because services swap first; by then the endpoint is already gone. A settled
-      // configuration costs no store reads, but a settled ROLLBACK does: the candidate is rebuilt
-      // from the file every pass while the applied entry holds the adopted serving definition, so
-      // the two never compare equal and both lookups run every interval until the file changes.
-      // That is the price of the applied set describing what actually serves — caching the
-      // adoption against the file would stop noticing a version another replica registers, which
-      // is the stale-applied-version bug this check exists to prevent.
+      // A file naming an already-stored version that is not the serving one is a rollback; adopt
+      // what serves, so every check below validates the version that actually runs rather than the
+      // one the reverted file names. Only a changed candidate is looked up. See
+      // {@link #servingInsteadOf} for why it adopts rather than rejects, and what it costs.
       if (applied == null || !applied.definition().equals(candidate.definition())) {
         CandidateDefinition serving = servingInsteadOf(candidate, rollbacks, candidateSha);
         if (serving != null) {

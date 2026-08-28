@@ -98,8 +98,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   private volatile boolean closed;
 
   /**
-   * The saga names this deployment currently serves, or {@code null} to serve everything
-   * registered.
+   * The saga names this deployment currently serves, or {@code null} when nothing has published a
+   * set.
    *
    * <p>Null is the embedded default: an application that registers a definition means to run it,
    * and has its own call sites to stop calling. A front end whose configuration decides what is
@@ -177,13 +177,12 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * this, nothing could ever be taken out of service. Sagas already running are unaffected — they
    * resume by version and never come through the start check.
    *
-   * <p>Call it after each configuration change, with the complete set. Passing {@code null}
-   * restores the default of serving everything registered.
+   * <p>Call it after each configuration change, with the complete set.
    *
-   * @param sagaNames the saga names to serve, copied defensively, or {@code null} to serve all
+   * @param sagaNames the saga names to serve, copied defensively
    */
-  public void servedDefinitions(@Nullable Set<String> sagaNames) {
-    this.servedDefinitions = sagaNames == null ? null : Set.copyOf(sagaNames);
+  public void serve(Set<String> sagaNames) {
+    this.servedDefinitions = Set.copyOf(sagaNames);
   }
 
   /**

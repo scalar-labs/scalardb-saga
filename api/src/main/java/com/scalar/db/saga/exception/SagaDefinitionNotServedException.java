@@ -1,5 +1,6 @@
 package com.scalar.db.saga.exception;
 
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -11,12 +12,12 @@ import java.util.Objects;
  * possible: removing the file stops new starts while sagas already running finish normally, and
  * recovery on them stays available.
  *
- * <p>Two situations produce this, and a single replica cannot tell them apart: the saga was retired
- * by removing its definition file, or it was just added and this replica's configuration has not
- * caught up with a fleet-mate that registered it first. The message names both, because acting on
- * the wrong one is the mistake worth preventing. It is a stable precondition failure rather than a
- * retryable conflict: the first situation never resolves by retrying, and treating it as though it
- * might would have clients retry a retired saga indefinitely.
+ * <p>Two situations produce this and a single replica cannot tell them apart: the saga was retired
+ * by removing its definition file, or it was just added and this replica has not caught up with a
+ * fleet-mate that registered it first. {@link SagaErrorCode#SAGA_DEFINITION_NOT_SERVED} carries the
+ * operator-facing wording for both. It is a stable precondition failure rather than a retryable
+ * conflict: the first situation never resolves by retrying, and treating it as though it might
+ * would have clients retry a retired saga indefinitely.
  *
  * <p>Distinct from {@link SagaDefinitionNotFoundException}: that means no such saga was ever
  * registered, which is a different problem with a different fix.
@@ -40,6 +41,12 @@ public class SagaDefinitionNotServedException extends SagaRuntimeException {
         ErrorMetadata.of(
             "saga_name", Objects.requireNonNull(sagaName, "sagaName must not be null")));
     this.sagaName = sagaName;
+  }
+
+  /** Reconstructs the exception from a wire-received metadata map. */
+  static SagaDefinitionNotServedException fromWire(Map<String, String> metadata) {
+    return new SagaDefinitionNotServedException(
+        Objects.requireNonNull(metadata.get("saga_name"), "sagaName must not be null"));
   }
 
   public String getSagaName() {

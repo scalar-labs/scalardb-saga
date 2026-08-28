@@ -1511,15 +1511,15 @@ public final class ScalarDbSagaStore implements SagaStore {
    * <p>The lookup picks the greatest {@code registered_at}, and the value comes from whichever
    * replica happens to serve the registration. Wall clocks across replicas disagree — by seconds,
    * routinely — so a replica running behind could register a NEWER version with an OLDER stamp and
-   * lose the selection race to the version it replaces. For a retirement that is the difference
-   * between a saga being retired and silently continuing to accept starts.
+   * lose the selection race to the version it replaces, leaving the version it was meant to replace
+   * still serving.
    *
    * <p>The scan runs inside the caller's transaction, so two replicas registering different
    * versions of the same saga at once read overlapping rows and the transaction layer has what it
-   * needs to make one of them lose. How far that goes is the store's to decide — whether a scan
-   * carries phantom protection is a property of the transaction implementation, and nothing here
-   * tests it. What is tested, and what the skew this method exists for actually needs, is the
-   * single-writer case: one replica's clock behind the latest row still stamps after it.
+   * needs to make one of them lose. How far that goes is the store's to decide: whether a scan
+   * carries phantom protection is a property of the transaction implementation, not of this method.
+   * What this method guarantees on its own is the single-writer case — a clock behind the latest
+   * row still stamps after it.
    */
   private Instant monotonicStamp(DistributedTransaction tx, String name) throws Exception {
     // Truncated to what the column stores. TIMESTAMPTZ does not keep sub-millisecond precision, so

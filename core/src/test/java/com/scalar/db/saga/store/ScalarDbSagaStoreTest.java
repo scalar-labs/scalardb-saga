@@ -273,8 +273,8 @@ class ScalarDbSagaStoreTest {
       throws Exception {
     // The column does not keep sub-millisecond precision. A clock a fraction of a millisecond past
     // the latest row looks strictly later, but persists as the SAME millisecond and ties it —
-    // leaving the latest-version scan free to pick either row, which for a retirement means the
-    // saga quietly stays startable.
+    // leaving the latest-version scan free to pick either row, so an upgrade can silently not
+    // take and the version it replaced keeps serving.
     // Arrange
     Instant existingLatest = Instant.parse("2026-08-26T12:00:00.123Z");
     Instant aFractionLater = existingLatest.plusNanos(500_000);
