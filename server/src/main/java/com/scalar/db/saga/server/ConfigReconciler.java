@@ -90,9 +90,10 @@ final class ConfigReconciler {
   // walking the step and CallSpec graph of every definition, every pass. Anything that copies a
   // cached definition on the way out would keep the cache and lose that.
   private final Map<String, CachedParse> definitionParseCache = new HashMap<>();
-  // Definitions whose files vanished while their registered version stays startable in the store,
-  // keyed by name → the services they reference. Deleting a file retires nothing, so these
-  // references outlive the file and must still be honored when a later pass removes a service.
+  // Definitions whose files are gone, keyed by name → the services they reference. Removing the
+  // file stops new starts, but the registration outlives it and so do the sagas still running
+  // under it; those resolve their services on every call, so these references must still be
+  // honored when a later pass removes a service.
   private final Map<String, Set<String>> vanishedDefinitionServices = new HashMap<>();
   private @Nullable String lastFailureSignature;
 
@@ -290,8 +291,8 @@ final class ConfigReconciler {
               status.rejection());
     }
 
-    // 3. APPLY definitions, advancing the applied entry per definition so a mid-apply failure
-    // retries only what remains.
+    // 4. APPLY definitions, advancing the applied entry per definition so a mid-apply failure
+    // retries only what remains, then publish what ended up served.
     List<String> definitionChanges = new ArrayList<>();
     try {
       registerChangedDefinitions(candidateDefinitions, definitionChanges, candidateSha);
@@ -301,13 +302,15 @@ final class ConfigReconciler {
       // as though the pass changed nothing.
       logAppliedIfChanged(serviceChanges, definitionChanges);
       throw e;
+    } finally {
+      // On both paths, because a registration failure does not abandon the ones that succeeded: a
+      // definition can be registered, endpointed and audited as applied by a pass that then
+      // rejects. Publishing only on success would leave that saga refused as unserved until some
+      // later pass concludes — which never comes if the failure is permanent. appliedDefinitions
+      // is already correct here either way: it gains a name only when that registration committed,
+      // and the withdrawal sweep runs before the throw.
+      servedDefinitions.accept(Set.copyOf(appliedDefinitions.keySet()));
     }
-
-    // 4. PUBLISH the full served set. The store keeps every definition ever registered, so what is
-    // startable has to be said separately, and this set is the saying of it. Step 2 already
-    // withdrew everything this pass drops; what this adds is the definitions registered since,
-    // which could not be offered before they existed.
-    servedDefinitions.accept(Set.copyOf(appliedDefinitions.keySet()));
 
     // 5. Status + audit. The INFO apply line is the audit record: names and versions only, never
     // values. A pass that found nothing to change keeps the previous applied timestamp: it
@@ -839,16 +842,19 @@ final class ConfigReconciler {
   }
 
   /**
-   * Warns when a definition's file is gone while its registered version stays startable.
+   * Records what a definition referenced before its file went, and notes the retirement.
+   *
+   * <p>Removing the file is how a saga is retired, so this is an ordinary operator action rather
+   * than a hazard, and it is logged at INFO: nothing else in the pass reports it, because a pure
+   * deletion registers nothing and swaps nothing. What survives the file is the registration, and
+   * with it the sagas still running under it — which is why the services it named are remembered
+   * here for {@link #warnOnRemovedServicesStillReferenced}.
    *
    * <p>Best effort by construction, and worth knowing exactly how: the applied set is rebuilt from
    * the directory at every boot, so only a process that observes both the definition and its
    * deletion can notice one. A replica that starts after the file was already deleted sees a
-   * directory that simply never contained it, and never warns. Hot reload is what makes this the
-   * normal case rather than the exception — a config-only change no longer restarts anything — but
-   * a rolling restart between the two edits still silences the warning, and does so per replica.
-   * The retirement marker that makes deletion mean something replaces this mechanism rather than
-   * patching it.
+   * directory that simply never contained it, and remembers nothing. A rolling restart between the
+   * two edits therefore loses the reference, per replica.
    */
   private void warnOnVanishedDefinitions(Map<String, CandidateDefinition> candidateDefinitions) {
     // A file that came back is a candidate again, and validation covers it from here.
@@ -860,37 +866,37 @@ final class ConfigReconciler {
         // version stays startable, so removing one of its services later would break starts of it
         // with nothing left to notice.
         vanishedDefinitionServices.put(name, serviceNamesOf(entry.getValue().definition()));
-        // Deleting a file retires nothing: the store's latest version keeps serving starts on
-        // every replica. Delete-without-disable silently recreates the dangling-service hazard
-        // validation exists to prevent, so it is the one flow that earns a loud warning.
-        logger.warn(
-            "Definition file for saga '{}' vanished from definitions_path, but the saga remains"
-                + " registered in the store and startable. Deleting a file retires nothing;"
-                + " disable the saga first, then delete its file.",
+        // The audit record for a retirement. A pure deletion registers nothing and swaps nothing,
+        // so without this the pass that takes a saga out of service says nothing at all.
+        logger.info(
+            "Saga '{}' is no longer served by this replica: its definition file is gone from"
+                + " definitions_path. The registered version stays in the store, so sagas already"
+                + " running under it finish normally.",
             name);
       }
     }
   }
 
   /**
-   * Warns when a service about to be removed is still referenced by a definition whose file is gone
-   * but whose registered version remains startable. Deleting a definition file retires nothing, so
-   * this is the one flow that can strand a registered saga with nothing rejecting the change: the
-   * candidate cross-check only covers definitions that still have files.
+   * Warns when a service about to be removed is still referenced by a definition whose file is
+   * gone. New starts of that saga are already refused, so the hazard is not them: it is the sagas
+   * still running under it, whose declarative steps resolve the service on every call, compensation
+   * and recovery included. The candidate cross-check cannot see this, because it only covers
+   * definitions that still have files.
    *
-   * <p>It warns rather than rejects deliberately — refusing would leave no way to retire a service
-   * at all until a retirement marker exists — and the runbook's rule stays disable-then-delete.
-   * Once a definition can be marked retired, a retired one needs no warning here.
+   * <p>It warns rather than rejects deliberately: retiring a saga and dropping the service only it
+   * used is one change and has to be able to converge as one. Whether anything is still in flight
+   * is a question about saga state, which this pass does not read.
    */
   private void warnOnRemovedServicesStillReferenced(Map<String, ServiceConfig> candidateServices) {
     for (Map.Entry<String, Set<String>> entry : vanishedDefinitionServices.entrySet()) {
       for (String service : entry.getValue()) {
         if (!candidateServices.containsKey(service) && appliedServices.containsKey(service)) {
           logger.warn(
-              "Service '{}' is being removed, but saga '{}' still references it: that saga's"
-                  + " definition file is gone while its registered version remains startable, so"
-                  + " new starts of it will fail to resolve the service. Retire the saga before"
-                  + " deleting the services it names.",
+              "Service '{}' is being removed, but saga '{}' still references it: that saga is no"
+                  + " longer served here, yet any of its sagas still running resolve the service on"
+                  + " every call, compensation included. Those will fail mid-way. Let them drain"
+                  + " before deleting the services the saga names.",
               service,
               entry.getKey());
         }

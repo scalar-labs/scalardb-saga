@@ -879,9 +879,10 @@ class ConfigReconcilerTest {
     }
 
     @Test
-    void run_registrationFailsWhileAnotherDefinitionVanished_warnsOnlyOnce() throws IOException {
+    void run_registrationFailsWhileAnotherDefinitionVanished_recordsItOnlyOnce()
+        throws IOException {
       // The vanished-name cleanup used to sit after the registration loop, so an unrelated
-      // failure skipped it and the "deleting retires nothing" warning re-fired every pass.
+      // failure skipped it and the retirement was re-reported every pass.
       // Arrange
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("a.json", "saga-a", "1.0", "account");
@@ -904,16 +905,16 @@ class ConfigReconcilerTest {
         long afterFirst =
             logs.events().stream()
                 .filter(e -> e.getFormattedMessage().contains("saga-a"))
-                .filter(e -> e.getFormattedMessage().contains("retires nothing"))
+                .filter(e -> e.getFormattedMessage().contains("no longer served"))
                 .count();
         reconciler.run();
         long afterSecond =
             logs.events().stream()
                 .filter(e -> e.getFormattedMessage().contains("saga-a"))
-                .filter(e -> e.getFormattedMessage().contains("retires nothing"))
+                .filter(e -> e.getFormattedMessage().contains("no longer served"))
                 .count();
 
-        // Assert — warned once, not once per pass, despite the ongoing unrelated failure
+        // Assert — recorded once, not once per pass, despite the ongoing unrelated failure
         assertThat(afterFirst).isEqualTo(1);
         assertThat(afterSecond).isEqualTo(1);
       }
@@ -1568,7 +1569,10 @@ class ConfigReconcilerTest {
     }
 
     @Test
-    void run_vanishedDefinitionFile_warnsThatDeletionRetiresNothing() throws IOException {
+    void run_vanishedDefinitionFile_recordsTheRetirementWithoutWarning() throws IOException {
+      // Deleting a definition file is how a saga is retired, so it is an ordinary operator action:
+      // it earns an audit line, not a warning. A pure deletion registers nothing and swaps
+      // nothing, so without that line the pass that takes a saga out of service says nothing.
       // Arrange — two definitions so the empty-transition guard does not fire; one file vanishes
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("a.json", "saga-a", "1.0", "account");
@@ -1577,7 +1581,7 @@ class ConfigReconcilerTest {
       reconciler.run();
       Files.delete(definitionsDir.resolve("b.json"));
 
-      // Act & Assert — a warning, not a rejection: the saga remains registered and startable
+      // Act & Assert
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
         boolean applied = reconciler.run();
 
@@ -1585,10 +1589,40 @@ class ConfigReconcilerTest {
         assertThat(logs.events())
             .anySatisfy(
                 event -> {
-                  assertThat(event.getLevel()).isEqualTo(Level.WARN);
-                  assertThat(event.getFormattedMessage()).contains("saga-b");
-                });
+                  assertThat(event.getLevel()).isEqualTo(Level.INFO);
+                  assertThat(event.getFormattedMessage())
+                      .contains("saga-b")
+                      .contains("no longer served");
+                })
+            .noneSatisfy(event -> assertThat(event.getLevel()).isEqualTo(Level.WARN));
       }
+    }
+
+    @Test
+    void run_oneRegistrationFailsPermanently_stillServesTheOnesThatRegistered() throws IOException {
+      // A registration failure does not abandon the ones that succeeded, so a pass can commit a
+      // registration and still reject. Publishing only on success would leave that saga refused as
+      // unserved until a later pass concludes — which never comes while the failure is permanent,
+      // even though the audit line says it applied.
+      // Arrange — 'good' registers cleanly; 'bad' always fails the way a version-content conflict
+      // does, which needs an operator and so repeats every pass
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("good.json", "good-saga", "1.0", "account");
+      writeDefinition("bad.json", "bad-saga", "1.0", "account");
+      definitionRegistrar =
+          definition -> {
+            if (definition.getName().equals("bad-saga")) {
+              throw SagaDefinitionException.versionContentConflict("bad-saga", "1.0");
+            }
+            registered.add(definition);
+          };
+
+      // Act
+      boolean applied = reconciler().run();
+
+      // Assert — the pass rejects, but the saga that did register is served
+      assertThat(applied).isFalse();
+      assertThat(served).containsExactly("good-saga");
     }
   }
 }
