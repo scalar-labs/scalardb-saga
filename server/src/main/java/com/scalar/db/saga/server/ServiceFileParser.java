@@ -59,8 +59,11 @@ final class ServiceFileParser {
    */
   private static final Pattern SERVICE_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9._-]{1,128}");
 
-  // RFC 7230's token rule, which the JDK's HttpRequest.Builder.header() applies at request
-  // time. Checking it here turns a per-request permanent failure into a rejected pass.
+  /**
+   * The shape a header name must have: RFC 7230's token rule, which {@code
+   * HttpRequest.Builder.header()} applies at request time. Checking it here turns a per-request
+   * permanent failure into a rejected pass.
+   */
   private static final Pattern HEADER_NAME_PATTERN =
       Pattern.compile("[!#$%&'*+\\-.^_`|~0-9A-Za-z]+");
 
@@ -386,8 +389,7 @@ final class ServiceFileParser {
                     + " name, so every call to service '"
                     + name
                     + "' would fail permanently and compensate. Use letters, digits, or"
-                    + " !#$%&'*+-.^_`|~ only; a space, colon, comma, or parenthesis in the name is"
-                    + " the usual cause, from a whole header line pasted onto the key.");
+                    + " !#$%&'*+-.^_`|~ only.");
           }
           if (RESERVED_HEADERS.contains(header)) {
             throw new IllegalArgumentException(
@@ -498,10 +500,10 @@ final class ServiceFileParser {
   }
 
   /**
-   * Rejects an {@code allowed_hosts} entry that is not shaped like a host, mirroring exactly what
-   * the engine's outbound policy enforces: {@code OutboundHttpPolicy} compares each entry against
-   * {@code URI.getHost()}, so an entry that URI parsing does not hand back verbatim as the host
-   * could never match any request. Round-tripping through a URI is what makes this the same
+   * Rejects an {@code allowed_hosts} entry that is not shaped like a host, so what survives is what
+   * the engine's outbound policy could match: {@code OutboundHttpPolicy} compares each entry
+   * against {@code URI.getHost()}, so an entry that URI parsing does not hand back verbatim as the
+   * host could never match any request. Round-tripping through a URI is what makes this the same
    * function the policy uses rather than an imitation of it, which a rule-by-rule check drifts
    * from: a port suffix, a path, a user-info prefix and an embedded space all fail the comparison,
    * an IPv6 literal keeps its brackets and passes, and an underscored name is refused here because

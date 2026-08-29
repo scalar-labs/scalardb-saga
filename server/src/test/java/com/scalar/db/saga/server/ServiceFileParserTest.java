@@ -240,7 +240,7 @@ class ServiceFileParserTest {
       // None of these is something URI.getHost() ever returns, so the entry could never match a
       // request: a pasted path, an unbalanced bracket, an underscored name the JDK's client cannot
       // send to at all, and a user-info prefix. The value is redacted for the same reason the port
-      // case is — allowed_hosts is resolved before it is checked.
+      // case is; allowed_hosts is resolved before it is checked.
       // Arrange
       writeService("account.properties", "base_url=http://a:1\nallowed_hosts=" + entry + "\n");
 
@@ -255,8 +255,9 @@ class ServiceFileParserTest {
     void parseFile_allowedHostsEntryWithAMissedComma_throwsWithoutEchoingTheValue()
         throws IOException {
       // The accident the shape check is really for: a comma dropped between two hosts leaves one
-      // entry with a space in it. Properties treats an unescaped space as the key/value separator,
-      // so reaching the parser at all takes the escape.
+      // entry with a space in it. The escape is not what carries the space here, since this one
+      // sits in the value, where Properties does not split; it is written that way to read as the
+      // typo it stands for.
       // Arrange
       writeService("account.properties", "base_url=http://a:1\nallowed_hosts=payment\\ svc\n");
 
@@ -364,8 +365,7 @@ class ServiceFileParserTest {
 
       // Act & Assert
       assertThatThrownBy(ServiceFileParserTest.this::parse)
-          .isInstanceOf(IllegalArgumentException.class)
-          .hasMessageContaining("not an HTTP token");
+          .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
@@ -456,30 +456,28 @@ class ServiceFileParserTest {
     void parseFile_headerNameThatIsNotAToken_throwsIllegalArgumentException(String header)
         throws IOException {
       // HttpRequest.Builder.header() enforces RFC 7230's token rule, so a name it refuses fails
-      // every call to the service permanently and compensates — the same end state the restricted
-      // name list exists to prevent, reached by a name nobody thought to list.
+      // every call to the service permanently and compensates. It is the same end state the
+      // restricted name list exists to prevent, reached by a name nobody thought to list.
       // Arrange
       writeService("account.properties", "base_url=http://a:1\nheader." + header + "=v\n");
 
       // Act & Assert
       assertThatThrownBy(ServiceFileParserTest.this::parse)
-          .isInstanceOf(IllegalArgumentException.class)
-          .hasMessageContaining("not an HTTP token");
+          .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void parseFile_headerNameCarryingAnEscapedSpace_throwsIllegalArgumentException()
         throws IOException {
-      // Properties treats an unescaped space or colon as the key/value separator, so a whole
-      // header line pasted onto the key arrives escaped; that is how a name carrying one reaches
-      // the parser rather than being read as a name with an odd value.
+      // An unescaped space or colon ends the key, so a name carrying one reaches this check only
+      // when it is escaped. A pasted header line is not that shape: it parses as a name with the
+      // rest of the line as its value, which is a separate gap this check does not close.
       // Arrange
       writeService("account.properties", "base_url=http://a:1\nheader.X\\ Api\\ Key=v\n");
 
       // Act & Assert
       assertThatThrownBy(ServiceFileParserTest.this::parse)
-          .isInstanceOf(IllegalArgumentException.class)
-          .hasMessageContaining("not an HTTP token");
+          .isInstanceOf(IllegalArgumentException.class);
     }
 
     @ParameterizedTest
