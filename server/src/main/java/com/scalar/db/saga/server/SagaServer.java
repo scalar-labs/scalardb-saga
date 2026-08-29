@@ -653,7 +653,8 @@ public final class SagaServer implements AutoCloseable {
     }
     // Reload stops first, before anything else winds down: a pass that ran during the drain could
     // swap the endpoint set out from under sagas that are still finishing their current step, and
-    // stopping it here also guarantees no registration is in flight when the store closes.
+    // stopping it here keeps a registration from racing the store's close. That second part is
+    // best effort; stop() waits only until the deadline below, and warns if a pass outlives it.
     if (reloadManager != null) {
       reloadManager.stop(
           System.nanoTime()
