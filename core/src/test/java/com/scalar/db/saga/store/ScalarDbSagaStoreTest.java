@@ -1594,6 +1594,55 @@ class ScalarDbSagaStoreTest {
     verify(tx, times(2)).scan(any(Scan.class));
   }
 
+  /**
+   * The scan limit is no longer settable from configuration, so this builder is its only remaining
+   * caller and the only way to vary the page size. Pinning that the configured value reaches every
+   * status scan is what keeps that seam honest — without it the setter would have no consumer at
+   * all beyond a getter round-trip.
+   */
+  @Test
+  void findRecoverable_customScanLimitGiven_capsEveryStatusScanAtThatLimit() throws Exception {
+    // Arrange
+    ScalarDbSagaStore limited =
+        new ScalarDbSagaStore(
+            txManager,
+            objectMapper,
+            schema,
+            ScalarDbSagaStoreConfig.builder().recoveryScanLimit(7).build(),
+            () -> OWN_APPEND_ID);
+    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    ArgumentCaptor<Scan> scans = ArgumentCaptor.forClass(Scan.class);
+
+    // Act
+    limited.findRecoverable(Instant.now(), null);
+
+    // Assert — one scan per recoverable status, each carrying the configured cap
+    verify(tx, times(2)).scan(scans.capture());
+    assertThat(scans.getAllValues())
+        .isNotEmpty()
+        .allSatisfy(s -> assertThat(s.getLimit()).isEqualTo(7));
+  }
+
+  /**
+   * The recovery manager compares its own budget against this at startup; neither side can make
+   * that comparison alone. A store reporting the wrong number would silence a real warning.
+   */
+  @Test
+  void recoveryPageSize_returnsTheConfiguredScanLimit() {
+    // Arrange
+    ScalarDbSagaStore limited =
+        new ScalarDbSagaStore(
+            txManager,
+            objectMapper,
+            schema,
+            ScalarDbSagaStoreConfig.builder().recoveryScanLimit(7).build(),
+            () -> OWN_APPEND_ID);
+
+    // Act & Assert
+    assertThat(limited.recoveryPageSize()).isEqualTo(7);
+    assertThat(store.recoveryPageSize()).isEqualTo(100);
+  }
+
   @Test
   void findRecoverable_storageFailureGiven_throwsSagaPersistenceException() throws Exception {
     // Arrange

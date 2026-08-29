@@ -36,6 +36,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ScheduledExecutorService;
@@ -115,6 +116,99 @@ class SagaRecoveryManagerTest {
   }
 
   // =========================================================================
+  // start() — budget vs page-size floor
+  // =========================================================================
+
+  /**
+   * The budget floor is documented for operators in three files but was enforced nowhere. Neither
+   * config can check it alone — only the store knows its page size, only the engine knows the
+   * budget — so the check lives at startup, where both are in hand. It warns rather than rejects:
+   * every value below the floor was legal before, and failing startup on one would turn an upgrade
+   * into an outage.
+   */
+  @Nested
+  class StartupBudgetWarning {
+
+    @Test
+    void start_budgetAtOrBelowOneStatusScan_warnsTrailingStatusIsNeverRecovered() {
+      // Arrange
+      when(store.recoveryPageSize()).thenReturn(100);
+      ListAppender<ILoggingEvent> appender = attachLogCapture();
+      try {
+        // Act
+        managerWithBudget(100).start();
+
+        // Assert
+        assertThat(appender.list)
+            .filteredOn(e -> e.getLevel() == Level.WARN)
+            .extracting(ILoggingEvent::getFormattedMessage)
+            .anySatisfy(m -> assertThat(m).contains("never recovered"));
+      } finally {
+        recoveryLogger().detachAppender(appender);
+      }
+    }
+
+    @Test
+    void start_budgetBelowAFullPage_warnsTrailingStatusIsThrottled() {
+      // Arrange — above one status scan, below the two-status page
+      when(store.recoveryPageSize()).thenReturn(100);
+      ListAppender<ILoggingEvent> appender = attachLogCapture();
+      try {
+        // Act
+        managerWithBudget(150).start();
+
+        // Assert
+        assertThat(appender.list)
+            .filteredOn(e -> e.getLevel() == Level.WARN)
+            .extracting(ILoggingEvent::getFormattedMessage)
+            .anySatisfy(m -> assertThat(m).contains("reduced rate"));
+      } finally {
+        recoveryLogger().detachAppender(appender);
+      }
+    }
+
+    @Test
+    void start_budgetCoversAFullPage_warnsNothing() {
+      // Arrange
+      when(store.recoveryPageSize()).thenReturn(100);
+      ListAppender<ILoggingEvent> appender = attachLogCapture();
+      try {
+        // Act
+        managerWithBudget(200).start();
+
+        // Assert
+        assertThat(appender.list).filteredOn(e -> e.getLevel() == Level.WARN).isEmpty();
+      } finally {
+        recoveryLogger().detachAppender(appender);
+      }
+    }
+
+    /** A store that does not page recovery scans reports 0, and the check is skipped entirely. */
+    @Test
+    void start_storeDoesNotPage_warnsNothing() {
+      // Arrange
+      when(store.recoveryPageSize()).thenReturn(0);
+      ListAppender<ILoggingEvent> appender = attachLogCapture();
+      try {
+        // Act
+        managerWithBudget(1).start();
+
+        // Assert
+        assertThat(appender.list).filteredOn(e -> e.getLevel() == Level.WARN).isEmpty();
+      } finally {
+        recoveryLogger().detachAppender(appender);
+      }
+    }
+
+    private SagaRecoveryManager managerWithBudget(int budget) {
+      RecoveryConfig config =
+          new RecoveryConfig(
+              60_000, 30, GRACE_PERIOD, budget, 10, Clock.fixed(NOW, ZoneOffset.UTC));
+      return new SagaRecoveryManager(store, engine, registry, OWNER_ID, config, scheduler);
+    }
+  }
+
+  // =========================================================================
   // recover() — cursor pagination
   // =========================================================================
 
@@ -189,8 +283,8 @@ class SagaRecoveryManagerTest {
     }
 
     @Test
-    void recover_batchLimitReached_stopsEarly() {
-      // Arrange — batch size of 2
+    void recover_sweepBudgetReached_stopsEarly() {
+      // Arrange — sweep budget of 2
       RecoveryConfig smallBatch =
           new RecoveryConfig(60_000, 30, GRACE_PERIOD, 2, 10, Clock.fixed(NOW, ZoneOffset.UTC));
       SagaRecoveryManager smallManager =
@@ -220,7 +314,7 @@ class SagaRecoveryManagerTest {
       ExecutionContext ctx1 = mock(ExecutionContext.class);
       ExecutionContext ctx2 = mock(ExecutionContext.class);
 
-      // Page 1 has 2 sagas (hits batch limit), page 2 has 1 more
+      // Page 1 has 2 sagas (hits the sweep budget), page 2 has 1 more
       when(store.findRecoverable(any(), any()))
           .thenReturn(new Recoverables(List.of(saga1, saga2), cursor));
       when(store.claimForRecovery(saga1, OWNER_ID)).thenReturn(Optional.of(saga1));
@@ -236,11 +330,11 @@ class SagaRecoveryManagerTest {
       // Act
       smallManager.recover();
 
-      // Assert — processed 2, hit batch limit, did not scan page 2
+      // Assert — processed 2, hit the sweep budget, did not scan page 2
       verify(engine).recover(eq(new RecoveryAction.Resume(0)), eq(def), eq(ctx1));
       verify(engine).recover(eq(new RecoveryAction.Resume(0)), eq(def), eq(ctx2));
       verify(store, never()).claimForRecovery(eq(saga3), any());
-      // findRecoverable called only once — batch limit stopped before second page
+      // findRecoverable called only once — the sweep budget stopped it before the second page
       verify(store).findRecoverable(any(), any());
     }
 
@@ -1287,6 +1381,76 @@ class SagaRecoveryManagerTest {
   class ScatteredSweepBudget {
 
     /**
+     * A page holds every recoverable status one after another, RUNNING before COMPENSATING, and the
+     * sweep submits at most its remaining budget before advancing the bucket. A budget no larger
+     * than one status scan therefore never reaches COMPENSATING — the failure the documented budget
+     * floor exists to prevent, and the one nothing verified before this test.
+     */
+    @Test
+    void recover_budgetCoversOnlyTheLeadingStatus_neverReachesCompensating() {
+      // Arrange — a page of 2 RUNNING then 2 COMPENSATING, against a budget of 2
+      SagaRecoveryManager manager = managerWithMaxRecoveriesPerSweep(2);
+      SagaStateSnapshot running1 = snapshotWithId("run-1", SagaStatus.RUNNING);
+      SagaStateSnapshot running2 = snapshotWithId("run-2", SagaStatus.RUNNING);
+      SagaStateSnapshot comp1 = snapshotWithId("comp-1", SagaStatus.COMPENSATING);
+      SagaStateSnapshot comp2 = snapshotWithId("comp-2", SagaStatus.COMPENSATING);
+      when(store.findRecoverable(any(), any()))
+          .thenReturn(new Recoverables(List.of(running1, running2, comp1, comp2), null));
+      when(store.claimForRecovery(any(), eq(OWNER_ID))).thenReturn(Optional.empty());
+
+      // Act
+      manager.recover();
+
+      // Assert — the budget is spent on the leading status; the trailing one is never claimed
+      verify(store).claimForRecovery(eq(running1), eq(OWNER_ID));
+      verify(store).claimForRecovery(eq(running2), eq(OWNER_ID));
+      verify(store, never()).claimForRecovery(eq(comp1), any());
+      verify(store, never()).claimForRecovery(eq(comp2), any());
+    }
+
+    /** With a budget covering the whole page, the trailing status is reached. */
+    @Test
+    void recover_budgetCoversTheWholePage_reachesCompensating() {
+      // Arrange — same page, budget of 4
+      SagaRecoveryManager manager = managerWithMaxRecoveriesPerSweep(4);
+      SagaStateSnapshot running1 = snapshotWithId("run-1", SagaStatus.RUNNING);
+      SagaStateSnapshot running2 = snapshotWithId("run-2", SagaStatus.RUNNING);
+      SagaStateSnapshot comp1 = snapshotWithId("comp-1", SagaStatus.COMPENSATING);
+      SagaStateSnapshot comp2 = snapshotWithId("comp-2", SagaStatus.COMPENSATING);
+      when(store.findRecoverable(any(), any()))
+          .thenReturn(new Recoverables(List.of(running1, running2, comp1, comp2), null));
+      when(store.claimForRecovery(any(), eq(OWNER_ID))).thenReturn(Optional.empty());
+
+      // Act
+      manager.recover();
+
+      // Assert
+      verify(store).claimForRecovery(eq(comp1), eq(OWNER_ID));
+      verify(store).claimForRecovery(eq(comp2), eq(OWNER_ID));
+    }
+
+    /**
+     * The documented budget floor is {@code pageSize x recoverableStatuses}. The status count is
+     * derived at runtime from {@link SagaStatus#isRecoverable()}, so marking a third status
+     * recoverable would silently move that floor and falsify the operator documentation in three
+     * files. This pins the multiplier.
+     */
+    @Test
+    void isRecoverable_acrossAllStatuses_matchesTheDocumentedFloorMultiplier() {
+      // Act
+      List<SagaStatus> recoverable =
+          Arrays.stream(SagaStatus.values()).filter(SagaStatus::isRecoverable).toList();
+
+      // Assert — the docs' "200" is 100 x this count; RUNNING must lead so COMPENSATING trails
+      assertThat(recoverable).containsExactly(SagaStatus.RUNNING, SagaStatus.COMPENSATING);
+    }
+
+    private SagaStateSnapshot snapshotWithId(String sagaId, SagaStatus status) {
+      return new SagaStateSnapshot(
+          sagaId, SAGA_NAME, status, OWNER_ID, DEF_VERSION, NOW.minusSeconds(300), NOW);
+    }
+
+    /**
      * A manager whose per-sweep budget is {@code maxRecoveriesPerSweep}, on the standard fixed
      * clock.
      */
@@ -1319,7 +1483,7 @@ class SagaRecoveryManagerTest {
 
     @Test
     void recover_claimLost_budgetNotConsumedAndScanContinues() {
-      // Arrange — batch size 1: the lost race on page 1 must not spend the budget, so the sweep
+      // Arrange — sweep budget 1: the lost race on page 1 must not spend the budget, so the sweep
       // reaches page 2 and recovers its saga. The attempts-counted budget stopped after page 1.
       SagaRecoveryManager smallManager = managerWithMaxRecoveriesPerSweep(1);
 
@@ -1342,7 +1506,7 @@ class SagaRecoveryManagerTest {
 
     @Test
     void recover_driveFailsAfterClaim_budgetConsumed() {
-      // Arrange — batch size 1: the claim committed, so the failed drive still spends the budget
+      // Arrange — sweep budget 1: the claim committed, so the failed drive still spends the budget
       // and the sweep must NOT continue to the next page (that would be a claim spree).
       SagaRecoveryManager smallManager = managerWithMaxRecoveriesPerSweep(1);
 
@@ -1380,7 +1544,7 @@ class SagaRecoveryManagerTest {
 
     @Test
     void recover_budgetStop_nextPassResumesAtSameCursor() {
-      // Arrange — batch size 1: pass 1 stops on budget holding the next cursor; pass 2 must
+      // Arrange — sweep budget 1: pass 1 stops on budget holding the next cursor; pass 2 must
       // resume there instead of restarting at the permutation's first bucket.
       SagaRecoveryManager smallManager = managerWithMaxRecoveriesPerSweep(1);
 
@@ -1405,7 +1569,7 @@ class SagaRecoveryManagerTest {
 
     @Test
     void recover_claimThrows_budgetConsumedConservatively() {
-      // Arrange — batch size 1: a claim that throws may have committed without confirmation, so
+      // Arrange — sweep budget 1: a claim that throws may have committed without confirmation, so
       // it must spend the budget; the sweep must NOT continue claiming across the ring.
       SagaRecoveryManager smallManager = managerWithMaxRecoveriesPerSweep(1);
 
@@ -1619,7 +1783,7 @@ class SagaRecoveryManagerTest {
 
     @Test
     void recover_parkedRaceLost_budgetNotConsumedAndScanContinues() {
-      // Arrange — batch size 1: the parked saga on page 1 was already resolved by a callback
+      // Arrange — sweep budget 1: the parked saga on page 1 was already resolved by a callback
       // (lost race), so the parked sweep must continue to page 2.
       SagaRecoveryManager smallManager = managerWithMaxRecoveriesPerSweep(1);
 

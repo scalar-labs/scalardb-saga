@@ -19,6 +19,7 @@ import com.scalar.db.saga.store.SweepScatter;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -57,7 +58,7 @@ import org.slf4j.LoggerFactory;
  * otherwise do each other's work: the claim protocol guarantees one winner per saga, but losers
  * waste aborted claim transactions. Three coordination-free mechanisms, all derived from the
  * replica's {@code ownerId}, keep replicas apart: each replica sweeps buckets in its own scattered
- * permutation ({@link SagaStore#initialSweepCursor}); the batch budget forgives lost races (only
+ * permutation ({@link SagaStore#initialSweepCursor}); the sweep budget forgives lost races (only
  * committed work and failures consume it), so contention never exhausts a pass; and the periodic
  * schedule is de-phased by a deterministic per-replica offset (the startup pass stays immediate).
  * Residual collisions are correctness-safe and visible in the per-pass summary log.
@@ -147,9 +148,50 @@ class SagaRecoveryManager {
         ownerId,
         offsetSeconds,
         intervalSeconds);
+    warnIfBudgetTruncatesAPage();
     scheduler.schedule(this::recoverSafely, 0, TimeUnit.SECONDS);
     scheduler.scheduleWithFixedDelay(
         this::recoverSafely, intervalSeconds + offsetSeconds, intervalSeconds, TimeUnit.SECONDS);
+  }
+
+  /**
+   * Warns once at startup when the sweep budget cannot cover one bucket page.
+   *
+   * <p>A page holds every recoverable status one after another and the sweep submits at most its
+   * remaining budget before advancing the bucket, so the truncation always falls on the trailing
+   * status. Below one page's worth of budget that status is served at a reduced rate; at or below a
+   * single status scan it is never reached at all. Neither is rejected: both were legal before this
+   * check existed, and failing startup on a previously valid value would turn an upgrade into an
+   * outage.
+   */
+  private void warnIfBudgetTruncatesAPage() {
+    int pageSize = store.recoveryPageSize();
+    if (pageSize <= 0) {
+      return;
+    }
+    long statuses = Arrays.stream(SagaStatus.values()).filter(SagaStatus::isRecoverable).count();
+    long fullPage = (long) pageSize * statuses;
+    int budget = config.maxRecoveriesPerSweep();
+    if (budget >= fullPage) {
+      return;
+    }
+    if (budget <= pageSize) {
+      logger.warn(
+          "Recovery budget {} is at or below the {}-row scan for a single status, so sagas in"
+              + " trailing recoverable statuses are never recovered. Raise it above {}.",
+          budget,
+          pageSize,
+          fullPage);
+    } else {
+      logger.warn(
+          "Recovery budget {} is below one full page of {} rows ({} statuses x {}), so sagas in"
+              + " trailing recoverable statuses are served at a reduced rate. Raise it above {}.",
+          budget,
+          fullPage,
+          statuses,
+          pageSize,
+          fullPage);
+    }
   }
 
   /**
@@ -196,7 +238,7 @@ class SagaRecoveryManager {
   /**
    * Outcome of one dispatched recovery task, captured at the task's commit point: the claim for a
    * stale saga, the WAITING transition for a parked one. Every outcome except {@code LOST_RACE}
-   * consumes batch budget. {@code COMMITTED*} spent the saga's availability even when the drive
+   * consumes sweep budget. {@code COMMITTED*} spent the saga's availability even when the drive
    * after the commit failed. {@code ERROR} is charged conservatively: the failed operation may have
    * committed without the store being able to confirm it (an unknown-status commit whose
    * verification read-back also failed leaves the saga claimed but undriven), and a failure means
@@ -291,7 +333,7 @@ class SagaRecoveryManager {
 
   /**
    * Single recovery pass, two sweeps in the replica's scattered bucket order: stale RUNNING and
-   * COMPENSATING sagas, and overdue parked (WAITING) sagas, each with its own batch budget so a
+   * COMPENSATING sagas, and overdue parked (WAITING) sagas, each with its own sweep budget so a
    * staleness backlog cannot starve the timeout sweep.
    *
    * <p>The pass runs in rounds. A round scans BOTH sweeps from their current cursors, submitting

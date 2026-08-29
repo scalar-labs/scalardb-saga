@@ -894,7 +894,7 @@ class SagaServerConfigTest {
   @Test
   void recoveryConfig_maxRecoveriesPerSweepAboveIntRange_throwsIllegalArgumentException() {
     // Parsed as a long and range-checked: a bare (int) cast would wrap this to a small or negative
-    // batch size instead of rejecting it.
+    // budget instead of rejecting it.
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY, "4294967296");
 

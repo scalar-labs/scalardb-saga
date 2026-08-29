@@ -854,6 +854,11 @@ public final class ScalarDbSagaStore implements SagaStore {
   }
 
   @Override
+  public int recoveryPageSize() {
+    return config.getRecoveryScanLimit();
+  }
+
+  @Override
   public Recoverables findRecoverable(Instant threshold, @Nullable ScanCursor cursor) {
     SweepStep step = nextSweepStep(cursor);
     if (step == null) {

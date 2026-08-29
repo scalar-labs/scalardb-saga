@@ -163,7 +163,7 @@ class SagaRetentionManagerTest {
     }
 
     @Test
-    void cleanup_batchLimitReached_stopsEarly() {
+    void cleanup_passBudgetReached_stopsEarly() {
       // Arrange
       RetentionConfig smallBatch =
           new RetentionConfig(RETENTION_PERIOD, 3600, 2, 10, Clock.fixed(NOW, ZoneOffset.UTC));
@@ -180,7 +180,7 @@ class SagaRetentionManagerTest {
       // Act
       smallManager.cleanup();
 
-      // Assert — purged 2, hit batch limit, did not scan COMPENSATED
+      // Assert — purged 2, hit the pass budget, did not scan COMPENSATED
       verify(store).deleteSaga("saga-001");
       verify(store).deleteSaga("saga-002");
       verify(store, never())
@@ -347,7 +347,7 @@ class SagaRetentionManagerTest {
 
     @Test
     void cleanup_lostRaceRefundsBudget_nextRoundRescansAndSpendsIt() {
-      // Arrange — batch budget 2. The first round scans two candidates but loses one to a racing
+      // Arrange — pass budget 2. The first round scans two candidates but loses one to a racing
       // replica (deleteSaga returns false), refunding its budget; the purged rows are physically
       // gone, so the second round's re-scan surfaces a fresh candidate and the refunded budget is
       // spent on it instead of being silently dropped.
