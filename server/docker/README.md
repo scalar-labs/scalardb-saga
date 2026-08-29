@@ -229,7 +229,11 @@ Operational notes, learned from how Kubernetes actually delivers files:
   service files and `server.properties` have different authors: it is the only egress bound that
   holds no matter what sequence of edits arrives. Without it, the reload rejects a service whose
   `allowed_hosts` goes from restricted to empty — which catches the edit that loses the line, but
-  not a service deleted in one interval and recreated allow-all in the next.
+  not a service deleted in one interval and recreated allow-all in the next, and not a restart. That
+  rejection compares the candidate against what the replica has already applied, and a replica that
+  is starting has applied nothing, so it accepts the set the running ones reject: a truncated file
+  sits rejected until the next rolling deploy, pod restart, or scale-out, then boots clean
+  everywhere.
 - **`max_body_bytes` is capped at 64 MiB per service**, against a 1 MiB default. The coordinator
   buffers a whole response before a step sees it and holds one per in-flight call, so this is the
   daemon's memory rather than the service's. A participant with more to hand back should write it
