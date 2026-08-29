@@ -485,7 +485,11 @@ final class ServiceFileParser {
               + " permitted under a ceiling. Declare the hosts this service may call.");
     }
     for (String host : service.allowedHosts()) {
-      if (!ceiling.contains(host)) {
+      // Compared case-insensitively because that is how the host is matched at request time:
+      // OutboundHttpPolicy lowercases both its allowlist and the request URI's host. A raw compare
+      // here would reject a service for a difference that never reaches the wire.
+      String normalized = host.toLowerCase(Locale.ROOT);
+      if (ceiling.stream().noneMatch(entry -> entry.toLowerCase(Locale.ROOT).equals(normalized))) {
         // Redacted like every other rejected value: allowed_hosts is resolved before it is
         // checked, so a secret reference pasted onto this key arrives here as its plaintext, and
         // this message is logged on every pass that rejects.
@@ -515,7 +519,7 @@ final class ServiceFileParser {
    * cannot redact a message the engine composes — so the rule is that nothing unvalidated is ever
    * handed across that boundary. The same reasoning already applies to {@code base_url}.
    */
-  private static void requireHostShape(String qualifiedKey, String host) {
+  static void requireHostShape(String qualifiedKey, String host) {
     String normalized = host.trim().toLowerCase(Locale.ROOT);
     String parsed;
     try {

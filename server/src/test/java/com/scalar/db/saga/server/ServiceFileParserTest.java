@@ -706,6 +706,18 @@ class ServiceFileParserTest {
     }
 
     @Test
+    void requireWithinCeiling_hostDifferingOnlyInCase_isAccepted() throws IOException {
+      // The runtime matches hosts case-insensitively: OutboundHttpPolicy lowercases its allowlist
+      // and the request URI's host. A ceiling that compared raw would reject a service over a
+      // difference that never reaches the wire.
+      // Arrange
+      writeService("a.properties", "base_url=http://a:1\nallowed_hosts=Account-Svc\n");
+
+      // Act & Assert
+      assertThat(parseWithCeiling("account-svc")).containsOnlyKeys("a");
+    }
+
+    @Test
     void parse_allowedHostOutsideCeiling_throwsIllegalArgumentException() throws IOException {
       writeService("a.properties", "base_url=http://a:1\nallowed_hosts=evil-svc\n");
 

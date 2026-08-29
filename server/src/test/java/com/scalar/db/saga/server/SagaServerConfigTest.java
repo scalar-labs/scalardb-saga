@@ -751,6 +751,23 @@ class SagaServerConfigTest {
   }
 
   @Test
+  void load_ceilingEntryWithAPort_throwsIllegalArgumentException(@TempDir Path dir) {
+    // A ceiling is compared against entries that are shaped like hosts, so one that cannot be a
+    // host matches nothing and rejects every service in the fleet — with a message naming the
+    // service files rather than the property that is actually wrong. Catch it where it is written.
+    // Arrange
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.EGRESS_ALLOWED_HOSTS_CEILING_KEY, "account-svc:8080");
+
+    // Act & Assert
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.EGRESS_ALLOWED_HOSTS_CEILING_KEY)
+        .hasMessageNotContaining("account-svc:8080");
+  }
+
+  @Test
   void load_negativeReloadInterval_throwsIllegalArgumentException() {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.RELOAD_INTERVAL_SECONDS_KEY, "-1");
