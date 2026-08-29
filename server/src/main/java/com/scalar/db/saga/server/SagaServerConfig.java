@@ -988,6 +988,22 @@ public final class SagaServerConfig {
   }
 
   /**
+   * Parses {@code egress.allowed_hosts_ceiling}, holding every entry to the same host shape a
+   * service file's {@code allowed_hosts} must have.
+   *
+   * <p>An unshaped ceiling entry is the worst of the config typos this module can take: the ceiling
+   * is compared against entries that ARE shaped like hosts, so one that never can be matches
+   * nothing, and every service in the fleet is rejected as exceeding it — pointing the operator at
+   * the service files rather than at the property they mistyped.
+   */
+  private static List<String> parseCeiling(String ceiling) {
+    List<String> entries = parseCommaSeparated(EGRESS_ALLOWED_HOSTS_CEILING_KEY, ceiling);
+    entries.forEach(
+        host -> ServiceFileParser.requireHostShape(EGRESS_ALLOWED_HOSTS_CEILING_KEY, host));
+    return entries;
+  }
+
+  /**
    * Parses the services-directory settings into a {@link ReloadConfig}: where the service files
    * live, how often they are re-read, where their secret references may resolve, and the optional
    * egress ceiling. The files themselves are read by the reconciler, not here.
@@ -1009,9 +1025,7 @@ public final class SagaServerConfig {
             secretsRoot == null || secretsRoot.isBlank()
                 ? DEFAULT_SECRETS_ROOT
                 : secretsRoot.trim()),
-        ceiling == null
-            ? List.of()
-            : parseCommaSeparated(EGRESS_ALLOWED_HOSTS_CEILING_KEY, ceiling),
+        ceiling == null ? List.of() : parseCeiling(ceiling),
         Clock.systemUTC());
   }
 

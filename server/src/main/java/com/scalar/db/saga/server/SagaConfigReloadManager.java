@@ -11,8 +11,8 @@ import org.slf4j.LoggerFactory;
  * Schedules the {@link ConfigReconciler} on a fixed delay — the watcher half of configuration hot
  * reload, shaped like its living siblings {@code SagaRecoveryManager}/{@code SagaRetentionManager}:
  * a single-thread named daemon scheduler, a {@code reloadSafely()} wrapper so nothing escapes to
- * the scheduler, and a {@code stop(deadlineNanos)} that awaits the in-flight pass so no
- * registration store writes happen after the server's drain begins.
+ * the scheduler, and a deadline-bounded {@code stop(deadlineNanos)} that awaits the in-flight pass
+ * before the server's drain.
  *
  * <p>{@code scheduleWithFixedDelay} inherently serializes passes; the first scheduled pass runs one
  * full interval after {@link #start()}, because the boot pass has already applied the current

@@ -250,8 +250,8 @@ class ConfigReconcilerTest {
 
     @Test
     void run_yamlDefinitionFile_parsesAndApplies() throws IOException {
-      // The reconciler dispatches json/yaml itself now (it parses the bytes it hashed rather than
-      // re-opening the file), so both formats need pinning here.
+      // The reconciler dispatches JSON or YAML itself now (it parses the bytes it hashed rather
+      // than re-opening the file), so both formats need pinning here.
       // Arrange
       writeService("account", "base_url=http://account:8080\n");
       Files.writeString(
@@ -621,6 +621,33 @@ class ConfigReconcilerTest {
       }
       assertThat(requireNonNull(reconciler.status().rejection()).reason())
           .contains(SagaServerConfig.SERVICES_PATH_KEY)
+          .doesNotContain("SUPER-SECRET-VALUE");
+    }
+
+    @Test
+    void run_definitionsPathDoesNotExist_rejectedWithoutEchoingThePath() throws IOException {
+      // definitions_path is resolved like services_path above, and the listing failure quotes the
+      // configured value back, so a secret reference pasted onto that key must not reach the log.
+      // Arrange
+      writeService("account", "base_url=http://account:8080\n");
+      Path missing = definitionsDir.resolve("SUPER-SECRET-VALUE");
+      ReloadConfig reloadConfig =
+          new ReloadConfig(
+              servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
+      ConfigReconciler reconciler =
+          new ConfigReconciler(
+              reloadConfig, missing, false, registrar, d -> definitionRegistrar.accept(d));
+
+      // Act & Assert
+      try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
+        assertThat(reconciler.run()).isFalse();
+
+        assertThat(logs.events())
+            .noneSatisfy(
+                event -> assertThat(event.getFormattedMessage()).contains("SUPER-SECRET-VALUE"));
+      }
+      assertThat(requireNonNull(reconciler.status().rejection()).reason())
+          .contains(SagaServerConfig.DEFINITIONS_PATH_KEY)
           .doesNotContain("SUPER-SECRET-VALUE");
     }
 

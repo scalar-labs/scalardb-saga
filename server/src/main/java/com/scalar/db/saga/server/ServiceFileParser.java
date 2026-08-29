@@ -4,6 +4,7 @@ import com.scalar.db.saga.server.SagaServerConfig.ServiceConfig;
 import com.scalar.db.saga.transport.HttpServiceConfig;
 import java.io.IOException;
 import java.io.StringReader;
+import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -57,6 +58,14 @@ final class ServiceFileParser {
    * verbatim.
    */
   private static final Pattern SERVICE_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9._-]{1,128}");
+
+  /**
+   * The shape a header name must have: RFC 7230's token rule, which {@code
+   * HttpRequest.Builder.header()} applies at request time. Checking it here turns a per-request
+   * permanent failure into a rejected pass.
+   */
+  private static final Pattern HEADER_NAME_PATTERN =
+      Pattern.compile("[!#$%&'*+\\-.^_`|~0-9A-Za-z]+");
 
   private static final String BASE_URL_KEY = "base_url";
   private static final String ALLOWED_HOSTS_KEY = "allowed_hosts";
@@ -216,10 +225,15 @@ final class ServiceFileParser {
   }
 
   /**
-   * Rejects a control character in a header name or value, the way the checks above reject a header
-   * name the JDK will not send: left in place, every call to the service fails permanently and
-   * compensates, and this module exists to catch that at validation rather than at the first
-   * request.
+   * Rejects a header value the JDK's client cannot put on the wire, the way {@link
+   * #HEADER_NAME_PATTERN} rejects a name it will not send: left in place, every call to the service
+   * fails permanently and compensates, and this module exists to catch that at validation rather
+   * than at the first request.
+   *
+   * <p>Two characters classes qualify, and they are separate mistakes. A control character is the
+   * line break a token acquires when it is pasted into a secret file; a character above U+00FF is a
+   * byte-order mark on that file, or a smart quote from a paste. The client refuses both, and no
+   * check above catches either, because a value is not a token.
    *
    * <p>The realistic route is a secret, not a hostile file. A header value may be a {@code
    * ${file:...}} reference and only its ends are trimmed, so a token pasted into a secret file with
@@ -228,18 +242,29 @@ final class ServiceFileParser {
    * <p>Neither the value nor the offending character is echoed: the value may be a resolved secret,
    * and the position alone locates it.
    */
-  private static String requireNoControlCharacters(
-      String fileName, String header, String text, String part) {
+  private static String requireSendableValue(String fileName, String header, String text) {
     for (int i = 0; i < text.length(); i++) {
-      if (Character.isISOControl(text.charAt(i))) {
+      char c = text.charAt(i);
+      if (c > 0xFF) {
         throw new IllegalArgumentException(
             "Service file '"
                 + fileName
                 + "' header '"
                 + Redaction.oneLine(header)
-                + "' has a control character in its "
-                + part
-                + " at position "
+                + "' has a character above U+00FF in its value at position "
+                + i
+                + ". The JDK's client refuses to send one, so it would fail every request this"
+                + " service is called with, failing each step permanently and compensating. A"
+                + " secret file saved with a byte-order mark, or a smart quote from a paste, is the"
+                + " usual cause.");
+      }
+      if (Character.isISOControl(c)) {
+        throw new IllegalArgumentException(
+            "Service file '"
+                + fileName
+                + "' header '"
+                + Redaction.oneLine(header)
+                + "' has a control character in its value at position "
                 + i
                 + ". No HTTP header may carry one, so the JDK's client would refuse every request"
                 + " this service is called with, failing each step permanently and compensating."
@@ -354,6 +379,18 @@ final class ServiceFileParser {
             throw new IllegalArgumentException(
                 "Service file '" + fileName + "' key '" + key + "' has no header name.");
           }
+          if (!HEADER_NAME_PATTERN.matcher(header).matches()) {
+            throw new IllegalArgumentException(
+                "Service file '"
+                    + fileName
+                    + "' sets header '"
+                    + Redaction.oneLine(header)
+                    + "', which is not an HTTP token. The JDK's client refuses to send such a"
+                    + " name, so every call to service '"
+                    + name
+                    + "' would fail permanently and compensate. Use letters, digits, or"
+                    + " !#$%&'*+-.^_`|~ only.");
+          }
           if (RESERVED_HEADERS.contains(header)) {
             throw new IllegalArgumentException(
                 "Service file '"
@@ -396,13 +433,12 @@ final class ServiceFileParser {
                     + " Remove one of them.");
           }
           headers.put(
-              requireNoControlCharacters(fileName, header, header, "name"),
-              requireNoControlCharacters(
+              header,
+              requireSendableValue(
                   fileName,
                   header,
                   SagaServerConfig.requireNonBlank(
-                      qualifiedKey, resolve(secrets, raw, qualifiedKey)),
-                  "value"));
+                      qualifiedKey, resolve(secrets, raw, qualifiedKey))));
         }
       }
     }
@@ -449,7 +485,11 @@ final class ServiceFileParser {
               + " permitted under a ceiling. Declare the hosts this service may call.");
     }
     for (String host : service.allowedHosts()) {
-      if (!ceiling.contains(host)) {
+      // Compared case-insensitively because that is how the host is matched at request time:
+      // OutboundHttpPolicy lowercases both its allowlist and the request URI's host. A raw compare
+      // here would reject a service for a difference that never reaches the wire.
+      String normalized = host.toLowerCase(Locale.ROOT);
+      if (ceiling.stream().noneMatch(entry -> entry.toLowerCase(Locale.ROOT).equals(normalized))) {
         // Redacted like every other rejected value: allowed_hosts is resolved before it is
         // checked, so a secret reference pasted onto this key arrives here as its plaintext, and
         // this message is logged on every pass that rejects.
@@ -464,28 +504,39 @@ final class ServiceFileParser {
   }
 
   /**
-   * Rejects an {@code allowed_hosts} entry that is not shaped like a host, mirroring exactly what
-   * the engine's outbound policy enforces: a port suffix would silently never match, since the
-   * allowlist is compared against {@code URI.getHost()}, and an IPv6 literal keeps its brackets.
+   * Rejects an {@code allowed_hosts} entry that is not shaped like a host, so what survives is what
+   * the engine's outbound policy could match: {@code OutboundHttpPolicy} compares each entry
+   * against {@code URI.getHost()}, so an entry that URI parsing does not hand back verbatim as the
+   * host could never match any request. Round-tripping through a URI is what makes this the same
+   * function the policy uses rather than an imitation of it, which a rule-by-rule check drifts
+   * from: a port suffix, a path, a user-info prefix and an embedded space all fail the comparison,
+   * an IPv6 literal keeps its brackets and passes, and an underscored name is refused here because
+   * {@code URI.getHost()} is null for it. The JDK's client cannot send to such a host at all, which
+   * is the same ground a base URL carrying one is already rejected on.
    *
    * <p>Checking it HERE rather than letting the engine reject it at apply time is what keeps a
    * resolved value out of the log. The engine's message names the offending host, and this module
    * cannot redact a message the engine composes — so the rule is that nothing unvalidated is ever
    * handed across that boundary. The same reasoning already applies to {@code base_url}.
    */
-  private static void requireHostShape(String qualifiedKey, String host) {
+  static void requireHostShape(String qualifiedKey, String host) {
     String normalized = host.trim().toLowerCase(Locale.ROOT);
-    boolean bracketed = normalized.startsWith("[");
-    boolean malformed =
-        normalized.isEmpty()
-            || (bracketed ? !normalized.endsWith("]") : normalized.indexOf(':') >= 0);
-    if (malformed) {
+    String parsed;
+    try {
+      parsed = URI.create("http://" + normalized).getHost();
+    } catch (IllegalArgumentException e) {
+      // Deliberately not chained: the cause quotes the raw entry back, and allowed_hosts is
+      // resolved before it is checked, so the entry may have come from a secret.
+      parsed = null;
+    }
+    if (!normalized.equals(parsed)) {
       throw new IllegalArgumentException(
           qualifiedKey
               + " has an entry that is not a host name "
               + Redaction.redacted(host)
-              + ". Give a host without a port (an IPv6 literal keeps its brackets); the allowlist"
-              + " is matched against the request URI's host.");
+              + ". Give a bare host with no port, path, or user-info (an IPv6 literal keeps its"
+              + " brackets); the allowlist is matched against the request URI's host, which is why"
+              + " a name carrying a space or an underscore can never match one.");
     }
   }
 
