@@ -122,9 +122,9 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
       throw new IllegalArgumentException(
           "'"
               + scanLimit
-              + "' has been removed. It is now an internal page size with no operator meaning."
-              + " Delete the key; to spread recovery over more or fewer passes, size"
-              + " scalar.db.saga.server.recovery.max_recoveries_per_sweep instead.");
+              + "' has been removed; it is now an internal page size. Delete the key. To pace"
+              + " recovery, size RecoveryConfig.maxRecoveriesPerSweep instead (daemon key:"
+              + " scalar.db.saga.server.recovery.max_recoveries_per_sweep).");
     }
   }
 

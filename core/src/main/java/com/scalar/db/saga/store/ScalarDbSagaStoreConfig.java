@@ -6,9 +6,8 @@ class ScalarDbSagaStoreConfig {
   private static final int DEFAULT_MAX_EVENT_PAYLOAD_BYTES = 0;
   private static final int DEFAULT_TRANSACTION_RETRY_COUNT = 3;
   // Deliberately not operator-configurable. This is a page size, and no operator-visible signal
-  // says it needs changing or in which direction. Tests still set it through the builder to force
-  // multi-page behaviour. If a storage backend ever needs a different value, adding a property back
-  // is compatible; removing one is not.
+  // says it needs changing or in which direction. If a storage backend ever needs a different
+  // value, adding a property back is compatible; removing one is not.
   //
   // Raising this is not free: it raises the minimum safe recovery budget with it, because a page
   // holds one status after another and a sweep stops submitting once its budget runs out. See
@@ -50,18 +49,13 @@ class ScalarDbSagaStoreConfig {
    * Returns the maximum number of rows returned per status scan in {@code findRecoverable}. Any
    * sagas beyond this limit are picked up on the next recovery cycle.
    *
-   * <p>This per-bucket cap works with {@link
-   * com.scalar.db.saga.engine.RecoveryConfig#maxRecoveriesPerSweep()} in two ways, and both bound
-   * it from above.
-   *
-   * <p>It must stay below {@code maxRecoveriesPerSweep / numRecoverableStatuses}. A page holds
+   * <p>{@link com.scalar.db.saga.engine.RecoveryConfig#maxRecoveriesPerSweep()} bounds this from
+   * above: it must not exceed {@code maxRecoveriesPerSweep / numRecoverableStatuses}. A page holds
    * every recoverable status one after another, and the sweep stops submitting the moment its
-   * budget runs out, so a budget smaller than a full page never reaches the trailing status. With
-   * RUNNING first and COMPENSATING second, compensating sagas would then go unrecovered on every
-   * revolution.
-   *
-   * <p>It also forces the cursor to advance a bucket per round; without that bound one hot bucket
-   * pins the cursor and every bucket behind it starves.
+   * budget runs out, so a smaller budget truncates the page and the truncation always falls on the
+   * trailing status. With RUNNING first and COMPENSATING second, a budget at or below this limit
+   * never recovers compensating sagas at all; above it but below a full page they are served, but
+   * throttled behind running ones.
    *
    * @return the recovery scan limit
    */
@@ -129,9 +123,8 @@ class ScalarDbSagaStoreConfig {
      * Sets the maximum number of rows returned per status scan in {@code findRecoverable}. Any
      * sagas beyond this limit are picked up on the next recovery cycle.
      *
-     * <p>Not settable from configuration properties — see the field comment on the default. Tests
-     * use this to force multi-page behaviour. See {@link
-     * ScalarDbSagaStoreConfig#getRecoveryScanLimit()} for how it interacts with {@link
+     * <p>Not settable from configuration properties — see the field comment on the default. See
+     * {@link ScalarDbSagaStoreConfig#getRecoveryScanLimit()} for how it interacts with {@link
      * com.scalar.db.saga.engine.RecoveryConfig#maxRecoveriesPerSweep()}.
      *
      * @param recoveryScanLimit the scan limit (must be &gt;= 1)

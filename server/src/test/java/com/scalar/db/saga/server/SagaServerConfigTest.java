@@ -874,7 +874,7 @@ class SagaServerConfigTest {
   }
 
   @Test
-  void recoveryConfig_negativeTimeout_throwsIllegalArgumentException() {
+  void recoveryConfig_negativeStalenessThreshold_throwsIllegalArgumentException() {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY, "-1");
 

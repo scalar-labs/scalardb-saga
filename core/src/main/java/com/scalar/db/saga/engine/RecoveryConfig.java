@@ -27,9 +27,12 @@ import java.util.Objects;
  *     sweep keeps scanning until its budget is spent or a full bucket revolution completes, and a
  *     budget-stopped sweep resumes at the same position next pass. A small value therefore never
  *     skips buckets — it only spreads a revolution across more passes, delaying recovery of the
- *     sagas behind the cut. Keep it at or above 200: a bucket is read as one page per recoverable
- *     status, and a sweep stops submitting once its budget runs out, so a budget smaller than one
- *     full page leaves the trailing status (COMPENSATING) unrecovered on every revolution.
+ *     sagas behind the cut. Size it well above 200. A bucket is read as one page per recoverable
+ *     status and a sweep stops submitting once its budget runs out, so a budget below 200 truncates
+ *     the page, and the truncation always falls on the trailing status: at or below 100
+ *     COMPENSATING sagas are never recovered, and between 100 and 200 they are served but throttled
+ *     behind RUNNING ones. Treat 200 as a floor rather than a target — the budget is spent across
+ *     buckets, so a sweep budgeted at 200 covers a single bucket.
  * @param maxConcurrentRecoveries maximum number of sagas recovered concurrently within a single
  *     recovery pass (limits database pressure from virtual threads)
  * @param clock clock for time-based decisions (inject a fixed clock for testing)
@@ -69,7 +72,7 @@ public record RecoveryConfig(
 
   /**
    * Default: 60s staleness threshold, scan every 30s, 4-hour grace period, 1000 recoveries per
-   * pass, 10 concurrent recoveries.
+   * sweep, 10 concurrent recoveries.
    */
   public static RecoveryConfig defaults() {
     return defaults(Clock.systemUTC());

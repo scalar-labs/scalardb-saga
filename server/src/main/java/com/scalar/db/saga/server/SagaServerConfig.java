@@ -169,10 +169,13 @@ import org.jspecify.annotations.Nullable;
  *       pass can do up to twice this number (the pass summary reports them as {@code stale[...]}
  *       and {@code parked[...]}). Claims lost to another replica do not count against it (failed
  *       attempts do), and a sweep stopped by the cap resumes where it left off next pass, so a
- *       small value never skips sagas — it only spreads recovery over more passes. Do not set it
- *       below 200: a bucket is read as one page per recoverable status and a sweep stops submitting
- *       once its budget runs out, so a budget under one full page leaves compensating sagas
- *       unrecovered on every pass
+ *       small value never skips sagas — it only spreads recovery over more passes. Keep it well
+ *       above 200: a bucket is read as one page per recoverable status and a sweep stops submitting
+ *       once its budget runs out, so a budget below 200 truncates the page, and the truncation
+ *       always falls on the trailing status. At or below 100, compensating sagas are never
+ *       recovered; between 100 and 200 they are served but throttled behind running ones. 200 is a
+ *       floor, not a target — the budget is spent across buckets, so a pass budgeted at 200 covers
+ *       a single bucket
  *   <li>{@code recovery.max_concurrent_recoveries} — how many of those are recovered at once,
  *       bounding the database pressure of a single pass
  * </ul>
