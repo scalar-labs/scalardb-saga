@@ -636,7 +636,7 @@ class ConfigReconcilerTest {
               servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
       ConfigReconciler reconciler =
           new ConfigReconciler(
-              reloadConfig, missing, false, registrar, d -> definitionRegistrar.accept(d));
+              reloadConfig, missing, false, registrar, definitionStore, names -> served = names);
 
       // Act & Assert
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
