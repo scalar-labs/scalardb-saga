@@ -65,7 +65,7 @@ class ServiceFileParserTest {
   class FileParsing {
 
     @Test
-    void parseDirectory_baseUrlOnlyGiven_parsesService() throws IOException {
+    void parse_baseUrlOnlyGiven_parsesService() throws IOException {
       writeService("account.properties", "base_url=http://account-svc:8080\n");
 
       assertThat(parse())
@@ -76,7 +76,7 @@ class ServiceFileParserTest {
     }
 
     @Test
-    void parseDirectory_multipleFilesGiven_parsesAll() throws IOException {
+    void parse_multipleFilesGiven_parsesAll() throws IOException {
       writeService("account.properties", "base_url=http://account-svc:8080\n");
       writeService("ledger.properties", "base_url=http://ledger-svc:9000\n");
 
@@ -453,7 +453,7 @@ class ServiceFileParserTest {
     }
 
     @Test
-    void parseDirectory_sameHeaderNameOnDifferentServices_isAccepted() throws IOException {
+    void parse_sameHeaderNameOnDifferentServices_isAccepted() throws IOException {
       writeService("a.properties", "base_url=http://a:1\nheader.Authorization=Bearer a\n");
       writeService("b.properties", "base_url=http://b:1\nheader.Authorization=Bearer b\n");
 
@@ -522,13 +522,13 @@ class ServiceFileParserTest {
   class DirectoryHygiene {
 
     @Test
-    void parseDirectory_missingDirectory_throwsIllegalArgumentException() {
+    void parse_missingDirectory_throwsIllegalArgumentException() {
       assertThatThrownBy(() -> parse(servicesDir.resolve("nope")))
           .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
-    void parseDirectory_dotEntries_areIgnored() throws IOException {
+    void parse_dotEntries_areIgnored() throws IOException {
       // kubelet's ..data symlink, its timestamped directories, and ordinary dotfiles.
       writeService("account.properties", "base_url=http://a:1\n");
       Files.createDirectory(servicesDir.resolve("..2026_08_21"));
@@ -539,7 +539,7 @@ class ServiceFileParserTest {
     }
 
     @Test
-    void parseDirectory_nonPropertiesFile_throwsIllegalArgumentException() throws IOException {
+    void parse_nonPropertiesFile_throwsIllegalArgumentException() throws IOException {
       writeService("account.properties", "base_url=http://a:1\n");
       Files.writeString(servicesDir.resolve("stray.txt"), "junk");
 
@@ -549,7 +549,7 @@ class ServiceFileParserTest {
     }
 
     @Test
-    void parseDirectory_kubeletProjectedVolumeLayout_parsesServices() throws IOException {
+    void parse_kubeletProjectedVolumeLayout_parsesServices() throws IOException {
       // The layout kubelet mounts a ConfigMap as: the real files live in a ..<timestamp>
       // directory, ..data symlinks to it, and every visible file is a symlink through ..data.
       Path timestamped = Files.createDirectory(servicesDir.resolve("..2026_08_23_10_00_00"));
@@ -565,8 +565,7 @@ class ServiceFileParserTest {
     }
 
     @Test
-    void parseDirectory_symlinkEscapingServicesPath_throwsIllegalArgumentException()
-        throws IOException {
+    void parse_symlinkEscapingServicesPath_throwsIllegalArgumentException() throws IOException {
       // A symlink out of the directory is a second route to reading an arbitrary file.
       Files.writeString(secretsDir.resolve("outside.properties"), "base_url=http://a:1\n");
       Files.createSymbolicLink(
@@ -578,7 +577,7 @@ class ServiceFileParserTest {
     }
 
     @Test
-    void parseDirectory_danglingSymlink_throwsIllegalArgumentException() throws IOException {
+    void parse_danglingSymlink_throwsIllegalArgumentException() throws IOException {
       Files.createSymbolicLink(
           servicesDir.resolve("account.properties"), servicesDir.resolve("gone.properties"));
 
@@ -588,7 +587,7 @@ class ServiceFileParserTest {
     }
 
     @Test
-    void parseDirectory_symlinkToDirectoryInsideServicesPath_throwsIllegalArgumentException()
+    void parse_symlinkToDirectoryInsideServicesPath_throwsIllegalArgumentException()
         throws IOException {
       // Contained but not a regular file: resolving inside the directory is necessary, not
       // sufficient.
@@ -602,8 +601,7 @@ class ServiceFileParserTest {
     }
 
     @Test
-    void parseDirectory_symlinkWithNonPropertiesName_throwsIllegalArgumentException()
-        throws IOException {
+    void parse_symlinkWithNonPropertiesName_throwsIllegalArgumentException() throws IOException {
       // The visible name carries the service name, so the extension rule applies to it even when
       // the link target is a contained regular file.
       Files.writeString(servicesDir.resolve("account.properties"), "base_url=http://a:1\n");
@@ -616,7 +614,7 @@ class ServiceFileParserTest {
     }
 
     @Test
-    void parseDirectory_oversizedServiceFile_throwsIllegalArgumentException() throws IOException {
+    void parse_oversizedServiceFile_throwsIllegalArgumentException() throws IOException {
       writeService(
           "account.properties",
           "base_url=http://a:1\n# " + "x".repeat((int) WatchedFiles.MAX_FILE_BYTES) + "\n");
@@ -627,7 +625,7 @@ class ServiceFileParserTest {
     }
 
     @Test
-    void parseDirectory_invalidServiceName_throwsIllegalArgumentException() throws IOException {
+    void parse_invalidServiceName_throwsIllegalArgumentException() throws IOException {
       writeService("bad name!.properties", "base_url=http://a:1\n");
 
       assertThatThrownBy(ServiceFileParserTest.this::parse)
@@ -651,15 +649,14 @@ class ServiceFileParserTest {
     }
 
     @Test
-    void parseDirectory_allowedHostsWithinCeiling_isAccepted() throws IOException {
+    void parse_allowedHostsWithinCeiling_isAccepted() throws IOException {
       writeService("a.properties", "base_url=http://a:1\nallowed_hosts=a-svc\n");
 
       assertThat(parseWithCeiling("a-svc", "b-svc")).containsOnlyKeys("a");
     }
 
     @Test
-    void parseDirectory_allowedHostOutsideCeiling_throwsIllegalArgumentException()
-        throws IOException {
+    void parse_allowedHostOutsideCeiling_throwsIllegalArgumentException() throws IOException {
       writeService("a.properties", "base_url=http://a:1\nallowed_hosts=evil-svc\n");
 
       assertThatThrownBy(() -> parseWithCeiling("a-svc"))
@@ -668,7 +665,7 @@ class ServiceFileParserTest {
     }
 
     @Test
-    void parseDirectory_secretResolvedAllowedHostOutsideCeiling_throwsIllegalArgumentException()
+    void parse_secretResolvedAllowedHostOutsideCeiling_throwsIllegalArgumentException()
         throws IOException {
       // Pins the ordering that makes the ceiling meaningful: allowed_hosts is resolved before the
       // ceiling check, so a secret-sourced host cannot smuggle egress past the operator's ceiling.
@@ -685,8 +682,7 @@ class ServiceFileParserTest {
     }
 
     @Test
-    void parseDirectory_emptyAllowedHostsUnderCeiling_throwsIllegalArgumentException()
-        throws IOException {
+    void parse_emptyAllowedHostsUnderCeiling_throwsIllegalArgumentException() throws IOException {
       // Empty means allow-all, which is precisely what a ceiling exists to forbid.
       writeService("a.properties", "base_url=http://a:1\n");
 
