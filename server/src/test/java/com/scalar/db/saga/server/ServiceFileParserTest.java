@@ -233,6 +233,40 @@ class ServiceFileParserTest {
       assertThat(requireNonNull(parse().get("account")).allowedHosts()).containsExactly("[::1]");
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"foo/path", "foo]", "payment_svc", "user@account-svc"})
+    void parseFile_allowedHostsEntryThatIsNotAHost_throwsWithoutEchoingTheValue(String entry)
+        throws IOException {
+      // None of these is something URI.getHost() ever returns, so the entry could never match a
+      // request: a pasted path, an unbalanced bracket, an underscored name the JDK's client cannot
+      // send to at all, and a user-info prefix. The value is redacted for the same reason the port
+      // case is — allowed_hosts is resolved before it is checked.
+      // Arrange
+      writeService("account.properties", "base_url=http://a:1\nallowed_hosts=" + entry + "\n");
+
+      // Act & Assert
+      assertThatThrownBy(ServiceFileParserTest.this::parse)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("not a host name")
+          .hasMessageNotContaining(entry);
+    }
+
+    @Test
+    void parseFile_allowedHostsEntryWithAMissedComma_throwsWithoutEchoingTheValue()
+        throws IOException {
+      // The accident the shape check is really for: a comma dropped between two hosts leaves one
+      // entry with a space in it. Properties treats an unescaped space as the key/value separator,
+      // so reaching the parser at all takes the escape.
+      // Arrange
+      writeService("account.properties", "base_url=http://a:1\nallowed_hosts=payment\\ svc\n");
+
+      // Act & Assert
+      assertThatThrownBy(ServiceFileParserTest.this::parse)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("not a host name")
+          .hasMessageNotContaining("payment svc");
+    }
+
     @Test
     void parseFile_allowedHostsWithEmptyElement_throwsIllegalArgumentException()
         throws IOException {

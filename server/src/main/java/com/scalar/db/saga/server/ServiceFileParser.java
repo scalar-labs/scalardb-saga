@@ -4,6 +4,7 @@ import com.scalar.db.saga.server.SagaServerConfig.ServiceConfig;
 import com.scalar.db.saga.transport.HttpServiceConfig;
 import java.io.IOException;
 import java.io.StringReader;
+import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -483,8 +484,14 @@ final class ServiceFileParser {
 
   /**
    * Rejects an {@code allowed_hosts} entry that is not shaped like a host, mirroring exactly what
-   * the engine's outbound policy enforces: a port suffix would silently never match, since the
-   * allowlist is compared against {@code URI.getHost()}, and an IPv6 literal keeps its brackets.
+   * the engine's outbound policy enforces: {@code OutboundHttpPolicy} compares each entry against
+   * {@code URI.getHost()}, so an entry that URI parsing does not hand back verbatim as the host
+   * could never match any request. Round-tripping through a URI is what makes this the same
+   * function the policy uses rather than an imitation of it, which a rule-by-rule check drifts
+   * from: a port suffix, a path, a user-info prefix and an embedded space all fail the comparison,
+   * an IPv6 literal keeps its brackets and passes, and an underscored name is refused here because
+   * {@code URI.getHost()} is null for it. The JDK's client cannot send to such a host at all, which
+   * is the same ground a base URL carrying one is already rejected on.
    *
    * <p>Checking it HERE rather than letting the engine reject it at apply time is what keeps a
    * resolved value out of the log. The engine's message names the offending host, and this module
@@ -493,17 +500,22 @@ final class ServiceFileParser {
    */
   private static void requireHostShape(String qualifiedKey, String host) {
     String normalized = host.trim().toLowerCase(Locale.ROOT);
-    boolean bracketed = normalized.startsWith("[");
-    boolean malformed =
-        normalized.isEmpty()
-            || (bracketed ? !normalized.endsWith("]") : normalized.indexOf(':') >= 0);
-    if (malformed) {
+    String parsed;
+    try {
+      parsed = URI.create("http://" + normalized).getHost();
+    } catch (IllegalArgumentException e) {
+      // Deliberately not chained: the cause quotes the raw entry back, and allowed_hosts is
+      // resolved before it is checked, so the entry may have come from a secret.
+      parsed = null;
+    }
+    if (!normalized.equals(parsed)) {
       throw new IllegalArgumentException(
           qualifiedKey
               + " has an entry that is not a host name "
               + Redaction.redacted(host)
-              + ". Give a host without a port (an IPv6 literal keeps its brackets); the allowlist"
-              + " is matched against the request URI's host.");
+              + ". Give a bare host with no port, path, or user-info (an IPv6 literal keeps its"
+              + " brackets); the allowlist is matched against the request URI's host, which is why"
+              + " a name carrying a space or an underscore can never match one.");
     }
   }
 
