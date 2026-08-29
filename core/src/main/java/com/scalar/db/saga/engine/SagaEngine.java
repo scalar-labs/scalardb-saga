@@ -19,6 +19,7 @@ import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.StatusEvent;
 import com.scalar.db.saga.store.StepEvent;
+import com.scalar.db.saga.transport.HttpEndpointRegistrar;
 import com.scalar.db.saga.transport.SagaCorrelationContext;
 import java.time.Clock;
 import java.time.Instant;
@@ -72,6 +73,7 @@ public class SagaEngine implements AutoCloseable {
   private final StepInstantiator stepInstantiator;
   private final String ownerId;
   private final ShutdownConfig shutdownConfig;
+  private final long defaultSagaTimeoutMillis;
   private final Clock clock;
   private volatile boolean shuttingDown = false;
   private final Object shutdownLock = new Object();
@@ -85,17 +87,24 @@ public class SagaEngine implements AutoCloseable {
       StepInstantiator stepInstantiator,
       String ownerId,
       ShutdownConfig shutdownConfig,
+      long defaultSagaTimeoutMillis,
       Clock clock) {
     this.store = store;
     this.stepInstantiator = stepInstantiator;
     this.ownerId = ownerId;
     this.shutdownConfig = shutdownConfig;
+    this.defaultSagaTimeoutMillis = defaultSagaTimeoutMillis;
     this.clock = clock;
   }
 
   /** The owner id this engine stamps on transitions it records (used by the admin service). */
   String ownerId() {
     return ownerId;
+  }
+
+  /** The swap seam for configuration hot reload, surfaced on the orchestrator. */
+  HttpEndpointRegistrar httpEndpointRegistrar() {
+    return stepInstantiator.httpEndpointRegistrar();
   }
 
   // ---------------------------------------------------------------------------
@@ -300,7 +309,14 @@ public class SagaEngine implements AutoCloseable {
       int pivotIndex,
       long sagaTimeoutMillis) {
 
-    long sagaDeadline = TimeoutPolicy.calculateSagaDeadline(sagaTimeoutMillis, clock.millis());
+    // The engine default fills in only when the definition specifies no timeout, and it does so
+    // here — at deadline computation — so every execution entry (start, recovery resume, parked
+    // resume) enforces it, and a stored definition never has to carry a baked-in copy of it. The
+    // deadline is recomputed from the current default at each drive, so an in-flight saga's
+    // effective timeout follows the configuration current at each resumption.
+    long effectiveTimeoutMillis =
+        sagaTimeoutMillis > 0 ? sagaTimeoutMillis : defaultSagaTimeoutMillis;
+    long sagaDeadline = TimeoutPolicy.calculateSagaDeadline(effectiveTimeoutMillis, clock.millis());
 
     for (int i = fromStepIndex; i < plan.size(); i++) {
       // Check graceful shutdown between steps

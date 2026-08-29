@@ -6,10 +6,10 @@ import com.scalar.db.saga.engine.RetentionConfig;
 import com.scalar.db.saga.engine.ShutdownMode;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -46,9 +46,11 @@ import org.jspecify.annotations.Nullable;
  *       sweep phases across restarts. Must match {@code [a-zA-Z0-9._-]{1,128}} — it is stamped on
  *       claimed rows and echoed in log lines
  *   <li>{@code definitions_path} — path to a JSON/YAML saga definition file or directory
- *   <li>{@code default_saga_timeout_millis} — a default saga timeout applied to a loaded definition
- *       that set none ({@code 0} = unbounded); {@code 0} (default) disables it. A definition's own
- *       timeout always wins
+ *   <li>{@code default_saga_timeout_millis} — a default saga timeout enforced at execution for
+ *       definitions that set none ({@code 0} = unbounded); {@code 0} (default) disables it. A
+ *       definition's own timeout always wins. Applied at every execution entry (start, recovery
+ *       resume, parked resume) rather than baked into the stored definition, so changing it takes
+ *       effect for in-flight sagas at their next drive and never conflicts with stored content
  *   <li>{@code max_start_requests_per_minute} — per-principal rate limit on {@code POST}/{@code PUT
  *       /sagas}; {@code 0} (default) disables rate limiting. The limit is keyed on the
  *       authenticated principal, so it is only per-caller once a real provider (jwt or apikey) is
@@ -185,30 +187,48 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code retention.max_concurrent_purges} — how many of that batch are purged at once
  * </ul>
  *
- * <h2>Declarative services ({@code service.<name>.*})</h2>
+ * <h2>Declarative services ({@code services_path})</h2>
  *
- * <p>One block per service a declarative step's {@code "service":"<name>"} resolves to. {@code
- * <name>} is a config-local identifier and must not contain {@code .}.
+ * <p>Downstream services live in a directory of per-service files, one {@code
+ * <service-name>.properties} per service a declarative step's {@code "service":"<name>"} resolves
+ * to. The service name is the file name minus the {@code .properties} extension. Inside a file the
+ * keys are prefix-free:
  *
  * <ul>
- *   <li>{@code service.<name>.base_url} — the service's base URL (required for each named service)
- *   <li>{@code service.<name>.allowed_hosts} — comma-separated SSRF allowlist for this service;
- *       unset = any host. Matching is on the host name only, so it is defense in depth for a
- *       trusted endpoint, not a sandbox
- *   <li>{@code service.<name>.max_body_bytes} — request/response body cap for this service; unset
- *       uses the engine default
- *   <li>{@code service.<name>.header.<HeaderName>} — a header sent on every request to this
- *       service, repeated per header. This is the channel for calling an <b>authenticated</b>
- *       service (e.g. {@code header.Authorization}), and the value takes a secret reference like
- *       any other key here. The engine stamps its own headers ({@code X-Saga-Id}, {@code
+ *   <li>{@code base_url} — the service's base URL (required)
+ *   <li>{@code allowed_hosts} — comma-separated SSRF allowlist for this service; unset = any host.
+ *       Matching is on the host name only, so it is defense in depth for a trusted endpoint, not a
+ *       sandbox
+ *   <li>{@code max_body_bytes} — request/response body cap for this service; unset uses the engine
+ *       default
+ *   <li>{@code header.<HeaderName>} — a header sent on every request to this service, repeated per
+ *       header. This is the channel for calling an <b>authenticated</b> service (e.g. {@code
+ *       header.Authorization}), and the value takes a secret reference — confined to {@code
+ *       secrets_root}, see below. The engine stamps its own headers ({@code X-Saga-Id}, {@code
  *       X-Saga-Step}, {@code X-Saga-Callback-Url}) on every request and they always win, so
- *       configuring one of those names is rejected at startup rather than silently ignored. Header
- *       names are case-insensitive per the HTTP spec, so setting one name in two spellings is
- *       rejected too. A header value is trimmed, which is what lets a {@code ${file:...}} secret
- *       ending in a newline be sent at all — an untrimmed newline is a control character no HTTP
- *       header value may carry. The five names the JDK's HTTP client reserves for itself ({@code
- *       Connection}, {@code Content-Length}, {@code Expect}, {@code Host}, {@code Upgrade}) are
- *       rejected as well, since it refuses to send them; see {@link #JDK_RESTRICTED_HEADERS}
+ *       configuring one of those names is rejected. Header names are case-insensitive per the HTTP
+ *       spec, so setting one name in two spellings is rejected too. A header value is trimmed,
+ *       which is what lets a {@code ${file:...}} secret ending in a newline be sent at all — an
+ *       untrimmed newline is a control character no HTTP header value may carry. The names the
+ *       JDK's HTTP client refuses to send ({@code Connection}, {@code Content-Length}, {@code
+ *       Expect}, {@code Host}, {@code Upgrade}) are rejected as well
+ * </ul>
+ *
+ * <p>The directory-level keys:
+ *
+ * <ul>
+ *   <li>{@code services_path} — the directory of service files; unset = no services
+ *   <li>{@code reload.interval_seconds} — seconds between configuration reload passes (default
+ *       {@value #DEFAULT_RELOAD_INTERVAL_SECONDS}); {@code 0} disables reload (startup-only
+ *       loading). Parsed and documented now; takes effect when the reload pass ships
+ *   <li>{@code secrets_root} — the directory {@code ${file:...}} references in service files must
+ *       resolve inside, after symlink resolution (default {@value #DEFAULT_SECRETS_ROOT}). Service
+ *       files are a live trust boundary under reload, so their file references are confined to the
+ *       secrets mounted for that purpose; {@code server.properties} itself is bootstrap
+ *       configuration and stays unconfined
+ *   <li>{@code egress.allowed_hosts_ceiling} — optional comma-separated ceiling; when set, every
+ *       service's {@code allowed_hosts} must be a non-empty subset of it, so no service file can
+ *       authorize egress beyond what the operator allowed
  * </ul>
  *
  * <h2>Async callbacks ({@code callback.*})</h2>
@@ -267,12 +287,12 @@ import org.jspecify.annotations.Nullable;
  * empty value there is far more likely a template that failed to resolve than an intent to run
  * without the protection. That covers {@code callback.max_age_seconds}, {@code
  * max_start_requests_per_minute}, and {@code tls.enabled}, whose defaults disable the check
- * outright, plus the {@code service.<name>} attributes whose blank fallback would be open ({@code
- * allowed_hosts} would admit any host; a {@code header.<Name>} would send an empty header, and an
- * empty {@code Authorization} is an unauthenticated call) or meaningless ({@code base_url} has no
- * default to fall back to). {@code service.<name>.max_body_bytes} sits on the other side of that
- * line deliberately: unset leaves the engine's own 1 MiB cap in place, so the body stays bounded
- * either way.
+ * outright, plus, inside a service file, the settings whose blank fallback would be open ({@code
+ * allowed_hosts} would admit any host; a {@code header.<HeaderName>} would send an empty header,
+ * and an empty {@code Authorization} is an unauthenticated call) or meaningless ({@code base_url}
+ * has no default to fall back to). A service file's {@code max_body_bytes} sits on the other side
+ * of that line deliberately: unset leaves the engine's own 1 MiB cap in place, so the body stays
+ * bounded either way.
  *
  * <p>All other properties configure the saga engine's persistence (e.g. ScalarDB connection
  * settings and the {@code scalar.db.saga.store.*} keys documented on {@code
@@ -374,10 +394,15 @@ public final class SagaServerConfig {
   static final String SECURITY_APIKEY_PRINCIPAL_SUFFIX = ".principal";
 
   static final String SERVICE_KEY_PREFIX = SERVER_PREFIX + "service.";
-  static final String SERVICE_BASE_URL_SUFFIX = ".base_url";
-  static final String SERVICE_ALLOWED_HOSTS_SUFFIX = ".allowed_hosts";
-  static final String SERVICE_MAX_BODY_BYTES_SUFFIX = ".max_body_bytes";
-  static final String SERVICE_HEADER_INFIX = ".header.";
+  static final String SERVICES_PATH_KEY = SERVER_PREFIX + "services_path";
+  static final String RELOAD_PREFIX = SERVER_PREFIX + "reload.";
+  static final String RELOAD_INTERVAL_SECONDS_KEY = RELOAD_PREFIX + "interval_seconds";
+  static final String SECRETS_ROOT_KEY = SERVER_PREFIX + "secrets_root";
+  static final String EGRESS_ALLOWED_HOSTS_CEILING_KEY =
+      SERVER_PREFIX + "egress.allowed_hosts_ceiling";
+
+  static final long DEFAULT_RELOAD_INTERVAL_SECONDS = 30L;
+  static final String DEFAULT_SECRETS_ROOT = "/run/secrets";
 
   static final String STORE_MAX_EVENT_PAYLOAD_BYTES_KEY = PREFIX + "store.max_event_payload_bytes";
 
@@ -413,7 +438,7 @@ public final class SagaServerConfig {
   // this many request service-times before the server sheds load.
   static final int DEFAULT_MAX_QUEUED_REQUESTS_PER_THREAD = 2;
   static final long DEFAULT_SAGA_TIMEOUT_MILLIS =
-      0L; // 0 = disabled (definition's own timeout wins)
+      DefaultSagaOrchestrator.DEFAULT_SAGA_TIMEOUT_MILLIS;
   static final int DEFAULT_MAX_START_REQUESTS_PER_MINUTE = 0; // 0 = disabled (no rate limiting)
 
   /**
@@ -426,6 +451,10 @@ public final class SagaServerConfig {
           HOST_KEY,
           OWNER_ID_KEY,
           DEFINITIONS_PATH_KEY,
+          SERVICES_PATH_KEY,
+          RELOAD_INTERVAL_SECONDS_KEY,
+          SECRETS_ROOT_KEY,
+          EGRESS_ALLOWED_HOSTS_CEILING_KEY,
           DEFAULT_SAGA_TIMEOUT_MILLIS_KEY,
           MAX_START_REQUESTS_PER_MINUTE_KEY,
           HTTP_ENABLED_KEY,
@@ -491,79 +520,10 @@ public final class SagaServerConfig {
   /**
    * Namespaces whose keys carry an operator-chosen segment, so they cannot be enumerated. Only that
    * one segment is the operator's; the sub-settings around it are fixed names, still checked key by
-   * key (see {@link #parseServices} and {@link #rejectUnknownApiKeySetting}). The rest of {@code
-   * security.} has no such segment and is enumerated in {@link #SECURITY_PROVIDER_KEYS}.
+   * key (see {@link #rejectUnknownApiKeySetting}). The rest of {@code security.} has no such
+   * segment and is enumerated in {@link #SECURITY_PROVIDER_KEYS}.
    */
-  private static final List<String> DELEGATED_PREFIXES =
-      List.of(SERVICE_KEY_PREFIX, SECURITY_APIKEY_KEY_PREFIX);
-
-  /**
-   * Header names the engine issues itself, so configuring one as a service header cannot change
-   * what a participant receives: the engine's value wins. {@code X-Saga-Callback-Url} is set only
-   * on the async-step requests that need one, so configuring it is worse than inert — the rest of
-   * the requests would carry a callback URL the engine never issued. Rejected at load, where the
-   * error can name the offending key, rather than leaving an operator to wonder why their header
-   * never arrives. Compared case-insensitively, matching the HTTP spec and the engine's own header
-   * merge. The names mirror the engine's internal {@code HttpHeaders}, not visible from here.
-   */
-  private static final Set<String> RESERVED_HEADERS = reservedHeaders();
-
-  private static Set<String> reservedHeaders() {
-    Set<String> names = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
-    names.addAll(List.of("X-Saga-Id", "X-Saga-Step", "X-Saga-Callback-Url"));
-    return Collections.unmodifiableSet(names);
-  }
-
-  /** The system property with which the JDK opens individual {@link #JDK_RESTRICTED_HEADERS}. */
-  private static final String ALLOW_RESTRICTED_HEADERS_PROPERTY =
-      "jdk.httpclient.allowRestrictedHeaders";
-
-  /**
-   * Header names {@code java.net.http} owns for framing, connection management, and routing, and so
-   * refuses outright: {@code HttpRequest.Builder.header()} throws {@link IllegalArgumentException}
-   * on them. Unlike a {@link #RESERVED_HEADERS} name, one of these does not merely fail to arrive —
-   * the engine cannot build the request at all, so every call to the service fails permanently and
-   * compensates. Nothing catches that at startup: the throw lands on the first outbound call, where
-   * it is reported against the URI rather than the config key that caused it, while liveness and
-   * readiness stay green. Rejecting at load turns a silent, service-wide outage into a startup
-   * error naming the key.
-   *
-   * <p>Whoever sets {@link #ALLOW_RESTRICTED_HEADERS_PROPERTY} takes a name back off this set, so
-   * the check forbids exactly what the JDK forbids rather than a fixed five; {@code Host} is worth
-   * opening to route a participant through a shared ingress. Read from the system property, which
-   * is where the JDK looks first — a name opened through {@code conf/net.properties} instead is not
-   * visible here, since {@code sun.net.NetProperties} is not exported.
-   */
-  private static final Set<String> JDK_RESTRICTED_HEADERS =
-      jdkRestrictedHeaders(System.getProperty(ALLOW_RESTRICTED_HEADERS_PROPERTY));
-
-  /**
-   * Returns the restricted header names the JDK still refuses once {@code allowRestrictedHeaders} —
-   * the raw {@link #ALLOW_RESTRICTED_HEADERS_PROPERTY} value, or null when unset — has opened the
-   * names it lists.
-   *
-   * <p>Deliberately mirrors {@code jdk.internal.net.http.common.Utils.getDisallowedHeaders()} quirk
-   * for quirk: the whole value is trimmed once and split on commas, but the tokens themselves are
-   * not trimmed, so {@code "host, connection"} opens only {@code host}. Trimming the tokens here
-   * would be the friendlier reading and exactly the wrong one — it would accept a config key the
-   * JDK then rejects at send time, which is the bug this check exists to prevent. Token matching is
-   * case-insensitive, as it is there.
-   *
-   * @param allowRestrictedHeaders the raw system property value, or null when unset
-   * @return the names still refused, compared case-insensitively
-   */
-  static Set<String> jdkRestrictedHeaders(@Nullable String allowRestrictedHeaders) {
-    Set<String> names = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
-    names.addAll(List.of("Connection", "Content-Length", "Expect", "Host", "Upgrade"));
-    if (allowRestrictedHeaders != null) {
-      // The JDK splits with the default limit; -1 here only keeps the trailing empty tokens it
-      // drops, and removing "" from a set of five header names is a no-op either way.
-      for (String token : allowRestrictedHeaders.trim().split(",", -1)) {
-        names.remove(token);
-      }
-    }
-    return Collections.unmodifiableSet(names);
-  }
+  private static final List<String> DELEGATED_PREFIXES = List.of(SECURITY_APIKEY_KEY_PREFIX);
 
   private final String host;
   private final String ownerId;
@@ -600,6 +560,7 @@ public final class SagaServerConfig {
   private final Properties properties;
   private final Properties rawProperties;
   private final @Nullable Path definitionsPath;
+  private final ReloadConfig reloadConfig;
   private final Map<String, ServiceConfig> services;
 
   /**
@@ -730,7 +691,8 @@ public final class SagaServerConfig {
             0);
     this.definitionsPath =
         parseOptionalPath(resolved.getProperty(DEFINITIONS_PATH_KEY), DEFINITIONS_PATH_KEY);
-    this.services = parseServices(resolved);
+    this.reloadConfig = parseReloadConfig(resolved);
+    this.services = loadServices(reloadConfig);
     this.properties = applyStoreDefaults(copyOf(resolved));
     this.grpcMaxInboundMessageBytes = parseGrpcMaxInboundMessageBytes(this.properties);
     this.rawProperties = copyOf(raw);
@@ -868,12 +830,23 @@ public final class SagaServerConfig {
         continue;
       }
       if (DELEGATED_PREFIXES.stream().anyMatch(key::startsWith)) {
-        // The name segment is the operator's, but the settings around it are fixed. Check the
-        // API-key ones here; parseServices checks the service ones as it builds each service.
+        // The name segment is the operator's, but the settings around it are fixed.
         if (key.startsWith(SECURITY_APIKEY_KEY_PREFIX)) {
           rejectUnknownApiKeySetting(key);
         }
         continue;
+      }
+      if (key.startsWith(SERVICE_KEY_PREFIX)) {
+        // The one unknown-key family with a known history: these keys were the pre-services_path
+        // format, so the error names the migration instead of reading as a typo.
+        throw new IllegalArgumentException(
+            "'"
+                + key
+                + "': service configuration moved to services_path. Put each service in its own"
+                + " <name>.properties file (keys base_url, allowed_hosts, max_body_bytes,"
+                + " header.<HeaderName>) in the directory '"
+                + SERVICES_PATH_KEY
+                + "' points at, and remove the service.* keys.");
       }
       throw new IllegalArgumentException(
           "Unknown configuration key '"
@@ -1014,145 +987,47 @@ public final class SagaServerConfig {
   }
 
   /**
-   * Collects the {@code service.<name>.*} keys into one {@link ServiceConfig} per service. The
-   * service name is the segment up to the first {@code .}, so an unrecognized remainder — a typo,
-   * or a name that itself contains a {@code .} — is reported rather than ignored; a silently
-   * dropped {@code header.Authorization} would mean unauthenticated calls to a downstream service.
+   * Parses the services-directory settings into a {@link ReloadConfig}. All four keys are read even
+   * though only the static half is consumed today, so the surface (and its validation) is complete
+   * before the reload pass ships.
    */
-  private static Map<String, ServiceConfig> parseServices(Properties properties) {
-    Map<String, ServiceBuilder> builders = new LinkedHashMap<>();
-    for (String key : new TreeSet<>(properties.stringPropertyNames())) {
-      if (!key.startsWith(SERVICE_KEY_PREFIX)) {
-        continue;
-      }
-      String remainder = key.substring(SERVICE_KEY_PREFIX.length());
-      int dot = remainder.indexOf('.');
-      if (dot <= 0) {
-        throw new IllegalArgumentException(
-            "'"
-                + key
-                + "' is not a valid service key. Use '"
-                + SERVICE_KEY_PREFIX
-                + "<name>"
-                + SERVICE_BASE_URL_SUFFIX
-                + "' and the other service settings documented on SagaServerConfig.");
-      }
-      String name = remainder.substring(0, dot);
-      // Keep the leading dot so the attribute matches the suffix constants directly.
-      String attribute = remainder.substring(dot);
-      ServiceBuilder builder = builders.computeIfAbsent(name, _ -> new ServiceBuilder());
-      String value = properties.getProperty(key);
-      switch (attribute) {
-        case SERVICE_BASE_URL_SUFFIX -> builder.baseUrl = requireNonBlank(key, value);
-        case SERVICE_ALLOWED_HOSTS_SUFFIX ->
-            builder.allowedHosts = parseCommaSeparated(key, requireNonBlank(key, value));
-        case SERVICE_MAX_BODY_BYTES_SUFFIX ->
-            builder.maxBodyBytes = parseBoundedLong(value, key, 0L, 1L);
-        default -> {
-          if (!attribute.startsWith(SERVICE_HEADER_INFIX)) {
-            throw new IllegalArgumentException(
-                "Unknown service setting '"
-                    + attribute.substring(1)
-                    + "' in '"
-                    + key
-                    + "'. Valid settings are base_url, allowed_hosts, max_body_bytes, and"
-                    + " header.<HeaderName>. A service name must not contain '.'.");
-          }
-          String header = attribute.substring(SERVICE_HEADER_INFIX.length());
-          if (header.isBlank()) {
-            throw new IllegalArgumentException("'" + key + "' has no header name.");
-          }
-          if (RESERVED_HEADERS.contains(header)) {
-            throw new IllegalArgumentException(
-                "'"
-                    + key
-                    + "' sets '"
-                    + header
-                    + "', which the engine issues itself. Its value wins on every request the"
-                    + " engine sets it on, so configuring it here either has no effect or sends a"
-                    + " header the engine never issued. Remove the key.");
-          }
-          if (JDK_RESTRICTED_HEADERS.contains(header)) {
-            throw new IllegalArgumentException(
-                "'"
-                    + key
-                    + "' sets '"
-                    + header
-                    + "', which the JDK's HTTP client — not the engine — refuses to send: it owns"
-                    + " that name for framing, connection management, and routing. Left in place,"
-                    + " every call to service '"
-                    + name
-                    + "' would fail permanently and compensate. Remove the key, or start the daemon"
-                    + " with -D"
-                    + ALLOW_RESTRICTED_HEADERS_PROPERTY
-                    + "="
-                    + header.toLowerCase(Locale.ROOT)
-                    + " to allow it (comma-separated for several, with no spaces around the"
-                    + " commas).");
-          }
-          String duplicate = findSameNameIgnoringCase(builder.headers, header);
-          if (duplicate != null) {
-            throw new IllegalArgumentException(
-                "Service '"
-                    + name
-                    + "' sets header '"
-                    + duplicate
-                    + "' and '"
-                    + header
-                    + "', which differ only in case. HTTP header names are case-insensitive, so"
-                    + " only one of the two would be sent, and which one is not deterministic."
-                    + " Remove one of them.");
-          }
-          builder.headers.put(header, requireNonBlank(key, value));
-        }
-      }
-    }
-    Map<String, ServiceConfig> services = new LinkedHashMap<>();
-    builders.forEach(
-        (name, builder) -> {
-          String baseUrl = builder.baseUrl;
-          if (baseUrl == null) {
-            throw new IllegalArgumentException(
-                "Service '"
-                    + name
-                    + "' is configured but has no '"
-                    + SERVICE_KEY_PREFIX
-                    + name
-                    + SERVICE_BASE_URL_SUFFIX
-                    + "', so there is nothing for a declarative step to call.");
-          }
-          services.put(
-              name,
-              new ServiceConfig(
-                  baseUrl, builder.allowedHosts, builder.maxBodyBytes, builder.headers));
-        });
-    return services;
+  private static ReloadConfig parseReloadConfig(Properties resolved) {
+    String secretsRoot = resolved.getProperty(SECRETS_ROOT_KEY);
+    String ceiling =
+        requireNonBlankIfSet(
+            EGRESS_ALLOWED_HOSTS_CEILING_KEY,
+            resolved.getProperty(EGRESS_ALLOWED_HOSTS_CEILING_KEY));
+    return new ReloadConfig(
+        parseOptionalPath(resolved.getProperty(SERVICES_PATH_KEY), SERVICES_PATH_KEY),
+        parseBoundedLong(
+            resolved.getProperty(RELOAD_INTERVAL_SECONDS_KEY),
+            RELOAD_INTERVAL_SECONDS_KEY,
+            DEFAULT_RELOAD_INTERVAL_SECONDS,
+            0L),
+        Path.of(
+            secretsRoot == null || secretsRoot.isBlank()
+                ? DEFAULT_SECRETS_ROOT
+                : secretsRoot.trim()),
+        ceiling == null
+            ? List.of()
+            : parseCommaSeparated(EGRESS_ALLOWED_HOSTS_CEILING_KEY, ceiling),
+        Clock.systemUTC());
   }
 
   /**
-   * Returns the header name already collected for this service that differs from {@code header}
-   * only in case, or null when there is none. HTTP header names are case-insensitive, so two
-   * spellings of one name collapse to a single header downstream and the surviving value is not
-   * deterministic; rejecting the pair here turns that into a startup error. A scan rather than a
-   * second case-insensitive index: one service's header set is a handful of entries, and the map
-   * keeps the operator's own spelling for the error message.
+   * Loads the service set from {@code services_path} (one {@code <name>.properties} file per
+   * service), or none when the key is unset. Reading the directory here keeps {@code services()}
+   * the single source the server wires endpoints from, exactly as with the old prefixed keys.
    */
-  private static @Nullable String findSameNameIgnoringCase(
-      Map<String, String> headers, String header) {
-    for (String existing : headers.keySet()) {
-      if (existing.equalsIgnoreCase(header)) {
-        return existing;
-      }
+  private static Map<String, ServiceConfig> loadServices(ReloadConfig reloadConfig) {
+    Path servicesPath = reloadConfig.servicesPath();
+    if (servicesPath == null) {
+      return Map.of();
     }
-    return null;
-  }
-
-  /** Accumulates one service's keys while {@link #parseServices} walks the property table. */
-  private static final class ServiceBuilder {
-    private @Nullable String baseUrl;
-    private List<String> allowedHosts = List.of();
-    private long maxBodyBytes; // 0 = unset, use the engine default
-    private final Map<String, String> headers = new LinkedHashMap<>();
+    return ServiceFileParser.parseDirectory(
+        servicesPath,
+        new ServiceSecretResolver(reloadConfig.secretsRoot()),
+        reloadConfig.allowedHostsCeiling());
   }
 
   /**
@@ -1417,10 +1292,12 @@ public final class SagaServerConfig {
   }
 
   /**
-   * Returns the server-wide default saga timeout (ms) applied to a loaded definition that specified
-   * none ({@code 0} = unbounded); {@code 0} (the default) disables it. A definition's own timeout
-   * always takes precedence — this only fills in for definitions that left it unset, so a
-   * daemon-hosted saga cannot run without a deadline.
+   * Returns the server-wide default saga timeout (ms) enforced at execution for definitions that
+   * specified none ({@code 0} = unbounded); {@code 0} (the default) disables it. A definition's own
+   * timeout always takes precedence — this only fills in for definitions that left it unset, so a
+   * daemon-hosted saga cannot run without a deadline. Forwarded to the engine (which applies it at
+   * deadline computation on every execution entry) instead of being baked into the stored
+   * definition, so changing it never conflicts with stored content.
    */
   public long defaultSagaTimeoutMillis() {
     return defaultSagaTimeoutMillis;
@@ -1458,13 +1335,23 @@ public final class SagaServerConfig {
 
   /**
    * Returns the configured {@code service name -> configuration} map, each registered as an HTTP
-   * endpoint a declarative step can call. Empty when no {@code service.<name>.*} keys are set. The
-   * map is unmodifiable and iterates in service-name order.
+   * endpoint a declarative step can call, loaded from the {@code services_path} directory (one
+   * {@code <name>.properties} file per service). Empty when {@code services_path} is unset. The map
+   * is unmodifiable and iterates in service-name order.
    */
   public Map<String, ServiceConfig> services() {
     // An unmodifiable view rather than Map.copyOf: the keys were collected in sorted order, which
     // copyOf would discard for an unspecified one.
     return Collections.unmodifiableMap(services);
+  }
+
+  /**
+   * Returns the services-directory settings: the directory itself, the reload interval (parsed now,
+   * consumed once the reload pass ships), the secrets root confining {@code ${file:...}} references
+   * in service files, and the optional egress ceiling.
+   */
+  public ReloadConfig reloadConfig() {
+    return reloadConfig;
   }
 
   private static String parseHost(@Nullable String value) {
@@ -1596,7 +1483,7 @@ public final class SagaServerConfig {
    * values, and enforces {@code value >= minInclusive} (e.g. {@code 0} for an optional bound that
    * may be disabled, {@code 1} for a strictly-positive ceiling).
    */
-  private static long parseBoundedLong(
+  static long parseBoundedLong(
       @Nullable String value, String key, long defaultValue, long minInclusive) {
     if (value == null || value.isBlank()) {
       return defaultValue;
@@ -1640,7 +1527,7 @@ public final class SagaServerConfig {
   }
 
   /** Returns the trimmed value, rejecting a missing or blank one as a misconfigured key. */
-  private static String requireNonBlank(String key, @Nullable String value) {
+  static String requireNonBlank(String key, @Nullable String value) {
     if (value == null || value.isBlank()) {
       throw new IllegalArgumentException("'" + key + "' must not be blank");
     }
@@ -1674,7 +1561,7 @@ public final class SagaServerConfig {
    * Splits a comma-separated list, trimming each element and rejecting an empty one so a stray
    * comma cannot introduce a blank entry the consumer would have to interpret.
    */
-  private static List<String> parseCommaSeparated(String key, String value) {
+  static List<String> parseCommaSeparated(String key, String value) {
     List<String> elements = new ArrayList<>();
     for (String element : value.split(",", -1)) {
       String trimmed = element.trim();

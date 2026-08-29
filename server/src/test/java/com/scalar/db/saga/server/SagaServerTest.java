@@ -26,6 +26,7 @@ import io.grpc.health.v1.HealthCheckResponse;
 import io.grpc.health.v1.HealthGrpc;
 import io.grpc.netty.NettyServerBuilder;
 import io.javalin.Javalin;
+import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -34,8 +35,8 @@ import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Properties;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -103,9 +104,12 @@ class SagaServerTest {
   }
 
   @Test
-  void constructor_definitionWithoutTimeout_appliesServerDefault(@TempDir Path dir)
+  void constructor_definitionWithoutTimeout_registersItUnmodified(@TempDir Path dir)
       throws Exception {
-    // Arrange — a definition with no timeout, and a server default of 30s
+    // Arrange — a definition with no timeout, and a server default of 30s. The default is
+    // enforced by the engine at execution (forwarded via applyEngineSettings), NOT baked into the
+    // registered definition: the stored form must equal the parsed file, or changing the default
+    // turns an unchanged file into a same-version content conflict at the next boot.
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
@@ -116,10 +120,10 @@ class SagaServerTest {
     // Act
     new SagaServer(SagaServerConfig.load(props), orchestrator);
 
-    // Assert — the registered definition got the server default
+    // Assert — the registered definition still has no timeout of its own
     ArgumentCaptor<SagaDefinition> captor = ArgumentCaptor.forClass(SagaDefinition.class);
     verify(orchestrator).register(captor.capture());
-    assertThat(captor.getValue().getTimeoutMillis()).isEqualTo(30_000L);
+    assertThat(captor.getValue().getTimeoutMillis()).isZero();
   }
 
   @Test
@@ -565,6 +569,7 @@ class SagaServerTest {
     props.setProperty(SagaServerConfig.OWNER_ID_KEY, "saga-daemon-7");
     props.setProperty(SagaServerConfig.SHUTDOWN_MODE_KEY, "WAIT_ALL_SAGAS");
     props.setProperty(SagaServerConfig.SHUTDOWN_TIMEOUT_MILLIS_KEY, "7001");
+    props.setProperty(SagaServerConfig.DEFAULT_SAGA_TIMEOUT_MILLIS_KEY, "7006");
     props.setProperty(SagaServerConfig.DETAIL_MAX_TIMELINE_EVENTS_KEY, "7005");
     props.setProperty(SagaServerConfig.SYNC_TIMEOUT_MILLIS_KEY, "7002");
     props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "7003");
@@ -592,21 +597,20 @@ class SagaServerTest {
     verify(builder).ownerId("saga-daemon-7");
     verify(builder).shutdownMode(ShutdownMode.WAIT_ALL_SAGAS);
     verify(builder).shutdownTimeoutMillis(7001L);
+    verify(builder).defaultSagaTimeoutMillis(7006L);
     verify(builder).maxTimelineEvents(7005);
     verify(builder).recoveryConfig(config.recoveryConfig());
     verify(builder).retentionConfig(config.retentionConfig());
   }
 
   @Test
-  void applyEngineSettings_withServicesConfigured_registersEachAsAnEndpoint() {
+  void applyEngineSettings_withServicesConfigured_registersEachAsAnEndpoint(@TempDir Path dir)
+      throws IOException {
     // Arrange
+    Files.writeString(dir.resolve("account.properties"), "base_url=https://account.example\n");
+    Files.writeString(dir.resolve("ledger.properties"), "base_url=https://ledger.example\n");
     Properties props = new Properties();
-    props.setProperty(
-        SagaServerConfig.SERVICE_KEY_PREFIX + "account" + SagaServerConfig.SERVICE_BASE_URL_SUFFIX,
-        "https://account.example");
-    props.setProperty(
-        SagaServerConfig.SERVICE_KEY_PREFIX + "ledger" + SagaServerConfig.SERVICE_BASE_URL_SUFFIX,
-        "https://ledger.example");
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, dir.toString());
     SagaServerConfig config = SagaServerConfig.load(props);
     DefaultSagaOrchestrator.Builder builder =
         mock(DefaultSagaOrchestrator.Builder.class, RETURNS_SELF);
@@ -653,36 +657,15 @@ class SagaServerTest {
     verify(builder, never()).callbackUrlProvider(any());
   }
 
-  /** Builds the single service {@code account} from the given extra {@code service.account.*}. */
-  private static SagaServerConfig.ServiceConfig accountService(Properties extra) {
-    Properties props = new Properties();
-    props.setProperty(
-        SagaServerConfig.SERVICE_KEY_PREFIX + "account" + SagaServerConfig.SERVICE_BASE_URL_SUFFIX,
-        "https://account.example");
-    extra.stringPropertyNames().forEach(k -> props.setProperty(k, extra.getProperty(k)));
-    return Objects.requireNonNull(SagaServerConfig.load(props).services().get("account"));
-  }
-
   @Test
   void addHttpEndpoint_withOutboundPolicyConfigured_forwardsEachSettingToTheEndpoint() {
     // Arrange
-    Properties extra = new Properties();
-    extra.setProperty(
-        SagaServerConfig.SERVICE_KEY_PREFIX
-            + "account"
-            + SagaServerConfig.SERVICE_ALLOWED_HOSTS_SUFFIX,
-        "account.example");
-    extra.setProperty(
-        SagaServerConfig.SERVICE_KEY_PREFIX
-            + "account"
-            + SagaServerConfig.SERVICE_MAX_BODY_BYTES_SUFFIX,
-        "4096");
-    extra.setProperty(
-        SagaServerConfig.SERVICE_KEY_PREFIX
-            + "account"
-            + SagaServerConfig.SERVICE_HEADER_INFIX
-            + "Authorization",
-        "Bearer t0ken");
+    SagaServerConfig.ServiceConfig account =
+        new SagaServerConfig.ServiceConfig(
+            "https://account.example",
+            List.of("account.example"),
+            4096L,
+            Map.of("Authorization", "Bearer t0ken"));
     DefaultSagaOrchestrator.Builder builder =
         mock(DefaultSagaOrchestrator.Builder.class, RETURNS_SELF);
     DefaultSagaOrchestrator.Builder.HttpEndpointBuilder endpoint =
@@ -690,7 +673,7 @@ class SagaServerTest {
     when(builder.httpEndpoint(any(), any())).thenReturn(endpoint);
 
     // Act
-    SagaServer.addHttpEndpoint(builder, "account", accountService(extra));
+    SagaServer.addHttpEndpoint(builder, "account", account);
 
     // Assert
     verify(endpoint).allowedHosts("account.example");
@@ -711,7 +694,10 @@ class SagaServerTest {
     when(builder.httpEndpoint(any(), any())).thenReturn(endpoint);
 
     // Act
-    SagaServer.addHttpEndpoint(builder, "account", accountService(new Properties()));
+    SagaServer.addHttpEndpoint(
+        builder,
+        "account",
+        new SagaServerConfig.ServiceConfig("https://account.example", List.of(), 0L, Map.of()));
 
     // Assert
     verify(endpoint, never()).allowedHosts(any(String[].class));

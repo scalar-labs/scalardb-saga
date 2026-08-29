@@ -26,9 +26,10 @@ docker run --rm \
   ghcr.io/scalar-labs/scalardb-saga-server:<version>
 ```
 
-Mount over `/scalardb-saga/conf` with your own `server.properties` and `definitions/`. Start from the
-template in this directory — every key is documented there and on `SagaServerConfig`, or on
-`JwtConfig` and `ApiKeyConfig` for the security keys of each provider.
+Mount over `/scalardb-saga/conf` with your own `server.properties`, `definitions/`, and — when you
+configure downstream services — `services/`. Start from the template in this directory — every key is
+documented there and on `SagaServerConfig`, or on `JwtConfig` and `ApiKeyConfig` for the security
+keys of each provider.
 
 Daemon mode is **declarative-only**: a definition naming a code step (`stepClass`) is rejected at
 startup, because an operator cannot add classes to this image. Use a declarative service step, or embed
@@ -42,9 +43,12 @@ Point the daemon at a different file by overriding the command:
 docker run ... ghcr.io/scalar-labs/scalardb-saga-server:<version> --config /etc/saga/other.properties
 ```
 
-Secrets do not have to be baked in. Any value under `scalar.db.saga.*` accepts `${env:NAME}` or
-`${file:UTF-8:/path}`, the latter reading a mounted Kubernetes Secret. Keys under plain `scalar.db.*`
-are resolved by ScalarDB, which supports `${env:...}` but **not** `${file:...}`.
+Secrets do not have to be baked in. In `server.properties`, any value under `scalar.db.saga.*`
+accepts `${env:NAME}` or `${file:UTF-8:/path}`, the latter reading a mounted Kubernetes Secret. In
+service files the same references work, but `${file:...}` must resolve inside `secrets_root`
+(default `/run/secrets`) — service files are reloadable input, so what they may read is confined to
+the secrets mounted for that purpose. Keys under plain `scalar.db.*` are resolved by ScalarDB, which
+supports `${env:...}` but **not** `${file:...}`.
 
 | Variable | Effect |
 | --- | --- |
@@ -186,7 +190,7 @@ Two operational notes:
 - **Async callbacks**: with TLS on, `callback.base_url` should be an `https` URL — participants dial
   it, and a plain `http` URL pointing back at this server dies at the handshake on the first async
   step. The daemon warns at startup about that combination.
-- **Outbound calls are unaffected**: participant calls (`service.<name>.base_url`) and JWKS fetches
+- **Outbound calls are unaffected**: participant calls (each service file's `base_url`) and JWKS fetches
   verify against the JVM's default trust store. A participant behind a private CA needs that CA in
   the daemon's trust store (`JAVA_OPTS=-Djavax.net.ssl.trustStore=...`); there is deliberately no
   per-service trust knob.

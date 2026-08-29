@@ -66,56 +66,6 @@ public final class SagaDefinition {
     this.pivotIndex = computePivotIndex();
   }
 
-  private SagaDefinition(
-      String name,
-      String version,
-      SagaMode mode,
-      List<StepDefinition> steps,
-      RecoveryStrategy recoveryStrategy,
-      long timeoutMillis,
-      @Nullable RetryPolicy defaultRetryPolicy,
-      int pivotIndex) {
-    this.name = name;
-    this.version = version;
-    this.mode = mode;
-    this.steps = List.copyOf(steps);
-    this.recoveryStrategy = recoveryStrategy;
-    this.timeoutMillis = timeoutMillis;
-    this.defaultRetryPolicy = defaultRetryPolicy;
-    this.pivotIndex = pivotIndex;
-  }
-
-  /**
-   * Returns a copy of this definition with its saga-level timeout replaced. Everything else —
-   * steps, mode, recovery strategy, retry policy, pivot — is unchanged, so no re-validation beyond
-   * the timeout bound is needed. Returns {@code this} when the timeout is unchanged.
-   *
-   * <p>Daemon mode uses this to apply a server-wide default timeout to a loaded definition that
-   * left its timeout unset ({@code 0} = unbounded), so a daemon-hosted saga cannot run without a
-   * deadline.
-   *
-   * @param timeoutMillis the new saga timeout in milliseconds ({@code 0} = no timeout)
-   * @return a copy with the given timeout, or {@code this} if unchanged
-   * @throws IllegalArgumentException if {@code timeoutMillis} is negative
-   */
-  public SagaDefinition withTimeoutMillis(long timeoutMillis) {
-    if (timeoutMillis < 0) {
-      throw new IllegalArgumentException("timeoutMillis must be >= 0, got " + timeoutMillis);
-    }
-    if (timeoutMillis == this.timeoutMillis) {
-      return this;
-    }
-    return new SagaDefinition(
-        name,
-        version,
-        mode,
-        steps,
-        recoveryStrategy,
-        timeoutMillis,
-        defaultRetryPolicy,
-        pivotIndex);
-  }
-
   /**
    * Starts a programmatic definition for {@code name}; pick the mode with {@link
    * ModeSelector#saga()} or {@link ModeSelector#tcc()}, which return a {@link SagaBuilder} / {@link

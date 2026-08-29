@@ -1,40 +1,43 @@
 package com.scalar.db.saga.transport;
 
 import com.scalar.db.saga.api.SagaHttpClient;
-import com.scalar.db.saga.api.Step;
-import com.scalar.db.saga.api.TccStep;
-import com.scalar.db.saga.definition.CallSpec;
-import com.scalar.db.saga.definition.SagaDefinition.ServiceStep.Phase;
-import com.scalar.db.saga.exception.SagaDefinitionException;
 import java.net.http.HttpClient;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * The single per-endpoint owner of the shared HTTP machinery for one {@code httpEndpoint(name,
- * baseUrl)}: it owns ONE {@link HttpExchange} + {@link OutboundHttpPolicy} + {@link HttpClient} and
+ * The per-endpoint unit of the shared HTTP machinery for one {@code httpEndpoint(name, baseUrl)}:
+ * it carries ONE {@link HttpExchange} + {@link OutboundHttpPolicy} + {@link HttpClient} and
  * produces BOTH the {@link SagaHttpClient} for code steps (via {@link #sagaHttpClient()}) and the
- * declarative steps (via {@link #toStep}/{@link #toTccStep}). Both ride the same {@link
- * HttpExchange}, so a code step and a declarative step against the same endpoint share one client,
- * one policy, and one status-classification path. One owner, one {@link #close()} — so the "one
- * engine per endpoint" invariant never passes through a two-client state.
+ * declarative {@link #transportAdapter()}. Both ride the same {@link HttpExchange}, so a code step
+ * and a declarative step against the same endpoint share one client, one policy, and one
+ * status-classification path — the "one engine per endpoint" invariant.
+ *
+ * <p>Lifecycle is owned by the {@link HttpEndpointManager}, which creates endpoints from
+ * configuration, reuses them across swaps while their topology is unchanged (diffed via {@link
+ * #sameTopology}; header rotation is absorbed in place via {@link #updateDefaultHeaders}), and
+ * retires them gracefully via {@link #shutdown()} on topology change or removal.
  *
  * <p>A framework-created {@link HttpClient} uses {@link HttpClient.Redirect#NEVER} (an allowed host
- * must not 302 to a disallowed one, bypassing the SSRF allowlist) and is closed by {@link
- * #close()}; a caller-supplied client is left open (the caller owns its lifecycle).
+ * must not 302 to a disallowed one, bypassing the SSRF allowlist) and is shut down at retirement; a
+ * caller-supplied client is never shut down here (the caller owns its lifecycle).
  *
  * <p>This lives in the {@code transport} package (not {@code engine}) so it can construct the
  * package-private {@link HttpExchange}/{@link OutboundHttpPolicy}/{@link SagaHttpClientImpl} and
- * the package-private {@link HttpTransportAdapter}/{@link DeclarativeBindingStep}/{@link
- * DeclarativeBindingTccStep}; the engine-side {@code HttpEndpointRegistry} holds one of these per
- * endpoint name.
+ * the package-private {@link HttpTransportAdapter}; the {@link HttpEndpointManager} holds one of
+ * these per endpoint name.
  */
-public final class HttpEndpoint implements AutoCloseable {
+final class HttpEndpoint implements AutoCloseable {
 
   private static final Logger logger = LoggerFactory.getLogger(HttpEndpoint.class);
+
+  /** Grace {@link #close()} gives in-flight exchanges before force-stopping the owned client. */
+  private static final Duration CLOSE_GRACE = Duration.ofSeconds(2);
 
   /**
    * Connect-phase timeout for a framework-created client, so a black-holed host fails fast instead
@@ -44,23 +47,32 @@ public final class HttpEndpoint implements AutoCloseable {
   private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
 
   private final HttpExchange exchange;
+
+  // The immutable topology this endpoint was built from: everything in its config except the
+  // default headers, whose single live copy mutates in place on the exchange. A swap diffs a
+  // candidate config against these fields (see sameTopology) to decide reuse; keeping them here,
+  // on the object they describe, is what spares the manager a parallel config map that could
+  // drift from the endpoints it shadows.
   private final String baseUrl;
+  private final List<String> allowedHosts;
+  private final long maxBodyBytes;
+
   private final HttpClient client;
   private final boolean ownsClient;
   private final TransportAdapter transportAdapter;
-  private final @Nullable CallbackUrlProvider callbackUrlProvider;
 
   private HttpEndpoint(
       HttpExchange exchange,
-      String baseUrl,
+      HttpServiceConfig config,
       HttpClient client,
       boolean ownsClient,
       @Nullable CallbackUrlProvider callbackUrlProvider) {
     this.exchange = exchange;
-    this.baseUrl = baseUrl;
+    this.baseUrl = config.baseUrl();
+    this.allowedHosts = config.allowedHosts();
+    this.maxBodyBytes = config.maxBodyBytes();
     this.client = client;
     this.ownsClient = ownsClient;
-    this.callbackUrlProvider = callbackUrlProvider;
     // The declarative transport adapter rides the SAME exchange as the SagaHttpClient, so both
     // front-ends share one client/policy/status-classification path (the "one engine per endpoint"
     // invariant).
@@ -118,7 +130,7 @@ public final class HttpEndpoint implements AutoCloseable {
       ownsClient = true;
     }
     HttpExchange exchange = new HttpExchange(client, policyOf(config), config.defaultHeaders());
-    return new HttpEndpoint(exchange, config.baseUrl(), client, ownsClient, callbackUrlProvider);
+    return new HttpEndpoint(exchange, config, client, ownsClient, callbackUrlProvider);
   }
 
   private static OutboundHttpPolicy policyOf(HttpServiceConfig config) {
@@ -140,66 +152,92 @@ public final class HttpEndpoint implements AutoCloseable {
     return new SagaHttpClientImpl(exchange, baseUrl);
   }
 
-  /**
-   * Wraps a declaratively-defined service step's phases as a {@link Step} (SAGA) named {@code
-   * stepName}, riding this endpoint's shared {@link HttpExchange}.
-   */
-  public Step toStep(String stepName, Map<Phase, CallSpec> phases) {
-    requireCallbackProviderForAsync(stepName, phases);
-    return new DeclarativeBindingStep(stepName, transportAdapter, phases);
-  }
-
-  /**
-   * Wraps a declaratively-defined service step's phases as a {@link TccStep} (TCC) named {@code
-   * stepName}, riding this endpoint's shared {@link HttpExchange}.
-   */
-  public TccStep toTccStep(String stepName, Map<Phase, CallSpec> phases) {
-    requireCallbackProviderForAsync(stepName, phases);
-    return new DeclarativeBindingTccStep(stepName, transportAdapter, phases);
-  }
-
-  /**
-   * Fails fast (at plan build / registration) if a step declares an async phase but no callback URL
-   * provider is configured — such a step would park on a {@code 202} but never receive a callback
-   * URL, so it could never be completed. Requires the operator to configure the callback base URL +
-   * secret before registering an async definition.
-   */
-  private void requireCallbackProviderForAsync(String stepName, Map<Phase, CallSpec> phases) {
-    if (callbackUrlProvider != null) {
-      return;
-    }
-    for (CallSpec spec : phases.values()) {
-      if (spec.isAsync()) {
-        throw SagaDefinitionException.declarativeStepInvalid(
-            stepName,
-            "declares an async phase but async completion is not configured on the daemon (missing"
-                + " callback URL / secret)");
-      }
-    }
-  }
-
   /** The shared {@link HttpExchange} both front-ends ride (package-private; for identity tests). */
   HttpExchange exchange() {
     return exchange;
   }
 
-  /** The declarative {@link TransportAdapter} (package-private; for identity tests). */
+  /**
+   * The declarative {@link TransportAdapter} riding this endpoint's shared {@link HttpExchange} —
+   * what a {@link TransportResolver} resolution returns.
+   */
   TransportAdapter transportAdapter() {
     return transportAdapter;
   }
 
   /**
-   * Closes the framework-created {@link HttpClient}, if this endpoint created it. A caller-supplied
-   * client is left open. Best-effort: a failure is logged.
+   * Whether {@code candidate} describes this endpoint's topology — everything in its config except
+   * the default headers, whose change is absorbed in place via {@link #updateDefaultHeaders}.
+   * {@code Objects.equals} on the supplied client is identity (it does not override equals), which
+   * is the intent: a different client instance is a different endpoint.
+   */
+  boolean sameTopology(HttpServiceConfig candidate) {
+    return baseUrl.equals(candidate.baseUrl())
+        && allowedHosts.equals(candidate.allowedHosts())
+        && maxBodyBytes == candidate.maxBodyBytes()
+        && Objects.equals(ownsClient ? null : client, candidate.httpClient());
+  }
+
+  /**
+   * Replaces the endpoint default headers applied to every subsequent request through this endpoint
+   * (both front-ends): secret rotation as a value swap, no client or connection churn.
+   */
+  void updateDefaultHeaders(Map<String, String> headers) {
+    exchange.updateDefaultHeaders(headers);
+  }
+
+  /**
+   * Initiates graceful retirement and never blocks: exchanges already in flight complete, and every
+   * subsequent request through this endpoint fails pre-send as retryable (to be re-resolved against
+   * the endpoint set that replaced it). A caller-supplied client is not shut down — the caller owns
+   * its lifecycle — but the retirement flag still makes this endpoint's requests fail fast. Never
+   * {@code HttpClient.close()}: its Javadoc permits blocking indefinitely on an abandoned streaming
+   * body.
+   */
+  void shutdown() {
+    exchange.markRetired();
+    if (ownsClient) {
+      client.shutdown();
+    }
+  }
+
+  /**
+   * Whether retirement has completed — the owned client has terminated, or the client was
+   * caller-supplied (never shut down here, so there is nothing to wait for).
+   */
+  boolean isTerminated() {
+    return !ownsClient || client.isTerminated();
+  }
+
+  /** Waits up to {@code duration} for an owned client to terminate after {@link #shutdown()}. */
+  boolean awaitTermination(Duration duration) throws InterruptedException {
+    return !ownsClient || client.awaitTermination(duration);
+  }
+
+  /** Force-stops an owned client, interrupting whatever {@link #shutdown()} left in flight. */
+  void shutdownNow() {
+    if (ownsClient) {
+      try {
+        client.shutdownNow();
+      } catch (RuntimeException e) {
+        logger.warn("Failed to force-stop endpoint HTTP client", e);
+      }
+    }
+  }
+
+  /**
+   * Retires this endpoint and waits briefly for in-flight exchanges before force-stopping. A
+   * caller-supplied client is left running. For standalone use (tests); the engine's endpoint
+   * manager drains all endpoints under one shared deadline instead.
    */
   @Override
   public void close() {
-    if (ownsClient) {
-      try {
-        client.close();
-      } catch (RuntimeException e) {
-        logger.warn("Failed to close endpoint HTTP client", e);
-      }
+    shutdown();
+    try {
+      awaitTermination(CLOSE_GRACE);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
     }
+    shutdownNow();
   }
 }
