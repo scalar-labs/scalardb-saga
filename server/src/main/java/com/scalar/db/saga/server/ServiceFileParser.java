@@ -58,6 +58,11 @@ final class ServiceFileParser {
    */
   private static final Pattern SERVICE_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9._-]{1,128}");
 
+  // RFC 7230's token rule, which the JDK's HttpRequest.Builder.header() applies at request
+  // time. Checking it here turns a per-request permanent failure into a rejected pass.
+  private static final Pattern HEADER_NAME_PATTERN =
+      Pattern.compile("[!#$%&'*+\\-.^_`|~0-9A-Za-z]+");
+
   private static final String BASE_URL_KEY = "base_url";
   private static final String ALLOWED_HOSTS_KEY = "allowed_hosts";
   private static final String MAX_BODY_BYTES_KEY = "max_body_bytes";
@@ -354,6 +359,19 @@ final class ServiceFileParser {
             throw new IllegalArgumentException(
                 "Service file '" + fileName + "' key '" + key + "' has no header name.");
           }
+          if (!HEADER_NAME_PATTERN.matcher(header).matches()) {
+            throw new IllegalArgumentException(
+                "Service file '"
+                    + fileName
+                    + "' sets header '"
+                    + Redaction.oneLine(header)
+                    + "', which is not an HTTP token. The JDK's client refuses to send such a"
+                    + " name, so every call to service '"
+                    + name
+                    + "' would fail permanently and compensate. Use letters, digits, or"
+                    + " !#$%&'*+-.^_`|~ only; a space, colon, comma, or parenthesis in the name is"
+                    + " the usual cause, from a whole header line pasted onto the key.");
+          }
           if (RESERVED_HEADERS.contains(header)) {
             throw new IllegalArgumentException(
                 "Service file '"
@@ -396,7 +414,7 @@ final class ServiceFileParser {
                     + " Remove one of them.");
           }
           headers.put(
-              requireNoControlCharacters(fileName, header, header, "name"),
+              header,
               requireNoControlCharacters(
                   fileName,
                   header,

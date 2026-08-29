@@ -270,14 +270,16 @@ class ServiceFileParserTest {
     void parseFile_headerNameWithAControlCharacter_throwsIllegalArgumentException()
         throws IOException {
       // Properties.load performs escape processing on keys, so the name half of the key can carry
-      // one too — and an unsendable name fails every call exactly as an unsendable value does.
+      // one too — and an unsendable name fails every call exactly as an unsendable value does. A
+      // control character is not an HTTP token character, so the token rule is what rejects it;
+      // the value keeps its own control-character check, since a value is not a token.
       // Arrange
       writeService("account.properties", "base_url=http://a:1\nheader.X-A\\u0000B=v\n");
 
       // Act & Assert
       assertThatThrownBy(ServiceFileParserTest.this::parse)
           .isInstanceOf(IllegalArgumentException.class)
-          .hasMessageContaining("control character");
+          .hasMessageContaining("not an HTTP token");
     }
 
     @Test
@@ -361,6 +363,37 @@ class ServiceFileParserTest {
 
       assertThatThrownBy(ServiceFileParserTest.this::parse)
           .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"X-Api(Key)", "X-Api,Key", "X/Key", "X@Key", "X{Key}"})
+    void parseFile_headerNameThatIsNotAToken_throwsIllegalArgumentException(String header)
+        throws IOException {
+      // HttpRequest.Builder.header() enforces RFC 7230's token rule, so a name it refuses fails
+      // every call to the service permanently and compensates — the same end state the restricted
+      // name list exists to prevent, reached by a name nobody thought to list.
+      // Arrange
+      writeService("account.properties", "base_url=http://a:1\nheader." + header + "=v\n");
+
+      // Act & Assert
+      assertThatThrownBy(ServiceFileParserTest.this::parse)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("not an HTTP token");
+    }
+
+    @Test
+    void parseFile_headerNameCarryingAnEscapedSpace_throwsIllegalArgumentException()
+        throws IOException {
+      // Properties treats an unescaped space or colon as the key/value separator, so a whole
+      // header line pasted onto the key arrives escaped; that is how a name carrying one reaches
+      // the parser rather than being read as a name with an odd value.
+      // Arrange
+      writeService("account.properties", "base_url=http://a:1\nheader.X\\ Api\\ Key=v\n");
+
+      // Act & Assert
+      assertThatThrownBy(ServiceFileParserTest.this::parse)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("not an HTTP token");
     }
 
     @ParameterizedTest
