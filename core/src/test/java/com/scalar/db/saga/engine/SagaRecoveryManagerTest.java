@@ -1286,11 +1286,14 @@ class SagaRecoveryManagerTest {
   @Nested
   class ScatteredSweepBudget {
 
-    /** A manager whose per-sweep budget is {@code batchSize}, on the standard fixed clock. */
-    private SagaRecoveryManager managerWithBatchSize(int batchSize) {
+    /**
+     * A manager whose per-sweep budget is {@code maxRecoveriesPerPass}, on the standard fixed
+     * clock.
+     */
+    private SagaRecoveryManager managerWithMaxRecoveriesPerPass(int maxRecoveriesPerPass) {
       RecoveryConfig config =
           new RecoveryConfig(
-              60_000, 30, GRACE_PERIOD, batchSize, 10, Clock.fixed(NOW, ZoneOffset.UTC));
+              60_000, 30, GRACE_PERIOD, maxRecoveriesPerPass, 10, Clock.fixed(NOW, ZoneOffset.UTC));
       return new SagaRecoveryManager(store, engine, registry, OWNER_ID, config, scheduler);
     }
 
@@ -1313,7 +1316,7 @@ class SagaRecoveryManagerTest {
     void recover_claimLost_budgetNotConsumedAndScanContinues() {
       // Arrange — batch size 1: the lost race on page 1 must not spend the budget, so the sweep
       // reaches page 2 and recovers its saga. The attempts-counted budget stopped after page 1.
-      SagaRecoveryManager smallManager = managerWithBatchSize(1);
+      SagaRecoveryManager smallManager = managerWithMaxRecoveriesPerPass(1);
 
       SagaStateSnapshot lost = namedSnapshot("saga-lost");
       SagaStateSnapshot won = namedSnapshot("saga-won");
@@ -1336,7 +1339,7 @@ class SagaRecoveryManagerTest {
     void recover_driveFailsAfterClaim_budgetConsumed() {
       // Arrange — batch size 1: the claim committed, so the failed drive still spends the budget
       // and the sweep must NOT continue to the next page (that would be a claim spree).
-      SagaRecoveryManager smallManager = managerWithBatchSize(1);
+      SagaRecoveryManager smallManager = managerWithMaxRecoveriesPerPass(1);
 
       SagaStateSnapshot saga = namedSnapshot("saga-drive-fails");
       ScanCursor cursor = mock(ScanCursor.class);
@@ -1374,7 +1377,7 @@ class SagaRecoveryManagerTest {
     void recover_budgetStop_nextPassResumesAtSameCursor() {
       // Arrange — batch size 1: pass 1 stops on budget holding the next cursor; pass 2 must
       // resume there instead of restarting at the permutation's first bucket.
-      SagaRecoveryManager smallManager = managerWithBatchSize(1);
+      SagaRecoveryManager smallManager = managerWithMaxRecoveriesPerPass(1);
 
       ScanCursor initial = mock(ScanCursor.class);
       ScanCursor next = mock(ScanCursor.class);
@@ -1399,7 +1402,7 @@ class SagaRecoveryManagerTest {
     void recover_claimThrows_budgetConsumedConservatively() {
       // Arrange — batch size 1: a claim that throws may have committed without confirmation, so
       // it must spend the budget; the sweep must NOT continue claiming across the ring.
-      SagaRecoveryManager smallManager = managerWithBatchSize(1);
+      SagaRecoveryManager smallManager = managerWithMaxRecoveriesPerPass(1);
 
       SagaStateSnapshot saga = namedSnapshot("saga-claim-throws");
       ScanCursor cursor = mock(ScanCursor.class);
@@ -1613,7 +1616,7 @@ class SagaRecoveryManagerTest {
     void recover_parkedRaceLost_budgetNotConsumedAndScanContinues() {
       // Arrange — batch size 1: the parked saga on page 1 was already resolved by a callback
       // (lost race), so the parked sweep must continue to page 2.
-      SagaRecoveryManager smallManager = managerWithBatchSize(1);
+      SagaRecoveryManager smallManager = managerWithMaxRecoveriesPerPass(1);
 
       when(store.findRecoverable(any(), any())).thenReturn(new Recoverables(List.of(), null));
       ScanCursor cursor = mock(ScanCursor.class);

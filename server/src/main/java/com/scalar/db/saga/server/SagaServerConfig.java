@@ -158,17 +158,17 @@ import org.jspecify.annotations.Nullable;
  * from {@link RecoveryConfig#defaults()}.
  *
  * <ul>
- *   <li>{@code recovery.timeout_millis} — staleness threshold: a saga untouched for longer is
- *       considered abandoned and eligible for recovery. Must exceed the longest a healthy instance
- *       goes between updating a saga, or a live saga is stolen from the instance still running it
+ *   <li>{@code recovery.staleness_threshold_millis} — a saga untouched for longer is considered
+ *       abandoned and eligible for recovery. Must exceed the longest a healthy instance goes
+ *       between updating a saga, or a live saga is stolen from the instance still running it
  *   <li>{@code recovery.interval_seconds} — how often the scan runs
  *   <li>{@code recovery.compensation_grace_period_seconds} — how long a saga may stay stuck with
  *       failing compensation before it is escalated for manual intervention
- *   <li>{@code recovery.batch_size} — per-pass recovery work budget. Claims lost to another replica
- *       do not count against it (failed attempts do), and a pass stopped by the cap resumes where
- *       it left off next pass, so a small value never skips sagas — it only spreads recovery over
- *       more passes
- *   <li>{@code recovery.max_concurrent_recoveries} — how many of that batch are recovered at once,
+ *   <li>{@code recovery.max_recoveries_per_pass} — how many sagas one pass may recover. Claims lost
+ *       to another replica do not count against it (failed attempts do), and a pass stopped by the
+ *       cap resumes where it left off next pass, so a small value never skips sagas — it only
+ *       spreads recovery over more passes
+ *   <li>{@code recovery.max_concurrent_recoveries} — how many of those are recovered at once,
  *       bounding the database pressure of a single pass
  * </ul>
  *
@@ -180,11 +180,11 @@ import org.jspecify.annotations.Nullable;
  * <ul>
  *   <li>{@code retention.period_seconds} — how long a terminal saga is kept before it is purgeable
  *       (default 7 days). This is the window in which a saga's history can still be inspected
- *   <li>{@code retention.cleanup_interval_seconds} — how often the purge runs
- *   <li>{@code retention.batch_size} — cap on sagas actually purged per pass (deletes that turn out
- *       to be no-ops because another replica already purged the saga do not count); it must keep up
- *       with the terminal-saga rate over one interval or the backlog grows
- *   <li>{@code retention.max_concurrent_purges} — how many of that batch are purged at once
+ *   <li>{@code retention.interval_seconds} — how often the purge runs
+ *   <li>{@code retention.max_purges_per_pass} — cap on sagas actually purged per pass (deletes that
+ *       turn out to be no-ops because another replica already purged the saga do not count); it
+ *       must keep up with the terminal-saga rate over one interval or the backlog grows
+ *   <li>{@code retention.max_concurrent_purges} — how many of those are purged at once
  * </ul>
  *
  * <h2>Declarative services ({@code services_path})</h2>
@@ -356,19 +356,20 @@ public final class SagaServerConfig {
   static final String DETAIL_MAX_TIMELINE_EVENTS_KEY = DETAIL_PREFIX + "max_timeline_events";
 
   static final String RECOVERY_PREFIX = SERVER_PREFIX + "recovery.";
-  static final String RECOVERY_TIMEOUT_MILLIS_KEY = RECOVERY_PREFIX + "timeout_millis";
+  static final String RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY =
+      RECOVERY_PREFIX + "staleness_threshold_millis";
   static final String RECOVERY_INTERVAL_SECONDS_KEY = RECOVERY_PREFIX + "interval_seconds";
   static final String RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY =
       RECOVERY_PREFIX + "compensation_grace_period_seconds";
-  static final String RECOVERY_BATCH_SIZE_KEY = RECOVERY_PREFIX + "batch_size";
+  static final String RECOVERY_MAX_RECOVERIES_PER_PASS_KEY =
+      RECOVERY_PREFIX + "max_recoveries_per_pass";
   static final String RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY =
       RECOVERY_PREFIX + "max_concurrent_recoveries";
 
   static final String RETENTION_PREFIX = SERVER_PREFIX + "retention.";
   static final String RETENTION_PERIOD_SECONDS_KEY = RETENTION_PREFIX + "period_seconds";
-  static final String RETENTION_CLEANUP_INTERVAL_SECONDS_KEY =
-      RETENTION_PREFIX + "cleanup_interval_seconds";
-  static final String RETENTION_BATCH_SIZE_KEY = RETENTION_PREFIX + "batch_size";
+  static final String RETENTION_INTERVAL_SECONDS_KEY = RETENTION_PREFIX + "interval_seconds";
+  static final String RETENTION_MAX_PURGES_PER_PASS_KEY = RETENTION_PREFIX + "max_purges_per_pass";
   static final String RETENTION_MAX_CONCURRENT_PURGES_KEY =
       RETENTION_PREFIX + "max_concurrent_purges";
 
@@ -473,14 +474,14 @@ public final class SagaServerConfig {
           SHUTDOWN_MODE_KEY,
           SHUTDOWN_TIMEOUT_MILLIS_KEY,
           DETAIL_MAX_TIMELINE_EVENTS_KEY,
-          RECOVERY_TIMEOUT_MILLIS_KEY,
+          RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY,
           RECOVERY_INTERVAL_SECONDS_KEY,
           RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY,
-          RECOVERY_BATCH_SIZE_KEY,
+          RECOVERY_MAX_RECOVERIES_PER_PASS_KEY,
           RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY,
           RETENTION_PERIOD_SECONDS_KEY,
-          RETENTION_CLEANUP_INTERVAL_SECONDS_KEY,
-          RETENTION_BATCH_SIZE_KEY,
+          RETENTION_INTERVAL_SECONDS_KEY,
+          RETENTION_MAX_PURGES_PER_PASS_KEY,
           RETENTION_MAX_CONCURRENT_PURGES_KEY,
           CALLBACK_BASE_URL_KEY,
           CALLBACK_SECRET_KEY,
@@ -930,14 +931,14 @@ public final class SagaServerConfig {
     RecoveryConfig defaults = RecoveryConfig.defaults();
     return new RecoveryConfig(
         parseBoundedLong(
-            properties.getProperty(RECOVERY_TIMEOUT_MILLIS_KEY),
-            RECOVERY_TIMEOUT_MILLIS_KEY,
-            defaults.recoveryTimeoutMillis(),
+            properties.getProperty(RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY),
+            RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY,
+            defaults.stalenessThresholdMillis(),
             1L),
         parseBoundedLong(
             properties.getProperty(RECOVERY_INTERVAL_SECONDS_KEY),
             RECOVERY_INTERVAL_SECONDS_KEY,
-            defaults.recoveryIntervalSeconds(),
+            defaults.intervalSeconds(),
             1L),
         Duration.ofSeconds(
             parseBoundedLong(
@@ -946,9 +947,9 @@ public final class SagaServerConfig {
                 defaults.compensationGracePeriod().toSeconds(),
                 1L)),
         parseBoundedInt(
-            properties.getProperty(RECOVERY_BATCH_SIZE_KEY),
-            RECOVERY_BATCH_SIZE_KEY,
-            defaults.batchSize(),
+            properties.getProperty(RECOVERY_MAX_RECOVERIES_PER_PASS_KEY),
+            RECOVERY_MAX_RECOVERIES_PER_PASS_KEY,
+            defaults.maxRecoveriesPerPass(),
             1),
         parseBoundedInt(
             properties.getProperty(RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY),
@@ -969,14 +970,14 @@ public final class SagaServerConfig {
                 defaults.retentionPeriod().toSeconds(),
                 1L)),
         parseBoundedLong(
-            properties.getProperty(RETENTION_CLEANUP_INTERVAL_SECONDS_KEY),
-            RETENTION_CLEANUP_INTERVAL_SECONDS_KEY,
-            defaults.cleanupIntervalSeconds(),
+            properties.getProperty(RETENTION_INTERVAL_SECONDS_KEY),
+            RETENTION_INTERVAL_SECONDS_KEY,
+            defaults.intervalSeconds(),
             1L),
         parseBoundedInt(
-            properties.getProperty(RETENTION_BATCH_SIZE_KEY),
-            RETENTION_BATCH_SIZE_KEY,
-            defaults.batchSize(),
+            properties.getProperty(RETENTION_MAX_PURGES_PER_PASS_KEY),
+            RETENTION_MAX_PURGES_PER_PASS_KEY,
+            defaults.maxPurgesPerPass(),
             1),
         parseBoundedInt(
             properties.getProperty(RETENTION_MAX_CONCURRENT_PURGES_KEY),

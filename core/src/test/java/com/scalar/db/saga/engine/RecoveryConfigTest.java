@@ -24,38 +24,38 @@ class RecoveryConfigTest {
         new RecoveryConfig(30_000, 10, Duration.ofHours(2), 500, 5, FIXED_CLOCK);
 
     // Assert
-    assertThat(config.recoveryTimeoutMillis()).isEqualTo(30_000);
-    assertThat(config.recoveryIntervalSeconds()).isEqualTo(10);
+    assertThat(config.stalenessThresholdMillis()).isEqualTo(30_000);
+    assertThat(config.intervalSeconds()).isEqualTo(10);
     assertThat(config.compensationGracePeriod()).isEqualTo(Duration.ofHours(2));
-    assertThat(config.batchSize()).isEqualTo(500);
+    assertThat(config.maxRecoveriesPerPass()).isEqualTo(500);
     assertThat(config.maxConcurrentRecoveries()).isEqualTo(5);
     assertThat(config.clock()).isEqualTo(FIXED_CLOCK);
   }
 
   // =========================================================================
-  // Validation — recoveryTimeoutMillis
+  // Validation — stalenessThresholdMillis
   // =========================================================================
 
   @Test
-  void constructor_zeroRecoveryTimeoutMillis_throwsException() {
+  void constructor_zeroStalenessThresholdMillis_throwsException() {
     // Act & Assert
     assertThatThrownBy(() -> new RecoveryConfig(0, 10, Duration.ofHours(2), 500, 5, FIXED_CLOCK))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
-  void constructor_negativeRecoveryTimeoutMillis_throwsException() {
+  void constructor_negativeStalenessThresholdMillis_throwsException() {
     // Act & Assert
     assertThatThrownBy(() -> new RecoveryConfig(-1, 10, Duration.ofHours(2), 500, 5, FIXED_CLOCK))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   // =========================================================================
-  // Validation — recoveryIntervalSeconds
+  // Validation — intervalSeconds
   // =========================================================================
 
   @Test
-  void constructor_zeroRecoveryIntervalSeconds_throwsException() {
+  void constructor_zeroIntervalSeconds_throwsException() {
     // Act & Assert
     assertThatThrownBy(
             () -> new RecoveryConfig(30_000, 0, Duration.ofHours(2), 500, 5, FIXED_CLOCK))
@@ -63,7 +63,7 @@ class RecoveryConfigTest {
   }
 
   @Test
-  void constructor_negativeRecoveryIntervalSeconds_throwsException() {
+  void constructor_negativeIntervalSeconds_throwsException() {
     // Act & Assert
     assertThatThrownBy(
             () -> new RecoveryConfig(30_000, -1, Duration.ofHours(2), 500, 5, FIXED_CLOCK))
@@ -98,18 +98,18 @@ class RecoveryConfigTest {
   }
 
   // =========================================================================
-  // Validation — batchSize
+  // Validation — maxRecoveriesPerPass
   // =========================================================================
 
   @Test
-  void constructor_zeroBatchSize_throwsException() {
+  void constructor_zeroMaxRecoveriesPerPass_throwsException() {
     // Act & Assert
     assertThatThrownBy(() -> new RecoveryConfig(30_000, 10, Duration.ofHours(2), 0, 5, FIXED_CLOCK))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
-  void constructor_negativeBatchSize_throwsException() {
+  void constructor_negativeMaxRecoveriesPerPass_throwsException() {
     // Act & Assert
     assertThatThrownBy(
             () -> new RecoveryConfig(30_000, 10, Duration.ofHours(2), -1, 5, FIXED_CLOCK))
@@ -158,10 +158,10 @@ class RecoveryConfigTest {
     RecoveryConfig config = RecoveryConfig.defaults();
 
     // Assert
-    assertThat(config.recoveryTimeoutMillis()).isEqualTo(60_000);
-    assertThat(config.recoveryIntervalSeconds()).isEqualTo(30);
+    assertThat(config.stalenessThresholdMillis()).isEqualTo(60_000);
+    assertThat(config.intervalSeconds()).isEqualTo(30);
     assertThat(config.compensationGracePeriod()).isEqualTo(Duration.ofHours(4));
-    assertThat(config.batchSize()).isEqualTo(1000);
+    assertThat(config.maxRecoveriesPerPass()).isEqualTo(1000);
     assertThat(config.maxConcurrentRecoveries()).isEqualTo(10);
   }
 
@@ -171,10 +171,10 @@ class RecoveryConfigTest {
     RecoveryConfig config = RecoveryConfig.defaults(FIXED_CLOCK);
 
     // Assert
-    assertThat(config.recoveryTimeoutMillis()).isEqualTo(60_000);
-    assertThat(config.recoveryIntervalSeconds()).isEqualTo(30);
+    assertThat(config.stalenessThresholdMillis()).isEqualTo(60_000);
+    assertThat(config.intervalSeconds()).isEqualTo(30);
     assertThat(config.compensationGracePeriod()).isEqualTo(Duration.ofHours(4));
-    assertThat(config.batchSize()).isEqualTo(1000);
+    assertThat(config.maxRecoveriesPerPass()).isEqualTo(1000);
     assertThat(config.maxConcurrentRecoveries()).isEqualTo(10);
     assertThat(config.clock()).isEqualTo(FIXED_CLOCK);
   }

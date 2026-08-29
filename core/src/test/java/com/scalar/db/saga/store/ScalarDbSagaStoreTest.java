@@ -2612,7 +2612,7 @@ class ScalarDbSagaStoreTest {
     ScalarDbSagaStoreConfig config = ScalarDbSagaStoreConfig.builder().build();
 
     // Assert
-    assertThat(config.getRecoveryScanLimit()).isEqualTo(100);
+    assertThat(config.getRecoveryScanLimit()).isEqualTo(250);
   }
 
   @Test

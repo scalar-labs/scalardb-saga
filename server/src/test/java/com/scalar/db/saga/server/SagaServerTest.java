@@ -573,9 +573,9 @@ class SagaServerTest {
     props.setProperty(SagaServerConfig.DETAIL_MAX_TIMELINE_EVENTS_KEY, "7005");
     props.setProperty(SagaServerConfig.SYNC_TIMEOUT_MILLIS_KEY, "7002");
     props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "7003");
-    props.setProperty(SagaServerConfig.RECOVERY_TIMEOUT_MILLIS_KEY, "7004");
-    props.setProperty(SagaServerConfig.RECOVERY_BATCH_SIZE_KEY, "51");
-    props.setProperty(SagaServerConfig.RETENTION_BATCH_SIZE_KEY, "52");
+    props.setProperty(SagaServerConfig.RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY, "7004");
+    props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_PASS_KEY, "51");
+    props.setProperty(SagaServerConfig.RETENTION_MAX_PURGES_PER_PASS_KEY, "52");
     return SagaServerConfig.load(props);
   }
 

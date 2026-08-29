@@ -5,7 +5,11 @@ class ScalarDbSagaStoreConfig {
 
   private static final int DEFAULT_MAX_EVENT_PAYLOAD_BYTES = 0;
   private static final int DEFAULT_TRANSACTION_RETRY_COUNT = 3;
-  private static final int DEFAULT_RECOVERY_SCAN_LIMIT = 100;
+  // Deliberately not operator-configurable. This is a page size, and no operator-visible signal
+  // says it needs changing or in which direction. Tests still set it through the builder to force
+  // multi-page behaviour. If a storage backend ever needs a different value, adding a property back
+  // is compatible; removing one is not.
+  private static final int DEFAULT_RECOVERY_SCAN_LIMIT = 250;
 
   private final int maxEventPayloadBytes;
   private final int transactionRetryCount;
@@ -43,9 +47,11 @@ class ScalarDbSagaStoreConfig {
    * sagas beyond this limit are picked up on the next recovery cycle.
    *
    * <p>This per-bucket cap works together with {@link
-   * com.scalar.db.saga.engine.RecoveryConfig#batchSize()} (total cap per pass) to ensure fair
-   * distribution across buckets. Keep this value smaller than {@code batchSize /
-   * numRecoverableStatuses} so that a single hot bucket cannot consume the entire batch budget.
+   * com.scalar.db.saga.engine.RecoveryConfig#maxRecoveriesPerPass()} (total cap per pass) to ensure
+   * fair distribution across buckets. It must stay below {@code maxRecoveriesPerPass /
+   * numRecoverableStatuses} so that a single hot bucket cannot consume the entire pass budget. That
+   * bound is what forces the sweep cursor to advance a bucket per round; without it one hot bucket
+   * pins the cursor and every bucket behind it starves.
    *
    * @return the recovery scan limit
    */
@@ -113,8 +119,10 @@ class ScalarDbSagaStoreConfig {
      * Sets the maximum number of rows returned per status scan in {@code findRecoverable}. Any
      * sagas beyond this limit are picked up on the next recovery cycle.
      *
-     * <p>See {@link ScalarDbSagaStoreConfig#getRecoveryScanLimit()} for how this interacts with
-     * {@link com.scalar.db.saga.engine.RecoveryConfig#batchSize()}.
+     * <p>Not settable from configuration properties — see the field comment on the default. Tests
+     * use this to force multi-page behaviour. See {@link
+     * ScalarDbSagaStoreConfig#getRecoveryScanLimit()} for how it interacts with {@link
+     * com.scalar.db.saga.engine.RecoveryConfig#maxRecoveriesPerPass()}.
      *
      * @param recoveryScanLimit the scan limit (must be &gt;= 1)
      * @return this builder

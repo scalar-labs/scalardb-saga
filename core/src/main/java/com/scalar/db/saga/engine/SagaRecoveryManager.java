@@ -43,7 +43,7 @@ import org.slf4j.LoggerFactory;
  *
  * <p>On each recovery pass, sweeps the {@code saga_state} buckets for sagas in {@link
  * SagaStatus#RUNNING} or {@link SagaStatus#COMPENSATING} whose {@code updated_at} is older than
- * {@link RecoveryConfig#recoveryTimeoutMillis()}. For each recoverable saga:
+ * {@link RecoveryConfig#stalenessThresholdMillis()}. For each recoverable saga:
  *
  * <ol>
  *   <li>Claims via {@link SagaStore#claimForRecovery} (optimistic concurrency).
@@ -140,7 +140,7 @@ class SagaRecoveryManager {
    */
   @SuppressWarnings("FutureReturnValueIgnored") // fire-and-forget scheduled tasks
   public void start() {
-    long intervalSeconds = config.recoveryIntervalSeconds();
+    long intervalSeconds = config.intervalSeconds();
     long offsetSeconds = SweepScatter.offsetSeconds(ownerId, "recovery", intervalSeconds);
     logger.info(
         "Recovery sweeps for owner {}: schedule offset {}s within the {}s interval",
@@ -339,7 +339,8 @@ class SagaRecoveryManager {
     try {
       // Compute the staleness cutoff once from the injected clock so every page this pass uses a
       // consistent threshold.
-      Instant staleThreshold = config.clock().instant().minusMillis(config.recoveryTimeoutMillis());
+      Instant staleThreshold =
+          config.clock().instant().minusMillis(config.stalenessThresholdMillis());
       SweepPageAction stalePage =
           (cursor, limit, futures) -> {
             Recoverables result = store.findRecoverable(staleThreshold, cursor);
@@ -378,12 +379,12 @@ class SagaRecoveryManager {
       while (true) {
         boolean staleActive =
             staleCursor != null
-                && stale.spent() < config.batchSize()
+                && stale.spent() < config.maxRecoveriesPerPass()
                 && !stale.aborted
                 && !stale.storeUnavailable;
         boolean parkedActive =
             parkedCursor != null
-                && parked.spent() < config.batchSize()
+                && parked.spent() < config.maxRecoveriesPerPass()
                 && !parked.aborted
                 && !parked.storeUnavailable;
         if (!staleActive && !parkedActive) {
@@ -447,14 +448,15 @@ class SagaRecoveryManager {
       String scanFailureMessage) {
     @Nullable ScanCursor cursor = start;
     int submitted = 0;
-    while (cursor != null && counters.spent() + submitted < config.batchSize()) {
+    while (cursor != null && counters.spent() + submitted < config.maxRecoveriesPerPass()) {
       if (Thread.currentThread().isInterrupted()) {
         return cursor;
       }
       int before = futures.size();
       try {
         cursor =
-            page.scanAndSubmit(cursor, config.batchSize() - counters.spent() - submitted, futures);
+            page.scanAndSubmit(
+                cursor, config.maxRecoveriesPerPass() - counters.spent() - submitted, futures);
       } catch (RejectedExecutionException e) {
         logger.warn("Recovery executor shut down; ending the pass", e);
         counters.aborted = true;
@@ -483,7 +485,7 @@ class SagaRecoveryManager {
   /**
    * Why a sweep ended where it did, for the pass summary. Budget is checked before revolution: when
    * the budget is exhausted exactly on the last bucket both are true, and budget is the actionable
-   * signal — it is what an operator sizes {@code batchSize} by.
+   * signal — it is what an operator sizes {@code maxRecoveriesPerPass} by.
    */
   private StopReason stopReason(SweepCounters counters, @Nullable ScanCursor cursor) {
     if (counters.aborted) {
@@ -492,7 +494,7 @@ class SagaRecoveryManager {
     if (counters.storeUnavailable) {
       return StopReason.STORE_UNAVAILABLE;
     }
-    if (counters.spent() >= config.batchSize()) {
+    if (counters.spent() >= config.maxRecoveriesPerPass()) {
       return StopReason.BUDGET;
     }
     if (cursor == null) {

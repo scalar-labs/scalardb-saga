@@ -33,8 +33,6 @@ import java.util.Properties;
  *       ({@code 0} = no limit, default: {@code 0})
  *   <li>{@code scalar.db.saga.store.transaction_retry_count} — max transaction retry attempts
  *       (default: {@code 3})
- *   <li>{@code scalar.db.saga.store.recovery_scan_limit} — max rows per recovery scan (default:
- *       {@code 100})
  *   <li>{@code scalar.db.saga.store.num_buckets} — number of state-table bucket partitions
  *       (default: {@code 16})
  * </ul>
@@ -104,10 +102,6 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
     String retryCount = properties.getProperty(PROP_PREFIX + "transaction_retry_count");
     if (retryCount != null) {
       builder.transactionRetryCount(parseIntProperty("transaction_retry_count", retryCount));
-    }
-    String scanLimit = properties.getProperty(PROP_PREFIX + "recovery_scan_limit");
-    if (scanLimit != null) {
-      builder.recoveryScanLimit(parseIntProperty("recovery_scan_limit", scanLimit));
     }
     String numBuckets = properties.getProperty(PROP_PREFIX + "num_buckets");
     if (numBuckets != null) {
