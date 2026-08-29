@@ -19,7 +19,6 @@ import com.scalar.db.saga.store.SweepScatter;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -155,7 +154,7 @@ class SagaRecoveryManager {
   }
 
   /**
-   * Warns once at startup when the sweep budget cannot cover one bucket page.
+   * Warns when the sweep budget cannot cover one bucket page.
    *
    * <p>A page holds every recoverable status one after another and the sweep submits at most its
    * remaining budget before advancing the bucket, so the truncation always falls on the trailing
@@ -166,32 +165,18 @@ class SagaRecoveryManager {
    */
   private void warnIfBudgetTruncatesAPage() {
     int pageSize = store.recoveryPageSize();
-    if (pageSize <= 0) {
-      return;
-    }
-    long statuses = Arrays.stream(SagaStatus.values()).filter(SagaStatus::isRecoverable).count();
-    long fullPage = (long) pageSize * statuses;
     int budget = config.maxRecoveriesPerSweep();
-    if (budget >= fullPage) {
+    if (pageSize <= 0 || budget >= pageSize) {
       return;
     }
-    if (budget <= pageSize) {
-      logger.warn(
-          "Recovery budget {} is at or below the {}-row scan for a single status, so sagas in"
-              + " trailing recoverable statuses are never recovered. Raise it above {}.",
-          budget,
-          pageSize,
-          fullPage);
-    } else {
-      logger.warn(
-          "Recovery budget {} is below one full page of {} rows ({} statuses x {}), so sagas in"
-              + " trailing recoverable statuses are served at a reduced rate. Raise it above {}.",
-          budget,
-          fullPage,
-          statuses,
-          pageSize,
-          fullPage);
-    }
+    logger.warn(
+        "Recovery budget {} is below one recovery page of {} rows, so a bucket's page is truncated"
+            + " and the cut always falls on the trailing recoverable status: those sagas are"
+            + " throttled behind the leading one, and under a sustained backlog may never be"
+            + " recovered at all. Raise maxRecoveriesPerSweep to at least {}.",
+        budget,
+        pageSize,
+        pageSize);
   }
 
   /**

@@ -83,7 +83,7 @@ class SagaServerStartupIntegrationTest {
     props.setProperty(SagaServerConfig.RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY, "90000");
     props.setProperty(SagaServerConfig.RECOVERY_INTERVAL_SECONDS_KEY, "300");
     props.setProperty(SagaServerConfig.RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY, "600");
-    props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY, "50");
+    props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY, "250");
     props.setProperty(SagaServerConfig.RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY, "2");
     props.setProperty(SagaServerConfig.RETENTION_PERIOD_SECONDS_KEY, "3600");
     props.setProperty(SagaServerConfig.RETENTION_INTERVAL_SECONDS_KEY, "300");

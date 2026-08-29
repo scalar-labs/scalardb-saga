@@ -318,16 +318,14 @@ public interface SagaStore extends AutoCloseable {
   Recoverables findRecoverable(Instant threshold, @Nullable ScanCursor cursor);
 
   /**
-   * Returns how many rows one {@link #findRecoverable} call returns per recoverable status, per
-   * bucket, or {@code 0} if this store does not page recovery scans.
+   * Returns how many rows one {@link #findRecoverable} call can return, or {@code 0} if this store
+   * does not page recovery scans.
    *
-   * <p>Exists so the recovery manager can check its own budget against it at startup. A page holds
-   * every recoverable status one after another and the sweep stops submitting once its budget runs
-   * out, so a budget below {@code pageSize x recoverableStatuses} truncates the page and the
-   * truncation always falls on the trailing status. Only the store knows this number, and only the
-   * engine knows the budget, so neither can make that comparison alone.
+   * <p>The recovery manager compares its per-sweep budget against this at startup: a budget below
+   * one page truncates the page, and the cut falls on whichever recoverable status the store
+   * returns last. A decorator must delegate this rather than answer for itself.
    *
-   * @return rows per status per bucket, or {@code 0} if not applicable
+   * @return rows one {@code findRecoverable} call can return, or {@code 0} if not applicable
    */
   default int recoveryPageSize() {
     return 0;

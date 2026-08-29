@@ -165,10 +165,10 @@ class SagaRetentionManagerTest {
     @Test
     void cleanup_passBudgetReached_stopsEarly() {
       // Arrange
-      RetentionConfig smallBatch =
+      RetentionConfig smallBudget =
           new RetentionConfig(RETENTION_PERIOD, 3600, 2, 10, Clock.fixed(NOW, ZoneOffset.UTC));
       SagaRetentionManager smallManager =
-          new SagaRetentionManager(store, OWNER_ID, smallBatch, scheduler);
+          new SagaRetentionManager(store, OWNER_ID, smallBudget, scheduler);
 
       SagaStateSnapshot saga1 = snapshot("saga-001", SagaStatus.COMPLETED);
       SagaStateSnapshot saga2 = snapshot("saga-002", SagaStatus.COMPLETED);
@@ -351,10 +351,10 @@ class SagaRetentionManagerTest {
       // replica (deleteSaga returns false), refunding its budget; the purged rows are physically
       // gone, so the second round's re-scan surfaces a fresh candidate and the refunded budget is
       // spent on it instead of being silently dropped.
-      RetentionConfig smallBatch =
+      RetentionConfig smallBudget =
           new RetentionConfig(RETENTION_PERIOD, 3600, 2, 10, Clock.fixed(NOW, ZoneOffset.UTC));
       SagaRetentionManager smallManager =
-          new SagaRetentionManager(store, OWNER_ID, smallBatch, scheduler);
+          new SagaRetentionManager(store, OWNER_ID, smallBudget, scheduler);
       SagaStateSnapshot lostRace = snapshot("saga-lost", SagaStatus.COMPLETED);
       SagaStateSnapshot won = snapshot("saga-won", SagaStatus.COMPLETED);
       SagaStateSnapshot fresh = snapshot("saga-fresh", SagaStatus.COMPLETED);

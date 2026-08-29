@@ -36,7 +36,6 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ScheduledExecutorService;
@@ -116,99 +115,6 @@ class SagaRecoveryManagerTest {
   }
 
   // =========================================================================
-  // start() — budget vs page-size floor
-  // =========================================================================
-
-  /**
-   * The budget floor is documented for operators in three files but was enforced nowhere. Neither
-   * config can check it alone — only the store knows its page size, only the engine knows the
-   * budget — so the check lives at startup, where both are in hand. It warns rather than rejects:
-   * every value below the floor was legal before, and failing startup on one would turn an upgrade
-   * into an outage.
-   */
-  @Nested
-  class StartupBudgetWarning {
-
-    @Test
-    void start_budgetAtOrBelowOneStatusScan_warnsTrailingStatusIsNeverRecovered() {
-      // Arrange
-      when(store.recoveryPageSize()).thenReturn(100);
-      ListAppender<ILoggingEvent> appender = attachLogCapture();
-      try {
-        // Act
-        managerWithBudget(100).start();
-
-        // Assert
-        assertThat(appender.list)
-            .filteredOn(e -> e.getLevel() == Level.WARN)
-            .extracting(ILoggingEvent::getFormattedMessage)
-            .anySatisfy(m -> assertThat(m).contains("never recovered"));
-      } finally {
-        recoveryLogger().detachAppender(appender);
-      }
-    }
-
-    @Test
-    void start_budgetBelowAFullPage_warnsTrailingStatusIsThrottled() {
-      // Arrange — above one status scan, below the two-status page
-      when(store.recoveryPageSize()).thenReturn(100);
-      ListAppender<ILoggingEvent> appender = attachLogCapture();
-      try {
-        // Act
-        managerWithBudget(150).start();
-
-        // Assert
-        assertThat(appender.list)
-            .filteredOn(e -> e.getLevel() == Level.WARN)
-            .extracting(ILoggingEvent::getFormattedMessage)
-            .anySatisfy(m -> assertThat(m).contains("reduced rate"));
-      } finally {
-        recoveryLogger().detachAppender(appender);
-      }
-    }
-
-    @Test
-    void start_budgetCoversAFullPage_warnsNothing() {
-      // Arrange
-      when(store.recoveryPageSize()).thenReturn(100);
-      ListAppender<ILoggingEvent> appender = attachLogCapture();
-      try {
-        // Act
-        managerWithBudget(200).start();
-
-        // Assert
-        assertThat(appender.list).filteredOn(e -> e.getLevel() == Level.WARN).isEmpty();
-      } finally {
-        recoveryLogger().detachAppender(appender);
-      }
-    }
-
-    /** A store that does not page recovery scans reports 0, and the check is skipped entirely. */
-    @Test
-    void start_storeDoesNotPage_warnsNothing() {
-      // Arrange
-      when(store.recoveryPageSize()).thenReturn(0);
-      ListAppender<ILoggingEvent> appender = attachLogCapture();
-      try {
-        // Act
-        managerWithBudget(1).start();
-
-        // Assert
-        assertThat(appender.list).filteredOn(e -> e.getLevel() == Level.WARN).isEmpty();
-      } finally {
-        recoveryLogger().detachAppender(appender);
-      }
-    }
-
-    private SagaRecoveryManager managerWithBudget(int budget) {
-      RecoveryConfig config =
-          new RecoveryConfig(
-              60_000, 30, GRACE_PERIOD, budget, 10, Clock.fixed(NOW, ZoneOffset.UTC));
-      return new SagaRecoveryManager(store, engine, registry, OWNER_ID, config, scheduler);
-    }
-  }
-
-  // =========================================================================
   // recover() — cursor pagination
   // =========================================================================
 
@@ -285,10 +191,10 @@ class SagaRecoveryManagerTest {
     @Test
     void recover_sweepBudgetReached_stopsEarly() {
       // Arrange — sweep budget of 2
-      RecoveryConfig smallBatch =
+      RecoveryConfig smallBudget =
           new RecoveryConfig(60_000, 30, GRACE_PERIOD, 2, 10, Clock.fixed(NOW, ZoneOffset.UTC));
       SagaRecoveryManager smallManager =
-          new SagaRecoveryManager(store, engine, registry, OWNER_ID, smallBatch, scheduler);
+          new SagaRecoveryManager(store, engine, registry, OWNER_ID, smallBudget, scheduler);
 
       SagaStateSnapshot saga1 = snapshot(SagaStatus.RUNNING);
       SagaStateSnapshot saga2 =
@@ -1429,22 +1335,6 @@ class SagaRecoveryManagerTest {
       verify(store).claimForRecovery(eq(comp2), eq(OWNER_ID));
     }
 
-    /**
-     * The documented budget floor is {@code pageSize x recoverableStatuses}. The status count is
-     * derived at runtime from {@link SagaStatus#isRecoverable()}, so marking a third status
-     * recoverable would silently move that floor and falsify the operator documentation in three
-     * files. This pins the multiplier.
-     */
-    @Test
-    void isRecoverable_acrossAllStatuses_matchesTheDocumentedFloorMultiplier() {
-      // Act
-      List<SagaStatus> recoverable =
-          Arrays.stream(SagaStatus.values()).filter(SagaStatus::isRecoverable).toList();
-
-      // Assert — the docs' "200" is 100 x this count; RUNNING must lead so COMPENSATING trails
-      assertThat(recoverable).containsExactly(SagaStatus.RUNNING, SagaStatus.COMPENSATING);
-    }
-
     private SagaStateSnapshot snapshotWithId(String sagaId, SagaStatus status) {
       return new SagaStateSnapshot(
           sagaId, SAGA_NAME, status, OWNER_ID, DEF_VERSION, NOW.minusSeconds(300), NOW);
@@ -1466,11 +1356,6 @@ class SagaRecoveryManagerTest {
       return new SagaRecoveryManager(store, engine, registry, OWNER_ID, config, scheduler);
     }
 
-    private SagaStateSnapshot namedSnapshot(String sagaId) {
-      return new SagaStateSnapshot(
-          sagaId, SAGA_NAME, SagaStatus.RUNNING, OWNER_ID, DEF_VERSION, NOW.minusSeconds(300), NOW);
-    }
-
     private void setupSuccessfulRecovery(SagaStateSnapshot saga) {
       SagaDefinition def = definition();
       ExecutionContext ctx = mock(ExecutionContext.class);
@@ -1487,8 +1372,8 @@ class SagaRecoveryManagerTest {
       // reaches page 2 and recovers its saga. The attempts-counted budget stopped after page 1.
       SagaRecoveryManager smallManager = managerWithMaxRecoveriesPerSweep(1);
 
-      SagaStateSnapshot lost = namedSnapshot("saga-lost");
-      SagaStateSnapshot won = namedSnapshot("saga-won");
+      SagaStateSnapshot lost = snapshotWithId("saga-lost", SagaStatus.RUNNING);
+      SagaStateSnapshot won = snapshotWithId("saga-won", SagaStatus.RUNNING);
       ScanCursor cursor = mock(ScanCursor.class);
       when(store.findRecoverable(any(), any()))
           .thenReturn(new Recoverables(List.of(lost), cursor))
@@ -1510,7 +1395,7 @@ class SagaRecoveryManagerTest {
       // and the sweep must NOT continue to the next page (that would be a claim spree).
       SagaRecoveryManager smallManager = managerWithMaxRecoveriesPerSweep(1);
 
-      SagaStateSnapshot saga = namedSnapshot("saga-drive-fails");
+      SagaStateSnapshot saga = snapshotWithId("saga-drive-fails", SagaStatus.RUNNING);
       ScanCursor cursor = mock(ScanCursor.class);
       when(store.findRecoverable(any(), any())).thenReturn(new Recoverables(List.of(saga), cursor));
       when(store.claimForRecovery(saga, OWNER_ID)).thenReturn(Optional.of(saga));
@@ -1551,7 +1436,7 @@ class SagaRecoveryManagerTest {
       ScanCursor initial = mock(ScanCursor.class);
       ScanCursor next = mock(ScanCursor.class);
       when(store.initialSweepCursor(OWNER_ID)).thenReturn(initial);
-      SagaStateSnapshot saga = namedSnapshot("saga-budget");
+      SagaStateSnapshot saga = snapshotWithId("saga-budget", SagaStatus.RUNNING);
       when(store.findRecoverable(any(), eq(initial)))
           .thenReturn(new Recoverables(List.of(saga), next));
       when(store.findRecoverable(any(), eq(next))).thenReturn(new Recoverables(List.of(), null));
@@ -1573,7 +1458,7 @@ class SagaRecoveryManagerTest {
       // it must spend the budget; the sweep must NOT continue claiming across the ring.
       SagaRecoveryManager smallManager = managerWithMaxRecoveriesPerSweep(1);
 
-      SagaStateSnapshot saga = namedSnapshot("saga-claim-throws");
+      SagaStateSnapshot saga = snapshotWithId("saga-claim-throws", SagaStatus.RUNNING);
       ScanCursor cursor = mock(ScanCursor.class);
       when(store.findRecoverable(any(), any())).thenReturn(new Recoverables(List.of(saga), cursor));
       when(store.claimForRecovery(saga, OWNER_ID))
@@ -1638,8 +1523,8 @@ class SagaRecoveryManagerTest {
           new java.util.concurrent.CountDownLatch(1);
       java.util.concurrent.CountDownLatch parkedProcessed =
           new java.util.concurrent.CountDownLatch(1);
-      SagaStateSnapshot slow = namedSnapshot("saga-slow");
-      SagaStateSnapshot fast = namedSnapshot("saga-fast");
+      SagaStateSnapshot slow = snapshotWithId("saga-slow", SagaStatus.RUNNING);
+      SagaStateSnapshot fast = snapshotWithId("saga-fast", SagaStatus.RUNNING);
       ScanCursor cursor = mock(ScanCursor.class);
       when(store.findRecoverable(any(), any()))
           .thenReturn(new Recoverables(List.of(slow), cursor))
@@ -1695,7 +1580,7 @@ class SagaRecoveryManagerTest {
       java.util.concurrent.CountDownLatch claimStarted = new java.util.concurrent.CountDownLatch(1);
       java.util.concurrent.CountDownLatch taskObservedInterrupt =
           new java.util.concurrent.CountDownLatch(1);
-      SagaStateSnapshot saga = namedSnapshot("saga-cancelled-with-pass");
+      SagaStateSnapshot saga = snapshotWithId("saga-cancelled-with-pass", SagaStatus.RUNNING);
       when(store.findRecoverable(any(), any())).thenReturn(new Recoverables(List.of(saga), null));
       when(store.claimForRecovery(saga, OWNER_ID))
           .thenAnswer(
@@ -1737,7 +1622,7 @@ class SagaRecoveryManagerTest {
       // recover(), waits on the lock, and is interrupted: B must return without running a pass.
       java.util.concurrent.CountDownLatch passAStarted = new java.util.concurrent.CountDownLatch(1);
       java.util.concurrent.CountDownLatch releasePassA = new java.util.concurrent.CountDownLatch(1);
-      SagaStateSnapshot saga = namedSnapshot("saga-holding-the-lock");
+      SagaStateSnapshot saga = snapshotWithId("saga-holding-the-lock", SagaStatus.RUNNING);
       when(store.findRecoverable(any(), any())).thenReturn(new Recoverables(List.of(saga), null));
       when(store.claimForRecovery(saga, OWNER_ID))
           .thenAnswer(

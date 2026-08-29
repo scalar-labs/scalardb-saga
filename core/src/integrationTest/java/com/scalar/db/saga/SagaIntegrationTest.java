@@ -1281,12 +1281,12 @@ class SagaIntegrationTest {
       }
       crashStartBacklog(twoStepDefinition(), steps, sagaIds);
 
-      RecoveryConfig smallBatch =
+      RecoveryConfig smallBudget =
           new RecoveryConfig(60_000, 30, Duration.ofHours(4), 2, 10, Clock.systemUTC());
       try (SagaStore storeA = ScalarDbSagaStoreFactory.create(props).createStore();
           SagaStore storeB = ScalarDbSagaStoreFactory.create(props).createStore();
-          DefaultSagaOrchestrator replicaA = replica(storeA, steps, "replica-a", smallBatch);
-          DefaultSagaOrchestrator replicaB = replica(storeB, steps, "replica-b", smallBatch)) {
+          DefaultSagaOrchestrator replicaA = replica(storeA, steps, "replica-a", smallBudget);
+          DefaultSagaOrchestrator replicaB = replica(storeB, steps, "replica-b", smallBudget)) {
 
         // Act — alternate passes until the backlog drains
         int passes = 0;
@@ -1317,10 +1317,10 @@ class SagaIntegrationTest {
       }
       crashStartBacklog(twoStepDefinition(), steps, sagaIds);
 
-      RecoveryConfig batchOfOne =
+      RecoveryConfig budgetOfOne =
           new RecoveryConfig(60_000, 30, Duration.ofHours(4), 1, 10, Clock.systemUTC());
       try (SagaStore store = ScalarDbSagaStoreFactory.create(props).createStore();
-          DefaultSagaOrchestrator orchestrator = replica(store, steps, "replica-a", batchOfOne)) {
+          DefaultSagaOrchestrator orchestrator = replica(store, steps, "replica-a", budgetOfOne)) {
 
         // Act & Assert — each pass recovers exactly one saga (the budget counts successes), and
         // the budget-stopped sweep resumes across passes until every bucket's saga is recovered
@@ -1345,12 +1345,12 @@ class SagaIntegrationTest {
       }
       crashStartBacklog(twoStepDefinition(), steps, sagaIds);
 
-      RecoveryConfig batchOfOne =
+      RecoveryConfig budgetOfOne =
           new RecoveryConfig(60_000, 30, Duration.ofHours(4), 1, 10, Clock.systemUTC());
       try (SagaStore baseStore = ScalarDbSagaStoreFactory.create(props).createStore();
           DriveFailingStore failingStore = new DriveFailingStore(baseStore);
           DefaultSagaOrchestrator orchestrator =
-              replica(failingStore, steps, "replica-fail", batchOfOne)) {
+              replica(failingStore, steps, "replica-fail", budgetOfOne)) {
         failingStore.failEventReads.set(true);
 
         // Act — one pass with budget 1

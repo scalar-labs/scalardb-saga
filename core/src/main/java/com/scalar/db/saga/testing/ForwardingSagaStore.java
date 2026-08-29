@@ -152,6 +152,11 @@ public abstract class ForwardingSagaStore implements SagaStore {
   }
 
   @Override
+  public int recoveryPageSize() {
+    return delegate.recoveryPageSize();
+  }
+
+  @Override
   public Optional<SagaStateSnapshot> claimForRecovery(SagaStateSnapshot saga, String newOwnerId) {
     return delegate.claimForRecovery(saga, newOwnerId);
   }
