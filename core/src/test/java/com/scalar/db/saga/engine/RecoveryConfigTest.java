@@ -27,7 +27,7 @@ class RecoveryConfigTest {
     assertThat(config.stalenessThresholdMillis()).isEqualTo(30_000);
     assertThat(config.intervalSeconds()).isEqualTo(10);
     assertThat(config.compensationGracePeriod()).isEqualTo(Duration.ofHours(2));
-    assertThat(config.maxRecoveriesPerPass()).isEqualTo(500);
+    assertThat(config.maxRecoveriesPerSweep()).isEqualTo(500);
     assertThat(config.maxConcurrentRecoveries()).isEqualTo(5);
     assertThat(config.clock()).isEqualTo(FIXED_CLOCK);
   }
@@ -98,18 +98,18 @@ class RecoveryConfigTest {
   }
 
   // =========================================================================
-  // Validation — maxRecoveriesPerPass
+  // Validation — maxRecoveriesPerSweep
   // =========================================================================
 
   @Test
-  void constructor_zeroMaxRecoveriesPerPass_throwsException() {
+  void constructor_zeroMaxRecoveriesPerSweep_throwsException() {
     // Act & Assert
     assertThatThrownBy(() -> new RecoveryConfig(30_000, 10, Duration.ofHours(2), 0, 5, FIXED_CLOCK))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
-  void constructor_negativeMaxRecoveriesPerPass_throwsException() {
+  void constructor_negativeMaxRecoveriesPerSweep_throwsException() {
     // Act & Assert
     assertThatThrownBy(
             () -> new RecoveryConfig(30_000, 10, Duration.ofHours(2), -1, 5, FIXED_CLOCK))
@@ -161,7 +161,7 @@ class RecoveryConfigTest {
     assertThat(config.stalenessThresholdMillis()).isEqualTo(60_000);
     assertThat(config.intervalSeconds()).isEqualTo(30);
     assertThat(config.compensationGracePeriod()).isEqualTo(Duration.ofHours(4));
-    assertThat(config.maxRecoveriesPerPass()).isEqualTo(1000);
+    assertThat(config.maxRecoveriesPerSweep()).isEqualTo(1000);
     assertThat(config.maxConcurrentRecoveries()).isEqualTo(10);
   }
 
@@ -174,7 +174,7 @@ class RecoveryConfigTest {
     assertThat(config.stalenessThresholdMillis()).isEqualTo(60_000);
     assertThat(config.intervalSeconds()).isEqualTo(30);
     assertThat(config.compensationGracePeriod()).isEqualTo(Duration.ofHours(4));
-    assertThat(config.maxRecoveriesPerPass()).isEqualTo(1000);
+    assertThat(config.maxRecoveriesPerSweep()).isEqualTo(1000);
     assertThat(config.maxConcurrentRecoveries()).isEqualTo(10);
     assertThat(config.clock()).isEqualTo(FIXED_CLOCK);
   }

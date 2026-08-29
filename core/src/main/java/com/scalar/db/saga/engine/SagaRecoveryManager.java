@@ -379,12 +379,12 @@ class SagaRecoveryManager {
       while (true) {
         boolean staleActive =
             staleCursor != null
-                && stale.spent() < config.maxRecoveriesPerPass()
+                && stale.spent() < config.maxRecoveriesPerSweep()
                 && !stale.aborted
                 && !stale.storeUnavailable;
         boolean parkedActive =
             parkedCursor != null
-                && parked.spent() < config.maxRecoveriesPerPass()
+                && parked.spent() < config.maxRecoveriesPerSweep()
                 && !parked.aborted
                 && !parked.storeUnavailable;
         if (!staleActive && !parkedActive) {
@@ -448,7 +448,7 @@ class SagaRecoveryManager {
       String scanFailureMessage) {
     @Nullable ScanCursor cursor = start;
     int submitted = 0;
-    while (cursor != null && counters.spent() + submitted < config.maxRecoveriesPerPass()) {
+    while (cursor != null && counters.spent() + submitted < config.maxRecoveriesPerSweep()) {
       if (Thread.currentThread().isInterrupted()) {
         return cursor;
       }
@@ -456,7 +456,7 @@ class SagaRecoveryManager {
       try {
         cursor =
             page.scanAndSubmit(
-                cursor, config.maxRecoveriesPerPass() - counters.spent() - submitted, futures);
+                cursor, config.maxRecoveriesPerSweep() - counters.spent() - submitted, futures);
       } catch (RejectedExecutionException e) {
         logger.warn("Recovery executor shut down; ending the pass", e);
         counters.aborted = true;
@@ -485,7 +485,7 @@ class SagaRecoveryManager {
   /**
    * Why a sweep ended where it did, for the pass summary. Budget is checked before revolution: when
    * the budget is exhausted exactly on the last bucket both are true, and budget is the actionable
-   * signal — it is what an operator sizes {@code maxRecoveriesPerPass} by.
+   * signal — it is what an operator sizes {@code maxRecoveriesPerSweep} by.
    */
   private StopReason stopReason(SweepCounters counters, @Nullable ScanCursor cursor) {
     if (counters.aborted) {
@@ -494,7 +494,7 @@ class SagaRecoveryManager {
     if (counters.storeUnavailable) {
       return StopReason.STORE_UNAVAILABLE;
     }
-    if (counters.spent() >= config.maxRecoveriesPerPass()) {
+    if (counters.spent() >= config.maxRecoveriesPerSweep()) {
       return StopReason.BUDGET;
     }
     if (cursor == null) {

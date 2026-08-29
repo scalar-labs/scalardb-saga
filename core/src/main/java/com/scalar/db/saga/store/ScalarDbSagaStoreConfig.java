@@ -9,7 +9,11 @@ class ScalarDbSagaStoreConfig {
   // says it needs changing or in which direction. Tests still set it through the builder to force
   // multi-page behaviour. If a storage backend ever needs a different value, adding a property back
   // is compatible; removing one is not.
-  private static final int DEFAULT_RECOVERY_SCAN_LIMIT = 250;
+  //
+  // Raising this is not free: it raises the minimum safe recovery budget with it, because a page
+  // holds one status after another and a sweep stops submitting once its budget runs out. See
+  // getRecoveryScanLimit below. Within-bucket paging removes the coupling; until then, leave it.
+  private static final int DEFAULT_RECOVERY_SCAN_LIMIT = 100;
 
   private final int maxEventPayloadBytes;
   private final int transactionRetryCount;
@@ -46,11 +50,17 @@ class ScalarDbSagaStoreConfig {
    * Returns the maximum number of rows returned per status scan in {@code findRecoverable}. Any
    * sagas beyond this limit are picked up on the next recovery cycle.
    *
-   * <p>This per-bucket cap works together with {@link
-   * com.scalar.db.saga.engine.RecoveryConfig#maxRecoveriesPerPass()} (total cap per pass) to ensure
-   * fair distribution across buckets. It must stay below {@code maxRecoveriesPerPass /
-   * numRecoverableStatuses} so that a single hot bucket cannot consume the entire pass budget. That
-   * bound is what forces the sweep cursor to advance a bucket per round; without it one hot bucket
+   * <p>This per-bucket cap works with {@link
+   * com.scalar.db.saga.engine.RecoveryConfig#maxRecoveriesPerSweep()} in two ways, and both bound
+   * it from above.
+   *
+   * <p>It must stay below {@code maxRecoveriesPerSweep / numRecoverableStatuses}. A page holds
+   * every recoverable status one after another, and the sweep stops submitting the moment its
+   * budget runs out, so a budget smaller than a full page never reaches the trailing status. With
+   * RUNNING first and COMPENSATING second, compensating sagas would then go unrecovered on every
+   * revolution.
+   *
+   * <p>It also forces the cursor to advance a bucket per round; without that bound one hot bucket
    * pins the cursor and every bucket behind it starves.
    *
    * @return the recovery scan limit
@@ -122,7 +132,7 @@ class ScalarDbSagaStoreConfig {
      * <p>Not settable from configuration properties — see the field comment on the default. Tests
      * use this to force multi-page behaviour. See {@link
      * ScalarDbSagaStoreConfig#getRecoveryScanLimit()} for how it interacts with {@link
-     * com.scalar.db.saga.engine.RecoveryConfig#maxRecoveriesPerPass()}.
+     * com.scalar.db.saga.engine.RecoveryConfig#maxRecoveriesPerSweep()}.
      *
      * @param recoveryScanLimit the scan limit (must be &gt;= 1)
      * @return this builder

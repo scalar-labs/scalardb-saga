@@ -94,6 +94,7 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
   }
 
   private static ScalarDbSagaStoreConfig parseConfig(Properties properties) {
+    rejectRemovedKeys(properties);
     ScalarDbSagaStoreConfig.Builder builder = ScalarDbSagaStoreConfig.builder();
     String maxPayload = properties.getProperty(PROP_PREFIX + "max_event_payload_bytes");
     if (maxPayload != null) {
@@ -108,6 +109,23 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
       builder.numBuckets(parseIntProperty("num_buckets", numBuckets));
     }
     return builder.build();
+  }
+
+  /**
+   * Fails on a removed key rather than ignoring it. Nothing else validates this namespace, so a
+   * store key that is merely dropped from the parser reads as unset: the deployment starts cleanly
+   * and runs on a default the operator believes they overrode.
+   */
+  private static void rejectRemovedKeys(Properties properties) {
+    String scanLimit = PROP_PREFIX + "recovery_scan_limit";
+    if (properties.getProperty(scanLimit) != null) {
+      throw new IllegalArgumentException(
+          "'"
+              + scanLimit
+              + "' has been removed. It is now an internal page size with no operator meaning."
+              + " Delete the key; to spread recovery over more or fewer passes, size"
+              + " scalar.db.saga.server.recovery.max_recoveries_per_sweep instead.");
+    }
   }
 
   private static int parseIntProperty(String key, String value) {

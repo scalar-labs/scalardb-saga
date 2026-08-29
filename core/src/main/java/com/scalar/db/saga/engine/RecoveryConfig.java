@@ -18,13 +18,18 @@ import java.util.Objects;
  *     replicas started together do not scan in phase
  * @param compensationGracePeriod how long a saga can remain stuck (with step failure events) before
  *     being escalated to {@link SagaStatus#ESCALATED}
- * @param maxRecoveriesPerPass per-pass work budget (committed claims for the staleness sweep,
- *     committed WAITING transitions for the parked sweep — each sweep has its own budget). Claims
- *     lost to another replica do not consume the budget, but failed attempts do, so a degraded
- *     store gets backpressure instead of a full-ring retry storm; the sweep keeps scanning until
- *     the budget is spent or a full bucket revolution completes, and a budget-stopped sweep resumes
- *     at the same position next pass. A small value therefore never skips buckets — it only spreads
- *     a revolution across more passes, delaying recovery of the sagas behind the cut.
+ * @param maxRecoveriesPerSweep work budget for <em>each</em> sweep of a pass, not for the pass as a
+ *     whole: a pass sweeps for stale sagas (committed claims) and for overdue parked sagas
+ *     (committed WAITING transitions), and each gets this budget in full, so a pass can do up to
+ *     twice this number. The budgets are deliberately separate so a large stale backlog cannot
+ *     starve the parked sweep. Claims lost to another replica do not consume the budget, but failed
+ *     attempts do, so a degraded store gets backpressure instead of a full-ring retry storm; a
+ *     sweep keeps scanning until its budget is spent or a full bucket revolution completes, and a
+ *     budget-stopped sweep resumes at the same position next pass. A small value therefore never
+ *     skips buckets — it only spreads a revolution across more passes, delaying recovery of the
+ *     sagas behind the cut. Keep it at or above 200: a bucket is read as one page per recoverable
+ *     status, and a sweep stops submitting once its budget runs out, so a budget smaller than one
+ *     full page leaves the trailing status (COMPENSATING) unrecovered on every revolution.
  * @param maxConcurrentRecoveries maximum number of sagas recovered concurrently within a single
  *     recovery pass (limits database pressure from virtual threads)
  * @param clock clock for time-based decisions (inject a fixed clock for testing)
@@ -33,7 +38,7 @@ public record RecoveryConfig(
     long stalenessThresholdMillis,
     long intervalSeconds,
     Duration compensationGracePeriod,
-    int maxRecoveriesPerPass,
+    int maxRecoveriesPerSweep,
     int maxConcurrentRecoveries,
     Clock clock) {
 
@@ -51,9 +56,9 @@ public record RecoveryConfig(
       throw new IllegalArgumentException(
           "compensationGracePeriod must be positive, got " + compensationGracePeriod);
     }
-    if (maxRecoveriesPerPass <= 0) {
+    if (maxRecoveriesPerSweep <= 0) {
       throw new IllegalArgumentException(
-          "maxRecoveriesPerPass must be > 0, got " + maxRecoveriesPerPass);
+          "maxRecoveriesPerSweep must be > 0, got " + maxRecoveriesPerSweep);
     }
     if (maxConcurrentRecoveries <= 0) {
       throw new IllegalArgumentException(

@@ -164,10 +164,15 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code recovery.interval_seconds} — how often the scan runs
  *   <li>{@code recovery.compensation_grace_period_seconds} — how long a saga may stay stuck with
  *       failing compensation before it is escalated for manual intervention
- *   <li>{@code recovery.max_recoveries_per_pass} — how many sagas one pass may recover. Claims lost
- *       to another replica do not count against it (failed attempts do), and a pass stopped by the
- *       cap resumes where it left off next pass, so a small value never skips sagas — it only
- *       spreads recovery over more passes
+ *   <li>{@code recovery.max_recoveries_per_sweep} — a pass makes two sweeps, one for abandoned
+ *       sagas and one for parked sagas past their deadline, and this bounds each separately, so one
+ *       pass can do up to twice this number (the pass summary reports them as {@code stale[...]}
+ *       and {@code parked[...]}). Claims lost to another replica do not count against it (failed
+ *       attempts do), and a sweep stopped by the cap resumes where it left off next pass, so a
+ *       small value never skips sagas — it only spreads recovery over more passes. Do not set it
+ *       below 200: a bucket is read as one page per recoverable status and a sweep stops submitting
+ *       once its budget runs out, so a budget under one full page leaves compensating sagas
+ *       unrecovered on every pass
  *   <li>{@code recovery.max_concurrent_recoveries} — how many of those are recovered at once,
  *       bounding the database pressure of a single pass
  * </ul>
@@ -361,8 +366,8 @@ public final class SagaServerConfig {
   static final String RECOVERY_INTERVAL_SECONDS_KEY = RECOVERY_PREFIX + "interval_seconds";
   static final String RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY =
       RECOVERY_PREFIX + "compensation_grace_period_seconds";
-  static final String RECOVERY_MAX_RECOVERIES_PER_PASS_KEY =
-      RECOVERY_PREFIX + "max_recoveries_per_pass";
+  static final String RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY =
+      RECOVERY_PREFIX + "max_recoveries_per_sweep";
   static final String RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY =
       RECOVERY_PREFIX + "max_concurrent_recoveries";
 
@@ -477,7 +482,7 @@ public final class SagaServerConfig {
           RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY,
           RECOVERY_INTERVAL_SECONDS_KEY,
           RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY,
-          RECOVERY_MAX_RECOVERIES_PER_PASS_KEY,
+          RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY,
           RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY,
           RETENTION_PERIOD_SECONDS_KEY,
           RETENTION_INTERVAL_SECONDS_KEY,
@@ -947,9 +952,9 @@ public final class SagaServerConfig {
                 defaults.compensationGracePeriod().toSeconds(),
                 1L)),
         parseBoundedInt(
-            properties.getProperty(RECOVERY_MAX_RECOVERIES_PER_PASS_KEY),
-            RECOVERY_MAX_RECOVERIES_PER_PASS_KEY,
-            defaults.maxRecoveriesPerPass(),
+            properties.getProperty(RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY),
+            RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY,
+            defaults.maxRecoveriesPerSweep(),
             1),
         parseBoundedInt(
             properties.getProperty(RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY),

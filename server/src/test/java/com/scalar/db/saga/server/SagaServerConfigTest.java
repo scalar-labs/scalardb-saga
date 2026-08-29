@@ -851,7 +851,7 @@ class SagaServerConfigTest {
     assertThat(config.stalenessThresholdMillis()).isEqualTo(defaults.stalenessThresholdMillis());
     assertThat(config.intervalSeconds()).isEqualTo(defaults.intervalSeconds());
     assertThat(config.compensationGracePeriod()).isEqualTo(defaults.compensationGracePeriod());
-    assertThat(config.maxRecoveriesPerPass()).isEqualTo(defaults.maxRecoveriesPerPass());
+    assertThat(config.maxRecoveriesPerSweep()).isEqualTo(defaults.maxRecoveriesPerSweep());
     assertThat(config.maxConcurrentRecoveries()).isEqualTo(defaults.maxConcurrentRecoveries());
   }
 
@@ -861,7 +861,7 @@ class SagaServerConfigTest {
     props.setProperty(SagaServerConfig.RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY, "90000");
     props.setProperty(SagaServerConfig.RECOVERY_INTERVAL_SECONDS_KEY, "15");
     props.setProperty(SagaServerConfig.RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY, "1800");
-    props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_PASS_KEY, "2000");
+    props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY, "2000");
     props.setProperty(SagaServerConfig.RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY, "25");
 
     RecoveryConfig config = SagaServerConfig.load(props).recoveryConfig();
@@ -869,7 +869,7 @@ class SagaServerConfigTest {
     assertThat(config.stalenessThresholdMillis()).isEqualTo(90_000L);
     assertThat(config.intervalSeconds()).isEqualTo(15L);
     assertThat(config.compensationGracePeriod()).isEqualTo(Duration.ofMinutes(30));
-    assertThat(config.maxRecoveriesPerPass()).isEqualTo(2000);
+    assertThat(config.maxRecoveriesPerSweep()).isEqualTo(2000);
     assertThat(config.maxConcurrentRecoveries()).isEqualTo(25);
   }
 
@@ -883,20 +883,20 @@ class SagaServerConfigTest {
   }
 
   @Test
-  void recoveryConfig_nonNumericMaxRecoveriesPerPass_throwsIllegalArgumentException() {
+  void recoveryConfig_nonNumericMaxRecoveriesPerSweep_throwsIllegalArgumentException() {
     Properties props = new Properties();
-    props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_PASS_KEY, "many");
+    props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY, "many");
 
     assertThatThrownBy(() -> SagaServerConfig.load(props))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
-  void recoveryConfig_maxRecoveriesPerPassAboveIntRange_throwsIllegalArgumentException() {
+  void recoveryConfig_maxRecoveriesPerSweepAboveIntRange_throwsIllegalArgumentException() {
     // Parsed as a long and range-checked: a bare (int) cast would wrap this to a small or negative
     // batch size instead of rejecting it.
     Properties props = new Properties();
-    props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_PASS_KEY, "4294967296");
+    props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY, "4294967296");
 
     assertThatThrownBy(() -> SagaServerConfig.load(props))
         .isInstanceOf(IllegalArgumentException.class);
@@ -943,7 +943,7 @@ class SagaServerConfigTest {
         SagaServerConfig.RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY,
         SagaServerConfig.RECOVERY_INTERVAL_SECONDS_KEY,
         SagaServerConfig.RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY,
-        SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_PASS_KEY,
+        SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY,
         SagaServerConfig.RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY,
         SagaServerConfig.RETENTION_PERIOD_SECONDS_KEY,
         SagaServerConfig.RETENTION_INTERVAL_SECONDS_KEY,
@@ -976,7 +976,7 @@ class SagaServerConfigTest {
     props.setProperty(SagaServerConfig.RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY, "1");
     props.setProperty(SagaServerConfig.RECOVERY_INTERVAL_SECONDS_KEY, "1");
     props.setProperty(SagaServerConfig.RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY, "1");
-    props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_PASS_KEY, "1");
+    props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY, "1");
     props.setProperty(SagaServerConfig.RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY, "1");
     props.setProperty(SagaServerConfig.RETENTION_PERIOD_SECONDS_KEY, "1");
     props.setProperty(SagaServerConfig.RETENTION_INTERVAL_SECONDS_KEY, "1");
@@ -989,7 +989,7 @@ class SagaServerConfigTest {
     assertThat(recovery.stalenessThresholdMillis()).isEqualTo(1L);
     assertThat(recovery.intervalSeconds()).isEqualTo(1L);
     assertThat(recovery.compensationGracePeriod()).isEqualTo(Duration.ofSeconds(1));
-    assertThat(recovery.maxRecoveriesPerPass()).isEqualTo(1);
+    assertThat(recovery.maxRecoveriesPerSweep()).isEqualTo(1);
     assertThat(recovery.maxConcurrentRecoveries()).isEqualTo(1);
     RetentionConfig retention = config.retentionConfig();
     assertThat(retention.retentionPeriod()).isEqualTo(Duration.ofSeconds(1));
