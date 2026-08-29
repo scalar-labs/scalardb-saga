@@ -222,10 +222,15 @@ final class ServiceFileParser {
   }
 
   /**
-   * Rejects a control character in a header name or value, the way the checks above reject a header
-   * name the JDK will not send: left in place, every call to the service fails permanently and
-   * compensates, and this module exists to catch that at validation rather than at the first
-   * request.
+   * Rejects a header value the JDK's client cannot put on the wire, the way {@link
+   * #HEADER_NAME_PATTERN} rejects a name it will not send: left in place, every call to the service
+   * fails permanently and compensates, and this module exists to catch that at validation rather
+   * than at the first request.
+   *
+   * <p>Two characters classes qualify, and they are separate mistakes. A control character is the
+   * line break a token acquires when it is pasted into a secret file; a character above U+00FF is a
+   * byte-order mark on that file, or a smart quote from a paste. The client refuses both, and no
+   * check above catches either, because a value is not a token.
    *
    * <p>The realistic route is a secret, not a hostile file. A header value may be a {@code
    * ${file:...}} reference and only its ends are trimmed, so a token pasted into a secret file with
@@ -234,18 +239,29 @@ final class ServiceFileParser {
    * <p>Neither the value nor the offending character is echoed: the value may be a resolved secret,
    * and the position alone locates it.
    */
-  private static String requireNoControlCharacters(
-      String fileName, String header, String text, String part) {
+  private static String requireSendableValue(String fileName, String header, String text) {
     for (int i = 0; i < text.length(); i++) {
-      if (Character.isISOControl(text.charAt(i))) {
+      char c = text.charAt(i);
+      if (c > 0xFF) {
         throw new IllegalArgumentException(
             "Service file '"
                 + fileName
                 + "' header '"
                 + Redaction.oneLine(header)
-                + "' has a control character in its "
-                + part
-                + " at position "
+                + "' has a character above U+00FF in its value at position "
+                + i
+                + ". The JDK's client refuses to send one, so it would fail every request this"
+                + " service is called with, failing each step permanently and compensating. A"
+                + " secret file saved with a byte-order mark, or a smart quote from a paste, is the"
+                + " usual cause.");
+      }
+      if (Character.isISOControl(c)) {
+        throw new IllegalArgumentException(
+            "Service file '"
+                + fileName
+                + "' header '"
+                + Redaction.oneLine(header)
+                + "' has a control character in its value at position "
                 + i
                 + ". No HTTP header may carry one, so the JDK's client would refuse every request"
                 + " this service is called with, failing each step permanently and compensating."
@@ -416,12 +432,11 @@ final class ServiceFileParser {
           }
           headers.put(
               header,
-              requireNoControlCharacters(
+              requireSendableValue(
                   fileName,
                   header,
                   SagaServerConfig.requireNonBlank(
-                      qualifiedKey, resolve(secrets, raw, qualifiedKey)),
-                  "value"));
+                      qualifiedKey, resolve(secrets, raw, qualifiedKey))));
         }
       }
     }

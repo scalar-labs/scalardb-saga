@@ -301,12 +301,64 @@ class ServiceFileParserTest {
     }
 
     @Test
+    void parseFile_headerValueAboveLatin1_throwsWithoutEchoingTheValue() throws IOException {
+      // A value is not a token, so the name rule above does not reach it — but the JDK's client
+      // refuses any character above U+00FF in a value just as firmly as a control character, and
+      // an accepted one fails every call permanently after a pass that reported success.
+      // Arrange
+      Files.writeString(secretsDir.resolve("token"), "Bearer SECRET-中文");
+      writeService(
+          "account.properties",
+          "base_url=http://a:1\nheader.Authorization=${file:UTF-8:"
+              + secretsDir.resolve("token")
+              + "}\n");
+
+      // Act & Assert
+      assertThatThrownBy(ServiceFileParserTest.this::parse)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("above U+00FF")
+          .hasMessageNotContaining("SECRET");
+    }
+
+    @Test
+    void parseFile_secretFileWithAByteOrderMark_throwsWithoutEchoingTheValue() throws IOException {
+      // The likeliest arrival of one: an editor saves the secret with a BOM. It is not whitespace,
+      // so the trim keeps it, and it is not a control character, so only the U+00FF rule catches
+      // it.
+      // Arrange
+      Files.writeString(secretsDir.resolve("token"), "﻿Bearer SECRET-abc");
+      writeService(
+          "account.properties",
+          "base_url=http://a:1\nheader.Authorization=${file:UTF-8:"
+              + secretsDir.resolve("token")
+              + "}\n");
+
+      // Act & Assert
+      assertThatThrownBy(ServiceFileParserTest.this::parse)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("above U+00FF")
+          .hasMessageNotContaining("SECRET");
+    }
+
+    @Test
+    void parseFile_headerValueAtTheLatin1Boundary_isAccepted() throws IOException {
+      // The other side of the same rule: U+00FF is the last character the client will send, so the
+      // check must not reach below it and reject a value that works.
+      // Arrange
+      writeService("account.properties", "base_url=http://a:1\nheader.X-Api-Key=abcÿ\n");
+
+      // Act & Assert
+      assertThat(requireNonNull(parse().get("account")).headers())
+          .containsEntry("X-Api-Key", "abcÿ");
+    }
+
+    @Test
     void parseFile_headerNameWithAControlCharacter_throwsIllegalArgumentException()
         throws IOException {
       // Properties.load performs escape processing on keys, so the name half of the key can carry
-      // one too — and an unsendable name fails every call exactly as an unsendable value does. A
-      // control character is not an HTTP token character, so the token rule is what rejects it;
-      // the value keeps its own control-character check, since a value is not a token.
+      // one too, and an unsendable name fails every call exactly as an unsendable value does. A
+      // control character is not an HTTP token character, so the token rule is what rejects it
+      // here; a value is not a token, so it carries its own rule.
       // Arrange
       writeService("account.properties", "base_url=http://a:1\nheader.X-A\\u0000B=v\n");
 
