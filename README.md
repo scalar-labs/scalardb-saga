@@ -109,9 +109,9 @@ Definitions are equally valid in YAML.
 
 | Module | Artifact | Java | Distribution |
 | --- | --- | --- | --- |
-| `server` | — | 21 | `ghcr.io/scalar-labs/scalardb-saga-server` |
+| `server` | — | 25 | `ghcr.io/scalar-labs/scalardb-saga-server` |
 | `client` | `com.scalar-labs:scalardb-saga-java-client-sdk` | 8 | Maven Central |
-| `core` | `com.scalar-labs:scalardb-saga-core` | 21 | Maven Central |
+| `core` | `com.scalar-labs:scalardb-saga-core` | 25 | Maven Central |
 | `api` | `com.scalar-labs:scalardb-saga-api` | 8 | Maven Central |
 | `rpc` | `com.scalar-labs:scalardb-saga-rpc` | 8 | Maven Central |
 | `bom` | `com.scalar-labs:scalardb-saga-bom` | — | Maven Central |
@@ -120,6 +120,12 @@ The server is not published to Maven Central: it ships as a container image, whi
 meant to be deployed. `api` and `rpc` are published because `core` and `client` expose them, not
 because you normally declare them yourself. The client SDK and the types it exposes are compiled
 for Java 8, so applications that cannot move off it can still use server mode.
+
+Embedding `core` requires a **Java 25** runtime. The engine runs sagas on virtual threads, and on
+older runtimes a JDBC driver holds a monitor across each protocol exchange, so every query parks
+while pinned to its carrier and effective database concurrency is capped at the number of carriers;
+JEP 491 removed that pinning in JDK 24. Applications that cannot move off an older JVM should use
+server mode through the client SDK, which stays on Java 8.
 
 ## Install
 
@@ -167,7 +173,7 @@ Snapshots built from `main` are published to the Central snapshot repository.
 
 Bug reports and feature suggestions are welcome as GitHub issues.
 
-Building requires JDK 21. Before opening a pull request:
+Building requires JDK 25. Before opening a pull request:
 
 ```bash
 ./gradlew spotlessApply   # format

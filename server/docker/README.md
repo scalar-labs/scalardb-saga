@@ -64,9 +64,21 @@ without it, but JUL then keeps its own `INFO` default: it builds a `LogRecord` f
 call before the bridge can discard it, and a `<logger name="io.grpc" level="DEBUG"/>` has no effect at
 all, because JUL declines those records before the bridge ever sees them.
 
-The image already sets `-XX:MaxRAMPercentage=75.0` (heap sized from the cgroup limit, not the host) and
+The image already sets `-XX:MaxRAMPercentage=75.0` (heap sized from the cgroup limit, not the host),
 `-XX:+ExitOnOutOfMemoryError` (die on heap exhaustion so the orchestrator restarts it, rather than hold
-saga leases while making no progress). Override either through `JAVA_OPTS`.
+saga leases while making no progress), and `--enable-native-access=ALL-UNNAMED` (the JDBC driver and
+Netty's epoll transport both load a native library, which JDK 24 made a restricted operation). Override
+any of them through `JAVA_OPTS`.
+
+## Virtual-thread pinning
+
+The daemon runs every saga on a virtual thread, so anything that pins a carrier throttles the whole
+server: pinned carriers cap effective concurrency at the size of the carrier pool. The Java 25 runtime
+removes the common case — JEP 491 stopped a thread pinning its carrier while it holds a monitor, which
+is how JDBC drivers guard a protocol exchange — but native frames and `Object.wait` still pin.
+
+To check under your own driver, record the JFR event `jdk.VirtualThreadPinned`. The older
+`-Djdk.tracePinnedThreads` system property does not work: it was removed in JDK 24.
 
 ## Health checks
 

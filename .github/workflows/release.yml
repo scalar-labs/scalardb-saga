@@ -257,11 +257,11 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Set up Java 21
+      - name: Set up Java 25
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v4
         with:
           distribution: temurin
-          java-version: 21
+          java-version: 25
 
       # No cache anywhere on the release path. setup-gradle writes cache entries only from jobs on the
       # default branch and reads them everywhere else, and its last restore key is scoped to the
@@ -313,11 +313,11 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Set up Java 21
+      - name: Set up Java 25
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v4
         with:
           distribution: temurin
-          java-version: 21
+          java-version: 25
 
       # No cache, for the reason publish-maven gives.
       - name: Set up Gradle
@@ -415,11 +415,11 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Set up Java 21
+      - name: Set up Java 25
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v4
         with:
           distribution: temurin
-          java-version: 21
+          java-version: 25
 
       # No cache, for the reason publish-maven gives.
       - name: Set up Gradle

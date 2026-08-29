@@ -6,8 +6,8 @@ Refer to `~/git/scalardb-saga-design/docs/scalardb-saga-design.md` for architect
 
 ## Language
 
-- **Java 21** for all modules (core engine, framework integrations, daemon, testing, dev server, etc.)
-- **Java 8** only for the daemon client SDK (`scalardb-saga-java-client-sdk`) to maximize adoption
+- **Java 25** for the engine and everything that runs it (core engine, framework integrations, daemon, testing, dev server, etc.) — JEP 491 (JDK 24) removes the virtual-thread carrier pinning that otherwise caps database concurrency at the carrier count
+- **Java 8** for the published SDK surface (`api`, `rpc`, `client`) to maximize adoption
 - Users on Java 8 use daemon mode via client SDK or call HTTP/gRPC endpoints directly
 
 ## Build

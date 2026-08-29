@@ -12,7 +12,12 @@
 #
 # A JRE, not a JDK: the daemon runs a start script and needs no compiler, so shipping javac would add
 # tooling that is useful to an attacker inside the container and to nobody else.
-FROM eclipse-temurin:21-jre-noble@sha256:ca397720325ceefe39ce397f186759fc87d9efafb2dc4ce53315980844c2f4f2
+#
+# An LTS major, and 25 specifically: the engine runs sagas on virtual threads, and JEP 491 (JDK 24) is
+# what keeps a JDBC driver's monitor from pinning the carrier for the length of each protocol
+# exchange; while it pins, effective database concurrency is capped at the number of carriers. Interim
+# releases stop receiving patches the moment the next one ships, so only LTS majors are candidates.
+FROM eclipse-temurin:25-jre-noble@sha256:b4c93a50fc67612798db73d68ca3b0ee4ebdd51736e59cca370e689b9797037e
 
 # Two things in one layer, since each `RUN` is a layer and neither is worth its own:
 #
@@ -65,9 +70,9 @@ USER 201:201
 # can be disabled in the configuration, in which case its port simply goes unbound.
 EXPOSE 12080 12051
 
-# No entrypoint wrapper script. Container-aware JVM flags (MaxRAMPercentage, ExitOnOutOfMemoryError)
-# are baked into the start script by Gradle's applicationDefaultJvmArgs, and JAVA_OPTS still
-# overrides them at run time — so the shell hop the other Scalar images use to assemble JAVA_OPTS
+# No entrypoint wrapper script. The JVM flags (MaxRAMPercentage, ExitOnOutOfMemoryError,
+# enable-native-access) are baked into the start script by Gradle's applicationDefaultJvmArgs, and
+# JAVA_OPTS still overrides them at run time — so the shell hop the other Scalar images use to assemble JAVA_OPTS
 # buys nothing here. The script ends in `exec java`, so the JVM becomes PID 1 and receives SIGTERM
 # directly; SagaServer's shutdown hook then drains in-flight sagas rather than dropping them.
 #

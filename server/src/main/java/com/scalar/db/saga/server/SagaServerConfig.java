@@ -1040,7 +1040,7 @@ public final class SagaServerConfig {
       String name = remainder.substring(0, dot);
       // Keep the leading dot so the attribute matches the suffix constants directly.
       String attribute = remainder.substring(dot);
-      ServiceBuilder builder = builders.computeIfAbsent(name, unused -> new ServiceBuilder());
+      ServiceBuilder builder = builders.computeIfAbsent(name, _ -> new ServiceBuilder());
       String value = properties.getProperty(key);
       switch (attribute) {
         case SERVICE_BASE_URL_SUFFIX -> builder.baseUrl = requireNonBlank(key, value);
