@@ -224,6 +224,9 @@ public interface SagaStore extends AutoCloseable {
   /**
    * The newest event's type and stamp: everything recovery needs to judge whether a saga is being
    * driven, without reading any payload.
+   *
+   * @param type the event's type
+   * @param createdAt when the event was appended
    */
   record NewestEvent(EventType type, Instant createdAt) {}
 

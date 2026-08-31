@@ -634,8 +634,8 @@ public class SagaEngine implements AutoCloseable {
    * exhausted, the saga stays COMPENSATING for recovery to retry. The backward mirror of {@link
    * #executeSteps}, which likewise owns its direction's terminal transition.
    *
-   * <p>Not an entry point; callers already hold the {@code registerActive} guard. The guarded entry
-   * is {@link #compensateFrom}.
+   * <p>Not an entry point; callers already hold the {@code registerOrHandOff} guard. The guarded
+   * entry is {@link #compensateFrom}.
    *
    * <p>Package-private for testing.
    *

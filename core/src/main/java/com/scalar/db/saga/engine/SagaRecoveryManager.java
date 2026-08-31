@@ -807,9 +807,21 @@ class SagaRecoveryManager {
    *
    * <p>Two things have to be true: the event is recent, and it is not a give-up. A compensation
    * failure is written by a drive that then stops and hands the saga back to recovery, so reading
-   * it as liveness would make the give-up postpone the very retry it is asking for. Nothing else in
-   * the stream says "I stopped here" — that is why the graceful drain has to hand over explicitly
-   * rather than rely on this signal.
+   * it as liveness would make the give-up postpone the very retry it is asking for.
+   *
+   * <p>It is the only marker excluded, though not the only event a drive can stop after: a step
+   * failure past the pivot ends the drive too, and past the pivot is no corner, since a TCC plan
+   * puts every confirm step there and forward recovery puts every step there. Excluding {@code
+   * STEP_FAILED} as well would cost more than it buys. Before the pivot the same event is written
+   * immediately before the transition to COMPENSATING, so excluding it would open a window in which
+   * a saga actively compensating on another replica can be claimed; that is the failure this guard
+   * exists to prevent. Past the pivot it means a step's retry policy has just been exhausted, and
+   * waiting one timeout before re-driving is the better cadence anyway. Only the first attempt
+   * after such a give-up moves: {@link SagaStore#claimForRecovery} re-stamps {@code updated_at}, so
+   * the steady-state retry interval is unchanged.
+   *
+   * <p>A drive that stops without writing anything at all leaves no marker here to read; that is
+   * why the graceful drain has to hand over explicitly rather than rely on this signal.
    *
    * <p>Only the event stamp is compared, never the state row's. {@link SagaStore#findRecoverable}
    * returns nothing newer than {@code staleThreshold}, so every candidate already has an old row by
