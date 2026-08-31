@@ -35,18 +35,23 @@ import org.jspecify.annotations.Nullable;
  * AWS Step Functions {@code StartSyncExecution} and Netflix Conductor, which return {@code 200} for
  * a failed execution and carry the outcome in the body.
  *
- * <p><b>Bounded synchronous start (opt-in).</b> A synchronous start runs the saga on the engine's
- * (virtual-thread) executor and blocks the request thread only until the saga is terminal — which,
- * with retries/compensation over slow participants, can be long. When {@code
- * scalar.db.saga.server.sync.timeout_millis} is set (default {@code 0} = disabled, i.e. block to
- * terminal), the request instead returns {@code 202} once that bound elapses, while the saga keeps
- * running (poll {@code GET /sagas/{id}}). This caps how long a single request can hold a thread, so
- * a burst of slow synchronous sagas cannot exhaust the request pool. Returning {@code 202} (rather
- * than an error) is the honest outcome — the saga is not cancelled, it is still being processed —
- * and reuses the {@code 202} this endpoint already returns for a non-terminal outcome. The pattern
- * mirrors RFC 7240's {@code Prefer: respond-async, wait=N}, Azure Durable Functions' {@code
+ * <p><b>Bounded synchronous start.</b> A synchronous start runs the saga on the engine's
+ * (virtual-thread) executor and waits, never longer than the bound resolved by {@link
+ * com.scalar.db.saga.server.SagaServerConfig#syncWaitBoundMillis(long)} — the {@code
+ * sync.max_wait_millis} ceiling, tightened by {@code sync.timeout_millis} when that is set. Once
+ * the bound elapses the request returns {@code 202} while the saga keeps running (poll {@code GET
+ * /sagas/{id}}). This caps how long a single request can hold a thread, so a burst of slow
+ * synchronous sagas cannot exhaust the request pool. Returning {@code 202} rather than an error is
+ * the honest outcome: the saga is not cancelled, it is still being processed, and it reuses the
+ * {@code 202} this endpoint already returns for a non-terminal outcome. The pattern mirrors RFC
+ * 7240's {@code Prefer: respond-async, wait=N}, Azure Durable Functions' {@code
  * WaitForCompletionOrCreateCheckStatusResponse}, and Conductor's {@code executeWorkflow} wait
  * timeout.
+ *
+ * <p>The bound is unconditional. Until 2026-08, an unset {@code sync.timeout_millis} (the default)
+ * meant the saga ran <em>inline on the request thread</em> with no bound at all, so ~200 concurrent
+ * slow sagas exhausted the Jetty pool; the ceiling existed and was documented, but was never handed
+ * to this layer. See {@code todos/076}.
  *
  * <p>Not yet wired: {@code PUT /sagas/{id}/cancel} (needs the engine's {@code cancel} method). The
  * {@code GET /sagas} listing lives on the admin surface ({@link SagaAdminResource}).
@@ -60,10 +65,14 @@ public final class SagaResource {
    *
    * @param app the Javalin app
    * @param orchestrator the saga orchestrator the endpoints delegate to
-   * @param syncTimeoutMillis the synchronous-start timeout ({@code 0} disables it; see the class
-   *     doc's bounded-synchronous-start note)
+   * @param syncWaitBoundMillis how long a synchronous start may wait before answering {@code 202},
+   *     already resolved by {@link
+   *     com.scalar.db.saga.server.SagaServerConfig#syncWaitBoundMillis(long)}. Always finite, so no
+   *     start can block indefinitely; pass the resolved bound rather than the raw keys, because
+   *     combining them at the call site is what let this path block for a whole saga.
    */
-  public static void register(Javalin app, SagaOrchestrator orchestrator, long syncTimeoutMillis) {
+  public static void register(
+      Javalin app, SagaOrchestrator orchestrator, long syncWaitBoundMillis) {
     app.post(
         "/sagas",
         ctx -> {
@@ -72,16 +81,13 @@ public final class SagaResource {
           if (isAsync(ctx.queryParam("async"))) {
             String sagaId = orchestrator.startAsync(request.requireSagaName(), input);
             respond(ctx, 202, orchestrator.getStateSnapshot(sagaId));
-          } else if (syncTimeoutMillis > 0) {
+          } else {
             AtomicReference<SagaStateSnapshot> terminal = new AtomicReference<>();
             CountDownLatch done = new CountDownLatch(1);
             String sagaId =
                 orchestrator.startAsync(
                     request.requireSagaName(), input, terminalSignal(done, terminal));
-            respondBoundedSync(ctx, orchestrator, sagaId, done, terminal, syncTimeoutMillis);
-          } else {
-            String sagaId = orchestrator.start(request.requireSagaName(), input);
-            respondSync(ctx, orchestrator, sagaId);
+            respondBoundedSync(ctx, orchestrator, sagaId, done, terminal, syncWaitBoundMillis);
           }
         },
         SagaOperation.START_SAGA);
@@ -95,15 +101,12 @@ public final class SagaResource {
           if (isAsync(ctx.queryParam("async"))) {
             orchestrator.startAsync(sagaId, request.requireSagaName(), input);
             respond(ctx, 202, orchestrator.getStateSnapshot(sagaId));
-          } else if (syncTimeoutMillis > 0) {
+          } else {
             AtomicReference<SagaStateSnapshot> terminal = new AtomicReference<>();
             CountDownLatch done = new CountDownLatch(1);
             orchestrator.startAsync(
                 sagaId, request.requireSagaName(), input, terminalSignal(done, terminal));
-            respondBoundedSync(ctx, orchestrator, sagaId, done, terminal, syncTimeoutMillis);
-          } else {
-            orchestrator.start(sagaId, request.requireSagaName(), input);
-            respondSync(ctx, orchestrator, sagaId);
+            respondBoundedSync(ctx, orchestrator, sagaId, done, terminal, syncWaitBoundMillis);
           }
         },
         SagaOperation.START_SAGA);
@@ -122,17 +125,6 @@ public final class SagaResource {
             ctx.status(200)
                 .json(SagaDetailResponse.from(orchestrator.getSagaDetail(ctx.pathParam("id")))),
         SagaOperation.GET_SAGA_DETAIL);
-  }
-
-  /**
-   * Renders a synchronous start response: {@code 200} once the saga has reached a terminal state
-   * (the body {@code status} carries the business outcome — {@code COMPLETED} vs {@code
-   * COMPENSATED}/{@code ESCALATED}), or {@code 202} while it is still resolving ({@code
-   * COMPENSATING} / parked {@code RUNNING}) — poll {@code GET /sagas/{id}}.
-   */
-  private static void respondSync(Context ctx, SagaOrchestrator orchestrator, String sagaId) {
-    SagaStateSnapshot snapshot = orchestrator.getStateSnapshot(sagaId);
-    respond(ctx, snapshot.getStatus().isTerminal() ? 200 : 202, snapshot);
   }
 
   /**
@@ -164,11 +156,12 @@ public final class SagaResource {
   }
 
   /**
-   * Renders a <em>bounded</em> synchronous start: waits up to {@code timeoutMillis} for the saga to
-   * reach a terminal state. If it does, responds like {@link #respondSync} ({@code 200}/{@code
-   * 202}); if the bound elapses first, responds {@code 202} with the in-flight snapshot while the
-   * saga keeps running on the engine's executor (the client polls {@code GET /sagas/{id}}). The
-   * request thread is therefore held for at most {@code timeoutMillis}, never the saga's full run.
+   * Renders a bounded synchronous start: waits up to {@code timeoutMillis} for the saga to reach a
+   * terminal state, then responds {@code 200} if it did (the body {@code status} carries the
+   * business outcome) or {@code 202} otherwise, with the in-flight snapshot, while the saga keeps
+   * running on the engine's executor (the client polls {@code GET /sagas/{id}}). A saga that is
+   * still resolving, such as a parked step, also answers {@code 202}. The request thread is
+   * therefore held for at most {@code timeoutMillis}, never the saga's full run.
    */
   private static void respondBoundedSync(
       Context ctx,

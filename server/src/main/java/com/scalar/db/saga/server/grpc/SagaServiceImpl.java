@@ -16,6 +16,7 @@ import com.scalar.db.saga.rpc.SagaDetail;
 import com.scalar.db.saga.rpc.SagaServiceGrpc;
 import com.scalar.db.saga.rpc.SagaSnapshot;
 import com.scalar.db.saga.rpc.StartSagaRequest;
+import com.scalar.db.saga.server.SagaServerConfig;
 import io.grpc.Context;
 import io.grpc.stub.StreamObserver;
 import java.io.IOException;
@@ -35,11 +36,13 @@ import org.jspecify.annotations.Nullable;
  * local to the call.
  *
  * <p><b>Sync vs async.</b> {@code async=true} starts the saga and returns the running snapshot
- * immediately. {@code async=false} blocks until the saga is terminal, bounded by {@code min(}{@code
- * sync.timeout_millis}, remaining gRPC call deadline{@code )}; when that bound elapses it returns
- * the in-flight snapshot (whose status — the source of truth — is non-terminal, the gRPC analogue
- * of REST's {@code 202}) and <b>the saga keeps running</b>. The wait runs on the server's
- * virtual-thread executor, so a blocked call is cheap.
+ * immediately. {@code async=false} blocks until the saga is terminal, bounded by {@link
+ * com.scalar.db.saga.server.SagaServerConfig#syncWaitBoundMillis(long)} — the {@code
+ * sync.max_wait_millis} ceiling tightened by {@code sync.timeout_millis} — and then further by the
+ * remaining gRPC call deadline; when that bound elapses it returns the in-flight snapshot (whose
+ * status — the source of truth — is non-terminal, the gRPC analogue of REST's {@code 202}) and
+ * <b>the saga keeps running</b>. The wait runs on the server's virtual-thread executor, so a
+ * blocked call is cheap.
  *
  * <p><b>AwaitSaga.</b> A long-poll on an <i>existing</i> saga: it blocks for one bounded window and
  * returns the terminal snapshot if reached, else the current non-terminal snapshot. The client
@@ -192,10 +195,9 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
    * sync.max_wait_millis]} — the wait is never unbounded.
    */
   private long computeBoundMillis(long requestedCapMillis) {
-    long bound = Math.min(syncMaxWaitMillis, requestedCapMillis);
-    if (syncTimeoutMillis > 0L) {
-      bound = Math.min(bound, syncTimeoutMillis);
-    }
+    long bound =
+        SagaServerConfig.syncWaitBoundMillis(
+            syncMaxWaitMillis, syncTimeoutMillis, requestedCapMillis);
     // Floor at 0: here 0 means "return immediately" for the await, so a tight/expired client
     // deadline correctly collapses the wait to nothing.
     return GrpcDeadlines.tightenToCallDeadline(bound, 0L);

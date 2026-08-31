@@ -490,7 +490,9 @@ public final class SagaServer implements AutoCloseable {
     }
     HealthResource.register(httpServer);
     ErrorMapper.register(httpServer);
-    SagaResource.register(httpServer, orchestrator, config.syncTimeoutMillis());
+    // The resolved bound, not the raw keys: REST has no per-request cap of its own, and combining
+    // the two keys at the call site is what previously left this transport ignoring the ceiling.
+    SagaResource.register(httpServer, orchestrator, config.syncWaitBoundMillis(Long.MAX_VALUE));
     SagaAdminResource.register(httpServer, orchestrator, adminDriveDeadlineMillis());
     // The async-callback route exists only when a callback secret is configured; without it there
     // is nothing to authenticate callbacks against, so async completion is not enabled.
@@ -507,21 +509,19 @@ public final class SagaServer implements AutoCloseable {
   }
 
   /**
-   * The bound on a single-saga admin inline drive: {@code sync.max_wait_millis} — the daemon's
-   * standing ceiling on how long any request may hold a thread — tightened by {@code
-   * sync.timeout_millis} when that is set. This mirrors the terms {@code
-   * SagaServiceImpl.computeBoundMillis} applies on the request-thread paths, minus the per-call
-   * gRPC client deadline, which has no REST analogue. Past the bound the durable transition is
-   * already recorded and the response carries the saga's current state, so the bound only caps how
-   * long the request waits, never correctness. Reusing {@code sync.max_wait_millis} keeps the drive
-   * inside the shutdown drain window {@link #grpcDrainMillis()} derives from the same value.
+   * The bound on a single-saga admin inline drive: the shared synchronous-wait bound, with no
+   * caller-supplied cap. Past the bound the durable transition is already recorded and the response
+   * carries the saga's current state, so the bound only caps how long the request waits, never
+   * correctness. Deriving it from {@code sync.max_wait_millis} keeps the drive inside the shutdown
+   * drain window {@link #grpcDrainMillis()} derives from the same value.
+   *
+   * <p>This used to re-implement the min-terms itself, and its javadoc noted that it "mirrors"
+   * {@code SagaServiceImpl.computeBoundMillis}. Two hand-kept copies of one policy is how the saga
+   * start path ended up with neither; the policy now lives once, in {@link
+   * SagaServerConfig#syncWaitBoundMillis(long)}.
    */
   private long adminDriveDeadlineMillis() {
-    long bound = config.syncMaxWaitMillis();
-    if (config.syncTimeoutMillis() > 0L) {
-      bound = Math.min(bound, config.syncTimeoutMillis());
-    }
-    return bound;
+    return config.syncWaitBoundMillis(Long.MAX_VALUE);
   }
 
   /**
