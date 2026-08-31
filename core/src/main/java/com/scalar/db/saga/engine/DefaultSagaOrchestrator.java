@@ -107,8 +107,13 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * configuration pass, which is what makes removing a definition file retire the saga.
    *
    * <p>Pushed rather than pulled, and an immutable snapshot rather than a live view: a start reads
-   * it without a lock, so it cannot contend with a configuration pass on the hot path. A rejected
-   * pass publishes nothing, so the previously served set keeps serving.
+   * it without a lock, so it cannot contend with a configuration pass on the hot path.
+   *
+   * <p>A pass rejected before it applied anything publishes nothing, so the previously served set
+   * keeps serving. One rejected after that point does publish: what it committed before failing is
+   * live, and a definition registered by a pass that then fails on an unrelated one has to be
+   * served rather than refused until some later pass concludes. So the served set can narrow
+   * mid-pass, and anything added between the withdrawal and the registration has to keep that true.
    */
   private volatile @Nullable Set<String> servedDefinitions;
 
