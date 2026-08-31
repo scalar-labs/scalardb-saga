@@ -219,8 +219,11 @@ import org.jspecify.annotations.Nullable;
  * <ul>
  *   <li>{@code services_path} — the directory of service files; unset = no services
  *   <li>{@code reload.interval_seconds} — seconds between configuration reload passes (default
- *       {@value #DEFAULT_RELOAD_INTERVAL_SECONDS}); {@code 0} disables reload (startup-only
- *       loading). Parsed and documented now; takes effect when the reload pass ships
+ *       {@value #DEFAULT_RELOAD_INTERVAL_SECONDS}): service files and definitions are re-read and
+ *       validated as a complete set, so changes land without a restart. Validation is all or
+ *       nothing; applying is not — services swap before definitions register, one definition at a
+ *       time, so a failure part way through leaves what committed live and retries the rest next
+ *       pass. {@code 0} disables reload (startup-only loading)
  *   <li>{@code secrets_root} — the directory {@code ${file:...}} references in service files must
  *       resolve inside, after symlink resolution (default {@value #DEFAULT_SECRETS_ROOT}). Service
  *       files are a live trust boundary under reload, so their file references are confined to the
@@ -561,7 +564,6 @@ public final class SagaServerConfig {
   private final Properties rawProperties;
   private final @Nullable Path definitionsPath;
   private final ReloadConfig reloadConfig;
-  private final Map<String, ServiceConfig> services;
 
   /**
    * Parses every setting from the already secret-resolved {@code properties}, then cross-checks the
@@ -692,7 +694,6 @@ public final class SagaServerConfig {
     this.definitionsPath =
         parseOptionalPath(resolved.getProperty(DEFINITIONS_PATH_KEY), DEFINITIONS_PATH_KEY);
     this.reloadConfig = parseReloadConfig(resolved);
-    this.services = loadServices(reloadConfig);
     this.properties = applyStoreDefaults(copyOf(resolved));
     this.grpcMaxInboundMessageBytes = parseGrpcMaxInboundMessageBytes(this.properties);
     this.rawProperties = copyOf(raw);
@@ -987,9 +988,25 @@ public final class SagaServerConfig {
   }
 
   /**
-   * Parses the services-directory settings into a {@link ReloadConfig}. All four keys are read even
-   * though only the static half is consumed today, so the surface (and its validation) is complete
-   * before the reload pass ships.
+   * Parses {@code egress.allowed_hosts_ceiling}, holding every entry to the same host shape a
+   * service file's {@code allowed_hosts} must have.
+   *
+   * <p>An unshaped ceiling entry is the worst of the config typos this module can take: the ceiling
+   * is compared against entries that ARE shaped like hosts, so one that never can be matches
+   * nothing, and every service in the fleet is rejected as exceeding it — pointing the operator at
+   * the service files rather than at the property they mistyped.
+   */
+  private static List<String> parseCeiling(String ceiling) {
+    List<String> entries = parseCommaSeparated(EGRESS_ALLOWED_HOSTS_CEILING_KEY, ceiling);
+    entries.forEach(
+        host -> ServiceFileParser.requireHostShape(EGRESS_ALLOWED_HOSTS_CEILING_KEY, host));
+    return entries;
+  }
+
+  /**
+   * Parses the services-directory settings into a {@link ReloadConfig}: where the service files
+   * live, how often they are re-read, where their secret references may resolve, and the optional
+   * egress ceiling. The files themselves are read by the reconciler, not here.
    */
   private static ReloadConfig parseReloadConfig(Properties resolved) {
     String secretsRoot = resolved.getProperty(SECRETS_ROOT_KEY);
@@ -1008,31 +1025,14 @@ public final class SagaServerConfig {
             secretsRoot == null || secretsRoot.isBlank()
                 ? DEFAULT_SECRETS_ROOT
                 : secretsRoot.trim()),
-        ceiling == null
-            ? List.of()
-            : parseCommaSeparated(EGRESS_ALLOWED_HOSTS_CEILING_KEY, ceiling),
+        ceiling == null ? List.of() : parseCeiling(ceiling),
         Clock.systemUTC());
   }
 
   /**
-   * Loads the service set from {@code services_path} (one {@code <name>.properties} file per
-   * service), or none when the key is unset. Reading the directory here keeps {@code services()}
-   * the single source the server wires endpoints from, exactly as with the old prefixed keys.
-   */
-  private static Map<String, ServiceConfig> loadServices(ReloadConfig reloadConfig) {
-    Path servicesPath = reloadConfig.servicesPath();
-    if (servicesPath == null) {
-      return Map.of();
-    }
-    return ServiceFileParser.parseDirectory(
-        servicesPath,
-        new ServiceSecretResolver(reloadConfig.secretsRoot()),
-        reloadConfig.allowedHostsCeiling());
-  }
-
-  /**
    * One downstream service a declarative step can call: the base URL plus the outbound policy the
-   * engine applies to every request to it.
+   * engine applies to every request to it. Produced by {@link ServiceFileParser} from a service
+   * file; this class only points at the directory they live in.
    *
    * @param baseUrl the service base URL
    * @param allowedHosts the SSRF allowlist; empty allows any host
@@ -1331,18 +1331,6 @@ public final class SagaServerConfig {
   /** Returns the optional path to declarative saga definitions loaded at startup. */
   public Optional<Path> definitionsPath() {
     return Optional.ofNullable(definitionsPath);
-  }
-
-  /**
-   * Returns the configured {@code service name -> configuration} map, each registered as an HTTP
-   * endpoint a declarative step can call, loaded from the {@code services_path} directory (one
-   * {@code <name>.properties} file per service). Empty when {@code services_path} is unset. The map
-   * is unmodifiable and iterates in service-name order.
-   */
-  public Map<String, ServiceConfig> services() {
-    // An unmodifiable view rather than Map.copyOf: the keys were collected in sorted order, which
-    // copyOf would discard for an unspecified one.
-    return Collections.unmodifiableMap(services);
   }
 
   /**
