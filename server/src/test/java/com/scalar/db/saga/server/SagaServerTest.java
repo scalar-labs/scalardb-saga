@@ -5,6 +5,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -14,6 +16,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import ch.qos.logback.classic.Level;
+import com.scalar.db.saga.api.SagaCallback;
+import com.scalar.db.saga.api.SagaStateSnapshot;
+import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.engine.ShutdownMode;
@@ -35,6 +40,7 @@ import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -361,6 +367,70 @@ class SagaServerTest {
     try (SagaServer server =
         new SagaServer(SagaServerConfig.load(props), mock(DefaultSagaOrchestrator.class)).start()) {
       assertThat(server.port()).isGreaterThan(0);
+    }
+  }
+
+  /**
+   * The wiring, end to end: with {@code sync.timeout_millis} unset — the default — a synchronous
+   * REST start must still honour the {@code sync.max_wait_millis} ceiling.
+   *
+   * <p>Covers the seam the unit tests cannot: {@code SagaServerConfigTest} pins the policy and
+   * {@code SagaResourceStartTest} passes {@code SagaResource.register} a bound directly, so both
+   * would still pass if {@code registerRoutes} went back to handing REST the raw {@code
+   * sync.timeout_millis}. That handoff is precisely what the original bug was, and a bound of
+   * {@code 0} makes the wait return immediately, so this asserts the request actually waits for a
+   * delayed completion instead.
+   */
+  @Test
+  void start_syncTimeoutUnset_restStartStillHonoursTheMaxWaitCeiling(@TempDir Path dir)
+      throws Exception {
+    // Arrange — the default: no sync.timeout_millis, only the ceiling.
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "10000");
+
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
+    SagaStateSnapshot completed =
+        new SagaStateSnapshot(
+            "s1", "saga", SagaStatus.COMPLETED, "owner", "v1", Instant.EPOCH, Instant.EPOCH);
+    // Completes only after a delay, so answering before the callback proves the wait was skipped.
+    when(orchestrator.startAsync(eq("saga"), anyMap(), any(SagaCallback.class)))
+        .thenAnswer(
+            invocation -> {
+              SagaCallback callback = invocation.getArgument(2, SagaCallback.class);
+              Thread.ofVirtual()
+                  .start(
+                      () -> {
+                        try {
+                          Thread.sleep(300);
+                        } catch (InterruptedException e) {
+                          Thread.currentThread().interrupt();
+                          return;
+                        }
+                        callback.onCompleted(completed);
+                      });
+              return "s1";
+            });
+
+    // Act
+    try (SagaServer server = new SagaServer(SagaServerConfig.load(props), orchestrator).start()) {
+      HttpResponse<String> response =
+          HttpClient.newHttpClient()
+              .send(
+                  HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + server.port() + "/sagas"))
+                      .header("Content-Type", "application/json")
+                      .POST(HttpRequest.BodyPublishers.ofString("{\"sagaName\":\"saga\"}"))
+                      .build(),
+                  HttpResponse.BodyHandlers.ofString());
+
+      // Assert — it waited for the completion rather than answering 202 straight away, which is
+      // only possible if REST received the ceiling and not the unset timeout.
+      assertThat(response.statusCode()).isEqualTo(200);
+      assertThat(response.body()).contains("COMPLETED");
     }
   }
 
