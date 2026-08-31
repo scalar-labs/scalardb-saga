@@ -76,6 +76,15 @@ final class ServiceSecretResolver {
    * SecretResolver} documents, e.g. {@code UTF-8:/run/secrets/token}).
    */
   private String readContainedFile(String key) {
+    // Every message below redacts the configured root. It is a scalar.db.saga.* value like any
+    // other, so it may itself have been written as a ${file:...} reference and arrive here as the
+    // secret's plaintext — one the operator never typed anywhere the daemon may echo. These
+    // messages reach the reload WARN on every pass that rejects.
+    //
+    // The reference path stays visible, and deliberately: the operator wrote it in the service
+    // file, so quoting it back discloses nothing they kept elsewhere, and it is what makes the
+    // error actionable. A path under a secret-valued root would already put that secret in the
+    // service file, which is a different problem from this one.
     int colon = key.indexOf(':');
     if (colon <= 0 || colon == key.length() - 1) {
       throw new IllegalArgumentException(
@@ -93,11 +102,13 @@ final class ServiceSecretResolver {
       } catch (IOException e) {
         throw new UncheckedIOException(
             new IOException(
-                "secrets_root '"
-                    + secretsRoot
+                "'"
+                    + SagaServerConfig.SECRETS_ROOT_KEY
                     + "' cannot be resolved ("
-                    + e.getMessage()
-                    + "); ${file:...} references in service files resolve only inside it",
+                    + e.getClass().getSimpleName()
+                    + ") "
+                    + Redaction.redacted(secretsRoot.toString())
+                    + "; ${file:...} references in service files resolve only inside it",
                 e));
       }
       // toRealPath resolves symlinks, so a link inside the root pointing outside it lands on the
@@ -105,7 +116,13 @@ final class ServiceSecretResolver {
       Path real = path.toRealPath();
       if (!real.startsWith(realRoot)) {
         throw new UncheckedIOException(
-            new IOException("'" + path + "' resolves outside secrets_root '" + secretsRoot + "'"));
+            new IOException(
+                "'"
+                    + path
+                    + "' resolves outside '"
+                    + SagaServerConfig.SECRETS_ROOT_KEY
+                    + "' "
+                    + Redaction.redacted(secretsRoot.toString())));
       }
       if (!Files.isRegularFile(real)) {
         throw new UncheckedIOException(new IOException("'" + path + "' is not a regular file"));
@@ -117,8 +134,11 @@ final class ServiceSecretResolver {
       }
       return Files.readString(real, charset);
     } catch (IOException e) {
+      // The cause is named by class rather than quoted: a filesystem exception's message is the
+      // path it failed on, which after symlink resolution need not be the one the operator wrote.
       throw new UncheckedIOException(
-          new IOException("'" + path + "' cannot be read (" + e.getMessage() + ")", e));
+          new IOException(
+              "'" + path + "' cannot be read (" + e.getClass().getSimpleName() + ")", e));
     }
   }
 }

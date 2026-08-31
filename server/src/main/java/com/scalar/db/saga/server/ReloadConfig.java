@@ -10,15 +10,15 @@ import org.jspecify.annotations.Nullable;
  * RecoveryConfig}/{@code RetentionConfig} (one record per background concern, carrying the {@link
  * Clock}).
  *
- * <p>In this phase only the static half is consumed: {@code servicesPath} feeds boot-time service
- * loading, and {@code secretsRoot}/{@code allowedHostsCeiling} bound what a service file may
- * reference and authorize. {@code intervalSeconds} is parsed and documented now so the surface is
- * complete, and takes effect when the reload pass ships; {@code 0} disables reload entirely
- * (startup-only loading, today's behavior).
+ * <p>{@code servicesPath} feeds boot-time service loading and every reload pass; {@code
+ * secretsRoot}/{@code allowedHostsCeiling} bound what a service file may reference and authorize;
+ * {@code intervalSeconds} paces {@code SagaConfigReloadManager}'s passes, and {@code 0} disables
+ * reload entirely (startup-only loading).
  *
  * @param servicesPath directory of per-service {@code <name>.properties} files, or {@code null}
  *     when no services are configured
- * @param intervalSeconds seconds between reload passes; {@code 0} disables reload
+ * @param intervalSeconds seconds between reload passes; {@code 0} disables reload (startup-only
+ *     loading)
  * @param secretsRoot directory that {@code ${file:...}} references in service files must resolve
  *     inside (after symlink resolution); see {@link ServiceSecretResolver}
  * @param allowedHostsCeiling optional operator ceiling: when non-empty, every service's {@code

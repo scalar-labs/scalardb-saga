@@ -219,6 +219,26 @@ jobs:
         run: |
           timeout 30 bash -c 'until : < /dev/tcp/127.0.0.1/12051; do sleep 1; done'
 
+      # One mutation end to end through the packaged image: add a header to a mounted service file
+      # and assert the reload pass applies it (the audit line names the changed service). The
+      # behavioral matrix lives in the server's integrationTest suite; this asserts only that the
+      # shipped image watches the mounted directory on the default interval. The boot pass logs its
+      # own "Config applied" line for the initial definitions, so the grep pins the service diff.
+      - name: Check a config reload applies
+        run: |
+          set -euo pipefail
+          printf 'header.X-Smoke=rotated\n' >> .github/smoke/services/payment.properties
+          for _ in $(seq 1 45); do
+            if docker logs saga 2>&1 | grep -q 'services\[~payment\]'; then
+              echo "reload audit line observed"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::no reload audit line within 90s of mutating a service file"
+          docker logs saga | tail -50
+          exit 1
+
       # Guards against a regression in the shipped logback.xml: with no configuration on the classpath
       # Logback would default to DEBUG, flooding an operator's log pipeline.
       - name: Check startup logging
