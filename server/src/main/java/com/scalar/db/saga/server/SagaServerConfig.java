@@ -174,7 +174,7 @@ import org.jspecify.annotations.Nullable;
  *       once its budget runs out, so a budget below 200 truncates the page, and the truncation
  *       always falls on the trailing status. At or below 100, compensating sagas are never
  *       recovered; between 100 and 200 they are served but throttled behind running ones. 200 is a
- *       floor, not a target — the budget is spent across buckets, so a pass budgeted at 200 covers
+ *       floor, not a target — the budget is spent across buckets, so a sweep budgeted at 200 covers
  *       a single bucket
  *   <li>{@code recovery.max_concurrent_recoveries} — how many of those are recovered at once,
  *       bounding the database pressure of a single pass
