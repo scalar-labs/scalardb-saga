@@ -158,6 +158,12 @@ dependencies {
 }
 
 tasks.withType<Test>().configureEach {
+    // sqlite-jdbc and Netty's epoll transport both reach System.load, which JDK 24 made a
+    // restricted method. The server distribution grants this through applicationDefaultJvmArgs;
+    // the test JVMs need the same grant, or every run prints the JEP 472 warning and a future
+    // release blocks the call outright, failing every suite that opens a SQLite store.
+    jvmArgs("--enable-native-access=ALL-UNNAMED")
+
     testLogging {
         events("passed", "skipped", "failed")
     }
