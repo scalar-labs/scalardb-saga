@@ -40,6 +40,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
@@ -1037,16 +1038,37 @@ class SagaEngineTest {
   @Nested
   class GracefulShutdown {
 
+    /**
+     * Blocks until the shutting-down flag is up. shutdown() raises it, then sleeps in a loop until
+     * the active set empties, so a thread parked in that sleep is the first observable state that
+     * proves the flag the drive is about to read is already set.
+     */
+    private static void awaitDraining(Thread shutdownThread) {
+      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+      while (shutdownThread.getState() != Thread.State.TIMED_WAITING) {
+        if (System.nanoTime() > deadline) {
+          throw new AssertionError("shutdown() never reached its drain poll");
+        }
+        Thread.onSpinWait();
+      }
+    }
+
     @Test
     void executeSaga_shuttingDownWaitCurrentStep_stopsBetweenSteps() throws Exception {
-      // Arrange
+      // Arrange — drive the saga on a background thread and block it inside its first step, so
+      // shutdown() runs concurrently with the drive instead of from inside it. The concurrency is
+      // the point: called on the drive's own thread, shutdown() can never see the active set empty,
+      // so its marking loop stamps the saga too and the assertion below would hold even with the
+      // hand-off in executeSteps deleted.
+      CountDownLatch stepStarted = new CountDownLatch(1);
+      CountDownLatch stepRelease = new CountDownLatch(1);
       Step step1 = mock(Step.class);
       when(step1.getName()).thenReturn("s1");
       when(step1.execute(any(SagaContext.class)))
           .thenAnswer(
               invocation -> {
-                // Trigger shutdown during step1 execution
-                engine.shutdown();
+                stepStarted.countDown();
+                stepRelease.await();
                 return StepResult.empty();
               });
       Step step2 = successStep("s2");
@@ -1067,22 +1089,28 @@ class SagaEngineTest {
               0,
               Clock.systemUTC());
 
-      // Act
-      engine.executeSaga(def, saga, Map.of());
+      Thread sagaThread = new Thread(() -> engine.executeSaga(def, saga, Map.of()));
+      sagaThread.start();
+      stepStarted.await();
+
+      // Act — shut down from another thread, and release the step only once that thread is polling
+      // for the drain. Releasing earlier would race the flag, and step2 could slip through.
+      Thread shutdownThread = new Thread(engine::shutdown);
+      shutdownThread.start();
+      awaitDraining(shutdownThread);
+      stepRelease.countDown();
+      sagaThread.join(5000);
+      shutdownThread.join(5000);
 
       // Assert — step2 never executed (stopped between steps)
       verify(step2, never()).execute(any(SagaContext.class));
-      // ...and the saga was handed to the sweeper. A drive that drains cleanly unregisters itself
-      // before shutdown()'s marking loop runs, so that loop never sees it; without this hand-off it
-      // would sit RUNNING with a freshly written step event, which recovery reads as recently
+      // ...and the drive itself handed the saga to the sweeper. It returns between steps and
+      // unregisters while the drain is still polling, so the drain finds an empty set and marks
+      // nothing: this single call is the hand-off in executeSteps and nothing else. Without it the
+      // saga would sit RUNNING with a freshly written step event, which recovery reads as recently
       // driven and skips for a whole timeout — stalling exactly the long-running sagas a graceful
       // drain exists to hand over promptly.
-      //
-      // atLeastOnce, not once: this test calls shutdown() from inside the step, on the drive's own
-      // thread, so the drain cannot complete and its marking loop stamps the saga as well. Both
-      // writes stamp the epoch, so the overlap is harmless; what matters is that the hand-off
-      // happens even when the loop misses it.
-      verify(store, atLeastOnce()).markForRecovery(saga.getSagaId());
+      verify(store, times(1)).markForRecovery(saga.getSagaId());
     }
 
     @Test

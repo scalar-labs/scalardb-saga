@@ -1555,6 +1555,23 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
+  void getNewestEvent_unknownEventType_throwsSagaPersistenceException() throws Exception {
+    // Arrange
+    // A rolling upgrade can leave an older replica reading a type only a newer one writes. The
+    // probe has to translate it the way the full row mapper does; a raw IllegalArgumentException
+    // would escape this method unwrapped, on every pass, for as long as that saga is a candidate.
+    Result row = mock(Result.class);
+    when(row.getTimestampTZ("created_at")).thenReturn(Instant.parse("2026-08-25T10:00:00Z"));
+    when(row.getText("event_type")).thenReturn("A_TYPE_FROM_A_NEWER_VERSION");
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(row));
+
+    // Act & Assert — an unreadable stored event is a permanent failure: not retryable.
+    assertThatThrownBy(() -> store.getNewestEvent("saga-1"))
+        .isInstanceOfSatisfying(
+            SagaPersistenceException.class, e -> assertThat(e.isRetryable()).isFalse());
+  }
+
+  @Test
   void getNewestEvent_storageFailureGiven_throwsSagaPersistenceException() throws Exception {
     // Arrange
     when(tx.scan(any(Scan.class))).thenThrow(mock(CrudException.class));

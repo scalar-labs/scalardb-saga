@@ -162,6 +162,20 @@ class SagaRecoveryManagerTest {
         .toList();
   }
 
+  /**
+   * The stale sweep's counters from the pass summary, so a test can name the outcome it expects
+   * rather than settle for what the store was not asked to do.
+   */
+  private static String staleCounters(ListAppender<ILoggingEvent> logs) {
+    String summary =
+        logs.list.stream()
+            .map(ILoggingEvent::getFormattedMessage)
+            .filter(message -> message.startsWith("Recovery pass:"))
+            .reduce((first, second) -> second)
+            .orElseThrow(() -> new AssertionError("no recovery pass summary was logged"));
+    return summary.substring(summary.indexOf("stale[") + "stale[".length(), summary.indexOf(']'));
+  }
+
   /** A newest-event stub standing for ordinary progress: a step that completed at this instant. */
   private static SagaStore.NewestEvent progressAt(Instant createdAt) {
     return new SagaStore.NewestEvent(EventType.STEP_COMPLETED, createdAt);
@@ -508,6 +522,25 @@ class SagaRecoveryManagerTest {
     }
 
     @Test
+    void recover_driveStartsWhileWaitingForAPermit_isNotClaimed() {
+      // The mirror of the event-probe race above, for the other guard. Screening for a local drive
+      // also happens before a permit is taken, so a drive can start on this instance during the
+      // wait; the claim would then rewrite the token of a drive that is one step old. The screen
+      // says no drive, the re-check under the permit says there is one, and the re-check decides.
+      SagaStateSnapshot saga = staleSaga();
+      scanReturns(saga);
+      when(engine.isLocallyActive(SAGA_ID)).thenReturn(false, true);
+      when(store.getNewestEvent(SAGA_ID))
+          .thenReturn(Optional.of(progressAt(NOW.minusSeconds(600))));
+
+      // Act
+      manager.recover();
+
+      // Assert
+      verify(store, never()).claimForRecovery(any(), any());
+    }
+
+    @Test
     void recover_newestEventIsACompensationGiveUp_isClaimedDespiteBeingRecent() {
       // A compensation failure is written by a drive that then stops and hands the saga back to
       // recovery. Reading it as liveness would make the give-up postpone the very retry it asks
@@ -565,12 +598,20 @@ class SagaRecoveryManagerTest {
       SagaStateSnapshot saga = staleSaga();
       scanReturns(saga);
       when(store.getNewestEvent(SAGA_ID)).thenReturn(Optional.empty());
+      ListAppender<ILoggingEvent> logs = attachLogCapture();
 
-      // Act
-      manager.recover();
+      try {
+        // Act
+        manager.recover();
 
-      // Assert
-      verify(store, never()).claimForRecovery(any(), any());
+        // Assert — the outcome is ERROR, not SKIPPED. Both leave the claim unmade, so the counter
+        // is what separates them, and the difference matters: an error spends batch budget, which
+        // is how a pass winds down against a damaged store, while a skip is free.
+        verify(store, never()).claimForRecovery(any(), any());
+        assertThat(staleCounters(logs)).contains("errors=1");
+      } finally {
+        recoveryLogger().detachAppender(logs);
+      }
     }
 
     @Test
@@ -581,12 +622,18 @@ class SagaRecoveryManagerTest {
       SagaStateSnapshot saga = handoffSaga();
       scanReturns(saga);
       when(store.getNewestEvent(SAGA_ID)).thenReturn(Optional.empty());
+      ListAppender<ILoggingEvent> logs = attachLogCapture();
 
-      // Act
-      manager.recover();
+      try {
+        // Act
+        manager.recover();
 
-      // Assert
-      verify(store, never()).claimForRecovery(any(), any());
+        // Assert — an error, as for any other damaged row; the carve-out changes nothing here.
+        verify(store, never()).claimForRecovery(any(), any());
+        assertThat(staleCounters(logs)).contains("errors=1");
+      } finally {
+        recoveryLogger().detachAppender(logs);
+      }
     }
 
     @Test
