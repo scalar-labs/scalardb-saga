@@ -105,8 +105,33 @@ final class ConfigReconciler {
 
   private record CachedParse(String contentSha256, SagaDefinition definition) {}
 
-  /** A parsed candidate definition with its origin file, for error attribution. */
-  private record CandidateDefinition(String fileName, SagaDefinition definition) {}
+  /**
+   * A parsed candidate definition with its origin file, for error attribution.
+   *
+   * <p>{@code fileVersion} is the version the file names, and is null unless it differs from {@code
+   * definition} — which happens only when {@code servingInsteadOf} adopted a rollback, leaving the
+   * serving version to validate against a file that no longer contains it. Every message built from
+   * a candidate has to say so, or it attributes the serving version's steps to a file the operator
+   * will open and not find them in.
+   */
+  private record CandidateDefinition(
+      String fileName, SagaDefinition definition, @Nullable String fileVersion) {
+
+    /** Names what the steps being reported came from, and where the file disagrees with it. */
+    String describeSource() {
+      return fileVersion == null
+          ? "Definition file '" + fileName + "'"
+          : "Serving version "
+              + definition.getVersion()
+              + " of saga '"
+              + definition.getName()
+              + "' (adopted because file '"
+              + fileName
+              + "' names version "
+              + fileVersion
+              + ", which is already registered)";
+    }
+  }
 
   /**
    * Thrown internally when a pass is rejected; carries the aggregated reason and whether clearing
@@ -408,9 +433,14 @@ final class ConfigReconciler {
         + candidate.definition().getName()
         + " "
         + candidate.definition().getVersion()
-        + " (file '"
-        + candidate.fileName()
-        + "'): "
+        + (candidate.fileVersion() == null
+            ? " (file '" + candidate.fileName() + "')"
+            : " (serving; file '"
+                + candidate.fileName()
+                + "' names "
+                + candidate.fileVersion()
+                + ")")
+        + ": "
         + e.getMessage()
         + registrationHint(e, needsOperator);
   }
@@ -473,7 +503,7 @@ final class ConfigReconciler {
     rollbacks.add(
         Redaction.oneLine(
             describeNotServing(candidate, Objects.requireNonNull(serving).getVersion())));
-    return new CandidateDefinition(candidate.fileName(), serving);
+    return new CandidateDefinition(candidate.fileName(), serving, definition.getVersion());
   }
 
   /**
@@ -668,7 +698,8 @@ final class ConfigReconciler {
           }
         }
         CandidateDefinition previous =
-            candidates.put(definition.getName(), new CandidateDefinition(fileName, definition));
+            candidates.put(
+                definition.getName(), new CandidateDefinition(fileName, definition, null));
         if (previous != null) {
           errors.add(
               "Definition files '"
@@ -794,9 +825,8 @@ final class ConfigReconciler {
         if (step instanceof SagaDefinition.ServiceStep serviceStep) {
           if (!candidateServices.containsKey(serviceStep.getService())) {
             errors.add(
-                "Definition file '"
-                    + candidate.fileName()
-                    + "' step '"
+                candidate.describeSource()
+                    + " step '"
                     + step.getName()
                     + "' references service '"
                     + serviceStep.getService()
@@ -805,9 +835,8 @@ final class ConfigReconciler {
           if (!asyncCallbacksConfigured
               && serviceStep.getPhases().values().stream().anyMatch(CallSpec::isAsync)) {
             errors.add(
-                "Definition file '"
-                    + candidate.fileName()
-                    + "' step '"
+                candidate.describeSource()
+                    + " step '"
                     + step.getName()
                     + "' declares an async phase, but async completion is not configured on this"
                     + " daemon (missing callback URL / secret) — registration would fail on every"

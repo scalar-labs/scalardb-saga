@@ -1605,10 +1605,14 @@ class ConfigReconcilerTest {
       writeDefinition("saga.json", "order-saga", "1.0", "account");
       Files.delete(servicesDir.resolve("legacy.properties"));
 
-      // Assert
+      // Assert — the reference has to be attributed to the serving 2.0 rather than to the file,
+      // which was rolled back to 1.0 and contains neither this step nor any mention of legacy.
+      // Asserting on "legacy" alone would pass either way and leave the attribution unpinned.
       assertThatThrownBy(reconciler()::runOrThrow)
           .isInstanceOf(IllegalStateException.class)
-          .hasMessageContaining("legacy");
+          .hasMessageContaining("Serving version 2.0 of saga 'order-saga'")
+          .hasMessageContaining("file 'saga.json' names version 1.0")
+          .hasMessageContaining("references service 'legacy'");
     }
 
     @Test
