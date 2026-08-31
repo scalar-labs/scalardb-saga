@@ -407,26 +407,47 @@ public final class SagaServer implements AutoCloseable {
 
   /**
    * Builds the Javalin app with a bounded Jetty thread pool <b>and</b> a bounded job queue, so a
-   * burst of slow requests can exhaust neither request-handling threads nor memory. {@code
-   * maxThreads} caps concurrency; the idle timeout lets the pool shrink back toward {@code
-   * minThreads} when quiet; and once all threads are busy, at most {@code maxQueuedRequests} more
-   * requests wait before the server sheds load (fast failure) rather than queueing unboundedly.
-   * When TLS is enabled, the listener is the HTTPS connector built by {@link #tlsConnector}, which
-   * displaces Javalin's default plaintext one.
+   * burst of slow requests can exhaust neither request-handling threads nor memory. The idle
+   * timeout lets the pool shrink back toward {@code minThreads} when quiet, and once the pool is
+   * saturated at most {@code maxQueuedRequests} more requests wait before the server sheds load
+   * (fast failure) rather than queueing unboundedly. When TLS is enabled, the listener is the HTTPS
+   * connector built by {@link #tlsConnector}, which displaces Javalin's default plaintext one.
+   *
+   * <p><b>Handlers run on virtual threads.</b> The pool is given a virtual-thread executor, so
+   * Jetty dispatches each blocking handler invocation onto a virtual thread and the platform thread
+   * returns to the pool immediately. A request waiting on its saga therefore costs a parked virtual
+   * thread rather than one of {@code maxThreads} OS threads, which is what lets a synchronous start
+   * wait without the request pool being the limit. gRPC has always worked this way (its handler
+   * executor is virtual); this brings HTTP into line.
+   *
+   * <p>Two consequences worth naming. {@code maxThreads} no longer caps how many requests are
+   * in-flight — it caps how many can be *dispatched* at once — so the implicit admission control it
+   * used to provide is gone, and bounding concurrent saga execution is admission control's job. And
+   * because handlers now block on virtual threads, store I/O on the request path can pin a carrier
+   * with a natively-blocking driver; see {@code todos/070} (Java 25) and {@code todos/071} (the
+   * store bulkhead). The bounded job queue below is deliberately kept: it still bounds the dispatch
+   * backlog and is the server's fast-failure path.
    */
-  private static Javalin createHttpServer(SagaServerConfig config, @Nullable TlsMaterial tls) {
+  // Package-private for testing that handlers really land on virtual threads, without booting a
+  // server; the same reason grpcDrainMillis() is. A silent revert to platform threads would leave
+  // the daemon healthy and this fix inert, so it is worth a direct assertion.
+  static Javalin createHttpServer(SagaServerConfig config, @Nullable TlsMaterial tls) {
     int queueCap = config.httpMaxQueuedRequests();
     // A fixed-capacity queue (initial == growBy == max == cap): it never grows past the cap, so the
     // backlog is memory-bounded and the pool rejects further work once threads and queue are full.
     BlockingArrayQueue<Runnable> jobQueue = new BlockingArrayQueue<>(queueCap, queueCap, queueCap);
     return Javalin.create(
         cfg -> {
-          cfg.jetty.threadPool =
+          QueuedThreadPool threadPool =
               new QueuedThreadPool(
                   config.httpMaxThreads(),
                   config.httpMinThreads(),
                   (int) THREAD_POOL_IDLE_TIMEOUT_MILLIS,
                   jobQueue);
+          // Jetty's AdaptiveExecutionStrategy routes BLOCKING invocations here, which is how the
+          // handler body ends up on a virtual thread while the pool keeps its bounded queue.
+          threadPool.setVirtualThreadsExecutor(Executors.newVirtualThreadPerTaskExecutor());
+          cfg.jetty.threadPool = threadPool;
           if (tls != null) {
             // Registering any connector suppresses Javalin's default plaintext one (it is created
             // only when the connector list is empty), so TLS-on cannot leak a plaintext listener.
