@@ -15,10 +15,13 @@ import org.jspecify.annotations.Nullable;
  * reads the right values; it clears the binding when the step returns. A call made off that thread
  * (no binding) falls back to empty correlation, so a misuse never NPEs.
  *
- * <p><b>Future: migrate to {@code ScopedValue}.</b> A scoped value would remove the manual {@link
- * #bind} and {@link #restore}, since it unbinds at scope exit, and it cannot be retained the way a
- * thread-local can. Propagation into {@code StructuredTaskScope} forks would also fix the
- * off-thread fallback noted above, but that API is still preview on Java 25.
+ * <p><b>Future: migrate to {@code ScopedValue}.</b> JEP 506 finalized it in Java 25, so the
+ * preview-API blocker is gone: a scoped value removes the manual {@link #bind} and {@link
+ * #restore}, since it unbinds at scope exit, and it cannot be retained the way a thread-local can.
+ * The swap is deferred to its own change because it alters how the engine binds correlation around
+ * a step and needs its own tests. The off-thread fallback noted above would be fixed by propagation
+ * into {@code StructuredTaskScope} forks, but that class is still preview on Java 25, and a library
+ * cannot require {@code --enable-preview} of its consumers.
  */
 public final class SagaCorrelationContext {
 

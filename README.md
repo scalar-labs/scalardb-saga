@@ -121,11 +121,15 @@ meant to be deployed. `api` and `rpc` are published because `core` and `client` 
 because you normally declare them yourself. The client SDK and the types it exposes are compiled
 for Java 8, so applications that cannot move off it can still use server mode.
 
-Embedding `core` requires a **Java 25** runtime. The engine runs sagas on virtual threads, and on
-older runtimes a JDBC driver holds a monitor across each protocol exchange, so every query parks
-while pinned to its carrier and effective database concurrency is capped at the number of carriers;
-JEP 491 removed that pinning in JDK 24. Applications that cannot move off an older JVM should use
-server mode through the client SDK, which stays on Java 8.
+Embedding `core` requires a **Java 25** runtime. The engine drives sagas on virtual threads on its
+asynchronous, recovery, and retention paths, and on older runtimes a virtual thread that blocked on a
+monitor pinned its carrier, capping effective database concurrency at the number of carriers; JEP 491
+removed that pinning in JDK 24. Applications that cannot move off an older JVM should use server mode
+through the client SDK, which stays on Java 8.
+
+If your JDBC driver loads a native library, the JVM prints a `restricted method in java.lang.System`
+warning at startup, because JDK 24 made `System.load` a restricted method. Pass
+`--enable-native-access=ALL-UNNAMED` to silence it, as the server image does.
 
 ## Install
 
