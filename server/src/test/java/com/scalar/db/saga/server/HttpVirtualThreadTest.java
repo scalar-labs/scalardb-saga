@@ -13,10 +13,13 @@ import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 /**
  * Pins that HTTP handlers run on virtual threads, so a request waiting on its saga costs a parked
@@ -30,6 +33,10 @@ import org.junit.jupiter.api.Test;
  */
 class HttpVirtualThreadTest {
 
+  // The handler's wait must outlast awaitPeak's, so a loaded runner cannot make them race.
+  private static final long HANDLER_RELEASE_TIMEOUT_SECONDS = 30L;
+  private static final long PEAK_WAIT_SECONDS = 10L;
+
   private static SagaServerConfig config(int maxThreads) {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
@@ -39,10 +46,12 @@ class HttpVirtualThreadTest {
   }
 
   @Test
+  @Timeout(60)
   void handler_onTheConfiguredHttpServer_runsOnAVirtualThread() throws Exception {
     // Arrange
     AtomicBoolean virtual = new AtomicBoolean();
-    Javalin app = SagaServer.createHttpServer(config(8), null);
+    ExecutorService virtualThreads = Executors.newVirtualThreadPerTaskExecutor();
+    Javalin app = SagaServer.createHttpServer(config(8), null, virtualThreads);
     app.get("/probe", ctx -> virtual.set(Thread.currentThread().isVirtual()));
     app.start(0);
 
@@ -51,6 +60,7 @@ class HttpVirtualThreadTest {
       send(app, "/probe");
     } finally {
       app.stop();
+      virtualThreads.shutdown();
     }
 
     // Assert
@@ -58,7 +68,9 @@ class HttpVirtualThreadTest {
   }
 
   @Test
-  void concurrentBlockingHandlers_exceedMaxThreads() throws Exception {
+  @Timeout(90)
+  void createHttpServer_moreConcurrentBlockingHandlersThanMaxThreads_allRunAtOnce()
+      throws Exception {
     // Arrange — a deliberately tiny pool, and far more requests than it has threads. Each request
     // blocks inside the handler, which is what a synchronous saga start does while it waits.
     int maxThreads = 4;
@@ -70,12 +82,16 @@ class HttpVirtualThreadTest {
     // outcome of the wait is recorded and asserted rather than discarded.
     AtomicBoolean releasedCleanly = new AtomicBoolean(true);
 
-    Javalin app = SagaServer.createHttpServer(config(maxThreads), null);
+    ExecutorService virtualThreads = Executors.newVirtualThreadPerTaskExecutor();
+    Javalin app = SagaServer.createHttpServer(config(maxThreads), null, virtualThreads);
     app.get(
         "/block",
         ctx -> {
           peak.accumulateAndGet(concurrent.incrementAndGet(), Math::max);
-          if (!release.await(10, TimeUnit.SECONDS)) {
+          // Comfortably longer than awaitPeak's own budget below: these two waits race, and if a
+          // handler gives up first the peak collapses and the test fails for a reason unrelated to
+          // what it asserts. @Timeout is the real backstop, so this only has to lose that race.
+          if (!release.await(HANDLER_RELEASE_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
             releasedCleanly.set(false);
           }
           concurrent.decrementAndGet();
@@ -98,6 +114,7 @@ class HttpVirtualThreadTest {
       }
     } finally {
       app.stop();
+      virtualThreads.shutdown();
     }
 
     // Assert — on platform threads the peak cannot exceed the pool; here every request sits in the
@@ -108,7 +125,7 @@ class HttpVirtualThreadTest {
 
   /** Polls rather than sleeping a fixed interval, so the test is fast and not timing-fragile. */
   private static void awaitPeak(AtomicInteger peak, int target) throws InterruptedException {
-    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(PEAK_WAIT_SECONDS);
     while (peak.get() < target && System.nanoTime() < deadline) {
       Thread.sleep(10);
     }

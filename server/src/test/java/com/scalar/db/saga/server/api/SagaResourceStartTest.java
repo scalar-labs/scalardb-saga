@@ -5,6 +5,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -14,6 +15,7 @@ import com.scalar.db.saga.api.SagaCallback;
 import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.server.security.SagaAuthRequest;
 import com.scalar.db.saga.server.security.SagaAuthenticationException;
 import com.scalar.db.saga.server.security.SagaIdentity;
@@ -28,6 +30,7 @@ import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.time.Instant;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -132,6 +135,31 @@ class SagaResourceStartTest {
   }
 
   @Test
+  void postSagas_sagaParksOnAnAsyncStep_returns202WithoutWaitingOutTheBound() throws Exception {
+    // Arrange — the saga parks instead of finishing. setUp's bound is 30s, so if parking did not
+    // release the wait this request would hang for that long; asserting the elapsed time is what
+    // distinguishes "answered because it parked" from "answered because the bound elapsed".
+    when(orchestrator.startAsync(eq(SAGA_NAME), anyMap(), any(SagaCallback.class)))
+        .thenAnswer(
+            invocation -> {
+              invocation.getArgument(2, SagaCallback.class).onParked(snapshot(SagaStatus.WAITING));
+              return SAGA_ID;
+            });
+
+    // Act
+    long startNanos = System.nanoTime();
+    HttpResponse<String> response = post("/sagas", "{\"sagaName\":\"" + SAGA_NAME + "\"}");
+    long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+
+    // Assert — a parked saga is still running, so 202 with its current state, delivered promptly.
+    assertThat(response.statusCode()).isEqualTo(202);
+    assertThat(response.body()).contains("WAITING");
+    assertThat(elapsedMillis).isLessThan(5_000L);
+    // The park answered it; the resource never fell back to reading the snapshot itself.
+    verify(orchestrator, never()).getStateSnapshot(SAGA_ID);
+  }
+
+  @Test
   void postSagas_asyncQueryParamGiven_returns202WithoutWaiting() throws Exception {
     // Arrange
     when(orchestrator.startAsync(eq(SAGA_NAME), anyMap())).thenReturn(SAGA_ID);
@@ -168,6 +196,30 @@ class SagaResourceStartTest {
     assertThat(response.statusCode()).isEqualTo(200);
     verify(orchestrator).startAsync(eq(SAGA_ID), eq(SAGA_NAME), anyMap(), any(SagaCallback.class));
     verify(orchestrator, never()).start(any(String.class), any(String.class), anyMap());
+  }
+
+  @Test
+  void putSagasById_duplicateId_returns409WithoutTheExistingSnapshot() throws Exception {
+    // Arrange — startAsync validates the id and persists before dispatching, so a duplicate throws
+    // on the request thread. The exception carries the existing saga; the response must not.
+    SagaStateSnapshot victim =
+        new SagaStateSnapshot(
+            SAGA_ID, "someone-elses-saga", SagaStatus.RUNNING, "victim", "v1", TS, TS);
+    doThrow(new SagaAlreadyExistsException(SAGA_ID, victim))
+        .when(orchestrator)
+        .startAsync(eq(SAGA_ID), eq(SAGA_NAME), anyMap(), any(SagaCallback.class));
+
+    // Act
+    HttpResponse<String> response =
+        put("/sagas/" + SAGA_ID, "{\"sagaName\":\"" + SAGA_NAME + "\"}");
+
+    // Assert — 409 through ErrorMapper, not the 202 branch. The body deliberately omits the
+    // existing snapshot: including it would let an ID-guessing caller read another caller's saga
+    // state (see this resource's class javadoc). Asserting the absence is the point of the test.
+    assertThat(response.statusCode()).isEqualTo(409);
+    assertThat(response.body()).doesNotContain("someone-elses-saga");
+    assertThat(response.body()).doesNotContain("victim");
+    assertThat(response.body()).doesNotContain("RUNNING");
   }
 
   private SagaStateSnapshot snapshot(SagaStatus status) {

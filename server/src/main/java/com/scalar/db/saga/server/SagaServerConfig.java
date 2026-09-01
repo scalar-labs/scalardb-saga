@@ -72,12 +72,15 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code grpc.port} — gRPC listen port (default {@value #DEFAULT_GRPC_PORT}; {@code 0} binds
  *       an ephemeral port)
  *   <li>{@code http.max_threads} / {@code http.min_threads} — Jetty request thread-pool bounds
- *       (defaults {@value #DEFAULT_MAX_THREADS} / {@value #DEFAULT_MIN_THREADS}); the max caps
- *       concurrent request threads so a burst of slow requests cannot exhaust threads
- *   <li>{@code http.max_queued_requests} — cap on requests waiting for a handler thread once all
- *       {@code http.max_threads} are busy; further requests are shed (fast failure) rather than
- *       queued unboundedly. Defaults to {@value #DEFAULT_MAX_QUEUED_REQUESTS_PER_THREAD} × {@code
- *       http.max_threads}, bounding worst-case queueing delay to roughly that many service times
+ *       (defaults {@value #DEFAULT_MAX_THREADS} / {@value #DEFAULT_MIN_THREADS}). Handlers run on
+ *       virtual threads, so the max caps how many requests are <em>dispatched</em> at once, not how
+ *       many are in flight: a request waiting on its saga costs no pool thread. It therefore does
+ *       not bound concurrent saga execution — nothing does yet
+ *   <li>{@code http.max_queued_requests} — cap on the pool's job queue, so the dispatch backlog is
+ *       memory-bounded and the pool rejects rather than growing without limit. Defaults to {@value
+ *       #DEFAULT_MAX_QUEUED_REQUESTS_PER_THREAD} × {@code http.max_threads}. Because a blocking
+ *       handler is dispatched to a virtual thread rather than queued, this does not shed a burst of
+ *       slow sagas
  *   <li>{@code grpc.max_inbound_metadata_bytes} — cap on a call's total request metadata (default
  *       {@value #DEFAULT_GRPC_MAX_INBOUND_METADATA_BYTES}). Raise it only if legitimate credentials
  *       do not fit — a JWT access token with many claims is the usual reason
@@ -127,8 +130,8 @@ import org.jspecify.annotations.Nullable;
  *       it further.
  * </ul>
  *
- * <p>Read the pair through {@link #syncWaitBoundMillis(long)} rather than separately: combining
- * them per transport is how REST came to ignore the ceiling and block for a whole saga.
+ * <p>Read the pair through {@link #syncWaitBoundMillis(long)} rather than separately; a transport
+ * should be handed the resolved bound, not the two keys behind it.
  *
  * <h2>Shutdown ({@code shutdown.*})</h2>
  *
@@ -418,7 +421,9 @@ public final class SagaServerConfig {
   static final boolean DEFAULT_TLS_ENABLED = false; // plaintext; a mesh/ingress terminates TLS
   static final int DEFAULT_GRPC_MAX_INBOUND_METADATA_BYTES = 8 * 1024;
   static final int DEFAULT_MAX_EVENT_PAYLOAD_BYTES = 1_048_576; // 1 MiB
-  static final long DEFAULT_SYNC_TIMEOUT_MILLIS = 0L; // 0 = disabled (sync blocks to terminal)
+  // 0 = no extra tightening, NOT an unbounded wait: sync.max_wait_millis is the ceiling and always
+  // applies, on both transports.
+  static final long DEFAULT_SYNC_TIMEOUT_MILLIS = 0L;
   static final long DEFAULT_SYNC_MAX_WAIT_MILLIS =
       60_000L; // ceiling on a synchronous server-side wait
   static final ShutdownMode DEFAULT_SHUTDOWN_MODE = DefaultSagaOrchestrator.DEFAULT_SHUTDOWN_MODE;
@@ -1185,10 +1190,6 @@ public final class SagaServerConfig {
    * applies. A synchronous start that has not reached a terminal state within the resulting bound
    * returns {@code 202} and the saga keeps running on the engine's executor (the client polls
    * {@code GET /sagas/{id}}).
-   *
-   * <p>Prefer {@link #syncWaitBoundMillis(long)} over reading this directly: it is only one of the
-   * two inputs to the bound, and combining them at the call site is what let REST block
-   * indefinitely.
    */
   public long syncTimeoutMillis() {
     return syncTimeoutMillis;
@@ -1199,8 +1200,6 @@ public final class SagaServerConfig {
    * transports. {@link #syncTimeoutMillis()} and a gRPC client's call deadline can only tighten
    * this bound, never exceed it, so a synchronous start can never block indefinitely. Defaults to
    * {@value #DEFAULT_SYNC_MAX_WAIT_MILLIS} ms.
-   *
-   * <p>Prefer {@link #syncWaitBoundMillis(long)} over reading this directly.
    */
   public long syncMaxWaitMillis() {
     return syncMaxWaitMillis;
@@ -1211,33 +1210,22 @@ public final class SagaServerConfig {
    * tightened by {@code requestedCapMillis} and by {@link #syncTimeoutMillis()} when that is set.
    * Pass {@link Long#MAX_VALUE} when the caller has no cap of its own.
    *
+   * <p>Derived state of two configuration keys, so it lives here rather than in either transport. A
+   * transport that needs to tighten it further does so on top of this result, as the gRPC call
+   * deadline does.
+   *
+   * <p>Deliberately {@code public} though only {@link SagaServer} calls it. Restricting it would
+   * protect nothing while {@link #syncTimeoutMillis()} and {@link #syncMaxWaitMillis()} stay
+   * public: combining that pair by hand is the mistake this method exists to prevent, so hiding the
+   * safe method while leaving the raw one reachable is backwards. It also keeps the gRPC tests able
+   * to resolve a bound through a real config instead of restating the policy.
+   *
    * @param requestedCapMillis a caller-supplied cap, or {@code Long.MAX_VALUE} for none
    * @return the wait bound in milliseconds
    */
   public long syncWaitBoundMillis(long requestedCapMillis) {
-    return syncWaitBoundMillis(syncMaxWaitMillis, syncTimeoutMillis, requestedCapMillis);
-  }
-
-  /**
-   * The synchronous-wait bound policy, in one place: the ceiling always applies, and the optional
-   * timeout only tightens it. Static so the gRPC service can share it while still being constructed
-   * from plain values rather than from this class.
-   *
-   * <p>It lives here rather than in either transport because it is derived state of two
-   * configuration keys, and because splitting it is exactly how the transports diverged: REST was
-   * handed {@code sync.timeout_millis} alone and could not honour the ceiling this class documents,
-   * so a synchronous REST start blocked for the whole saga. Anything layered on top is
-   * transport-specific and belongs with that transport, as a gRPC call deadline does.
-   *
-   * @param maxWaitMillis the absolute ceiling
-   * @param timeoutMillis the optional tightening bound; {@code 0} means unset
-   * @param requestedCapMillis a caller-supplied cap, or {@code Long.MAX_VALUE} for none
-   * @return the wait bound in milliseconds
-   */
-  public static long syncWaitBoundMillis(
-      long maxWaitMillis, long timeoutMillis, long requestedCapMillis) {
-    long bound = Math.min(maxWaitMillis, requestedCapMillis);
-    return timeoutMillis > 0L ? Math.min(bound, timeoutMillis) : bound;
+    long bound = Math.min(syncMaxWaitMillis, requestedCapMillis);
+    return syncTimeoutMillis > 0L ? Math.min(bound, syncTimeoutMillis) : bound;
   }
 
   /**

@@ -687,21 +687,6 @@ class SagaServerConfigTest {
   }
 
   @Test
-  void syncWaitBoundMillis_everyCombination_neverExceedsTheCeiling() {
-    // Arrange — the invariant the configuration documents: a synchronous start can never block
-    // indefinitely, whatever the other two inputs are.
-    long ceiling = 10_000L;
-
-    // Act + Assert
-    for (long timeout : new long[] {0L, 1L, 9_999L, 10_000L, 10_001L, Long.MAX_VALUE}) {
-      for (long cap : new long[] {1L, 9_999L, 10_001L, Long.MAX_VALUE}) {
-        assertThat(SagaServerConfig.syncWaitBoundMillis(ceiling, timeout, cap))
-            .isLessThanOrEqualTo(ceiling);
-      }
-    }
-  }
-
-  @Test
   void load_syncTimeoutGiven_parsesValue() {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.SYNC_TIMEOUT_MILLIS_KEY, "5000");

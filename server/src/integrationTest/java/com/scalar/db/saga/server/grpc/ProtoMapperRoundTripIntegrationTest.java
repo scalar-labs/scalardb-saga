@@ -68,7 +68,11 @@ class ProtoMapperRoundTripIntegrationTest {
 
     server =
         NettyServerBuilder.forPort(0)
-            .addService(new SagaServiceImpl(orchestrator, 0L, 0L))
+            .addService(
+                // This suite only round-trips protos, so a synchronous start need not wait
+                // at all. Stated as a zero bound rather than as the old 0/0 key pair, which
+                // encoded a sync.max_wait_millis the config layer rejects (it must be >= 1).
+                new SagaServiceImpl(orchestrator, cap -> 0L))
             .addService(
                 ServerInterceptors.intercept(new AdminServiceImpl(orchestrator, 0L), identity()))
             .build()

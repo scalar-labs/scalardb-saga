@@ -190,11 +190,16 @@ port-forward). Non-Java REST consumers pass their CA the usual way (`curl --cace
 ## Graceful shutdown
 
 The JVM is PID 1 and receives `SIGTERM` directly, which triggers a drain rather than dropping
-in-flight work. The daemon drains in two windows, one after the other, so budget for their sum:
+in-flight work. The daemon drains in three windows, one after the other, so budget for their sum:
 
-- **gRPC call drain** — `max(30s, sync.max_wait_millis + 5s)`, so 65s at the default
-  `sync.max_wait_millis` of 60s. It tracks that setting: raise it to `300000` and this window
-  becomes 305s.
+- **HTTP request drain** — `max(30s, sync.max_wait_millis + 5s)`, so 65s at the default
+  `sync.max_wait_millis` of 60s. A REST handler waiting on a synchronous saga start may legitimately
+  block for the full ceiling, so the window tracks that setting rather than being fixed. In-flight
+  requests are answered before the listener closes; new connections are refused as soon as the drain
+  begins, so a load balancer still needs its own pre-stop delay or readiness flip. Expect a floor of
+  a second or two even with nothing in flight, while idle keep-alive connections are closed.
+- **gRPC call drain** — the same `max(30s, sync.max_wait_millis + 5s)`, so 65s at the default. One
+  derivation serves both transports, for the same reason.
 - **Saga engine drain** — `shutdown.timeout_millis`, 30s by default. Under the default
   `shutdown.mode=WAIT_CURRENT_STEP` the engine only finishes each running step and leaves the saga
   for recovery, so this window is rarely spent in full; `WAIT_ALL_SAGAS` instead waits for in-flight
@@ -202,8 +207,8 @@ in-flight work. The daemon drains in two windows, one after the other, so budget
   `0` skips this window entirely, cancelling in-flight work at once and leaving all of it to the
   recovery scan.
 
-At defaults that totals 95s. Set `terminationGracePeriodSeconds` above the sum; below it, the daemon
-is `SIGKILL`ed mid-drain.
+At defaults that totals 160s. Set `terminationGracePeriodSeconds` above the sum; below it, the
+daemon is `SIGKILL`ed mid-drain.
 
 Being cut short costs latency, not integrity: whatever was interrupted is reclaimed by the recovery
 scan on the next boot.

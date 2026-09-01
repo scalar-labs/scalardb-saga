@@ -206,6 +206,19 @@ jobs:
             exit 1
           fi
 
+      # The HTTP counterpart of the epoll check above, and green for the same reason it is needed:
+      # if the virtual-thread executor is ever dropped, every request is still served and every
+      # probe still passes, while the request pool silently becomes the ceiling on concurrent sync
+      # starts again. The boot log is the only evidence visible from outside the JVM.
+      - name: Check HTTP handlers run on virtual threads
+        run: |
+          set -euo pipefail
+          if ! docker logs saga 2>&1 | grep -q "HTTP handlers run on virtual threads"; then
+            echo "::error::HTTP handlers are not on virtual threads; the request pool is the ceiling again"
+            docker logs saga 2>&1 | tail -40
+            exit 1
+          fi
+
       # A TCP connect, not a gRPC call: this asserts the transport is bound and reachable in the
       # packaged image. The health service's actual semantics are covered by the server's
       # integrationTest suite, which needs no container.
