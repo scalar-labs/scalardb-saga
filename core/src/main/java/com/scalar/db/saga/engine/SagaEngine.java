@@ -27,7 +27,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -77,7 +77,11 @@ public class SagaEngine implements AutoCloseable {
   private final Clock clock;
   private volatile boolean shuttingDown = false;
   private final Object shutdownLock = new Object();
-  private final Set<String> activeSagas = ConcurrentHashMap.newKeySet();
+  // Saga id -> when this instance's current drive of it began. A map rather than a set because
+  // recovery needs the start time to tell a wedged drive from a merely slow one, and the drive is
+  // the only thing that knows it: registration creates the entry and the drive's finally removes
+  // it, so the value is always this episode's, never a stale earlier one.
+  private final ConcurrentHashMap<String, Instant> activeSagas = new ConcurrentHashMap<>();
   private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
   private final ConcurrentHashMap<String, List<StepWithPolicy>> planCache =
       new ConcurrentHashMap<>();
@@ -159,8 +163,7 @@ public class SagaEngine implements AutoCloseable {
   public SagaStateSnapshot resumeFrom(
       SagaDefinition def, ExecutionContext context, int fromStepIndex) {
     String sagaId = context.getSagaId();
-    if (!registerActive(sagaId)) {
-      store.markForRecovery(sagaId);
+    if (!registerOrHandOff(sagaId)) {
       return context.getCurrentState();
     }
     try {
@@ -177,8 +180,7 @@ public class SagaEngine implements AutoCloseable {
    */
   public void compensateFrom(SagaDefinition def, ExecutionContext context, int fromStepIndex) {
     String sagaId = context.getSagaId();
-    if (!registerActive(sagaId)) {
-      store.markForRecovery(sagaId);
+    if (!registerOrHandOff(sagaId)) {
       return;
     }
     try {
@@ -277,7 +279,7 @@ public class SagaEngine implements AutoCloseable {
     }
 
     // Mark remaining active sagas for immediate recovery pickup
-    for (String sagaId : activeSagas) {
+    for (String sagaId : activeSagas.keySet()) {
       try {
         store.markForRecovery(sagaId);
         logger.info("Marked saga {} for recovery during shutdown", sagaId);
@@ -322,6 +324,12 @@ public class SagaEngine implements AutoCloseable {
       // Check graceful shutdown between steps
       if (shouldStopBetweenSteps()) {
         logger.info("Stopping saga {} between steps due to shutdown", context.getSagaId());
+        // Hand it over explicitly. The drive returns cleanly, so its finally unregisters the saga
+        // before shutdown()'s marking loop runs and that loop never sees it — leaving a RUNNING row
+        // with a freshly written step event. Recovery reads a recent event as "recently driven" and
+        // skips the saga for a whole timeout, which is the opposite of what draining is for. The
+        // epoch stamp is the deliberate hand-off the sweeper takes immediately.
+        store.markForRecovery(context.getSagaId());
         return;
       }
 
@@ -626,8 +634,8 @@ public class SagaEngine implements AutoCloseable {
    * exhausted, the saga stays COMPENSATING for recovery to retry. The backward mirror of {@link
    * #executeSteps}, which likewise owns its direction's terminal transition.
    *
-   * <p>Not an entry point; callers already hold the {@code registerActive} guard. The guarded entry
-   * is {@link #compensateFrom}.
+   * <p>Not an entry point; callers already hold the {@code registerOrHandOff} guard. The guarded
+   * entry is {@link #compensateFrom}.
    *
    * <p>Package-private for testing.
    *
@@ -802,16 +810,65 @@ public class SagaEngine implements AutoCloseable {
   }
 
   // ---------------------------------------------------------------------------
+  // Package-private — what recovery may ask about local drives
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Returns whether this instance is currently driving the given saga.
+   *
+   * <p>Advisory and racy by design: the set is read without {@link #shutdownLock}, so the answer
+   * can be stale the moment it is returned. It is never a lock and must not be used to establish
+   * exclusion. Recovery uses it to avoid claiming a saga this instance is demonstrably executing —
+   * a false negative there costs at most one claim of a saga whose row was freshly stamped anyway,
+   * while a false positive is impossible: an id is in the set only between the drive registering
+   * and its {@code finally} removing it.
+   */
+  boolean isLocallyActive(String sagaId) {
+    return activeSagas.containsKey(sagaId);
+  }
+
+  /**
+   * When this instance's current drive of the saga began, or empty if it is not driving it.
+   *
+   * <p>Advisory in the same way as {@link #isLocallyActive}. The instant is this episode's start: a
+   * saga that parks and is later resumed gets a fresh entry, so the value never folds in an earlier
+   * episode or the idle time between them.
+   */
+  Optional<Instant> activeSince(String sagaId) {
+    return Optional.ofNullable(activeSagas.get(sagaId));
+  }
+
+  // ---------------------------------------------------------------------------
   // Private — shutdown coordination
   // ---------------------------------------------------------------------------
 
-  private boolean registerActive(String sagaId) {
+  /**
+   * Registers this instance as the driver of the saga, or hands it to the sweeper when nothing here
+   * will drive it.
+   *
+   * <p>The two refusals are not interchangeable and the difference must be decided under {@link
+   * #shutdownLock}. Shutting down means nobody here will run this saga, so it has to be marked.
+   * Already active means a healthy drive owns it, and marking would stamp the epoch on that drive's
+   * row — rewriting the clustering key it holds and killing it, turning a duplicate dispatch into a
+   * failed saga. Deciding outside the lock would reopen exactly that race: {@code putIfAbsent}
+   * could fail because a live drive owns the saga, shutdown could flip, and the caller would mark
+   * it.
+   *
+   * <p>The store write is deliberately outside the lock; only the decision needs to be inside.
+   *
+   * @return true when the caller should proceed to drive the saga
+   */
+  private boolean registerOrHandOff(String sagaId) {
     synchronized (shutdownLock) {
-      if (shuttingDown) {
-        return false;
+      if (!shuttingDown) {
+        // false: another drive on this instance already owns it and is still running.
+        // millis(), not instant(): every other clock read in this class goes through millis(),
+        // and stored timestamps are millisecond-granular anyway.
+        return activeSagas.putIfAbsent(sagaId, Instant.ofEpochMilli(clock.millis())) == null;
       }
-      return activeSagas.add(sagaId);
     }
+    store.markForRecovery(sagaId);
+    return false;
   }
 
   private void unregisterActive(String sagaId) {

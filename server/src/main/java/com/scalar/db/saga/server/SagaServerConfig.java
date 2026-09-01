@@ -158,9 +158,22 @@ import org.jspecify.annotations.Nullable;
  * from {@link RecoveryConfig#defaults()}.
  *
  * <ul>
- *   <li>{@code recovery.timeout_millis} — staleness threshold: a saga untouched for longer is
- *       considered abandoned and eligible for recovery. Must exceed the longest a healthy instance
- *       goes between updating a saga, or a live saga is stolen from the instance still running it
+ *   <li>{@code recovery.timeout_millis} — staleness threshold: a saga that has made no progress for
+ *       longer is considered abandoned and eligible for recovery. Progress is judged from the
+ *       saga's newest event, so a saga executing a long step is not mistaken for a dead one. Set it
+ *       above the longest a <b>single step</b> can take, which is simply its step timeout: that
+ *       deadline is an absolute instant computed once before the retry loop, so it bounds the
+ *       entire attempt sequence — every retry and all backoff — rather than each attempt. A healthy
+ *       saga emits an event only at step boundaries, so that is the longest silence to expect.
+ *       <b>With neither a step timeout nor a saga timeout configured there is no such bound</b> —
+ *       the step runs until it returns — and no value here is safe; set one of those timeouts if
+ *       you rely on recovery leaving long steps alone. Raising it delays recovery of genuinely
+ *       crashed sagas by the same amount: this value is your crash-recovery MTTR.
+ *       <p>Recovery is at-least-once across replicas. A step whose attempt sequence outlives this
+ *       threshold produces no events while it runs, so another replica can begin recovering the
+ *       saga while the first is still executing it; the loser is fenced on its next state write,
+ *       but the participant call itself has already been made. Size the threshold above the step
+ *       envelope, and make participants tolerate a duplicate invocation
  *   <li>{@code recovery.interval_seconds} — how often the scan runs
  *   <li>{@code recovery.compensation_grace_period_seconds} — how long a saga may stay stuck with
  *       failing compensation before it is escalated for manual intervention
@@ -168,8 +181,11 @@ import org.jspecify.annotations.Nullable;
  *       do not count against it (failed attempts do), and a pass stopped by the cap resumes where
  *       it left off next pass, so a small value never skips sagas — it only spreads recovery over
  *       more passes
- *   <li>{@code recovery.max_concurrent_recoveries} — how many of that batch are recovered at once,
- *       bounding the database pressure of a single pass
+ *   <li>{@code recovery.max_concurrent_recoveries} — how many sagas are <b>recovered</b> at once:
+ *       claimed and driven, participant calls included. It bounds the expensive half of a pass. The
+ *       cheap screening that decides whether a saga needs recovering at all runs outside this
+ *       limit, under its own fixed bound, so a pass is never held up waiting for a running saga to
+ *       finish before it can answer a one-read question
  * </ul>
  *
  * <h2>Retention ({@code retention.*})</h2>
