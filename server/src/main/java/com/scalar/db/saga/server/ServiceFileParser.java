@@ -1,26 +1,23 @@
 package com.scalar.db.saga.server;
 
 import com.scalar.db.saga.server.SagaServerConfig.ServiceConfig;
+import com.scalar.db.saga.transport.HttpServiceConfig;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.StringReader;
+import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.LinkOption;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.regex.Pattern;
-import java.util.stream.Stream;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -56,21 +53,38 @@ final class ServiceFileParser {
   static final String PROPERTIES_EXTENSION = ".properties";
 
   /**
-   * Cap on one service file. A legitimate file is a handful of lines; anything near this cap is a
-   * mis-placed artifact, and reading it whole would only defer the failure to a confusing place.
-   */
-  static final long MAX_FILE_BYTES = 1024 * 1024;
-
-  /**
    * The shape a service name (and so a service file's base name) must have: the same conservative
    * set the owner id uses, because service names land in definitions, log lines, and error messages
    * verbatim.
    */
   private static final Pattern SERVICE_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9._-]{1,128}");
 
+  /**
+   * The shape a header name must have: RFC 7230's token rule, which {@code
+   * HttpRequest.Builder.header()} applies at request time. Checking it here turns a per-request
+   * permanent failure into a rejected pass.
+   */
+  private static final Pattern HEADER_NAME_PATTERN =
+      Pattern.compile("[!#$%&'*+\\-.^_`|~0-9A-Za-z]+");
+
   private static final String BASE_URL_KEY = "base_url";
   private static final String ALLOWED_HOSTS_KEY = "allowed_hosts";
   private static final String MAX_BODY_BYTES_KEY = "max_body_bytes";
+
+  /**
+   * The largest {@code max_body_bytes} a service file may claim, 64 MiB against a 1 MiB default.
+   *
+   * <p>The knob raises a bound the coordinator holds on its own heap: a response is buffered whole
+   * before a step sees it, and every in-flight call to that service holds one. Without a ceiling a
+   * service file sets it to {@code Long.MAX_VALUE} and the coordinator's memory becomes whatever a
+   * participant chooses to return — a service file taking the daemon down for every saga, not only
+   * for its own. The ceiling is deliberately generous: it is there to keep the bound a bound, not
+   * to size responses. A participant with more than this to hand back should write it somewhere and
+   * return a reference, because 64 MiB times the calls in flight is already more heap than a
+   * coordinator should spend on bodies it only passes through.
+   */
+  static final long MAX_BODY_BYTES_CEILING = 64L * 1024 * 1024;
+
   private static final String HEADER_KEY_PREFIX = "header.";
 
   /**
@@ -142,58 +156,44 @@ final class ServiceFileParser {
   private ServiceFileParser() {}
 
   /**
-   * Parses every service file in {@code servicesPath} into one {@link ServiceConfig} per service,
-   * applying the directory hygiene and, when {@code allowedHostsCeiling} is non-empty, requiring
-   * every service's {@code allowed_hosts} to be a non-empty subset of it (an empty allowlist means
-   * allow-all, which a ceiling by definition forbids).
-   *
-   * @throws IllegalArgumentException on an unreadable directory, a stray entry, or any per-file
-   *     parse failure (prefixed with the file name)
+   * One directory entry the hygiene walk admitted: the visible file name (for error attribution)
+   * and the fully resolved target the containment check vouched for — every read must go through
+   * the target, never re-open the visible entry (see {@link #parseFile}).
    */
-  static Map<String, ServiceConfig> parseDirectory(
-      Path servicesPath, ServiceSecretResolver secrets, List<String> allowedHostsCeiling) {
+  record ServiceFile(String fileName, Path target) {}
+
+  /**
+   * The hygiene walk alone: lists the directory's service files as {@code name → entry}, in name
+   * order, applying the dot-entry, symlink-containment, stray-entry, and name-shape rules.
+   * Structural problems (an unreadable directory, a stray entry, an escaping symlink) throw;
+   * per-file content problems are the caller's to surface, so the reload pass can aggregate them
+   * across files while boot fails fast.
+   */
+  static Map<String, ServiceFile> listServiceFiles(Path servicesPath) {
     if (!Files.isDirectory(servicesPath)) {
       throw new IllegalArgumentException(
-          "services_path '" + servicesPath + "' is not a readable directory");
+          "'"
+              + SagaServerConfig.SERVICES_PATH_KEY
+              + "' is not a readable directory "
+              + Redaction.redacted(servicesPath.toString()));
     }
-    Path realServicesPath;
-    try {
-      realServicesPath = servicesPath.toRealPath();
-    } catch (IOException e) {
-      throw new IllegalArgumentException(
-          "services_path '" + servicesPath + "' cannot be resolved (" + e.getMessage() + ")", e);
-    }
-    Map<String, ServiceConfig> services = new LinkedHashMap<>();
-    List<Path> entries;
-    try (Stream<Path> stream = Files.list(servicesPath)) {
-      entries = stream.sorted().toList();
-    } catch (IOException e) {
-      throw new IllegalArgumentException(
-          "services_path '" + servicesPath + "' cannot be listed (" + e.getMessage() + ")", e);
-    }
+    Path realServicesPath =
+        WatchedFiles.realPathOf(servicesPath, SagaServerConfig.SERVICES_PATH_KEY);
+    Map<String, ServiceFile> files = new LinkedHashMap<>();
+    List<Path> entries = WatchedFiles.listSorted(servicesPath, SagaServerConfig.SERVICES_PATH_KEY);
     for (Path entry : entries) {
-      String fileName = Objects.requireNonNull(entry.getFileName()).toString();
+      String fileName = WatchedFiles.fileNameOf(entry);
       if (fileName.startsWith(".")) {
         // kubelet's ..data symlink and ..<timestamp> directories, and ordinary dotfiles.
         continue;
       }
-      Path target;
-      if (Files.isSymbolicLink(entry)) {
-        // Kubelet publishes every visible key of a projected volume as a symlink through its
-        // ..data indirection (account.properties -> ..data/account.properties), so a visible
-        // symlink is the expected shape of the mounted-ConfigMap layout, not an anomaly. It just
-        // must not become a second route to reading an arbitrary file under a service's name;
-        // requiring the resolved target to stay inside the directory forbids exactly that.
-        target = requireContainedRegularTarget(entry, fileName, realServicesPath);
-      } else if (Files.isRegularFile(entry, LinkOption.NOFOLLOW_LINKS)) {
-        try {
-          target = entry.toRealPath();
-        } catch (IOException e) {
-          throw new IllegalArgumentException(
-              "services_path entry '" + fileName + "' cannot be resolved (" + e.getMessage() + ")",
-              e);
-        }
-      } else {
+      Path target =
+          WatchedFiles.resolveEntry(
+              entry, fileName, realServicesPath, SagaServerConfig.SERVICES_PATH_KEY);
+      if (target == null) {
+        // Unlike the definitions directory, a stray entry here is an error rather than something
+        // to skip: every non-dot entry carries a service name, so a silently ignored one is a
+        // service the operator believes is configured.
         throw new IllegalArgumentException(
             "services_path entry '"
                 + fileName
@@ -219,78 +219,88 @@ final class ServiceFileParser {
                 + "' has an invalid service name; the base name must match "
                 + SERVICE_NAME_PATTERN.pattern());
       }
-      ServiceConfig service = parseFile(name, fileName, target, secrets);
-      requireWithinCeiling(name, service, allowedHostsCeiling);
-      services.put(name, service);
+      files.put(name, new ServiceFile(fileName, target));
     }
-    return services;
+    return files;
   }
 
   /**
-   * Requires a visible symlink entry to resolve to a regular file still inside {@code
-   * realServicesPath} after full symlink resolution — the same containment {@link
-   * ServiceSecretResolver} applies to the secrets root. Kubelet's projected-volume chain ({@code
-   * account.properties -> ..data/account.properties -> ..<timestamp>/account.properties}) stays
-   * within the mount directory, so it passes; a link escaping the directory, dangling, or landing
-   * on anything but a regular file is the arbitrary-file route this check exists to forbid.
+   * Rejects a header value the JDK's client cannot put on the wire, the way {@link
+   * #HEADER_NAME_PATTERN} rejects a name it will not send: left in place, every call to the service
+   * fails permanently and compensates, and this module exists to catch that at validation rather
+   * than at the first request.
    *
-   * @return the resolved target, which the caller must read instead of {@code entry}: re-opening
-   *     the entry would follow the symlink afresh, so a swap between this check and the read could
-   *     redirect the read to a file the containment never validated
-   */
-  private static Path requireContainedRegularTarget(
-      Path entry, String fileName, Path realServicesPath) {
-    Path target;
-    try {
-      target = entry.toRealPath();
-    } catch (IOException e) {
-      throw new IllegalArgumentException(
-          "services_path entry '"
-              + fileName
-              + "' is a symlink that cannot be resolved ("
-              + e.getMessage()
-              + ")",
-          e);
-    }
-    if (!target.startsWith(realServicesPath)
-        || !Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) {
-      throw new IllegalArgumentException(
-          "services_path entry '"
-              + fileName
-              + "' is a symlink that does not resolve to a regular file inside services_path,"
-              + " which would be a route to reading an arbitrary file under a service's name."
-              + " Only the mounted-volume indirection, a link resolving within the directory, is"
-              + " allowed.");
-    }
-    return target;
-  }
-
-  /**
-   * Parses one service file. Fails fast on the first problem, with every message prefixed by the
-   * visible file name so the caller can aggregate across files without losing attribution.
+   * <p>Two characters classes qualify, and they are separate mistakes. A control character is the
+   * line break a token acquires when it is pasted into a secret file; a character above U+00FF is a
+   * byte-order mark on that file, or a smart quote from a paste. The client refuses both, and no
+   * check above catches either, because a value is not a token.
    *
-   * <p>{@code file} must be the fully resolved path the directory scan validated. It is opened once
-   * with {@code NOFOLLOW_LINKS} and the size cap is enforced on the bytes read through that handle:
-   * the directory can change between validation and read (the reload pass repeats this parse
-   * indefinitely), and no such change may redirect or unbound the read the validation vouched for.
+   * <p>The realistic route is a secret, not a hostile file. A header value may be a {@code
+   * ${file:...}} reference and only its ends are trimmed, so a token pasted into a secret file with
+   * a line break in it resolves to a multi-line value and would otherwise be applied.
+   *
+   * <p>Neither the value nor the offending character is echoed: the value may be a resolved secret,
+   * and the position alone locates it.
    */
-  static ServiceConfig parseFile(
-      String name, String fileName, Path file, ServiceSecretResolver secrets) {
-    Properties properties = new Properties();
-    try (InputStream in =
-        Files.newInputStream(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
-      byte[] bytes = in.readNBytes((int) MAX_FILE_BYTES + 1);
-      if (bytes.length > MAX_FILE_BYTES) {
+  private static String requireSendableValue(String fileName, String header, String text) {
+    for (int i = 0; i < text.length(); i++) {
+      char c = text.charAt(i);
+      if (c > 0xFF) {
         throw new IllegalArgumentException(
             "Service file '"
                 + fileName
-                + "' exceeds the "
-                + MAX_FILE_BYTES
-                + "-byte cap; a service file is a handful of lines");
+                + "' header '"
+                + Redaction.oneLine(header)
+                + "' has a character above U+00FF in its value at position "
+                + i
+                + ". The JDK's client refuses to send one, so it would fail every request this"
+                + " service is called with, failing each step permanently and compensating. A"
+                + " secret file saved with a byte-order mark, or a smart quote from a paste, is the"
+                + " usual cause.");
       }
+      if (Character.isISOControl(c)) {
+        throw new IllegalArgumentException(
+            "Service file '"
+                + fileName
+                + "' header '"
+                + Redaction.oneLine(header)
+                + "' has a control character in its value at position "
+                + i
+                + ". No HTTP header may carry one, so the JDK's client would refuse every request"
+                + " this service is called with, failing each step permanently and compensating."
+                + " A secret file with a line break inside it is the usual cause.");
+      }
+    }
+    return text;
+  }
+
+  /** Rejects a {@code max_body_bytes} above {@link #MAX_BODY_BYTES_CEILING}. */
+  private static long requireWithinBodyCeiling(long maxBodyBytes, String qualifiedKey) {
+    if (maxBodyBytes > MAX_BODY_BYTES_CEILING) {
+      throw new IllegalArgumentException(
+          "'"
+              + qualifiedKey
+              + "' must be <= "
+              + MAX_BODY_BYTES_CEILING
+              + "; the coordinator buffers a whole response per in-flight call, so this bound is"
+              + " the daemon's own memory, not the service's.");
+    }
+    return maxBodyBytes;
+  }
+
+  /**
+   * Parses one service file from bytes already read, so a caller that also hashes the file hashes
+   * and parses the very same snapshot. Reading twice would let a writer change the file in between,
+   * leaving the recorded hash describing content that was never applied — and the reconciler
+   * repeats this parse against a directory a writer keeps updating.
+   */
+  static ServiceConfig parseFile(
+      String name, String fileName, byte[] content, ServiceSecretResolver secrets) {
+    Properties properties = new Properties();
+    try {
       properties.load(
           new StringReader(
-              StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString()));
+              StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(content)).toString()));
     } catch (IOException e) {
       throw new IllegalArgumentException(
           "Service file '" + fileName + "' cannot be read (" + e.getMessage() + ")", e);
@@ -311,7 +321,7 @@ final class ServiceFileParser {
             "Service file '{}' key '{}' uses ${{env:...}}; environment variables cannot change in"
                 + " a running process, so this value will not pick up rotation",
             fileName,
-            key.replaceAll("[\r\n]", "_"));
+            Redaction.oneLine(key));
       }
       // Unquoted: the delegated validators quote the whole key themselves, so quoting here would
       // double up in their messages.
@@ -320,19 +330,33 @@ final class ServiceFileParser {
       // property did in the prefixed format; only the unknown-key error fires on the raw value,
       // since naming the typo helps more than resolving it.
       switch (key) {
-        case BASE_URL_KEY ->
-            baseUrl =
-                SagaServerConfig.requireNonBlank(qualifiedKey, resolve(secrets, raw, qualifiedKey));
-        case ALLOWED_HOSTS_KEY ->
-            allowedHosts =
-                SagaServerConfig.parseCommaSeparated(
-                    qualifiedKey,
-                    SagaServerConfig.requireNonBlank(
-                        qualifiedKey, resolve(secrets, raw, qualifiedKey)));
+        case BASE_URL_KEY -> {
+          baseUrl =
+              SagaServerConfig.requireNonBlank(qualifiedKey, resolve(secrets, raw, qualifiedKey));
+          try {
+            // The same rules every endpoint construction enforces, surfaced here so a bad URL is
+            // a per-file validation error instead of an apply-time one. The value is not echoed:
+            // it may have been resolved from a secret reference.
+            HttpServiceConfig.validateBaseUrl(baseUrl);
+          } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException(
+                qualifiedKey + ": " + e.getMessage() + " " + Redaction.redacted(baseUrl));
+          }
+        }
+        case ALLOWED_HOSTS_KEY -> {
+          allowedHosts =
+              SagaServerConfig.parseCommaSeparated(
+                  qualifiedKey,
+                  SagaServerConfig.requireNonBlank(
+                      qualifiedKey, resolve(secrets, raw, qualifiedKey)));
+          allowedHosts.forEach(host -> requireHostShape(qualifiedKey, host));
+        }
         case MAX_BODY_BYTES_KEY ->
             maxBodyBytes =
-                SagaServerConfig.parseBoundedLong(
-                    resolve(secrets, raw, qualifiedKey), qualifiedKey, 0L, 1L);
+                requireWithinBodyCeiling(
+                    SagaServerConfig.parseBoundedLong(
+                        resolve(secrets, raw, qualifiedKey), qualifiedKey, 0L, 1L),
+                    qualifiedKey);
         default -> {
           if (!key.startsWith(HEADER_KEY_PREFIX)) {
             throw new IllegalArgumentException(
@@ -354,6 +378,18 @@ final class ServiceFileParser {
           if (header.isBlank()) {
             throw new IllegalArgumentException(
                 "Service file '" + fileName + "' key '" + key + "' has no header name.");
+          }
+          if (!HEADER_NAME_PATTERN.matcher(header).matches()) {
+            throw new IllegalArgumentException(
+                "Service file '"
+                    + fileName
+                    + "' sets header '"
+                    + Redaction.oneLine(header)
+                    + "', which is not an HTTP token. The JDK's client refuses to send such a"
+                    + " name, so every call to service '"
+                    + name
+                    + "' would fail permanently and compensate. Use letters, digits, or"
+                    + " !#$%&'*+-.^_`|~ only.");
           }
           if (RESERVED_HEADERS.contains(header)) {
             throw new IllegalArgumentException(
@@ -398,7 +434,11 @@ final class ServiceFileParser {
           }
           headers.put(
               header,
-              SagaServerConfig.requireNonBlank(qualifiedKey, resolve(secrets, raw, qualifiedKey)));
+              requireSendableValue(
+                  fileName,
+                  header,
+                  SagaServerConfig.requireNonBlank(
+                      qualifiedKey, resolve(secrets, raw, qualifiedKey))));
         }
       }
     }
@@ -433,8 +473,7 @@ final class ServiceFileParser {
    * {@code allowed_hosts} that is a subset of it. Empty means allow-all, which is precisely what a
    * ceiling exists to forbid.
    */
-  private static void requireWithinCeiling(
-      String name, ServiceConfig service, List<String> ceiling) {
+  static void requireWithinCeiling(String name, ServiceConfig service, List<String> ceiling) {
     if (ceiling.isEmpty()) {
       return;
     }
@@ -446,15 +485,58 @@ final class ServiceFileParser {
               + " permitted under a ceiling. Declare the hosts this service may call.");
     }
     for (String host : service.allowedHosts()) {
-      if (!ceiling.contains(host)) {
+      // Compared case-insensitively because that is how the host is matched at request time:
+      // OutboundHttpPolicy lowercases both its allowlist and the request URI's host. A raw compare
+      // here would reject a service for a difference that never reaches the wire.
+      String normalized = host.toLowerCase(Locale.ROOT);
+      if (ceiling.stream().noneMatch(entry -> entry.toLowerCase(Locale.ROOT).equals(normalized))) {
+        // Redacted like every other rejected value: allowed_hosts is resolved before it is
+        // checked, so a secret reference pasted onto this key arrives here as its plaintext, and
+        // this message is logged on every pass that rejects.
         throw new IllegalArgumentException(
             "Service '"
                 + name
-                + "' allows host '"
-                + host
-                + "', which is outside egress.allowed_hosts_ceiling. A service file cannot"
-                + " authorize egress beyond the operator ceiling.");
+                + "' allows a host outside egress.allowed_hosts_ceiling "
+                + Redaction.redacted(host)
+                + ". A service file cannot authorize egress beyond the operator ceiling.");
       }
+    }
+  }
+
+  /**
+   * Rejects an {@code allowed_hosts} entry that is not shaped like a host, so what survives is what
+   * the engine's outbound policy could match: {@code OutboundHttpPolicy} compares each entry
+   * against {@code URI.getHost()}, so an entry that URI parsing does not hand back verbatim as the
+   * host could never match any request. Round-tripping through a URI is what makes this the same
+   * function the policy uses rather than an imitation of it, which a rule-by-rule check drifts
+   * from: a port suffix, a path, a user-info prefix and an embedded space all fail the comparison,
+   * an IPv6 literal keeps its brackets and passes, and an underscored name is refused here because
+   * {@code URI.getHost()} is null for it. The JDK's client cannot send to such a host at all, which
+   * is the same ground a base URL carrying one is already rejected on.
+   *
+   * <p>Checking it HERE rather than letting the engine reject it at apply time is what keeps a
+   * resolved value out of the log. The engine's message names the offending host, and this module
+   * cannot redact a message the engine composes — so the rule is that nothing unvalidated is ever
+   * handed across that boundary. The same reasoning already applies to {@code base_url}.
+   */
+  static void requireHostShape(String qualifiedKey, String host) {
+    String normalized = host.trim().toLowerCase(Locale.ROOT);
+    String parsed;
+    try {
+      parsed = URI.create("http://" + normalized).getHost();
+    } catch (IllegalArgumentException e) {
+      // Deliberately not chained: the cause quotes the raw entry back, and allowed_hosts is
+      // resolved before it is checked, so the entry may have come from a secret.
+      parsed = null;
+    }
+    if (!normalized.equals(parsed)) {
+      throw new IllegalArgumentException(
+          qualifiedKey
+              + " has an entry that is not a host name "
+              + Redaction.redacted(host)
+              + ". Give a bare host with no port, path, or user-info (an IPv6 literal keeps its"
+              + " brackets); the allowlist is matched against the request URI's host, which is why"
+              + " a name carrying a space or an underscore can never match one.");
     }
   }
 

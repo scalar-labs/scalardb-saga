@@ -3,7 +3,6 @@ package com.scalar.db.saga.server;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.scalar.db.saga.exception.SagaDefinitionException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Properties;
@@ -68,7 +67,9 @@ class SagaServerStartupIntegrationTest {
     Properties props = storeProperties();
 
     assertThatThrownBy(() -> new SagaServer(SagaServerConfig.load(props)))
-        .isInstanceOf(SagaDefinitionException.class);
+        // Aggregated by the boot pass; the message names the definition and the missing service.
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("account");
   }
 
   @Test

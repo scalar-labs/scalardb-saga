@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -60,12 +61,18 @@ class HttpDrainTest {
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    // Since the config reconciler landed, a definition's service must resolve to a service file.
+    Path services = Files.createDirectories(dir.resolve("services"));
+    Files.writeString(services.resolve("svc.properties"), "base_url=http://127.0.0.1:1\n");
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, services.toString());
 
     CountDownLatch started = new CountDownLatch(1);
     SagaStateSnapshot completed =
         new SagaStateSnapshot(
             "s1", "saga", SagaStatus.COMPLETED, "owner", "v1", Instant.EPOCH, Instant.EPOCH);
     DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
+    // The config reconciler applies the service set through this registrar at startup.
+    lenient().when(orchestrator.httpEndpointRegistrar()).thenReturn(endpoints -> {});
     when(orchestrator.startAsync(eq("saga"), anyMap(), any(SagaCallback.class)))
         .thenAnswer(
             invocation -> {

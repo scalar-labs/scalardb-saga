@@ -11,7 +11,6 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
-import java.util.regex.Pattern;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -137,9 +136,6 @@ public class SagaServerCommand implements Callable<Integer> {
     return CommandLine.ExitCode.SOFTWARE;
   }
 
-  /** Matches a line break and the whitespace around it, so a chained message stays on one line. */
-  private static final Pattern LINE_BREAK = Pattern.compile("\\s*\\R\\s*");
-
   /**
    * Renders a failure and every cause that adds something the text does not already carry, as one
    * line. Package-private so the cases the command line cannot reach — a cause with no message, a
@@ -162,7 +158,7 @@ public class SagaServerCommand implements Callable<Integer> {
     // line; getMessage() is the operator-facing text everywhere it is set.
     StringBuilder detail =
         new StringBuilder(
-            message == null || message.isBlank() ? failure.toString() : oneLine(message));
+            message == null || message.isBlank() ? failure.toString() : Redaction.oneLine(message));
     // Compared by identity so a cause chain that loops back terminates rather than hanging the
     // handler that was supposed to end the process.
     Set<Throwable> seen = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -174,7 +170,7 @@ public class SagaServerCommand implements Callable<Integer> {
       if (causeMessage == null || causeMessage.isBlank()) {
         continue;
       }
-      String text = oneLine(causeMessage);
+      String text = Redaction.oneLine(causeMessage);
       if (detail.indexOf(text) >= 0) {
         continue;
       }
@@ -184,15 +180,6 @@ public class SagaServerCommand implements Callable<Integer> {
       detail.append(')');
     }
     return detail.toString();
-  }
-
-  /**
-   * Collapses line breaks so a multi-line message stays on one line. Jackson puts the source
-   * location of a parse error on a second line, which would otherwise split the report in two and
-   * leave a log pipeline keying off the first line alone.
-   */
-  private static String oneLine(String message) {
-    return LINE_BREAK.matcher(message.strip()).replaceAll(" ");
   }
 
   /**

@@ -1,6 +1,5 @@
 package com.scalar.db.saga.server;
 
-import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -510,20 +509,6 @@ class SagaServerConfigTest {
   }
 
   @Test
-  void load_blankMaxBodyBytes_isTreatedAsUnset(@TempDir Path dir) throws IOException {
-    // Deliberately on the other side of the line from the two keys above: unset leaves the engine's
-    // own cap in place, so a blank value still bounds the body rather than removing a protection.
-    Files.writeString(
-        dir.resolve("account.properties"), "base_url=http://account-svc:8080\nmax_body_bytes=\n");
-    Properties props = new Properties();
-    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, dir.toString());
-
-    SagaServerConfig config = SagaServerConfig.load(props);
-
-    assertThat(requireNonNull(config.services().get("account")).maxBodyBytes()).isZero();
-  }
-
-  @Test
   void securityProvider_unset_defaultsToNoop() {
     SagaServerConfig config = SagaServerConfig.load(new Properties());
 
@@ -777,22 +762,9 @@ class SagaServerConfigTest {
   }
 
   @Test
-  void load_noServicesPath_returnsEmptyServices() {
-    assertThat(SagaServerConfig.load(new Properties()).services()).isEmpty();
-  }
-
-  @Test
-  void load_servicesPathGiven_loadsServicesFromDirectory(@TempDir Path dir) throws IOException {
-    Files.writeString(dir.resolve("account.properties"), "base_url=http://account-svc:8080\n");
-    Files.writeString(dir.resolve("ledger.properties"), "base_url=http://ledger-svc:9000\n");
-    Properties props = new Properties();
-    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, dir.toString());
-
-    SagaServerConfig config = SagaServerConfig.load(props);
-
-    assertThat(config.services()).containsOnlyKeys("account", "ledger");
-    assertThat(requireNonNull(config.services().get("account")).baseUrl())
-        .isEqualTo("http://account-svc:8080");
+  void load_noServicesPath_leavesTheDirectoryUnset() {
+    // Service files are read by the reconciler, not here; this class only points at the directory.
+    assertThat(SagaServerConfig.load(new Properties()).reloadConfig().servicesPath()).isNull();
   }
 
   @Test
@@ -836,27 +808,29 @@ class SagaServerConfigTest {
   }
 
   @Test
+  void load_ceilingEntryWithAPort_throwsIllegalArgumentException(@TempDir Path dir) {
+    // A ceiling is compared against entries that are shaped like hosts, so one that cannot be a
+    // host matches nothing and rejects every service in the fleet — with a message naming the
+    // service files rather than the property that is actually wrong. Catch it where it is written.
+    // Arrange
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.EGRESS_ALLOWED_HOSTS_CEILING_KEY, "account-svc:8080");
+
+    // Act & Assert
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.EGRESS_ALLOWED_HOSTS_CEILING_KEY)
+        .hasMessageNotContaining("account-svc:8080");
+  }
+
+  @Test
   void load_negativeReloadInterval_throwsIllegalArgumentException() {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.RELOAD_INTERVAL_SECONDS_KEY, "-1");
 
     assertThatThrownBy(() -> SagaServerConfig.load(props))
         .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void load_ceilingGiven_serviceOutsideItIsRejected(@TempDir Path dir) throws IOException {
-    // The end-to-end wiring of the ceiling: the per-case matrix lives in ServiceFileParserTest.
-    Files.writeString(
-        dir.resolve("account.properties"),
-        "base_url=http://account-svc:8080\nallowed_hosts=other-svc\n");
-    Properties props = new Properties();
-    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, dir.toString());
-    props.setProperty(SagaServerConfig.EGRESS_ALLOWED_HOSTS_CEILING_KEY, "account-svc");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("ceiling");
   }
 
   @Test
