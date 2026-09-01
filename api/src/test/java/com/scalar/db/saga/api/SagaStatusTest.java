@@ -3,6 +3,8 @@ package com.scalar.db.saga.api;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.util.ArrayList;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class SagaStatusTest {
@@ -64,6 +66,27 @@ class SagaStatusTest {
     // Act & Assert
     assertThat(SagaStatus.RUNNING.isRecoverable()).isTrue();
     assertThat(SagaStatus.COMPENSATING.isRecoverable()).isTrue();
+  }
+
+  /**
+   * The recoverable set is load-bearing outside this enum, in both membership and order. Recovery
+   * scans one page per recoverable status in declaration order and truncates from the end, so the
+   * trailing status is the one a short budget starves, and the documented budget floor is the scan
+   * limit times this count. Adding a third recoverable status moves that floor and silently
+   * falsifies the operator documentation in three files.
+   */
+  @Test
+  void values_filteredByIsRecoverable_areRunningThenCompensating() {
+    // Act
+    List<SagaStatus> recoverable = new ArrayList<>();
+    for (SagaStatus status : SagaStatus.values()) {
+      if (status.isRecoverable()) {
+        recoverable.add(status);
+      }
+    }
+
+    // Assert
+    assertThat(recoverable).containsExactly(SagaStatus.RUNNING, SagaStatus.COMPENSATING);
   }
 
   @Test

@@ -354,6 +354,20 @@ public interface SagaStore extends AutoCloseable {
   Recoverables findRecoverable(Instant threshold, @Nullable ScanCursor cursor);
 
   /**
+   * Returns how many rows one {@link #findRecoverable} call can return, or {@code 0} if this store
+   * does not page recovery scans.
+   *
+   * <p>The recovery manager compares its per-sweep budget against this at startup: a budget below
+   * one page truncates the page, and the cut falls on whichever recoverable status the store
+   * returns last. A decorator must delegate this rather than answer for itself.
+   *
+   * @return rows one {@code findRecoverable} call can return, or {@code 0} if not applicable
+   */
+  default int recoveryPageSize() {
+    return 0;
+  }
+
+  /**
    * Attempts to claim a saga for recovery by updating its owner. Returns an empty {@link Optional}
    * if the saga has already been claimed by another recovery process (optimistic concurrency
    * check).

@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockingDetails;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 
@@ -31,6 +32,46 @@ class ForwardingSagaStoreTest {
     PlainForwardingStore(SagaStore delegate) {
       super(delegate);
     }
+  }
+
+  /**
+   * Every {@link SagaStore} method must have a forwarder here, including {@code default} ones.
+   *
+   * <p>The sweep below enumerates the <em>interface</em>, not this class. That distinction is the
+   * whole point: {@link #allDeclaredForwarders_forwardToDelegateWithIdenticalArguments} walks the
+   * forwarders that exist, so a method with no forwarder at all is invisible to it — which is
+   * exactly the failure this class's javadoc promises cannot happen.
+   *
+   * <p>A missing forwarder is worst for a {@code default} that returns a constant rather than
+   * routing through other interface methods: the decorator then answers for itself instead of the
+   * store it wraps, silently reporting something untrue about the delegate.
+   */
+  @Test
+  void everySagaStoreMethod_reachesTheDelegate() throws Exception {
+    // Arrange
+    SagaStore delegate = mock(SagaStore.class);
+    PlainForwardingStore forwarding = new PlainForwardingStore(delegate);
+    List<String> stranded = new ArrayList<>();
+
+    // Act — every interface method, not just the ones this class declares
+    for (Method interfaceMethod : SagaStore.class.getMethods()) {
+      if (interfaceMethod.isSynthetic()) {
+        continue;
+      }
+      clearInvocations(delegate);
+      interfaceMethod.invoke(forwarding, distinctArgumentsFor(interfaceMethod));
+      if (mockingDetails(delegate).getInvocations().isEmpty()) {
+        stranded.add(interfaceMethod.getName());
+      }
+    }
+
+    // Assert
+    assertThat(stranded)
+        .withFailMessage(
+            "These SagaStore methods never reached the delegate: %s. A decorator that inherits a"
+                + " default answers for itself instead of the store it wraps.",
+            stranded)
+        .isEmpty();
   }
 
   /**

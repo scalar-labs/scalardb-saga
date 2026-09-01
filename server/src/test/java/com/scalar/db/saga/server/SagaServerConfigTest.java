@@ -868,7 +868,7 @@ class SagaServerConfigTest {
   @Test
   void recoveryConfig_maxRecoveriesPerSweepAboveIntRange_throwsIllegalArgumentException() {
     // Parsed as a long and range-checked: a bare (int) cast would wrap this to a small or negative
-    // batch size instead of rejecting it.
+    // budget instead of rejecting it.
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY, "4294967296");
 
@@ -942,9 +942,8 @@ class SagaServerConfigTest {
 
   @Test
   void load_everyRecoveryAndRetentionBoundAtOne_isAccepted() {
-    // The other half of the pin above: rejecting 0 alone would still allow a bound to drift to 2
-    // and
-    // refuse a value the engine takes. 1 is the smallest the engine accepts on all nine, so setting
+    // The other half of the pin above. Rejecting 0 alone would still let a bound drift to 2 and
+    // refuse a value the engine accepts. 1 is the smallest the engine takes on all nine, so setting
     // them together proves no daemon bound sits above it.
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY, "1");

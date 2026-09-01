@@ -72,7 +72,7 @@ import org.slf4j.LoggerFactory;
  * otherwise do each other's work: the claim protocol guarantees one winner per saga, but losers
  * waste aborted claim transactions. Three coordination-free mechanisms, all derived from the
  * replica's {@code ownerId}, keep replicas apart: each replica sweeps buckets in its own scattered
- * permutation ({@link SagaStore#initialSweepCursor}); the batch budget forgives lost races (only
+ * permutation ({@link SagaStore#initialSweepCursor}); the sweep budget forgives lost races (only
  * committed work and failures consume it), so contention never exhausts a pass; and the periodic
  * schedule is de-phased by a deterministic per-replica offset (the startup pass stays immediate).
  * Residual collisions are correctness-safe and visible in the per-pass summary log.
@@ -183,9 +183,36 @@ class SagaRecoveryManager {
         ownerId,
         offsetSeconds,
         intervalSeconds);
+    warnIfBudgetTruncatesAPage();
     scheduler.schedule(this::recoverSafely, 0, TimeUnit.SECONDS);
     scheduler.scheduleWithFixedDelay(
         this::recoverSafely, intervalSeconds + offsetSeconds, intervalSeconds, TimeUnit.SECONDS);
+  }
+
+  /**
+   * Warns when the sweep budget cannot cover one bucket page.
+   *
+   * <p>A page holds every recoverable status one after another and the sweep submits at most its
+   * remaining budget before advancing the bucket, so the truncation always falls on the trailing
+   * status: those sagas are throttled behind the leading one, and under a sustained backlog may
+   * never be recovered at all. It is not rejected: the value was legal before this check existed,
+   * and failing startup on a previously valid value would turn an upgrade into an outage.
+   */
+  private void warnIfBudgetTruncatesAPage() {
+    int pageSize = store.recoveryPageSize();
+    int budget = config.maxRecoveriesPerSweep();
+    if (pageSize <= 0 || budget >= pageSize) {
+      return;
+    }
+    logger.warn(
+        "Recovery budget {} is below one recovery page of {} rows, so a bucket's page is truncated"
+            + " and the cut always falls on the trailing recoverable status: those sagas are"
+            + " throttled behind the leading one, and under a sustained backlog may never be"
+            + " recovered at all. Raise RecoveryConfig.maxRecoveriesPerSweep to at least {}"
+            + " (daemon key: scalar.db.saga.server.recovery.max_recoveries_per_sweep).",
+        budget,
+        pageSize,
+        pageSize);
   }
 
   /**
@@ -232,7 +259,7 @@ class SagaRecoveryManager {
   /**
    * Outcome of one dispatched recovery task, captured at the task's commit point: the claim for a
    * stale saga, the WAITING transition for a parked one. {@code COMMITTED}, {@code DRIVE_FAILED}
-   * and {@code ERROR} consume batch budget; {@code LOST_RACE} and {@code SKIPPED} are free.
+   * and {@code ERROR} consume sweep budget; {@code LOST_RACE} and {@code SKIPPED} are free.
    *
    * <p>{@code DRIVE_FAILED} is a claim that committed and an execution that then threw. The saga is
    * ours and its availability is spent either way, so it is charged exactly like {@code COMMITTED}
@@ -348,7 +375,7 @@ class SagaRecoveryManager {
 
   /**
    * Single recovery pass, two sweeps in the replica's scattered bucket order: stale RUNNING and
-   * COMPENSATING sagas, and overdue parked (WAITING) sagas, each with its own batch budget so a
+   * COMPENSATING sagas, and overdue parked (WAITING) sagas, each with its own sweep budget so a
    * staleness backlog cannot starve the timeout sweep. The budgets are per sweep; the recovery
    * permits are not, so the two still contend for those — which is why screening takes none.
    *

@@ -1696,6 +1696,54 @@ class ScalarDbSagaStoreTest {
     verify(tx, times(2)).scan(any(Scan.class));
   }
 
+  /**
+   * The scan limit is no longer settable from configuration, so this builder is its only remaining
+   * caller and the only way to vary the page size. Pinning that the configured value reaches every
+   * status scan is what keeps that seam honest — without it the setter would have no consumer at
+   * all beyond a getter round-trip.
+   */
+  @Test
+  void findRecoverable_withCustomScanLimit_capsEveryStatusScanAtThatLimit() throws Exception {
+    // Arrange
+    ScalarDbSagaStore limited =
+        new ScalarDbSagaStore(
+            txManager,
+            objectMapper,
+            schema,
+            ScalarDbSagaStoreConfig.builder().recoveryScanLimit(7).build(),
+            () -> OWN_APPEND_ID);
+    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    ArgumentCaptor<Scan> scans = ArgumentCaptor.forClass(Scan.class);
+
+    // Act
+    limited.findRecoverable(Instant.now(), null);
+
+    // Assert — one scan per recoverable status, each carrying the configured cap
+    verify(tx, times(2)).scan(scans.capture());
+    assertThat(scans.getAllValues())
+        .isNotEmpty()
+        .allSatisfy(s -> assertThat(s.getLimit()).isEqualTo(7));
+  }
+
+  /**
+   * One call returns one scan per recoverable status, so the page the recovery manager sizes its
+   * budget against is the scan limit times that count — not the scan limit alone.
+   */
+  @Test
+  void recoveryPageSize_withCustomScanLimit_countsEveryRecoverableStatus() {
+    // Arrange
+    ScalarDbSagaStore limited =
+        new ScalarDbSagaStore(
+            txManager,
+            objectMapper,
+            schema,
+            ScalarDbSagaStoreConfig.builder().recoveryScanLimit(7).build(),
+            () -> OWN_APPEND_ID);
+
+    // Act & Assert — 7 rows per status, RUNNING and COMPENSATING
+    assertThat(limited.recoveryPageSize()).isEqualTo(14);
+  }
+
   @Test
   void findRecoverable_storageFailureGiven_throwsSagaPersistenceException() throws Exception {
     // Arrange
@@ -2708,6 +2756,8 @@ class ScalarDbSagaStoreTest {
         .isInstanceOf(IllegalArgumentException.class);
   }
 
+  // Changing this default moves the documented budget floor (scanLimit x recoverable statuses),
+  // which is stated as a concrete number in RecoveryConfig, SagaServerConfig and server.properties.
   @Test
   void build_withDefaults_hasDefaultRecoveryScanLimit() {
     // Act
@@ -2715,16 +2765,6 @@ class ScalarDbSagaStoreTest {
 
     // Assert
     assertThat(config.getRecoveryScanLimit()).isEqualTo(100);
-  }
-
-  @Test
-  void recoveryScanLimit_positiveValueGiven_setsValue() {
-    // Act
-    ScalarDbSagaStoreConfig config =
-        ScalarDbSagaStoreConfig.builder().recoveryScanLimit(500).build();
-
-    // Assert
-    assertThat(config.getRecoveryScanLimit()).isEqualTo(500);
   }
 
   @Test
