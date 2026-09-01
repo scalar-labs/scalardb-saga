@@ -571,6 +571,53 @@ public final class ScalarDbSagaStore implements SagaStore {
         "get event count for saga " + sagaId);
   }
 
+  @Override
+  public Optional<NewestEvent> getNewestEvent(String sagaId) {
+    return runInTransaction(
+        tx -> {
+          // The same reverse-ordered, limited shape getStateWithEvents uses, and supported for the
+          // same reason. What is specific here is the projection: recovery wants the type and the
+          // stamp, so the payload never leaves the store.
+          Scan scan =
+              Scan.newBuilder(buildEventScan(sagaId))
+                  .projections("sequence", "event_type", "created_at")
+                  .ordering(Scan.Ordering.desc("sequence"))
+                  .limit(1)
+                  .build();
+          return tx.scan(scan).stream()
+              .findFirst()
+              .map(
+                  r -> {
+                    Instant createdAt = r.getTimestampTZ("created_at");
+                    if (createdAt == null) {
+                      // Unreachable through this store, which stamps created_at on every append.
+                      // Reporting the epoch rather than throwing keeps a damaged row claimable: a
+                      // saga that cannot report progress must not become permanently unclaimable.
+                      logger.warn(
+                          "Newest event of saga {} has no created_at; treating as no progress",
+                          sagaId);
+                      createdAt = Instant.EPOCH;
+                    }
+                    String eventTypeStr =
+                        Objects.requireNonNull(
+                            r.getText("event_type"), "event_type must not be null");
+                    EventType eventType;
+                    try {
+                      eventType = EventType.valueOf(eventTypeStr);
+                    } catch (IllegalArgumentException e) {
+                      // Same conversion the full row mapper does. A raw IllegalArgumentException
+                      // would escape this public method unwrapped, and during a rolling upgrade an
+                      // older replica reading a type only the newer one writes would surface it on
+                      // every pass for that saga.
+                      throw SagaPersistenceException.deserializationFailed(e);
+                    }
+                    return new NewestEvent(eventType, createdAt);
+                  });
+        },
+        null, // read-only — retry the whole transaction on UTSE
+        "get newest event for saga " + sagaId);
+  }
+
   // ---------------------------------------------------------------------------
   // Queries
   // ---------------------------------------------------------------------------
