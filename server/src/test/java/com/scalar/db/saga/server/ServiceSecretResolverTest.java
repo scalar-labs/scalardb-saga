@@ -19,6 +19,37 @@ class ServiceSecretResolverTest {
   }
 
   @Test
+  void resolve_fileOutsideSecretsRoot_doesNotEchoTheConfiguredRoot() throws IOException {
+    // secrets_root is a scalar.db.saga.* value like any other, so it may itself have been written
+    // as a ${file:...} reference and arrive here as the secret's plaintext. These messages reach
+    // the reload WARN on every pass that rejects.
+    // Arrange
+    Path rootNamedLikeASecret = Files.createDirectory(secretsDir.resolve("SUPER-SECRET-VALUE"));
+    Files.writeString(outsideDir.resolve("stolen"), "outside-content");
+    ServiceSecretResolver resolver = new ServiceSecretResolver(rootNamedLikeASecret);
+
+    // Act & Assert
+    assertThatThrownBy(() -> resolver.resolve("${file:UTF-8:" + outsideDir.resolve("stolen") + "}"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.SECRETS_ROOT_KEY)
+        .hasMessageNotContaining("SUPER-SECRET-VALUE");
+  }
+
+  @Test
+  void resolve_unresolvableSecretsRoot_doesNotEchoTheConfiguredRoot() {
+    // The root itself missing is the case whose own cause carries it: a filesystem exception's
+    // message is the path it failed on.
+    // Arrange
+    Path missing = secretsDir.resolve("SUPER-SECRET-VALUE");
+    ServiceSecretResolver resolver = new ServiceSecretResolver(missing);
+
+    // Act & Assert
+    assertThatThrownBy(() -> resolver.resolve("${file:UTF-8:" + missing.resolve("token") + "}"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageNotContaining("SUPER-SECRET-VALUE");
+  }
+
+  @Test
   void resolve_noReference_returnsValueUnchanged() {
     assertThat(resolver().resolve("plain-value")).isEqualTo("plain-value");
   }
@@ -41,7 +72,7 @@ class ServiceSecretResolverTest {
     assertThatThrownBy(
             () -> resolver().resolve("${file:UTF-8:" + outsideDir.resolve("stolen") + "}"))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("outside secrets_root")
+        .hasMessageContaining("resolves outside")
         .hasMessageNotContaining("outside-content");
   }
 
@@ -55,7 +86,7 @@ class ServiceSecretResolverTest {
     assertThatThrownBy(
             () -> resolver().resolve("${file:UTF-8:" + secretsDir.resolve("innocent") + "}"))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("outside secrets_root")
+        .hasMessageContaining("resolves outside")
         .hasMessageNotContaining("outside-content");
   }
 

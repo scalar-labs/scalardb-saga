@@ -1,9 +1,6 @@
 package com.scalar.db.saga.server;
 
-import com.scalar.db.saga.definition.SagaDefinition;
-import com.scalar.db.saga.definition.SagaDefinitionParser;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
-import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.server.api.CallbackResource;
 import com.scalar.db.saga.server.api.ErrorMapper;
 import com.scalar.db.saga.server.api.HealthResource;
@@ -31,19 +28,15 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.stream.Stream;
 import org.eclipse.jetty.http.HttpVersion;
 import org.eclipse.jetty.server.HttpConfiguration;
 import org.eclipse.jetty.server.HttpConnectionFactory;
@@ -63,10 +56,13 @@ import org.slf4j.bridge.SLF4JBridgeHandler;
  * mode).
  *
  * <p>Construction builds the embedded {@link DefaultSagaOrchestrator} — creating the saga schema if
- * needed — from the configured properties, then loads and registers any declarative saga
- * definitions found at the configured definitions path. {@link #start()} starts background
- * recovery/retention tasks and binds the enabled transports. {@link #close()} stops accepting
- * requests and then drains in-flight sagas via {@link DefaultSagaOrchestrator#close()}.
+ * needed — from the configured properties, then runs one configuration pass that validates and
+ * registers the service files and declarative saga definitions (fatally, preserving fail-fast
+ * boot). {@link #start()} starts background recovery/retention tasks, binds the enabled transports,
+ * and — unless {@code reload.interval_seconds} is {@code 0} — begins re-running that pass
+ * periodically, so service and definition changes apply without a restart. {@link #close()} stops
+ * accepting requests, stops the reload pass, and then drains in-flight sagas via {@link
+ * DefaultSagaOrchestrator#close()}.
  *
  * <p>Each transport is independently toggleable ({@link SagaServerConfig#httpEnabled()} / {@link
  * SagaServerConfig#grpcEnabled()}, both on by default); the config layer guarantees at least one is
@@ -86,6 +82,15 @@ public final class SagaServer implements AutoCloseable {
   private static final long THREAD_POOL_IDLE_TIMEOUT_MILLIS = 60_000L;
   private static final long RATE_LIMIT_WINDOW_MILLIS = 60_000L;
 
+  /**
+   * The slice of the shutdown budget the in-flight reload pass may take before the saga drain
+   * starts. Deliberately a small fixed window rather than the configured budget: the two waits are
+   * sequential, an operator sizes the container's grace period from one number, and a pass is
+   * milliseconds unless the store is slow — whereas the drain that follows needs the rest. A pass
+   * still running when this elapses is interrupted, which the manager logs.
+   */
+  private static final long RELOAD_DRAIN_MILLIS = 5_000L;
+
   private final SagaServerConfig config;
   private final DefaultSagaOrchestrator orchestrator;
   private final SagaSecurityProvider securityProvider;
@@ -102,6 +107,10 @@ public final class SagaServer implements AutoCloseable {
   private final @Nullable HealthStatusManager grpcHealth;
   private final AtomicBoolean closed = new AtomicBoolean();
   private volatile boolean grpcStarted;
+  // The reload pipeline: the reconciler is also the boot loader; the manager is null when
+  // reload.interval_seconds is 0 (startup-only loading).
+  private final ConfigReconciler reconciler;
+  private final @Nullable SagaConfigReloadManager reloadManager;
 
   /**
    * Builds the server, its underlying saga engine (connecting to ScalarDB), and registers
@@ -149,10 +158,39 @@ public final class SagaServer implements AutoCloseable {
     // Built before wiring the transports so both can share one provider (the gRPC interceptor uses
     // it too). A null placeholder lets the catch below close it only if it was built.
     @Nullable SagaSecurityProvider provider = null;
+    // Same placeholder idiom: the catch below stops the manager only if it was built, and cannot
+    // read the final field to find out.
+    @Nullable SagaConfigReloadManager manager = null;
     try {
       provider = SecurityProviderFactory.create(config);
       this.securityProvider = provider;
-      loadDefinitions();
+      // Boot goes through the same pass reload uses: snapshot, validate (aggregated), apply. It is
+      // the only thing that installs endpoints, so "any set a reload accepted also cold-boots a
+      // fresh replica" holds by construction rather than by two paths agreeing.
+      ConfigReconciler configReconciler =
+          new ConfigReconciler(
+              config.reloadConfig(),
+              config.definitionsPath().orElse(null),
+              config.callbackBaseUrl().isPresent() && config.callbackSecret().isPresent(),
+              orchestrator.httpEndpointRegistrar(),
+              orchestrator::register);
+      this.reconciler = configReconciler;
+      configReconciler.runOrThrow();
+      // A daemon with no registered definitions cannot run any saga — fail fast rather than serve
+      // a healthy but useless process. Reload cannot lift this later: the empty-transition guard
+      // rejects a wind-down to zero, so a useful daemon always starts with at least one.
+      if (configReconciler.appliedDefinitionCount() == 0) {
+        throw new IllegalStateException(
+            "No saga definitions registered. Set '"
+                + SagaServerConfig.DEFINITIONS_PATH_KEY
+                + "' to a file or directory containing at least one saga definition.");
+      }
+      logger.info("Registered {} saga definition(s)", configReconciler.appliedDefinitionCount());
+      manager =
+          config.reloadConfig().intervalSeconds() > 0
+              ? new SagaConfigReloadManager(configReconciler, config.reloadConfig())
+              : null;
+      this.reloadManager = manager;
       if (httpServer != null) {
         registerRoutes(httpServer);
       }
@@ -166,7 +204,12 @@ public final class SagaServer implements AutoCloseable {
       }
     } catch (RuntimeException e) {
       // Release the executor, the security provider, and the store/DB connections held by the
-      // orchestrator if startup wiring fails.
+      // orchestrator if startup wiring fails. The reload manager may already exist — it is built
+      // before the routes are wired, and wiring them can throw — and close() is not reached on
+      // this path, so it is stopped here rather than left behind.
+      if (manager != null) {
+        manager.stop(System.nanoTime());
+      }
       if (grpcExecutor != null) {
         grpcExecutor.shutdown();
       }
@@ -287,7 +330,9 @@ public final class SagaServer implements AutoCloseable {
         .maxTimelineEvents(config.detailMaxTimelineEvents())
         .recoveryConfig(config.recoveryConfig())
         .retentionConfig(config.retentionConfig());
-    config.services().forEach((name, service) -> addHttpEndpoint(builder, name, service));
+    // No endpoints here: the orchestrator is built with none, and the boot configuration pass
+    // installs them through the same swap a reload uses. One conversion from service file to live
+    // endpoint means a set that boots and a set that reloads cannot drift apart.
     // Enable async-callback provisioning only when both the callback base URL and secret are set;
     // otherwise no provider is wired and registering an async definition fails fast (in the
     // engine).
@@ -296,113 +341,6 @@ public final class SagaServer implements AutoCloseable {
           new HmacCallbackUrlProvider(
               config.callbackBaseUrl().get(), config.callbackSecret().get(), Clock.systemUTC()));
     }
-  }
-
-  /**
-   * Registers one configured service as an HTTP endpoint, applying the optional outbound policy.
-   * {@code allowedHosts} and {@code maxBodyBytes} are applied only when configured, so an unset key
-   * leaves the engine's own default in place rather than overwriting it with a sentinel. Visible
-   * for testing, like {@link #applyEngineSettings}.
-   */
-  static void addHttpEndpoint(
-      DefaultSagaOrchestrator.Builder builder,
-      String name,
-      SagaServerConfig.ServiceConfig service) {
-    DefaultSagaOrchestrator.Builder.HttpEndpointBuilder endpoint =
-        builder.httpEndpoint(name, service.baseUrl());
-    if (!service.allowedHosts().isEmpty()) {
-      endpoint.allowedHosts(service.allowedHosts().toArray(new String[0]));
-    }
-    if (service.maxBodyBytes() > 0) {
-      endpoint.maxBodyBytes(service.maxBodyBytes());
-    }
-    endpoint.defaultHeaders(service.headers()).add();
-  }
-
-  private void loadDefinitions() {
-    int count = config.definitionsPath().map(this::registerDefinitions).orElse(0);
-    // A daemon with no registered definitions cannot run any saga, and definitions are currently
-    // loaded only here at startup — so fail fast rather than serve a healthy but useless process.
-    // If dynamic definition registration (e.g. an admin endpoint) is added later, relax this to
-    // allow an empty startup when that mechanism is enabled.
-    if (count == 0) {
-      throw new IllegalStateException(
-          "No saga definitions registered. Set '"
-              + SagaServerConfig.DEFINITIONS_PATH_KEY
-              + "' to a file or directory containing at least one saga definition.");
-    }
-    logger.info("Registered {} saga definition(s)", count);
-  }
-
-  private int registerDefinitions(Path path) {
-    // The path is a resolved config value, so a secret reference pasted onto the definitions key
-    // arrives here as the secret's plaintext; failures below name the key and describe the value
-    // via Redaction instead of echoing it. A missing path is refused up front because that is the
-    // failure a pasted secret actually produces; letting it fall through would echo the "path" in
-    // the definition parser's message and cause.
-    if (!Files.exists(path)) {
-      throw new IllegalArgumentException(
-          "Invalid value for '"
-              + SagaServerConfig.DEFINITIONS_PATH_KEY
-              + "': no such file or directory "
-              + Redaction.redacted(path.toString()));
-    }
-    try {
-      if (Files.isDirectory(path)) {
-        try (Stream<Path> files = Files.list(path)) {
-          List<Path> definitions =
-              files
-                  .filter(Files::isRegularFile)
-                  .filter(SagaServer::isDefinitionFile)
-                  .sorted()
-                  .toList();
-          definitions.forEach(this::registerDefinition);
-          return definitions.size();
-        }
-      }
-      registerDefinition(path);
-      return 1;
-    } catch (IOException e) {
-      // Thrown without the cause: an IOException message here is the path itself, which is the
-      // resolved value. The class name keeps the diagnosis (permission denied or a path that
-      // disappeared) without the echo.
-      throw new IllegalStateException(
-          "Failed to load saga definitions from '"
-              + SagaServerConfig.DEFINITIONS_PATH_KEY
-              + "' ("
-              + e.getClass().getSimpleName()
-              + ") "
-              + Redaction.redacted(path.toString()));
-    }
-  }
-
-  /**
-   * Parses one definition file and registers it, rejecting code steps — daemon mode is
-   * declarative-only (see the class comment).
-   */
-  private void registerDefinition(Path path) {
-    SagaDefinition definition = SagaDefinitionParser.parseFile(path);
-    for (SagaDefinition.StepDefinition step : definition.getSteps()) {
-      if (step instanceof SagaDefinition.ClassStep) {
-        throw SagaDefinitionException.stepClassNotSupportedOnServer(
-            definition.getName(), step.getName());
-      }
-    }
-    // The server-wide default saga timeout is deliberately NOT baked into the definition here: it
-    // is applied by the engine at deadline computation (see Builder#defaultSagaTimeoutMillis), so
-    // the stored form always equals the parsed file and changing the default never turns an
-    // unchanged file into a same-version content conflict at boot.
-    orchestrator.register(definition);
-  }
-
-  private static boolean isDefinitionFile(Path path) {
-    Path fileName = path.getFileName();
-    if (fileName == null) {
-      // Only a filesystem root has no file name, and a root is never a definition file.
-      return false;
-    }
-    String name = fileName.toString().toLowerCase(Locale.ROOT);
-    return name.endsWith(".json") || name.endsWith(".yaml") || name.endsWith(".yml");
   }
 
   /**
@@ -642,6 +580,11 @@ public final class SagaServer implements AutoCloseable {
         grpcServer.start();
         grpcStarted = true;
       }
+      if (reloadManager != null) {
+        // After the transports: a replica never reloads before it is serving, so a bad candidate
+        // set cannot wedge startup halfway (boot already applied the current set fatally above).
+        reloadManager.start();
+      }
     } catch (RuntimeException e) {
       // Stop the (partially started) HTTP/gRPC server and drain/close the orchestrator so a failed
       // start — e.g. a port bind failure after background tasks are running — does not leak
@@ -691,12 +634,32 @@ public final class SagaServer implements AutoCloseable {
     return grpcServer == null ? -1 : grpcServer.getPort();
   }
 
+  /**
+   * Runs one reload pass synchronously; for integration tests, which mutate the watched directories
+   * and need a deterministic pass instead of waiting out the interval.
+   *
+   * @return whether the pass applied (or verified) cleanly
+   */
+  boolean reloadNow() {
+    return reconciler.run();
+  }
+
   @Override
   public void close() {
     // Idempotent: start() calls close() on a bind failure, and try-with-resources will call it
     // again, so guard against draining the orchestrator (and closing the store) twice.
     if (!closed.compareAndSet(false, true)) {
       return;
+    }
+    // Reload stops first, before anything else winds down: a pass that ran during the drain could
+    // swap the endpoint set out from under sagas that are still finishing their current step, and
+    // stopping it here keeps a registration from racing the store's close. That second part is
+    // best effort; stop() waits only until the deadline below, and warns if a pass outlives it.
+    if (reloadManager != null) {
+      reloadManager.stop(
+          System.nanoTime()
+              + TimeUnit.MILLISECONDS.toNanos(
+                  Math.min(RELOAD_DRAIN_MILLIS, config.shutdownTimeoutMillis())));
     }
     // Stop accepting new requests on the enabled transports, drain in-flight gRPC calls, then drain
     // sagas.

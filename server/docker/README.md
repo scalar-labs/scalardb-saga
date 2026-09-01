@@ -187,6 +187,58 @@ Java clients of the SDK enable TLS with `useTransportSecurity()`; against a priv
 `trustCaCertificate(path)` (and `overrideAuthority(name)` when dialing by IP or through a
 port-forward). Non-Java REST consumers pass their CA the usual way (`curl --cacert ...`).
 
+## Configuration reload
+
+With `reload.interval_seconds` > 0 (default 30), the daemon re-reads `services_path` and
+`definitions_path` on that interval, validates the **complete** candidate set, and only then
+applies it — services first, then definition registrations. A set that fails **validation** changes
+nothing at all: the previously applied configuration keeps serving, the rejection is logged once at
+WARN (repeats at DEBUG until it changes), and the next pass retries. A failure while **applying**
+(the store is unreachable, say) can leave part of the set live — the swapped endpoints, or the
+definitions registered before the failure; those are named in an `INFO` apply line of their own,
+and the next pass retries only what is left. The applied INFO line carries the changed names and a
+SHA-256 over the raw file bytes — grep it across replicas to tell a lagging replica from a
+rejecting one. Secret **values** never appear in any log line.
+
+Operational notes, learned from how Kubernetes actually delivers files:
+
+- **Mount whole ConfigMaps/Secrets, never `subPath`**: a `subPath` mount pins the file's inode, so
+  updates never arrive. The kubelet's atomic-symlink layout (`..data`) is fully supported — the
+  daemon re-opens files through their symlink paths every pass.
+- **Multi-part credentials (cert + key) belong in ONE Secret volume**: kubelet updates are atomic
+  per volume, so splitting a pair across two Secrets invites a torn rotation.
+- **Rotate with dual validity**: a rotated downstream credential propagates within kubelet sync
+  plus one reload interval, and replicas do not rotate in lockstep — the downstream service must
+  accept old and new credentials for at least that window.
+- **Retire a saga before deleting its files — disable first, then delete.** Deleting a definition
+  file retires nothing: the version already registered stays in the store and stays startable on
+  every replica, so new starts of it keep arriving. The daemon warns when a definition's file
+  disappears, and warns again if you later remove a service that the vanished definition still
+  names — at which point starts of it fail to resolve an endpoint. (The `disabled` marker that
+  makes retirement real is not in this release; until then, keep the files in place.)
+- **Definition rollback is roll-forward only**: `helm rollback` reverts service files, but
+  re-registering an old definition version is an idempotent no-op — the store's latest version
+  keeps winning. To revert a definition, register the old content as a NEW, bumped version.
+- **Changing a service's `base_url` mid-saga is safe only if the endpoints are compatible**: an
+  in-flight step finishes against the endpoint it resolved; the saga's next step (or a TCC
+  confirm/cancel) resolves the new one.
+- **Trust model**: whoever can write the watched directories reshapes the daemon's egress within
+  one interval, no restart — treat write access to them as operator-equivalent. `${file:...}`
+  references in service files resolve only inside `secrets_root`, and
+  `egress.allowed_hosts_ceiling` bounds what any service file can authorize. Set the ceiling if
+  service files and `server.properties` have different authors: it is the only egress bound that
+  holds no matter what sequence of edits arrives. Without it, the reload rejects a service whose
+  `allowed_hosts` goes from restricted to empty — which catches the edit that loses the line, but
+  not a service deleted in one interval and recreated allow-all in the next, and not a restart. That
+  rejection compares the candidate against what the replica has already applied, and a replica that
+  is starting has applied nothing, so it accepts the set the running ones reject: a truncated file
+  sits rejected until the next rolling deploy, pod restart, or scale-out, then boots clean
+  everywhere.
+- **`max_body_bytes` is capped at 64 MiB per service**, against a 1 MiB default. The coordinator
+  buffers a whole response before a step sees it and holds one per in-flight call, so this is the
+  daemon's memory rather than the service's. A participant with more to hand back should write it
+  somewhere and return a reference.
+
 ## Graceful shutdown
 
 The JVM is PID 1 and receives `SIGTERM` directly, which triggers a drain rather than dropping

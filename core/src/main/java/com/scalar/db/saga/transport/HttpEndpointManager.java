@@ -205,18 +205,25 @@ public final class HttpEndpointManager
       Map<String, HttpEndpoint> next = new HashMap<>();
       List<HttpEndpoint> replaced = new ArrayList<>();
       List<HttpEndpoint> created = new ArrayList<>();
+      // Reused endpoints whose headers the candidate rotates. Collected here and applied only
+      // after every construction below has succeeded: updating them as they are met would mutate
+      // live endpoints before the swap is known to be completable, and a later build failing then
+      // leaves those rotations in place while the caller's applied state — the thing the next
+      // swap's diff is computed against — still describes the old headers. That combination is
+      // silent and does not converge: an operator reverting the file produces a diff of nothing,
+      // so no further swap ever puts the old headers back.
+      Map<HttpEndpoint, Map<String, String>> headerRotations = new LinkedHashMap<>();
       try {
         for (Map.Entry<String, HttpServiceConfig> entry : candidate.entrySet()) {
           String name = entry.getKey();
           HttpServiceConfig config = entry.getValue();
           HttpEndpoint existing = current.get(name);
           if (existing != null && existing.sameTopology(config)) {
-            // Same client, exchange, and policy survive; the header set is applied unconditionally
-            // (an equal-value set is a free no-op) so every swap converges the live headers on its
-            // candidate. The headers deliberately have no stored record to diff against: the one
-            // live copy on the exchange is the whole truth, so a failed swap cannot strand a stale
-            // record behind a rotation it already applied.
-            existing.updateDefaultHeaders(config.defaultHeaders());
+            // Same client, exchange, and policy survive; the header set is applied
+            // unconditionally (an equal-value set is a free no-op) so every swap converges the
+            // live headers on its candidate. The headers deliberately have no stored record to
+            // diff against: the one live copy on the exchange is the whole truth.
+            headerRotations.put(existing, config.defaultHeaders());
             next.put(name, existing);
           } else {
             HttpEndpoint fresh = HttpEndpoint.create(config, callbackUrlProvider);
@@ -237,6 +244,10 @@ public final class HttpEndpointManager
         }
         retired.addAll(created);
         throw e;
+      }
+      // Every endpoint the candidate needs now exists, so nothing below can fail the swap.
+      for (Map.Entry<HttpEndpoint, Map<String, String>> rotation : headerRotations.entrySet()) {
+        rotation.getKey().updateDefaultHeaders(rotation.getValue());
       }
       for (Map.Entry<String, HttpEndpoint> entry : current.entrySet()) {
         if (!candidate.containsKey(entry.getKey())) {

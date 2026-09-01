@@ -1480,6 +1480,108 @@ class ScalarDbSagaStoreTest {
   }
 
   // ---------------------------------------------------------------------------
+  // getNewestEvent
+  // ---------------------------------------------------------------------------
+
+  @Test
+  void getNewestEvent_noEvents_returnsEmpty() throws Exception {
+    // Arrange
+    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+
+    // Act
+    Optional<SagaStore.NewestEvent> newest = store.getNewestEvent("saga-1");
+
+    // Assert
+    assertThat(newest).isEmpty();
+  }
+
+  @Test
+  void getNewestEvent_eventsExist_returnsNewestStamp() throws Exception {
+    // Arrange
+    // The scan is ordered desc on sequence and limited to one row, so the store sees only the
+    // newest event; the test asserts it reports that row's stamp rather than reducing over rows.
+    Instant newestStamp = Instant.parse("2026-08-25T10:00:00Z");
+    Result newestRow = mock(Result.class);
+    when(newestRow.getTimestampTZ("created_at")).thenReturn(newestStamp);
+    when(newestRow.getText("event_type")).thenReturn("STEP_COMPLETED");
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(newestRow));
+
+    // Act
+    Optional<SagaStore.NewestEvent> newest = store.getNewestEvent("saga-1");
+
+    // Assert
+    assertThat(newest).map(SagaStore.NewestEvent::createdAt).contains(newestStamp);
+    assertThat(newest).map(SagaStore.NewestEvent::type).contains(EventType.STEP_COMPLETED);
+  }
+
+  @Test
+  void getNewestEvent_eventsExist_scansNewestFirstLimitedToOneRow() throws Exception {
+    // Arrange
+    // The ordering and limit are the contract: "newest" means highest sequence, and recovery must
+    // not pay for a full event scan on every probe.
+    Result row = mock(Result.class);
+    when(row.getTimestampTZ("created_at")).thenReturn(Instant.parse("2026-08-25T10:00:00Z"));
+    when(row.getText("event_type")).thenReturn("STEP_COMPLETED");
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(row));
+
+    // Act
+    store.getNewestEvent("saga-1");
+
+    // Assert
+    ArgumentCaptor<Scan> captor = ArgumentCaptor.forClass(Scan.class);
+    verify(tx).scan(captor.capture());
+    Scan scan = captor.getValue();
+    assertThat(scan.getLimit()).isEqualTo(1);
+    assertThat(scan.getOrderings()).containsExactly(Scan.Ordering.desc("sequence"));
+    assertThat(scan.getProjections())
+        .containsExactlyInAnyOrder("sequence", "event_type", "created_at");
+  }
+
+  @Test
+  void getNewestEvent_newestEventHasNoTimestamp_returnsEpoch() throws Exception {
+    // Arrange
+    // Unreachable through this store, which stamps created_at on every append. Reporting the epoch
+    // keeps the saga claimable: one that cannot report progress must not become unclaimable.
+    Result row = mock(Result.class);
+    when(row.getTimestampTZ("created_at")).thenReturn(null);
+    when(row.getText("event_type")).thenReturn("STEP_COMPLETED");
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(row));
+
+    // Act
+    Optional<SagaStore.NewestEvent> newest = store.getNewestEvent("saga-1");
+
+    // Assert
+    assertThat(newest).map(SagaStore.NewestEvent::createdAt).contains(Instant.EPOCH);
+  }
+
+  @Test
+  void getNewestEvent_unknownEventType_throwsSagaPersistenceException() throws Exception {
+    // Arrange
+    // A rolling upgrade can leave an older replica reading a type only a newer one writes. The
+    // probe has to translate it the way the full row mapper does; a raw IllegalArgumentException
+    // would escape this method unwrapped, on every pass, for as long as that saga is a candidate.
+    Result row = mock(Result.class);
+    when(row.getTimestampTZ("created_at")).thenReturn(Instant.parse("2026-08-25T10:00:00Z"));
+    when(row.getText("event_type")).thenReturn("A_TYPE_FROM_A_NEWER_VERSION");
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(row));
+
+    // Act & Assert — an unreadable stored event is a permanent failure: not retryable.
+    assertThatThrownBy(() -> store.getNewestEvent("saga-1"))
+        .isInstanceOfSatisfying(
+            SagaPersistenceException.class, e -> assertThat(e.isRetryable()).isFalse());
+  }
+
+  @Test
+  void getNewestEvent_storageFailureGiven_throwsSagaPersistenceException() throws Exception {
+    // Arrange
+    when(tx.scan(any(Scan.class))).thenThrow(mock(CrudException.class));
+
+    // Act & Assert
+    assertThatThrownBy(() -> store.getNewestEvent("saga-1"))
+        .isInstanceOf(SagaPersistenceException.class);
+  }
+
+  // ---------------------------------------------------------------------------
   // getStateSnapshot
   // ---------------------------------------------------------------------------
 
