@@ -194,10 +194,9 @@ class SagaRecoveryManager {
    *
    * <p>A page holds every recoverable status one after another and the sweep submits at most its
    * remaining budget before advancing the bucket, so the truncation always falls on the trailing
-   * status. Below one page's worth of budget that status is served at a reduced rate; at or below a
-   * single status scan it is never reached at all. Neither is rejected: both were legal before this
-   * check existed, and failing startup on a previously valid value would turn an upgrade into an
-   * outage.
+   * status: those sagas are throttled behind the leading one, and under a sustained backlog may
+   * never be recovered at all. It is not rejected: the value was legal before this check existed,
+   * and failing startup on a previously valid value would turn an upgrade into an outage.
    */
   private void warnIfBudgetTruncatesAPage() {
     int pageSize = store.recoveryPageSize();
@@ -209,7 +208,8 @@ class SagaRecoveryManager {
         "Recovery budget {} is below one recovery page of {} rows, so a bucket's page is truncated"
             + " and the cut always falls on the trailing recoverable status: those sagas are"
             + " throttled behind the leading one, and under a sustained backlog may never be"
-            + " recovered at all. Raise maxRecoveriesPerSweep to at least {}.",
+            + " recovered at all. Raise RecoveryConfig.maxRecoveriesPerSweep to at least {}"
+            + " (daemon key: scalar.db.saga.server.recovery.max_recoveries_per_sweep).",
         budget,
         pageSize,
         pageSize);

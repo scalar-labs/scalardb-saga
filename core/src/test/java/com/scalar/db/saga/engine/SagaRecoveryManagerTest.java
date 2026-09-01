@@ -1773,6 +1773,121 @@ class SagaRecoveryManagerTest {
   }
 
   // =========================================================================
+  // start() — budget vs page-size floor
+  // =========================================================================
+
+  /**
+   * The budget floor is documented for operators in three files but neither config can check it
+   * alone: only the store knows its page size, only the engine knows the budget. So the check lives
+   * at startup, where both are in hand. It warns rather than rejects, because every value below the
+   * floor was legal before the check existed and failing startup on one would turn an upgrade into
+   * an outage.
+   *
+   * <p>These assert the message text, not just that something was logged: the operator
+   * documentation tells people to grep their logs for "throttled", so the word is part of the
+   * contract rather than an implementation detail.
+   */
+  @Nested
+  class StartupBudgetWarning {
+
+    @Test
+    void start_budgetBelowOnePage_warnsTrailingStatusIsThrottled() {
+      // Arrange
+      when(store.recoveryPageSize()).thenReturn(200);
+      ListAppender<ILoggingEvent> appender = attachLogCapture();
+
+      try {
+        // Act
+        managerWithBudget(150).start();
+
+        // Assert — the floor it names is the page size, the value the check actually accepts, and
+        // the remedy carries both the field an embedded caller sets and the daemon operator's key.
+        assertThat(appender.list)
+            .filteredOn(e -> e.getLevel() == Level.WARN)
+            .extracting(ILoggingEvent::getFormattedMessage)
+            .anySatisfy(
+                m ->
+                    assertThat(m)
+                        .contains("throttled")
+                        .contains("Raise RecoveryConfig.maxRecoveriesPerSweep to at least 200")
+                        .contains("scalar.db.saga.server.recovery.max_recoveries_per_sweep"));
+      } finally {
+        recoveryLogger().detachAppender(appender);
+      }
+    }
+
+    /**
+     * Suppression is {@code budget >= pageSize}, so a budget of exactly one page is enough and must
+     * stay silent. This is the boundary the message's remedy is worded against: it advises raising
+     * the budget <em>to</em> the page size, which only helps if that value is accepted.
+     */
+    @Test
+    void start_budgetExactlyOnePage_warnsNothing() {
+      // Arrange
+      when(store.recoveryPageSize()).thenReturn(200);
+      ListAppender<ILoggingEvent> appender = attachLogCapture();
+
+      try {
+        // Act
+        managerWithBudget(200).start();
+
+        // Assert
+        assertThat(appender.list).filteredOn(e -> e.getLevel() == Level.WARN).isEmpty();
+      } finally {
+        recoveryLogger().detachAppender(appender);
+      }
+    }
+
+    @Test
+    void start_budgetAboveOnePage_warnsNothing() {
+      // Arrange
+      when(store.recoveryPageSize()).thenReturn(200);
+      ListAppender<ILoggingEvent> appender = attachLogCapture();
+
+      try {
+        // Act
+        managerWithBudget(250).start();
+
+        // Assert
+        assertThat(appender.list).filteredOn(e -> e.getLevel() == Level.WARN).isEmpty();
+      } finally {
+        recoveryLogger().detachAppender(appender);
+      }
+    }
+
+    /**
+     * A store that does not page recovery scans reports 0, and must not be warned about. This pins
+     * the outcome, not the branch that produces it: the {@code pageSize <= 0} term reads as what
+     * guards this, but since a budget is validated positive at construction, {@code budget >=
+     * pageSize} already returns for any non-positive page size. Deleting the term changes nothing
+     * this test can see. It is kept as a statement of intent, not because it is reachable.
+     */
+    @Test
+    void start_storeDoesNotPage_warnsNothing() {
+      // Arrange — a budget of 1 would trip the comparison against any real page size
+      when(store.recoveryPageSize()).thenReturn(0);
+      ListAppender<ILoggingEvent> appender = attachLogCapture();
+
+      try {
+        // Act
+        managerWithBudget(1).start();
+
+        // Assert
+        assertThat(appender.list).filteredOn(e -> e.getLevel() == Level.WARN).isEmpty();
+      } finally {
+        recoveryLogger().detachAppender(appender);
+      }
+    }
+
+    private SagaRecoveryManager managerWithBudget(int budget) {
+      RecoveryConfig config =
+          new RecoveryConfig(
+              60_000, 30, GRACE_PERIOD, budget, 10, Clock.fixed(NOW, ZoneOffset.UTC));
+      return new SagaRecoveryManager(store, engine, registry, OWNER_ID, config, scheduler);
+    }
+  }
+
+  // =========================================================================
   // recover() — success-counted budget, page isolation, cross-pass resume
   // =========================================================================
 
