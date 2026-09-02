@@ -68,9 +68,39 @@ without it, but JUL then keeps its own `INFO` default: it builds a `LogRecord` f
 call before the bridge can discard it, and a `<logger name="io.grpc" level="DEBUG"/>` has no effect at
 all, because JUL declines those records before the bridge ever sees them.
 
-The image already sets `-XX:MaxRAMPercentage=75.0` (heap sized from the cgroup limit, not the host) and
+The image already sets `-XX:MaxRAMPercentage=75.0` (heap sized from the cgroup limit, not the host),
 `-XX:+ExitOnOutOfMemoryError` (die on heap exhaustion so the orchestrator restarts it, rather than hold
-saga leases while making no progress). Override either through `JAVA_OPTS`.
+saga leases while making no progress), and `--enable-native-access=ALL-UNNAMED` (the JDBC driver and
+Netty's epoll transport both load a native library, which JDK 24 made a restricted operation). Override
+the first two through `JAVA_OPTS`. Native access, once enabled, cannot be withdrawn that way: there is
+no `--disable-native-access`, and repeating the flag accumulates rather than replaces.
+
+## Virtual-thread pinning
+
+The daemon drives sagas on virtual threads on the gRPC, asynchronous, bounded-synchronous, recovery,
+and retention paths, so anything that pins a carrier throttles the whole server: pinned carriers cap
+effective concurrency at the size of the carrier pool. A plain synchronous `POST /sagas` is the
+exception; with `sync.timeout_millis` at its default of `0` it drives the saga to a terminal state on
+the calling Jetty worker, which is a platform thread.
+
+On the Java 25 runtime this image ships, a virtual thread does not pin its carrier while it blocks on
+a monitor, `Object.wait` included; JEP 491 is what makes that true. Native frames do pin, so a driver
+with a JNI core holds its carrier for the length of every call; SQLite is the clear case.
+
+To check under your own driver, record the JFR event `jdk.VirtualThreadPinned`. It carries a 20 ms
+threshold in the default JFR configuration, so shorter pins stay invisible until you lower it. The
+older `-Djdk.tracePinnedThreads` system property does not work: it was removed in JDK 24.
+
+## Database connections
+
+Because sagas run on virtual threads, the number of store operations the daemon can have in flight is
+not bounded by a server-side thread pool. The ceiling is whatever your ScalarDB storage imposes —
+a connection pool for the JDBC storages, a request or throughput limit for the others. If the daemon
+exhausts the store under load, that is where to look; the ScalarDB documentation covers the settings
+each storage exposes.
+
+`jdk.virtualThreadScheduler.parallelism` is not the lever: carriers exist for CPU work, and a parked
+virtual thread does not occupy one.
 
 ## Health checks
 

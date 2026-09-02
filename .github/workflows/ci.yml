@@ -60,11 +60,11 @@ jobs:
             exit 1
           fi
 
-      - name: Set up Java 21
+      - name: Set up Java 25
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v4
         with:
           distribution: temurin
-          java-version: 21
+          java-version: 25
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
@@ -109,11 +109,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
-      - name: Set up Java 21
+      - name: Set up Java 25
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v4
         with:
           distribution: temurin
-          java-version: 21
+          java-version: 25
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
@@ -253,6 +253,13 @@ jobs:
             echo "::error::container logged at DEBUG; the default logback.xml is not being picked up"
             exit 1
           fi
+          # A dropped --enable-native-access is the same class of silent degradation as an epoll
+          # fallback: every other assertion here stays green while the JVM warns on each boot, and a
+          # future release turns that warning into a blocked call.
+          if grep -q "A restricted method in java.lang.System" <<<"${logs}"; then
+            echo "::error::restricted-method warning at boot; --enable-native-access is missing from the start script"
+            exit 1
+          fi
 
       # SIGTERM must reach the JVM so SagaServer's shutdown hook drains in-flight sagas. If a wrapper
       # script swallowed the signal, the daemon would be SIGKILLed after the timeout instead.
@@ -378,11 +385,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
-      - name: Set up Java 21
+      - name: Set up Java 25
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v4
         with:
           distribution: temurin
-          java-version: 21
+          java-version: 25
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0

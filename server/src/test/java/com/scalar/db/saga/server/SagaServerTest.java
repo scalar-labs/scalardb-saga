@@ -299,7 +299,7 @@ class SagaServerTest {
           .hasMessageNotContaining(dir.toString());
       verify(orchestrator).close();
     } finally {
-      boolean unused = dir.toFile().setReadable(true); // let the @TempDir cleanup walk the dir
+      boolean _ = dir.toFile().setReadable(true); // let the @TempDir cleanup walk the dir
     }
   }
 
