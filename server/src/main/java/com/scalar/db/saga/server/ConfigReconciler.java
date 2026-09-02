@@ -344,7 +344,12 @@ final class ConfigReconciler {
     // Logged from here rather than from the parser so the validator can render the same
     // observations into its report instead. A torn snapshot returns above, so a discarded attempt
     // no longer repeats its warnings.
-    warnings.forEach(logger::warn);
+    //
+    // One line each, at the sink, the way describeProblems does it for the error channel. Every
+    // warning source today sanitizes the file-supplied part it quotes, so nothing reaches here with
+    // a line break in it; doing it here too is what keeps that true of the next source added, which
+    // will not know the rule.
+    warnings.forEach(warning -> logger.warn("{}", Redaction.oneLine(warning)));
 
     if (!errors.isEmpty()) {
       throw new PassRejectedException(

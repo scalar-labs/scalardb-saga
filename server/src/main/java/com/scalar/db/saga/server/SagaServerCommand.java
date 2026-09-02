@@ -253,7 +253,10 @@ public class SagaServerCommand implements Callable<Integer> {
               + " saga definition(s). No problems found.");
     } else {
       out.println(problems.size() + " problem(s) found:");
-      problems.forEach(problem -> out.println("  - " + problem));
+      // One line per problem, whatever the message carries. These are composed from mounted files:
+      // a parse error puts its source location on a second line, and a ${file:...} reference may
+      // itself contain a newline, either of which would break the list or forge output lines.
+      problems.forEach(problem -> out.println("  - " + Redaction.oneLine(problem)));
       if (truncationNote != null) {
         out.println();
         out.println(truncationNote);
@@ -262,7 +265,7 @@ public class SagaServerCommand implements Callable<Integer> {
     if (!warnings.isEmpty()) {
       out.println();
       out.println(warnings.size() + " warning(s):");
-      warnings.forEach(warning -> out.println("  - " + warning));
+      warnings.forEach(warning -> out.println("  - " + Redaction.oneLine(warning)));
     }
     out.println();
     out.println("Not checked without a running daemon:");

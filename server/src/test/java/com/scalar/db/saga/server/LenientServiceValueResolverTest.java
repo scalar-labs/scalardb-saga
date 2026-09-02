@@ -71,19 +71,53 @@ class LenientServiceValueResolverTest {
 
     // Act & Assert — not softened: this file would be read on a real daemon too.
     assertThatThrownBy(() -> resolver().resolve("${file:UTF-8:" + outside + "}"))
-        .isInstanceOf(ServiceSecretResolver.ContainmentViolationException.class);
+        .isInstanceOf(ServiceSecretResolver.PermanentReferenceException.class);
   }
 
   @Test
   void resolve_secretsRootMissingAltogether_returnsUnresolvedMarker() {
-    // Arrange — the ordinary laptop case: the mount point does not exist at all.
-    LenientServiceValueResolver missingRoot =
-        new LenientServiceValueResolver(secretsDir.resolve("not-mounted"));
+    // Arrange — the ordinary laptop case: the mount point does not exist, and the reference points
+    // inside it, which is what makes this a fact about the machine rather than about the file.
+    Path root = secretsDir.resolve("not-mounted");
+    LenientServiceValueResolver missingRoot = new LenientServiceValueResolver(root);
 
     // Act
-    Resolution resolution = missingRoot.resolve("${file:UTF-8:/run/secrets/token}");
+    Resolution resolution = missingRoot.resolve("${file:UTF-8:" + root.resolve("token") + "}");
 
     // Assert
     assertThat(resolution.unresolvedReason()).isNotNull();
+  }
+
+  @Test
+  void resolve_referenceMissingItsCharset_throws() {
+    // ${file:<path>} without a charset is malformed wherever it runs: the daemon rejects it before
+    // touching the filesystem. Softening it would let --validate-config pass a file that can never
+    // start a server, which is the one thing it exists to prevent.
+    assertThatThrownBy(() -> resolver().resolve("${file:/run/secrets/token}"))
+        .isInstanceOf(ServiceSecretResolver.PermanentReferenceException.class);
+  }
+
+  @Test
+  void resolve_referenceWithAnUnknownCharset_throws() throws IOException {
+    // Arrange — the file is present, so nothing here is environment-dependent.
+    Path token = Files.writeString(secretsDir.resolve("token"), "s3cret");
+
+    // Act & Assert
+    assertThatThrownBy(() -> resolver().resolve("${file:NOSUCH-CHARSET:" + token + "}"))
+        .isInstanceOf(ServiceSecretResolver.PermanentReferenceException.class);
+  }
+
+  @Test
+  void resolve_escapingReferenceWithTheSecretsRootUnmounted_throws() throws IOException {
+    // Arrange — the laptop shape: the root is not mounted, so it cannot be resolved to compare
+    // against. The escape is still an escape, and is still what this check exists to catch.
+    Files.writeString(elsewhere.resolve("token"), "s3cret");
+    LenientServiceValueResolver missingRoot =
+        new LenientServiceValueResolver(secretsDir.resolve("not-mounted"));
+
+    // Act & Assert
+    assertThatThrownBy(
+            () -> missingRoot.resolve("${file:UTF-8:" + elsewhere.resolve("token") + "}"))
+        .isInstanceOf(ServiceSecretResolver.PermanentReferenceException.class);
   }
 }

@@ -443,6 +443,26 @@ class SagaServerCommandTest {
     }
 
     @Test
+    void execute_referencePathWithALineBreak_staysOnOneReportLine() throws IOException {
+      // Arrange — Properties.load performs escape processing, so a path written with \\n arrives
+      // carrying a real newline. It reaches the report through the resolver's message, and an
+      // unsanitized report would let a service file forge what reads as extra output lines.
+      writeService(
+          "account",
+          "base_url=http://account:8080\nheader.X-Api-Key=${file:UTF-8:"
+              + secretsDir
+              + "/a\\nb}\n");
+      writeDefinition("order-saga", "account");
+      StringWriter out = new StringWriter();
+
+      // Act
+      validate(out, writeConfig());
+
+      // Assert
+      assertThat(out.toString()).doesNotContain("a\nb");
+    }
+
+    @Test
     void execute_unknownServerSettingGiven_exitsOneAndSaysReadingStopped() throws IOException {
       // Arrange — server settings are read in order and stop at the first refusal, unlike the
       // service and definition files, which aggregate. The report must not imply otherwise.
