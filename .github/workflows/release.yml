@@ -258,7 +258,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Java 25
-        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v4
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v4
         with:
           distribution: temurin
           java-version: 25
@@ -314,7 +314,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Java 25
-        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v4
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v4
         with:
           distribution: temurin
           java-version: 25
@@ -340,7 +340,7 @@ jobs:
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Log in to ghcr.io
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -416,7 +416,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Java 25
-        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v4
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v4
         with:
           distribution: temurin
           java-version: 25

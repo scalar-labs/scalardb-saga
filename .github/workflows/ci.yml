@@ -61,7 +61,7 @@ jobs:
           fi
 
       - name: Set up Java 25
-        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v4
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v4
         with:
           distribution: temurin
           java-version: 25
@@ -95,7 +95,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Lint the server Dockerfile
-        uses: hadolint/hadolint-action@2a66e89f53d0771bb131a7fa31f3136336094aa6 # v3.4.0
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
         with:
           dockerfile: server/docker/Dockerfile
 
@@ -110,7 +110,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Java 25
-        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v4
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v4
         with:
           distribution: temurin
           java-version: 25
@@ -141,7 +141,7 @@ jobs:
           done
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       # Host architecture only, and loaded rather than pushed. Everything asserted below except the
       # epoll load is architecture-independent; the arm64 side is covered by the packaging check above
@@ -386,7 +386,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Java 25
-        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v4
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v4
         with:
           distribution: temurin
           java-version: 25
@@ -404,7 +404,7 @@ jobs:
           platforms: arm64
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Build the arm64 image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
