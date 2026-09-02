@@ -128,20 +128,36 @@ public class SagaEngine implements AutoCloseable {
     if (shuttingDown) {
       throw new IllegalStateException("Engine is shutting down; cannot create new sagas");
     }
+    // Before persisting, so invalid input fails on the caller's thread rather than on the executor.
+    // ExecutionContext validates the same map when execution starts, but by then an asynchronous
+    // caller is already committed to waiting out its bound for a saga that can never run — and a
+    // doomed saga has been written to the store for recovery to find.
+    ExecutionContext.validateInput(input);
     return store.createSaga(sagaId, def.getName(), ownerId, input, def.getVersion());
   }
 
   /**
-   * Executes a saga from an existing snapshot.
+   * Executes a saga from an existing snapshot, and returns the state <em>this execution</em> left
+   * it in: terminal, {@code WAITING} when it parked, or still {@code RUNNING} when it handed off to
+   * recovery on shutdown.
+   *
+   * <p>Returned rather than re-read afterwards, because "what did this execution do?" is a local
+   * question and the store is a shared, moving answer. Between the return and a read, a participant
+   * callback — on this replica or another — can resume the saga, so a reader sees {@code RUNNING}
+   * for a saga that parked perfectly well. A caller deciding what to report cannot tell that apart
+   * from a defect; this cannot go stale.
    *
    * @param def the saga definition
    * @param saga the initial state snapshot (from {@link #createSaga})
    * @param input the saga input data
+   * @return the state this execution left the saga in
    */
-  void executeSaga(SagaDefinition def, SagaStateSnapshot saga, Map<String, Object> input) {
+  SagaStateSnapshot executeSaga(
+      SagaDefinition def, SagaStateSnapshot saga, Map<String, Object> input) {
     ExecutionContext context = new ExecutionContext(saga.getSagaId(), input, saga);
     context.setNextEventSequence(1); // SAGA_STARTED was seq 0
     resumeFrom(def, context, 0);
+    return context.getCurrentState();
   }
 
   /**
@@ -877,5 +893,15 @@ public class SagaEngine implements AutoCloseable {
 
   private boolean shouldStopBetweenSteps() {
     return shuttingDown && shutdownConfig.mode() == ShutdownMode.WAIT_CURRENT_STEP;
+  }
+
+  /**
+   * Whether {@link #close} has begun. Exposed so a caller inspecting a saga that stopped short of a
+   * terminal state can tell a deliberate shutdown hand-off from a defect: {@link
+   * #shouldStopBetweenSteps} makes execution return <em>normally</em> with the saga still {@code
+   * RUNNING}, which is indistinguishable from an engine bug without this.
+   */
+  boolean isShuttingDown() {
+    return shuttingDown;
   }
 }

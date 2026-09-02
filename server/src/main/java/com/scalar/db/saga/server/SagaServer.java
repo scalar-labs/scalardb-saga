@@ -34,6 +34,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -78,8 +79,8 @@ import org.slf4j.bridge.SLF4JBridgeHandler;
 public final class SagaServer implements AutoCloseable {
 
   private static final Logger logger = LoggerFactory.getLogger(SagaServer.class);
-  private static final long GRPC_SHUTDOWN_MIN_SECONDS = 30L;
-  private static final long GRPC_SHUTDOWN_SLACK_MILLIS = 5_000L;
+  private static final long DRAIN_MIN_SECONDS = 30L;
+  private static final long DRAIN_SLACK_MILLIS = 5_000L;
   private static final long THREAD_POOL_IDLE_TIMEOUT_MILLIS = 60_000L;
   private static final long RATE_LIMIT_WINDOW_MILLIS = 60_000L;
 
@@ -103,10 +104,14 @@ public final class SagaServer implements AutoCloseable {
   private final @Nullable TlsMaterial tlsMaterial;
   // Each transport is null when disabled; SagaServerConfig guarantees at least one is enabled.
   private final @Nullable Javalin httpServer;
+  private final @Nullable ExecutorService httpVirtualThreads;
   private final @Nullable ExecutorService grpcExecutor;
   private final @Nullable Server grpcServer;
   private final @Nullable HealthStatusManager grpcHealth;
   private final AtomicBoolean closed = new AtomicBoolean();
+  // Completed at the top of close(), so a bounded synchronous start stops waiting the moment
+  // shutdown begins instead of holding its request until the wait bound elapses.
+  private final CompletableFuture<Void> shutdownSignal = new CompletableFuture<>();
   private volatile boolean grpcStarted;
   // The reload pipeline: the reconciler is also the boot loader; the manager is null when
   // reload.interval_seconds is 0 (startup-only loading).
@@ -147,10 +152,18 @@ public final class SagaServer implements AutoCloseable {
       }
     }
     this.tlsMaterial = tlsMaterial;
-    Javalin httpServer = config.httpEnabled() ? createHttpServer(config, tlsMaterial) : null;
+    // Created here rather than inside createHttpServer so the server owns it: Jetty never stops
+    // an executor it was handed, and close() must be able to wait for handler bodies.
+    ExecutorService httpVirtualThreads =
+        config.httpEnabled() ? Executors.newVirtualThreadPerTaskExecutor() : null;
+    Javalin httpServer =
+        httpVirtualThreads == null
+            ? null
+            : createHttpServer(config, tlsMaterial, httpVirtualThreads);
     ExecutorService grpcExecutor =
         config.grpcEnabled() ? Executors.newVirtualThreadPerTaskExecutor() : null;
     this.httpServer = httpServer;
+    this.httpVirtualThreads = httpVirtualThreads;
     this.grpcExecutor = grpcExecutor;
     this.rateLimiter =
         config.maxStartRequestsPerMinute() > 0
@@ -223,12 +236,15 @@ public final class SagaServer implements AutoCloseable {
         this.grpcServer = null;
       }
     } catch (RuntimeException e) {
-      // Release the executor, the security provider, and the store/DB connections held by the
+      // Release the executors, the security provider, and the store/DB connections held by the
       // orchestrator if startup wiring fails. The reload manager may already exist — it is built
       // before the routes are wired, and wiring them can throw — and close() is not reached on
       // this path, so it is stopped here rather than left behind.
       if (manager != null) {
         manager.stop(System.nanoTime());
+      }
+      if (httpVirtualThreads != null) {
+        httpVirtualThreads.shutdown();
       }
       if (grpcExecutor != null) {
         grpcExecutor.shutdown();
@@ -254,7 +270,7 @@ public final class SagaServer implements AutoCloseable {
    */
   private Server buildGrpcServer(ExecutorService executor, HealthStatusManager health) {
     SagaServiceImpl service =
-        new SagaServiceImpl(orchestrator, config.syncTimeoutMillis(), config.syncMaxWaitMillis());
+        new SagaServiceImpl(orchestrator, config::syncWaitBoundMillis, shutdownSignal);
     AdminServiceImpl adminService = new AdminServiceImpl(orchestrator, adminDriveDeadlineMillis());
     SagaSecurityInterceptor security = new SagaSecurityInterceptor(securityProvider);
     NettyServerBuilder builder =
@@ -364,27 +380,57 @@ public final class SagaServer implements AutoCloseable {
   }
 
   /**
-   * Builds the Javalin app with a bounded Jetty thread pool <b>and</b> a bounded job queue, so a
-   * burst of slow requests can exhaust neither request-handling threads nor memory. {@code
-   * maxThreads} caps concurrency; the idle timeout lets the pool shrink back toward {@code
-   * minThreads} when quiet; and once all threads are busy, at most {@code maxQueuedRequests} more
-   * requests wait before the server sheds load (fast failure) rather than queueing unboundedly.
-   * When TLS is enabled, the listener is the HTTPS connector built by {@link #tlsConnector}, which
-   * displaces Javalin's default plaintext one.
+   * Builds the Javalin app with a bounded Jetty thread pool and a bounded job queue, so the
+   * dispatch backlog cannot grow without limit. The idle timeout lets the pool shrink back toward
+   * {@code minThreads} when quiet, and the queue's fixed capacity makes the pool reject rather than
+   * grow once both are full. It does <b>not</b> shed a burst of slow requests — see below. When TLS
+   * is enabled, the listener is the HTTPS connector built by {@link #tlsConnector}, which displaces
+   * Javalin's default plaintext one.
+   *
+   * <p><b>Handlers run on virtual threads.</b> The pool is given a virtual-thread executor, so
+   * Jetty dispatches each blocking handler invocation onto a virtual thread and the platform thread
+   * returns to the pool immediately. A request waiting on its saga therefore costs a parked virtual
+   * thread rather than one of {@code maxThreads} OS threads, which is what lets a synchronous start
+   * wait without the request pool being the limit. gRPC has always worked this way (its handler
+   * executor is virtual); this brings HTTP into line.
+   *
+   * <p>Two consequences worth naming. First, {@code maxThreads} no longer caps how many requests
+   * are in flight — it caps how many can be <em>dispatched</em> at once. Jetty's execution strategy
+   * routes a blocking handler invocation to the virtual-thread executor, so it never enters the job
+   * queue below; measured on a 4-thread pool, 300 concurrent slow requests all ran, where before
+   * the change 2 ran and the rest were shed. So the pool and its queue no longer shed saga-induced
+   * load at the front door, and <b>nothing currently bounds concurrent saga execution</b> — the
+   * engine's executors are unbounded and the rate limiter is off by default. Bounding it is
+   * admission control's job and admission control does not exist yet; until it does, overload
+   * degrades into store-connection contention and latency rather than failing fast. The queue is
+   * still kept: it bounds the dispatch backlog, which is memory, and it is what makes the pool
+   * reject rather than grow when the producer side saturates.
+   *
+   * <p>Second, because handlers now block on virtual threads, store I/O on the request path can pin
+   * a carrier with a natively-blocking driver; see {@code todos/070} (Java 25) and {@code
+   * todos/071} (the store bulkhead).
    */
-  private static Javalin createHttpServer(SagaServerConfig config, @Nullable TlsMaterial tls) {
+  // Package-private for testing that handlers really land on virtual threads, without booting a
+  // server; the same reason grpcDrainMillis() is. A silent revert to platform threads would leave
+  // the daemon healthy and this fix inert, so it is worth a direct assertion.
+  static Javalin createHttpServer(
+      SagaServerConfig config, @Nullable TlsMaterial tls, ExecutorService virtualThreads) {
     int queueCap = config.httpMaxQueuedRequests();
     // A fixed-capacity queue (initial == growBy == max == cap): it never grows past the cap, so the
     // backlog is memory-bounded and the pool rejects further work once threads and queue are full.
     BlockingArrayQueue<Runnable> jobQueue = new BlockingArrayQueue<>(queueCap, queueCap, queueCap);
     return Javalin.create(
         cfg -> {
-          cfg.jetty.threadPool =
+          QueuedThreadPool threadPool =
               new QueuedThreadPool(
                   config.httpMaxThreads(),
                   config.httpMinThreads(),
                   (int) THREAD_POOL_IDLE_TIMEOUT_MILLIS,
                   jobQueue);
+          // Jetty's AdaptiveExecutionStrategy routes BLOCKING invocations here, which is how the
+          // handler body ends up on a virtual thread while the pool keeps its bounded queue.
+          threadPool.setVirtualThreadsExecutor(virtualThreads);
+          cfg.jetty.threadPool = threadPool;
           if (tls != null) {
             // Registering any connector suppresses Javalin's default plaintext one (it is created
             // only when the connector list is empty), so TLS-on cannot leak a plaintext listener.
@@ -448,7 +494,8 @@ public final class SagaServer implements AutoCloseable {
     }
     HealthResource.register(httpServer);
     ErrorMapper.register(httpServer);
-    SagaResource.register(httpServer, orchestrator, config.syncTimeoutMillis());
+    SagaResource.register(
+        httpServer, orchestrator, config.syncWaitBoundMillis(Long.MAX_VALUE), shutdownSignal);
     SagaAdminResource.register(httpServer, orchestrator, adminDriveDeadlineMillis());
     // The async-callback route exists only when a callback secret is configured; without it there
     // is nothing to authenticate callbacks against, so async completion is not enabled.
@@ -465,21 +512,14 @@ public final class SagaServer implements AutoCloseable {
   }
 
   /**
-   * The bound on a single-saga admin inline drive: {@code sync.max_wait_millis} — the daemon's
-   * standing ceiling on how long any request may hold a thread — tightened by {@code
-   * sync.timeout_millis} when that is set. This mirrors the terms {@code
-   * SagaServiceImpl.computeBoundMillis} applies on the request-thread paths, minus the per-call
-   * gRPC client deadline, which has no REST analogue. Past the bound the durable transition is
-   * already recorded and the response carries the saga's current state, so the bound only caps how
-   * long the request waits, never correctness. Reusing {@code sync.max_wait_millis} keeps the drive
-   * inside the shutdown drain window {@link #grpcDrainMillis()} derives from the same value.
+   * The bound on a single-saga admin inline drive: the shared synchronous-wait bound, with no
+   * caller-supplied cap. Past the bound the durable transition is already recorded and the response
+   * carries the saga's current state, so the bound only caps how long the request waits, never
+   * correctness. Deriving it from {@code sync.max_wait_millis} keeps the drive inside the shutdown
+   * drain window {@link #grpcDrainMillis()} derives from the same value.
    */
   private long adminDriveDeadlineMillis() {
-    long bound = config.syncMaxWaitMillis();
-    if (config.syncTimeoutMillis() > 0L) {
-      bound = Math.min(bound, config.syncTimeoutMillis());
-    }
-    return bound;
+    return config.syncWaitBoundMillis(Long.MAX_VALUE);
   }
 
   /**
@@ -630,6 +670,17 @@ public final class SagaServer implements AutoCloseable {
         "SagaServer started ({}, {})",
         httpServer == null ? "HTTP disabled" : "HTTP port " + port(),
         grpcServer == null ? "gRPC disabled" : "gRPC port " + grpcPort());
+    // Derived from the pool's actual state, not from "HTTP is enabled": the smoke test greps this
+    // line as its only external evidence, so it has to disappear if the wiring in
+    // createHttpServer ever does. Losing that wiring would otherwise leave every request served
+    // and every probe green while silently restoring the request-pool ceiling it removes — the
+    // same reason the smoke test reads /proc/1/maps rather than trusting that epoll was requested.
+    if (httpServer != null
+        && httpServer.jettyServer().server().getThreadPool()
+            instanceof QueuedThreadPool configuredPool
+        && configuredPool.getVirtualThreadsExecutor() != null) {
+      logger.info("HTTP handlers run on virtual threads");
+    }
     return this;
   }
 
@@ -671,6 +722,14 @@ public final class SagaServer implements AutoCloseable {
     if (!closed.compareAndSet(false, true)) {
       return;
     }
+    // One deadline for the whole HTTP drain, shared by Jetty's stop and the executor backstop
+    // below. Giving the backstop a fresh full window would double-count it in an operator's grace
+    // period, and it is only ever reached after Jetty has already spent that window.
+    long httpDrainDeadlineNanos = System.nanoTime();
+    // Wake every bounded synchronous start before anything else: each one would otherwise hold its
+    // request until its wait bound elapsed, and a terminating server cannot advance those sagas
+    // anyway. This is what keeps the drains below short enough to fit a grace period.
+    shutdownSignal.complete(null);
     // Reload stops first, before anything else winds down: a pass that ran during the drain could
     // swap the endpoint set out from under sagas that are still finishing their current step, and
     // stopping it here keeps a registration from racing the store's close. That second part is
@@ -681,20 +740,83 @@ public final class SagaServer implements AutoCloseable {
               + TimeUnit.MILLISECONDS.toNanos(
                   Math.min(RELOAD_DRAIN_MILLIS, config.shutdownTimeoutMillis())));
     }
-    // Stop accepting new requests on the enabled transports, drain in-flight gRPC calls, then drain
-    // sagas.
+    // Then stop accepting new requests on the enabled transports, drain in-flight calls, and drain
+    // sagas. Order matters: every handler body must finish before orchestrator.close() closes the
+    // store underneath it.
     if (httpServer != null) {
-      httpServer.stop();
+      try {
+        // Jetty runs Graceful.shutdown() from Server.doStop() only when stopTimeout is positive.
+        // Without it, stop() goes straight to stopping the connectors and an in-flight request's
+        // socket dies under it — the caller sees a closed channel rather than its response. The
+        // connector's own Graceful (its endpoint set must empty) tracks those requests, so this
+        // works whether or not the handler body is on a virtual thread.
+        //
+        // Set here rather than at construction, and only for a server that actually started:
+        // gracefully stopping a Jetty that never bound raises a checked ExecutionException, and
+        // Javalin stops the server itself when start() fails to bind — so a stop timeout baked in
+        // at construction replaces a port-in-use error with that, exactly when the operator needs
+        // the real one.
+        httpDrainDeadlineNanos =
+            System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(httpDrainMillis());
+        org.eclipse.jetty.server.Server jetty = httpServer.jettyServer().server();
+        if (jetty.isRunning()) {
+          jetty.setStopTimeout(httpDrainMillis());
+        }
+        // Blocks until in-flight requests have been answered; see httpDrainMillis().
+        httpServer.stop();
+      } catch (Exception e) {
+        // Catch broadly, and deliberately. Two failures land here and neither may abort the drains
+        // below: a drain that overruns its window (Jetty ends FAILED, but the connectors are
+        // stopped and the port released), and stopping a server that never bound — start() calls
+        // close() on a bind failure, and gracefully stopping a never-started Jetty raises a checked
+        // ExecutionException that would otherwise replace the bind error the caller needs to see.
+        logger.warn("HTTP drain did not complete cleanly", e);
+      }
     }
     shutdownGrpc();
-    // gRPC does not own the executor we supplied it, so shut it down ourselves. shutdownGrpc() has
-    // already drained in-flight calls, so no tasks remain and a plain shutdown() suffices.
+    // Neither Jetty nor gRPC stops an executor it was handed, so shut both down ourselves.
+    // shutdownGrpc() has already drained in-flight calls, so no gRPC tasks remain and a plain
+    // shutdown() suffices. For HTTP, awaitTermination is the backstop for a drain that overran:
+    // Jetty abandons those handler bodies without interrupting them, and they must not still be
+    // running when the store closes.
+    if (httpVirtualThreads != null) {
+      shutdownHttpVirtualThreads(httpVirtualThreads, httpDrainDeadlineNanos);
+    }
     if (grpcExecutor != null) {
       grpcExecutor.shutdown();
     }
     closeSecurityProvider(securityProvider);
     orchestrator.close();
     logger.info("SagaServer stopped");
+  }
+
+  /**
+   * Shuts down the executor that ran the HTTP handler bodies and waits for any that outlived the
+   * Jetty drain, so none is still touching the store when {@link DefaultSagaOrchestrator#close()}
+   * closes it. Bounded by the same drain window, and only ever reached with stragglers after that
+   * window already overran, so it logs rather than blocking shutdown further.
+   *
+   * <p>A straggler past that point is <b>deliberately abandoned</b>, unlike {@link #shutdownGrpc},
+   * which escalates to {@code shutdownNow()}. It is left running and the store closes underneath
+   * it. That is a considered trade rather than an oversight: by then the client's connection is
+   * gone, the saga is persisted, and recovery is the backstop — whereas blocking shutdown further
+   * risks the whole process being killed mid-drain, which loses the sagas still draining below.
+   * Widening the window is the lever here, not escalation.
+   */
+  private void shutdownHttpVirtualThreads(
+      ExecutorService httpVirtualThreads, long drainDeadlineNanos) {
+    httpVirtualThreads.shutdown();
+    // Only what is left of the HTTP window, not a second full one: Jetty's stop has already had it.
+    long remainingMillis =
+        Math.max(0L, TimeUnit.NANOSECONDS.toMillis(drainDeadlineNanos - System.nanoTime()));
+    try {
+      if (!httpVirtualThreads.awaitTermination(remainingMillis, TimeUnit.MILLISECONDS)) {
+        logger.warn("HTTP handlers still running after the drain window; closing the store anyway");
+      }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      logger.warn("Interrupted while waiting for HTTP handlers to finish");
+    }
   }
 
   /**
@@ -744,16 +866,39 @@ public final class SagaServer implements AutoCloseable {
    * bounded-sync {@code StartSaga}/{@code AwaitSaga} call can reach its own wait ceiling before we
    * force-cancel it: a fixed 30s drain would cut a legitimate 60s (default) wait in half, and the
    * gap would widen further whenever an operator raises {@code sync.max_wait_millis}. Kept at a
-   * {@value #GRPC_SHUTDOWN_MIN_SECONDS}s floor for small ceilings, and padded with {@value
-   * #GRPC_SHUTDOWN_SLACK_MILLIS}ms of slack so the call unwinds before the deadline rather than at
-   * it.
+   * {@value #DRAIN_MIN_SECONDS}s floor for small ceilings, and padded with {@value
+   * #DRAIN_SLACK_MILLIS}ms of slack so the call unwinds before the deadline rather than at it.
    *
    * <p>Package-private for testing the derivation without binding a port or shutting down a server.
    */
   long grpcDrainMillis() {
+    return drainMillis(config);
+  }
+
+  /**
+   * The graceful HTTP drain window (ms) — the same derivation, for the same reason: a REST handler
+   * blocked in a bounded synchronous start waits up to {@code sync.max_wait_millis}, so a shorter
+   * window would cut a legitimate request short. Jetty applies it as the server's stop timeout, and
+   * past it {@code stop()} abandons whatever is still running.
+   *
+   * <p>One derivation serves both transports deliberately.
+   *
+   * <p>Package-private for testing the derivation without binding a port.
+   */
+  long httpDrainMillis() {
+    return drainMillis(config);
+  }
+
+  /**
+   * The graceful drain window (ms) for either transport: the {@code sync.max_wait_millis} ceiling a
+   * request may legitimately wait, padded with {@value #DRAIN_SLACK_MILLIS}ms of slack so the call
+   * unwinds before the deadline rather than at it, and floored at {@value #DRAIN_MIN_SECONDS}s for
+   * small ceilings. Static because {@link #createHttpServer} needs it before an instance exists.
+   */
+  static long drainMillis(SagaServerConfig config) {
     return Math.max(
-        TimeUnit.SECONDS.toMillis(GRPC_SHUTDOWN_MIN_SECONDS),
-        config.syncMaxWaitMillis() + GRPC_SHUTDOWN_SLACK_MILLIS);
+        TimeUnit.SECONDS.toMillis(DRAIN_MIN_SECONDS),
+        config.syncMaxWaitMillis() + DRAIN_SLACK_MILLIS);
   }
 
   /**

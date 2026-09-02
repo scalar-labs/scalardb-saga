@@ -402,14 +402,18 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       // is the backstop.
       asyncExecutor.execute(
           () -> {
+            // What execution decided, or null if it threw before deciding anything. Recorded
+            // rather than branched on, because the dispatch below must stay in the finally: a saga
+            // that reached a terminal state and then threw still owes its caller that callback.
+            SagaStateSnapshot executed = null;
             try {
-              engine.executeSaga(def, saga, input);
+              executed = engine.executeSaga(def, saga, input);
             } catch (Throwable t) {
               // Saga state is persisted — recovery will pick it up
               logger.error("Async saga {} failed unexpectedly", saga.getSagaId(), t);
             } finally {
               try {
-                dispatchCallback(saga.getSagaId(), callback);
+                dispatchCallback(saga.getSagaId(), callback, executed);
               } catch (Throwable t) {
                 logger.error("Failed to dispatch callback for saga {}", saga.getSagaId(), t);
               }
@@ -424,18 +428,66 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     }
   }
 
-  private void dispatchCallback(String sagaId, @Nullable SagaCallback callback) {
+  /**
+   * Reports what execution did to the caller's callback, if it supplied one.
+   *
+   * @param executed the state execution left the saga in, or {@code null} when it threw before
+   *     reaching one — in which case the cause is already logged and there is no outcome to report
+   */
+  private void dispatchCallback(
+      String sagaId, @Nullable SagaCallback callback, @Nullable SagaStateSnapshot executed) {
     if (callback == null) {
       return;
     }
-    SagaStateSnapshot result =
-        store.getStateSnapshot(sagaId).orElseThrow(() -> new SagaNotFoundException(sagaId));
+    // Execution threw before reaching a verdict, so there is no local answer. Fall back to the
+    // store — it may well have completed the saga and failed afterwards, and that caller is still
+    // owed its terminal callback. This read carries the staleness the verdict exists to avoid, but
+    // it is the only source available, and it is confined to the exceptional path.
+    boolean aborted = executed == null;
+    SagaStateSnapshot result;
+    if (executed == null) {
+      result = store.getStateSnapshot(sagaId).orElseThrow(() -> new SagaNotFoundException(sagaId));
+    } else {
+      result = executed;
+    }
+    // Every status is listed and there is no default, deliberately: a new SagaStatus must not
+    // silently inherit another one's callback. Without a default arm, Error Prone's
+    // MissingCasesInEnumSwitch — escalated to an error in the java conventions — fails the build
+    // when one is added, forcing the choice here.
     switch (result.getStatus()) {
       case COMPLETED -> callback.onCompleted(result);
       case COMPENSATED -> callback.onCompensated(result);
       case ESCALATED -> callback.onEscalated(result);
-      default ->
-          logger.warn("Saga {} ended in non-terminal status: {}", sagaId, result.getStatus());
+      // Parked on an async step, waiting for that step's callback or its deadline. Report it
+      // rather than only logging: a caller in a bounded synchronous start has nothing else to
+      // wake on, and would otherwise wait out its whole bound for a saga that stopped progressing
+      // in milliseconds.
+      case WAITING -> callback.onParked(result);
+      // Execution returned without the saga resting anywhere. Since this is execution's own
+      // verdict rather than a later read of shared state, a resume landing elsewhere can no longer
+      // masquerade as either case below — which is what makes the error worth acting on.
+      case RUNNING, COMPENSATING -> {
+        if (aborted) {
+          logger.warn(
+              "Saga {} was left in {} by a failed execution; recovery will reclaim it",
+              sagaId,
+              result.getStatus());
+        } else if (engine.isShuttingDown()) {
+          // The designed hand-off: under WAIT_CURRENT_STEP the engine finishes the running step,
+          // marks the saga for recovery, and returns with it still RUNNING. Debug rather than warn,
+          // because a rolling restart produces one per in-flight saga and none is actionable.
+          logger.debug(
+              "Saga {} left in {} by shutdown; recovery will reclaim it",
+              sagaId,
+              result.getStatus());
+        } else {
+          logger.error(
+              "Saga {} finished executing but is still {} — this is an engine invariant violation,"
+                  + " please report it; recovery will reclaim the saga",
+              sagaId,
+              result.getStatus());
+        }
+      }
     }
   }
 

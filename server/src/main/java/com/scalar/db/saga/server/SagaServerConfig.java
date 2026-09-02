@@ -72,12 +72,15 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code grpc.port} — gRPC listen port (default {@value #DEFAULT_GRPC_PORT}; {@code 0} binds
  *       an ephemeral port)
  *   <li>{@code http.max_threads} / {@code http.min_threads} — Jetty request thread-pool bounds
- *       (defaults {@value #DEFAULT_MAX_THREADS} / {@value #DEFAULT_MIN_THREADS}); the max caps
- *       concurrent request threads so a burst of slow requests cannot exhaust threads
- *   <li>{@code http.max_queued_requests} — cap on requests waiting for a handler thread once all
- *       {@code http.max_threads} are busy; further requests are shed (fast failure) rather than
- *       queued unboundedly. Defaults to {@value #DEFAULT_MAX_QUEUED_REQUESTS_PER_THREAD} × {@code
- *       http.max_threads}, bounding worst-case queueing delay to roughly that many service times
+ *       (defaults {@value #DEFAULT_MAX_THREADS} / {@value #DEFAULT_MIN_THREADS}). Handlers run on
+ *       virtual threads, so the max caps how many requests are <em>dispatched</em> at once, not how
+ *       many are in flight: a request waiting on its saga costs no pool thread. It therefore does
+ *       not bound concurrent saga execution — nothing does yet
+ *   <li>{@code http.max_queued_requests} — cap on the pool's job queue, so the dispatch backlog is
+ *       memory-bounded and the pool rejects rather than growing without limit. Defaults to {@value
+ *       #DEFAULT_MAX_QUEUED_REQUESTS_PER_THREAD} × {@code http.max_threads}. Because a blocking
+ *       handler is dispatched to a virtual thread rather than queued, this does not shed a burst of
+ *       slow sagas
  *   <li>{@code grpc.max_inbound_metadata_bytes} — cap on a call's total request metadata (default
  *       {@value #DEFAULT_GRPC_MAX_INBOUND_METADATA_BYTES}). Raise it only if legitimate credentials
  *       do not fit — a JWT access token with many claims is the usual reason
@@ -119,12 +122,16 @@ import org.jspecify.annotations.Nullable;
  * <h2>Synchronous starts ({@code sync.*})</h2>
  *
  * <ul>
- *   <li>{@code sync.timeout_millis} — bound (ms) on how long a synchronous start blocks before
- *       returning {@code 202} while the saga continues; {@code 0} (default) disables it
  *   <li>{@code sync.max_wait_millis} — absolute ceiling (ms) on a synchronous start's server-side
- *       wait, so it can never block indefinitely (default {@value #DEFAULT_SYNC_MAX_WAIT_MILLIS});
- *       {@code sync.timeout_millis} and a gRPC client's deadline only tighten it
+ *       wait, so it can never block indefinitely (default {@value #DEFAULT_SYNC_MAX_WAIT_MILLIS}).
+ *       Applies to both transports.
+ *   <li>{@code sync.timeout_millis} — optional tightening of that ceiling; {@code 0} (default)
+ *       means no tightening, <em>not</em> an unbounded wait. A gRPC client's call deadline tightens
+ *       it further.
  * </ul>
+ *
+ * <p>Read the pair through {@link #syncWaitBoundMillis(long)} rather than separately; a transport
+ * should be handed the resolved bound, not the two keys behind it.
  *
  * <h2>Shutdown ({@code shutdown.*})</h2>
  *
@@ -442,7 +449,9 @@ public final class SagaServerConfig {
   static final boolean DEFAULT_TLS_ENABLED = false; // plaintext; a mesh/ingress terminates TLS
   static final int DEFAULT_GRPC_MAX_INBOUND_METADATA_BYTES = 8 * 1024;
   static final int DEFAULT_MAX_EVENT_PAYLOAD_BYTES = 1_048_576; // 1 MiB
-  static final long DEFAULT_SYNC_TIMEOUT_MILLIS = 0L; // 0 = disabled (sync blocks to terminal)
+  // 0 = no extra tightening, NOT an unbounded wait: sync.max_wait_millis is the ceiling and always
+  // applies, on both transports.
+  static final long DEFAULT_SYNC_TIMEOUT_MILLIS = 0L;
   static final long DEFAULT_SYNC_MAX_WAIT_MILLIS =
       60_000L; // ceiling on a synchronous server-side wait
   static final ShutdownMode DEFAULT_SHUTDOWN_MODE = DefaultSagaOrchestrator.DEFAULT_SHUTDOWN_MODE;
@@ -1201,24 +1210,47 @@ public final class SagaServerConfig {
   }
 
   /**
-   * Returns the synchronous-start timeout in milliseconds, or {@code 0} when disabled (the
-   * default). When positive, a synchronous {@code POST}/{@code PUT} that has not reached a terminal
-   * state within this bound returns {@code 202} and the saga keeps running on the engine's executor
-   * (the client polls {@code GET /sagas/{id}}) — so a slow saga cannot pin a request thread
-   * indefinitely.
+   * Returns the synchronous-start timeout in milliseconds, or {@code 0} when unset (the default).
+   * When positive it tightens {@link #syncMaxWaitMillis()}; when {@code 0} the ceiling alone
+   * applies. A synchronous start that has not reached a terminal state within the resulting bound
+   * returns {@code 202} and the saga keeps running on the engine's executor (the client polls
+   * {@code GET /sagas/{id}}).
    */
   public long syncTimeoutMillis() {
     return syncTimeoutMillis;
   }
 
   /**
-   * Returns the absolute ceiling (ms) on a synchronous gRPC {@code StartSaga}'s server-side wait.
-   * {@link #syncTimeoutMillis()} and the client's call deadline can only tighten this bound, never
-   * exceed it, so a synchronous start can never pin a server thread indefinitely. Defaults to
+   * Returns the absolute ceiling (ms) on a synchronous start's server-side wait, for both
+   * transports. {@link #syncTimeoutMillis()} and a gRPC client's call deadline can only tighten
+   * this bound, never exceed it, so a synchronous start can never block indefinitely. Defaults to
    * {@value #DEFAULT_SYNC_MAX_WAIT_MILLIS} ms.
    */
   public long syncMaxWaitMillis() {
     return syncMaxWaitMillis;
+  }
+
+  /**
+   * Returns the bound (ms) a synchronous start may wait: the ceiling {@link #syncMaxWaitMillis()},
+   * tightened by {@code requestedCapMillis} and by {@link #syncTimeoutMillis()} when that is set.
+   * Pass {@link Long#MAX_VALUE} when the caller has no cap of its own.
+   *
+   * <p>Derived state of two configuration keys, so it lives here rather than in either transport. A
+   * transport that needs to tighten it further does so on top of this result, as the gRPC call
+   * deadline does.
+   *
+   * <p>Deliberately {@code public} though only {@link SagaServer} calls it. Restricting it would
+   * protect nothing while {@link #syncTimeoutMillis()} and {@link #syncMaxWaitMillis()} stay
+   * public: combining that pair by hand is the mistake this method exists to prevent, so hiding the
+   * safe method while leaving the raw one reachable is backwards. It also keeps the gRPC tests able
+   * to resolve a bound through a real config instead of restating the policy.
+   *
+   * @param requestedCapMillis a caller-supplied cap, or {@code Long.MAX_VALUE} for none
+   * @return the wait bound in milliseconds
+   */
+  public long syncWaitBoundMillis(long requestedCapMillis) {
+    long bound = Math.min(syncMaxWaitMillis, requestedCapMillis);
+    return syncTimeoutMillis > 0L ? Math.min(bound, syncTimeoutMillis) : bound;
   }
 
   /**

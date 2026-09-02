@@ -614,6 +614,63 @@ class SagaServerConfigTest {
         .isEqualTo(SagaServerConfig.DEFAULT_SYNC_TIMEOUT_MILLIS);
   }
 
+  // The synchronous-wait bound policy. It lives on the config because both keys do, and because
+  // combining them per transport is how REST came to ignore the ceiling entirely (todos/076).
+
+  @Test
+  void syncWaitBoundMillis_noTimeoutSet_returnsCeiling() {
+    // Arrange — the default: the optional tightening key is unset.
+    SagaServerConfig config = SagaServerConfig.load(new Properties());
+
+    // Act
+    long bound = config.syncWaitBoundMillis(Long.MAX_VALUE);
+
+    // Assert — the ceiling still applies. This is the case that used to block forever on REST.
+    assertThat(bound).isEqualTo(SagaServerConfig.DEFAULT_SYNC_MAX_WAIT_MILLIS);
+  }
+
+  @Test
+  void syncWaitBoundMillis_timeoutTighterThanCeiling_returnsTimeout() {
+    // Arrange
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "60000");
+    props.setProperty(SagaServerConfig.SYNC_TIMEOUT_MILLIS_KEY, "5000");
+
+    // Act
+    long bound = SagaServerConfig.load(props).syncWaitBoundMillis(Long.MAX_VALUE);
+
+    // Assert
+    assertThat(bound).isEqualTo(5000L);
+  }
+
+  @Test
+  void syncWaitBoundMillis_timeoutLooserThanCeiling_returnsCeiling() {
+    // Arrange — the timeout may only tighten the ceiling, never raise it.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "10000");
+    props.setProperty(SagaServerConfig.SYNC_TIMEOUT_MILLIS_KEY, "60000");
+
+    // Act
+    long bound = SagaServerConfig.load(props).syncWaitBoundMillis(Long.MAX_VALUE);
+
+    // Assert
+    assertThat(bound).isEqualTo(10000L);
+  }
+
+  @Test
+  void syncWaitBoundMillis_requestedCapTightest_returnsRequestedCap() {
+    // Arrange
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "60000");
+    props.setProperty(SagaServerConfig.SYNC_TIMEOUT_MILLIS_KEY, "30000");
+
+    // Act — a caller-supplied cap, as gRPC's AwaitSaga passes.
+    long bound = SagaServerConfig.load(props).syncWaitBoundMillis(1000L);
+
+    // Assert
+    assertThat(bound).isEqualTo(1000L);
+  }
+
   @Test
   void load_syncTimeoutGiven_parsesValue() {
     Properties props = new Properties();
