@@ -83,7 +83,7 @@ class SagaRetentionManager {
    */
   @SuppressWarnings("FutureReturnValueIgnored") // fire-and-forget scheduled task
   public void start() {
-    long intervalSeconds = config.cleanupIntervalSeconds();
+    long intervalSeconds = config.intervalSeconds();
     scheduler.scheduleWithFixedDelay(
         this::cleanupSafely,
         intervalSeconds + SweepScatter.offsetSeconds(ownerId, "retention", intervalSeconds),
@@ -140,13 +140,13 @@ class SagaRetentionManager {
    * (another replica already purged the saga) refunds its budget, and because purged rows are
    * physically gone, the next round's re-scan surfaces fresh candidates for the refunded budget
    * instead of the same rows — so under multi-replica contention a pass still purges up to {@code
-   * batchSize} sagas when a backlog exists, instead of quietly under-delivering by its lost races.
-   * A round that purges nothing ends the pass: the backlog is drained, the round was lost to racing
-   * replicas entirely (the next pass re-scans), or the remaining candidates are failing their
-   * deletes — and failing rows stay in place, so re-scanning would refetch them forever. Failed
-   * deletes also refund budget, so total attempted operations may exceed {@code batchSize}; this is
-   * acceptable — widespread delete failures indicate a store-level issue, not a batch-sizing
-   * problem.
+   * maxPurgesPerPass} sagas when a backlog exists, instead of quietly under-delivering by its lost
+   * races. A round that purges nothing ends the pass: the backlog is drained, the round was lost to
+   * racing replicas entirely (the next pass re-scans), or the remaining candidates are failing
+   * their deletes — and failing rows stay in place, so re-scanning would refetch them forever.
+   * Failed deletes also refund budget, so total attempted operations may exceed {@code
+   * maxPurgesPerPass}; this is acceptable — widespread delete failures indicate a store-level
+   * issue, not a batch-sizing problem.
    *
    * <p>Each pass starts the bucket sweep one position further into the replica's scattered order
    * (the rotation below), so when a sustained backlog lets the front buckets fill the whole budget,
@@ -158,11 +158,11 @@ class SagaRetentionManager {
     int purged = 0;
     int rotation = passCount++;
 
-    while (purged < config.batchSize()) {
+    while (purged < config.maxPurgesPerPass()) {
       int purgedBeforeRound = purged;
       for (SagaStatus status : PURGEABLE_STATUSES) {
-        purged += purgeByStatus(status, threshold, config.batchSize() - purged, rotation);
-        if (purged >= config.batchSize()) {
+        purged += purgeByStatus(status, threshold, config.maxPurgesPerPass() - purged, rotation);
+        if (purged >= config.maxPurgesPerPass()) {
           return; // batch limit reached — continue in next pass
         }
         if (Thread.currentThread().isInterrupted()) {

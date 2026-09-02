@@ -55,6 +55,11 @@ Refer to `~/git/scalardb-saga-design/docs/scalardb-saga-design.md` for architect
 - Adding a code: register it in `ExceptionRegistry` and add a row to the golden-table tests in both `GrpcErrorMapperTest` and `ErrorMapperTest` — the registry round-trip and sub-range guard tests fail the build otherwise
 - Every wire-facing error carries a code: gRPC interceptor refusals compose through `GrpcErrorMapper.close`, and REST's unmatched-route 404 goes through `ErrorMapper`'s `NotFoundResponse` handler — never close a call or write an error body outside the two mappers
 
+## Configuration keys
+
+- `scalar.db.saga.*` property keys freeze at first release, the same as `SagaErrorCode` and the Maven group: once a version ships every key lives in somebody's properties file, so renaming or removing one is a breaking change. Adding a key is compatible; renaming, removing, or repurposing one is not
+- The record components that mirror them (`RecoveryConfig`, `RetentionConfig`) freeze with the keys — a key and its component are one surface, so a name that does not say what it bounds has to be corrected before GA, not after
+
 ## Design Principles
 
 - Follow **SOLID** and **DRY**

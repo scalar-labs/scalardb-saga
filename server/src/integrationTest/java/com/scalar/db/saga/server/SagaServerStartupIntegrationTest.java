@@ -81,14 +81,14 @@ class SagaServerStartupIntegrationTest {
     props.setProperty(SagaServerConfig.OWNER_ID_KEY, "saga-daemon-it-0");
     props.setProperty(SagaServerConfig.SHUTDOWN_MODE_KEY, "WAIT_ALL_SAGAS");
     props.setProperty(SagaServerConfig.SHUTDOWN_TIMEOUT_MILLIS_KEY, "5000");
-    props.setProperty(SagaServerConfig.RECOVERY_TIMEOUT_MILLIS_KEY, "90000");
+    props.setProperty(SagaServerConfig.RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY, "90000");
     props.setProperty(SagaServerConfig.RECOVERY_INTERVAL_SECONDS_KEY, "300");
     props.setProperty(SagaServerConfig.RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY, "600");
-    props.setProperty(SagaServerConfig.RECOVERY_BATCH_SIZE_KEY, "50");
+    props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY, "50");
     props.setProperty(SagaServerConfig.RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY, "2");
     props.setProperty(SagaServerConfig.RETENTION_PERIOD_SECONDS_KEY, "3600");
-    props.setProperty(SagaServerConfig.RETENTION_CLEANUP_INTERVAL_SECONDS_KEY, "300");
-    props.setProperty(SagaServerConfig.RETENTION_BATCH_SIZE_KEY, "100");
+    props.setProperty(SagaServerConfig.RETENTION_INTERVAL_SECONDS_KEY, "300");
+    props.setProperty(SagaServerConfig.RETENTION_MAX_PURGES_PER_PASS_KEY, "100");
     props.setProperty(SagaServerConfig.RETENTION_MAX_CONCURRENT_PURGES_KEY, "2");
 
     // start() binds both transports and starts the background recovery and retention tasks the

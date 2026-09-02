@@ -822,55 +822,55 @@ class SagaServerConfigTest {
     RecoveryConfig config = SagaServerConfig.load(new Properties()).recoveryConfig();
     RecoveryConfig defaults = RecoveryConfig.defaults();
 
-    assertThat(config.recoveryTimeoutMillis()).isEqualTo(defaults.recoveryTimeoutMillis());
-    assertThat(config.recoveryIntervalSeconds()).isEqualTo(defaults.recoveryIntervalSeconds());
+    assertThat(config.stalenessThresholdMillis()).isEqualTo(defaults.stalenessThresholdMillis());
+    assertThat(config.intervalSeconds()).isEqualTo(defaults.intervalSeconds());
     assertThat(config.compensationGracePeriod()).isEqualTo(defaults.compensationGracePeriod());
-    assertThat(config.batchSize()).isEqualTo(defaults.batchSize());
+    assertThat(config.maxRecoveriesPerSweep()).isEqualTo(defaults.maxRecoveriesPerSweep());
     assertThat(config.maxConcurrentRecoveries()).isEqualTo(defaults.maxConcurrentRecoveries());
   }
 
   @Test
   void recoveryConfig_withAllOptions_setsAllFields() {
     Properties props = new Properties();
-    props.setProperty(SagaServerConfig.RECOVERY_TIMEOUT_MILLIS_KEY, "90000");
+    props.setProperty(SagaServerConfig.RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY, "90000");
     props.setProperty(SagaServerConfig.RECOVERY_INTERVAL_SECONDS_KEY, "15");
     props.setProperty(SagaServerConfig.RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY, "1800");
-    props.setProperty(SagaServerConfig.RECOVERY_BATCH_SIZE_KEY, "2000");
+    props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY, "2000");
     props.setProperty(SagaServerConfig.RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY, "25");
 
     RecoveryConfig config = SagaServerConfig.load(props).recoveryConfig();
 
-    assertThat(config.recoveryTimeoutMillis()).isEqualTo(90_000L);
-    assertThat(config.recoveryIntervalSeconds()).isEqualTo(15L);
+    assertThat(config.stalenessThresholdMillis()).isEqualTo(90_000L);
+    assertThat(config.intervalSeconds()).isEqualTo(15L);
     assertThat(config.compensationGracePeriod()).isEqualTo(Duration.ofMinutes(30));
-    assertThat(config.batchSize()).isEqualTo(2000);
+    assertThat(config.maxRecoveriesPerSweep()).isEqualTo(2000);
     assertThat(config.maxConcurrentRecoveries()).isEqualTo(25);
   }
 
   @Test
-  void recoveryConfig_negativeTimeout_throwsIllegalArgumentException() {
+  void recoveryConfig_negativeStalenessThreshold_throwsIllegalArgumentException() {
     Properties props = new Properties();
-    props.setProperty(SagaServerConfig.RECOVERY_TIMEOUT_MILLIS_KEY, "-1");
+    props.setProperty(SagaServerConfig.RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY, "-1");
 
     assertThatThrownBy(() -> SagaServerConfig.load(props))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
-  void recoveryConfig_nonNumericBatchSize_throwsIllegalArgumentException() {
+  void recoveryConfig_nonNumericMaxRecoveriesPerSweep_throwsIllegalArgumentException() {
     Properties props = new Properties();
-    props.setProperty(SagaServerConfig.RECOVERY_BATCH_SIZE_KEY, "many");
+    props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY, "many");
 
     assertThatThrownBy(() -> SagaServerConfig.load(props))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
-  void recoveryConfig_batchSizeAboveIntRange_throwsIllegalArgumentException() {
+  void recoveryConfig_maxRecoveriesPerSweepAboveIntRange_throwsIllegalArgumentException() {
     // Parsed as a long and range-checked: a bare (int) cast would wrap this to a small or negative
     // batch size instead of rejecting it.
     Properties props = new Properties();
-    props.setProperty(SagaServerConfig.RECOVERY_BATCH_SIZE_KEY, "4294967296");
+    props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY, "4294967296");
 
     assertThatThrownBy(() -> SagaServerConfig.load(props))
         .isInstanceOf(IllegalArgumentException.class);
@@ -882,8 +882,8 @@ class SagaServerConfigTest {
     RetentionConfig defaults = RetentionConfig.defaults();
 
     assertThat(config.retentionPeriod()).isEqualTo(defaults.retentionPeriod());
-    assertThat(config.cleanupIntervalSeconds()).isEqualTo(defaults.cleanupIntervalSeconds());
-    assertThat(config.batchSize()).isEqualTo(defaults.batchSize());
+    assertThat(config.intervalSeconds()).isEqualTo(defaults.intervalSeconds());
+    assertThat(config.maxPurgesPerPass()).isEqualTo(defaults.maxPurgesPerPass());
     assertThat(config.maxConcurrentPurges()).isEqualTo(defaults.maxConcurrentPurges());
   }
 
@@ -891,15 +891,15 @@ class SagaServerConfigTest {
   void retentionConfig_withAllOptions_setsAllFields() {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.RETENTION_PERIOD_SECONDS_KEY, "86400");
-    props.setProperty(SagaServerConfig.RETENTION_CLEANUP_INTERVAL_SECONDS_KEY, "120");
-    props.setProperty(SagaServerConfig.RETENTION_BATCH_SIZE_KEY, "500");
+    props.setProperty(SagaServerConfig.RETENTION_INTERVAL_SECONDS_KEY, "120");
+    props.setProperty(SagaServerConfig.RETENTION_MAX_PURGES_PER_PASS_KEY, "500");
     props.setProperty(SagaServerConfig.RETENTION_MAX_CONCURRENT_PURGES_KEY, "4");
 
     RetentionConfig config = SagaServerConfig.load(props).retentionConfig();
 
     assertThat(config.retentionPeriod()).isEqualTo(Duration.ofDays(1));
-    assertThat(config.cleanupIntervalSeconds()).isEqualTo(120L);
-    assertThat(config.batchSize()).isEqualTo(500);
+    assertThat(config.intervalSeconds()).isEqualTo(120L);
+    assertThat(config.maxPurgesPerPass()).isEqualTo(500);
     assertThat(config.maxConcurrentPurges()).isEqualTo(4);
   }
 
@@ -914,14 +914,14 @@ class SagaServerConfigTest {
   @ParameterizedTest
   @ValueSource(
       strings = {
-        SagaServerConfig.RECOVERY_TIMEOUT_MILLIS_KEY,
+        SagaServerConfig.RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY,
         SagaServerConfig.RECOVERY_INTERVAL_SECONDS_KEY,
         SagaServerConfig.RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY,
-        SagaServerConfig.RECOVERY_BATCH_SIZE_KEY,
+        SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY,
         SagaServerConfig.RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY,
         SagaServerConfig.RETENTION_PERIOD_SECONDS_KEY,
-        SagaServerConfig.RETENTION_CLEANUP_INTERVAL_SECONDS_KEY,
-        SagaServerConfig.RETENTION_BATCH_SIZE_KEY,
+        SagaServerConfig.RETENTION_INTERVAL_SECONDS_KEY,
+        SagaServerConfig.RETENTION_MAX_PURGES_PER_PASS_KEY,
         SagaServerConfig.RETENTION_MAX_CONCURRENT_PURGES_KEY
       })
   void load_zeroRecoveryOrRetentionBound_throwsIllegalArgumentException(String key) {
@@ -947,28 +947,28 @@ class SagaServerConfigTest {
     // refuse a value the engine takes. 1 is the smallest the engine accepts on all nine, so setting
     // them together proves no daemon bound sits above it.
     Properties props = new Properties();
-    props.setProperty(SagaServerConfig.RECOVERY_TIMEOUT_MILLIS_KEY, "1");
+    props.setProperty(SagaServerConfig.RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY, "1");
     props.setProperty(SagaServerConfig.RECOVERY_INTERVAL_SECONDS_KEY, "1");
     props.setProperty(SagaServerConfig.RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY, "1");
-    props.setProperty(SagaServerConfig.RECOVERY_BATCH_SIZE_KEY, "1");
+    props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY, "1");
     props.setProperty(SagaServerConfig.RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY, "1");
     props.setProperty(SagaServerConfig.RETENTION_PERIOD_SECONDS_KEY, "1");
-    props.setProperty(SagaServerConfig.RETENTION_CLEANUP_INTERVAL_SECONDS_KEY, "1");
-    props.setProperty(SagaServerConfig.RETENTION_BATCH_SIZE_KEY, "1");
+    props.setProperty(SagaServerConfig.RETENTION_INTERVAL_SECONDS_KEY, "1");
+    props.setProperty(SagaServerConfig.RETENTION_MAX_PURGES_PER_PASS_KEY, "1");
     props.setProperty(SagaServerConfig.RETENTION_MAX_CONCURRENT_PURGES_KEY, "1");
 
     SagaServerConfig config = SagaServerConfig.load(props);
 
     RecoveryConfig recovery = config.recoveryConfig();
-    assertThat(recovery.recoveryTimeoutMillis()).isEqualTo(1L);
-    assertThat(recovery.recoveryIntervalSeconds()).isEqualTo(1L);
+    assertThat(recovery.stalenessThresholdMillis()).isEqualTo(1L);
+    assertThat(recovery.intervalSeconds()).isEqualTo(1L);
     assertThat(recovery.compensationGracePeriod()).isEqualTo(Duration.ofSeconds(1));
-    assertThat(recovery.batchSize()).isEqualTo(1);
+    assertThat(recovery.maxRecoveriesPerSweep()).isEqualTo(1);
     assertThat(recovery.maxConcurrentRecoveries()).isEqualTo(1);
     RetentionConfig retention = config.retentionConfig();
     assertThat(retention.retentionPeriod()).isEqualTo(Duration.ofSeconds(1));
-    assertThat(retention.cleanupIntervalSeconds()).isEqualTo(1L);
-    assertThat(retention.batchSize()).isEqualTo(1);
+    assertThat(retention.intervalSeconds()).isEqualTo(1L);
+    assertThat(retention.maxPurgesPerPass()).isEqualTo(1);
     assertThat(retention.maxConcurrentPurges()).isEqualTo(1);
   }
 

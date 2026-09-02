@@ -36,9 +36,10 @@ import org.junit.jupiter.api.io.TempDir;
  * Recovery must not claim a saga that is still being executed.
  *
  * <p>Step execution appends to {@code saga_events} and never touches {@code saga_state}, so a saga
- * whose steps outlive {@code recovery.timeout_millis} looks exactly like one whose process died.
- * Claiming it rewrites the state row's clustering key — the token the running drive holds — so the
- * drive fails at its next transition, and under load that snowballs (todos/056 finding 1).
+ * whose steps outlive {@code recovery.staleness_threshold_millis} looks exactly like one whose
+ * process died. Claiming it rewrites the state row's clustering key — the token the running drive
+ * holds — so the drive fails at its next transition, and under load that snowballs (todos/056
+ * finding 1).
  *
  * <p>These run the real recovery manager against a real store, because the guards live between the
  * scan and the claim: the mocked-store unit tests pin each guard's decision, but only a real pass
