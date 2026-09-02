@@ -43,6 +43,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongUnaryOperator;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
@@ -583,6 +584,12 @@ class SagaServiceImplTest {
   }
 
   private SagaServiceBlockingStub stub(long syncTimeoutMillis, long syncMaxWaitMillis) {
+    return stub(syncTimeoutMillis, syncMaxWaitMillis, new CompletableFuture<>());
+  }
+
+  /** As above, but with a shutdown signal the caller can complete to end a bounded wait early. */
+  private SagaServiceBlockingStub stub(
+      long syncTimeoutMillis, long syncMaxWaitMillis, CompletableFuture<Void> shutdownSignal) {
     String name = InProcessServerBuilder.generateName();
     try {
       servers.add(
@@ -590,7 +597,9 @@ class SagaServiceImplTest {
               .directExecutor()
               .addService(
                   new SagaServiceImpl(
-                      orchestrator, waitBound(syncTimeoutMillis, syncMaxWaitMillis)))
+                      orchestrator,
+                      waitBound(syncTimeoutMillis, syncMaxWaitMillis),
+                      shutdownSignal))
               .build()
               .start());
     } catch (IOException e) {

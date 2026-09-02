@@ -8,10 +8,10 @@ import com.scalar.db.saga.server.security.SagaOperation;
 import io.javalin.Javalin;
 import io.javalin.http.Context;
 import java.util.Map;
-import java.util.Objects;
-import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.TimeoutException;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -86,7 +86,10 @@ public final class SagaResource {
    *     indefinitely.
    */
   public static void register(
-      Javalin app, SagaOrchestrator orchestrator, long syncWaitBoundMillis) {
+      Javalin app,
+      SagaOrchestrator orchestrator,
+      long syncWaitBoundMillis,
+      CompletableFuture<Void> shutdownSignal) {
     app.post(
         "/sagas",
         ctx -> {
@@ -96,12 +99,11 @@ public final class SagaResource {
             String sagaId = orchestrator.startAsync(request.requireSagaName(), input);
             respond(ctx, 202, orchestrator.getStateSnapshot(sagaId));
           } else {
-            AtomicReference<SagaStateSnapshot> outcome = new AtomicReference<>();
-            CountDownLatch done = new CountDownLatch(1);
+            CompletableFuture<SagaStateSnapshot> outcome = new CompletableFuture<>();
             String sagaId =
-                orchestrator.startAsync(
-                    request.requireSagaName(), input, outcomeSignal(done, outcome));
-            respondBoundedSync(ctx, orchestrator, sagaId, done, outcome, syncWaitBoundMillis);
+                orchestrator.startAsync(request.requireSagaName(), input, outcomeSignal(outcome));
+            respondBoundedSync(
+                ctx, orchestrator, sagaId, outcome, shutdownSignal, syncWaitBoundMillis);
           }
         },
         SagaOperation.START_SAGA);
@@ -116,11 +118,11 @@ public final class SagaResource {
             orchestrator.startAsync(sagaId, request.requireSagaName(), input);
             respond(ctx, 202, orchestrator.getStateSnapshot(sagaId));
           } else {
-            AtomicReference<SagaStateSnapshot> outcome = new AtomicReference<>();
-            CountDownLatch done = new CountDownLatch(1);
+            CompletableFuture<SagaStateSnapshot> outcome = new CompletableFuture<>();
             orchestrator.startAsync(
-                sagaId, request.requireSagaName(), input, outcomeSignal(done, outcome));
-            respondBoundedSync(ctx, orchestrator, sagaId, done, outcome, syncWaitBoundMillis);
+                sagaId, request.requireSagaName(), input, outcomeSignal(outcome));
+            respondBoundedSync(
+                ctx, orchestrator, sagaId, outcome, shutdownSignal, syncWaitBoundMillis);
           }
         },
         SagaOperation.START_SAGA);
@@ -149,69 +151,64 @@ public final class SagaResource {
    * <p>Parking counts: a saga waiting on an external callback has stopped progressing, and holding
    * the request until the bound elapses would answer the same {@code 202} up to a minute later.
    */
-  private static SagaCallback outcomeSignal(
-      CountDownLatch done, AtomicReference<SagaStateSnapshot> outcome) {
+  private static SagaCallback outcomeSignal(CompletableFuture<SagaStateSnapshot> outcome) {
     return new SagaCallback() {
       @Override
       public void onCompleted(SagaStateSnapshot saga) {
-        outcome.set(saga);
-        done.countDown();
+        outcome.complete(saga);
       }
 
       @Override
       public void onCompensated(SagaStateSnapshot saga) {
-        outcome.set(saga);
-        done.countDown();
+        outcome.complete(saga);
       }
 
       @Override
       public void onEscalated(SagaStateSnapshot saga) {
-        outcome.set(saga);
-        done.countDown();
+        outcome.complete(saga);
       }
 
       @Override
       public void onParked(SagaStateSnapshot saga) {
-        outcome.set(saga);
-        done.countDown();
+        outcome.complete(saga);
       }
     };
   }
 
   /**
-   * Renders a bounded synchronous start: waits up to {@code timeoutMillis} for the engine to stop
-   * driving the saga, then responds {@code 200} if it reached a terminal state (the body {@code
-   * status} carries the business outcome) or {@code 202} otherwise, with the current snapshot,
-   * while the saga keeps running on the engine's executor (the client polls {@code GET
-   * /sagas/{id}}). A saga that parked on an async step answers {@code 202} as soon as it parks, not
-   * when the bound elapses. The request thread is therefore held for at most {@code timeoutMillis},
-   * and usually far less.
+   * Renders a bounded synchronous start. The wait ends at whichever comes first: the engine stops
+   * driving the saga (terminal, or parked on an async step), the server begins shutting down, or
+   * the bound elapses. Whatever ends it, the response carries the freshest state available and the
+   * status decides the code — terminal is {@code 200}, anything else {@code 202} with the saga
+   * still running (the client polls {@code GET /sagas/{id}}).
+   *
+   * <p>Shutdown short-circuits the wait rather than letting it run to the bound. The bound is a
+   * maximum, not a promise to wait, and a terminating server cannot advance the saga anyway — under
+   * the default {@code WAIT_CURRENT_STEP} the engine stops between steps — so holding the request
+   * would answer the same {@code 202} up to a minute later, on a process that may be killed before
+   * it can. Answering now also frees the connection while the load balancer is still draining.
    */
   private static void respondBoundedSync(
       Context ctx,
       SagaOrchestrator orchestrator,
       String sagaId,
-      CountDownLatch done,
-      AtomicReference<SagaStateSnapshot> outcome,
+      CompletableFuture<SagaStateSnapshot> outcome,
+      CompletableFuture<Void> shutdownSignal,
       long timeoutMillis) {
-    boolean settled;
     try {
-      settled = done.await(timeoutMillis, TimeUnit.MILLISECONDS);
+      CompletableFuture.anyOf(outcome, shutdownSignal).get(timeoutMillis, TimeUnit.MILLISECONDS);
     } catch (InterruptedException e) {
-      // Stop waiting and answer with what we know; the saga continues either way, so 202 is honest.
-      // Note shutdown does not land here: Jetty drains in-flight requests rather than interrupting
-      // their handlers, so this covers only a deliberate interrupt of the carrying thread.
       Thread.currentThread().interrupt();
-      settled = false;
+    } catch (TimeoutException | ExecutionException e) {
+      // The bound elapsed, or the shutdown signal completed exceptionally. Either way the saga's
+      // own state below is the answer, so there is nothing to handle here.
     }
-    if (settled) {
-      // 'settled' means a callback ran, and every one sets 'outcome' before counting down. The
-      // status decides the code: terminal is 200, a parked saga is 202.
-      SagaStateSnapshot snapshot = Objects.requireNonNull(outcome.get());
-      respond(ctx, snapshot.getStatus().isTerminal() ? 200 : 202, snapshot);
-    } else {
-      respond(ctx, 202, orchestrator.getStateSnapshot(sagaId));
-    }
+    // The callback's snapshot when it arrived; otherwise read the current one. Reading covers both
+    // the elapsed bound and shutdown, and means a saga that reached a terminal state in the
+    // meantime still answers 200 rather than a blanket 202.
+    SagaStateSnapshot settled = outcome.getNow(null);
+    SagaStateSnapshot snapshot = settled != null ? settled : orchestrator.getStateSnapshot(sagaId);
+    respond(ctx, snapshot.getStatus().isTerminal() ? 200 : 202, snapshot);
   }
 
   /** Renders a saga snapshot as the JSON response body with the given HTTP status. */

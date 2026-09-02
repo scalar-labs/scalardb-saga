@@ -242,25 +242,36 @@ Operational notes, learned from how Kubernetes actually delivers files:
 ## Graceful shutdown
 
 The JVM is PID 1 and receives `SIGTERM` directly, which triggers a drain rather than dropping
-in-flight work. The daemon drains in three windows, one after the other, so budget for their sum:
+in-flight work.
 
-- **HTTP request drain** — `max(30s, sync.max_wait_millis + 5s)`, so 65s at the default
-  `sync.max_wait_millis` of 60s. A REST handler waiting on a synchronous saga start may legitimately
-  block for the full ceiling, so the window tracks that setting rather than being fixed. In-flight
-  requests are answered before the listener closes; new connections are refused as soon as the drain
-  begins, so a load balancer still needs its own pre-stop delay or readiness flip. Expect a floor of
-  a second or two even with nothing in flight, while idle keep-alive connections are closed.
-- **gRPC call drain** — the same `max(30s, sync.max_wait_millis + 5s)`, so 65s at the default. One
-  derivation serves both transports, for the same reason.
+**In practice, expect roughly 35s at defaults**, dominated by the saga drain. The first thing
+shutdown does is wake every synchronous start that is waiting on its saga: those requests are
+answered `202` immediately rather than holding until their wait bound elapses, because a
+terminating server cannot advance the saga anyway. So the transport drains normally cost only as
+long as it takes to write the outstanding responses.
+
+The windows, in the order `close()` runs them:
+
+- **Reload stop** — up to 5s, and only if a configuration pass is mid-flight.
+- **HTTP request drain** — `max(30s, sync.max_wait_millis + 5s)`, so 65s at the default. This is a
+  ceiling, not a cost: it is reached only if a handler is stuck in something slow, such as a store
+  call. In-flight requests are answered before the listener closes; new connections are refused as
+  soon as the drain begins, so a load balancer still needs its own pre-stop delay or readiness flip.
+  The virtual-thread backstop that follows shares this same window rather than taking a second one.
+- **gRPC call drain** — the same `max(30s, sync.max_wait_millis + 5s)`. One derivation serves both
+  transports.
 - **Saga engine drain** — `shutdown.timeout_millis`, 30s by default. Under the default
-  `shutdown.mode=WAIT_CURRENT_STEP` the engine only finishes each running step and leaves the saga
-  for recovery, so this window is rarely spent in full; `WAIT_ALL_SAGAS` instead waits for in-flight
+  `shutdown.mode=WAIT_CURRENT_STEP` the engine finishes each running step and leaves the saga for
+  recovery, so this window is rarely spent in full; `WAIT_ALL_SAGAS` instead waits for in-flight
   sagas to reach a terminal state, which needs a window sized to your longest saga. Setting it to
   `0` skips this window entirely, cancelling in-flight work at once and leaving all of it to the
   recovery scan.
 
-At defaults that totals 160s. Set `terminationGracePeriodSeconds` above the sum; below it, the
-daemon is `SIGKILL`ed mid-drain.
+Worst case at defaults is therefore `5 + 65 + 65 + 30 = 165s`, but that requires handlers genuinely
+stuck for the full transport windows. Size `terminationGracePeriodSeconds` for the worst case you
+are willing to tolerate — note Kubernetes defaults it to **30s**, which is below even the typical
+figure above. Lowering `shutdown.timeout_millis` and `sync.max_wait_millis` lowers every window
+that derives from them.
 
 Being cut short costs latency, not integrity: whatever was interrupted is reclaimed by the recovery
 scan on the next boot.

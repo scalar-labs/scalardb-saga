@@ -22,9 +22,10 @@ import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.TimeoutException;
 import java.util.function.LongUnaryOperator;
 import net.jcip.annotations.ThreadSafe;
 import org.jspecify.annotations.Nullable;
@@ -65,11 +66,18 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
   // The shared synchronous-wait policy, already bound to the server's configuration. A function
   // rather than a value because AwaitSaga supplies a different per-call cap on every request.
   private final LongUnaryOperator syncWaitBound;
+  // Completed when the server begins shutting down; ends a bounded wait early. See
+  // startBoundedSync.
+  private final CompletableFuture<Void> shutdownSignal;
   private final ObjectMapper objectMapper = new ObjectMapper();
 
-  public SagaServiceImpl(SagaOrchestrator orchestrator, LongUnaryOperator syncWaitBound) {
+  public SagaServiceImpl(
+      SagaOrchestrator orchestrator,
+      LongUnaryOperator syncWaitBound,
+      CompletableFuture<Void> shutdownSignal) {
     this.orchestrator = Objects.requireNonNull(orchestrator, "orchestrator must not be null");
     this.syncWaitBound = Objects.requireNonNull(syncWaitBound, "syncWaitBound must not be null");
+    this.shutdownSignal = Objects.requireNonNull(shutdownSignal, "shutdownSignal must not be null");
   }
 
   @Override
@@ -155,21 +163,23 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
   }
 
   private SagaStateSnapshot startBoundedSync(StartSagaRequest request, Map<String, Object> input) {
-    AtomicReference<SagaStateSnapshot> outcome = new AtomicReference<>();
-    CountDownLatch done = new CountDownLatch(1);
-    String sagaId = dispatchStart(request, input, outcomeSignal(done, outcome));
-    long boundMillis = computeBoundMillis(Long.MAX_VALUE);
-    boolean settled;
+    CompletableFuture<SagaStateSnapshot> outcome = new CompletableFuture<>();
+    String sagaId = dispatchStart(request, input, outcomeSignal(outcome));
     try {
-      settled = done.await(boundMillis, TimeUnit.MILLISECONDS);
+      CompletableFuture.anyOf(outcome, shutdownSignal)
+          .get(computeBoundMillis(Long.MAX_VALUE), TimeUnit.MILLISECONDS);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
-      settled = false;
+    } catch (TimeoutException | ExecutionException e) {
+      // The bound elapsed, or the shutdown signal completed exceptionally; the snapshot below is
+      // the answer either way.
     }
-    // Never cancel the saga: whether the wait ended because the saga settled (terminal, or parked
-    // on an async step) or because the bound elapsed, return the current snapshot — its status is
-    // the source of truth and the saga keeps running.
-    return settled ? Objects.requireNonNull(outcome.get()) : snapshotAfterStart(sagaId);
+    // Never cancel the saga. Shutdown short-circuits the wait rather than letting it run to the
+    // bound: the bound is a maximum, not a promise to wait, and a terminating server cannot advance
+    // the saga anyway. Whatever ended the wait, return the freshest state — its status is the
+    // source of truth, and a non-terminal one is the gRPC analogue of REST's 202.
+    SagaStateSnapshot settled = outcome.getNow(null);
+    return settled != null ? settled : snapshotAfterStart(sagaId);
   }
 
   /**
@@ -263,31 +273,26 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
   }
 
   /** A {@link SagaCallback} that captures the terminal snapshot and releases {@code done}. */
-  private static SagaCallback outcomeSignal(
-      CountDownLatch done, AtomicReference<SagaStateSnapshot> outcome) {
+  private static SagaCallback outcomeSignal(CompletableFuture<SagaStateSnapshot> outcome) {
     return new SagaCallback() {
       @Override
       public void onCompleted(SagaStateSnapshot saga) {
-        outcome.set(saga);
-        done.countDown();
+        outcome.complete(saga);
       }
 
       @Override
       public void onCompensated(SagaStateSnapshot saga) {
-        outcome.set(saga);
-        done.countDown();
+        outcome.complete(saga);
       }
 
       @Override
       public void onEscalated(SagaStateSnapshot saga) {
-        outcome.set(saga);
-        done.countDown();
+        outcome.complete(saga);
       }
 
       @Override
       public void onParked(SagaStateSnapshot saga) {
-        outcome.set(saga);
-        done.countDown();
+        outcome.complete(saga);
       }
     };
   }

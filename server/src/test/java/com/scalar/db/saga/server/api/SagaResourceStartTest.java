@@ -30,6 +30,7 @@ import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.time.Instant;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -53,13 +54,15 @@ class SagaResourceStartTest {
   private final HttpClient http = HttpClient.newHttpClient();
   private Javalin app;
   private SagaOrchestrator orchestrator;
+  private CompletableFuture<Void> shutdownSignal;
 
   private void startServer(long syncWaitBoundMillis) {
+    shutdownSignal = new CompletableFuture<>();
     orchestrator = mock(SagaOrchestrator.class);
     app = Javalin.create();
     SagaSecurityHandler.register(app, new RoleHeaderProvider());
     ErrorMapper.register(app);
-    SagaResource.register(app, orchestrator, syncWaitBoundMillis);
+    SagaResource.register(app, orchestrator, syncWaitBoundMillis, shutdownSignal);
     app.start(0);
   }
 
@@ -160,6 +163,64 @@ class SagaResourceStartTest {
   }
 
   @Test
+  void postSagas_serverShutsDownMidWait_answers202WithoutWaitingOutTheBound() throws Exception {
+    // Arrange — a saga that never settles, against setUp's 30s bound. Shutdown must end the wait:
+    // the bound is a maximum, not a promise to wait, and a terminating server cannot advance the
+    // saga anyway, so holding the request would answer the same 202 up to 30s later.
+    when(orchestrator.startAsync(eq(SAGA_NAME), anyMap(), any(SagaCallback.class)))
+        .thenReturn(SAGA_ID);
+    when(orchestrator.getStateSnapshot(SAGA_ID)).thenReturn(snapshot(SagaStatus.RUNNING));
+
+    // Act — trip the signal just after the request is in flight.
+    long startNanos = System.nanoTime();
+    CompletableFuture<HttpResponse<String>> inFlight =
+        CompletableFuture.supplyAsync(
+            () -> {
+              try {
+                return post("/sagas", "{\"sagaName\":\"" + SAGA_NAME + "\"}");
+              } catch (Exception e) {
+                throw new IllegalStateException(e);
+              }
+            });
+    Thread.sleep(200);
+    shutdownSignal.complete(null);
+    HttpResponse<String> response = inFlight.get(10, TimeUnit.SECONDS);
+    long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+
+    // Assert — answered promptly, and honestly: the saga is still running.
+    assertThat(response.statusCode()).isEqualTo(202);
+    assertThat(response.body()).contains("RUNNING");
+    assertThat(elapsedMillis).isLessThan(10_000L);
+  }
+
+  @Test
+  void postSagas_shutdownAfterTheSagaCompleted_stillAnswers200() throws Exception {
+    // Arrange — the narrow case the short-circuit must not lose: the saga finished, and shutdown
+    // wakes the waiter. Re-reading the state is what keeps this a 200 rather than a blanket 202.
+    when(orchestrator.startAsync(eq(SAGA_NAME), anyMap(), any(SagaCallback.class)))
+        .thenReturn(SAGA_ID);
+    when(orchestrator.getStateSnapshot(SAGA_ID)).thenReturn(snapshot(SagaStatus.COMPLETED));
+
+    // Act
+    CompletableFuture<HttpResponse<String>> inFlight =
+        CompletableFuture.supplyAsync(
+            () -> {
+              try {
+                return post("/sagas", "{\"sagaName\":\"" + SAGA_NAME + "\"}");
+              } catch (Exception e) {
+                throw new IllegalStateException(e);
+              }
+            });
+    Thread.sleep(200);
+    shutdownSignal.complete(null);
+    HttpResponse<String> response = inFlight.get(10, TimeUnit.SECONDS);
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(200);
+    assertThat(response.body()).contains("COMPLETED");
+  }
+
+  @Test
   void postSagas_asyncQueryParamGiven_returns202WithoutWaiting() throws Exception {
     // Arrange
     when(orchestrator.startAsync(eq(SAGA_NAME), anyMap())).thenReturn(SAGA_ID);
@@ -196,6 +257,25 @@ class SagaResourceStartTest {
     assertThat(response.statusCode()).isEqualTo(200);
     verify(orchestrator).startAsync(eq(SAGA_ID), eq(SAGA_NAME), anyMap(), any(SagaCallback.class));
     verify(orchestrator, never()).start(any(String.class), any(String.class), anyMap());
+  }
+
+  @Test
+  void postSagas_engineRejectsTheInput_returns400WithoutWaitingOutTheBound() throws Exception {
+    // Arrange — input the engine refuses. Validation runs before the saga is persisted, so it
+    // throws on the request thread and reaches ErrorMapper, rather than failing on the executor
+    // where nothing reports it. Before this, such a request waited out the full bound and answered
+    // 202 for a saga that could never run — with setUp's 30s bound, a 30s wait for bad JSON.
+    when(orchestrator.startAsync(eq(SAGA_NAME), anyMap(), any(SagaCallback.class)))
+        .thenThrow(new IllegalArgumentException("SagaContext does not allow null values"));
+
+    // Act
+    long startNanos = System.nanoTime();
+    HttpResponse<String> response = post("/sagas", "{\"sagaName\":\"" + SAGA_NAME + "\"}");
+    long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(400);
+    assertThat(elapsedMillis).isLessThan(5_000L);
   }
 
   @Test

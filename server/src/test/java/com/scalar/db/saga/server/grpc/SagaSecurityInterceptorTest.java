@@ -69,7 +69,10 @@ class SagaSecurityInterceptorTest {
             .directExecutor()
             .addService(
                 ServerInterceptors.intercept(
-                    new SagaServiceImpl(orchestrator, cap -> Math.min(60_000L, cap)),
+                    new SagaServiceImpl(
+                        orchestrator,
+                        cap -> Math.min(60_000L, cap),
+                        new java.util.concurrent.CompletableFuture<>()),
                     new SagaSecurityInterceptor(new RoleHeaderProvider())))
             .build()
             .start();
@@ -201,7 +204,10 @@ class SagaSecurityInterceptorTest {
             .directExecutor()
             .addService(
                 ServerInterceptors.intercept(
-                    new SagaServiceImpl(orchestrator, cap -> Math.min(60_000L, cap)),
+                    new SagaServiceImpl(
+                        orchestrator,
+                        cap -> Math.min(60_000L, cap),
+                        new java.util.concurrent.CompletableFuture<>()),
                     new SagaSecurityInterceptor(provider)))
             .build()
             .start();

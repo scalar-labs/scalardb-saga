@@ -1,14 +1,13 @@
 package com.scalar.db.saga.server;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import com.scalar.db.saga.api.SagaCallback;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
@@ -25,6 +24,7 @@ import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
@@ -53,60 +53,73 @@ class HttpDrainTest {
 
   @Test
   @Timeout(60)
-  void close_requestInFlight_answersItBeforeTheStoreCloses(@TempDir Path dir) throws Exception {
-    // Arrange — a saga that is still running when the server is told to shut down.
+  void close_requestInFlight_answersItAndWaitsForTheHandlerBeforeClosingTheStore(@TempDir Path dir)
+      throws Exception {
+    // Arrange — a handler that is slow for a reason shutdown cannot short-circuit: it is inside a
+    // store read, not a bounded wait. (A bounded wait is deliberately woken by shutdown, so it
+    // would no longer exercise the drain.) The async start route calls getStateSnapshot after
+    // dispatching, so blocking that read parks the handler mid-request.
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
-    // Since the config reconciler landed, a definition's service must resolve to a service file.
     Path services = Files.createDirectories(dir.resolve("services"));
     Files.writeString(services.resolve("svc.properties"), "base_url=http://127.0.0.1:1\n");
     props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, services.toString());
 
-    CountDownLatch started = new CountDownLatch(1);
-    SagaStateSnapshot completed =
+    CountDownLatch entered = new CountDownLatch(1);
+    AtomicLong handlerFinishedAt = new AtomicLong();
+    AtomicLong storeClosedAt = new AtomicLong();
+    SagaStateSnapshot running =
         new SagaStateSnapshot(
-            "s1", "saga", SagaStatus.COMPLETED, "owner", "v1", Instant.EPOCH, Instant.EPOCH);
+            "s1", "saga", SagaStatus.RUNNING, "owner", "v1", Instant.EPOCH, Instant.EPOCH);
+
     DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
-    // The config reconciler applies the service set through this registrar at startup.
     lenient().when(orchestrator.httpEndpointRegistrar()).thenReturn(endpoints -> {});
-    when(orchestrator.startAsync(eq("saga"), anyMap(), any(SagaCallback.class)))
+    when(orchestrator.startAsync(eq("saga"), anyMap())).thenReturn("s1");
+    when(orchestrator.getStateSnapshot("s1"))
         .thenAnswer(
             invocation -> {
-              SagaCallback callback = invocation.getArgument(2, SagaCallback.class);
-              started.countDown();
-              var unused =
-                  CompletableFuture.runAsync(
-                      () -> callback.onCompleted(completed),
-                      CompletableFuture.delayedExecutor(2, TimeUnit.SECONDS));
-              return "s1";
+              entered.countDown();
+              Thread.sleep(2_000);
+              handlerFinishedAt.set(System.nanoTime());
+              return running;
             });
+    // close() on a mock is a no-op, so record when it happens; that is the ordering the fix exists
+    // to guarantee — todos/080's bug was a handler calling a store close() had already shut.
+    doAnswer(
+            invocation -> {
+              storeClosedAt.set(System.nanoTime());
+              return null;
+            })
+        .when(orchestrator)
+        .close();
 
     SagaServer server = new SagaServer(SagaServerConfig.load(props), orchestrator).start();
 
-    // Act — fire a synchronous start, wait until the handler is genuinely waiting on it, then
-    // close.
+    // Act
     CompletableFuture<HttpResponse<String>> inFlight =
         HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
             .build()
             .sendAsync(
-                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + server.port() + "/sagas"))
+                HttpRequest.newBuilder(
+                        URI.create("http://127.0.0.1:" + server.port() + "/sagas?async=true"))
                     .header("Content-Type", "application/json")
                     .timeout(Duration.ofSeconds(30))
                     .POST(HttpRequest.BodyPublishers.ofString("{\"sagaName\":\"saga\"}"))
                     .build(),
                 BodyHandlers.ofString());
-    assertThat(started.await(10, TimeUnit.SECONDS)).isTrue();
+    assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
     server.close();
 
-    // Assert — the caller got its answer rather than a dropped connection, and close() did not
-    // return until it had. Without the drain this throws a connection failure instead.
+    // Assert — the caller got its answer instead of a dropped connection, and the handler had
+    // finished before the store was closed underneath it.
     HttpResponse<String> response = inFlight.get(30, TimeUnit.SECONDS);
-    assertThat(response.statusCode()).isEqualTo(200);
-    assertThat(response.body()).contains("COMPLETED");
+    assertThat(response.statusCode()).isEqualTo(202);
+    assertThat(handlerFinishedAt.get()).isNotZero();
+    assertThat(storeClosedAt.get()).isGreaterThan(handlerFinishedAt.get());
   }
 }

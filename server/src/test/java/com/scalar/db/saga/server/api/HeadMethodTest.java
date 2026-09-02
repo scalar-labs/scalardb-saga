@@ -42,7 +42,8 @@ class HeadMethodTest {
     SagaSecurityHandler.register(app, new FullAccessProvider());
     ErrorMapper.register(app);
     HealthResource.register(app);
-    SagaResource.register(app, mock(SagaOrchestrator.class), 0L);
+    SagaResource.register(
+        app, mock(SagaOrchestrator.class), 0L, new java.util.concurrent.CompletableFuture<>());
     // A route registered with no operation, to prove the HEAD branch did not weaken the fail-closed
     // rejection of an untagged route on its normal (GET) path.
     app.get("/untagged", ctx -> ctx.result("should never be served"));

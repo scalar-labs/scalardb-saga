@@ -164,7 +164,8 @@ class TransportPolicyParityTest {
     Javalin app = Javalin.create();
     DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
     HealthResource.register(app);
-    SagaResource.register(app, mock(SagaOrchestrator.class), 0L);
+    SagaResource.register(
+        app, mock(SagaOrchestrator.class), 0L, new java.util.concurrent.CompletableFuture<>());
     SagaAdminResource.register(app, orchestrator, 0L);
     CallbackResource.register(app, orchestrator, "test-secret", 0L, Clock.systemUTC());
 

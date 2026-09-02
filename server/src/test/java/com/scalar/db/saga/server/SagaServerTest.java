@@ -504,6 +504,33 @@ class SagaServerTest {
   }
 
   @Test
+  void start_httpEnabled_logsThatHandlersRunOnVirtualThreads(@TempDir Path dir) throws Exception {
+    // Arrange — the packaged image has no way to show from outside that the pool got its
+    // virtual-thread executor, so the smoke test greps this line. That only means anything if the
+    // line is derived from the pool's actual state: this test is what stops it drifting back into
+    // an unconditional "HTTP is enabled" log that would survive the wiring being deleted.
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.GRPC_ENABLED_KEY, "false");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, svcServices(dir).toString());
+
+    // Act
+    try (LogCapture logs = LogCapture.of(SagaServer.class);
+        SagaServer server =
+            new SagaServer(SagaServerConfig.load(props), mockOrchestrator()).start()) {
+      // Assert
+      assertThat(logs.events())
+          .anySatisfy(
+              event ->
+                  assertThat(event.getFormattedMessage())
+                      .isEqualTo("HTTP handlers run on virtual threads"));
+    }
+  }
+
+  @Test
   void start_grpcDisabled_bindsOnlyHttp(@TempDir Path dir) throws Exception {
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     Properties props = new Properties();
