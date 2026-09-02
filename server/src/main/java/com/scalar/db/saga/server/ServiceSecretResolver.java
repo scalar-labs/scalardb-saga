@@ -32,7 +32,22 @@ import org.apache.commons.text.lookup.StringLookupFactory;
  * service files (the environment cannot change in a running pod, so it defeats rotation); the
  * parser warns on it.
  */
-final class ServiceSecretResolver {
+final class ServiceSecretResolver implements ServiceValueResolver {
+
+  /**
+   * A {@code ${file:...}} reference that resolves outside the secrets root, kept distinct from
+   * every other resolution failure so it stays fatal even where failures are tolerated.
+   *
+   * <p>{@code --validate-config} runs where the secrets are usually absent and softens "that file
+   * is not on this machine", which says nothing about whether the configuration is right. An escape
+   * is the opposite: the service file is reaching somewhere it may never reach, which is as wrong
+   * on a laptop as in production, and is exactly what an offline check should catch.
+   */
+  static final class ContainmentViolationException extends IllegalArgumentException {
+    ContainmentViolationException(String message) {
+      super(message);
+    }
+  }
 
   /**
    * Cap on a {@code ${file:...}} target, matching the cap on the service files themselves: a secret
@@ -59,10 +74,14 @@ final class ServiceSecretResolver {
    * Resolves any {@code ${env:...}} / {@code ${file:...}} references in {@code value}. A {@code
    * ${file:...}} reference outside the secrets root, or to a missing, non-regular, or oversized
    * file, throws; error messages name paths (they are configuration text) but never file contents.
+   *
+   * <p>This is the strict implementation, so it never returns an unresolved marker: every {@link
+   * Resolution} it returns carries a value.
    */
-  String resolve(String value) {
+  @Override
+  public Resolution resolve(String value) {
     try {
-      return substitutor.replace(value);
+      return Resolution.of(substitutor.replace(value));
     } catch (UncheckedIOException e) {
       // Unwrap to the message our own lookup composed; the cause chain would re-embed nothing
       // secret (contents are never in these messages), but the flattened form reads as one line.
@@ -115,14 +134,15 @@ final class ServiceSecretResolver {
       // real target and fails the startsWith check — the escape this confinement exists to stop.
       Path real = path.toRealPath();
       if (!real.startsWith(realRoot)) {
-        throw new UncheckedIOException(
-            new IOException(
-                "'"
-                    + path
-                    + "' resolves outside '"
-                    + SagaServerConfig.SECRETS_ROOT_KEY
-                    + "' "
-                    + Redaction.redacted(secretsRoot.toString())));
+        // Not an UncheckedIOException like its neighbours: this one must stay fatal even for a
+        // caller that tolerates unresolvable references. See ContainmentViolationException.
+        throw new ContainmentViolationException(
+            "'"
+                + path
+                + "' resolves outside '"
+                + SagaServerConfig.SECRETS_ROOT_KEY
+                + "' "
+                + Redaction.redacted(secretsRoot.toString()));
       }
       if (!Files.isRegularFile(real)) {
         throw new UncheckedIOException(new IOException("'" + path + "' is not a regular file"));

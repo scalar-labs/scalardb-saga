@@ -1,14 +1,17 @@
 package com.scalar.db.saga.server;
 
 import static java.util.Objects.requireNonNull;
+import static org.assertj.core.api.Assertions.as;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.entry;
+import static org.assertj.core.api.InstanceOfAssertFactories.STRING;
 
 import com.scalar.db.saga.server.SagaServerConfig.ServiceConfig;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -37,7 +40,11 @@ class ServiceFileParserTest {
     return parse(servicesDir);
   }
 
+  /** Warnings the parser collected on the most recent {@link #parse}. */
+  private final List<String> warnings = new ArrayList<>();
+
   private Map<String, ServiceConfig> parse(Path directory) {
+    warnings.clear();
     Map<String, ServiceConfig> services = new LinkedHashMap<>();
     ServiceFileParser.listServiceFiles(directory)
         .forEach(
@@ -45,11 +52,13 @@ class ServiceFileParserTest {
                 services.put(
                     name,
                     ServiceFileParser.parseFile(
-                        name,
-                        file.fileName(),
-                        WatchedFiles.read(
-                            file.fileName(), file.target(), WatchedFiles.MAX_FILE_BYTES),
-                        secrets())));
+                            name,
+                            file.fileName(),
+                            WatchedFiles.read(
+                                file.fileName(), file.target(), WatchedFiles.MAX_FILE_BYTES),
+                            secrets(),
+                            warnings)
+                        .config()));
     return services;
   }
 
@@ -751,6 +760,150 @@ class ServiceFileParserTest {
       assertThatThrownBy(() -> parseWithCeiling("a-svc"))
           .isInstanceOf(IllegalArgumentException.class)
           .hasMessageContaining("allow-all");
+    }
+  }
+
+  /**
+   * The offline half: with a lenient resolver, a value that cannot be read stops being an error and
+   * becomes a skipped check plus a warning. Every test here asserts both halves — that the parse
+   * survives, and that it said what it did not check — because a skip nobody is told about is
+   * exactly the failure this design was chosen to avoid.
+   */
+  @Nested
+  class LenientResolution {
+
+    private final List<String> lenientWarnings = new ArrayList<>();
+
+    /** Parses one file through the resolver {@code --validate-config} uses. */
+    private ServiceFileParser.ParsedService parseLeniently(String name, String content)
+        throws IOException {
+      String fileName = name + ServiceFileParser.PROPERTIES_EXTENSION;
+      writeService(fileName, content);
+      return ServiceFileParser.parseFile(
+          name,
+          fileName,
+          Files.readAllBytes(servicesDir.resolve(fileName)),
+          new LenientServiceValueResolver(secretsDir),
+          lenientWarnings);
+    }
+
+    /**
+     * A reference to a secret that is not on this machine, which is the whole point of leniency.
+     */
+    private String absentSecret() {
+      return "${file:UTF-8:" + secretsDir.resolve("absent") + "}";
+    }
+
+    @Test
+    void parseFile_unresolvableBaseUrlGiven_skipsTheUrlChecksAndWarns() throws IOException {
+      // Act
+      ServiceFileParser.ParsedService parsed = parseLeniently("a", "base_url=" + absentSecret());
+
+      // Assert
+      assertThat(parsed.unresolvedKeys()).containsExactly("base_url");
+      assertThat(lenientWarnings)
+          .singleElement(as(STRING))
+          .contains("base_url")
+          .contains("URL and host checks");
+    }
+
+    @Test
+    void parseFile_unresolvableBaseUrlGiven_isAnErrorForTheDaemon() throws IOException {
+      // The same file the lenient resolver tolerates must still stop a daemon that cannot read the
+      // secret: it would otherwise serve a service whose address it never resolved.
+      String fileName = "a" + ServiceFileParser.PROPERTIES_EXTENSION;
+      writeService(fileName, "base_url=" + absentSecret() + "\n");
+      byte[] content = Files.readAllBytes(servicesDir.resolve(fileName));
+
+      assertThatThrownBy(
+              () -> ServiceFileParser.parseFile("a", fileName, content, secrets(), lenientWarnings))
+          .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void parseFile_unresolvableHeaderValueGiven_skipsTheValueChecksAndWarns() throws IOException {
+      // Act
+      ServiceFileParser.ParsedService parsed =
+          parseLeniently("a", "base_url=http://a:1\nheader.X-Api-Key=" + absentSecret() + "\n");
+
+      // Assert — the header name was still checked; only its value was not.
+      assertThat(parsed.unresolvedKeys()).containsExactly("header.X-Api-Key");
+      assertThat(parsed.config().headers()).containsOnlyKeys("X-Api-Key");
+      assertThat(lenientWarnings)
+          .singleElement(as(STRING))
+          .contains("header.X-Api-Key")
+          .contains("header-value checks");
+    }
+
+    @Test
+    void parseFile_unresolvableHeaderNameStillChecked_throws() throws IOException {
+      // Leniency is about values. A header name the JDK refuses is wrong whatever its value
+      // resolves to, so it must still fail here.
+      assertThatThrownBy(
+              () ->
+                  parseLeniently(
+                      "a", "base_url=http://a:1\nheader.Content-Length=" + absentSecret() + "\n"))
+          .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void parseFile_unresolvableAllowedHostsGiven_skipsTheHostChecksAndWarns() throws IOException {
+      // Act
+      ServiceFileParser.ParsedService parsed =
+          parseLeniently("a", "base_url=http://a:1\nallowed_hosts=" + absentSecret() + "\n");
+
+      // Assert — recorded by key, because the ceiling check outside this class must skip too.
+      assertThat(parsed.unresolvedKeys()).containsExactly("allowed_hosts");
+      assertThat(parsed.config().allowedHosts()).isEmpty();
+      assertThat(lenientWarnings).singleElement(as(STRING)).contains("egress-ceiling");
+    }
+
+    @Test
+    void parseFile_unresolvableMaxBodyBytesGiven_skipsTheRangeCheckAndWarns() throws IOException {
+      // Act — the reference text is not a number, so an unskipped check would fail here.
+      ServiceFileParser.ParsedService parsed =
+          parseLeniently("a", "base_url=http://a:1\nmax_body_bytes=" + absentSecret() + "\n");
+
+      // Assert
+      assertThat(parsed.unresolvedKeys()).containsExactly("max_body_bytes");
+      assertThat(lenientWarnings).singleElement(as(STRING)).contains("numeric range check");
+    }
+
+    @Test
+    void parseFile_resolvableSecretsGiven_reportsNothingUnresolved() throws IOException {
+      // Arrange — with the secrets present, a lenient run must be indistinguishable from a strict
+      // one; leniency softens a failure, it does not skip the attempt.
+      Path token = Files.writeString(secretsDir.resolve("token"), "s3cret");
+
+      // Act
+      ServiceFileParser.ParsedService parsed =
+          parseLeniently(
+              "a", "base_url=http://a:1\nheader.X-Api-Key=${file:UTF-8:" + token + "}\n");
+
+      // Assert
+      assertThat(parsed.unresolvedKeys()).isEmpty();
+      assertThat(lenientWarnings).isEmpty();
+      assertThat(parsed.config().headers()).containsExactly(entry("X-Api-Key", "s3cret"));
+    }
+
+    @Test
+    void parseFile_envReferenceGiven_warnsThatItWillNotRotate() throws IOException {
+      // Not an error in either mode, and not about resolution: an env-sourced value cannot change
+      // in a running pod, which defeats the directory it is written in.
+      String fileName = "a" + ServiceFileParser.PROPERTIES_EXTENSION;
+      writeService(fileName, "base_url=http://a:1\nheader.X-Api-Key=${env:SAGA_TEST_TOKEN}\n");
+
+      ServiceFileParser.parseFile(
+          "a",
+          fileName,
+          Files.readAllBytes(servicesDir.resolve(fileName)),
+          secrets(),
+          lenientWarnings);
+
+      assertThat(lenientWarnings)
+          .singleElement(as(STRING))
+          .contains("header.X-Api-Key")
+          .contains("will not pick up rotation");
     }
   }
 }

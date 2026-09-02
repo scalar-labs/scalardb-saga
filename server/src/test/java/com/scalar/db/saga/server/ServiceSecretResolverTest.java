@@ -51,14 +51,15 @@ class ServiceSecretResolverTest {
 
   @Test
   void resolve_noReference_returnsValueUnchanged() {
-    assertThat(resolver().resolve("plain-value")).isEqualTo("plain-value");
+    assertThat(resolver().resolve("plain-value").value()).isEqualTo("plain-value");
   }
 
   @Test
   void resolve_fileInsideSecretsRoot_returnsContents() throws IOException {
     Files.writeString(secretsDir.resolve("token"), "s3cr3t");
 
-    String resolved = resolver().resolve("${file:UTF-8:" + secretsDir.resolve("token") + "}");
+    String resolved =
+        resolver().resolve("${file:UTF-8:" + secretsDir.resolve("token") + "}").value();
 
     assertThat(resolved).isEqualTo("s3cr3t");
   }
@@ -125,14 +126,14 @@ class ServiceSecretResolverTest {
   @Test
   void resolve_envReference_resolvesFromEnvironment() {
     // PATH exists in any test environment; the parser (not this class) warns about env use.
-    assertThat(resolver().resolve("${env:PATH}")).isEqualTo(System.getenv("PATH"));
+    assertThat(resolver().resolve("${env:PATH}").value()).isEqualTo(System.getenv("PATH"));
   }
 
   @Test
   void resolve_unknownPrefix_leftVerbatim() {
     // Matching SecretResolver: the dangerous prefixes (script/url/dns) are not registered, so the
     // reference stays literal instead of executing.
-    assertThat(resolver().resolve("${script:javascript:1+1}"))
+    assertThat(resolver().resolve("${script:javascript:1+1}").value())
         .isEqualTo("${script:javascript:1+1}");
   }
 
@@ -142,7 +143,8 @@ class ServiceSecretResolverTest {
     // must not trigger one.
     Files.writeString(secretsDir.resolve("tricky"), "pa$$${env:HOME}word");
 
-    String resolved = resolver().resolve("${file:UTF-8:" + secretsDir.resolve("tricky") + "}");
+    String resolved =
+        resolver().resolve("${file:UTF-8:" + secretsDir.resolve("tricky") + "}").value();
 
     assertThat(resolved).isEqualTo("pa$$${env:HOME}word");
   }

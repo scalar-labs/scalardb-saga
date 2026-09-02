@@ -187,6 +187,35 @@ Java clients of the SDK enable TLS with `useTransportSecurity()`; against a priv
 `trustCaCertificate(path)` (and `overrideAuthority(name)` when dialing by IP or through a
 port-forward). Non-Java REST consumers pass their CA the usual way (`curl --cacert ...`).
 
+## Checking a configuration before it ships
+
+```
+docker run --rm --volume "$PWD/conf:/scalardb-saga/conf:ro" \
+  ghcr.io/scalar-labs/scalardb-saga-server:<tag> \
+  --validate-config --config /scalardb-saga/conf/server.properties
+```
+
+Reads the same files a boot reads and applies the same checks a reload pass applies, then exits:
+`0` when the configuration is acceptable, `1` when it is not, with every problem listed on stdout.
+It opens no store connection, binds no port, and sends no request, so it is safe to run in CI, in an
+init container, or from a laptop against a configuration destined for production.
+
+Two things about the report are worth knowing before you rely on it.
+
+**A secret it cannot read is skipped, not failed.** The command is meant to run where the mounted
+secrets usually are not — a CI job, a laptop — so a `${file:...}` reference to a file that is not
+there leaves that value unresolved and skips the checks that are *about* the value: the URL and host
+checks for `base_url`, the range check for `max_body_bytes`, the header-value checks. Each skip is
+named in the report. Where the secrets are present, nothing is skipped and the run is identical to a
+strict one. A reference resolving **outside** `secrets_root` is still an error, everywhere: that is
+a mistake in the file, not a property of the machine you ran on.
+
+**It cannot see the store, so it cannot see history.** Whether a definition changed without bumping
+its version, whether a version is already registered, and which version is actually serving are all
+comparisons against what a running replica has applied. The report ends with that list. A clean
+result means the files are internally consistent and would boot a fresh replica — not that they are
+a valid *next* state for a fleet that is already running.
+
 ## Configuration reload
 
 With `reload.interval_seconds` > 0 (default 30), the daemon re-reads `services_path` and

@@ -827,10 +827,37 @@ public final class SagaServerConfig {
    *     contradict each other
    */
   public static SagaServerConfig load(Properties properties) {
+    return load(properties, SecretMode.STRICT, new ArrayList<>());
+  }
+
+  /**
+   * How a secret reference that cannot be read is treated.
+   *
+   * <p>The daemon is {@link #STRICT}: a value it could not resolve is a value it cannot serve with.
+   * {@code --validate-config} is {@link #LENIENT}, because it routinely runs where the secrets are
+   * not mounted — a laptop, a CI job — and failing there would make it useless in the two places it
+   * is for. Leniency is never visible when the secrets are present: it softens an actual failure,
+   * it does not skip the attempt.
+   */
+  enum SecretMode {
+    STRICT,
+    LENIENT
+  }
+
+  /**
+   * Parses a {@link SagaServerConfig}, tolerating unresolvable secret references under {@link
+   * SecretMode#LENIENT} and appending one warning per reference it could not read.
+   *
+   * @param properties server + ScalarDB properties
+   * @param mode how to treat a secret reference that cannot be read
+   * @param warnings collector for the references left unresolved
+   * @return the parsed configuration
+   */
+  static SagaServerConfig load(Properties properties, SecretMode mode, List<String> warnings) {
     Objects.requireNonNull(properties, "properties must not be null");
     // Keep the pre-resolution properties so a provider can tell a secret reference from an inline
     // value (both look identical after resolution) — e.g. the API-key provider requires references.
-    return new SagaServerConfig(resolveSecrets(properties), properties);
+    return new SagaServerConfig(resolveSecrets(properties, mode, warnings), properties);
   }
 
   /**
@@ -912,7 +939,8 @@ public final class SagaServerConfig {
    * scalar.db.*} store keys are left untouched, since ScalarDB resolves those itself with the same
    * syntax.
    */
-  private static Properties resolveSecrets(Properties properties) {
+  private static Properties resolveSecrets(
+      Properties properties, SecretMode mode, List<String> warnings) {
     SecretResolver resolver = new SecretResolver();
     // Rebuild from stringPropertyNames() so every string property is flattened into one table,
     // including any inherited from a defaults chain (new Properties(defaults)). A plain putAll or
@@ -924,7 +952,28 @@ public final class SagaServerConfig {
       if (value == null) {
         continue; // stringPropertyNames() only lists string-valued keys; guard for null-safety
       }
-      resolved.setProperty(key, key.startsWith(PREFIX) ? resolver.resolve(value) : value);
+      if (!key.startsWith(PREFIX)) {
+        resolved.setProperty(key, value); // scalar.db.* store keys pass through to ScalarDB
+      } else if (mode == SecretMode.STRICT) {
+        resolved.setProperty(key, resolver.resolve(value));
+      } else {
+        try {
+          resolved.setProperty(key, resolver.resolve(value));
+        } catch (RuntimeException e) {
+          // The reference text stands in for the value. Nothing here checks a secret's content —
+          // the settings that carry one are checked for presence and for pairing, which the
+          // reference satisfies — so this changes no verdict; it only avoids failing the whole
+          // check on a file that is simply not mounted on this machine. The value is never echoed:
+          // it may be an inline secret rather than a reference.
+          resolved.setProperty(key, value);
+          warnings.add(
+              "'"
+                  + key
+                  + "' could not be resolved ("
+                  + e.getMessage()
+                  + "); the reference text stands in for its value.");
+        }
+      }
     }
     // Non-string entries aren't listed by stringPropertyNames(); carry them through. forEach covers
     // the main table only; a non-string entry in a defaults chain is intentionally not flattened

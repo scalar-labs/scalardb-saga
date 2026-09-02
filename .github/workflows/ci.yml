@@ -165,6 +165,15 @@ jobs:
             exit 1
           fi
 
+      # Runs the validator over the very fixture the next step boots, so the two keep each other
+      # honest: a fixture the daemon starts on but --validate-config rejects (or the reverse) is a
+      # bug in one of them, and nothing else in CI compares the offline answer with the real one.
+      - name: Check --validate-config accepts the smoke configuration
+        run: |
+          docker run --rm \
+            --volume "$PWD/.github/smoke:/smoke:ro" \
+            scalardb-saga-server:ci --validate-config --config /smoke/server.properties
+
       # The configuration is a checked-in fixture (.github/smoke), shared with image-arm64-native-test
       # so the two jobs cannot drift into booting differently configured daemons.
       - name: Start the container

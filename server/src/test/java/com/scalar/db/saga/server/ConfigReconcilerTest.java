@@ -1,9 +1,11 @@
 package com.scalar.db.saga.server;
 
 import static java.util.Objects.requireNonNull;
+import static org.assertj.core.api.Assertions.as;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.InstanceOfAssertFactories.STRING;
 
 import ch.qos.logback.classic.Level;
 import com.scalar.db.saga.definition.SagaDefinition;
@@ -98,6 +100,7 @@ class ConfigReconcilerTest {
         reloadConfig,
         definitionsDir,
         asyncCallbacksConfigured,
+        new ServiceSecretResolver(reloadConfig.secretsRoot()),
         registrar,
         definitionStore,
         names -> served = names);
@@ -132,6 +135,7 @@ class ConfigReconcilerTest {
         new ReloadConfig(servicesDir, 10, secretsDir, List.of(), clock),
         definitionsDir,
         false,
+        new ServiceSecretResolver(secretsDir),
         registrar,
         definitionStore,
         names -> served = names);
@@ -475,7 +479,13 @@ class ConfigReconcilerTest {
               servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
       ConfigReconciler reconciler =
           new ConfigReconciler(
-              reloadConfig, file, false, registrar, definitionStore, names -> served = names);
+              reloadConfig,
+              file,
+              false,
+              new ServiceSecretResolver(secretsDir),
+              registrar,
+              definitionStore,
+              names -> served = names);
 
       // Act & Assert
       assertThat(reconciler.run()).isFalse();
@@ -502,7 +512,13 @@ class ConfigReconcilerTest {
               servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
       ConfigReconciler reconciler =
           new ConfigReconciler(
-              reloadConfig, link, false, registrar, definitionStore, names -> served = names);
+              reloadConfig,
+              link,
+              false,
+              new ServiceSecretResolver(secretsDir),
+              registrar,
+              definitionStore,
+              names -> served = names);
 
       // Act & Assert
       assertThat(reconciler.run()).isTrue();
@@ -575,6 +591,7 @@ class ConfigReconcilerTest {
               withCeiling,
               definitionsDir,
               false,
+              new ServiceSecretResolver(secretsDir),
               registrar,
               definitionStore,
               names -> served = names);
@@ -607,6 +624,7 @@ class ConfigReconcilerTest {
               misconfigured,
               definitionsDir,
               false,
+              new ServiceSecretResolver(secretsDir),
               registrar,
               definitionStore,
               names -> served = names);
@@ -636,7 +654,13 @@ class ConfigReconcilerTest {
               servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
       ConfigReconciler reconciler =
           new ConfigReconciler(
-              reloadConfig, missing, false, registrar, definitionStore, names -> served = names);
+              reloadConfig,
+              missing,
+              false,
+              new ServiceSecretResolver(secretsDir),
+              registrar,
+              definitionStore,
+              names -> served = names);
 
       // Act & Assert
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
@@ -1359,6 +1383,7 @@ class ConfigReconcilerTest {
                   servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC)),
               definitionsDir,
               false,
+              new ServiceSecretResolver(secretsDir),
               registrar,
               unreachable,
               names -> served = names);
@@ -1413,6 +1438,7 @@ class ConfigReconcilerTest {
                   servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC)),
               definitionsDir,
               false,
+              new ServiceSecretResolver(secretsDir),
               services -> {
                 swaps.add(services);
                 servedWhenSwapped.add(served);
@@ -1463,6 +1489,7 @@ class ConfigReconcilerTest {
                   servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC)),
               definitionsDir,
               false,
+              new ServiceSecretResolver(secretsDir),
               registrar,
               corrupt,
               names -> served = names);
@@ -1696,6 +1723,169 @@ class ConfigReconcilerTest {
       // Assert — the pass rejects, but the saga that did register is served
       assertThat(applied).isFalse();
       assertThat(served).containsExactly("good-saga");
+    }
+  }
+
+  /**
+   * The offline entry point behind {@code --validate-config}. Two properties carry it: it must
+   * reach the same verdict a pass would, and it must reach it without touching anything a running
+   * daemon owns.
+   */
+  @Nested
+  class OfflineValidation {
+
+    /** A reconciler wired the way the command wires one: no store, and nothing to apply with. */
+    private ConfigReconciler offlineReconciler() {
+      return new ConfigReconciler(
+          new ReloadConfig(
+              servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC)),
+          definitionsDir,
+          false,
+          new LenientServiceValueResolver(secretsDir),
+          services -> {
+            throw new AssertionError("validation swapped endpoints");
+          },
+          new NoDefinitionStore(),
+          names -> {
+            throw new AssertionError("validation published served sagas");
+          });
+    }
+
+    @Test
+    void validate_acceptableConfigurationGiven_reportsNoProblems() throws IOException {
+      // Arrange
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("order.json", "order-saga", "1", "account");
+
+      // Act
+      ConfigReconciler.ValidationReport report = offlineReconciler().validate();
+
+      // Assert
+      assertThat(report.problems()).isEmpty();
+      assertThat(report.serviceCount()).isEqualTo(1);
+      assertThat(report.definitionCount()).isEqualTo(1);
+    }
+
+    @Test
+    void validate_calledOnAnyConfiguration_appliesNothing() throws IOException {
+      // Arrange — every collaborator a pass would use throws, so reaching one fails the test.
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("order.json", "order-saga", "1", "account");
+
+      // Act
+      ConfigReconciler.ValidationReport report = offlineReconciler().validate();
+
+      // Assert — the guarantee the command relies on: nothing was swapped, registered or served.
+      assertThat(report.problems()).isEmpty();
+      assertThat(registered).isEmpty();
+      assertThat(served).isNull();
+    }
+
+    @Test
+    void validate_definitionNamingAnAbsentService_reportsTheSameProblemAsAPass()
+        throws IOException {
+      // Arrange — the cross-check a pass rejects on.
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("order.json", "order-saga", "1", "billing");
+
+      // Act
+      ConfigReconciler.ValidationReport report = offlineReconciler().validate();
+
+      // Assert — and the running pass rejects for a reason that names the same thing, so the
+      // offline answer cannot quietly diverge from the daemon's.
+      assertThat(report.problems())
+          .singleElement(as(STRING))
+          .contains("billing")
+          .contains("no service file");
+      assertThat(reconciler().run()).isFalse();
+    }
+
+    @Test
+    void validate_definitionFileWithAnUnrecognizedExtension_warnsItIsIgnored() throws IOException {
+      // Arrange — the mistake with no symptom before this: the daemon simply never sees the saga.
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("order.json", "order-saga", "1", "account");
+      Files.copy(definitionsDir.resolve("order.json"), definitionsDir.resolve("backup.json.bak"));
+
+      // Act
+      ConfigReconciler.ValidationReport report = offlineReconciler().validate();
+
+      // Assert
+      assertThat(report.problems()).isEmpty();
+      assertThat(report.warnings())
+          .singleElement(as(STRING))
+          .contains("backup.json.bak")
+          .contains("ignored");
+    }
+
+    @Test
+    void validate_directoryNamedLikeADefinition_warnsItIsIgnored() throws IOException {
+      // Arrange
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("order.json", "order-saga", "1", "account");
+      Files.createDirectory(definitionsDir.resolve("nested.json"));
+
+      // Act
+      ConfigReconciler.ValidationReport report = offlineReconciler().validate();
+
+      // Assert
+      assertThat(report.warnings())
+          .singleElement(as(STRING))
+          .contains("nested.json")
+          .contains("not a regular file");
+    }
+
+    @Test
+    void validate_noDefinitions_reportsNoProblemButCountsZero() throws IOException {
+      // Arrange — an empty definitions directory is not itself a problem for the pass (only a
+      // wind-down from a non-empty applied set is), so the count is what the caller mirrors the
+      // boot guard against.
+      writeService("account", "base_url=http://account:8080\n");
+
+      // Act
+      ConfigReconciler.ValidationReport report = offlineReconciler().validate();
+
+      // Assert
+      assertThat(report.problems()).isEmpty();
+      assertThat(report.definitionCount()).isZero();
+    }
+
+    @Test
+    void validate_unresolvableAllowedHostsUnderCeiling_doesNotReportACeilingViolation()
+        throws IOException {
+      // Arrange — an unresolved allowed_hosts parses to the empty list, which is the allow-all a
+      // ceiling forbids. Checking it would report a violation of a policy nobody has read yet.
+      writeService(
+          "account",
+          "base_url=http://account:8080\nallowed_hosts=${file:UTF-8:"
+              + secretsDir.resolve("absent")
+              + "}\n");
+      writeDefinition("order.json", "order-saga", "1", "account");
+      ConfigReconciler reconciler =
+          new ConfigReconciler(
+              new ReloadConfig(
+                  servicesDir,
+                  10,
+                  secretsDir,
+                  List.of("account"),
+                  Clock.fixed(NOW, ZoneOffset.UTC)),
+              definitionsDir,
+              false,
+              new LenientServiceValueResolver(secretsDir),
+              services -> {
+                throw new AssertionError("validation swapped endpoints");
+              },
+              new NoDefinitionStore(),
+              names -> {
+                throw new AssertionError("validation published served sagas");
+              });
+
+      // Act
+      ConfigReconciler.ValidationReport report = reconciler.validate();
+
+      // Assert — skipped and said so, rather than passed or failed.
+      assertThat(report.problems()).isEmpty();
+      assertThat(report.warnings()).anySatisfy(w -> assertThat(w).contains("egress-ceiling"));
     }
   }
 }

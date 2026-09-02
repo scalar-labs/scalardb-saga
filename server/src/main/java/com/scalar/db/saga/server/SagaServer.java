@@ -173,6 +173,7 @@ public final class SagaServer implements AutoCloseable {
               config.reloadConfig(),
               config.definitionsPath().orElse(null),
               config.callbackBaseUrl().isPresent() && config.callbackSecret().isPresent(),
+              new ServiceSecretResolver(config.reloadConfig().secretsRoot()),
               orchestrator.httpEndpointRegistrar(),
               new DefinitionStore() {
                 @Override
@@ -200,10 +201,7 @@ public final class SagaServer implements AutoCloseable {
       // a healthy but useless process. Reload cannot lift this later: the empty-transition guard
       // rejects a wind-down to zero, so a useful daemon always starts with at least one.
       if (configReconciler.appliedDefinitionCount() == 0) {
-        throw new IllegalStateException(
-            "No saga definitions registered. Set '"
-                + SagaServerConfig.DEFINITIONS_PATH_KEY
-                + "' to a file or directory containing at least one saga definition.");
+        throw new IllegalStateException(noDefinitionsMessage());
       }
       logger.info("Registered {} saga definition(s)", configReconciler.appliedDefinitionCount());
       manager =
@@ -754,6 +752,18 @@ public final class SagaServer implements AutoCloseable {
     return Math.max(
         TimeUnit.SECONDS.toMillis(GRPC_SHUTDOWN_MIN_SECONDS),
         config.syncMaxWaitMillis() + GRPC_SHUTDOWN_SLACK_MILLIS);
+  }
+
+  /**
+   * The boot guard's message, shared with {@code --validate-config} so the offline check and the
+   * guard it mirrors cannot come to say different things. The rule is the server's, not the reload
+   * pass's — the pass rejects only a wind-down to zero, which a first pass is not — so it is stated
+   * here and quoted there.
+   */
+  static String noDefinitionsMessage() {
+    return "No saga definitions registered. Set '"
+        + SagaServerConfig.DEFINITIONS_PATH_KEY
+        + "' to a file or directory containing at least one saga definition.";
   }
 
   /**
