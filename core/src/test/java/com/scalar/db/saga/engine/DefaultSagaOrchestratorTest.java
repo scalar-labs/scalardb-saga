@@ -9,6 +9,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
@@ -380,7 +381,8 @@ class DefaultSagaOrchestratorTest {
 
       when(definitionRegistry.resolve("transfer")).thenReturn(def);
       when(engine.createSaga(eq(def), isNull(), any())).thenReturn(runningSaga);
-      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(runningSaga));
+      // Execution's own verdict, not a store read: that is what the arm now branches on.
+      when(engine.executeSaga(eq(def), any(), any())).thenReturn(runningSaga);
 
       ListAppender<ILoggingEvent> logs = attachLogCapture();
       try {
@@ -392,6 +394,75 @@ class DefaultSagaOrchestratorTest {
         assertThat(logs.list).anySatisfy(e -> assertThat(e.getLevel()).isEqualTo(Level.ERROR));
         verify(callback, never()).onParked(any());
         verify(callback, never()).onCompleted(any());
+      } finally {
+        orchestratorLogger().detachAppender(logs);
+      }
+    }
+
+    @Test
+    void startAsync_sagaResumedBeforeTheCallbackIsDispatched_stillReportsThePark()
+        throws Exception {
+      // Arrange — the interleaving that used to corrupt the decision. Execution parks the saga
+      // (WAITING), and before the callback is dispatched a participant callback resumes it, so the
+      // store already says RUNNING. On this replica or another: the resume is not serialised with
+      // this thread at all.
+      //
+      // Reading the store here would see RUNNING and conclude two wrong things — skip onParked, so
+      // the caller waits out its whole bound, and log an engine invariant violation telling the
+      // operator to report a bug. Branching on execution's own verdict cannot go stale that way.
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot runningSaga = snapshot("saga-1", SagaStatus.RUNNING);
+      SagaStateSnapshot parkedSaga = snapshot("saga-1", SagaStatus.WAITING);
+      SagaCallback callback = mock(SagaCallback.class);
+
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(runningSaga);
+      when(engine.executeSaga(eq(def), any(), any())).thenReturn(parkedSaga);
+      // The resume has already landed by the time anyone could read. Lenient deliberately: this
+      // stub going unused is the point, and it is asserted explicitly below.
+      lenient().when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(runningSaga));
+
+      ListAppender<ILoggingEvent> logs = attachLogCapture();
+      try {
+        // Act
+        orchestrator.startAsync("transfer", Map.of(), callback);
+
+        // Assert — the park is reported, and nothing accuses the engine of a defect.
+        verify(callback, timeout(5000)).onParked(parkedSaga);
+        assertThat(logs.list).noneSatisfy(e -> assertThat(e.getLevel()).isEqualTo(Level.ERROR));
+        // The decision never consulted the store, so no resume — here or on another replica —
+        // could have changed it. That is the fix, stated as an assertion.
+        verify(store, never()).getStateSnapshot("saga-1");
+      } finally {
+        orchestratorLogger().detachAppender(logs);
+      }
+    }
+
+    @Test
+    void startAsync_shutdownLeavesSagaRunning_doesNotReportAnInvariantViolation() throws Exception {
+      // Arrange — the shutdown hand-off: under WAIT_CURRENT_STEP the engine finishes the running
+      // step, marks the saga for recovery, and returns *normally* with it still RUNNING. That is
+      // indistinguishable from an engine defect without asking the engine, so before this was
+      // handled every rolling restart told the operator to report a bug per in-flight saga.
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot runningSaga = snapshot("saga-1", SagaStatus.RUNNING);
+      SagaCallback callback = mock(SagaCallback.class);
+
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(runningSaga);
+      when(engine.isShuttingDown()).thenReturn(true);
+      when(engine.executeSaga(eq(def), any(), any())).thenReturn(runningSaga);
+
+      ListAppender<ILoggingEvent> logs = attachLogCapture();
+      try {
+        // Act
+        orchestrator.startAsync("transfer", Map.of(), callback);
+
+        // Assert — nothing above DEBUG, and certainly no "report it" ERROR.
+        await(() -> !logs.list.isEmpty());
+        assertThat(logs.list)
+            .allSatisfy(e -> assertThat(e.getLevel()).isEqualTo(Level.DEBUG))
+            .anySatisfy(e -> assertThat(e.getFormattedMessage()).contains("shutdown"));
       } finally {
         orchestratorLogger().detachAppender(logs);
       }
@@ -442,7 +513,9 @@ class DefaultSagaOrchestratorTest {
 
       when(definitionRegistry.resolve("transfer")).thenReturn(def);
       when(engine.createSaga(eq(def), isNull(), any())).thenReturn(runningSaga);
-      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(parkedSaga));
+      // The verdict path, not the abort fallback: a resume landing in the store afterwards must
+      // not be able to change what this execution reports.
+      when(engine.executeSaga(eq(def), any(), any())).thenReturn(parkedSaga);
 
       // Act
       orchestrator.startAsync("transfer", Map.of(), callback);

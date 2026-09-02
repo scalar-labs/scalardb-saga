@@ -107,6 +107,11 @@ tasks.withType<JavaCompile>().configureEach {
             "UnusedVariable",
             "FieldCanBeFinal",
         )
+        // An enum switch that silently gains a constant is a correctness bug, not a style point:
+        // the new constant inherits whatever the default arm does. Escalated to an error because a
+        // warning here is invisible in practice — there is no -Werror, and CI's warning step
+        // asserts nothing about its output.
+        error("MissingCasesInEnumSwitch")
     }
 }
 
