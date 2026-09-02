@@ -173,6 +173,7 @@ public final class SagaServer implements AutoCloseable {
               config.reloadConfig(),
               config.definitionsPath().orElse(null),
               config.callbackBaseUrl().isPresent() && config.callbackSecret().isPresent(),
+              new ServiceSecretResolver(config.reloadConfig().secretsRoot()),
               orchestrator.httpEndpointRegistrar(),
               new DefinitionStore() {
                 @Override
@@ -200,10 +201,7 @@ public final class SagaServer implements AutoCloseable {
       // a healthy but useless process. Reload cannot lift this later: the empty-transition guard
       // rejects a wind-down to zero, so a useful daemon always starts with at least one.
       if (configReconciler.appliedDefinitionCount() == 0) {
-        throw new IllegalStateException(
-            "No saga definitions registered. Set '"
-                + SagaServerConfig.DEFINITIONS_PATH_KEY
-                + "' to a file or directory containing at least one saga definition.");
+        throw new IllegalStateException(noDefinitionsMessage());
       }
       logger.info("Registered {} saga definition(s)", configReconciler.appliedDefinitionCount());
       manager =
@@ -490,25 +488,41 @@ public final class SagaServer implements AutoCloseable {
    * unconfigured daemon would serve full-access requests to anyone on the network.
    */
   private void ensureSecureBindingOrAcknowledged() {
+    String refusal = insecureBindingRefusal(config);
+    if (refusal != null) {
+      throw new IllegalArgumentException(refusal);
+    }
+  }
+
+  /**
+   * The refusal message for starting unauthenticated on a network-reachable interface, or {@code
+   * null} when the binding is acceptable.
+   *
+   * <p>Shared with {@code --validate-config}, like {@link #noDefinitionsMessage()}: the rule reads
+   * three configuration values and nothing else, so an offline check can reach the same verdict,
+   * and a configuration this refuses must not be one the validator calls acceptable. Stated once so
+   * the two cannot come to disagree.
+   */
+  static @Nullable String insecureBindingRefusal(SagaServerConfig config) {
     if (config.securityProvider().equals("noop")
         && !LoopbackHost.isLoopback(config.host())
         && !config.insecureModeEnabled()) {
-      throw new IllegalArgumentException(
-          "Refusing to start unauthenticated on a network-reachable interface: '"
-              + SagaServerConfig.SECURITY_PROVIDER_KEY
-              + "="
-              + config.securityProvider()
-              + "' disables authentication, but '"
-              + SagaServerConfig.HOST_KEY
-              + "="
-              + config.host()
-              + "' is not a loopback address. Configure a real security provider (jwt or apikey),"
-              + " bind '"
-              + SagaServerConfig.HOST_KEY
-              + "' to a loopback address, or set '"
-              + SagaServerConfig.INSECURE_MODE_ENABLED_KEY
-              + "=true' to acknowledge running without authentication on an exposed interface.");
+      return "Refusing to start unauthenticated on a network-reachable interface: '"
+          + SagaServerConfig.SECURITY_PROVIDER_KEY
+          + "="
+          + config.securityProvider()
+          + "' disables authentication, but '"
+          + SagaServerConfig.HOST_KEY
+          + "="
+          + config.host()
+          + "' is not a loopback address. Configure a real security provider (jwt or apikey),"
+          + " bind '"
+          + SagaServerConfig.HOST_KEY
+          + "' to a loopback address, or set '"
+          + SagaServerConfig.INSECURE_MODE_ENABLED_KEY
+          + "=true' to acknowledge running without authentication on an exposed interface.";
     }
+    return null;
   }
 
   /**
@@ -754,6 +768,18 @@ public final class SagaServer implements AutoCloseable {
     return Math.max(
         TimeUnit.SECONDS.toMillis(GRPC_SHUTDOWN_MIN_SECONDS),
         config.syncMaxWaitMillis() + GRPC_SHUTDOWN_SLACK_MILLIS);
+  }
+
+  /**
+   * The boot guard's message, shared with {@code --validate-config} so the offline check and the
+   * guard it mirrors cannot come to say different things. The rule is the server's, not the reload
+   * pass's — the pass rejects only a wind-down to zero, which a first pass is not — so it is stated
+   * here and quoted there.
+   */
+  static String noDefinitionsMessage() {
+    return "No saga definitions registered. Set '"
+        + SagaServerConfig.DEFINITIONS_PATH_KEY
+        + "' to a file or directory containing at least one saga definition.";
   }
 
   /**

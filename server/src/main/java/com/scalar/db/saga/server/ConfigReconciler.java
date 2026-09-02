@@ -73,7 +73,7 @@ final class ConfigReconciler {
   // with an async phase can only be provisioned when it is, and the pass rejects it at validation
   // rather than letting registration fail every pass with a retry that can never succeed.
   private final boolean asyncCallbacksConfigured;
-  private final ServiceSecretResolver secretResolver;
+  private final ServiceValueResolver secretResolver;
   private final HttpEndpointRegistrar registrar;
   private final DefinitionStore definitionStore;
   // Where this replica publishes the saga names it serves, after every pass that concluded.
@@ -104,6 +104,28 @@ final class ConfigReconciler {
   private record AppliedDefinition(String fileName, SagaDefinition definition) {}
 
   private record CachedParse(String contentSha256, SagaDefinition definition) {}
+
+  /** The validated candidate set a pass is about to apply, and the hashes that name it. */
+  private record Candidates(
+      Map<String, ServiceConfig> services,
+      Map<String, CandidateDefinition> definitions,
+      String candidateSha,
+      String servicesSha,
+      String definitionsSha) {}
+
+  /**
+   * What {@link #validate()} found: the problems that would reject the pass, and the warnings a
+   * pass would have logged.
+   *
+   * @param problems aggregated across files, in the order they were found; empty means acceptable
+   * @param warnings non-fatal observations — unresolved values whose checks were skipped, ignored
+   *     files, and {@code ${env:...}} in a service file
+   * @param serviceCount service files in the candidate set
+   * @param definitionCount definitions in the candidate set; zero is what the daemon's boot guard
+   *     refuses, so the caller mirrors that guard rather than this class inventing a second one
+   */
+  record ValidationReport(
+      List<String> problems, List<String> warnings, int serviceCount, int definitionCount) {}
 
   /**
    * A parsed candidate definition with its origin file, for error attribution.
@@ -166,13 +188,14 @@ final class ConfigReconciler {
       ReloadConfig reloadConfig,
       @Nullable Path definitionsPath,
       boolean asyncCallbacksConfigured,
+      ServiceValueResolver secretResolver,
       HttpEndpointRegistrar registrar,
       DefinitionStore definitionStore,
       Consumer<Set<String>> servedDefinitions) {
     this.reloadConfig = reloadConfig;
     this.definitionsPath = definitionsPath;
     this.asyncCallbacksConfigured = asyncCallbacksConfigured;
-    this.secretResolver = new ServiceSecretResolver(reloadConfig.secretsRoot());
+    this.secretResolver = secretResolver;
     this.registrar = registrar;
     this.definitionStore = definitionStore;
     this.servedDefinitions = servedDefinitions;
@@ -188,6 +211,39 @@ final class ConfigReconciler {
   /** The current status snapshot (for the future admin status endpoint, and for tests). */
   ReloadStatus status() {
     return status;
+  }
+
+  /**
+   * Offline entry: snapshot and validate, applying nothing, and hand back what a pass would have
+   * rejected on. Backs {@code --validate-config}.
+   *
+   * <p>What it cannot see is a consequence of having no store and no applied state, and the caller
+   * enumerates it: an un-bumped version change (compared against a running replica's applied set),
+   * a rollback to an already-registered version, and a version whose content conflicts with the
+   * stored one. Everything a candidate set can be judged on by itself is judged here.
+   */
+  synchronized ValidationReport validate() {
+    List<String> errors = new ArrayList<>();
+    List<String> warnings = new ArrayList<>();
+    @Nullable Candidates candidates = null;
+    try {
+      candidates = snapshotAndValidate(errors, warnings);
+    } catch (TornSnapshotException first) {
+      // Same one retry as a pass, and for the same reason; a second tear is reported rather than
+      // chased, since a directory being rewritten underneath the check cannot be judged.
+      errors.clear();
+      warnings.clear();
+      try {
+        candidates = snapshotAndValidate(errors, warnings);
+      } catch (TornSnapshotException second) {
+        errors.add(tornMessage());
+      }
+    }
+    return new ValidationReport(
+        List.copyOf(errors),
+        List.copyOf(warnings),
+        candidates == null ? 0 : candidates.services().size(),
+        candidates == null ? 0 : candidates.definitions().size());
   }
 
   /**
@@ -241,19 +297,25 @@ final class ConfigReconciler {
     }
   }
 
-  private void attemptPass() {
-    Instant now = Instant.now(reloadConfig.clock());
-    List<String> errors = new ArrayList<>();
-
-    // 1. SNAPSHOT + VALIDATE — no side effects on engine or store.
+  /**
+   * Step 1 of a pass, and the whole of {@link #validate()}: snapshot both directories and validate
+   * the complete candidate set, applying nothing. The one entry point for "is this configuration
+   * acceptable", so the offline answer and the daemon's answer cannot drift apart.
+   *
+   * <p>Problems are appended to {@code errors} and non-fatal observations to {@code warnings};
+   * neither is logged here, because the two callers report them differently — the pass logs, the
+   * validator renders a report. A torn snapshot still throws, since a candidate set spanning two
+   * generations of a mount is not a set anyone wrote and cannot be judged either way.
+   */
+  private Candidates snapshotAndValidate(List<String> errors, List<String> warnings) {
     Map<String, Path> servicesRead = new TreeMap<>();
     Map<String, Path> definitionsRead = new TreeMap<>();
     MessageDigest servicesDigest = sha256();
     Map<String, ServiceConfig> candidateServices =
-        snapshotServices(errors, servicesDigest, servicesRead);
+        snapshotServices(errors, warnings, servicesDigest, servicesRead);
     MessageDigest definitionsDigest = sha256();
     Map<String, CandidateDefinition> candidateDefinitions =
-        snapshotDefinitions(errors, definitionsDigest, definitionsRead);
+        snapshotDefinitions(errors, warnings, definitionsDigest, definitionsRead);
     String servicesSha = hex(servicesDigest);
     String definitionsSha = hex(definitionsDigest);
     String candidateSha = servicesSha + ":" + definitionsSha;
@@ -263,6 +325,31 @@ final class ConfigReconciler {
     requireUntornSnapshot(servicesRead, definitionsRead, candidateSha);
 
     validateCrossChecks(candidateServices, candidateDefinitions, errors, candidateSha);
+    return new Candidates(
+        candidateServices, candidateDefinitions, candidateSha, servicesSha, definitionsSha);
+  }
+
+  private void attemptPass() {
+    Instant now = Instant.now(reloadConfig.clock());
+    List<String> errors = new ArrayList<>();
+    List<String> warnings = new ArrayList<>();
+
+    // 1. SNAPSHOT + VALIDATE — no side effects on engine or store.
+    Candidates candidates = snapshotAndValidate(errors, warnings);
+    Map<String, ServiceConfig> candidateServices = candidates.services();
+    Map<String, CandidateDefinition> candidateDefinitions = candidates.definitions();
+    String candidateSha = candidates.candidateSha();
+    String servicesSha = candidates.servicesSha();
+    String definitionsSha = candidates.definitionsSha();
+    // Logged from here rather than from the parser so the validator can render the same
+    // observations into its report instead. A torn snapshot returns above, so a discarded attempt
+    // no longer repeats its warnings.
+    //
+    // One line each, at the sink, the way describeProblems does it for the error channel. Every
+    // warning source today sanitizes the file-supplied part it quotes, so nothing reaches here with
+    // a line break in it; doing it here too is what keeps that true of the next source added, which
+    // will not know the rule.
+    warnings.forEach(warning -> logger.warn("{}", Redaction.oneLine(warning)));
 
     if (!errors.isEmpty()) {
       throw new PassRejectedException(
@@ -584,7 +671,10 @@ final class ConfigReconciler {
   // ── Snapshot ─────────────────────────────────────────────────────────────
 
   private Map<String, ServiceConfig> snapshotServices(
-      List<String> errors, MessageDigest digest, Map<String, Path> targetsRead) {
+      List<String> errors,
+      List<String> warnings,
+      MessageDigest digest,
+      Map<String, Path> targetsRead) {
     Path servicesPath = reloadConfig.servicesPath();
     if (servicesPath == null) {
       return Map.of();
@@ -611,11 +701,17 @@ final class ConfigReconciler {
       digestContent(digest, file.fileName(), content);
       targetsRead.put(file.fileName(), file.target());
       try {
-        ServiceConfig service =
-            ServiceFileParser.parseFile(entry.getKey(), file.fileName(), content, secretResolver);
-        ServiceFileParser.requireWithinCeiling(
-            entry.getKey(), service, reloadConfig.allowedHostsCeiling());
-        candidates.put(entry.getKey(), service);
+        ServiceFileParser.ParsedService parsed =
+            ServiceFileParser.parseFile(
+                entry.getKey(), file.fileName(), content, secretResolver, warnings);
+        // An unresolved allowed_hosts parses to the empty list, which is exactly the allow-all a
+        // ceiling exists to forbid — checking it would report a violation of a policy nobody has
+        // read yet. The parser has already warned that the check is being skipped.
+        if (!parsed.unresolvedKeys().contains(ServiceFileParser.ALLOWED_HOSTS_KEY)) {
+          ServiceFileParser.requireWithinCeiling(
+              entry.getKey(), parsed.config(), reloadConfig.allowedHostsCeiling());
+        }
+        candidates.put(entry.getKey(), parsed.config());
       } catch (RuntimeException e) {
         errors.add(e.getMessage());
       }
@@ -655,13 +751,16 @@ final class ConfigReconciler {
   }
 
   private Map<String, CandidateDefinition> snapshotDefinitions(
-      List<String> errors, MessageDigest digest, Map<String, Path> targetsRead) {
+      List<String> errors,
+      List<String> warnings,
+      MessageDigest digest,
+      Map<String, Path> targetsRead) {
     if (definitionsPath == null) {
       return Map.of();
     }
     List<DefinitionFile> files;
     try {
-      files = listDefinitionFiles(definitionsPath);
+      files = listDefinitionFiles(definitionsPath, warnings);
     } catch (RuntimeException e) {
       errors.add(e.getMessage());
       return Map.of();
@@ -744,7 +843,7 @@ final class ConfigReconciler {
    * README has always been legal there). Reads must go through the returned target, never re-open
    * the visible entry.
    */
-  private static List<DefinitionFile> listDefinitionFiles(Path path) {
+  private static List<DefinitionFile> listDefinitionFiles(Path path, List<String> warnings) {
     if (!Files.exists(path)) {
       throw new IllegalArgumentException(
           "Invalid value for '"
@@ -774,7 +873,23 @@ final class ConfigReconciler {
     List<DefinitionFile> files = new ArrayList<>();
     for (Path entry : entries) {
       String fileName = WatchedFiles.fileNameOf(entry);
-      if (fileName.startsWith(".") || !isDefinitionFile(fileName)) {
+      if (fileName.startsWith(".")) {
+        // kubelet's ..data symlink and its timestamped directories, and ordinary dotfiles. Not
+        // warned about: they are the mount mechanism, so a warning would fire on every healthy
+        // pass.
+        continue;
+      }
+      if (!isDefinitionFile(fileName)) {
+        // Skipping is deliberate — a README has always been legal here — but doing it silently is
+        // how 'order-saga.json.bak' or a mistyped 'order-saga.jsonc' becomes a saga the operator
+        // believes they deployed and the daemon has never heard of. The only other symptom is the
+        // zero-definitions boot failure, which names no file.
+        warnings.add(
+            "'"
+                + SagaServerConfig.DEFINITIONS_PATH_KEY
+                + "' entry '"
+                + Redaction.oneLine(fileName)
+                + "' is ignored: a definition file must end in .json, .yaml, or .yml.");
         continue;
       }
       // A directory or other non-regular entry whose name matches the extension has always been
@@ -783,6 +898,12 @@ final class ConfigReconciler {
           WatchedFiles.resolveEntry(
               entry, fileName, realPath, SagaServerConfig.DEFINITIONS_PATH_KEY);
       if (target == null) {
+        warnings.add(
+            "'"
+                + SagaServerConfig.DEFINITIONS_PATH_KEY
+                + "' entry '"
+                + Redaction.oneLine(fileName)
+                + "' is ignored: it is named like a definition file but is not a regular file.");
         continue;
       }
       files.add(new DefinitionFile(fileName, target));
@@ -1012,7 +1133,10 @@ final class ConfigReconciler {
     if (!definitionsRead.isEmpty() && definitionsPath != null) {
       Map<String, Path> now = new TreeMap<>();
       try {
-        for (DefinitionFile file : listDefinitionFiles(definitionsPath)) {
+        // The re-check walks the directory a second time purely to compare targets, so its
+        // warnings are the ones the first walk already reported; collecting them again would
+        // duplicate every one of them.
+        for (DefinitionFile file : listDefinitionFiles(definitionsPath, new ArrayList<>())) {
           now.put(file.fileName(), file.target());
         }
       } catch (RuntimeException e) {

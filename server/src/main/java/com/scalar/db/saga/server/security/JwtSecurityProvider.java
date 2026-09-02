@@ -46,6 +46,18 @@ public final class JwtSecurityProvider implements SagaSecurityProvider {
   private static final String BEARER_PREFIX = "Bearer ";
 
   /**
+   * Parses and validates the JWT settings without building a provider, for {@code
+   * --validate-config}: building one starts the JWKS refresh executor, and this command promises to
+   * allocate nothing and call nothing.
+   *
+   * @param properties the resolved server properties
+   * @throws IllegalArgumentException if the JWT settings are missing or invalid
+   */
+  public static void validate(Properties properties) {
+    JwtConfig.from(properties);
+  }
+
+  /**
    * The accepted JWS signature algorithms: the RSA ({@code RS*}/{@code PS*}) and EC ({@code ES*})
    * families. Symmetric ({@code HS*}) and {@code none} are deliberately excluded — a JWKS publishes
    * public keys, so accepting an HMAC algorithm would let an attacker sign a token with the public

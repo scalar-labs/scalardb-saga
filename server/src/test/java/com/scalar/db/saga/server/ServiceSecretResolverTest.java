@@ -51,14 +51,15 @@ class ServiceSecretResolverTest {
 
   @Test
   void resolve_noReference_returnsValueUnchanged() {
-    assertThat(resolver().resolve("plain-value")).isEqualTo("plain-value");
+    assertThat(resolver().resolve("plain-value").value()).isEqualTo("plain-value");
   }
 
   @Test
   void resolve_fileInsideSecretsRoot_returnsContents() throws IOException {
     Files.writeString(secretsDir.resolve("token"), "s3cr3t");
 
-    String resolved = resolver().resolve("${file:UTF-8:" + secretsDir.resolve("token") + "}");
+    String resolved =
+        resolver().resolve("${file:UTF-8:" + secretsDir.resolve("token") + "}").value();
 
     assertThat(resolved).isEqualTo("s3cr3t");
   }
@@ -71,7 +72,7 @@ class ServiceSecretResolverTest {
 
     assertThatThrownBy(
             () -> resolver().resolve("${file:UTF-8:" + outsideDir.resolve("stolen") + "}"))
-        .isInstanceOf(IllegalArgumentException.class)
+        .isInstanceOf(PermanentReferenceException.class)
         .hasMessageContaining("resolves outside")
         .hasMessageNotContaining("outside-content");
   }
@@ -125,14 +126,14 @@ class ServiceSecretResolverTest {
   @Test
   void resolve_envReference_resolvesFromEnvironment() {
     // PATH exists in any test environment; the parser (not this class) warns about env use.
-    assertThat(resolver().resolve("${env:PATH}")).isEqualTo(System.getenv("PATH"));
+    assertThat(resolver().resolve("${env:PATH}").value()).isEqualTo(System.getenv("PATH"));
   }
 
   @Test
   void resolve_unknownPrefix_leftVerbatim() {
     // Matching SecretResolver: the dangerous prefixes (script/url/dns) are not registered, so the
     // reference stays literal instead of executing.
-    assertThat(resolver().resolve("${script:javascript:1+1}"))
+    assertThat(resolver().resolve("${script:javascript:1+1}").value())
         .isEqualTo("${script:javascript:1+1}");
   }
 
@@ -142,8 +143,42 @@ class ServiceSecretResolverTest {
     // must not trigger one.
     Files.writeString(secretsDir.resolve("tricky"), "pa$$${env:HOME}word");
 
-    String resolved = resolver().resolve("${file:UTF-8:" + secretsDir.resolve("tricky") + "}");
+    String resolved =
+        resolver().resolve("${file:UTF-8:" + secretsDir.resolve("tricky") + "}").value();
 
     assertThat(resolved).isEqualTo("pa$$${env:HOME}word");
+  }
+
+  @Test
+  void resolve_pathReachingTheRootThroughASymlinkedAncestor_returnsContents() throws IOException {
+    // The shape a container has: /var/run is a symlink to /run, so /var/run/secrets/token and
+    // /run/secrets/token are one file. Comparing the paths as written cannot see that; only
+    // resolving them can. A check that got this wrong would refuse a secret the daemon reads
+    // today, failing boot and freezing every later reload on the last configuration it applied.
+    // Arrange
+    Path root = Files.createDirectories(secretsDir.resolve("run/secrets"));
+    Files.createDirectory(secretsDir.resolve("var"));
+    Files.createSymbolicLink(secretsDir.resolve("var/run"), secretsDir.resolve("run"));
+    Files.writeString(root.resolve("token"), "s3cr3t");
+    Path throughTheLink = secretsDir.resolve("var/run/secrets/token");
+
+    // Act
+    String resolved =
+        new ServiceSecretResolver(root).resolve("${file:UTF-8:" + throughTheLink + "}").value();
+
+    // Assert
+    assertThat(resolved).isEqualTo("s3cr3t");
+  }
+
+  @Test
+  void resolve_unknownCharsetGiven_throwsPermanentReferenceException() throws IOException {
+    // Wrong wherever it runs, so it must not be softened by a caller that tolerates a secret this
+    // machine happens not to have.
+    // Arrange
+    Path token = Files.writeString(secretsDir.resolve("token"), "s3cr3t");
+
+    // Act & Assert
+    assertThatThrownBy(() -> resolver().resolve("${file:NOSUCH-CHARSET:" + token + "}"))
+        .isInstanceOf(PermanentReferenceException.class);
   }
 }

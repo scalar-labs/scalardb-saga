@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.nio.file.Files;
@@ -12,6 +13,7 @@ import java.nio.file.Path;
 import java.util.List;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.LoggerFactory;
@@ -276,5 +278,276 @@ class SagaServerCommandTest {
     assertThat(exitCode).isZero();
     // The start script the image invokes carries this name, so usage output has to match it.
     assertThat(out.toString()).contains("scalardb-saga-server").contains("--config");
+  }
+
+  /**
+   * {@code --validate-config}: the half of the command that runs to completion without binding a
+   * port or opening a store, so unlike {@link SagaServerCommand#call()}'s serving path it can be
+   * exercised end to end here — through the same parser and the same exception handler the process
+   * uses.
+   */
+  @Nested
+  class ValidateConfig {
+
+    @TempDir Path configDir;
+    @TempDir Path servicesDir;
+    @TempDir Path definitionsDir;
+    @TempDir Path secretsDir;
+
+    /** Runs the command capturing what it prints, the way the operator would see it. */
+    private int validate(StringWriter out, Path configFile) {
+      CommandLine commandLine = SagaServerCommand.newCommandLine();
+      commandLine.setOut(new PrintWriter(out, true));
+      return commandLine.execute("--validate-config", "--config", configFile.toString());
+    }
+
+    /** Writes a server.properties pointing at this test's directories. */
+    private Path writeConfig(String... extraLines) throws IOException {
+      StringBuilder text = new StringBuilder();
+      text.append("scalar.db.saga.server.services_path=").append(servicesDir).append('\n');
+      text.append("scalar.db.saga.server.definitions_path=").append(definitionsDir).append('\n');
+      text.append("scalar.db.saga.server.secrets_root=").append(secretsDir).append('\n');
+      // Loopback, so the fixture is a configuration the daemon would actually start on: with the
+      // default noop provider on a public interface it refuses to boot, and the validator now says
+      // so too. Tests that want that refusal append their own host line, which wins.
+      text.append("scalar.db.saga.server.host=127.0.0.1").append('\n');
+      for (String line : extraLines) {
+        text.append(line).append('\n');
+      }
+      return Files.writeString(configDir.resolve("server.properties"), text);
+    }
+
+    private void writeService(String name, String content) throws IOException {
+      Files.writeString(servicesDir.resolve(name + ".properties"), content);
+    }
+
+    private void writeDefinition(String sagaName, String service) throws IOException {
+      Files.writeString(
+          definitionsDir.resolve(sagaName + ".json"),
+          "{\"name\":\""
+              + sagaName
+              + "\",\"version\":\"1\",\"mode\":\"SAGA\",\"steps\":[{\"name\":\"s\",\"service\":\""
+              + service
+              + "\",\"execution\":{\"method\":\"POST\",\"path\":\"/x\"},"
+              + "\"compensation\":{\"method\":\"POST\",\"path\":\"/undo\"}}]}");
+    }
+
+    @Test
+    void parseArgs_validateConfigGiven_bindsTheFlagAndThePath() {
+      CommandLine.ParseResult result =
+          parse("--validate-config", "--config", "/etc/saga/server.properties");
+
+      assertThat(result.hasMatchedOption("--validate-config")).isTrue();
+      assertThat(result.matchedOptionValue("--config", (Path) null))
+          .isEqualTo(Path.of("/etc/saga/server.properties"));
+    }
+
+    @Test
+    void execute_validConfigurationGiven_exitsZero() throws IOException {
+      // Arrange
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("order-saga", "account");
+      StringWriter out = new StringWriter();
+
+      // Act
+      int exitCode = validate(out, writeConfig());
+
+      // Assert
+      assertThat(exitCode).isZero();
+      assertThat(out.toString())
+          .contains("1 service file(s) and 1 saga definition(s)")
+          .contains("Configuration is acceptable.");
+    }
+
+    @Test
+    void execute_definitionNamingAnAbsentService_exitsOneAndNamesIt() throws IOException {
+      // Arrange
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("order-saga", "billing");
+      StringWriter out = new StringWriter();
+
+      // Act
+      int exitCode = validate(out, writeConfig());
+
+      // Assert — 1, not picocli's SOFTWARE: a rejected configuration is a finding, not a crash.
+      assertThat(exitCode).isEqualTo(1);
+      assertThat(out.toString()).contains("billing").contains("Configuration is rejected.");
+    }
+
+    @Test
+    void execute_noDefinitionsGiven_exitsOneMirroringTheBootGuard() throws IOException {
+      // Arrange — a daemon refuses to start with nothing registered, so a validator that passed
+      // this would bless a configuration that cannot boot.
+      writeService("account", "base_url=http://account:8080\n");
+      StringWriter out = new StringWriter();
+
+      // Act
+      int exitCode = validate(out, writeConfig());
+
+      // Assert
+      assertThat(exitCode).isEqualTo(1);
+      assertThat(out.toString()).contains(SagaServer.noDefinitionsMessage());
+    }
+
+    @Test
+    void execute_anyConfigurationGiven_enumeratesWhatItCouldNotCheck() throws IOException {
+      // Arrange
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("order-saga", "account");
+      StringWriter out = new StringWriter();
+
+      // Act
+      validate(out, writeConfig());
+
+      // Assert — a clean result must not read as a promise that the daemon will start.
+      assertThat(out.toString())
+          .contains("Not checked without a running daemon:")
+          .contains("bumping its version")
+          .contains("ScalarDB settings")
+          .contains("can actually be bound");
+    }
+
+    @Test
+    void execute_secretsPresent_neverPrintsAResolvedValue() throws IOException {
+      // Arrange
+      Files.writeString(secretsDir.resolve("token"), "SUPER-SECRET-VALUE");
+      writeService(
+          "account",
+          "base_url=http://account:8080\nheader.X-Api-Key=${file:UTF-8:"
+              + secretsDir.resolve("token")
+              + "}\n");
+      writeDefinition("order-saga", "account");
+      StringWriter out = new StringWriter();
+
+      // Act
+      int exitCode = validate(out, writeConfig());
+
+      // Assert
+      assertThat(exitCode).isZero();
+      assertThat(out.toString()).doesNotContain("SUPER-SECRET-VALUE");
+    }
+
+    @Test
+    void execute_secretNotOnThisMachine_passesAndNamesTheSkippedCheck() throws IOException {
+      // Arrange — the laptop and CI case the lenient mode exists for.
+      writeService(
+          "account",
+          "base_url=http://account:8080\nheader.X-Api-Key=${file:UTF-8:"
+              + secretsDir.resolve("absent")
+              + "}\n");
+      writeDefinition("order-saga", "account");
+      StringWriter out = new StringWriter();
+
+      // Act
+      int exitCode = validate(out, writeConfig());
+
+      // Assert — acceptable, and explicit about the one thing it did not check.
+      assertThat(exitCode).isZero();
+      assertThat(out.toString())
+          .contains("warning(s):")
+          .contains("header.X-Api-Key")
+          .contains("header-value checks");
+    }
+
+    @Test
+    void execute_referencePathWithALineBreak_staysOnOneReportLine() throws IOException {
+      // Arrange — Properties.load performs escape processing, so a path written with \\n arrives
+      // carrying a real newline. It reaches the report through the resolver's message, and an
+      // unsanitized report would let a service file forge what reads as extra output lines.
+      writeService(
+          "account",
+          "base_url=http://account:8080\nheader.X-Api-Key=${file:UTF-8:"
+              + secretsDir
+              + "/a\\nb}\n");
+      writeDefinition("order-saga", "account");
+      StringWriter out = new StringWriter();
+
+      // Act
+      validate(out, writeConfig());
+
+      // Assert — anchored on the warning actually being present, so the absence below cannot pass
+      // merely because the report dropped it.
+      assertThat(out.toString()).contains("X-Api-Key").doesNotContain("a\nb");
+    }
+
+    @Test
+    void execute_unreadableSecretOnAShapeCheckedSetting_passesAndSaysItWasNotChecked()
+        throws IOException {
+      // Arrange — owner_id must match a pattern, and the reference text this command stands in
+      // does not. Checking the stand-in would reject a configuration that is correct in production.
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("order-saga", "account");
+      StringWriter out = new StringWriter();
+      Path config =
+          writeConfig(
+              "scalar.db.saga.server.owner_id=${file:UTF-8:"
+                  + secretsDir.resolve("absent-owner-id")
+                  + "}");
+
+      // Act
+      int exitCode = validate(out, config);
+
+      // Assert
+      assertThat(exitCode).isZero();
+      assertThat(out.toString())
+          .contains("owner_id")
+          .contains("was not checked")
+          .contains("Configuration is acceptable.");
+    }
+
+    @Test
+    void execute_malformedSecretReferenceGiven_exitsOneNamingTheExpectedForm() throws IOException {
+      // Arrange — the charset segment is missing, which fails on a running daemon too, so
+      // tolerating it would pass a configuration that can never start.
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("order-saga", "account");
+      StringWriter out = new StringWriter();
+      Path config =
+          writeConfig("scalar.db.saga.server.owner_id=${file:" + secretsDir.resolve("id") + "}");
+
+      // Act
+      int exitCode = validate(out, config);
+
+      // Assert
+      assertThat(exitCode).isEqualTo(1);
+      assertThat(out.toString()).contains("${file:<charset>:<path>}");
+    }
+
+    @Test
+    void execute_unauthenticatedOnANetworkInterface_exitsOneLikeTheDaemonWould()
+        throws IOException {
+      // Arrange — the shipped defaults: no security provider, bound to 0.0.0.0, no acknowledgement.
+      // The daemon refuses to start on this, so accepting it would be the exact disagreement this
+      // command exists to prevent.
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("order-saga", "account");
+      StringWriter out = new StringWriter();
+      Path config = writeConfig("scalar.db.saga.server.host=0.0.0.0");
+
+      // Act
+      int exitCode = validate(out, config);
+
+      // Assert
+      assertThat(exitCode).isEqualTo(1);
+      assertThat(out.toString()).contains("Refusing to start unauthenticated");
+    }
+
+    @Test
+    void execute_unknownServerSettingGiven_exitsOneAndSaysReadingStopped() throws IOException {
+      // Arrange — server settings are read in order and stop at the first refusal, unlike the
+      // service and definition files, which aggregate. The report must not imply otherwise.
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("order-saga", "account");
+      StringWriter out = new StringWriter();
+
+      // Act
+      int exitCode = validate(out, writeConfig("scalar.db.saga.server.no_such_key=1"));
+
+      // Assert
+      assertThat(exitCode).isEqualTo(1);
+      assertThat(out.toString())
+          .contains("no_such_key")
+          .contains("there may be more problems after this one");
+    }
   }
 }

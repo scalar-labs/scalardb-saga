@@ -32,6 +32,19 @@ public final class ApiKeySecurityProvider implements SagaSecurityProvider {
   }
 
   /**
+   * Parses and validates the API-key settings without building a provider, for {@code
+   * --validate-config}.
+   *
+   * @param resolved the resolved server properties
+   * @param raw the pre-resolution properties, which is what tells a secret reference from an inline
+   *     value
+   * @throws IllegalArgumentException if the API-key settings are missing or invalid
+   */
+  public static void validate(Properties resolved, Properties raw) {
+    ApiKeyConfig.from(resolved, raw);
+  }
+
+  /**
    * Builds a provider from {@code scalar.db.saga.server.security.apikey.*} properties.
    *
    * @param resolved the secret-resolved server properties

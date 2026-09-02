@@ -12,6 +12,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Properties;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -1504,5 +1505,73 @@ class SagaServerConfigTest {
     // flatten.
     assertThat(config.rawProperties().getProperty(SagaServerConfig.SECURITY_PROVIDER_KEY))
         .isEqualTo("${env:UNSET_NO_SUCH_VAR}");
+  }
+
+  /**
+   * Lenient loading, which only {@code --validate-config} uses. The rule it has to keep is that a
+   * secret this machine cannot read is recorded rather than substituted-and-believed, and that a
+   * reference which is wrong everywhere still fails.
+   */
+  @Nested
+  class LenientSecretResolution {
+
+    private Properties propertiesWith(String key, String value) {
+      Properties properties = new Properties();
+      properties.setProperty(key, value);
+      return properties;
+    }
+
+    @Test
+    public void load_unreadableSecretGiven_failsWithoutACollector() {
+      // The daemon's mode: a value it cannot resolve is a value it cannot serve with.
+      Properties properties =
+          propertiesWith(SagaServerConfig.OWNER_ID_KEY, "${file:UTF-8:/nonexistent/owner-id}");
+
+      assertThatThrownBy(() -> SagaServerConfig.load(properties))
+          .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    public void load_unreadableSecretGiven_recordsTheKeyAndCarriesOn() {
+      // Arrange
+      Properties properties =
+          propertiesWith(SagaServerConfig.OWNER_ID_KEY, "${file:UTF-8:/nonexistent/owner-id}");
+      SagaServerConfig.UnresolvedSecrets unresolved = new SagaServerConfig.UnresolvedSecrets();
+
+      // Act
+      SagaServerConfig config = SagaServerConfig.load(properties, unresolved);
+
+      // Assert — the key is named, so a caller knows which settings its verdict does not cover.
+      assertThat(config).isNotNull();
+      assertThat(unresolved.reasonsByKey()).containsOnlyKeys(SagaServerConfig.OWNER_ID_KEY);
+    }
+
+    @Test
+    public void load_malformedSecretReferenceGiven_failsEvenWithACollector() {
+      // No charset segment: wrong wherever it runs, so leniency must not swallow it.
+      Properties properties =
+          propertiesWith(SagaServerConfig.OWNER_ID_KEY, "${file:/nonexistent/owner-id}");
+
+      assertThatThrownBy(
+              () -> SagaServerConfig.load(properties, new SagaServerConfig.UnresolvedSecrets()))
+          .isInstanceOf(PermanentReferenceException.class);
+    }
+
+    @Test
+    public void load_readableSecretGiven_recordsNothing(@TempDir Path dir) throws IOException {
+      // Arrange — leniency is invisible where the secret is present.
+      Path token = Files.writeString(dir.resolve("owner"), "replica-7");
+      SagaServerConfig.UnresolvedSecrets unresolved = new SagaServerConfig.UnresolvedSecrets();
+
+      // Act
+      SagaServerConfig config =
+          SagaServerConfig.load(
+              propertiesWith(SagaServerConfig.OWNER_ID_KEY, "${file:UTF-8:" + token + "}"),
+              unresolved);
+
+      // Assert
+      assertThat(config.ownerId()).isEqualTo("replica-7");
+      assertThat(unresolved.isEmpty()).isTrue();
+    }
   }
 }

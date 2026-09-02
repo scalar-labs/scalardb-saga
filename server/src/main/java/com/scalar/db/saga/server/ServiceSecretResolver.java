@@ -32,7 +32,7 @@ import org.apache.commons.text.lookup.StringLookupFactory;
  * service files (the environment cannot change in a running pod, so it defeats rotation); the
  * parser warns on it.
  */
-final class ServiceSecretResolver {
+final class ServiceSecretResolver implements ServiceValueResolver {
 
   /**
    * Cap on a {@code ${file:...}} target, matching the cap on the service files themselves: a secret
@@ -59,15 +59,40 @@ final class ServiceSecretResolver {
    * Resolves any {@code ${env:...}} / {@code ${file:...}} references in {@code value}. A {@code
    * ${file:...}} reference outside the secrets root, or to a missing, non-regular, or oversized
    * file, throws; error messages name paths (they are configuration text) but never file contents.
+   *
+   * <p>This is the strict implementation, so it never returns an unresolved marker: every {@link
+   * Resolution} it returns carries a value.
    */
-  String resolve(String value) {
+  @Override
+  public Resolution resolve(String value) {
     try {
-      return substitutor.replace(value);
+      return Resolution.of(substitutor.replace(value));
     } catch (UncheckedIOException e) {
       // Unwrap to the message our own lookup composed; the cause chain would re-embed nothing
       // secret (contents are never in these messages), but the flattened form reads as one line.
       IOException cause = e.getCause();
       throw new IllegalArgumentException(cause != null ? cause.getMessage() : e.getMessage(), e);
+    }
+  }
+
+  /**
+   * The containment check for a secrets root that does not resolve: compares the paths as written,
+   * after normalizing {@code .} and {@code ..} away.
+   *
+   * <p>Strictly weaker than the symlink-resolved check, and used only where that one cannot run.
+   * {@link Path#startsWith} compares whole path components, so a root of {@code /run/secrets} does
+   * not admit {@code /run/secrets-evil}.
+   */
+  private void requireContainedAsWritten(Path path) {
+    if (!path.toAbsolutePath().normalize().startsWith(secretsRoot.toAbsolutePath().normalize())) {
+      throw new PermanentReferenceException(
+          "'"
+              + path
+              + "' resolves outside '"
+              + SagaServerConfig.SECRETS_ROOT_KEY
+              + "' "
+              + Redaction.redacted(secretsRoot.toString())
+              + ", as written");
     }
   }
 
@@ -85,21 +110,21 @@ final class ServiceSecretResolver {
     // file, so quoting it back discloses nothing they kept elsewhere, and it is what makes the
     // error actionable. A path under a secret-valued root would already put that secret in the
     // service file, which is a different problem from this one.
-    int colon = key.indexOf(':');
-    if (colon <= 0 || colon == key.length() - 1) {
-      throw new IllegalArgumentException(
-          "A ${file:...} reference in a service file must be ${file:<charset>:<path>}, e.g."
-              + " ${file:UTF-8:/run/secrets/token}; got '${file:"
-              + key
-              + "}'");
-    }
-    Charset charset = Charset.forName(key.substring(0, colon));
-    Path path = Path.of(key.substring(colon + 1));
+    SecretFileReference reference = SecretFileReference.parse(key);
+    Charset charset = reference.charset();
+    Path path = reference.path();
     try {
       Path realRoot;
       try {
         realRoot = secretsRoot.toRealPath();
       } catch (IOException e) {
+        // The root is not on this machine, so nothing can be resolved against it and the check
+        // below cannot run. Compare the paths as written instead: that cannot see through a
+        // symlink, but it still catches a reference plainly pointing somewhere else, which is the
+        // mistake an offline check is for. Only ever a fallback — applying it where the root does
+        // resolve would reject a reference reaching the root through a symlinked ancestor, which
+        // is an ordinary shape (a container's /var/run is usually a link to /run).
+        requireContainedAsWritten(path);
         throw new UncheckedIOException(
             new IOException(
                 "'"
@@ -115,14 +140,15 @@ final class ServiceSecretResolver {
       // real target and fails the startsWith check — the escape this confinement exists to stop.
       Path real = path.toRealPath();
       if (!real.startsWith(realRoot)) {
-        throw new UncheckedIOException(
-            new IOException(
-                "'"
-                    + path
-                    + "' resolves outside '"
-                    + SagaServerConfig.SECRETS_ROOT_KEY
-                    + "' "
-                    + Redaction.redacted(secretsRoot.toString())));
+        // Not an UncheckedIOException like its neighbours: this one must stay fatal even for a
+        // caller that tolerates unresolvable references. See PermanentReferenceException.
+        throw new PermanentReferenceException(
+            "'"
+                + path
+                + "' resolves outside '"
+                + SagaServerConfig.SECRETS_ROOT_KEY
+                + "' "
+                + Redaction.redacted(secretsRoot.toString()));
       }
       if (!Files.isRegularFile(real)) {
         throw new UncheckedIOException(new IOException("'" + path + "' is not a regular file"));

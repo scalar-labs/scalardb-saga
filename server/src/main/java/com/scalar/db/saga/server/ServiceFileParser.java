@@ -1,6 +1,7 @@
 package com.scalar.db.saga.server;
 
 import com.scalar.db.saga.server.SagaServerConfig.ServiceConfig;
+import com.scalar.db.saga.server.ServiceValueResolver.Resolution;
 import com.scalar.db.saga.transport.HttpServiceConfig;
 import java.io.IOException;
 import java.io.StringReader;
@@ -19,8 +20,6 @@ import java.util.Set;
 import java.util.TreeSet;
 import java.util.regex.Pattern;
 import org.jspecify.annotations.Nullable;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * Parses the {@code services_path} directory: one {@code <service-name>.properties} file per
@@ -48,8 +47,6 @@ import org.slf4j.LoggerFactory;
  */
 final class ServiceFileParser {
 
-  private static final Logger logger = LoggerFactory.getLogger(ServiceFileParser.class);
-
   static final String PROPERTIES_EXTENSION = ".properties";
 
   /**
@@ -68,7 +65,8 @@ final class ServiceFileParser {
       Pattern.compile("[!#$%&'*+\\-.^_`|~0-9A-Za-z]+");
 
   private static final String BASE_URL_KEY = "base_url";
-  private static final String ALLOWED_HOSTS_KEY = "allowed_hosts";
+  // Package-private: the reconciler consults it to skip the ceiling check on an unresolved value.
+  static final String ALLOWED_HOSTS_KEY = "allowed_hosts";
   private static final String MAX_BODY_BYTES_KEY = "max_body_bytes";
 
   /**
@@ -161,6 +159,18 @@ final class ServiceFileParser {
    * the target, never re-open the visible entry (see {@link #parseFile}).
    */
   record ServiceFile(String fileName, Path target) {}
+
+  /**
+   * One parsed service file: the configuration, plus the keys whose value could not be resolved.
+   *
+   * <p>{@code unresolvedKeys} is always empty for the daemon, whose resolver throws rather than
+   * returning a marker. It is non-empty only under {@code --validate-config} run where the secrets
+   * are not mounted, and it exists so a check that lives <b>outside</b> this class can skip the
+   * same way the checks inside it did — {@link #requireWithinCeiling} is the one, since an
+   * unresolved {@code allowed_hosts} would otherwise read as the empty allow-all a ceiling exists
+   * to forbid.
+   */
+  record ParsedService(ServiceConfig config, Set<String> unresolvedKeys) {}
 
   /**
    * The hygiene walk alone: lists the directory's service files as {@code name → entry}, in name
@@ -294,8 +304,12 @@ final class ServiceFileParser {
    * leaving the recorded hash describing content that was never applied — and the reconciler
    * repeats this parse against a directory a writer keeps updating.
    */
-  static ServiceConfig parseFile(
-      String name, String fileName, byte[] content, ServiceSecretResolver secrets) {
+  static ParsedService parseFile(
+      String name,
+      String fileName,
+      byte[] content,
+      ServiceValueResolver secrets,
+      List<String> warnings) {
     Properties properties = new Properties();
     try {
       properties.load(
@@ -310,18 +324,21 @@ final class ServiceFileParser {
     List<String> allowedHosts = List.of();
     long maxBodyBytes = 0;
     Map<String, String> headers = new LinkedHashMap<>();
+    Set<String> unresolvedKeys = new TreeSet<>();
     for (String key : new TreeSet<>(properties.stringPropertyNames())) {
       String raw = properties.getProperty(key);
       if (raw != null && raw.contains("${env:")) {
         // Legal but self-defeating in a service file: the environment cannot change in a running
         // pod, so an env-sourced value never rotates without a restart — the thing this directory
         // exists to avoid. The key comes from an unvalidated file, so it is sanitized against log
-        // forging (CRLF) before it reaches the log.
-        logger.warn(
-            "Service file '{}' key '{}' uses ${{env:...}}; environment variables cannot change in"
-                + " a running process, so this value will not pick up rotation",
-            fileName,
-            Redaction.oneLine(key));
+        // forging (CRLF) before it reaches the caller, which may log this verbatim.
+        warnings.add(
+            "Service file '"
+                + fileName
+                + "' key '"
+                + Redaction.oneLine(key)
+                + "' uses ${env:...}; environment variables cannot change in a running process, so"
+                + " this value will not pick up rotation");
       }
       // Unquoted: the delegated validators quote the whole key themselves, so quoting here would
       // double up in their messages.
@@ -331,32 +348,57 @@ final class ServiceFileParser {
       // since naming the typo helps more than resolving it.
       switch (key) {
         case BASE_URL_KEY -> {
-          baseUrl =
-              SagaServerConfig.requireNonBlank(qualifiedKey, resolve(secrets, raw, qualifiedKey));
-          try {
-            // The same rules every endpoint construction enforces, surfaced here so a bad URL is
-            // a per-file validation error instead of an apply-time one. The value is not echoed:
-            // it may have been resolved from a secret reference.
-            HttpServiceConfig.validateBaseUrl(baseUrl);
-          } catch (IllegalArgumentException e) {
-            throw new IllegalArgumentException(
-                qualifiedKey + ": " + e.getMessage() + " " + Redaction.redacted(baseUrl));
+          Resolution resolution = resolve(secrets, raw, qualifiedKey);
+          String unresolvedReason = resolution.unresolvedReason();
+          if (unresolvedReason == null) {
+            baseUrl = SagaServerConfig.requireNonBlank(qualifiedKey, resolution.value());
+            try {
+              // The same rules every endpoint construction enforces, surfaced here so a bad URL is
+              // a per-file validation error instead of an apply-time one. The value is not echoed:
+              // it may have been resolved from a secret reference.
+              HttpServiceConfig.validateBaseUrl(baseUrl);
+            } catch (IllegalArgumentException e) {
+              throw new IllegalArgumentException(
+                  qualifiedKey + ": " + e.getMessage() + " " + Redaction.redacted(baseUrl));
+            }
+          } else {
+            // The reference text stands in so the rest of the file still parses. Nothing builds an
+            // endpoint from it: only the offline validator ever sees a ParsedService naming an
+            // unresolved key, and it applies nothing.
+            baseUrl = resolution.value();
+            unresolvedKeys.add(key);
+            warnings.add(skipped(fileName, key, unresolvedReason, "its URL and host checks"));
           }
         }
         case ALLOWED_HOSTS_KEY -> {
-          allowedHosts =
-              SagaServerConfig.parseCommaSeparated(
-                  qualifiedKey,
-                  SagaServerConfig.requireNonBlank(
-                      qualifiedKey, resolve(secrets, raw, qualifiedKey)));
-          allowedHosts.forEach(host -> requireHostShape(qualifiedKey, host));
+          Resolution resolution = resolve(secrets, raw, qualifiedKey);
+          String unresolvedReason = resolution.unresolvedReason();
+          if (unresolvedReason == null) {
+            allowedHosts =
+                SagaServerConfig.parseCommaSeparated(
+                    qualifiedKey,
+                    SagaServerConfig.requireNonBlank(qualifiedKey, resolution.value()));
+            allowedHosts.forEach(host -> requireHostShape(qualifiedKey, host));
+          } else {
+            unresolvedKeys.add(key);
+            warnings.add(
+                skipped(
+                    fileName, key, unresolvedReason, "its host-shape and egress-ceiling checks"));
+          }
         }
-        case MAX_BODY_BYTES_KEY ->
+        case MAX_BODY_BYTES_KEY -> {
+          Resolution resolution = resolve(secrets, raw, qualifiedKey);
+          String unresolvedReason = resolution.unresolvedReason();
+          if (unresolvedReason == null) {
             maxBodyBytes =
                 requireWithinBodyCeiling(
-                    SagaServerConfig.parseBoundedLong(
-                        resolve(secrets, raw, qualifiedKey), qualifiedKey, 0L, 1L),
+                    SagaServerConfig.parseBoundedLong(resolution.value(), qualifiedKey, 0L, 1L),
                     qualifiedKey);
+          } else {
+            unresolvedKeys.add(key);
+            warnings.add(skipped(fileName, key, unresolvedReason, "its numeric range check"));
+          }
+        }
         default -> {
           if (!key.startsWith(HEADER_KEY_PREFIX)) {
             throw new IllegalArgumentException(
@@ -432,13 +474,20 @@ final class ServiceFileParser {
                     + " only one of the two would be sent, and which one is not deterministic."
                     + " Remove one of them.");
           }
-          headers.put(
-              header,
-              requireSendableValue(
-                  fileName,
-                  header,
-                  SagaServerConfig.requireNonBlank(
-                      qualifiedKey, resolve(secrets, raw, qualifiedKey))));
+          Resolution resolution = resolve(secrets, raw, qualifiedKey);
+          String unresolvedReason = resolution.unresolvedReason();
+          if (unresolvedReason == null) {
+            headers.put(
+                header,
+                requireSendableValue(
+                    fileName,
+                    header,
+                    SagaServerConfig.requireNonBlank(qualifiedKey, resolution.value())));
+          } else {
+            headers.put(header, resolution.value());
+            unresolvedKeys.add(key);
+            warnings.add(skipped(fileName, key, unresolvedReason, "its header-value checks"));
+          }
         }
       }
     }
@@ -450,7 +499,26 @@ final class ServiceFileParser {
               + BASE_URL_KEY
               + "', so there is nothing for a declarative step to call.");
     }
-    return new ServiceConfig(baseUrl, allowedHosts, maxBodyBytes, headers);
+    return new ParsedService(
+        new ServiceConfig(baseUrl, allowedHosts, maxBodyBytes, headers),
+        Set.copyOf(unresolvedKeys));
+  }
+
+  /**
+   * The warning an unresolved value leaves behind: what could not be resolved, why, and which
+   * checks did not run because of it. A validator that skipped a check silently would report a
+   * configuration as checked when it was not.
+   */
+  private static String skipped(String fileName, String key, String reason, String checks) {
+    return "Service file '"
+        + fileName
+        + "' key '"
+        + Redaction.oneLine(key)
+        + "' could not be resolved ("
+        + reason
+        + "), so "
+        + checks
+        + " did not run.";
   }
 
   /**
@@ -459,7 +527,7 @@ final class ServiceFileParser {
    * came from, and some of its failures (an invalid charset name, an unparsable path) escape its
    * own message wrapping entirely — so the attribution this class promises is added here.
    */
-  private static String resolve(ServiceSecretResolver secrets, String raw, String qualifiedKey) {
+  private static Resolution resolve(ServiceValueResolver secrets, String raw, String qualifiedKey) {
     try {
       return secrets.resolve(raw);
     } catch (RuntimeException e) {
