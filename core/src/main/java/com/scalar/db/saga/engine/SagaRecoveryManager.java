@@ -45,7 +45,7 @@ import org.slf4j.LoggerFactory;
  *
  * <p>On each recovery pass, sweeps the {@code saga_state} buckets for sagas in {@link
  * SagaStatus#RUNNING} or {@link SagaStatus#COMPENSATING} whose {@code updated_at} is older than
- * {@link RecoveryConfig#recoveryTimeoutMillis()}.
+ * {@link RecoveryConfig#stalenessThresholdMillis()}.
  *
  * <p><b>A swept saga is a candidate, not a claim.</b> The state row is written only at status
  * transitions and claims, never by step execution, so a saga that is merely running for a long time
@@ -86,9 +86,9 @@ class SagaRecoveryManager {
   // bucket through the whole ring.
   private static final int MAX_CONSECUTIVE_FAILED_PAGES = 3;
 
-  // A drive still holding its saga after this many recovery timeouts is stuck rather than slow: a
-  // healthy one emits an event at every step boundary, and the timeout is already sized above a
-  // single step's worst case. Not a knob — it only decides when a log line appears.
+  // A drive still holding its saga after this many staleness thresholds is stuck rather than
+  // slow: a healthy one emits an event at every step boundary, and the threshold is already
+  // sized above a single step's worst case. Not a knob — it only decides when a log line appears.
   private static final int HUNG_DRIVE_WARN_MULTIPLE = 10;
 
   private final SagaStore store;
@@ -176,7 +176,7 @@ class SagaRecoveryManager {
    */
   @SuppressWarnings("FutureReturnValueIgnored") // fire-and-forget scheduled tasks
   public void start() {
-    long intervalSeconds = config.recoveryIntervalSeconds();
+    long intervalSeconds = config.intervalSeconds();
     long offsetSeconds = SweepScatter.offsetSeconds(ownerId, "recovery", intervalSeconds);
     logger.info(
         "Recovery sweeps for owner {}: schedule offset {}s within the {}s interval",
@@ -397,7 +397,8 @@ class SagaRecoveryManager {
     try {
       // Compute the staleness cutoff once from the injected clock so every page this pass uses a
       // consistent threshold.
-      Instant staleThreshold = config.clock().instant().minusMillis(config.recoveryTimeoutMillis());
+      Instant staleThreshold =
+          config.clock().instant().minusMillis(config.stalenessThresholdMillis());
       // Forget sagas this instance has stopped driving, so a saga that runs long again is reported
       // again. On the pass thread, before any task can touch the set.
       hungDriveWarned.removeIf(id -> !engine.isLocallyActive(id));
@@ -439,12 +440,12 @@ class SagaRecoveryManager {
       while (true) {
         boolean staleActive =
             staleCursor != null
-                && stale.spent() < config.batchSize()
+                && stale.spent() < config.maxRecoveriesPerSweep()
                 && !stale.aborted
                 && !stale.storeUnavailable;
         boolean parkedActive =
             parkedCursor != null
-                && parked.spent() < config.batchSize()
+                && parked.spent() < config.maxRecoveriesPerSweep()
                 && !parked.aborted
                 && !parked.storeUnavailable;
         if (!staleActive && !parkedActive) {
@@ -508,14 +509,15 @@ class SagaRecoveryManager {
       String scanFailureMessage) {
     @Nullable ScanCursor cursor = start;
     int submitted = 0;
-    while (cursor != null && counters.spent() + submitted < config.batchSize()) {
+    while (cursor != null && counters.spent() + submitted < config.maxRecoveriesPerSweep()) {
       if (Thread.currentThread().isInterrupted()) {
         return cursor;
       }
       int before = futures.size();
       try {
         cursor =
-            page.scanAndSubmit(cursor, config.batchSize() - counters.spent() - submitted, futures);
+            page.scanAndSubmit(
+                cursor, config.maxRecoveriesPerSweep() - counters.spent() - submitted, futures);
       } catch (RejectedExecutionException e) {
         logger.warn("Recovery executor shut down; ending the pass", e);
         counters.aborted = true;
@@ -544,7 +546,7 @@ class SagaRecoveryManager {
   /**
    * Why a sweep ended where it did, for the pass summary. Budget is checked before revolution: when
    * the budget is exhausted exactly on the last bucket both are true, and budget is the actionable
-   * signal — it is what an operator sizes {@code batchSize} by.
+   * signal — it is what an operator sizes {@code maxRecoveriesPerSweep} by.
    */
   private StopReason stopReason(SweepCounters counters, @Nullable ScanCursor cursor) {
     if (counters.aborted) {
@@ -553,7 +555,7 @@ class SagaRecoveryManager {
     if (counters.storeUnavailable) {
       return StopReason.STORE_UNAVAILABLE;
     }
-    if (counters.spent() >= config.batchSize()) {
+    if (counters.spent() >= config.maxRecoveriesPerSweep()) {
       return StopReason.BUDGET;
     }
     if (cursor == null) {
@@ -852,10 +854,10 @@ class SagaRecoveryManager {
       return;
     }
     long stuckMillis = Duration.between(since.get(), config.clock().instant()).toMillis();
-    if (stuckMillis > HUNG_DRIVE_WARN_MULTIPLE * config.recoveryTimeoutMillis()
+    if (stuckMillis > HUNG_DRIVE_WARN_MULTIPLE * config.stalenessThresholdMillis()
         && hungDriveWarned.add(sagaId)) {
       logger.warn(
-          "Saga {} has been executing on this instance for {}ms, over {}x the recovery timeout."
+          "Saga {} has been executing on this instance for {}ms, over {}x the staleness threshold."
               + " Recovery skips it while it is active, so a wedged drive is never reclaimed here;"
               + " if it is stuck rather than slow, restart this instance or hand the saga to the"
               + " sweeper.",

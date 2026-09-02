@@ -109,9 +109,9 @@ Definitions are equally valid in YAML.
 
 | Module | Artifact | Java | Distribution |
 | --- | --- | --- | --- |
-| `server` | — | 21 | `ghcr.io/scalar-labs/scalardb-saga-server` |
+| `server` | — | 25 | `ghcr.io/scalar-labs/scalardb-saga-server` |
 | `client` | `com.scalar-labs:scalardb-saga-java-client-sdk` | 8 | Maven Central |
-| `core` | `com.scalar-labs:scalardb-saga-core` | 21 | Maven Central |
+| `core` | `com.scalar-labs:scalardb-saga-core` | 25 | Maven Central |
 | `api` | `com.scalar-labs:scalardb-saga-api` | 8 | Maven Central |
 | `rpc` | `com.scalar-labs:scalardb-saga-rpc` | 8 | Maven Central |
 | `bom` | `com.scalar-labs:scalardb-saga-bom` | — | Maven Central |
@@ -120,6 +120,16 @@ The server is not published to Maven Central: it ships as a container image, whi
 meant to be deployed. `api` and `rpc` are published because `core` and `client` expose them, not
 because you normally declare them yourself. The client SDK and the types it exposes are compiled
 for Java 8, so applications that cannot move off it can still use server mode.
+
+Embedding `core` requires a **Java 25** runtime. The engine drives sagas on virtual threads on its
+asynchronous, recovery, and retention paths, and on older runtimes a virtual thread that blocked on a
+monitor pinned its carrier, capping effective database concurrency at the number of carriers; JEP 491
+removed that pinning in JDK 24. Applications that cannot move off an older JVM should use server mode
+through the client SDK, which stays on Java 8.
+
+If your JDBC driver loads a native library, the JVM prints a `restricted method in java.lang.System`
+warning at startup, because JDK 24 made `System.load` a restricted method. Pass
+`--enable-native-access=ALL-UNNAMED` to silence it, as the server image does.
 
 ## Install
 
@@ -167,7 +177,7 @@ Snapshots built from `main` are published to the Central snapshot repository.
 
 Bug reports and feature suggestions are welcome as GitHub issues.
 
-Building requires JDK 21. Before opening a pull request:
+Building requires JDK 25. Before opening a pull request:
 
 ```bash
 ./gradlew spotlessApply   # format

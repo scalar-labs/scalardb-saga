@@ -227,6 +227,128 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
+  void registerDefinition_clockBehindTheLatestVersion_stampsStrictlyAfterIt() throws Exception {
+    // registered_at decides which version is "latest", and the value comes from whichever replica
+    // serves the registration. Replica clocks disagree, so a replica running behind would stamp a
+    // NEWER version with an OLDER time and lose the selection race to the version it replaces, so
+    // the upgrade would silently not take and the version it replaced would keep serving.
+    // Arrange — this replica's clock is a minute behind the newest existing registration
+    Instant behind = Instant.parse("2026-08-26T12:00:00Z");
+    Instant existingLatest = behind.plusSeconds(60);
+    ScalarDbSagaStore skewedStore =
+        new ScalarDbSagaStore(
+            txManager,
+            objectMapper,
+            schema,
+            ScalarDbSagaStoreConfig.builder().build(),
+            () -> OWN_APPEND_ID,
+            () -> behind);
+    SagaDefinition def =
+        SagaDefinition.newBuilder("order-saga")
+            .saga()
+            .version("v2")
+            .step("debit", "com.example.DebitStep")
+            .add()
+            .build();
+    Result olderRow = mock(Result.class);
+    when(olderRow.getTimestampTZ("registered_at")).thenReturn(existingLatest);
+    when(tx.get(any(Get.class))).thenReturn(Optional.empty());
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(olderRow));
+
+    // Act
+    skewedStore.registerDefinition(def);
+
+    // Assert — strictly after, so the newer version wins the latest-version lookup
+    ArgumentCaptor<Insert> captor = ArgumentCaptor.forClass(Insert.class);
+    verify(tx).insert(captor.capture());
+    Instant stamped =
+        Objects.requireNonNull(
+                captor.getValue().getColumns().get("registered_at"), "registered_at column missing")
+            .getTimestampTZValue();
+    assertThat(stamped).isAfter(existingLatest);
+  }
+
+  @Test
+  void registerDefinition_clockAheadByLessThanAMillisecond_stillStampsStrictlyAfter()
+      throws Exception {
+    // The column does not keep sub-millisecond precision. A clock a fraction of a millisecond past
+    // the latest row looks strictly later, but persists as the SAME millisecond and ties it —
+    // leaving the latest-version scan free to pick either row, so an upgrade can silently not
+    // take and the version it replaced keeps serving.
+    // Arrange
+    Instant existingLatest = Instant.parse("2026-08-26T12:00:00.123Z");
+    Instant aFractionLater = existingLatest.plusNanos(500_000);
+    ScalarDbSagaStore store =
+        new ScalarDbSagaStore(
+            txManager,
+            objectMapper,
+            schema,
+            ScalarDbSagaStoreConfig.builder().build(),
+            () -> OWN_APPEND_ID,
+            () -> aFractionLater);
+    SagaDefinition def =
+        SagaDefinition.newBuilder("order-saga")
+            .saga()
+            .version("v2")
+            .step("debit", "com.example.DebitStep")
+            .add()
+            .build();
+    Result olderRow = mock(Result.class);
+    when(olderRow.getTimestampTZ("registered_at")).thenReturn(existingLatest);
+    when(tx.get(any(Get.class))).thenReturn(Optional.empty());
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(olderRow));
+
+    // Act
+    store.registerDefinition(def);
+
+    // Assert — a whole millisecond later, which is what the column can still tell apart
+    ArgumentCaptor<Insert> captor = ArgumentCaptor.forClass(Insert.class);
+    verify(tx).insert(captor.capture());
+    assertThat(
+            Objects.requireNonNull(captor.getValue().getColumns().get("registered_at"))
+                .getTimestampTZValue())
+        .isEqualTo(existingLatest.plusMillis(1));
+  }
+
+  @Test
+  void registerDefinition_clockAheadOfTheLatestVersion_stampsWallTime() throws Exception {
+    // The ordinary case must not drift forward: with no skew the stamp is the clock, not
+    // latest + 1ms compounding over every registration.
+    // Arrange
+    Instant now = Instant.parse("2026-08-26T12:00:00Z");
+    ScalarDbSagaStore clockStore =
+        new ScalarDbSagaStore(
+            txManager,
+            objectMapper,
+            schema,
+            ScalarDbSagaStoreConfig.builder().build(),
+            () -> OWN_APPEND_ID,
+            () -> now);
+    SagaDefinition def =
+        SagaDefinition.newBuilder("order-saga")
+            .saga()
+            .version("v2")
+            .step("debit", "com.example.DebitStep")
+            .add()
+            .build();
+    Result olderRow = mock(Result.class);
+    when(olderRow.getTimestampTZ("registered_at")).thenReturn(now.minusSeconds(60));
+    when(tx.get(any(Get.class))).thenReturn(Optional.empty());
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(olderRow));
+
+    // Act
+    clockStore.registerDefinition(def);
+
+    // Assert
+    ArgumentCaptor<Insert> captor = ArgumentCaptor.forClass(Insert.class);
+    verify(tx).insert(captor.capture());
+    assertThat(
+            Objects.requireNonNull(captor.getValue().getColumns().get("registered_at"))
+                .getTimestampTZValue())
+        .isEqualTo(now);
+  }
+
+  @Test
   void registerDefinition_sameContentAlreadyExists_skipsWrite() throws Exception {
     // Arrange
     SagaDefinition def =

@@ -1,5 +1,6 @@
 package com.scalar.db.saga.server;
 
+import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.server.api.CallbackResource;
 import com.scalar.db.saga.server.api.ErrorMapper;
@@ -186,7 +187,26 @@ public final class SagaServer implements AutoCloseable {
               config.definitionsPath().orElse(null),
               config.callbackBaseUrl().isPresent() && config.callbackSecret().isPresent(),
               orchestrator.httpEndpointRegistrar(),
-              orchestrator::register);
+              new DefinitionStore() {
+                @Override
+                public void register(SagaDefinition definition) {
+                  orchestrator.register(definition);
+                }
+
+                @Override
+                public @Nullable SagaDefinition latest(String sagaName) {
+                  return orchestrator.latestDefinition(sagaName);
+                }
+
+                @Override
+                public boolean isRegistered(String sagaName, String version) {
+                  return orchestrator.isDefinitionRegistered(sagaName, version);
+                }
+              },
+              // What this replica's files describe is what it serves. The store keeps every
+              // definition ever registered, so without this a saga could never be taken out of
+              // service: removing its file would leave it startable here forever.
+              orchestrator::serve);
       this.reconciler = configReconciler;
       configReconciler.runOrThrow();
       // A daemon with no registered definitions cannot run any saga — fail fast rather than serve

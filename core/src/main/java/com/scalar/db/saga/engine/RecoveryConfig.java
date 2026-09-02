@@ -10,63 +10,70 @@ import java.util.Objects;
 /**
  * Configuration for the saga recovery manager.
  *
- * @param recoveryTimeoutMillis staleness threshold — a saga that has made no progress for this long
- *     is considered abandoned and eligible for recovery. Progress is judged from the saga's newest
- *     event, because step execution appends events without touching the state row: the row alone
- *     would make every long-running saga look dead. Size it above the longest a single step can
- *     take, which is its step timeout — {@code stepDeadline} is an absolute instant computed once
- *     before the retry loop, so it caps the whole attempt sequence, every retry and all backoff,
- *     not each attempt. A healthy saga emits an event only at step boundaries, so that timeout is
- *     the longest silence to expect. <b>With neither a step timeout nor a saga timeout configured
- *     there is no such bound</b> — the step runs until it returns — and no value of this setting is
- *     safe; set one of those timeouts if you rely on recovery leaving long steps alone. Raising
- *     this value delays recovery of genuinely crashed sagas by the same amount, so it is also the
- *     crash-recovery MTTR. Recovery is at-least-once across replicas: a step whose attempt sequence
- *     outlives this threshold emits no events while it runs, so another replica can begin
- *     recovering a saga the first is still executing — the loser is fenced at its next state write,
- *     but the participant call has already gone out, so participants must tolerate a duplicate
- *     invocation
- * @param recoveryIntervalSeconds how often the recovery scan runs (in seconds); each replica shifts
- *     its schedule within this interval by a deterministic offset derived from its owner ID, so
+ * @param stalenessThresholdMillis a saga that has made no progress for this long is considered
+ *     abandoned and eligible for recovery. Progress is judged from the saga's newest event, because
+ *     step execution appends events without touching the state row: the row alone would make every
+ *     long-running saga look dead. Size it above the longest a single step can take, which is its
+ *     step timeout — {@code stepDeadline} is an absolute instant computed once before the retry
+ *     loop, so it caps the whole attempt sequence, every retry and all backoff, not each attempt. A
+ *     healthy saga emits an event only at step boundaries, so that timeout is the longest silence
+ *     to expect. <b>With neither a step timeout nor a saga timeout configured there is no such
+ *     bound</b> — the step runs until it returns — and no value of this setting is safe; set one of
+ *     those timeouts if you rely on recovery leaving long steps alone. Raising this value delays
+ *     recovery of genuinely crashed sagas by the same amount, so it is also the crash-recovery
+ *     MTTR. Recovery is at-least-once across replicas: a step whose attempt sequence outlives this
+ *     threshold emits no events while it runs, so another replica can begin recovering a saga the
+ *     first is still executing — the loser is fenced at its next state write, but the participant
+ *     call has already gone out, so participants must tolerate a duplicate invocation
+ * @param intervalSeconds how often the recovery scan runs (in seconds); each replica shifts its
+ *     schedule within this interval by a deterministic offset derived from its owner ID, so
  *     replicas started together do not scan in phase
  * @param compensationGracePeriod how long a saga can remain stuck (with step failure events) before
  *     being escalated to {@link SagaStatus#ESCALATED}
- * @param batchSize per-pass work budget (committed claims for the staleness sweep, committed
- *     WAITING transitions for the parked sweep — each sweep has its own budget). Claims lost to
- *     another replica do not consume the budget, but failed attempts do, so a degraded store gets
- *     backpressure instead of a full-ring retry storm; the sweep keeps scanning until the budget is
- *     spent or a full bucket revolution completes, and a budget-stopped sweep resumes at the same
- *     position next pass. A small {@code batchSize} therefore never skips buckets — it only spreads
- *     a revolution across more passes, delaying recovery of the sagas behind the cut.
+ * @param maxRecoveriesPerSweep work budget for <em>each</em> sweep of a pass, not for the pass as a
+ *     whole: a pass sweeps for stale sagas (committed claims) and for overdue parked sagas
+ *     (committed WAITING transitions), and each gets this budget in full, so a pass can do up to
+ *     twice this number. The budgets are deliberately separate so a large stale backlog cannot
+ *     starve the parked sweep. Claims lost to another replica do not consume the budget, but failed
+ *     attempts do, so a degraded store gets backpressure instead of a full-ring retry storm; a
+ *     sweep keeps scanning until its budget is spent or a full bucket revolution completes, and a
+ *     budget-stopped sweep resumes at the same position next pass. A small value therefore never
+ *     skips buckets — it only spreads a revolution across more passes, delaying recovery of the
+ *     sagas behind the cut. Size it well above 200. A bucket is read as one page per recoverable
+ *     status and a sweep stops submitting once its budget runs out, so a budget below 200 truncates
+ *     the page, and the truncation always falls on the trailing status: at or below 100
+ *     COMPENSATING sagas are never recovered, and between 100 and 200 they are served but throttled
+ *     behind RUNNING ones. Treat 200 as a floor rather than a target — the budget is spent across
+ *     buckets, so a sweep budgeted at 200 covers a single bucket.
  * @param maxConcurrentRecoveries maximum number of sagas recovered concurrently within a single
  *     recovery pass (limits database pressure from virtual threads)
  * @param clock clock for time-based decisions (inject a fixed clock for testing)
  */
 public record RecoveryConfig(
-    long recoveryTimeoutMillis,
-    long recoveryIntervalSeconds,
+    long stalenessThresholdMillis,
+    long intervalSeconds,
     Duration compensationGracePeriod,
-    int batchSize,
+    int maxRecoveriesPerSweep,
     int maxConcurrentRecoveries,
     Clock clock) {
 
   /** Validates parameters. */
   public RecoveryConfig {
-    if (recoveryTimeoutMillis <= 0) {
+    if (stalenessThresholdMillis <= 0) {
       throw new IllegalArgumentException(
-          "recoveryTimeoutMillis must be > 0, got " + recoveryTimeoutMillis);
+          "stalenessThresholdMillis must be > 0, got " + stalenessThresholdMillis);
     }
-    if (recoveryIntervalSeconds <= 0) {
-      throw new IllegalArgumentException(
-          "recoveryIntervalSeconds must be > 0, got " + recoveryIntervalSeconds);
+    if (intervalSeconds <= 0) {
+      throw new IllegalArgumentException("intervalSeconds must be > 0, got " + intervalSeconds);
     }
     Objects.requireNonNull(compensationGracePeriod, "compensationGracePeriod must not be null");
     if (compensationGracePeriod.isNegative() || compensationGracePeriod.isZero()) {
       throw new IllegalArgumentException(
           "compensationGracePeriod must be positive, got " + compensationGracePeriod);
     }
-    if (batchSize <= 0) {
-      throw new IllegalArgumentException("batchSize must be > 0, got " + batchSize);
+    if (maxRecoveriesPerSweep <= 0) {
+      throw new IllegalArgumentException(
+          "maxRecoveriesPerSweep must be > 0, got " + maxRecoveriesPerSweep);
     }
     if (maxConcurrentRecoveries <= 0) {
       throw new IllegalArgumentException(
@@ -76,8 +83,8 @@ public record RecoveryConfig(
   }
 
   /**
-   * Default: 60s timeout, scan every 30s, 4-hour grace period, batch size 1000 (successful
-   * recoveries per pass), 10 concurrent recoveries.
+   * Default: 60s staleness threshold, scan every 30s, 4-hour grace period, 1000 recoveries per
+   * sweep, 10 concurrent recoveries.
    */
   public static RecoveryConfig defaults() {
     return defaults(Clock.systemUTC());

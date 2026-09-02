@@ -29,6 +29,7 @@ import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaDefinitionNotServedException;
 import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.store.EventType;
@@ -43,6 +44,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
@@ -218,6 +220,122 @@ class DefaultSagaOrchestratorTest {
       assertThatThrownBy(() -> orchestrator.start("unknown", Map.of()))
           .isInstanceOf(SagaDefinitionNotFoundException.class);
       verify(definitionRegistry).resolve("unknown");
+    }
+
+    @Test
+    void start_withServedSetExcludingTheName_throwsDefinitionNotServed() {
+      // The store is append-only, so a definition stays registered after the configuration that
+      // introduced it is gone. The served set is what says a saga is no longer startable here.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      orchestrator.serve(Set.of("other-saga"));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.start("transfer", Map.of()))
+          .isInstanceOf(SagaDefinitionNotServedException.class);
+      verify(engine, never()).execute(any(), any(), any());
+    }
+
+    @Test
+    void start_withServedSetIncludingTheName_starts() {
+      // The other half of the gate: publishing a served set must not block what it contains.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.execute(def, null, Map.of())).thenReturn("saga-1");
+      orchestrator.serve(Set.of("transfer"));
+
+      // Act
+      String sagaId = orchestrator.start("transfer", Map.of());
+
+      // Assert
+      assertThat(sagaId).isEqualTo("saga-1");
+    }
+
+    @Test
+    void start_unknownDefinitionWithServedSetExcludingIt_throwsDefinitionNotFound() {
+      // A name nobody ever registered is a different problem with a different fix, so it must stay
+      // a not-found rather than being reported as something this daemon declines to serve.
+      // Arrange
+      when(definitionRegistry.resolve("unknown")).thenReturn(null);
+      orchestrator.serve(Set.of("transfer"));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.start("unknown", Map.of()))
+          .isInstanceOf(SagaDefinitionNotFoundException.class);
+    }
+
+    @Test
+    void start_pinnedToAVersionOfANameNotServed_throwsDefinitionNotServed() {
+      // Being served is a property of the NAME, so pinning a version is refused on the same basis
+      // rather than being a way around it.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer", "1.0")).thenReturn(def);
+      orchestrator.serve(Set.of("other-saga"));
+
+      // Act & Assert
+      assertThatThrownBy(
+              () -> orchestrator.start(new SagaDefinitionId("transfer", "1.0"), Map.of()))
+          .isInstanceOf(SagaDefinitionNotServedException.class);
+      verify(engine, never()).execute(any(), any(), any());
+    }
+
+    @Test
+    void latestDefinition_registeredName_returnsWhatANameOnlyStartWouldRun() {
+      // The daemon asks this to find out whether its definition files still describe what serves.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+
+      // Act & Assert
+      assertThat(orchestrator.latestDefinition("transfer")).isSameAs(def);
+    }
+
+    @Test
+    void latestDefinition_unregisteredName_returnsNull() {
+      // Arrange
+      when(definitionRegistry.resolve("unknown")).thenReturn(null);
+
+      // Act & Assert
+      assertThat(orchestrator.latestDefinition("unknown")).isNull();
+    }
+
+    @Test
+    @SuppressWarnings("NullAway") // deliberately passing null: the guard is what is under test
+    void latestDefinition_nullSagaNameGiven_throwsNullPointer() {
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.latestDefinition(null))
+          .isInstanceOf(NullPointerException.class);
+    }
+
+    @Test
+    void isDefinitionRegistered_storedVersion_returnsTrue() {
+      // This is what separates a rollback from an ordinary upgrade: both name a version that is
+      // not the latest, and only a rollback names one the store already has.
+      // Arrange
+      when(definitionRegistry.resolve("transfer", "1.0")).thenReturn(definition("transfer"));
+
+      // Act & Assert
+      assertThat(orchestrator.isDefinitionRegistered("transfer", "1.0")).isTrue();
+    }
+
+    @Test
+    void isDefinitionRegistered_versionNeverStored_returnsFalse() {
+      // Arrange
+      when(definitionRegistry.resolve("transfer", "9.9")).thenReturn(null);
+
+      // Act & Assert
+      assertThat(orchestrator.isDefinitionRegistered("transfer", "9.9")).isFalse();
+    }
+
+    @Test
+    @SuppressWarnings("NullAway") // deliberately passing null: the guard is what is under test
+    void isDefinitionRegistered_nullVersionGiven_throwsNullPointer() {
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.isDefinitionRegistered("transfer", null))
+          .isInstanceOf(NullPointerException.class);
     }
 
     @Test
