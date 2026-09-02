@@ -795,6 +795,13 @@ public final class SagaServer implements AutoCloseable {
    * Jetty drain, so none is still touching the store when {@link DefaultSagaOrchestrator#close()}
    * closes it. Bounded by the same drain window, and only ever reached with stragglers after that
    * window already overran, so it logs rather than blocking shutdown further.
+   *
+   * <p>A straggler past that point is <b>deliberately abandoned</b>, unlike {@link #shutdownGrpc},
+   * which escalates to {@code shutdownNow()}. It is left running and the store closes underneath
+   * it. That is a considered trade rather than an oversight: by then the client's connection is
+   * gone, the saga is persisted, and recovery is the backstop — whereas blocking shutdown further
+   * risks the whole process being killed mid-drain, which loses the sagas still draining below.
+   * Widening the window is the lever here, not escalation.
    */
   private void shutdownHttpVirtualThreads(
       ExecutorService httpVirtualThreads, long drainDeadlineNanos) {
