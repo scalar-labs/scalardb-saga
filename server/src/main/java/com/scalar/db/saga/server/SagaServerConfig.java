@@ -10,6 +10,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -827,37 +828,75 @@ public final class SagaServerConfig {
    *     contradict each other
    */
   public static SagaServerConfig load(Properties properties) {
-    return load(properties, SecretMode.STRICT, new ArrayList<>());
+    return load(properties, null);
   }
 
   /**
-   * How a secret reference that cannot be read is treated.
+   * What a lenient load could not resolve, keyed by configuration key.
    *
-   * <p>The daemon is {@link #STRICT}: a value it could not resolve is a value it cannot serve with.
-   * {@code --validate-config} is {@link #LENIENT}, because it routinely runs where the secrets are
-   * not mounted — a laptop, a CI job — and failing there would make it useless in the two places it
-   * is for. Leniency is never visible when the secrets are present: it softens an actual failure,
-   * it does not skip the attempt.
+   * <p>Handing one to {@link #load} is what makes the load lenient: a secret reference this machine
+   * cannot read is recorded here instead of failing, and the reference text stands in so the load
+   * can continue. Passing {@code null} is the daemon's mode — a value it cannot resolve is a value
+   * it cannot serve with.
+   *
+   * <p>The stand-in is not a value, and a caller must not report a check made against it as a
+   * check. The keys are recorded, not only the reasons, so a caller can tell which settings its
+   * verdict does not actually cover.
    */
-  enum SecretMode {
-    STRICT,
-    LENIENT
+  static final class UnresolvedSecrets {
+
+    private final Map<String, String> reasonsByKey = new LinkedHashMap<>();
+
+    void record(String key, String reason) {
+      reasonsByKey.put(key, reason);
+    }
+
+    /** The keys left unresolved, in the order they were read, each mapped to why. */
+    Map<String, String> reasonsByKey() {
+      return Collections.unmodifiableMap(reasonsByKey);
+    }
+
+    boolean isEmpty() {
+      return reasonsByKey.isEmpty();
+    }
   }
 
   /**
-   * Parses a {@link SagaServerConfig}, tolerating unresolvable secret references under {@link
-   * SecretMode#LENIENT} and appending one warning per reference it could not read.
+   * Parses a {@link SagaServerConfig}, recording into {@code unresolved} — when one is given —
+   * every secret reference this machine cannot read, instead of failing on it.
    *
    * @param properties server + ScalarDB properties
-   * @param mode how to treat a secret reference that cannot be read
-   * @param warnings collector for the references left unresolved
+   * @param unresolved collector for unreadable secret references, or {@code null} to fail on one
    * @return the parsed configuration
    */
-  static SagaServerConfig load(Properties properties, SecretMode mode, List<String> warnings) {
+  static SagaServerConfig load(Properties properties, @Nullable UnresolvedSecrets unresolved) {
     Objects.requireNonNull(properties, "properties must not be null");
     // Keep the pre-resolution properties so a provider can tell a secret reference from an inline
     // value (both look identical after resolution) — e.g. the API-key provider requires references.
-    return new SagaServerConfig(resolveSecrets(properties, mode, warnings), properties);
+    try {
+      return new SagaServerConfig(resolveSecrets(properties, unresolved), properties);
+    } catch (RuntimeException e) {
+      if (unresolved == null || unresolved.isEmpty()) {
+        throw e;
+      }
+      // The stand-in left in place of an unreadable secret is not a value, and some settings are
+      // checked for their shape: owner_id against a pattern, a port against a range. Those checks
+      // would be judging text this class invented rather than anything the operator wrote, so the
+      // settings carrying one are dropped and the parse retried with their defaults. What that
+      // costs is that they go unchecked, which is why the keys are recorded for the caller to
+      // report. If the retry fails too, the problem is the operator's and its error is the honest
+      // one to raise.
+      Properties readable = new Properties();
+      properties.forEach(
+          (key, value) -> {
+            if (!unresolved.reasonsByKey().containsKey(key)) {
+              readable.put(key, value);
+            }
+          });
+      // Anything unreadable was just removed, so nothing new can be recorded; a fresh collector
+      // keeps the caller's list to what the first pass found.
+      return new SagaServerConfig(resolveSecrets(readable, new UnresolvedSecrets()), properties);
+    }
   }
 
   /**
@@ -940,7 +979,7 @@ public final class SagaServerConfig {
    * syntax.
    */
   private static Properties resolveSecrets(
-      Properties properties, SecretMode mode, List<String> warnings) {
+      Properties properties, @Nullable UnresolvedSecrets unresolved) {
     SecretResolver resolver = new SecretResolver();
     // Rebuild from stringPropertyNames() so every string property is flattened into one table,
     // including any inherited from a defaults chain (new Properties(defaults)). A plain putAll or
@@ -954,25 +993,25 @@ public final class SagaServerConfig {
       }
       if (!key.startsWith(PREFIX)) {
         resolved.setProperty(key, value); // scalar.db.* store keys pass through to ScalarDB
-      } else if (mode == SecretMode.STRICT) {
+        continue;
+      }
+      try {
         resolved.setProperty(key, resolver.resolve(value));
-      } else {
-        try {
-          resolved.setProperty(key, resolver.resolve(value));
-        } catch (RuntimeException e) {
-          // The reference text stands in for the value. Nothing here checks a secret's content —
-          // the settings that carry one are checked for presence and for pairing, which the
-          // reference satisfies — so this changes no verdict; it only avoids failing the whole
-          // check on a file that is simply not mounted on this machine. The value is never echoed:
-          // it may be an inline secret rather than a reference.
-          resolved.setProperty(key, value);
-          warnings.add(
-              "'"
-                  + key
-                  + "' could not be resolved ("
-                  + e.getMessage()
-                  + "); the reference text stands in for its value.");
+      } catch (PermanentReferenceException e) {
+        // Wrong wherever it runs, so never softened: tolerating it would pass a configuration that
+        // cannot start a server.
+        throw e;
+      } catch (RuntimeException e) {
+        if (unresolved == null) {
+          throw e;
         }
+        // The reference text stands in so the load can proceed, which keeps the checks that are
+        // about a setting's PRESENCE meaningful — the callback URL and secret must still be given
+        // together. It is not a value, and the caller is told which keys carry one so it does not
+        // report a check made against the stand-in as a check. The value is never echoed: it may be
+        // an inline secret rather than a reference.
+        resolved.setProperty(key, value);
+        unresolved.record(key, e.getMessage() == null ? e.toString() : e.getMessage());
       }
     }
     // Non-string entries aren't listed by stringPropertyNames(); carry them through. forEach covers

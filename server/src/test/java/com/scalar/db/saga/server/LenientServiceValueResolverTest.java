@@ -71,7 +71,7 @@ class LenientServiceValueResolverTest {
 
     // Act & Assert — not softened: this file would be read on a real daemon too.
     assertThatThrownBy(() -> resolver().resolve("${file:UTF-8:" + outside + "}"))
-        .isInstanceOf(ServiceSecretResolver.PermanentReferenceException.class);
+        .isInstanceOf(PermanentReferenceException.class);
   }
 
   @Test
@@ -94,7 +94,7 @@ class LenientServiceValueResolverTest {
     // touching the filesystem. Softening it would let --validate-config pass a file that can never
     // start a server, which is the one thing it exists to prevent.
     assertThatThrownBy(() -> resolver().resolve("${file:/run/secrets/token}"))
-        .isInstanceOf(ServiceSecretResolver.PermanentReferenceException.class);
+        .isInstanceOf(PermanentReferenceException.class);
   }
 
   @Test
@@ -104,7 +104,7 @@ class LenientServiceValueResolverTest {
 
     // Act & Assert
     assertThatThrownBy(() -> resolver().resolve("${file:NOSUCH-CHARSET:" + token + "}"))
-        .isInstanceOf(ServiceSecretResolver.PermanentReferenceException.class);
+        .isInstanceOf(PermanentReferenceException.class);
   }
 
   @Test
@@ -118,6 +118,6 @@ class LenientServiceValueResolverTest {
     // Act & Assert
     assertThatThrownBy(
             () -> missingRoot.resolve("${file:UTF-8:" + elsewhere.resolve("token") + "}"))
-        .isInstanceOf(ServiceSecretResolver.PermanentReferenceException.class);
+        .isInstanceOf(PermanentReferenceException.class);
   }
 }

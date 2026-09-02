@@ -183,18 +183,19 @@ public class SagaServerCommand implements Callable<Integer> {
    * @return 0 when the configuration is acceptable, 1 when it is not
    */
   private static int validateConfiguration(Path path, Properties properties, PrintWriter out) {
-    List<String> warnings = new ArrayList<>();
+    SagaServerConfig.UnresolvedSecrets unresolved = new SagaServerConfig.UnresolvedSecrets();
     SagaServerConfig config;
     try {
-      config = SagaServerConfig.load(properties, SagaServerConfig.SecretMode.LENIENT, warnings);
+      config = SagaServerConfig.load(properties, unresolved);
     } catch (RuntimeException e) {
-      // load() stops at the first key it cannot accept, so this is one problem rather than the
-      // list; the report says as much instead of implying the file has exactly one.
+      // Not an artefact of an unreadable secret — load() retries without those itself. The server
+      // settings are read in order and stop at the first refusal, so this is one problem rather
+      // than the list, and the report says as much instead of implying the file has exactly one.
       return report(
           out,
           path,
           List.of(describeChain(e)),
-          warnings,
+          unresolvedWarnings(unresolved),
           0,
           0,
           "The server settings are read in order and reading stopped here, so there may be more"
@@ -224,9 +225,35 @@ public class SagaServerCommand implements Callable<Integer> {
     if (problems.isEmpty() && result.definitionCount() == 0) {
       problems.add(SagaServer.noDefinitionsMessage());
     }
+    // The other guard that refuses a boot on configuration alone. Reported alongside the rest
+    // rather than instead of them: it is independent of anything the reconciler found.
+    String insecureBinding = SagaServer.insecureBindingRefusal(config);
+    if (insecureBinding != null) {
+      problems.add(insecureBinding);
+    }
+    List<String> warnings = unresolvedWarnings(unresolved);
     warnings.addAll(result.warnings());
     return report(
         out, path, problems, warnings, result.serviceCount(), result.definitionCount(), null);
+  }
+
+  /**
+   * One warning per setting whose secret this machine could not read, saying what was skipped
+   * rather than what was substituted.
+   */
+  private static List<String> unresolvedWarnings(SagaServerConfig.UnresolvedSecrets unresolved) {
+    List<String> warnings = new ArrayList<>();
+    unresolved
+        .reasonsByKey()
+        .forEach(
+            (key, reason) ->
+                warnings.add(
+                    "'"
+                        + key
+                        + "' could not be read on this machine ("
+                        + reason
+                        + "), so its value was not checked."));
+    return warnings;
   }
 
   /**

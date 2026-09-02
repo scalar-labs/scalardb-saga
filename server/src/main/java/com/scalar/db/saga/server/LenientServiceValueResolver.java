@@ -12,9 +12,8 @@ import java.nio.file.Path;
  * root — still fails, because softening it would let the check pass a configuration that can never
  * start a daemon, which is the one thing this command exists to prevent.
  *
- * <p>{@link ServiceSecretResolver.PermanentReferenceException} draws that line, and every one of
- * those checks runs before the file is opened, so the classification does not depend on what
- * happens to be mounted.
+ * <p>{@link PermanentReferenceException} draws that line, and every one of those checks runs before
+ * the file is opened, so the classification does not depend on what happens to be mounted.
  */
 final class LenientServiceValueResolver implements ServiceValueResolver {
 
@@ -28,7 +27,7 @@ final class LenientServiceValueResolver implements ServiceValueResolver {
   public Resolution resolve(String value) {
     try {
       return strict.resolve(value);
-    } catch (ServiceSecretResolver.PermanentReferenceException e) {
+    } catch (PermanentReferenceException e) {
       throw e;
     } catch (RuntimeException e) {
       return Resolution.unresolved(value, e.getMessage() == null ? e.toString() : e.getMessage());

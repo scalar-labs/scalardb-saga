@@ -174,6 +174,23 @@ jobs:
             --volume "$PWD/.github/smoke:/smoke:ro" \
             scalardb-saga-server:ci --validate-config --config /smoke/server.properties
 
+      # The fixture above acknowledges insecure mode, so it cannot exercise the guard that refuses
+      # to serve unauthenticated on a public interface — the likeliest way the two paths drift.
+      # Strip the acknowledgement and assert the offline check refuses it, as a boot would.
+      - name: Check --validate-config refuses what the daemon refuses to boot
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/smoke-unacknowledged
+          cp -R .github/smoke/. /tmp/smoke-unacknowledged/
+          grep -v 'insecure_mode' .github/smoke/server.properties \
+            > /tmp/smoke-unacknowledged/server.properties
+          if docker run --rm \
+              --volume "/tmp/smoke-unacknowledged:/smoke:ro" \
+              scalardb-saga-server:ci --validate-config --config /smoke/server.properties; then
+            echo "::error::--validate-config accepted a configuration the daemon refuses to boot"
+            exit 1
+          fi
+
       # The configuration is a checked-in fixture (.github/smoke), shared with image-arm64-native-test
       # so the two jobs cannot drift into booting differently configured daemons.
       - name: Start the container

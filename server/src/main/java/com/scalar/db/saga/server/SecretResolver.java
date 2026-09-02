@@ -47,10 +47,13 @@ final class SecretResolver {
 
   SecretResolver() {
     StringLookupFactory factory = StringLookupFactory.INSTANCE;
+    StringLookup fileLookup = factory.fileStringLookup();
     Map<String, StringLookup> lookups =
         Map.of(
-            "env", factory.environmentVariableStringLookup(),
-            "file", factory.fileStringLookup());
+            "env",
+            factory.environmentVariableStringLookup(),
+            "file",
+            key -> readFile(fileLookup, key));
     // addDefaultLookups=false excludes script/url/dns/etc. — the CVE-2022-42889 vectors; a null
     // default lookup means an unprefixed ${NAME} is not resolved either.
     StringLookup interpolator = factory.interpolatorStringLookup(lookups, null, false);
@@ -61,6 +64,21 @@ final class SecretResolver {
     // corrupted or trigger an unintended nested file/env lookup. Disable that recursion.
     substitutor.setDisableSubstitutionInValues(true);
     this.substitutor = substitutor;
+  }
+
+  /**
+   * Validates the reference form before the library reads the file, so a malformed reference and an
+   * unknown charset are reported as {@link PermanentReferenceException} rather than as whatever the
+   * library makes of them.
+   *
+   * <p>The distinction is what lets {@code --validate-config} soften "that secret is not on this
+   * machine" while still failing a reference that is wrong wherever it runs. Without it,
+   * commons-text reports both as the same {@code IllegalArgumentException}, and a typo in a
+   * reference would pass an offline check and then stop the daemon from starting.
+   */
+  private static String readFile(StringLookup fileLookup, String key) {
+    SecretFileReference.parse(key);
+    return fileLookup.lookup(key);
   }
 
   /**

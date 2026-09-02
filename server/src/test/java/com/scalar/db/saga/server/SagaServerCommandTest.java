@@ -307,6 +307,10 @@ class SagaServerCommandTest {
       text.append("scalar.db.saga.server.services_path=").append(servicesDir).append('\n');
       text.append("scalar.db.saga.server.definitions_path=").append(definitionsDir).append('\n');
       text.append("scalar.db.saga.server.secrets_root=").append(secretsDir).append('\n');
+      // Loopback, so the fixture is a configuration the daemon would actually start on: with the
+      // default noop provider on a public interface it refuses to boot, and the validator now says
+      // so too. Tests that want that refusal append their own host line, which wins.
+      text.append("scalar.db.saga.server.host=127.0.0.1").append('\n');
       for (String line : extraLines) {
         text.append(line).append('\n');
       }
@@ -458,8 +462,71 @@ class SagaServerCommandTest {
       // Act
       validate(out, writeConfig());
 
+      // Assert — anchored on the warning actually being present, so the absence below cannot pass
+      // merely because the report dropped it.
+      assertThat(out.toString()).contains("X-Api-Key").doesNotContain("a\nb");
+    }
+
+    @Test
+    void execute_unreadableSecretOnAShapeCheckedSetting_passesAndSaysItWasNotChecked()
+        throws IOException {
+      // Arrange — owner_id must match a pattern, and the reference text this command stands in
+      // does not. Checking the stand-in would reject a configuration that is correct in production.
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("order-saga", "account");
+      StringWriter out = new StringWriter();
+      Path config =
+          writeConfig(
+              "scalar.db.saga.server.owner_id=${file:UTF-8:"
+                  + secretsDir.resolve("absent-owner-id")
+                  + "}");
+
+      // Act
+      int exitCode = validate(out, config);
+
       // Assert
-      assertThat(out.toString()).doesNotContain("a\nb");
+      assertThat(exitCode).isZero();
+      assertThat(out.toString())
+          .contains("owner_id")
+          .contains("was not checked")
+          .contains("Configuration is acceptable.");
+    }
+
+    @Test
+    void execute_malformedSecretReferenceGiven_exitsOneNamingTheExpectedForm() throws IOException {
+      // Arrange — the charset segment is missing, which fails on a running daemon too, so
+      // tolerating it would pass a configuration that can never start.
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("order-saga", "account");
+      StringWriter out = new StringWriter();
+      Path config =
+          writeConfig("scalar.db.saga.server.owner_id=${file:" + secretsDir.resolve("id") + "}");
+
+      // Act
+      int exitCode = validate(out, config);
+
+      // Assert
+      assertThat(exitCode).isEqualTo(1);
+      assertThat(out.toString()).contains("${file:<charset>:<path>}");
+    }
+
+    @Test
+    void execute_unauthenticatedOnANetworkInterface_exitsOneLikeTheDaemonWould()
+        throws IOException {
+      // Arrange — the shipped defaults: no security provider, bound to 0.0.0.0, no acknowledgement.
+      // The daemon refuses to start on this, so accepting it would be the exact disagreement this
+      // command exists to prevent.
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("order-saga", "account");
+      StringWriter out = new StringWriter();
+      Path config = writeConfig("scalar.db.saga.server.host=0.0.0.0");
+
+      // Act
+      int exitCode = validate(out, config);
+
+      // Assert
+      assertThat(exitCode).isEqualTo(1);
+      assertThat(out.toString()).contains("Refusing to start unauthenticated");
     }
 
     @Test

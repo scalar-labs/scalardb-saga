@@ -35,27 +35,6 @@ import org.apache.commons.text.lookup.StringLookupFactory;
 final class ServiceSecretResolver implements ServiceValueResolver {
 
   /**
-   * A reference that is wrong wherever it runs, kept distinct from every other resolution failure
-   * so it stays fatal even where failures are tolerated.
-   *
-   * <p>{@code --validate-config} runs where the secrets are usually absent, and softens failures
-   * that describe <b>this machine</b> rather than the configuration: the file is not here, the root
-   * is not mounted, the path is a directory, the file is too large. None of those say anything
-   * about whether the configuration is right.
-   *
-   * <p>These do. A malformed {@code ${file:...}} form and a charset no JVM knows fail identically
-   * on a running daemon, so softening them would let an offline check pass a file that can never
-   * start a server. An escaping path is the same in a different way: the service file is reaching
-   * somewhere it may never reach, which is as wrong on a laptop as in production, and is exactly
-   * what an offline check should catch.
-   */
-  static final class PermanentReferenceException extends IllegalArgumentException {
-    PermanentReferenceException(String message) {
-      super(message);
-    }
-  }
-
-  /**
    * Cap on a {@code ${file:...}} target, matching the cap on the service files themselves: a secret
    * is small, and an unbounded read of a mis-pointed reference (a device node, a huge file) must
    * not stall or exhaust the resolving pass.
@@ -97,6 +76,27 @@ final class ServiceSecretResolver implements ServiceValueResolver {
   }
 
   /**
+   * The containment check for a secrets root that does not resolve: compares the paths as written,
+   * after normalizing {@code .} and {@code ..} away.
+   *
+   * <p>Strictly weaker than the symlink-resolved check, and used only where that one cannot run.
+   * {@link Path#startsWith} compares whole path components, so a root of {@code /run/secrets} does
+   * not admit {@code /run/secrets-evil}.
+   */
+  private void requireContainedAsWritten(Path path) {
+    if (!path.toAbsolutePath().normalize().startsWith(secretsRoot.toAbsolutePath().normalize())) {
+      throw new PermanentReferenceException(
+          "'"
+              + path
+              + "' resolves outside '"
+              + SagaServerConfig.SECRETS_ROOT_KEY
+              + "' "
+              + Redaction.redacted(secretsRoot.toString())
+              + ", as written");
+    }
+  }
+
+  /**
    * The {@code file} lookup body: {@code key} is {@code <charset>:<path>} (the same form {@link
    * SecretResolver} documents, e.g. {@code UTF-8:/run/secrets/token}).
    */
@@ -110,48 +110,21 @@ final class ServiceSecretResolver implements ServiceValueResolver {
     // file, so quoting it back discloses nothing they kept elsewhere, and it is what makes the
     // error actionable. A path under a secret-valued root would already put that secret in the
     // service file, which is a different problem from this one.
-    int colon = key.indexOf(':');
-    if (colon <= 0 || colon == key.length() - 1) {
-      throw new PermanentReferenceException(
-          "A ${file:...} reference in a service file must be ${file:<charset>:<path>}, e.g."
-              + " ${file:UTF-8:/run/secrets/token}; got '${file:"
-              + Redaction.oneLine(key)
-              + "}'");
-    }
-    String charsetName = key.substring(0, colon);
-    Charset charset;
-    try {
-      charset = Charset.forName(charsetName);
-    } catch (IllegalArgumentException e) {
-      // IllegalCharsetNameException and UnsupportedCharsetException both land here, and both mean
-      // the same thing to an operator: no JVM will read the file with this, so it is not a failure
-      // of the machine the check ran on.
-      throw new PermanentReferenceException(
-          "'"
-              + Redaction.oneLine(charsetName)
-              + "' in a ${file:...} reference is not a charset this JVM can decode with; use a"
-              + " standard name such as UTF-8");
-    }
-    Path path = Path.of(key.substring(colon + 1));
-    // Checked before the root is resolved, so an escaping reference is caught even where the root
-    // is not mounted — which is exactly where an offline check runs. It does not replace the
-    // symlink-resolved check below: this one only rejects a path that escapes as written, while a
-    // link inside the root pointing out of it still needs the real path to see it.
-    if (!path.toAbsolutePath().normalize().startsWith(secretsRoot.toAbsolutePath().normalize())) {
-      throw new PermanentReferenceException(
-          "'"
-              + path
-              + "' resolves outside '"
-              + SagaServerConfig.SECRETS_ROOT_KEY
-              + "' "
-              + Redaction.redacted(secretsRoot.toString())
-              + ", as written");
-    }
+    SecretFileReference reference = SecretFileReference.parse(key);
+    Charset charset = reference.charset();
+    Path path = reference.path();
     try {
       Path realRoot;
       try {
         realRoot = secretsRoot.toRealPath();
       } catch (IOException e) {
+        // The root is not on this machine, so nothing can be resolved against it and the check
+        // below cannot run. Compare the paths as written instead: that cannot see through a
+        // symlink, but it still catches a reference plainly pointing somewhere else, which is the
+        // mistake an offline check is for. Only ever a fallback — applying it where the root does
+        // resolve would reject a reference reaching the root through a symlinked ancestor, which
+        // is an ordinary shape (a container's /var/run is usually a link to /run).
+        requireContainedAsWritten(path);
         throw new UncheckedIOException(
             new IOException(
                 "'"

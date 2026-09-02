@@ -488,25 +488,41 @@ public final class SagaServer implements AutoCloseable {
    * unconfigured daemon would serve full-access requests to anyone on the network.
    */
   private void ensureSecureBindingOrAcknowledged() {
+    String refusal = insecureBindingRefusal(config);
+    if (refusal != null) {
+      throw new IllegalArgumentException(refusal);
+    }
+  }
+
+  /**
+   * The refusal message for starting unauthenticated on a network-reachable interface, or {@code
+   * null} when the binding is acceptable.
+   *
+   * <p>Shared with {@code --validate-config}, like {@link #noDefinitionsMessage()}: the rule reads
+   * three configuration values and nothing else, so an offline check can reach the same verdict,
+   * and a configuration this refuses must not be one the validator calls acceptable. Stated once so
+   * the two cannot come to disagree.
+   */
+  static @Nullable String insecureBindingRefusal(SagaServerConfig config) {
     if (config.securityProvider().equals("noop")
         && !LoopbackHost.isLoopback(config.host())
         && !config.insecureModeEnabled()) {
-      throw new IllegalArgumentException(
-          "Refusing to start unauthenticated on a network-reachable interface: '"
-              + SagaServerConfig.SECURITY_PROVIDER_KEY
-              + "="
-              + config.securityProvider()
-              + "' disables authentication, but '"
-              + SagaServerConfig.HOST_KEY
-              + "="
-              + config.host()
-              + "' is not a loopback address. Configure a real security provider (jwt or apikey),"
-              + " bind '"
-              + SagaServerConfig.HOST_KEY
-              + "' to a loopback address, or set '"
-              + SagaServerConfig.INSECURE_MODE_ENABLED_KEY
-              + "=true' to acknowledge running without authentication on an exposed interface.");
+      return "Refusing to start unauthenticated on a network-reachable interface: '"
+          + SagaServerConfig.SECURITY_PROVIDER_KEY
+          + "="
+          + config.securityProvider()
+          + "' disables authentication, but '"
+          + SagaServerConfig.HOST_KEY
+          + "="
+          + config.host()
+          + "' is not a loopback address. Configure a real security provider (jwt or apikey),"
+          + " bind '"
+          + SagaServerConfig.HOST_KEY
+          + "' to a loopback address, or set '"
+          + SagaServerConfig.INSECURE_MODE_ENABLED_KEY
+          + "=true' to acknowledge running without authentication on an exposed interface.";
     }
+    return null;
   }
 
   /**

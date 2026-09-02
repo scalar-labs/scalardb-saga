@@ -72,7 +72,7 @@ class ServiceSecretResolverTest {
 
     assertThatThrownBy(
             () -> resolver().resolve("${file:UTF-8:" + outsideDir.resolve("stolen") + "}"))
-        .isInstanceOf(IllegalArgumentException.class)
+        .isInstanceOf(PermanentReferenceException.class)
         .hasMessageContaining("resolves outside")
         .hasMessageNotContaining("outside-content");
   }
@@ -147,5 +147,38 @@ class ServiceSecretResolverTest {
         resolver().resolve("${file:UTF-8:" + secretsDir.resolve("tricky") + "}").value();
 
     assertThat(resolved).isEqualTo("pa$$${env:HOME}word");
+  }
+
+  @Test
+  void resolve_pathReachingTheRootThroughASymlinkedAncestor_returnsContents() throws IOException {
+    // The shape a container has: /var/run is a symlink to /run, so /var/run/secrets/token and
+    // /run/secrets/token are one file. Comparing the paths as written cannot see that; only
+    // resolving them can. A check that got this wrong would refuse a secret the daemon reads
+    // today, failing boot and freezing every later reload on the last configuration it applied.
+    // Arrange
+    Path root = Files.createDirectories(secretsDir.resolve("run/secrets"));
+    Files.createDirectory(secretsDir.resolve("var"));
+    Files.createSymbolicLink(secretsDir.resolve("var/run"), secretsDir.resolve("run"));
+    Files.writeString(root.resolve("token"), "s3cr3t");
+    Path throughTheLink = secretsDir.resolve("var/run/secrets/token");
+
+    // Act
+    String resolved =
+        new ServiceSecretResolver(root).resolve("${file:UTF-8:" + throughTheLink + "}").value();
+
+    // Assert
+    assertThat(resolved).isEqualTo("s3cr3t");
+  }
+
+  @Test
+  void resolve_unknownCharsetGiven_throwsPermanentReferenceException() throws IOException {
+    // Wrong wherever it runs, so it must not be softened by a caller that tolerates a secret this
+    // machine happens not to have.
+    // Arrange
+    Path token = Files.writeString(secretsDir.resolve("token"), "s3cr3t");
+
+    // Act & Assert
+    assertThatThrownBy(() -> resolver().resolve("${file:NOSUCH-CHARSET:" + token + "}"))
+        .isInstanceOf(PermanentReferenceException.class);
   }
 }
