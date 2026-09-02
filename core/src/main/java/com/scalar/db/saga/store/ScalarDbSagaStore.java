@@ -29,6 +29,7 @@ import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
@@ -230,7 +231,7 @@ public final class ScalarDbSagaStore implements SagaStore {
             throw SagaDefinitionException.versionContentConflict(name, version);
           }
 
-          tx.insert(buildDefinitionInsert(name, version, json));
+          tx.insert(buildDefinitionInsert(name, version, json, monotonicStamp(tx, name)));
           return Boolean.TRUE;
         },
         () -> {
@@ -1550,14 +1551,52 @@ public final class ScalarDbSagaStore implements SagaStore {
 
   // -- saga_definitions builders --
 
-  private Insert buildDefinitionInsert(String name, String version, String json) {
+  /**
+   * Returns a {@code registered_at} strictly after every version already registered under {@code
+   * name}, so registration order is what the latest-version lookup reads.
+   *
+   * <p>The lookup picks the greatest {@code registered_at}, and the value comes from whichever
+   * replica happens to serve the registration. Wall clocks across replicas disagree — by seconds,
+   * routinely — so a replica running behind could register a NEWER version with an OLDER stamp and
+   * lose the selection race to the version it replaces, leaving the version it was meant to replace
+   * still serving.
+   *
+   * <p>The scan runs inside the caller's transaction, so two replicas registering different
+   * versions of the same saga at once read overlapping rows and the transaction layer has what it
+   * needs to make one of them lose. How far that goes is the store's to decide: whether a scan
+   * carries phantom protection is a property of the transaction implementation, not of this method.
+   * What this method guarantees on its own is the single-writer case — a clock behind the latest
+   * row still stamps after it.
+   */
+  private Instant monotonicStamp(DistributedTransaction tx, String name) throws Exception {
+    // Truncated to what the column stores. TIMESTAMPTZ does not keep sub-millisecond precision, so
+    // comparing the raw clock against a value read back from the store compares two different
+    // things: a clock reading a fraction of a millisecond past the latest row would look strictly
+    // later, then persist as the same millisecond and tie it — leaving the ordering this method
+    // exists to guarantee up to whichever row the latest-version scan happens to see first.
+    Instant now = nowSupplier.get().truncatedTo(ChronoUnit.MILLIS);
+    Instant latest = null;
+    for (Result row : tx.scan(buildDefinitionScan(name))) {
+      Instant registeredAt = row.getTimestampTZ("registered_at");
+      if (registeredAt != null && (latest == null || registeredAt.isAfter(latest))) {
+        latest = registeredAt;
+      }
+    }
+    if (latest == null || now.isAfter(latest)) {
+      return now;
+    }
+    // The smallest step the column can still tell apart.
+    return latest.plusMillis(1);
+  }
+
+  private Insert buildDefinitionInsert(String name, String version, String json, Instant stamp) {
     return Insert.newBuilder()
         .namespace(SagaSchema.NAMESPACE)
         .table(SagaSchema.DEFINITIONS_TABLE)
         .partitionKey(Key.ofText("saga_name", name))
         .clusteringKey(Key.ofText("definition_version", version))
         .textValue("definition_json", json)
-        .timestampTZValue("registered_at", nowSupplier.get())
+        .timestampTZValue("registered_at", stamp)
         .build();
   }
 

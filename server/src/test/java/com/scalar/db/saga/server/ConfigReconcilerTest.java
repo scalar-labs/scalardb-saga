@@ -2,6 +2,7 @@ package com.scalar.db.saga.server;
 
 import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import ch.qos.logback.classic.Level;
@@ -20,9 +21,12 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Consumer;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -38,7 +42,50 @@ class ConfigReconcilerTest {
   private final List<Map<String, HttpServiceConfig>> swaps = new ArrayList<>();
   private final HttpEndpointRegistrar registrar = services -> swaps.add(services);
   private final List<SagaDefinition> registered = new ArrayList<>();
+  // What the pass published as this replica's served set, or null if it never published.
+  private @Nullable Set<String> served;
   private Consumer<SagaDefinition> definitionRegistrar = definition -> registered.add(definition);
+
+  /**
+   * A store with the real one's two load-bearing properties: append-only, and latest means most
+   * recently FIRST registered. Re-registering a version that already exists is a no-op that does
+   * not move it to the front, which is what makes a rolled-back definition file leave the newer
+   * version serving. A LinkedHashMap models exactly that — putIfAbsent on an existing key does not
+   * change iteration order.
+   */
+  private final Map<String, LinkedHashMap<String, SagaDefinition>> stored = new LinkedHashMap<>();
+
+  private final DefinitionStore definitionStore =
+      new DefinitionStore() {
+        @Override
+        public void register(SagaDefinition definition) {
+          definitionRegistrar.accept(definition);
+          // putIfAbsent, not put: registered content is immutable, so re-registering a version
+          // that is already there keeps the stored content and its place in the order.
+          stored
+              .computeIfAbsent(definition.getName(), name -> new LinkedHashMap<>())
+              .putIfAbsent(definition.getVersion(), definition);
+        }
+
+        @Override
+        public boolean isRegistered(String sagaName, String version) {
+          LinkedHashMap<String, SagaDefinition> versions = stored.get(sagaName);
+          return versions != null && versions.containsKey(version);
+        }
+
+        @Override
+        public @Nullable SagaDefinition latest(String sagaName) {
+          LinkedHashMap<String, SagaDefinition> versions = stored.get(sagaName);
+          if (versions == null || versions.isEmpty()) {
+            return null;
+          }
+          SagaDefinition latest = null;
+          for (SagaDefinition definition : versions.values()) {
+            latest = definition;
+          }
+          return latest;
+        }
+      };
 
   private ConfigReconciler reconciler() {
     return reconciler(false);
@@ -52,7 +99,8 @@ class ConfigReconcilerTest {
         definitionsDir,
         asyncCallbacksConfigured,
         registrar,
-        d -> definitionRegistrar.accept(d));
+        definitionStore,
+        names -> served = names);
   }
 
   /** A clock a test can step, for the timestamps a fixed clock cannot tell apart. */
@@ -85,7 +133,8 @@ class ConfigReconcilerTest {
         definitionsDir,
         false,
         registrar,
-        d -> definitionRegistrar.accept(d));
+        definitionStore,
+        names -> served = names);
   }
 
   private void writeService(String name, String content) throws IOException {
@@ -426,7 +475,7 @@ class ConfigReconcilerTest {
               servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
       ConfigReconciler reconciler =
           new ConfigReconciler(
-              reloadConfig, file, false, registrar, d -> definitionRegistrar.accept(d));
+              reloadConfig, file, false, registrar, definitionStore, names -> served = names);
 
       // Act & Assert
       assertThat(reconciler.run()).isFalse();
@@ -453,7 +502,7 @@ class ConfigReconcilerTest {
               servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
       ConfigReconciler reconciler =
           new ConfigReconciler(
-              reloadConfig, link, false, registrar, d -> definitionRegistrar.accept(d));
+              reloadConfig, link, false, registrar, definitionStore, names -> served = names);
 
       // Act & Assert
       assertThat(reconciler.run()).isTrue();
@@ -523,7 +572,12 @@ class ConfigReconcilerTest {
               servicesDir, 10, secretsDir, List.of("account"), Clock.fixed(NOW, ZoneOffset.UTC));
       ConfigReconciler reconciler =
           new ConfigReconciler(
-              withCeiling, definitionsDir, false, registrar, d -> definitionRegistrar.accept(d));
+              withCeiling,
+              definitionsDir,
+              false,
+              registrar,
+              definitionStore,
+              names -> served = names);
 
       // Act & Assert
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
@@ -550,7 +604,12 @@ class ConfigReconcilerTest {
               notADirectory, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
       ConfigReconciler reconciler =
           new ConfigReconciler(
-              misconfigured, definitionsDir, false, registrar, d -> definitionRegistrar.accept(d));
+              misconfigured,
+              definitionsDir,
+              false,
+              registrar,
+              definitionStore,
+              names -> served = names);
 
       // Act & Assert
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
@@ -577,7 +636,7 @@ class ConfigReconcilerTest {
               servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
       ConfigReconciler reconciler =
           new ConfigReconciler(
-              reloadConfig, missing, false, registrar, d -> definitionRegistrar.accept(d));
+              reloadConfig, missing, false, registrar, definitionStore, names -> served = names);
 
       // Act & Assert
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
@@ -847,9 +906,10 @@ class ConfigReconcilerTest {
     }
 
     @Test
-    void run_registrationFailsWhileAnotherDefinitionVanished_warnsOnlyOnce() throws IOException {
+    void run_registrationFailsWhileAnotherDefinitionVanished_recordsItOnlyOnce()
+        throws IOException {
       // The vanished-name cleanup used to sit after the registration loop, so an unrelated
-      // failure skipped it and the "deleting retires nothing" warning re-fired every pass.
+      // failure skipped it and the retirement was re-reported every pass.
       // Arrange
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("a.json", "saga-a", "1.0", "account");
@@ -872,16 +932,16 @@ class ConfigReconcilerTest {
         long afterFirst =
             logs.events().stream()
                 .filter(e -> e.getFormattedMessage().contains("saga-a"))
-                .filter(e -> e.getFormattedMessage().contains("retires nothing"))
+                .filter(e -> e.getFormattedMessage().contains("no longer served"))
                 .count();
         reconciler.run();
         long afterSecond =
             logs.events().stream()
                 .filter(e -> e.getFormattedMessage().contains("saga-a"))
-                .filter(e -> e.getFormattedMessage().contains("retires nothing"))
+                .filter(e -> e.getFormattedMessage().contains("no longer served"))
                 .count();
 
-        // Assert — warned once, not once per pass, despite the ongoing unrelated failure
+        // Assert — recorded once, not once per pass, despite the ongoing unrelated failure
         assertThat(afterFirst).isEqualTo(1);
         assertThat(afterSecond).isEqualTo(1);
       }
@@ -1269,7 +1329,323 @@ class ConfigReconcilerTest {
     }
 
     @Test
-    void run_vanishedDefinitionFile_warnsThatDeletionRetiresNothing() throws IOException {
+    void run_storeUnreachableDuringValidation_isATransientRejectionNotAnEscape()
+        throws IOException {
+      // The validation lookups are the only store reads a pass makes, and run() contains a
+      // rejected pass and nothing else. An escaping store outage would surface as an unexpected
+      // scheduler failure, record no rejection, and leave lastPassAt frozen — which is exactly the
+      // signal a wedged pass thread is supposed to have to itself.
+      // Arrange
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      DefinitionStore unreachable =
+          new DefinitionStore() {
+            @Override
+            public void register(SagaDefinition definition) {}
+
+            @Override
+            public @Nullable SagaDefinition latest(String sagaName) {
+              throw SagaPersistenceException.storeUnavailable(new IOException("connection reset"));
+            }
+
+            @Override
+            public boolean isRegistered(String sagaName, String version) {
+              throw new AssertionError("not reached: the latest lookup fails first");
+            }
+          };
+      ConfigReconciler reconciler =
+          new ConfigReconciler(
+              new ReloadConfig(
+                  servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC)),
+              definitionsDir,
+              false,
+              registrar,
+              unreachable,
+              names -> served = names);
+
+      // Act — contained, not thrown
+      boolean applied = reconciler.run();
+
+      // Assert — reported as transient, and the pass is recorded as having concluded
+      assertThat(applied).isFalse();
+      ReloadStatus.Rejection rejection = requireNonNull(reconciler.status().rejection());
+      assertThat(rejection.operatorActionRequired()).isFalse();
+      assertThat(reconciler.status().lastPassAt()).isEqualTo(NOW);
+    }
+
+    @Test
+    void run_definitionFileDeleted_stopsServingThatSaga() throws IOException {
+      // Retiring a saga is deleting its definition file. The store keeps the registration, so what
+      // the pass publishes as served is the only thing that stops new starts.
+      // Arrange — two definitions, so the empty-transition guard does not fire on the deletion
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("keep.json", "keep-saga", "1.0", "account");
+      writeDefinition("retire.json", "retire-saga", "1.0", "account");
+      ConfigReconciler reconciler = reconciler();
+      assertThat(reconciler.run()).isTrue();
+      assertThat(served).containsExactlyInAnyOrder("keep-saga", "retire-saga");
+
+      // Act
+      Files.delete(definitionsDir.resolve("retire.json"));
+
+      // Assert — still registered in the store, no longer served here
+      assertThat(reconciler.run()).isTrue();
+      assertThat(served).containsExactly("keep-saga");
+      assertThat(definitionStore.latest("retire-saga")).isNotNull();
+    }
+
+    @Test
+    void run_definitionAndItsServiceRemovedTogether_stopsServingBeforeTheEndpointGoes()
+        throws IOException {
+      // Ordering, not just outcome: the endpoint swap must not land while the saga is still
+      // offered, or a start in that window creates a saga whose first call cannot resolve. The
+      // withdrawal is published before the swap, so the served set never names a saga whose
+      // endpoints this pass has already taken away.
+      // Arrange
+      writeService("account", "base_url=http://account:8080\n");
+      writeService("legacy", "base_url=http://legacy:8080\n");
+      writeDefinition("keep.json", "keep-saga", "1.0", "account");
+      writeDefinition("retire.json", "retire-saga", "1.0", "legacy");
+      List<Set<String>> servedWhenSwapped = new ArrayList<>();
+      ConfigReconciler reconciler =
+          new ConfigReconciler(
+              new ReloadConfig(
+                  servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC)),
+              definitionsDir,
+              false,
+              services -> {
+                swaps.add(services);
+                servedWhenSwapped.add(served);
+              },
+              definitionStore,
+              names -> served = names);
+      assertThat(reconciler.run()).isTrue();
+      servedWhenSwapped.clear();
+
+      // Act — the retirement and its service leave in one change
+      Files.delete(definitionsDir.resolve("retire.json"));
+      Files.delete(servicesDir.resolve("legacy.properties"));
+
+      // Assert — by the time the endpoints were swapped, the saga was already withdrawn
+      assertThat(reconciler.run()).isTrue();
+      assertThat(servedWhenSwapped).isNotEmpty();
+      assertThat(servedWhenSwapped.get(0)).containsExactly("keep-saga");
+      assertThat(served).containsExactly("keep-saga");
+    }
+
+    @Test
+    void run_storeReadFailsPermanently_isReportedAsNeedingAnOperator() throws IOException {
+      // A store outage clears on its own; a stored definition that cannot be deserialized fails
+      // identically forever. Reporting the second as a retry would leave it repeating every
+      // interval with nobody told to look at it.
+      // Arrange
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      DefinitionStore corrupt =
+          new DefinitionStore() {
+            @Override
+            public void register(SagaDefinition definition) {}
+
+            @Override
+            public @Nullable SagaDefinition latest(String sagaName) {
+              throw SagaPersistenceException.deserializationFailed(
+                  new IOException("stored definition is not valid JSON"));
+            }
+
+            @Override
+            public boolean isRegistered(String sagaName, String version) {
+              throw new AssertionError("not reached: the latest lookup fails first");
+            }
+          };
+      ConfigReconciler reconciler =
+          new ConfigReconciler(
+              new ReloadConfig(
+                  servicesDir, 10, secretsDir, List.of(), Clock.fixed(NOW, ZoneOffset.UTC)),
+              definitionsDir,
+              false,
+              registrar,
+              corrupt,
+              names -> served = names);
+
+      // Act
+      boolean applied = reconciler.run();
+
+      // Assert
+      assertThat(applied).isFalse();
+      ReloadStatus.Rejection rejection = requireNonNull(reconciler.status().rejection());
+      assertThat(rejection.operatorActionRequired()).isTrue();
+    }
+
+    @Test
+    void run_definitionFileRolledBack_warnsOnceRatherThanEveryPass() throws IOException {
+      // A rolled-back file stays rolled back until an operator edits it, so the finding repeats
+      // every interval. It is a warning rather than a rejection, so nothing else in the log marks
+      // it as still open — which is why it follows the same state-change rule repeated rejections
+      // use rather than being logged every pass.
+      // Arrange
+      writeService("account", "base_url=http://account:8080\n");
+      writeService("legacy", "base_url=http://legacy:8080\n");
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      ConfigReconciler reconciler = reconciler();
+      assertThat(reconciler.run()).isTrue();
+      writeDefinition("saga.json", "order-saga", "2.0", "legacy");
+      assertThat(reconciler.run()).isTrue();
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+
+      // Act & Assert
+      try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
+        assertThat(reconciler.run()).isTrue();
+        assertThat(logs.events())
+            .anySatisfy(
+                event -> {
+                  assertThat(event.getLevel()).isEqualTo(Level.WARN);
+                  assertThat(event.getFormattedMessage())
+                      .contains("order-saga")
+                      .contains("1.0")
+                      .contains("2.0");
+                });
+
+        assertThat(reconciler.run()).isTrue();
+        assertThat(logs.events().stream().filter(e -> e.getLevel() == Level.WARN)).hasSize(1);
+      }
+    }
+
+    @Test
+    void run_passRejected_leavesThePreviouslyServedSetInPlace() throws IOException {
+      // A rejected pass keeps the previous configuration serving, so it must not publish a served
+      // set either — publishing a half-built one would retire sagas the rejection did not touch.
+      // Arrange
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("keep.json", "keep-saga", "1.0", "account");
+      writeDefinition("other.json", "other-saga", "1.0", "account");
+      ConfigReconciler reconciler = reconciler();
+      assertThat(reconciler.run()).isTrue();
+      served = null;
+
+      // Act — a definition naming a service that does not exist rejects the whole pass
+      writeDefinition("other.json", "other-saga", "2.0", "missing");
+
+      // Assert
+      assertThat(reconciler.run()).isFalse();
+      assertThat(served).isNull();
+    }
+
+    @Test
+    void run_definitionFileRolledBack_adoptsTheServingVersionInsteadOfRejecting()
+        throws IOException {
+      // A rollback of the definitions directory reverts the file and not the store: registering
+      // older content is a no-op and the newer version keeps serving. The rollback does not take
+      // whatever the pass decides, so the pass adopts what serves rather than refusing the only
+      // configuration the daemon can run.
+      // Arrange — the real history: v1 shipped, then v2 replaced it. Re-registering v1 later is
+      // then a no-op, which is the whole reason a rollback does not take effect.
+      writeService("account", "base_url=http://account:8080\n");
+      writeService("legacy", "base_url=http://legacy:8080\n");
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      ConfigReconciler reconciler = reconciler();
+      assertThat(reconciler.run()).isTrue();
+      writeDefinition("saga.json", "order-saga", "2.0", "legacy");
+      assertThat(reconciler.run()).isTrue();
+
+      // Act — the file reverts to v1; the store still serves v2
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+
+      // Assert — the pass applies, and the adopted candidate is the SERVING version: it equals the
+      // applied entry, so nothing is re-registered. Without adoption the file's v1.0 would be
+      // registered again, which is the no-op the whole check exists to stop being tracked as real.
+      int registeredBefore = registered.size();
+      assertThat(reconciler.run()).isTrue();
+      assertThat(reconciler.status().rejection()).isNull();
+      assertThat(registered).hasSize(registeredBefore);
+      assertThat(definitionStore.latest("order-saga")).isNotNull();
+      assertThat(requireNonNull(definitionStore.latest("order-saga")).getVersion())
+          .isEqualTo("2.0");
+    }
+
+    @Test
+    void runOrThrow_definitionFileRolledBack_stillBoots() throws IOException {
+      // A replica booting on a rolled-back definitions directory has to start. Its applied set is
+      // empty, so every definition looks changed and every one is compared against the store —
+      // the state a running daemon reaches after a rollback is the state a restarting one boots
+      // into. Refusing here is refusing to run over a disagreement no restart can settle, which
+      // turns a bad definition rollback into a fleet that cannot come back up.
+      // Arrange — v1 shipped, then v2 replaced it, then the directory was rolled back to v1
+      writeService("account", "base_url=http://account:8080\n");
+      writeService("legacy", "base_url=http://legacy:8080\n");
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      assertThat(reconciler().run()).isTrue();
+      writeDefinition("saga.json", "order-saga", "2.0", "legacy");
+      assertThat(reconciler().run()).isTrue();
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+
+      // Act & Assert — a fresh reconciler is a fresh process: nothing applied, everything compared.
+      // What it adopts is the serving 2.0, not the 1.0 its file names, which is what keeps the
+      // checks below it pointed at the version that actually runs.
+      ConfigReconciler booting = reconciler();
+      assertThatCode(booting::runOrThrow).doesNotThrowAnyException();
+      assertThat(booting.appliedDefinitionCount()).isEqualTo(1);
+      assertThat(registered).last().satisfies(d -> assertThat(d.getVersion()).isEqualTo("2.0"));
+    }
+
+    @Test
+    void runOrThrow_rolledBackDefinitionThenServiceRemoval_bootRejectsTheRemoval()
+        throws IOException {
+      // Booting must not be a way around the guard. The reverted file does not name legacy, so
+      // adopting the file's version would let a boot accept the removal of the service the
+      // serving version needs — the same hazard as on a running daemon, reached by restarting.
+      // Arrange
+      writeService("account", "base_url=http://account:8080\n");
+      writeService("legacy", "base_url=http://legacy:8080\n");
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      assertThat(reconciler().run()).isTrue();
+      writeDefinition("saga.json", "order-saga", "2.0", "legacy");
+      assertThat(reconciler().run()).isTrue();
+
+      // Act — roll the definition back and drop the service only the serving version names
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      Files.delete(servicesDir.resolve("legacy.properties"));
+
+      // Assert — the reference has to be attributed to the serving 2.0 rather than to the file,
+      // which was rolled back to 1.0 and contains neither this step nor any mention of legacy.
+      // Asserting on "legacy" alone would pass either way and leave the attribution unpinned.
+      assertThatThrownBy(reconciler()::runOrThrow)
+          .isInstanceOf(IllegalStateException.class)
+          .hasMessageContaining("Serving version 2.0 of saga 'order-saga'")
+          .hasMessageContaining("file 'saga.json' names version 1.0")
+          .hasMessageContaining("references service 'legacy'");
+    }
+
+    @Test
+    void run_rolledBackDefinitionThenServiceRemoval_removalIsNotApplied() throws IOException {
+      // The hazard the check exists for. With the file rolled back to v1, a pass that also drops
+      // the service only the SERVING v2 needs would sail through the cross-check — v1 does not
+      // reference it — and starts of v2 would then fail to resolve an endpoint on every replica.
+      // Arrange — v1 shipped, then v2 replaced it and moved the saga onto the legacy service
+      writeService("account", "base_url=http://account:8080\n");
+      writeService("legacy", "base_url=http://legacy:8080\n");
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      ConfigReconciler reconciler = reconciler();
+      assertThat(reconciler.run()).isTrue();
+      writeDefinition("saga.json", "order-saga", "2.0", "legacy");
+      assertThat(reconciler.run()).isTrue();
+      int swapsBefore = swaps.size();
+
+      // Act — roll the definition back to a version that does not name legacy, and drop legacy
+      writeDefinition("saga.json", "order-saga", "1.0", "account");
+      Files.delete(servicesDir.resolve("legacy.properties"));
+
+      // Assert — the pass adopts the serving v2, whose step still names legacy, so the removal is
+      // caught by the ordinary service cross-check and the endpoint stays live
+      assertThat(reconciler.run()).isFalse();
+      assertThat(requireNonNull(reconciler.status().rejection()).reason()).contains("legacy");
+      assertThat(swaps).hasSize(swapsBefore);
+    }
+
+    @Test
+    void run_vanishedDefinitionFile_recordsTheRetirementWithoutWarning() throws IOException {
+      // Deleting a definition file is how a saga is retired, so it is an ordinary operator action:
+      // it earns an audit line, not a warning. A pure deletion registers nothing and swaps
+      // nothing, so without that line the pass that takes a saga out of service says nothing.
       // Arrange — two definitions so the empty-transition guard does not fire; one file vanishes
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("a.json", "saga-a", "1.0", "account");
@@ -1278,7 +1654,7 @@ class ConfigReconcilerTest {
       reconciler.run();
       Files.delete(definitionsDir.resolve("b.json"));
 
-      // Act & Assert — a warning, not a rejection: the saga remains registered and startable
+      // Act & Assert
       try (LogCapture logs = LogCapture.of(ConfigReconciler.class)) {
         boolean applied = reconciler.run();
 
@@ -1286,10 +1662,40 @@ class ConfigReconcilerTest {
         assertThat(logs.events())
             .anySatisfy(
                 event -> {
-                  assertThat(event.getLevel()).isEqualTo(Level.WARN);
-                  assertThat(event.getFormattedMessage()).contains("saga-b");
-                });
+                  assertThat(event.getLevel()).isEqualTo(Level.INFO);
+                  assertThat(event.getFormattedMessage())
+                      .contains("saga-b")
+                      .contains("no longer served");
+                })
+            .noneSatisfy(event -> assertThat(event.getLevel()).isEqualTo(Level.WARN));
       }
+    }
+
+    @Test
+    void run_oneRegistrationFailsPermanently_stillServesTheOnesThatRegistered() throws IOException {
+      // A registration failure does not abandon the ones that succeeded, so a pass can commit a
+      // registration and still reject. Publishing only on success would leave that saga refused as
+      // unserved until a later pass concludes — which never comes while the failure is permanent,
+      // even though the audit line says it applied.
+      // Arrange — 'good' registers cleanly; 'bad' always fails the way a version-content conflict
+      // does, which needs an operator and so repeats every pass
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("good.json", "good-saga", "1.0", "account");
+      writeDefinition("bad.json", "bad-saga", "1.0", "account");
+      definitionRegistrar =
+          definition -> {
+            if (definition.getName().equals("bad-saga")) {
+              throw SagaDefinitionException.versionContentConflict("bad-saga", "1.0");
+            }
+            registered.add(definition);
+          };
+
+      // Act
+      boolean applied = reconciler().run();
+
+      // Assert — the pass rejects, but the saga that did register is served
+      assertThat(applied).isFalse();
+      assertThat(served).containsExactly("good-saga");
     }
   }
 }

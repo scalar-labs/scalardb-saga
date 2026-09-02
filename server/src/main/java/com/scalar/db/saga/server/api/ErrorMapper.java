@@ -5,6 +5,7 @@ import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaDefinitionNotServedException;
 import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaInvalidRequestException;
@@ -90,6 +91,10 @@ public final class ErrorMapper {
 
     // ── Precondition failed (422) ────────────────────────────────────────
     app.exception(SagaStatePreconditionException.class, (e, ctx) -> respond(ctx, 422, e));
+    // A saga this daemon does not serve is a stable precondition failure, not a transient race:
+    // retrying the same start against this replica never succeeds, which is what separates 422
+    // from the 409 the conflict codes carry.
+    app.exception(SagaDefinitionNotServedException.class, (e, ctx) -> respond(ctx, 422, e));
 
     // ── Bad request (400) ────────────────────────────────────────────────
     // SAGA_DEFINITION_VERSION_CONTENT_CONFLICT is the one definition code that is not a bad
