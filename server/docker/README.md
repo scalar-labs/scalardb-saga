@@ -210,11 +210,18 @@ named in the report. Where the secrets are present, nothing is skipped and the r
 strict one. A reference resolving **outside** `secrets_root` is still an error, everywhere: that is
 a mistake in the file, not a property of the machine you ran on.
 
+**What it does check beyond the files themselves.** The authentication settings are parsed and
+validated the way startup would — a provider name that is not one of `noop`, `jwt`, `apikey`, a JWKS
+URL that is missing or not `https`, an API key given inline instead of as a secret reference — and
+so is the rule that refuses to serve unauthenticated on a network-reachable interface. Those are
+startup failures an offline check can reach, so it reaches them.
+
 **It cannot see the store, so it cannot see history.** Whether a definition changed without bumping
 its version, whether a version is already registered, and which version is actually serving are all
 comparisons against what a running replica has applied. The report ends with that list. A clean
 result means the files are internally consistent and would boot a fresh replica — not that they are
-a valid *next* state for a fleet that is already running.
+a valid *next* state for a fleet that is already running. Nor are the ScalarDB settings parsed, or
+the configured ports test-bound; the report lists both.
 
 ## Configuration reload
 

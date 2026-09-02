@@ -769,6 +769,22 @@ class ServiceFileParserTest {
    * survives, and that it said what it did not check — because a skip nobody is told about is
    * exactly the failure this design was chosen to avoid.
    */
+  @Test
+  void parseFile_envReferenceGiven_warnsThatItWillNotRotate() throws IOException {
+    // Not an error in either mode, and not about resolution: an env-sourced value cannot change
+    // in a running pod, which defeats the directory it is written in.
+    String fileName = "a" + ServiceFileParser.PROPERTIES_EXTENSION;
+    writeService(fileName, "base_url=http://a:1\nheader.X-Api-Key=${env:SAGA_TEST_TOKEN}\n");
+
+    ServiceFileParser.parseFile(
+        "a", fileName, Files.readAllBytes(servicesDir.resolve(fileName)), secrets(), warnings);
+
+    assertThat(warnings)
+        .singleElement(as(STRING))
+        .contains("header.X-Api-Key")
+        .contains("will not pick up rotation");
+  }
+
   @Nested
   class LenientResolution {
 
@@ -808,7 +824,7 @@ class ServiceFileParserTest {
     }
 
     @Test
-    void parseFile_unresolvableBaseUrlGiven_isAnErrorForTheDaemon() throws IOException {
+    void parseFile_unreadableBaseUrlGivenToTheStrictResolver_throws() throws IOException {
       // The same file the lenient resolver tolerates must still stop a daemon that cannot read the
       // secret: it would otherwise serve a service whose address it never resolved.
       String fileName = "a" + ServiceFileParser.PROPERTIES_EXTENSION;
@@ -836,7 +852,7 @@ class ServiceFileParserTest {
     }
 
     @Test
-    void parseFile_unresolvableHeaderNameStillChecked_throws() throws IOException {
+    void parseFile_forbiddenHeaderNameWithAnUnreadableValueGiven_throws() throws IOException {
       // Leniency is about values. A header name the JDK refuses is wrong whatever its value
       // resolves to, so it must still fail here.
       assertThatThrownBy(
@@ -884,26 +900,6 @@ class ServiceFileParserTest {
       assertThat(parsed.unresolvedKeys()).isEmpty();
       assertThat(lenientWarnings).isEmpty();
       assertThat(parsed.config().headers()).containsExactly(entry("X-Api-Key", "s3cret"));
-    }
-
-    @Test
-    void parseFile_envReferenceGiven_warnsThatItWillNotRotate() throws IOException {
-      // Not an error in either mode, and not about resolution: an env-sourced value cannot change
-      // in a running pod, which defeats the directory it is written in.
-      String fileName = "a" + ServiceFileParser.PROPERTIES_EXTENSION;
-      writeService(fileName, "base_url=http://a:1\nheader.X-Api-Key=${env:SAGA_TEST_TOKEN}\n");
-
-      ServiceFileParser.parseFile(
-          "a",
-          fileName,
-          Files.readAllBytes(servicesDir.resolve(fileName)),
-          secrets(),
-          lenientWarnings);
-
-      assertThat(lenientWarnings)
-          .singleElement(as(STRING))
-          .contains("header.X-Api-Key")
-          .contains("will not pick up rotation");
     }
   }
 }

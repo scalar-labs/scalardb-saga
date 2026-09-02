@@ -1767,7 +1767,7 @@ class ConfigReconcilerTest {
     }
 
     @Test
-    void validate_calledOnAnyConfiguration_appliesNothing() throws IOException {
+    void validate_acceptableConfigurationGiven_appliesNothing() throws IOException {
       // Arrange — every collaborator a pass would use throws, so reaching one fails the test.
       writeService("account", "base_url=http://account:8080\n");
       writeDefinition("order.json", "order-saga", "1", "account");

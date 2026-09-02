@@ -837,7 +837,8 @@ public final class SagaServerConfig {
    * <p>Handing one to {@link #load} is what makes the load lenient: a secret reference this machine
    * cannot read is recorded here instead of failing, and the reference text stands in so the load
    * can continue. Passing {@code null} is the daemon's mode — a value it cannot resolve is a value
-   * it cannot serve with.
+   * it cannot serve with. {@link LenientServiceValueResolver} documents why the offline check wants
+   * that, and which failures it still refuses to soften.
    *
    * <p>The stand-in is not a value, and a caller must not report a check made against it as a
    * check. The keys are recorded, not only the reasons, so a caller can tell which settings its

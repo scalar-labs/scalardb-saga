@@ -165,20 +165,21 @@ public class SagaServerCommand implements Callable<Integer> {
               + " running replica has applied)",
           "whether a version is already registered, and which version is actually serving",
           "whether a version's stored content conflicts with the file",
-          "whether a service's base_url is reachable, and whether a callback URL and secret are"
-              + " the ones the participant expects (no request is made)",
-          "whether the store is reachable and its schema is present",
+          "whether a service's base_url or the callback URL is reachable, or whether the callback"
+              + " secret is the one the participant expects (no request is made, and the callback"
+              + " URL's syntax is checked only when TLS is enabled)",
+          "the ScalarDB settings: neither the store connection nor the scalar.db.* and"
+              + " scalar.db.saga.store.* values are parsed here",
+          "whether the configured host and ports can actually be bound",
           "the TLS certificate and key pair, which is validated at startup");
 
   /**
    * Validates the configuration without starting anything, and prints a report.
    *
-   * <p>Secret resolution is lenient here, and only here. The tool is for the moment before a
-   * rollout — a laptop, a CI job — where the mounted secrets are usually absent, and a run that
-   * failed on the first unreadable {@code ${file:...}} would be useless in exactly the places it is
-   * for. Leniency is invisible when the secrets are present: it softens a failure, it does not skip
-   * the attempt. Every check skipped because a value could not be read is named in the report, so a
-   * clean run never means less than it says.
+   * <p>Secret resolution is lenient here, and only here; {@link LenientServiceValueResolver}
+   * documents the policy and where it stops. What this method owes the reader is that every check
+   * skipped because a value could not be read is named in the report, so a clean run never means
+   * less than it says.
    *
    * @return 0 when the configuration is acceptable, 1 when it is not
    */
@@ -232,6 +233,22 @@ public class SagaServerCommand implements Callable<Integer> {
       problems.add(insecureBinding);
     }
     List<String> warnings = unresolvedWarnings(unresolved);
+    // Authentication is the startup check an operator most wants covered, so it is performed here
+    // rather than enumerated as skipped — except when a secret it reads could not be read on this
+    // machine, where the API-key rules would report a reference as unresolved and be describing
+    // this machine rather than the configuration.
+    if (unresolved.reasonsByKey().keySet().stream()
+        .anyMatch(key -> key.startsWith(SagaServerConfig.SECURITY_PREFIX))) {
+      warnings.add(
+          "The authentication settings were not checked: a secret they use could not be read on"
+              + " this machine.");
+    } else {
+      try {
+        SecurityProviderFactory.validate(config);
+      } catch (RuntimeException e) {
+        problems.add(describeChain(e));
+      }
+    }
     warnings.addAll(result.warnings());
     return report(
         out, path, problems, warnings, result.serviceCount(), result.definitionCount(), null);

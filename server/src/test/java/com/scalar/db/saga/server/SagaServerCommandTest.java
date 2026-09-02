@@ -333,11 +333,13 @@ class SagaServerCommandTest {
     }
 
     @Test
-    void parseArgs_validateConfigGiven_bindsTheFlag() throws IOException {
+    void parseArgs_validateConfigGiven_bindsTheFlagAndThePath() {
       CommandLine.ParseResult result =
-          parse("--validate-config", "--config", writeConfig().toString());
+          parse("--validate-config", "--config", "/etc/saga/server.properties");
 
       assertThat(result.hasMatchedOption("--validate-config")).isTrue();
+      assertThat(result.matchedOptionValue("--config", (Path) null))
+          .isEqualTo(Path.of("/etc/saga/server.properties"));
     }
 
     @Test
@@ -401,7 +403,8 @@ class SagaServerCommandTest {
       assertThat(out.toString())
           .contains("Not checked without a running daemon:")
           .contains("bumping its version")
-          .contains("store is reachable");
+          .contains("ScalarDB settings")
+          .contains("can actually be bound");
     }
 
     @Test

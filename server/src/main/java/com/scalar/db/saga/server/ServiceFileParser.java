@@ -518,7 +518,7 @@ final class ServiceFileParser {
         + reason
         + "), so "
         + checks
-        + " were skipped.";
+        + " did not run.";
   }
 
   /**

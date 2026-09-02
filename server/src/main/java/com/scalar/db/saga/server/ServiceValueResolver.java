@@ -8,9 +8,8 @@ import org.jspecify.annotations.Nullable;
  * <p>Two implementations, and the difference between them is what happens when a reference cannot
  * be read. The daemon uses {@link ServiceSecretResolver}, which throws: a service whose token file
  * is missing must not start serving with a header it could not build. {@code --validate-config}
- * uses {@link LenientServiceValueResolver}, which returns an <b>unresolved marker</b> instead,
- * because the tool routinely runs where the secrets are not mounted — a laptop, a CI job — and
- * failing there would make it useless in the two places it is for.
+ * uses {@link LenientServiceValueResolver}, which returns an <b>unresolved marker</b> instead; see
+ * that class for why, and for where the line is drawn.
  *
  * <p>An unresolved marker is not a value. Its contract is that the caller <b>skips the checks that
  * are about the value</b> and reports having skipped them; it must never be validated as if it were
@@ -44,10 +43,6 @@ interface ServiceValueResolver {
 
     static Resolution unresolved(String reference, String reason) {
       return new Resolution(reference, reason);
-    }
-
-    boolean isResolved() {
-      return unresolvedReason == null;
     }
   }
 }
