@@ -27,8 +27,9 @@ final class ServerHarness implements BenchHarness {
   private static final String HTTP_PORT_KEY = "scalar.db.saga.server.http.port";
   private static final String GRPC_PORT_KEY = "scalar.db.saga.server.grpc.port";
   private static final String DEFINITIONS_PATH_KEY = "scalar.db.saga.server.definitions_path";
-  private static final String SERVICE_BASE_URL_KEY =
-      "scalar.db.saga.server.service." + BenchmarkDefinitions.SERVICE + ".base_url";
+  // Since #127 a service is configured by a <name>.properties file in the services_path directory,
+  // not by inline scalar.db.saga.server.service.<name>.* keys — the daemon rejects those outright.
+  private static final String SERVICES_PATH_KEY = "scalar.db.saga.server.services_path";
 
   private final GrpcSagaOrchestratorClient client;
   private final SagaServer server;
@@ -85,7 +86,13 @@ final class ServerHarness implements BenchHarness {
       props.setProperty(HTTP_PORT_KEY, "0");
       props.setProperty(GRPC_PORT_KEY, "0");
       props.setProperty(DEFINITIONS_PATH_KEY, definitionsDir.toString());
-      props.setProperty(SERVICE_BASE_URL_KEY, participant.baseUrl());
+      // One file per service, in a directory of its own. Nested under the definitions dir so a
+      // single cleanup covers both; the definitions walk skips subdirectories.
+      Path servicesDir = Files.createDirectories(definitionsDir.resolve("services"));
+      Files.writeString(
+          servicesDir.resolve(BenchmarkDefinitions.SERVICE + ".properties"),
+          "base_url=" + participant.baseUrl() + System.lineSeparator());
+      props.setProperty(SERVICES_PATH_KEY, servicesDir.toString());
       HarnessSupport.applyOverrides(props, overrides);
 
       server = new SagaServer(SagaServerConfig.load(props)).start();

@@ -140,12 +140,12 @@ public final class BenchmarkCli implements Callable<Integer> {
   private long stallAbortSeconds = 180;
 
   @CommandLine.Option(
-      names = "--recovery-timeout-ms",
+      names = "--recovery-staleness-threshold-ms",
       description =
           "Recovery staleness threshold override for EMBEDDED and SERVER modes; 0 keeps the"
               + " default (60000). Shrinking it reproduces recovery-vs-live-saga contention"
               + " quickly (default: ${DEFAULT-VALUE}).")
-  private long recoveryTimeoutMillis = 0;
+  private long stalenessThresholdMillis = 0;
 
   @CommandLine.Option(
       names = "--recovery-interval-seconds",
@@ -218,7 +218,7 @@ public final class BenchmarkCli implements Callable<Integer> {
               sagaName,
               steps,
               stepDelayMillis,
-              recoveryTimeoutMillis,
+              stalenessThresholdMillis,
               recoveryIntervalSeconds);
       case SERVER ->
           ServerHarness.create(
@@ -231,9 +231,10 @@ public final class BenchmarkCli implements Callable<Integer> {
   /** The -D overrides plus the recovery flags mapped to the daemon's property keys. */
   private Map<String, String> serverOverrides() {
     Map<String, String> merged = new LinkedHashMap<>();
-    if (recoveryTimeoutMillis > 0) {
+    if (stalenessThresholdMillis > 0) {
       merged.put(
-          "scalar.db.saga.server.recovery.timeout_millis", Long.toString(recoveryTimeoutMillis));
+          "scalar.db.saga.server.recovery.staleness_threshold_millis",
+          Long.toString(stalenessThresholdMillis));
     }
     if (recoveryIntervalSeconds > 0) {
       merged.put(

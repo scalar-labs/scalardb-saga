@@ -44,9 +44,9 @@ final class EmbeddedHarness implements BenchHarness {
    * @param sagaName the definition name to register and start
    * @param stepCount sequential steps per saga
    * @param stepDelayMillis per-step sleep emulating participant latency
-   * @param recoveryTimeoutMillis staleness threshold override, {@code 0} for the engine default —
-   *     shrinking it makes recovery contend with live sagas without waiting a full minute
-   * @param recoveryIntervalSeconds recovery scan interval override, {@code 0} for the default
+   * @param stalenessThresholdMillis staleness threshold override, {@code 0} for the engine default
+   *     — shrinking it makes recovery contend with live sagas without waiting a full minute
+   * @param recoveryIntervalSeconds recovery sweep interval override, {@code 0} for the default
    */
   static EmbeddedHarness create(
       @Nullable Path propertiesFile,
@@ -54,7 +54,7 @@ final class EmbeddedHarness implements BenchHarness {
       String sagaName,
       int stepCount,
       long stepDelayMillis,
-      long recoveryTimeoutMillis,
+      long stalenessThresholdMillis,
       long recoveryIntervalSeconds) {
     HarnessSupport.StoreSetup store = HarnessSupport.storeProperties(propertiesFile);
     HarnessSupport.applyOverrides(store.properties(), overrides);
@@ -79,18 +79,16 @@ final class EmbeddedHarness implements BenchHarness {
                     }
                     return step;
                   });
-      if (recoveryTimeoutMillis > 0 || recoveryIntervalSeconds > 0) {
+      if (stalenessThresholdMillis > 0 || recoveryIntervalSeconds > 0) {
         RecoveryConfig defaults = RecoveryConfig.defaults();
         builder.recoveryConfig(
             new RecoveryConfig(
-                recoveryTimeoutMillis > 0
-                    ? recoveryTimeoutMillis
-                    : defaults.recoveryTimeoutMillis(),
-                recoveryIntervalSeconds > 0
-                    ? recoveryIntervalSeconds
-                    : defaults.recoveryIntervalSeconds(),
+                stalenessThresholdMillis > 0
+                    ? stalenessThresholdMillis
+                    : defaults.stalenessThresholdMillis(),
+                recoveryIntervalSeconds > 0 ? recoveryIntervalSeconds : defaults.intervalSeconds(),
                 defaults.compensationGracePeriod(),
-                defaults.batchSize(),
+                defaults.maxRecoveriesPerSweep(),
                 defaults.maxConcurrentRecoveries(),
                 defaults.clock()));
       }
