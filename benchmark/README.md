@@ -39,7 +39,7 @@ scalardb-saga-benchmark --mode embedded --start-mode async-fire --concurrency 25
 # Same threshold reached quickly, without waiting a minute: shrink the recovery window.
 # Works in embedded and server modes alike.
 scalardb-saga-benchmark --mode embedded --start-mode async-fire --concurrency 128 \
-    --requests 2000 --step-delay-ms 500 --recovery-timeout-ms 5000 --recovery-interval-seconds 2
+    --requests 2000 --step-delay-ms 500 --recovery-staleness-threshold-ms 5000 --recovery-interval-seconds 2
 
 # Full daemon round-trip over gRPC, in one process.
 scalardb-saga-benchmark --mode server --start-mode sync --concurrency 100 --requests 2000 \
