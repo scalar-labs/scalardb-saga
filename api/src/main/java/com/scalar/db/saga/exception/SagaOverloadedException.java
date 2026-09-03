@@ -19,6 +19,13 @@ import java.util.Objects;
  *
  * <p>Retry with bounded attempts, exponential backoff and jitter. Unbounded immediate retries feed
  * the overload they are reacting to.
+ *
+ * <p><b>The client SDK does not retry this for you</b>, deliberately, though it does retry other
+ * failures on the same transport status. A refusal is a definite answer, and what to do about it —
+ * shed the request, queue it, try another region, tell your own user — depends on things only the
+ * caller knows. Retrying inside the client would spend the caller's whole deadline on that decision
+ * and keep pressure on a server that has just said it is saturated. The code being marked retryable
+ * is a statement about safety, not urgency: repeating the request cannot double-start a saga.
  */
 public class SagaOverloadedException extends SagaRuntimeException {
 

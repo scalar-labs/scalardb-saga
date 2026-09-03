@@ -1,6 +1,7 @@
 package com.scalar.db.saga.grpc;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -319,6 +320,35 @@ class GrpcSagaOrchestratorClientTest {
         .isInstanceOf(SagaRuntimeException.class)
         .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
         .isEqualTo(SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED);
+  }
+
+  @Test
+  void start_engineOverloadedGiven_surfacesAtOnceWithoutRetrying() {
+    // A refusal is a definite answer — nothing was persisted — so what to do about it is the
+    // caller's call: shed, queue, try another region, tell its own user. Retrying inside the SDK
+    // would spend their whole deadline on that decision and keep pressure on a saturated server.
+    // Arrange — the script fails once and would succeed on a second attempt, so a retry shows up
+    // as the absence of an exception rather than as a count.
+    fake.failStartWith(
+        statusWithReason(
+            Status.Code.UNAVAILABLE, SagaErrorCode.ENGINE_OVERLOADED.code(), Map.of()));
+    fake.succeedStartWith(snapshot("s-1", SagaStatus.COMPLETED));
+
+    // Act & Assert
+    assertThatThrownBy(() -> client.start("transfer", Map.of()))
+        .isInstanceOf(SagaOverloadedException.class);
+  }
+
+  @Test
+  void start_bareUnavailableGiven_isStillRetried() {
+    // The other side of the same rule: an unreachable daemon may never have received the request,
+    // so the client absorbs it. Excluding the refusal must not have disarmed this.
+    // Arrange
+    fake.failStartWith(new StatusRuntimeException(Status.UNAVAILABLE));
+    fake.succeedStartWith(snapshot("s-1", SagaStatus.COMPLETED));
+
+    // Act & Assert — the retry lands on the scripted success.
+    assertThatCode(() -> client.start("transfer", Map.of())).doesNotThrowAnyException();
   }
 
   @Test
@@ -878,6 +908,17 @@ class GrpcSagaOrchestratorClientTest {
   }
 
   private static final class FakeSagaService extends SagaServiceGrpc.SagaServiceImplBase {
+
+    /** Scripts the next start attempt to fail; a later attempt falls through to the next entry. */
+    void failStartWith(StatusRuntimeException error) {
+      startScript.add(observer -> observer.onError(error));
+    }
+
+    /** Scripts a start attempt to succeed, so a retry is observable as the absence of an error. */
+    void succeedStartWith(SagaSnapshot snapshot) {
+      startScript.add(observer -> respondWith(observer, snapshot));
+    }
+
     @Nullable StartSagaRequest lastStart;
     @Nullable AwaitSagaRequest lastAwait;
     @Nullable StatusRuntimeException startError;

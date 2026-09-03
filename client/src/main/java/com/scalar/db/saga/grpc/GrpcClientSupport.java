@@ -126,6 +126,20 @@ final class GrpcClientSupport {
   }
 
   /**
+   * Whether {@code e} is the daemon refusing a start because its admission cap is full.
+   *
+   * <p>Read from the error code rather than the status, because the status cannot tell it apart: a
+   * refusal and an unreachable daemon are both {@code UNAVAILABLE}, and they call for opposite
+   * handling. An unreachable daemon may never have received the request, so the client retries it.
+   * A refusal is a definite answer — nothing was persisted — and repeating it is the caller's
+   * decision to make, not the SDK's.
+   */
+  static boolean isEngineOverloaded(StatusRuntimeException e) {
+    ErrorInfo info = errorInfo(e);
+    return info != null && SagaErrorCode.ENGINE_OVERLOADED.code().equals(info.getReason());
+  }
+
+  /**
    * Rebuilds the typed exception the daemon's {@link ErrorInfo} describes, inverting what {@code
    * GrpcErrorMapper} put on the wire, or returns {@code null} when the response carried no {@code
    * ErrorInfo} — an older daemon, an intermediary that stripped it, or a transport failure that
