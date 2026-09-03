@@ -19,6 +19,7 @@ import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.exception.SagaOverloadedException;
 import com.scalar.db.saga.exception.SagaPermissionDeniedException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaTimeoutException;
@@ -318,6 +319,38 @@ class GrpcSagaOrchestratorClientTest {
         .isInstanceOf(SagaRuntimeException.class)
         .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
         .isEqualTo(SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED);
+  }
+
+  @Test
+  void startAsync_engineOverloadedGiven_reconstructsSagaOverloadedException() {
+    // A refused start and an unreachable daemon both arrive as UNAVAILABLE, so only the code tells
+    // them apart — and they call for different handling: one means the server is full and the
+    // request is safe to repeat verbatim, the other that it may never have arrived.
+    // Arrange
+    fake.startError =
+        statusWithReason(Status.Code.UNAVAILABLE, SagaErrorCode.ENGINE_OVERLOADED.code(), Map.of());
+
+    // Act & Assert — startAsync surfaces the refusal directly. The synchronous start does not:
+    // UNAVAILABLE is retryable, so it rides out its own bounded backoff first, which is the
+    // behavior the client-side guidance asks for and is exercised by the retry tests above.
+    assertThatThrownBy(() -> client.startAsync("transfer", Map.of()))
+        .isInstanceOf(SagaOverloadedException.class)
+        .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.ENGINE_OVERLOADED);
+  }
+
+  @Test
+  void startAsync_bareUnavailableWithNoErrorInfo_staysSagaUnavailable() {
+    // The negative direction, pinned deliberately: a transport-level UNAVAILABLE carries no body,
+    // and must not be read as an admission refusal. Treating it as one would tell a caller the
+    // request was certainly refused when it may in fact have been executed.
+    // Arrange
+    fake.startError = new StatusRuntimeException(Status.UNAVAILABLE);
+
+    // Act & Assert
+    assertThatThrownBy(() -> client.startAsync("transfer", Map.of()))
+        .isInstanceOf(SagaUnavailableException.class)
+        .isNotInstanceOf(SagaOverloadedException.class);
   }
 
   @Test
