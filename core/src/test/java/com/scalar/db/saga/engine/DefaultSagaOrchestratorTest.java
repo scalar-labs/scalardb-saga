@@ -3,16 +3,19 @@ package com.scalar.db.saga.engine;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -32,6 +35,7 @@ import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaDefinitionNotServedException;
 import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.exception.SagaOverloadedException;
 import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaStateAndEvents;
@@ -45,8 +49,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -81,7 +89,8 @@ class DefaultSagaOrchestratorTest {
             recoveryManager,
             retentionManager,
             30_000,
-            Integer.MAX_VALUE);
+            Integer.MAX_VALUE,
+            0);
   }
 
   @AfterEach
@@ -716,6 +725,7 @@ class DefaultSagaOrchestratorTest {
               retentionManager,
               30_000,
               Integer.MAX_VALUE,
+              0,
               mockExecutor);
 
       SagaDefinition def = definition("transfer");
@@ -759,6 +769,7 @@ class DefaultSagaOrchestratorTest {
               retentionManager,
               30_000,
               Integer.MAX_VALUE,
+              0,
               mockExecutor);
 
       SagaDefinition def = definition("transfer");
@@ -962,6 +973,7 @@ class DefaultSagaOrchestratorTest {
               retentionManager,
               30_000,
               Integer.MAX_VALUE,
+              0,
               mockExecutor);
 
       SagaDefinition def = definition("transfer");
@@ -1033,7 +1045,14 @@ class DefaultSagaOrchestratorTest {
           .thenReturn(Optional.of(new SagaStateAndEvents(saga, List.of(), true)));
       try (DefaultSagaOrchestrator bounded =
           new DefaultSagaOrchestrator(
-              engine, store, definitionRegistry, recoveryManager, retentionManager, 30_000, 42)) {
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              42,
+              0)) {
 
         // Act
         SagaDetail detail = bounded.getSagaDetail("saga-1");
@@ -1155,6 +1174,7 @@ class DefaultSagaOrchestratorTest {
               retentionManager,
               30_000,
               Integer.MAX_VALUE,
+              0,
               mockExecutor);
 
       SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
@@ -1197,6 +1217,7 @@ class DefaultSagaOrchestratorTest {
               retentionManager,
               30_000,
               Integer.MAX_VALUE,
+              0,
               mockExecutor);
 
       SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
@@ -1306,6 +1327,7 @@ class DefaultSagaOrchestratorTest {
               retentionManager,
               30_000,
               Integer.MAX_VALUE,
+              0,
               mockExecutor);
 
       // Act
@@ -1339,6 +1361,267 @@ class DefaultSagaOrchestratorTest {
     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
     while (!condition.getAsBoolean() && System.nanoTime() < deadline) {
       Thread.sleep(10);
+    }
+  }
+
+  /**
+   * The admission cap. What has to hold: the cap is enforced, a refusal costs nothing durable,
+   * validation still answers first, and a permit comes back exactly once however the drive ends — a
+   * permit leaked shrinks capacity permanently, one returned twice raises it silently.
+   */
+  @Nested
+  class AdmissionCap {
+
+    /** An orchestrator capped at {@code cap}, sharing this test's mocks. */
+    private DefaultSagaOrchestrator capped(int cap) {
+      return new DefaultSagaOrchestrator(
+          engine,
+          store,
+          definitionRegistry,
+          recoveryManager,
+          retentionManager,
+          30_000,
+          Integer.MAX_VALUE,
+          cap);
+    }
+
+    private DefaultSagaOrchestrator capped(int cap, ExecutorService executor) {
+      return new DefaultSagaOrchestrator(
+          engine,
+          store,
+          definitionRegistry,
+          recoveryManager,
+          retentionManager,
+          30_000,
+          Integer.MAX_VALUE,
+          cap,
+          executor);
+    }
+
+    @Test
+    void start_atTheCap_throwsSagaOverloadedException() throws Exception {
+      // Arrange — cap of 1, with the first drive parked inside execute() so it holds its permit.
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      CountDownLatch inFlight = new CountDownLatch(1);
+      CountDownLatch release = new CountDownLatch(1);
+      when(engine.execute(eq(def), isNull(), any()))
+          .thenAnswer(
+              invocation -> {
+                inFlight.countDown();
+                if (!release.await(10, TimeUnit.SECONDS)) {
+                  throw new IllegalStateException("the test never released the drive");
+                }
+                return "saga-1";
+              });
+
+      try (DefaultSagaOrchestrator orchestrator = capped(1);
+          ExecutorService caller = Executors.newSingleThreadExecutor()) {
+        caller.execute(() -> orchestrator.start("transfer", Map.of()));
+        assertThat(inFlight.await(10, TimeUnit.SECONDS)).isTrue();
+
+        // Act & Assert
+        assertThatThrownBy(() -> orchestrator.start("transfer", Map.of()))
+            .isInstanceOf(SagaOverloadedException.class);
+        release.countDown();
+      }
+    }
+
+    @Test
+    void start_afterTheDriveReturns_admitsAgain() {
+      // The permit is per drive, so a finished drive must hand its seat back.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.execute(eq(def), isNull(), any())).thenReturn("saga-1");
+
+      try (DefaultSagaOrchestrator orchestrator = capped(1)) {
+        // Act
+        orchestrator.start("transfer", Map.of());
+
+        // Assert
+        assertThatCode(() -> orchestrator.start("transfer", Map.of())).doesNotThrowAnyException();
+      }
+    }
+
+    @Test
+    void start_driveThrows_stillReturnsThePermit() {
+      // A permit lost to a failing drive shrinks capacity for the life of the process.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.execute(eq(def), isNull(), any())).thenThrow(new IllegalStateException("boom"));
+
+      try (DefaultSagaOrchestrator orchestrator = capped(1)) {
+        assertThatThrownBy(() -> orchestrator.start("transfer", Map.of()))
+            .isInstanceOf(IllegalStateException.class);
+
+        // Assert — the seat is free again, so the next start reaches the engine.
+        assertThatThrownBy(() -> orchestrator.start("transfer", Map.of()))
+            .isInstanceOf(IllegalStateException.class);
+      }
+    }
+
+    @Test
+    void startAsync_atTheCap_persistsNothing() {
+      // The refusal has to land before createSaga: a rejected start that had already written would
+      // burn the caller's ID and make "retry" false advice.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(saga);
+      ExecutorService neverRuns = mock(ExecutorService.class);
+
+      try (DefaultSagaOrchestrator orchestrator = capped(1, neverRuns)) {
+        orchestrator.startAsync("transfer", Map.of());
+
+        // Act & Assert — the captured drive was never run, so the first permit is still held.
+        assertThatThrownBy(() -> orchestrator.startAsync("transfer", Map.of()))
+            .isInstanceOf(SagaOverloadedException.class);
+        verify(engine, times(1)).createSaga(eq(def), isNull(), any());
+      }
+    }
+
+    @Test
+    void startAsync_createSagaThrows_stillReturnsThePermit() {
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any()))
+          .thenThrow(new IllegalStateException("store down"));
+
+      try (DefaultSagaOrchestrator orchestrator = capped(1)) {
+        assertThatThrownBy(() -> orchestrator.startAsync("transfer", Map.of()))
+            .isInstanceOf(IllegalStateException.class);
+
+        // Assert — a second attempt is refused by the store, not by the cap.
+        assertThatThrownBy(() -> orchestrator.startAsync("transfer", Map.of()))
+            .isInstanceOf(IllegalStateException.class);
+      }
+    }
+
+    @Test
+    void startAsync_executorRejects_stillReturnsThePermit() {
+      // The saga is persisted and left to recovery, but this process is no longer driving it, so
+      // it must not go on occupying a seat.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(saga);
+      ExecutorService rejecting = mock(ExecutorService.class);
+      doThrow(new RejectedExecutionException("shutting down")).when(rejecting).execute(any());
+
+      try (DefaultSagaOrchestrator orchestrator = capped(1, rejecting)) {
+        orchestrator.startAsync("transfer", Map.of());
+
+        // Assert
+        assertThatCode(() -> orchestrator.startAsync("transfer", Map.of()))
+            .doesNotThrowAnyException();
+      }
+    }
+
+    @Test
+    void startAsync_driveCompletes_releasesBeforeDispatchingTheCallback() {
+      // Load-bearing order: a client told its saga finished may start the next one from inside the
+      // callback, and must not be refused by a seat this drive has finished with.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
+      SagaStateSnapshot completed = snapshot("saga-1", SagaStatus.COMPLETED);
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(saga);
+      when(engine.executeSaga(eq(def), eq(saga), any())).thenReturn(completed);
+      ExecutorService mockExecutor = mock(ExecutorService.class);
+      AtomicReference<Throwable> startedFromCallback = new AtomicReference<>();
+
+      try (DefaultSagaOrchestrator orchestrator = capped(1, mockExecutor)) {
+        SagaCallback callback = mock(SagaCallback.class);
+        // The next start, issued the moment the caller hears back.
+        doAnswer(
+                invocation -> {
+                  startedFromCallback.set(
+                      catchThrowable(() -> orchestrator.startAsync("transfer", Map.of())));
+                  return null;
+                })
+            .when(callback)
+            .onCompleted(any());
+        orchestrator.startAsync("transfer", Map.of(), callback);
+        ArgumentCaptor<Runnable> drive = ArgumentCaptor.forClass(Runnable.class);
+        verify(mockExecutor).execute(drive.capture());
+
+        // Act
+        drive.getValue().run();
+
+        // Assert
+        assertThat(startedFromCallback.get()).isNull();
+      }
+    }
+
+    @Test
+    void startAsync_callbackThrows_stillReturnsThePermit() {
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
+      SagaStateSnapshot completed = snapshot("saga-1", SagaStatus.COMPLETED);
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(saga);
+      when(engine.executeSaga(eq(def), eq(saga), any())).thenReturn(completed);
+      SagaCallback throwing = mock(SagaCallback.class);
+      doThrow(new Error("callback exploded")).when(throwing).onCompleted(any());
+      ExecutorService mockExecutor = mock(ExecutorService.class);
+
+      try (DefaultSagaOrchestrator orchestrator = capped(1, mockExecutor)) {
+        orchestrator.startAsync("transfer", Map.of(), throwing);
+        ArgumentCaptor<Runnable> drive = ArgumentCaptor.forClass(Runnable.class);
+        verify(mockExecutor).execute(drive.capture());
+        drive.getValue().run();
+
+        // Assert — the seat survived a callback that blew up after it was returned.
+        assertThatCode(() -> orchestrator.startAsync("transfer", Map.of()))
+            .doesNotThrowAnyException();
+      }
+    }
+
+    @Test
+    void start_unknownDefinitionAtTheCap_reportsTheDefinitionError() {
+      // Validation answers first: telling a caller to retry a saga that does not exist would send
+      // them into a loop that can never succeed.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(definitionRegistry.resolve("unknown")).thenReturn(null);
+      ExecutorService neverRuns = mock(ExecutorService.class);
+      when(engine.createSaga(eq(def), isNull(), any()))
+          .thenReturn(snapshot("saga-1", SagaStatus.RUNNING));
+
+      try (DefaultSagaOrchestrator orchestrator = capped(1, neverRuns)) {
+        orchestrator.startAsync("transfer", Map.of()); // fills the cap
+
+        // Act & Assert
+        assertThatThrownBy(() -> orchestrator.start("unknown", Map.of()))
+            .isInstanceOf(SagaDefinitionNotFoundException.class);
+      }
+    }
+
+    @Test
+    void start_withNoCapConfigured_neverRefuses() {
+      // The default: no controller at all, so the seams hold a null and skip the semaphore.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any()))
+          .thenReturn(snapshot("saga-1", SagaStatus.RUNNING));
+      ExecutorService neverRuns = mock(ExecutorService.class);
+
+      try (DefaultSagaOrchestrator orchestrator = capped(0, neverRuns)) {
+        // Act & Assert — far past any plausible cap, with every drive still outstanding.
+        for (int i = 0; i < 50; i++) {
+          orchestrator.startAsync("transfer", Map.of());
+        }
+        verify(engine, times(50)).createSaga(eq(def), isNull(), any());
+      }
     }
   }
 }

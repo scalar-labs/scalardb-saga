@@ -16,6 +16,7 @@ import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaInvalidRequestException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.exception.SagaOverloadedException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
@@ -198,6 +199,10 @@ class GrpcErrorMapperTest {
             SagaDefinitionNotServedException.of("order-saga"),
             Status.Code.FAILED_PRECONDITION,
             SagaErrorCode.SAGA_DEFINITION_NOT_SERVED),
+        new Arm(
+            new SagaOverloadedException(),
+            Status.Code.UNAVAILABLE,
+            SagaErrorCode.ENGINE_OVERLOADED),
         new Arm(
             SagaPersistenceException.storeUnavailable(new RuntimeException("db down")),
             Status.Code.UNAVAILABLE,

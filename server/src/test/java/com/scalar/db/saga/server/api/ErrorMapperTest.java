@@ -14,6 +14,7 @@ import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaInvalidRequestException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.exception.SagaOverloadedException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
@@ -319,6 +320,7 @@ class ErrorMapperTest {
             SagaDefinitionNotServedException.of("order-saga"),
             422,
             SagaErrorCode.SAGA_DEFINITION_NOT_SERVED),
+        new Arm(new SagaOverloadedException(), 503, SagaErrorCode.ENGINE_OVERLOADED),
         new Arm(
             SagaPersistenceException.storeUnavailable(new RuntimeException("db down")),
             503,

@@ -263,6 +263,14 @@ public enum SagaErrorCode {
       "The server abandoned the operation mid-flight — typically an interrupt during shutdown — rather than a dependency failing. Distinct from REQUEST_ABORTED, where the caller cancelled its own request.",
       "Retry the operation; it will land on another replica, or on this server after it restarts."),
 
+  ENGINE_OVERLOADED(
+      "DB-SAGA-20006",
+      Category.RETRYABLE_SERVER_ERROR,
+      "The engine is at its concurrent saga limit",
+      ErrorMetadataSchema.none(),
+      "The server is already running as many sagas as its admission cap allows, so it refused to start another. Nothing was persisted: the saga does not exist and its ID is still free. Distinct from RATE_LIMIT_EXCEEDED, which is about how often this caller may ask; this is about how much work the server is doing for everyone.",
+      "Retry with backoff and jitter, honouring Retry-After when present. Sustained rejection means the cap, the request rate limit, or downstream capacity needs revisiting."),
+
   UNRECOGNIZED_RETRYABLE_SERVER_ERROR(
       "DB-SAGA-29999",
       Category.RETRYABLE_SERVER_ERROR,
