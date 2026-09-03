@@ -6,10 +6,10 @@ import com.scalar.db.saga.engine.RetentionConfig;
 import com.scalar.db.saga.engine.ShutdownMode;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -46,9 +46,11 @@ import org.jspecify.annotations.Nullable;
  *       sweep phases across restarts. Must match {@code [a-zA-Z0-9._-]{1,128}} — it is stamped on
  *       claimed rows and echoed in log lines
  *   <li>{@code definitions_path} — path to a JSON/YAML saga definition file or directory
- *   <li>{@code default_saga_timeout_millis} — a default saga timeout applied to a loaded definition
- *       that set none ({@code 0} = unbounded); {@code 0} (default) disables it. A definition's own
- *       timeout always wins
+ *   <li>{@code default_saga_timeout_millis} — a default saga timeout enforced at execution for
+ *       definitions that set none ({@code 0} = unbounded); {@code 0} (default) disables it. A
+ *       definition's own timeout always wins. Applied at every execution entry (start, recovery
+ *       resume, parked resume) rather than baked into the stored definition, so changing it takes
+ *       effect for in-flight sagas at their next drive and never conflicts with stored content
  *   <li>{@code max_start_requests_per_minute} — per-principal rate limit on {@code POST}/{@code PUT
  *       /sagas}; {@code 0} (default) disables rate limiting. The limit is keyed on the
  *       authenticated principal, so it is only per-caller once a real provider (jwt or apikey) is
@@ -70,12 +72,15 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code grpc.port} — gRPC listen port (default {@value #DEFAULT_GRPC_PORT}; {@code 0} binds
  *       an ephemeral port)
  *   <li>{@code http.max_threads} / {@code http.min_threads} — Jetty request thread-pool bounds
- *       (defaults {@value #DEFAULT_MAX_THREADS} / {@value #DEFAULT_MIN_THREADS}); the max caps
- *       concurrent request threads so a burst of slow requests cannot exhaust threads
- *   <li>{@code http.max_queued_requests} — cap on requests waiting for a handler thread once all
- *       {@code http.max_threads} are busy; further requests are shed (fast failure) rather than
- *       queued unboundedly. Defaults to {@value #DEFAULT_MAX_QUEUED_REQUESTS_PER_THREAD} × {@code
- *       http.max_threads}, bounding worst-case queueing delay to roughly that many service times
+ *       (defaults {@value #DEFAULT_MAX_THREADS} / {@value #DEFAULT_MIN_THREADS}). Handlers run on
+ *       virtual threads, so the max caps how many requests are <em>dispatched</em> at once, not how
+ *       many are in flight: a request waiting on its saga costs no pool thread. It therefore does
+ *       not bound concurrent saga execution — nothing does yet
+ *   <li>{@code http.max_queued_requests} — cap on the pool's job queue, so the dispatch backlog is
+ *       memory-bounded and the pool rejects rather than growing without limit. Defaults to {@value
+ *       #DEFAULT_MAX_QUEUED_REQUESTS_PER_THREAD} × {@code http.max_threads}. Because a blocking
+ *       handler is dispatched to a virtual thread rather than queued, this does not shed a burst of
+ *       slow sagas
  *   <li>{@code grpc.max_inbound_metadata_bytes} — cap on a call's total request metadata (default
  *       {@value #DEFAULT_GRPC_MAX_INBOUND_METADATA_BYTES}). Raise it only if legitimate credentials
  *       do not fit — a JWT access token with many claims is the usual reason
@@ -117,12 +122,16 @@ import org.jspecify.annotations.Nullable;
  * <h2>Synchronous starts ({@code sync.*})</h2>
  *
  * <ul>
- *   <li>{@code sync.timeout_millis} — bound (ms) on how long a synchronous start blocks before
- *       returning {@code 202} while the saga continues; {@code 0} (default) disables it
  *   <li>{@code sync.max_wait_millis} — absolute ceiling (ms) on a synchronous start's server-side
- *       wait, so it can never block indefinitely (default {@value #DEFAULT_SYNC_MAX_WAIT_MILLIS});
- *       {@code sync.timeout_millis} and a gRPC client's deadline only tighten it
+ *       wait, so it can never block indefinitely (default {@value #DEFAULT_SYNC_MAX_WAIT_MILLIS}).
+ *       Applies to both transports.
+ *   <li>{@code sync.timeout_millis} — optional tightening of that ceiling; {@code 0} (default)
+ *       means no tightening, <em>not</em> an unbounded wait. A gRPC client's call deadline tightens
+ *       it further.
  * </ul>
+ *
+ * <p>Read the pair through {@link #syncWaitBoundMillis(long)} rather than separately; a transport
+ * should be handed the resolved bound, not the two keys behind it.
  *
  * <h2>Shutdown ({@code shutdown.*})</h2>
  *
@@ -156,18 +165,42 @@ import org.jspecify.annotations.Nullable;
  * from {@link RecoveryConfig#defaults()}.
  *
  * <ul>
- *   <li>{@code recovery.timeout_millis} — staleness threshold: a saga untouched for longer is
- *       considered abandoned and eligible for recovery. Must exceed the longest a healthy instance
- *       goes between updating a saga, or a live saga is stolen from the instance still running it
+ *   <li>{@code recovery.staleness_threshold_millis} — a saga that has made no progress for longer
+ *       is considered abandoned and eligible for recovery. Progress is judged from the saga's
+ *       newest event, so a saga executing a long step is not mistaken for a dead one. Set it above
+ *       the longest a <b>single step</b> can take, which is simply its step timeout: that deadline
+ *       is an absolute instant computed once before the retry loop, so it bounds the entire attempt
+ *       sequence — every retry and all backoff — rather than each attempt. A healthy saga emits an
+ *       event only at step boundaries, so that is the longest silence to expect. <b>With neither a
+ *       step timeout nor a saga timeout configured there is no such bound</b> — the step runs until
+ *       it returns — and no value here is safe; set one of those timeouts if you rely on recovery
+ *       leaving long steps alone. Raising it delays recovery of genuinely crashed sagas by the same
+ *       amount: this value is your crash-recovery MTTR.
+ *       <p>Recovery is at-least-once across replicas. A step whose attempt sequence outlives this
+ *       threshold produces no events while it runs, so another replica can begin recovering the
+ *       saga while the first is still executing it; the loser is fenced on its next state write,
+ *       but the participant call itself has already been made. Size the threshold above the step
+ *       envelope, and make participants tolerate a duplicate invocation
  *   <li>{@code recovery.interval_seconds} — how often the scan runs
  *   <li>{@code recovery.compensation_grace_period_seconds} — how long a saga may stay stuck with
  *       failing compensation before it is escalated for manual intervention
- *   <li>{@code recovery.batch_size} — per-pass recovery work budget. Claims lost to another replica
- *       do not count against it (failed attempts do), and a pass stopped by the cap resumes where
- *       it left off next pass, so a small value never skips sagas — it only spreads recovery over
- *       more passes
- *   <li>{@code recovery.max_concurrent_recoveries} — how many of that batch are recovered at once,
- *       bounding the database pressure of a single pass
+ *   <li>{@code recovery.max_recoveries_per_sweep} — a pass makes two sweeps, one for abandoned
+ *       sagas and one for parked sagas past their deadline, and this bounds each separately, so one
+ *       pass can do up to twice this number (the pass summary reports them as {@code stale[...]}
+ *       and {@code parked[...]}). Claims lost to another replica do not count against it (failed
+ *       attempts do), and a sweep stopped by the cap resumes where it left off next pass, so a
+ *       small value never skips sagas — it only spreads recovery over more passes. Keep it well
+ *       above 200: a bucket is read as one page per recoverable status and a sweep stops submitting
+ *       once its budget runs out, so a budget below 200 truncates the page, and the truncation
+ *       always falls on the trailing status. At or below 100, compensating sagas are never
+ *       recovered; between 100 and 200 they are served but throttled behind running ones. 200 is a
+ *       floor, not a target — the budget is spent across buckets, so a sweep budgeted at 200 covers
+ *       a single bucket
+ *   <li>{@code recovery.max_concurrent_recoveries} — how many sagas are <b>recovered</b> at once:
+ *       claimed and driven, participant calls included. It bounds the expensive half of a pass. The
+ *       cheap screening that decides whether a saga needs recovering at all runs outside this
+ *       limit, under its own fixed bound, so a pass is never held up waiting for a running saga to
+ *       finish before it can answer a one-read question
  * </ul>
  *
  * <h2>Retention ({@code retention.*})</h2>
@@ -178,37 +211,58 @@ import org.jspecify.annotations.Nullable;
  * <ul>
  *   <li>{@code retention.period_seconds} — how long a terminal saga is kept before it is purgeable
  *       (default 7 days). This is the window in which a saga's history can still be inspected
- *   <li>{@code retention.cleanup_interval_seconds} — how often the purge runs
- *   <li>{@code retention.batch_size} — cap on sagas actually purged per pass (deletes that turn out
- *       to be no-ops because another replica already purged the saga do not count); it must keep up
- *       with the terminal-saga rate over one interval or the backlog grows
- *   <li>{@code retention.max_concurrent_purges} — how many of that batch are purged at once
+ *   <li>{@code retention.interval_seconds} — how often the purge runs
+ *   <li>{@code retention.max_purges_per_pass} — cap on sagas actually purged per pass (deletes that
+ *       turn out to be no-ops because another replica already purged the saga do not count); it
+ *       must keep up with the terminal-saga rate over one interval or the backlog grows
+ *   <li>{@code retention.max_concurrent_purges} — how many of those are purged at once
  * </ul>
  *
- * <h2>Declarative services ({@code service.<name>.*})</h2>
+ * <h2>Declarative services ({@code services_path})</h2>
  *
- * <p>One block per service a declarative step's {@code "service":"<name>"} resolves to. {@code
- * <name>} is a config-local identifier and must not contain {@code .}.
+ * <p>Downstream services live in a directory of per-service files, one {@code
+ * <service-name>.properties} per service a declarative step's {@code "service":"<name>"} resolves
+ * to. The service name is the file name minus the {@code .properties} extension. Inside a file the
+ * keys are prefix-free:
  *
  * <ul>
- *   <li>{@code service.<name>.base_url} — the service's base URL (required for each named service)
- *   <li>{@code service.<name>.allowed_hosts} — comma-separated SSRF allowlist for this service;
- *       unset = any host. Matching is on the host name only, so it is defense in depth for a
- *       trusted endpoint, not a sandbox
- *   <li>{@code service.<name>.max_body_bytes} — request/response body cap for this service; unset
- *       uses the engine default
- *   <li>{@code service.<name>.header.<HeaderName>} — a header sent on every request to this
- *       service, repeated per header. This is the channel for calling an <b>authenticated</b>
- *       service (e.g. {@code header.Authorization}), and the value takes a secret reference like
- *       any other key here. The engine stamps its own headers ({@code X-Saga-Id}, {@code
+ *   <li>{@code base_url} — the service's base URL (required)
+ *   <li>{@code allowed_hosts} — comma-separated SSRF allowlist for this service; unset = any host.
+ *       Matching is on the host name only, so it is defense in depth for a trusted endpoint, not a
+ *       sandbox
+ *   <li>{@code max_body_bytes} — request/response body cap for this service; unset uses the engine
+ *       default
+ *   <li>{@code header.<HeaderName>} — a header sent on every request to this service, repeated per
+ *       header. This is the channel for calling an <b>authenticated</b> service (e.g. {@code
+ *       header.Authorization}), and the value takes a secret reference — confined to {@code
+ *       secrets_root}, see below. The engine stamps its own headers ({@code X-Saga-Id}, {@code
  *       X-Saga-Step}, {@code X-Saga-Callback-Url}) on every request and they always win, so
- *       configuring one of those names is rejected at startup rather than silently ignored. Header
- *       names are case-insensitive per the HTTP spec, so setting one name in two spellings is
- *       rejected too. A header value is trimmed, which is what lets a {@code ${file:...}} secret
- *       ending in a newline be sent at all — an untrimmed newline is a control character no HTTP
- *       header value may carry. The five names the JDK's HTTP client reserves for itself ({@code
- *       Connection}, {@code Content-Length}, {@code Expect}, {@code Host}, {@code Upgrade}) are
- *       rejected as well, since it refuses to send them; see {@link #JDK_RESTRICTED_HEADERS}
+ *       configuring one of those names is rejected. Header names are case-insensitive per the HTTP
+ *       spec, so setting one name in two spellings is rejected too. A header value is trimmed,
+ *       which is what lets a {@code ${file:...}} secret ending in a newline be sent at all — an
+ *       untrimmed newline is a control character no HTTP header value may carry. The names the
+ *       JDK's HTTP client refuses to send ({@code Connection}, {@code Content-Length}, {@code
+ *       Expect}, {@code Host}, {@code Upgrade}) are rejected as well
+ * </ul>
+ *
+ * <p>The directory-level keys:
+ *
+ * <ul>
+ *   <li>{@code services_path} — the directory of service files; unset = no services
+ *   <li>{@code reload.interval_seconds} — seconds between configuration reload passes (default
+ *       {@value #DEFAULT_RELOAD_INTERVAL_SECONDS}): service files and definitions are re-read and
+ *       validated as a complete set, so changes land without a restart. Validation is all or
+ *       nothing; applying is not — services swap before definitions register, one definition at a
+ *       time, so a failure part way through leaves what committed live and retries the rest next
+ *       pass. {@code 0} disables reload (startup-only loading)
+ *   <li>{@code secrets_root} — the directory {@code ${file:...}} references in service files must
+ *       resolve inside, after symlink resolution (default {@value #DEFAULT_SECRETS_ROOT}). Service
+ *       files are a live trust boundary under reload, so their file references are confined to the
+ *       secrets mounted for that purpose; {@code server.properties} itself is bootstrap
+ *       configuration and stays unconfined
+ *   <li>{@code egress.allowed_hosts_ceiling} — optional comma-separated ceiling; when set, every
+ *       service's {@code allowed_hosts} must be a non-empty subset of it, so no service file can
+ *       authorize egress beyond what the operator allowed
  * </ul>
  *
  * <h2>Async callbacks ({@code callback.*})</h2>
@@ -267,12 +321,12 @@ import org.jspecify.annotations.Nullable;
  * empty value there is far more likely a template that failed to resolve than an intent to run
  * without the protection. That covers {@code callback.max_age_seconds}, {@code
  * max_start_requests_per_minute}, and {@code tls.enabled}, whose defaults disable the check
- * outright, plus the {@code service.<name>} attributes whose blank fallback would be open ({@code
- * allowed_hosts} would admit any host; a {@code header.<Name>} would send an empty header, and an
- * empty {@code Authorization} is an unauthenticated call) or meaningless ({@code base_url} has no
- * default to fall back to). {@code service.<name>.max_body_bytes} sits on the other side of that
- * line deliberately: unset leaves the engine's own 1 MiB cap in place, so the body stays bounded
- * either way.
+ * outright, plus, inside a service file, the settings whose blank fallback would be open ({@code
+ * allowed_hosts} would admit any host; a {@code header.<HeaderName>} would send an empty header,
+ * and an empty {@code Authorization} is an unauthenticated call) or meaningless ({@code base_url}
+ * has no default to fall back to). A service file's {@code max_body_bytes} sits on the other side
+ * of that line deliberately: unset leaves the engine's own 1 MiB cap in place, so the body stays
+ * bounded either way.
  *
  * <p>All other properties configure the saga engine's persistence (e.g. ScalarDB connection
  * settings and the {@code scalar.db.saga.store.*} keys documented on {@code
@@ -336,19 +390,20 @@ public final class SagaServerConfig {
   static final String DETAIL_MAX_TIMELINE_EVENTS_KEY = DETAIL_PREFIX + "max_timeline_events";
 
   static final String RECOVERY_PREFIX = SERVER_PREFIX + "recovery.";
-  static final String RECOVERY_TIMEOUT_MILLIS_KEY = RECOVERY_PREFIX + "timeout_millis";
+  static final String RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY =
+      RECOVERY_PREFIX + "staleness_threshold_millis";
   static final String RECOVERY_INTERVAL_SECONDS_KEY = RECOVERY_PREFIX + "interval_seconds";
   static final String RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY =
       RECOVERY_PREFIX + "compensation_grace_period_seconds";
-  static final String RECOVERY_BATCH_SIZE_KEY = RECOVERY_PREFIX + "batch_size";
+  static final String RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY =
+      RECOVERY_PREFIX + "max_recoveries_per_sweep";
   static final String RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY =
       RECOVERY_PREFIX + "max_concurrent_recoveries";
 
   static final String RETENTION_PREFIX = SERVER_PREFIX + "retention.";
   static final String RETENTION_PERIOD_SECONDS_KEY = RETENTION_PREFIX + "period_seconds";
-  static final String RETENTION_CLEANUP_INTERVAL_SECONDS_KEY =
-      RETENTION_PREFIX + "cleanup_interval_seconds";
-  static final String RETENTION_BATCH_SIZE_KEY = RETENTION_PREFIX + "batch_size";
+  static final String RETENTION_INTERVAL_SECONDS_KEY = RETENTION_PREFIX + "interval_seconds";
+  static final String RETENTION_MAX_PURGES_PER_PASS_KEY = RETENTION_PREFIX + "max_purges_per_pass";
   static final String RETENTION_MAX_CONCURRENT_PURGES_KEY =
       RETENTION_PREFIX + "max_concurrent_purges";
 
@@ -374,10 +429,15 @@ public final class SagaServerConfig {
   static final String SECURITY_APIKEY_PRINCIPAL_SUFFIX = ".principal";
 
   static final String SERVICE_KEY_PREFIX = SERVER_PREFIX + "service.";
-  static final String SERVICE_BASE_URL_SUFFIX = ".base_url";
-  static final String SERVICE_ALLOWED_HOSTS_SUFFIX = ".allowed_hosts";
-  static final String SERVICE_MAX_BODY_BYTES_SUFFIX = ".max_body_bytes";
-  static final String SERVICE_HEADER_INFIX = ".header.";
+  static final String SERVICES_PATH_KEY = SERVER_PREFIX + "services_path";
+  static final String RELOAD_PREFIX = SERVER_PREFIX + "reload.";
+  static final String RELOAD_INTERVAL_SECONDS_KEY = RELOAD_PREFIX + "interval_seconds";
+  static final String SECRETS_ROOT_KEY = SERVER_PREFIX + "secrets_root";
+  static final String EGRESS_ALLOWED_HOSTS_CEILING_KEY =
+      SERVER_PREFIX + "egress.allowed_hosts_ceiling";
+
+  static final long DEFAULT_RELOAD_INTERVAL_SECONDS = 30L;
+  static final String DEFAULT_SECRETS_ROOT = "/run/secrets";
 
   static final String STORE_MAX_EVENT_PAYLOAD_BYTES_KEY = PREFIX + "store.max_event_payload_bytes";
 
@@ -389,7 +449,9 @@ public final class SagaServerConfig {
   static final boolean DEFAULT_TLS_ENABLED = false; // plaintext; a mesh/ingress terminates TLS
   static final int DEFAULT_GRPC_MAX_INBOUND_METADATA_BYTES = 8 * 1024;
   static final int DEFAULT_MAX_EVENT_PAYLOAD_BYTES = 1_048_576; // 1 MiB
-  static final long DEFAULT_SYNC_TIMEOUT_MILLIS = 0L; // 0 = disabled (sync blocks to terminal)
+  // 0 = no extra tightening, NOT an unbounded wait: sync.max_wait_millis is the ceiling and always
+  // applies, on both transports.
+  static final long DEFAULT_SYNC_TIMEOUT_MILLIS = 0L;
   static final long DEFAULT_SYNC_MAX_WAIT_MILLIS =
       60_000L; // ceiling on a synchronous server-side wait
   static final ShutdownMode DEFAULT_SHUTDOWN_MODE = DefaultSagaOrchestrator.DEFAULT_SHUTDOWN_MODE;
@@ -413,7 +475,7 @@ public final class SagaServerConfig {
   // this many request service-times before the server sheds load.
   static final int DEFAULT_MAX_QUEUED_REQUESTS_PER_THREAD = 2;
   static final long DEFAULT_SAGA_TIMEOUT_MILLIS =
-      0L; // 0 = disabled (definition's own timeout wins)
+      DefaultSagaOrchestrator.DEFAULT_SAGA_TIMEOUT_MILLIS;
   static final int DEFAULT_MAX_START_REQUESTS_PER_MINUTE = 0; // 0 = disabled (no rate limiting)
 
   /**
@@ -426,6 +488,10 @@ public final class SagaServerConfig {
           HOST_KEY,
           OWNER_ID_KEY,
           DEFINITIONS_PATH_KEY,
+          SERVICES_PATH_KEY,
+          RELOAD_INTERVAL_SECONDS_KEY,
+          SECRETS_ROOT_KEY,
+          EGRESS_ALLOWED_HOSTS_CEILING_KEY,
           DEFAULT_SAGA_TIMEOUT_MILLIS_KEY,
           MAX_START_REQUESTS_PER_MINUTE_KEY,
           HTTP_ENABLED_KEY,
@@ -444,14 +510,14 @@ public final class SagaServerConfig {
           SHUTDOWN_MODE_KEY,
           SHUTDOWN_TIMEOUT_MILLIS_KEY,
           DETAIL_MAX_TIMELINE_EVENTS_KEY,
-          RECOVERY_TIMEOUT_MILLIS_KEY,
+          RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY,
           RECOVERY_INTERVAL_SECONDS_KEY,
           RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY,
-          RECOVERY_BATCH_SIZE_KEY,
+          RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY,
           RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY,
           RETENTION_PERIOD_SECONDS_KEY,
-          RETENTION_CLEANUP_INTERVAL_SECONDS_KEY,
-          RETENTION_BATCH_SIZE_KEY,
+          RETENTION_INTERVAL_SECONDS_KEY,
+          RETENTION_MAX_PURGES_PER_PASS_KEY,
           RETENTION_MAX_CONCURRENT_PURGES_KEY,
           CALLBACK_BASE_URL_KEY,
           CALLBACK_SECRET_KEY,
@@ -491,79 +557,10 @@ public final class SagaServerConfig {
   /**
    * Namespaces whose keys carry an operator-chosen segment, so they cannot be enumerated. Only that
    * one segment is the operator's; the sub-settings around it are fixed names, still checked key by
-   * key (see {@link #parseServices} and {@link #rejectUnknownApiKeySetting}). The rest of {@code
-   * security.} has no such segment and is enumerated in {@link #SECURITY_PROVIDER_KEYS}.
+   * key (see {@link #rejectUnknownApiKeySetting}). The rest of {@code security.} has no such
+   * segment and is enumerated in {@link #SECURITY_PROVIDER_KEYS}.
    */
-  private static final List<String> DELEGATED_PREFIXES =
-      List.of(SERVICE_KEY_PREFIX, SECURITY_APIKEY_KEY_PREFIX);
-
-  /**
-   * Header names the engine issues itself, so configuring one as a service header cannot change
-   * what a participant receives: the engine's value wins. {@code X-Saga-Callback-Url} is set only
-   * on the async-step requests that need one, so configuring it is worse than inert — the rest of
-   * the requests would carry a callback URL the engine never issued. Rejected at load, where the
-   * error can name the offending key, rather than leaving an operator to wonder why their header
-   * never arrives. Compared case-insensitively, matching the HTTP spec and the engine's own header
-   * merge. The names mirror the engine's internal {@code HttpHeaders}, not visible from here.
-   */
-  private static final Set<String> RESERVED_HEADERS = reservedHeaders();
-
-  private static Set<String> reservedHeaders() {
-    Set<String> names = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
-    names.addAll(List.of("X-Saga-Id", "X-Saga-Step", "X-Saga-Callback-Url"));
-    return Collections.unmodifiableSet(names);
-  }
-
-  /** The system property with which the JDK opens individual {@link #JDK_RESTRICTED_HEADERS}. */
-  private static final String ALLOW_RESTRICTED_HEADERS_PROPERTY =
-      "jdk.httpclient.allowRestrictedHeaders";
-
-  /**
-   * Header names {@code java.net.http} owns for framing, connection management, and routing, and so
-   * refuses outright: {@code HttpRequest.Builder.header()} throws {@link IllegalArgumentException}
-   * on them. Unlike a {@link #RESERVED_HEADERS} name, one of these does not merely fail to arrive —
-   * the engine cannot build the request at all, so every call to the service fails permanently and
-   * compensates. Nothing catches that at startup: the throw lands on the first outbound call, where
-   * it is reported against the URI rather than the config key that caused it, while liveness and
-   * readiness stay green. Rejecting at load turns a silent, service-wide outage into a startup
-   * error naming the key.
-   *
-   * <p>Whoever sets {@link #ALLOW_RESTRICTED_HEADERS_PROPERTY} takes a name back off this set, so
-   * the check forbids exactly what the JDK forbids rather than a fixed five; {@code Host} is worth
-   * opening to route a participant through a shared ingress. Read from the system property, which
-   * is where the JDK looks first — a name opened through {@code conf/net.properties} instead is not
-   * visible here, since {@code sun.net.NetProperties} is not exported.
-   */
-  private static final Set<String> JDK_RESTRICTED_HEADERS =
-      jdkRestrictedHeaders(System.getProperty(ALLOW_RESTRICTED_HEADERS_PROPERTY));
-
-  /**
-   * Returns the restricted header names the JDK still refuses once {@code allowRestrictedHeaders} —
-   * the raw {@link #ALLOW_RESTRICTED_HEADERS_PROPERTY} value, or null when unset — has opened the
-   * names it lists.
-   *
-   * <p>Deliberately mirrors {@code jdk.internal.net.http.common.Utils.getDisallowedHeaders()} quirk
-   * for quirk: the whole value is trimmed once and split on commas, but the tokens themselves are
-   * not trimmed, so {@code "host, connection"} opens only {@code host}. Trimming the tokens here
-   * would be the friendlier reading and exactly the wrong one — it would accept a config key the
-   * JDK then rejects at send time, which is the bug this check exists to prevent. Token matching is
-   * case-insensitive, as it is there.
-   *
-   * @param allowRestrictedHeaders the raw system property value, or null when unset
-   * @return the names still refused, compared case-insensitively
-   */
-  static Set<String> jdkRestrictedHeaders(@Nullable String allowRestrictedHeaders) {
-    Set<String> names = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
-    names.addAll(List.of("Connection", "Content-Length", "Expect", "Host", "Upgrade"));
-    if (allowRestrictedHeaders != null) {
-      // The JDK splits with the default limit; -1 here only keeps the trailing empty tokens it
-      // drops, and removing "" from a set of five header names is a no-op either way.
-      for (String token : allowRestrictedHeaders.trim().split(",", -1)) {
-        names.remove(token);
-      }
-    }
-    return Collections.unmodifiableSet(names);
-  }
+  private static final List<String> DELEGATED_PREFIXES = List.of(SECURITY_APIKEY_KEY_PREFIX);
 
   private final String host;
   private final String ownerId;
@@ -600,7 +597,7 @@ public final class SagaServerConfig {
   private final Properties properties;
   private final Properties rawProperties;
   private final @Nullable Path definitionsPath;
-  private final Map<String, ServiceConfig> services;
+  private final ReloadConfig reloadConfig;
 
   /**
    * Parses every setting from the already secret-resolved {@code properties}, then cross-checks the
@@ -730,7 +727,7 @@ public final class SagaServerConfig {
             0);
     this.definitionsPath =
         parseOptionalPath(resolved.getProperty(DEFINITIONS_PATH_KEY), DEFINITIONS_PATH_KEY);
-    this.services = parseServices(resolved);
+    this.reloadConfig = parseReloadConfig(resolved);
     this.properties = applyStoreDefaults(copyOf(resolved));
     this.grpcMaxInboundMessageBytes = parseGrpcMaxInboundMessageBytes(this.properties);
     this.rawProperties = copyOf(raw);
@@ -868,12 +865,23 @@ public final class SagaServerConfig {
         continue;
       }
       if (DELEGATED_PREFIXES.stream().anyMatch(key::startsWith)) {
-        // The name segment is the operator's, but the settings around it are fixed. Check the
-        // API-key ones here; parseServices checks the service ones as it builds each service.
+        // The name segment is the operator's, but the settings around it are fixed.
         if (key.startsWith(SECURITY_APIKEY_KEY_PREFIX)) {
           rejectUnknownApiKeySetting(key);
         }
         continue;
+      }
+      if (key.startsWith(SERVICE_KEY_PREFIX)) {
+        // The one unknown-key family with a known history: these keys were the pre-services_path
+        // format, so the error names the migration instead of reading as a typo.
+        throw new IllegalArgumentException(
+            "'"
+                + key
+                + "': service configuration moved to services_path. Put each service in its own"
+                + " <name>.properties file (keys base_url, allowed_hosts, max_body_bytes,"
+                + " header.<HeaderName>) in the directory '"
+                + SERVICES_PATH_KEY
+                + "' points at, and remove the service.* keys.");
       }
       throw new IllegalArgumentException(
           "Unknown configuration key '"
@@ -957,14 +965,14 @@ public final class SagaServerConfig {
     RecoveryConfig defaults = RecoveryConfig.defaults();
     return new RecoveryConfig(
         parseBoundedLong(
-            properties.getProperty(RECOVERY_TIMEOUT_MILLIS_KEY),
-            RECOVERY_TIMEOUT_MILLIS_KEY,
-            defaults.recoveryTimeoutMillis(),
+            properties.getProperty(RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY),
+            RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY,
+            defaults.stalenessThresholdMillis(),
             1L),
         parseBoundedLong(
             properties.getProperty(RECOVERY_INTERVAL_SECONDS_KEY),
             RECOVERY_INTERVAL_SECONDS_KEY,
-            defaults.recoveryIntervalSeconds(),
+            defaults.intervalSeconds(),
             1L),
         Duration.ofSeconds(
             parseBoundedLong(
@@ -973,9 +981,9 @@ public final class SagaServerConfig {
                 defaults.compensationGracePeriod().toSeconds(),
                 1L)),
         parseBoundedInt(
-            properties.getProperty(RECOVERY_BATCH_SIZE_KEY),
-            RECOVERY_BATCH_SIZE_KEY,
-            defaults.batchSize(),
+            properties.getProperty(RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY),
+            RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY,
+            defaults.maxRecoveriesPerSweep(),
             1),
         parseBoundedInt(
             properties.getProperty(RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY),
@@ -996,14 +1004,14 @@ public final class SagaServerConfig {
                 defaults.retentionPeriod().toSeconds(),
                 1L)),
         parseBoundedLong(
-            properties.getProperty(RETENTION_CLEANUP_INTERVAL_SECONDS_KEY),
-            RETENTION_CLEANUP_INTERVAL_SECONDS_KEY,
-            defaults.cleanupIntervalSeconds(),
+            properties.getProperty(RETENTION_INTERVAL_SECONDS_KEY),
+            RETENTION_INTERVAL_SECONDS_KEY,
+            defaults.intervalSeconds(),
             1L),
         parseBoundedInt(
-            properties.getProperty(RETENTION_BATCH_SIZE_KEY),
-            RETENTION_BATCH_SIZE_KEY,
-            defaults.batchSize(),
+            properties.getProperty(RETENTION_MAX_PURGES_PER_PASS_KEY),
+            RETENTION_MAX_PURGES_PER_PASS_KEY,
+            defaults.maxPurgesPerPass(),
             1),
         parseBoundedInt(
             properties.getProperty(RETENTION_MAX_CONCURRENT_PURGES_KEY),
@@ -1014,150 +1022,51 @@ public final class SagaServerConfig {
   }
 
   /**
-   * Collects the {@code service.<name>.*} keys into one {@link ServiceConfig} per service. The
-   * service name is the segment up to the first {@code .}, so an unrecognized remainder — a typo,
-   * or a name that itself contains a {@code .} — is reported rather than ignored; a silently
-   * dropped {@code header.Authorization} would mean unauthenticated calls to a downstream service.
+   * Parses {@code egress.allowed_hosts_ceiling}, holding every entry to the same host shape a
+   * service file's {@code allowed_hosts} must have.
+   *
+   * <p>An unshaped ceiling entry is the worst of the config typos this module can take: the ceiling
+   * is compared against entries that ARE shaped like hosts, so one that never can be matches
+   * nothing, and every service in the fleet is rejected as exceeding it — pointing the operator at
+   * the service files rather than at the property they mistyped.
    */
-  private static Map<String, ServiceConfig> parseServices(Properties properties) {
-    Map<String, ServiceBuilder> builders = new LinkedHashMap<>();
-    for (String key : new TreeSet<>(properties.stringPropertyNames())) {
-      if (!key.startsWith(SERVICE_KEY_PREFIX)) {
-        continue;
-      }
-      String remainder = key.substring(SERVICE_KEY_PREFIX.length());
-      int dot = remainder.indexOf('.');
-      if (dot <= 0) {
-        throw new IllegalArgumentException(
-            "'"
-                + key
-                + "' is not a valid service key. Use '"
-                + SERVICE_KEY_PREFIX
-                + "<name>"
-                + SERVICE_BASE_URL_SUFFIX
-                + "' and the other service settings documented on SagaServerConfig.");
-      }
-      String name = remainder.substring(0, dot);
-      // Keep the leading dot so the attribute matches the suffix constants directly.
-      String attribute = remainder.substring(dot);
-      ServiceBuilder builder = builders.computeIfAbsent(name, unused -> new ServiceBuilder());
-      String value = properties.getProperty(key);
-      switch (attribute) {
-        case SERVICE_BASE_URL_SUFFIX -> builder.baseUrl = requireNonBlank(key, value);
-        case SERVICE_ALLOWED_HOSTS_SUFFIX ->
-            builder.allowedHosts = parseCommaSeparated(key, requireNonBlank(key, value));
-        case SERVICE_MAX_BODY_BYTES_SUFFIX ->
-            builder.maxBodyBytes = parseBoundedLong(value, key, 0L, 1L);
-        default -> {
-          if (!attribute.startsWith(SERVICE_HEADER_INFIX)) {
-            throw new IllegalArgumentException(
-                "Unknown service setting '"
-                    + attribute.substring(1)
-                    + "' in '"
-                    + key
-                    + "'. Valid settings are base_url, allowed_hosts, max_body_bytes, and"
-                    + " header.<HeaderName>. A service name must not contain '.'.");
-          }
-          String header = attribute.substring(SERVICE_HEADER_INFIX.length());
-          if (header.isBlank()) {
-            throw new IllegalArgumentException("'" + key + "' has no header name.");
-          }
-          if (RESERVED_HEADERS.contains(header)) {
-            throw new IllegalArgumentException(
-                "'"
-                    + key
-                    + "' sets '"
-                    + header
-                    + "', which the engine issues itself. Its value wins on every request the"
-                    + " engine sets it on, so configuring it here either has no effect or sends a"
-                    + " header the engine never issued. Remove the key.");
-          }
-          if (JDK_RESTRICTED_HEADERS.contains(header)) {
-            throw new IllegalArgumentException(
-                "'"
-                    + key
-                    + "' sets '"
-                    + header
-                    + "', which the JDK's HTTP client — not the engine — refuses to send: it owns"
-                    + " that name for framing, connection management, and routing. Left in place,"
-                    + " every call to service '"
-                    + name
-                    + "' would fail permanently and compensate. Remove the key, or start the daemon"
-                    + " with -D"
-                    + ALLOW_RESTRICTED_HEADERS_PROPERTY
-                    + "="
-                    + header.toLowerCase(Locale.ROOT)
-                    + " to allow it (comma-separated for several, with no spaces around the"
-                    + " commas).");
-          }
-          String duplicate = findSameNameIgnoringCase(builder.headers, header);
-          if (duplicate != null) {
-            throw new IllegalArgumentException(
-                "Service '"
-                    + name
-                    + "' sets header '"
-                    + duplicate
-                    + "' and '"
-                    + header
-                    + "', which differ only in case. HTTP header names are case-insensitive, so"
-                    + " only one of the two would be sent, and which one is not deterministic."
-                    + " Remove one of them.");
-          }
-          builder.headers.put(header, requireNonBlank(key, value));
-        }
-      }
-    }
-    Map<String, ServiceConfig> services = new LinkedHashMap<>();
-    builders.forEach(
-        (name, builder) -> {
-          String baseUrl = builder.baseUrl;
-          if (baseUrl == null) {
-            throw new IllegalArgumentException(
-                "Service '"
-                    + name
-                    + "' is configured but has no '"
-                    + SERVICE_KEY_PREFIX
-                    + name
-                    + SERVICE_BASE_URL_SUFFIX
-                    + "', so there is nothing for a declarative step to call.");
-          }
-          services.put(
-              name,
-              new ServiceConfig(
-                  baseUrl, builder.allowedHosts, builder.maxBodyBytes, builder.headers));
-        });
-    return services;
+  private static List<String> parseCeiling(String ceiling) {
+    List<String> entries = parseCommaSeparated(EGRESS_ALLOWED_HOSTS_CEILING_KEY, ceiling);
+    entries.forEach(
+        host -> ServiceFileParser.requireHostShape(EGRESS_ALLOWED_HOSTS_CEILING_KEY, host));
+    return entries;
   }
 
   /**
-   * Returns the header name already collected for this service that differs from {@code header}
-   * only in case, or null when there is none. HTTP header names are case-insensitive, so two
-   * spellings of one name collapse to a single header downstream and the surviving value is not
-   * deterministic; rejecting the pair here turns that into a startup error. A scan rather than a
-   * second case-insensitive index: one service's header set is a handful of entries, and the map
-   * keeps the operator's own spelling for the error message.
+   * Parses the services-directory settings into a {@link ReloadConfig}: where the service files
+   * live, how often they are re-read, where their secret references may resolve, and the optional
+   * egress ceiling. The files themselves are read by the reconciler, not here.
    */
-  private static @Nullable String findSameNameIgnoringCase(
-      Map<String, String> headers, String header) {
-    for (String existing : headers.keySet()) {
-      if (existing.equalsIgnoreCase(header)) {
-        return existing;
-      }
-    }
-    return null;
-  }
-
-  /** Accumulates one service's keys while {@link #parseServices} walks the property table. */
-  private static final class ServiceBuilder {
-    private @Nullable String baseUrl;
-    private List<String> allowedHosts = List.of();
-    private long maxBodyBytes; // 0 = unset, use the engine default
-    private final Map<String, String> headers = new LinkedHashMap<>();
+  private static ReloadConfig parseReloadConfig(Properties resolved) {
+    String secretsRoot = resolved.getProperty(SECRETS_ROOT_KEY);
+    String ceiling =
+        requireNonBlankIfSet(
+            EGRESS_ALLOWED_HOSTS_CEILING_KEY,
+            resolved.getProperty(EGRESS_ALLOWED_HOSTS_CEILING_KEY));
+    return new ReloadConfig(
+        parseOptionalPath(resolved.getProperty(SERVICES_PATH_KEY), SERVICES_PATH_KEY),
+        parseBoundedLong(
+            resolved.getProperty(RELOAD_INTERVAL_SECONDS_KEY),
+            RELOAD_INTERVAL_SECONDS_KEY,
+            DEFAULT_RELOAD_INTERVAL_SECONDS,
+            0L),
+        Path.of(
+            secretsRoot == null || secretsRoot.isBlank()
+                ? DEFAULT_SECRETS_ROOT
+                : secretsRoot.trim()),
+        ceiling == null ? List.of() : parseCeiling(ceiling),
+        Clock.systemUTC());
   }
 
   /**
    * One downstream service a declarative step can call: the base URL plus the outbound policy the
-   * engine applies to every request to it.
+   * engine applies to every request to it. Produced by {@link ServiceFileParser} from a service
+   * file; this class only points at the directory they live in.
    *
    * @param baseUrl the service base URL
    * @param allowedHosts the SSRF allowlist; empty allows any host
@@ -1301,24 +1210,47 @@ public final class SagaServerConfig {
   }
 
   /**
-   * Returns the synchronous-start timeout in milliseconds, or {@code 0} when disabled (the
-   * default). When positive, a synchronous {@code POST}/{@code PUT} that has not reached a terminal
-   * state within this bound returns {@code 202} and the saga keeps running on the engine's executor
-   * (the client polls {@code GET /sagas/{id}}) — so a slow saga cannot pin a request thread
-   * indefinitely.
+   * Returns the synchronous-start timeout in milliseconds, or {@code 0} when unset (the default).
+   * When positive it tightens {@link #syncMaxWaitMillis()}; when {@code 0} the ceiling alone
+   * applies. A synchronous start that has not reached a terminal state within the resulting bound
+   * returns {@code 202} and the saga keeps running on the engine's executor (the client polls
+   * {@code GET /sagas/{id}}).
    */
   public long syncTimeoutMillis() {
     return syncTimeoutMillis;
   }
 
   /**
-   * Returns the absolute ceiling (ms) on a synchronous gRPC {@code StartSaga}'s server-side wait.
-   * {@link #syncTimeoutMillis()} and the client's call deadline can only tighten this bound, never
-   * exceed it, so a synchronous start can never pin a server thread indefinitely. Defaults to
+   * Returns the absolute ceiling (ms) on a synchronous start's server-side wait, for both
+   * transports. {@link #syncTimeoutMillis()} and a gRPC client's call deadline can only tighten
+   * this bound, never exceed it, so a synchronous start can never block indefinitely. Defaults to
    * {@value #DEFAULT_SYNC_MAX_WAIT_MILLIS} ms.
    */
   public long syncMaxWaitMillis() {
     return syncMaxWaitMillis;
+  }
+
+  /**
+   * Returns the bound (ms) a synchronous start may wait: the ceiling {@link #syncMaxWaitMillis()},
+   * tightened by {@code requestedCapMillis} and by {@link #syncTimeoutMillis()} when that is set.
+   * Pass {@link Long#MAX_VALUE} when the caller has no cap of its own.
+   *
+   * <p>Derived state of two configuration keys, so it lives here rather than in either transport. A
+   * transport that needs to tighten it further does so on top of this result, as the gRPC call
+   * deadline does.
+   *
+   * <p>Deliberately {@code public} though only {@link SagaServer} calls it. Restricting it would
+   * protect nothing while {@link #syncTimeoutMillis()} and {@link #syncMaxWaitMillis()} stay
+   * public: combining that pair by hand is the mistake this method exists to prevent, so hiding the
+   * safe method while leaving the raw one reachable is backwards. It also keeps the gRPC tests able
+   * to resolve a bound through a real config instead of restating the policy.
+   *
+   * @param requestedCapMillis a caller-supplied cap, or {@code Long.MAX_VALUE} for none
+   * @return the wait bound in milliseconds
+   */
+  public long syncWaitBoundMillis(long requestedCapMillis) {
+    long bound = Math.min(syncMaxWaitMillis, requestedCapMillis);
+    return syncTimeoutMillis > 0L ? Math.min(bound, syncTimeoutMillis) : bound;
   }
 
   /**
@@ -1417,10 +1349,12 @@ public final class SagaServerConfig {
   }
 
   /**
-   * Returns the server-wide default saga timeout (ms) applied to a loaded definition that specified
-   * none ({@code 0} = unbounded); {@code 0} (the default) disables it. A definition's own timeout
-   * always takes precedence — this only fills in for definitions that left it unset, so a
-   * daemon-hosted saga cannot run without a deadline.
+   * Returns the server-wide default saga timeout (ms) enforced at execution for definitions that
+   * specified none ({@code 0} = unbounded); {@code 0} (the default) disables it. A definition's own
+   * timeout always takes precedence — this only fills in for definitions that left it unset, so a
+   * daemon-hosted saga cannot run without a deadline. Forwarded to the engine (which applies it at
+   * deadline computation on every execution entry) instead of being baked into the stored
+   * definition, so changing it never conflicts with stored content.
    */
   public long defaultSagaTimeoutMillis() {
     return defaultSagaTimeoutMillis;
@@ -1457,14 +1391,12 @@ public final class SagaServerConfig {
   }
 
   /**
-   * Returns the configured {@code service name -> configuration} map, each registered as an HTTP
-   * endpoint a declarative step can call. Empty when no {@code service.<name>.*} keys are set. The
-   * map is unmodifiable and iterates in service-name order.
+   * Returns the services-directory settings: the directory itself, the reload interval (parsed now,
+   * consumed once the reload pass ships), the secrets root confining {@code ${file:...}} references
+   * in service files, and the optional egress ceiling.
    */
-  public Map<String, ServiceConfig> services() {
-    // An unmodifiable view rather than Map.copyOf: the keys were collected in sorted order, which
-    // copyOf would discard for an unspecified one.
-    return Collections.unmodifiableMap(services);
+  public ReloadConfig reloadConfig() {
+    return reloadConfig;
   }
 
   private static String parseHost(@Nullable String value) {
@@ -1596,7 +1528,7 @@ public final class SagaServerConfig {
    * values, and enforces {@code value >= minInclusive} (e.g. {@code 0} for an optional bound that
    * may be disabled, {@code 1} for a strictly-positive ceiling).
    */
-  private static long parseBoundedLong(
+  static long parseBoundedLong(
       @Nullable String value, String key, long defaultValue, long minInclusive) {
     if (value == null || value.isBlank()) {
       return defaultValue;
@@ -1640,7 +1572,7 @@ public final class SagaServerConfig {
   }
 
   /** Returns the trimmed value, rejecting a missing or blank one as a misconfigured key. */
-  private static String requireNonBlank(String key, @Nullable String value) {
+  static String requireNonBlank(String key, @Nullable String value) {
     if (value == null || value.isBlank()) {
       throw new IllegalArgumentException("'" + key + "' must not be blank");
     }
@@ -1674,7 +1606,7 @@ public final class SagaServerConfig {
    * Splits a comma-separated list, trimming each element and rejecting an empty one so a stray
    * comma cannot introduce a blank entry the consumer would have to interpret.
    */
-  private static List<String> parseCommaSeparated(String key, String value) {
+  static List<String> parseCommaSeparated(String key, String value) {
     List<String> elements = new ArrayList<>();
     for (String element : value.split(",", -1)) {
       String trimmed = element.trim();

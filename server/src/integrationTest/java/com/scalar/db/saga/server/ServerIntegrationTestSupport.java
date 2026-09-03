@@ -6,6 +6,7 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.UncheckedIOException;
+import java.io.Writer;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -17,6 +18,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
@@ -48,6 +50,10 @@ abstract class ServerIntegrationTestSupport {
   private HttpServer participant;
   private Path tempDbPath;
   private Path definitionsDir;
+  private Path servicesDir;
+  private Path secretsDir;
+  private String participantBaseUrl;
+  private Properties serverProperties;
   private SagaServer server;
 
   @BeforeEach
@@ -56,12 +62,28 @@ abstract class ServerIntegrationTestSupport {
     configureParticipant(participant);
     participant.start();
     String baseUrl = "http://localhost:" + participant.getAddress().getPort();
+    this.participantBaseUrl = baseUrl;
 
     tempDbPath = Files.createTempFile("saga-daemon-it-", ".db");
     definitionsDir = Files.createTempDirectory("saga-daemon-it-defs-");
     writeDefinitions(definitionsDir);
+    servicesDir = Files.createTempDirectory("saga-daemon-it-services-");
+    secretsDir = Files.createTempDirectory("saga-daemon-it-secrets-");
+    Map<String, Properties> services = new LinkedHashMap<>();
+    Properties baseService = new Properties();
+    baseService.setProperty("base_url", baseUrl);
+    services.put(SERVICE, baseService);
+    configureServices(services);
+    for (Map.Entry<String, Properties> service : services.entrySet()) {
+      try (Writer writer =
+          Files.newBufferedWriter(
+              servicesDir.resolve(service.getKey() + ".properties"), StandardCharsets.UTF_8)) {
+        service.getValue().store(writer, null);
+      }
+    }
 
-    Properties props = new Properties();
+    serverProperties = new Properties();
+    Properties props = serverProperties;
     props.setProperty("scalar.db.storage", "jdbc");
     props.setProperty(
         "scalar.db.contact_points",
@@ -71,9 +93,8 @@ abstract class ServerIntegrationTestSupport {
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, definitionsDir.toString());
-    props.setProperty(
-        SagaServerConfig.SERVICE_KEY_PREFIX + SERVICE + SagaServerConfig.SERVICE_BASE_URL_SUFFIX,
-        baseUrl);
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, servicesDir.toString());
+    props.setProperty(SagaServerConfig.SECRETS_ROOT_KEY, secretsDir.toString());
     configureProperties(props);
 
     server = new SagaServer(SagaServerConfig.load(props)).start();
@@ -88,6 +109,8 @@ abstract class ServerIntegrationTestSupport {
       participant.stop(0);
     }
     deleteRecursively(definitionsDir);
+    deleteRecursively(servicesDir);
+    deleteRecursively(secretsDir);
     if (tempDbPath != null) {
       Files.deleteIfExists(tempDbPath);
     }
@@ -114,6 +137,61 @@ abstract class ServerIntegrationTestSupport {
    * default).
    */
   protected void configureProperties(Properties props) {}
+
+  /**
+   * Adjusts the service files written to {@code services_path} before the server starts. The map
+   * arrives holding {@value #SERVICE} with its {@code base_url} pointing at the participant; mutate
+   * it or add further services (prefix-free keys, as the files carry them).
+   */
+  protected void configureServices(Map<String, Properties> services) {}
+
+  /** The participant's base URL, for reload tests writing service files that point at it. */
+  protected final String participantBaseUrl() {
+    return participantBaseUrl;
+  }
+
+  /** The live services directory; reload tests mutate it and then call {@link #reloadNow()}. */
+  protected final Path servicesDir() {
+    return servicesDir;
+  }
+
+  /** The live definitions directory; reload tests mutate it and then call {@link #reloadNow()}. */
+  protected final Path definitionsDir() {
+    return definitionsDir;
+  }
+
+  /** The secrets root service-file {@code ${file:...}} references must resolve inside. */
+  protected final Path secretsDir() {
+    return secretsDir;
+  }
+
+  /** Writes (or overwrites) one service file in the live services directory. */
+  protected final void writeService(String name, Properties service) throws IOException {
+    try (Writer writer =
+        Files.newBufferedWriter(
+            servicesDir.resolve(name + ".properties"), StandardCharsets.UTF_8)) {
+      service.store(writer, null);
+    }
+  }
+
+  /**
+   * Stops the running server and starts a fresh one against the same directories and store — a cold
+   * boot of whatever state the watched directories are in right now.
+   */
+  protected final void restartServer() {
+    server.close();
+    server = new SagaServer(SagaServerConfig.load(serverProperties)).start();
+  }
+
+  /**
+   * Runs one reload pass synchronously — deterministic reload for tests, instead of waiting out the
+   * interval.
+   *
+   * @return whether the pass applied (or verified) cleanly
+   */
+  protected final boolean reloadNow() {
+    return server.reloadNow();
+  }
 
   // --- optional apikey security wiring (shared by the admin integration tests) ----------------
 

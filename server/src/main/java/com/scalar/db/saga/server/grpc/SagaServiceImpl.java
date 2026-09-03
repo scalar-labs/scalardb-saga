@@ -22,9 +22,11 @@ import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.TimeoutException;
+import java.util.function.LongUnaryOperator;
 import net.jcip.annotations.ThreadSafe;
 import org.jspecify.annotations.Nullable;
 
@@ -35,11 +37,13 @@ import org.jspecify.annotations.Nullable;
  * local to the call.
  *
  * <p><b>Sync vs async.</b> {@code async=true} starts the saga and returns the running snapshot
- * immediately. {@code async=false} blocks until the saga is terminal, bounded by {@code min(}{@code
- * sync.timeout_millis}, remaining gRPC call deadline{@code )}; when that bound elapses it returns
- * the in-flight snapshot (whose status — the source of truth — is non-terminal, the gRPC analogue
- * of REST's {@code 202}) and <b>the saga keeps running</b>. The wait runs on the server's
- * virtual-thread executor, so a blocked call is cheap.
+ * immediately. {@code async=false} blocks until the saga is terminal, bounded by the {@code
+ * sync.max_wait_millis} ceiling tightened by {@code sync.timeout_millis}, and then further by the
+ * remaining gRPC call deadline. The wait also ends early if the saga parks on an async step, since
+ * it has stopped progressing. When it ends without a terminal state it returns the in-flight
+ * snapshot (whose status — the source of truth — is non-terminal, the gRPC analogue of REST's
+ * {@code 202}) and <b>the saga keeps running</b>. The wait runs on the server's virtual-thread
+ * executor, so a blocked call is cheap.
  *
  * <p><b>AwaitSaga.</b> A long-poll on an <i>existing</i> saga: it blocks for one bounded window and
  * returns the terminal snapshot if reached, else the current non-terminal snapshot. The client
@@ -59,15 +63,21 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
       new TypeReference<>() {};
 
   private final SagaOrchestrator orchestrator;
-  private final long syncTimeoutMillis;
-  private final long syncMaxWaitMillis;
+  // The shared synchronous-wait policy, already bound to the server's configuration. A function
+  // rather than a value because AwaitSaga supplies a different per-call cap on every request.
+  private final LongUnaryOperator syncWaitBound;
+  // Completed when the server begins shutting down; ends a bounded wait early. See
+  // startBoundedSync.
+  private final CompletableFuture<Void> shutdownSignal;
   private final ObjectMapper objectMapper = new ObjectMapper();
 
   public SagaServiceImpl(
-      SagaOrchestrator orchestrator, long syncTimeoutMillis, long syncMaxWaitMillis) {
+      SagaOrchestrator orchestrator,
+      LongUnaryOperator syncWaitBound,
+      CompletableFuture<Void> shutdownSignal) {
     this.orchestrator = Objects.requireNonNull(orchestrator, "orchestrator must not be null");
-    this.syncTimeoutMillis = syncTimeoutMillis;
-    this.syncMaxWaitMillis = syncMaxWaitMillis;
+    this.syncWaitBound = Objects.requireNonNull(syncWaitBound, "syncWaitBound must not be null");
+    this.shutdownSignal = Objects.requireNonNull(shutdownSignal, "shutdownSignal must not be null");
   }
 
   @Override
@@ -153,20 +163,23 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
   }
 
   private SagaStateSnapshot startBoundedSync(StartSagaRequest request, Map<String, Object> input) {
-    AtomicReference<SagaStateSnapshot> terminal = new AtomicReference<>();
-    CountDownLatch done = new CountDownLatch(1);
-    String sagaId = dispatchStart(request, input, terminalSignal(done, terminal));
-    long boundMillis = computeBoundMillis(Long.MAX_VALUE);
-    boolean reached;
+    CompletableFuture<SagaStateSnapshot> outcome = new CompletableFuture<>();
+    String sagaId = dispatchStart(request, input, outcomeSignal(outcome));
     try {
-      reached = done.await(boundMillis, TimeUnit.MILLISECONDS);
+      CompletableFuture.anyOf(outcome, shutdownSignal)
+          .get(computeBoundMillis(Long.MAX_VALUE), TimeUnit.MILLISECONDS);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
-      reached = false;
+    } catch (TimeoutException | ExecutionException e) {
+      // The bound elapsed, or the shutdown signal completed exceptionally; the snapshot below is
+      // the answer either way.
     }
-    // Never cancel the saga: if the bound elapsed first, return the in-flight (non-terminal)
-    // snapshot — its status is the source of truth and the saga keeps running.
-    return reached ? Objects.requireNonNull(terminal.get()) : snapshotAfterStart(sagaId);
+    // Never cancel the saga. Shutdown short-circuits the wait rather than letting it run to the
+    // bound: the bound is a maximum, not a promise to wait, and a terminating server cannot advance
+    // the saga anyway. Whatever ended the wait, return the freshest state — its status is the
+    // source of truth, and a non-terminal one is the gRPC analogue of REST's 202.
+    SagaStateSnapshot settled = outcome.getNow(null);
+    return settled != null ? settled : snapshotAfterStart(sagaId);
   }
 
   /**
@@ -192,10 +205,7 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
    * sync.max_wait_millis]} — the wait is never unbounded.
    */
   private long computeBoundMillis(long requestedCapMillis) {
-    long bound = Math.min(syncMaxWaitMillis, requestedCapMillis);
-    if (syncTimeoutMillis > 0L) {
-      bound = Math.min(bound, syncTimeoutMillis);
-    }
+    long bound = syncWaitBound.applyAsLong(requestedCapMillis);
     // Floor at 0: here 0 means "return immediately" for the await, so a tight/expired client
     // deadline correctly collapses the wait to nothing.
     return GrpcDeadlines.tightenToCallDeadline(bound, 0L);
@@ -263,25 +273,26 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
   }
 
   /** A {@link SagaCallback} that captures the terminal snapshot and releases {@code done}. */
-  private static SagaCallback terminalSignal(
-      CountDownLatch done, AtomicReference<SagaStateSnapshot> terminal) {
+  private static SagaCallback outcomeSignal(CompletableFuture<SagaStateSnapshot> outcome) {
     return new SagaCallback() {
       @Override
       public void onCompleted(SagaStateSnapshot saga) {
-        terminal.set(saga);
-        done.countDown();
+        outcome.complete(saga);
       }
 
       @Override
       public void onCompensated(SagaStateSnapshot saga) {
-        terminal.set(saga);
-        done.countDown();
+        outcome.complete(saga);
       }
 
       @Override
       public void onEscalated(SagaStateSnapshot saga) {
-        terminal.set(saga);
-        done.countDown();
+        outcome.complete(saga);
+      }
+
+      @Override
+      public void onParked(SagaStateSnapshot saga) {
+        outcome.complete(saga);
       }
     };
   }

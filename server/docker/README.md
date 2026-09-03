@@ -26,9 +26,10 @@ docker run --rm \
   ghcr.io/scalar-labs/scalardb-saga-server:<version>
 ```
 
-Mount over `/scalardb-saga/conf` with your own `server.properties` and `definitions/`. Start from the
-template in this directory — every key is documented there and on `SagaServerConfig`, or on
-`JwtConfig` and `ApiKeyConfig` for the security keys of each provider.
+Mount over `/scalardb-saga/conf` with your own `server.properties`, `definitions/`, and — when you
+configure downstream services — `services/`. Start from the template in this directory — every key is
+documented there and on `SagaServerConfig`, or on `JwtConfig` and `ApiKeyConfig` for the security
+keys of each provider.
 
 Daemon mode is **declarative-only**: a definition naming a code step (`stepClass`) is rejected at
 startup, because an operator cannot add classes to this image. Use a declarative service step, or embed
@@ -42,9 +43,12 @@ Point the daemon at a different file by overriding the command:
 docker run ... ghcr.io/scalar-labs/scalardb-saga-server:<version> --config /etc/saga/other.properties
 ```
 
-Secrets do not have to be baked in. Any value under `scalar.db.saga.*` accepts `${env:NAME}` or
-`${file:UTF-8:/path}`, the latter reading a mounted Kubernetes Secret. Keys under plain `scalar.db.*`
-are resolved by ScalarDB, which supports `${env:...}` but **not** `${file:...}`.
+Secrets do not have to be baked in. In `server.properties`, any value under `scalar.db.saga.*`
+accepts `${env:NAME}` or `${file:UTF-8:/path}`, the latter reading a mounted Kubernetes Secret. In
+service files the same references work, but `${file:...}` must resolve inside `secrets_root`
+(default `/run/secrets`) — service files are reloadable input, so what they may read is confined to
+the secrets mounted for that purpose. Keys under plain `scalar.db.*` are resolved by ScalarDB, which
+supports `${env:...}` but **not** `${file:...}`.
 
 | Variable | Effect |
 | --- | --- |
@@ -64,9 +68,39 @@ without it, but JUL then keeps its own `INFO` default: it builds a `LogRecord` f
 call before the bridge can discard it, and a `<logger name="io.grpc" level="DEBUG"/>` has no effect at
 all, because JUL declines those records before the bridge ever sees them.
 
-The image already sets `-XX:MaxRAMPercentage=75.0` (heap sized from the cgroup limit, not the host) and
+The image already sets `-XX:MaxRAMPercentage=75.0` (heap sized from the cgroup limit, not the host),
 `-XX:+ExitOnOutOfMemoryError` (die on heap exhaustion so the orchestrator restarts it, rather than hold
-saga leases while making no progress). Override either through `JAVA_OPTS`.
+saga leases while making no progress), and `--enable-native-access=ALL-UNNAMED` (the JDBC driver and
+Netty's epoll transport both load a native library, which JDK 24 made a restricted operation). Override
+the first two through `JAVA_OPTS`. Native access, once enabled, cannot be withdrawn that way: there is
+no `--disable-native-access`, and repeating the flag accumulates rather than replaces.
+
+## Virtual-thread pinning
+
+The daemon drives sagas on virtual threads on the gRPC, asynchronous, bounded-synchronous, recovery,
+and retention paths, so anything that pins a carrier throttles the whole server: pinned carriers cap
+effective concurrency at the size of the carrier pool. A plain synchronous `POST /sagas` is the
+exception; with `sync.timeout_millis` at its default of `0` it drives the saga to a terminal state on
+the calling Jetty worker, which is a platform thread.
+
+On the Java 25 runtime this image ships, a virtual thread does not pin its carrier while it blocks on
+a monitor, `Object.wait` included; JEP 491 is what makes that true. Native frames do pin, so a driver
+with a JNI core holds its carrier for the length of every call; SQLite is the clear case.
+
+To check under your own driver, record the JFR event `jdk.VirtualThreadPinned`. It carries a 20 ms
+threshold in the default JFR configuration, so shorter pins stay invisible until you lower it. The
+older `-Djdk.tracePinnedThreads` system property does not work: it was removed in JDK 24.
+
+## Database connections
+
+Because sagas run on virtual threads, the number of store operations the daemon can have in flight is
+not bounded by a server-side thread pool. The ceiling is whatever your ScalarDB storage imposes —
+a connection pool for the JDBC storages, a request or throughput limit for the others. If the daemon
+exhausts the store under load, that is where to look; the ScalarDB documentation covers the settings
+each storage exposes.
+
+`jdk.virtualThreadScheduler.parallelism` is not the lever: carriers exist for CPU work, and a parked
+virtual thread does not occupy one.
 
 ## Health checks
 
@@ -174,7 +208,7 @@ Two operational notes:
 - **Async callbacks**: with TLS on, `callback.base_url` should be an `https` URL — participants dial
   it, and a plain `http` URL pointing back at this server dies at the handshake on the first async
   step. The daemon warns at startup about that combination.
-- **Outbound calls are unaffected**: participant calls (`service.<name>.base_url`) and JWKS fetches
+- **Outbound calls are unaffected**: participant calls (each service file's `base_url`) and JWKS fetches
   verify against the JVM's default trust store. A participant behind a private CA needs that CA in
   the daemon's trust store (`JAVA_OPTS=-Djavax.net.ssl.trustStore=...`); there is deliberately no
   per-service trust knob.
@@ -183,23 +217,128 @@ Java clients of the SDK enable TLS with `useTransportSecurity()`; against a priv
 `trustCaCertificate(path)` (and `overrideAuthority(name)` when dialing by IP or through a
 port-forward). Non-Java REST consumers pass their CA the usual way (`curl --cacert ...`).
 
+## Configuration reload
+
+With `reload.interval_seconds` > 0 (default 30), the daemon re-reads `services_path` and
+`definitions_path` on that interval, validates the **complete** candidate set, and only then
+applies it — services first, then definition registrations. A set that fails **validation** changes
+nothing at all: the previously applied configuration keeps serving, the rejection is logged once at
+WARN (repeats at DEBUG until it changes), and the next pass retries. A failure while **applying**
+(the store is unreachable, say) can leave part of the set live — the swapped endpoints, or the
+definitions registered before the failure; those are named in an `INFO` apply line of their own,
+and the next pass retries only what is left. The applied INFO line carries the changed names and a
+SHA-256 over the raw file bytes — grep it across replicas to tell a lagging replica from a
+rejecting one. Secret **values** never appear in any log line.
+
+Operational notes, learned from how Kubernetes actually delivers files:
+
+- **Mount whole ConfigMaps/Secrets, never `subPath`**: a `subPath` mount pins the file's inode, so
+  updates never arrive. The kubelet's atomic-symlink layout (`..data`) is fully supported — the
+  daemon re-opens files through their symlink paths every pass.
+- **Multi-part credentials (cert + key) belong in ONE Secret volume**: kubelet updates are atomic
+  per volume, so splitting a pair across two Secrets invites a torn rotation.
+- **Rotate with dual validity**: a rotated downstream credential propagates within kubelet sync
+  plus one reload interval, and replicas do not rotate in lockstep — the downstream service must
+  accept old and new credentials for at least that window.
+- **Retire a saga by deleting its definition file.** A daemon serves the sagas its own definition
+  files describe, so removing the file stops new starts: they are refused with `422` /
+  `FAILED_PRECONDITION` and error code `SAGA_DEFINITION_NOT_SERVED`. Starts pinned to a specific
+  version are refused too — being served is a property of the name, so pinning is not a way around
+  it. Sagas already running finish normally and admin recovery on them keeps working, because they
+  resume by the version recorded at their start rather than through the start check. Bring the saga
+  back by restoring the file.
+
+  The registration itself is never deleted: the store is append-only, so the definition stays there
+  for the sagas still running under it. That is why a `404` and this `422` mean different things —
+  `404` is a saga nobody ever registered (check the name), `422` is one this daemon is not serving.
+
+  Three things to know:
+
+  - **Retirement is per replica, and applies as each one syncs.** There is no fleet-wide switch;
+    starts keep succeeding on replicas whose files have not caught up. That is one sync period only
+    while reload passes are concluding — a pass rejected for an unrelated reason (a dangling service
+    reference in the same commit, say) applies nothing at all, retirement included, and says so only
+    in the first `Config reload rejected` WARN. With `reload.interval_seconds=0` a deleted file takes
+    effect at the next restart. Check the reload log after retiring something that matters.
+  - **A newly ADDED saga can be refused the same way, for the same window.** A replica that has not
+    yet seen the new file answers `SAGA_DEFINITION_NOT_SERVED` for it, because from where it stands
+    "registered but not in my configuration" looks identical to a retirement. Retry, or wait a sync
+    period.
+  - **Do not delete a retired saga's services while any of its sagas are still running.** A
+    declarative step resolves its service on every call, compensation and recovery included, so a
+    saga still in flight would fail to resolve an endpoint mid-way. The daemon warns when you remove
+    a service that a vanished definition still names — let the in-flight sagas drain first, and note
+    that `ESCALATED` and parked sagas count: driving one to a conclusion later resolves the same
+    services, so they have to be resolved before the services go.
+
+  Deleting the **last** definition file is rejected while the daemon runs: an empty candidate set
+  reads as a failed mount rather than a deliberate wind-down. Leave one definition in place, or wind
+  the daemon down through a restart.
+- **Definition rollback is roll-forward only**: `helm rollback` reverts service files, but
+  re-registering an old definition version is an idempotent no-op — the store's latest version
+  keeps winning. "Latest" means the version registered most recently, not the highest-numbered one;
+  versions are opaque strings and nothing compares them. To revert a definition, register the old
+  content as a NEW version, which then serves because it was registered last. The
+  reload now says so rather than letting it pass quietly: a definition file naming an
+  already-registered version that is not the one serving draws a WARN naming both versions, and the
+  pass goes on validating the version that actually serves. It is not rejected — the rollback has
+  already failed to take by the time the daemon sees it, and refusing the only configuration it can
+  run would stop a replica from starting over a disagreement no restart can settle. Validating what
+  serves is also what keeps the service checks honest: removing a service the serving version still
+  needs is caught, even while the file names an older version that does not.
+- **Changing a service's `base_url` mid-saga is safe only if the endpoints are compatible**: an
+  in-flight step finishes against the endpoint it resolved; the saga's next step (or a TCC
+  confirm/cancel) resolves the new one.
+- **Trust model**: whoever can write the watched directories reshapes the daemon's egress within
+  one interval, no restart — treat write access to them as operator-equivalent. `${file:...}`
+  references in service files resolve only inside `secrets_root`, and
+  `egress.allowed_hosts_ceiling` bounds what any service file can authorize. Set the ceiling if
+  service files and `server.properties` have different authors: it is the only egress bound that
+  holds no matter what sequence of edits arrives. Without it, the reload rejects a service whose
+  `allowed_hosts` goes from restricted to empty — which catches the edit that loses the line, but
+  not a service deleted in one interval and recreated allow-all in the next, and not a restart. That
+  rejection compares the candidate against what the replica has already applied, and a replica that
+  is starting has applied nothing, so it accepts the set the running ones reject: a truncated file
+  sits rejected until the next rolling deploy, pod restart, or scale-out, then boots clean
+  everywhere.
+- **`max_body_bytes` is capped at 64 MiB per service**, against a 1 MiB default. The coordinator
+  buffers a whole response before a step sees it and holds one per in-flight call, so this is the
+  daemon's memory rather than the service's. A participant with more to hand back should write it
+  somewhere and return a reference.
+
 ## Graceful shutdown
 
 The JVM is PID 1 and receives `SIGTERM` directly, which triggers a drain rather than dropping
-in-flight work. The daemon drains in two windows, one after the other, so budget for their sum:
+in-flight work.
 
-- **gRPC call drain** — `max(30s, sync.max_wait_millis + 5s)`, so 65s at the default
-  `sync.max_wait_millis` of 60s. It tracks that setting: raise it to `300000` and this window
-  becomes 305s.
+**In practice, expect roughly 35s at defaults**, dominated by the saga drain. The first thing
+shutdown does is wake every synchronous start that is waiting on its saga: those requests are
+answered `202` immediately rather than holding until their wait bound elapses, because a
+terminating server cannot advance the saga anyway. So the transport drains normally cost only as
+long as it takes to write the outstanding responses.
+
+The windows, in the order `close()` runs them:
+
+- **Reload stop** — up to 5s, and only if a configuration pass is mid-flight.
+- **HTTP request drain** — `max(30s, sync.max_wait_millis + 5s)`, so 65s at the default. This is a
+  ceiling, not a cost: it is reached only if a handler is stuck in something slow, such as a store
+  call. In-flight requests are answered before the listener closes; new connections are refused as
+  soon as the drain begins, so a load balancer still needs its own pre-stop delay or readiness flip.
+  The virtual-thread backstop that follows shares this same window rather than taking a second one.
+- **gRPC call drain** — the same `max(30s, sync.max_wait_millis + 5s)`. One derivation serves both
+  transports.
 - **Saga engine drain** — `shutdown.timeout_millis`, 30s by default. Under the default
-  `shutdown.mode=WAIT_CURRENT_STEP` the engine only finishes each running step and leaves the saga
-  for recovery, so this window is rarely spent in full; `WAIT_ALL_SAGAS` instead waits for in-flight
+  `shutdown.mode=WAIT_CURRENT_STEP` the engine finishes each running step and leaves the saga for
+  recovery, so this window is rarely spent in full; `WAIT_ALL_SAGAS` instead waits for in-flight
   sagas to reach a terminal state, which needs a window sized to your longest saga. Setting it to
   `0` skips this window entirely, cancelling in-flight work at once and leaving all of it to the
   recovery scan.
 
-At defaults that totals 95s. Set `terminationGracePeriodSeconds` above the sum; below it, the daemon
-is `SIGKILL`ed mid-drain.
+Worst case at defaults is therefore `5 + 65 + 65 + 30 = 165s`, but that requires handlers genuinely
+stuck for the full transport windows. Size `terminationGracePeriodSeconds` for the worst case you
+are willing to tolerate — note Kubernetes defaults it to **30s**, which is below even the typical
+figure above. Lowering `shutdown.timeout_millis` and `sync.max_wait_millis` lowers every window
+that derives from them.
 
 Being cut short costs latency, not integrity: whatever was interrupted is reclaimed by the recovery
 scan on the next boot.

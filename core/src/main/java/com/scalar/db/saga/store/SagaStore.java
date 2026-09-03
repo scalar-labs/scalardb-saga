@@ -221,6 +221,42 @@ public interface SagaStore extends AutoCloseable {
   /** Returns the event count for the given saga without materializing all events. */
   int getEventCount(String sagaId);
 
+  /**
+   * The newest event's type and stamp: everything recovery needs to judge whether a saga is being
+   * driven, without reading any payload.
+   *
+   * @param type the event's type
+   * @param createdAt when the event was appended
+   */
+  record NewestEvent(EventType type, Instant createdAt) {}
+
+  /**
+   * Returns the newest event for this saga, or empty when it has none at all. Reads only the type
+   * and the timestamp, never the payload.
+   *
+   * <p>Recovery uses this as a progress probe: a saga whose state row looks stale but whose event
+   * stream is recent was <em>recently driven</em>, so it must not be claimed on state-row age
+   * alone. The type matters because some events say the opposite — a compensation failure is
+   * written by a drive that then gives up, so it marks the end of an attempt rather than progress.
+   *
+   * <p>An empty result means a state row exists with no events behind it, which the store itself
+   * cannot produce — {@link #createSaga} writes the first event in the same transaction as the row
+   * — so the caller should treat it as damage rather than as an absence of progress.
+   *
+   * <p>"Newest" means highest {@code sequence}, not latest wall clock. Events are stamped by
+   * whichever replica appended them, so under cross-replica skew the highest-sequence row can carry
+   * an earlier stamp than the one before it; that is bounded by the same small-skew assumption the
+   * recovery staleness threshold already rests on.
+   *
+   * <p>Runs in its own read-only transaction.
+   *
+   * @param sagaId the saga instance ID
+   * @return the newest event's type and stamp, or empty when the saga has no events
+   * @throws com.scalar.db.saga.exception.SagaPersistenceException if the read fails, or if the
+   *     stored event type is not one this version knows — which a rolling upgrade can produce
+   */
+  Optional<NewestEvent> getNewestEvent(String sagaId);
+
   // ---------------------------------------------------------------------------
   // Queries
   // ---------------------------------------------------------------------------

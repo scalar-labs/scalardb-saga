@@ -60,11 +60,11 @@ jobs:
             exit 1
           fi
 
-      - name: Set up Java 21
+      - name: Set up Java 25
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v4
         with:
           distribution: temurin
-          java-version: 21
+          java-version: 25
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
@@ -109,11 +109,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
-      - name: Set up Java 21
+      - name: Set up Java 25
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v4
         with:
           distribution: temurin
-          java-version: 21
+          java-version: 25
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
@@ -206,6 +206,19 @@ jobs:
             exit 1
           fi
 
+      # The HTTP counterpart of the epoll check above, and green for the same reason it is needed:
+      # if the virtual-thread executor is ever dropped, every request is still served and every
+      # probe still passes, while the request pool silently becomes the ceiling on concurrent sync
+      # starts again. The boot log is the only evidence visible from outside the JVM.
+      - name: Check HTTP handlers run on virtual threads
+        run: |
+          set -euo pipefail
+          if ! docker logs saga 2>&1 | grep -q "HTTP handlers run on virtual threads"; then
+            echo "::error::HTTP handlers are not on virtual threads; the request pool is the ceiling again"
+            docker logs saga 2>&1 | tail -40
+            exit 1
+          fi
+
       # A TCP connect, not a gRPC call: this asserts the transport is bound and reachable in the
       # packaged image. The health service's actual semantics are covered by the server's
       # integrationTest suite, which needs no container.
@@ -219,6 +232,26 @@ jobs:
         run: |
           timeout 30 bash -c 'until : < /dev/tcp/127.0.0.1/12051; do sleep 1; done'
 
+      # One mutation end to end through the packaged image: add a header to a mounted service file
+      # and assert the reload pass applies it (the audit line names the changed service). The
+      # behavioral matrix lives in the server's integrationTest suite; this asserts only that the
+      # shipped image watches the mounted directory on the default interval. The boot pass logs its
+      # own "Config applied" line for the initial definitions, so the grep pins the service diff.
+      - name: Check a config reload applies
+        run: |
+          set -euo pipefail
+          printf 'header.X-Smoke=rotated\n' >> .github/smoke/services/payment.properties
+          for _ in $(seq 1 45); do
+            if docker logs saga 2>&1 | grep -q 'services\[~payment\]'; then
+              echo "reload audit line observed"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::no reload audit line within 90s of mutating a service file"
+          docker logs saga | tail -50
+          exit 1
+
       # Guards against a regression in the shipped logback.xml: with no configuration on the classpath
       # Logback would default to DEBUG, flooding an operator's log pipeline.
       - name: Check startup logging
@@ -231,6 +264,13 @@ jobs:
           fi
           if grep -q " DEBUG " <<<"${logs}"; then
             echo "::error::container logged at DEBUG; the default logback.xml is not being picked up"
+            exit 1
+          fi
+          # A dropped --enable-native-access is the same class of silent degradation as an epoll
+          # fallback: every other assertion here stays green while the JVM warns on each boot, and a
+          # future release turns that warning into a blocked call.
+          if grep -q "A restricted method in java.lang.System" <<<"${logs}"; then
+            echo "::error::restricted-method warning at boot; --enable-native-access is missing from the start script"
             exit 1
           fi
 
@@ -358,11 +398,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
-      - name: Set up Java 21
+      - name: Set up Java 25
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v4
         with:
           distribution: temurin
-          java-version: 21
+          java-version: 25
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0

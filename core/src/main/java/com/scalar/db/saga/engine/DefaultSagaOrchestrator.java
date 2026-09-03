@@ -11,6 +11,7 @@ import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.definition.SagaDefinitionParser;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaDefinitionNotServedException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
@@ -18,8 +19,9 @@ import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.SagaStoreFactory;
 import com.scalar.db.saga.store.StepEvent;
 import com.scalar.db.saga.transport.CallbackUrlProvider;
+import com.scalar.db.saga.transport.HttpEndpointManager;
+import com.scalar.db.saga.transport.HttpEndpointRegistrar;
 import com.scalar.db.saga.transport.HttpServiceConfig;
-import java.net.URI;
 import java.net.http.HttpClient;
 import java.nio.file.Path;
 import java.time.Clock;
@@ -29,6 +31,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
@@ -62,6 +65,14 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   public static final long DEFAULT_SHUTDOWN_TIMEOUT_MILLIS = 30_000L;
 
   /**
+   * The default saga timeout in milliseconds applied when {@link
+   * Builder#defaultSagaTimeoutMillis(long)} is not called: {@code 0}, meaning no default is applied
+   * and definitions without a timeout of their own run without one. Exposed for the same reason as
+   * {@link #DEFAULT_SHUTDOWN_MODE}.
+   */
+  public static final long DEFAULT_SAGA_TIMEOUT_MILLIS = 0L;
+
+  /**
    * The timeline bound applied when {@link Builder#maxTimelineEvents(int)} is not called:
    * effectively unbounded, so an in-process (embedded) caller always sees a saga's full timeline. A
    * remote front end serving {@link #getSagaDetail} over a network should configure a real bound —
@@ -85,6 +96,26 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   private final int maxTimelineEvents;
   private final ExecutorService asyncExecutor;
   private volatile boolean closed;
+
+  /**
+   * The saga names this deployment currently serves, or {@code null} when nothing has published a
+   * set.
+   *
+   * <p>Null is the embedded default: an application that registers a definition means to run it,
+   * and has its own call sites to stop calling. A front end whose configuration decides what is
+   * served — the daemon, whose definition files do — publishes a snapshot here after each
+   * configuration pass, which is what makes removing a definition file retire the saga.
+   *
+   * <p>Pushed rather than pulled, and an immutable snapshot rather than a live view: a start reads
+   * it without a lock, so it cannot contend with a configuration pass on the hot path.
+   *
+   * <p>A pass rejected before it applied anything publishes nothing, so the previously served set
+   * keeps serving. One rejected after that point does publish: what it committed before failing is
+   * live, and a definition registered by a pass that then fails on an unrelated one has to be
+   * served rather than refused until some later pass concludes. So the served set can narrow
+   * mid-pass, and anything added between the withdrawal and the registration has to keep that true.
+   */
+  private volatile @Nullable Set<String> servedDefinitions;
 
   DefaultSagaOrchestrator(
       SagaEngine engine,
@@ -142,9 +173,70 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     definitionRegistry.register(definition);
   }
 
+  /**
+   * Publishes the set of saga names this deployment serves; every other registered saga is refused
+   * at start with {@link SagaDefinitionNotServedException}.
+   *
+   * <p>For a front end whose configuration decides what runs. The store is append-only, so a
+   * definition stays registered long after the configuration that introduced it is gone; without
+   * this, nothing could ever be taken out of service. Sagas already running are unaffected — they
+   * resume by version and never come through the start check.
+   *
+   * <p>Call it after each configuration change, with the complete set.
+   *
+   * @param sagaNames the saga names to serve, copied defensively
+   */
+  public void serve(Set<String> sagaNames) {
+    this.servedDefinitions = Set.copyOf(sagaNames);
+  }
+
+  /**
+   * The definition of {@code sagaName} that a name-only start would run — the store's latest — or
+   * {@code null} when nothing is registered under that name.
+   *
+   * <p>For a caller that maintains definition files and needs to know whether they still describe
+   * what is serving. Registered content is immutable and the store is append-only, so re-writing an
+   * older version's file registers nothing and leaves the newer version winning; without asking,
+   * such a caller cannot tell that its files and the fleet disagree. It gets the whole definition
+   * rather than the version alone because, on finding them disagreeing, what serves is the only
+   * thing left worth validating.
+   */
+  public @Nullable SagaDefinition latestDefinition(String sagaName) {
+    Objects.requireNonNull(sagaName, "sagaName must not be null");
+    return definitionRegistry.resolve(sagaName);
+  }
+
+  /**
+   * Whether {@code version} of {@code sagaName} is already registered.
+   *
+   * <p>With {@link #latestDefinition} this distinguishes the two ways a definition file can name a
+   * version that is not serving: a NEW version, which is an ordinary upgrade about to become the
+   * latest, and an OLDER one that is already stored, which is a rollback that will register nothing
+   * and leave the newer version running.
+   */
+  public boolean isDefinitionRegistered(String sagaName, String version) {
+    Objects.requireNonNull(sagaName, "sagaName must not be null");
+    Objects.requireNonNull(version, "version must not be null");
+    return definitionRegistry.resolve(sagaName, version) != null;
+  }
+
   public void register(Path definitionFile) {
     Objects.requireNonNull(definitionFile, "definitionFile must not be null");
     register(SagaDefinitionParser.parseFile(definitionFile));
+  }
+
+  /**
+   * The narrow seam for replacing the full HTTP endpoint set at runtime (configuration hot reload).
+   * See {@link HttpEndpointRegistrar} for the swap semantics — reuse on unchanged topology,
+   * in-place header rotation, graceful retirement — and the embedded-mode contract: a class step's
+   * injected {@code SagaHttpClient} is pinned when its plan is built and is NOT rebound by a swap.
+   *
+   * <p>The returned registrar shares this orchestrator's lifecycle: a swap applied after {@link
+   * #close()} throws {@link IllegalStateException}, so a hot-reload caller racing shutdown must be
+   * prepared for it.
+   */
+  public HttpEndpointRegistrar httpEndpointRegistrar() {
+    return engine.httpEndpointRegistrar();
   }
 
   // ---------------------------------------------------------------------------
@@ -310,14 +402,18 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       // is the backstop.
       asyncExecutor.execute(
           () -> {
+            // What execution decided, or null if it threw before deciding anything. Recorded
+            // rather than branched on, because the dispatch below must stay in the finally: a saga
+            // that reached a terminal state and then threw still owes its caller that callback.
+            SagaStateSnapshot executed = null;
             try {
-              engine.executeSaga(def, saga, input);
+              executed = engine.executeSaga(def, saga, input);
             } catch (Throwable t) {
               // Saga state is persisted — recovery will pick it up
               logger.error("Async saga {} failed unexpectedly", saga.getSagaId(), t);
             } finally {
               try {
-                dispatchCallback(saga.getSagaId(), callback);
+                dispatchCallback(saga.getSagaId(), callback, executed);
               } catch (Throwable t) {
                 logger.error("Failed to dispatch callback for saga {}", saga.getSagaId(), t);
               }
@@ -332,18 +428,66 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     }
   }
 
-  private void dispatchCallback(String sagaId, @Nullable SagaCallback callback) {
+  /**
+   * Reports what execution did to the caller's callback, if it supplied one.
+   *
+   * @param executed the state execution left the saga in, or {@code null} when it threw before
+   *     reaching one — in which case the cause is already logged and there is no outcome to report
+   */
+  private void dispatchCallback(
+      String sagaId, @Nullable SagaCallback callback, @Nullable SagaStateSnapshot executed) {
     if (callback == null) {
       return;
     }
-    SagaStateSnapshot result =
-        store.getStateSnapshot(sagaId).orElseThrow(() -> new SagaNotFoundException(sagaId));
+    // Execution threw before reaching a verdict, so there is no local answer. Fall back to the
+    // store — it may well have completed the saga and failed afterwards, and that caller is still
+    // owed its terminal callback. This read carries the staleness the verdict exists to avoid, but
+    // it is the only source available, and it is confined to the exceptional path.
+    boolean aborted = executed == null;
+    SagaStateSnapshot result;
+    if (executed == null) {
+      result = store.getStateSnapshot(sagaId).orElseThrow(() -> new SagaNotFoundException(sagaId));
+    } else {
+      result = executed;
+    }
+    // Every status is listed and there is no default, deliberately: a new SagaStatus must not
+    // silently inherit another one's callback. Without a default arm, Error Prone's
+    // MissingCasesInEnumSwitch — escalated to an error in the java conventions — fails the build
+    // when one is added, forcing the choice here.
     switch (result.getStatus()) {
       case COMPLETED -> callback.onCompleted(result);
       case COMPENSATED -> callback.onCompensated(result);
       case ESCALATED -> callback.onEscalated(result);
-      default ->
-          logger.warn("Saga {} ended in non-terminal status: {}", sagaId, result.getStatus());
+      // Parked on an async step, waiting for that step's callback or its deadline. Report it
+      // rather than only logging: a caller in a bounded synchronous start has nothing else to
+      // wake on, and would otherwise wait out its whole bound for a saga that stopped progressing
+      // in milliseconds.
+      case WAITING -> callback.onParked(result);
+      // Execution returned without the saga resting anywhere. Since this is execution's own
+      // verdict rather than a later read of shared state, a resume landing elsewhere can no longer
+      // masquerade as either case below — which is what makes the error worth acting on.
+      case RUNNING, COMPENSATING -> {
+        if (aborted) {
+          logger.warn(
+              "Saga {} was left in {} by a failed execution; recovery will reclaim it",
+              sagaId,
+              result.getStatus());
+        } else if (engine.isShuttingDown()) {
+          // The designed hand-off: under WAIT_CURRENT_STEP the engine finishes the running step,
+          // marks the saga for recovery, and returns with it still RUNNING. Debug rather than warn,
+          // because a rolling restart produces one per in-flight saga and none is actionable.
+          logger.debug(
+              "Saga {} left in {} by shutdown; recovery will reclaim it",
+              sagaId,
+              result.getStatus());
+        } else {
+          logger.error(
+              "Saga {} finished executing but is still {} — this is an engine invariant violation,"
+                  + " please report it; recovery will reclaim the saga",
+              sagaId,
+              result.getStatus());
+        }
+      }
     }
   }
 
@@ -619,6 +763,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     if (def == null) {
       throw SagaDefinitionNotFoundException.byName(sagaName);
     }
+    requireServed(sagaName);
     return def;
   }
 
@@ -627,7 +772,29 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     if (def == null) {
       throw SagaDefinitionNotFoundException.byId(id);
     }
+    // Whether a saga is served is a property of the NAME, so pinning a version is refused on the
+    // same basis as a name-only start rather than being a way around it.
+    requireServed(id.name());
     return def;
+  }
+
+  /**
+   * Refuses a start of a saga this deployment does not serve.
+   *
+   * <p>Checked after the definition resolves, so a name nobody ever registered stays a not-found
+   * rather than becoming this: the two are different problems with different fixes. Resolving first
+   * also means the check costs nothing — the served set is an in-memory snapshot and the store read
+   * had to happen anyway.
+   *
+   * <p>Only new starts come through here. In-flight sagas resume through {@link
+   * #resolveDefinition}, so ceasing to serve a saga stops new work without stranding work already
+   * running, or the admin operations that drive it to a conclusion.
+   */
+  private void requireServed(String sagaName) {
+    Set<String> served = servedDefinitions;
+    if (served != null && !served.contains(sagaName)) {
+      throw SagaDefinitionNotServedException.of(sagaName);
+    }
   }
 
   private SagaDefinition resolveDefinition(SagaStateSnapshot saga) {
@@ -682,6 +849,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     private String ownerId = java.util.UUID.randomUUID().toString();
     private ShutdownMode shutdownMode = DEFAULT_SHUTDOWN_MODE;
     private long shutdownTimeoutMillis = DEFAULT_SHUTDOWN_TIMEOUT_MILLIS;
+    private long defaultSagaTimeoutMillis = DEFAULT_SAGA_TIMEOUT_MILLIS;
     private int maxTimelineEvents = DEFAULT_MAX_TIMELINE_EVENTS;
     private Clock clock = Clock.systemUTC();
     private ResourceRegistry.@Nullable Builder resourceRegistryBuilder;
@@ -750,6 +918,31 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
      */
     public Builder shutdownTimeoutMillis(long shutdownTimeoutMillis) {
       this.shutdownTimeoutMillis = shutdownTimeoutMillis;
+      return this;
+    }
+
+    /**
+     * Sets a default saga timeout in milliseconds, applied at execution to any definition that
+     * specifies no timeout of its own ({@code timeoutMillis == 0}). The default is applied at every
+     * execution entry — start, recovery resume, and parked resume — by recomputing the deadline at
+     * each drive, so an in-flight saga's effective timeout follows the value configured at each
+     * resumption, and the stored definition never carries a baked-in copy of it. Disabling the
+     * default ({@code 0}) is one-way for parked sagas, though: a saga whose park deadline came only
+     * from this default re-parks with no deadline on its next drive, which does not merely widen
+     * its deadline but removes it from the parked-timeout sweep for good; raising the default again
+     * later cannot re-bound it, and only its callback or a forced completion moves it. Defaults to
+     * {@value #DEFAULT_SAGA_TIMEOUT_MILLIS}: definitions without a timeout run without one.
+     *
+     * @param defaultSagaTimeoutMillis the default saga timeout; {@code 0} applies none
+     * @return this builder
+     * @throws IllegalArgumentException if the value is negative
+     */
+    public Builder defaultSagaTimeoutMillis(long defaultSagaTimeoutMillis) {
+      if (defaultSagaTimeoutMillis < 0) {
+        throw new IllegalArgumentException(
+            "defaultSagaTimeoutMillis must be >= 0, got " + defaultSagaTimeoutMillis);
+      }
+      this.defaultSagaTimeoutMillis = defaultSagaTimeoutMillis;
       return this;
     }
 
@@ -866,36 +1059,14 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       if (baseUrl.isBlank()) {
         throw new IllegalArgumentException("baseUrl must not be blank");
       }
-      validateBaseUrl(baseUrl);
-      return new HttpEndpointBuilder(name, baseUrl);
-    }
-
-    /**
-     * Fails fast on a malformed or misleading {@code baseUrl} at build time rather than at the
-     * first saga run: it must be a valid absolute {@code http}/{@code https} URL with a host and no
-     * user-info component (a {@code user@host} authority silently retargets the host — e.g. {@code
-     * http://svc@evil.com} resolves to {@code evil.com}).
-     */
-    private static void validateBaseUrl(String baseUrl) {
-      URI uri;
+      // Fail fast here at build time rather than at the first saga run. The endpoint name is
+      // safe context; the shared validator deliberately does not echo the URL (see its javadoc).
       try {
-        uri = URI.create(baseUrl);
+        HttpServiceConfig.validateBaseUrl(baseUrl);
       } catch (IllegalArgumentException e) {
-        throw new IllegalArgumentException("baseUrl is not a valid URI: " + baseUrl, e);
+        throw new IllegalArgumentException("endpoint '" + name + "': " + e.getMessage(), e);
       }
-      String scheme = uri.getScheme();
-      if (scheme == null
-          || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) {
-        throw new IllegalArgumentException("baseUrl must use the http or https scheme: " + baseUrl);
-      }
-      if (uri.getHost() == null) {
-        throw new IllegalArgumentException("baseUrl must have a host: " + baseUrl);
-      }
-      if (uri.getUserInfo() != null) {
-        throw new IllegalArgumentException(
-            "baseUrl must not contain a user-info component (it silently retargets the host): "
-                + baseUrl);
-      }
+      return new HttpEndpointBuilder(name, baseUrl);
     }
 
     /**
@@ -954,14 +1125,14 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       }
 
       SagaStore store = null;
-      HttpEndpointRegistry httpEndpointRegistry = null;
+      HttpEndpointManager endpointManager = null;
       try {
         store = storeFactory.createStore();
         // The orchestrator owns the HTTP endpoints created from httpEndpoint(...): they are closed
         // on close (or here if build fails) — mirroring the store's lifecycle. A code step's
         // SagaHttpClient and a declarative step against the same endpoint share one HttpExchange
         // (one client, one policy).
-        httpEndpointRegistry = HttpEndpointRegistry.create(httpEndpoints, callbackUrlProvider);
+        endpointManager = HttpEndpointManager.create(httpEndpoints, callbackUrlProvider);
         StepResolver resolver = buildStepResolver();
 
         RecoveryConfig resolvedRecoveryConfig =
@@ -971,8 +1142,10 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
 
         SagaEngine.ShutdownConfig shutdownConfig =
             new SagaEngine.ShutdownConfig(shutdownMode, shutdownTimeoutMillis);
-        StepInstantiator stepInstantiator = new StepInstantiator(resolver, httpEndpointRegistry);
-        SagaEngine engine = new SagaEngine(store, stepInstantiator, ownerId, shutdownConfig, clock);
+        StepInstantiator stepInstantiator = new StepInstantiator(resolver, endpointManager);
+        SagaEngine engine =
+            new SagaEngine(
+                store, stepInstantiator, ownerId, shutdownConfig, defaultSagaTimeoutMillis, clock);
         SagaDefinitionRegistry definitionRegistry = new SagaDefinitionRegistry(store);
 
         SagaRecoveryManager recoveryManager =
@@ -991,7 +1164,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
             maxTimelineEvents);
       } catch (Throwable t) {
         // Roll back the resources that hold real external connections: the store (DB sessions) and
-        // the HTTP endpoint registry (holds HTTP clients). Each is null if its own creation threw,
+        // the HTTP endpoint manager (holds HTTP clients). Each is null if its own creation threw,
         // so each close is null-guarded. The engine and the recovery/retention managers constructed
         // inside the try only hold executors that stay inert until started — their threads spin up
         // on start()/first task, never during build — so a failed build leaves them with no live
@@ -1004,9 +1177,9 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
         // client stack, or an OutOfMemoryError while building the clients or the engine's
         // executors. The resources are still released, and t is rethrown unchanged. Precise rethrow
         // keeps this compiling without a throws clause: the try body raises no checked exceptions.
-        if (httpEndpointRegistry != null) {
+        if (endpointManager != null) {
           try {
-            httpEndpointRegistry.close();
+            endpointManager.close();
           } catch (Throwable closeException) {
             t.addSuppressed(closeException);
           }

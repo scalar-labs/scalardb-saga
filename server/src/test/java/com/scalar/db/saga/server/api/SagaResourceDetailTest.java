@@ -51,7 +51,7 @@ class SagaResourceDetailTest {
     app = Javalin.create();
     SagaSecurityHandler.register(app, new RoleHeaderProvider());
     ErrorMapper.register(app);
-    SagaResource.register(app, orchestrator, 0L);
+    SagaResource.register(app, orchestrator, 0L, new java.util.concurrent.CompletableFuture<>());
     app.start(0);
   }
 

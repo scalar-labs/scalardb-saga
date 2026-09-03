@@ -103,6 +103,7 @@ public final class ExceptionRegistry {
     m.put(
         SagaErrorCode.SAGA_PARKED,
         meta -> SagaStatePreconditionException.fromWire(SagaErrorCode.SAGA_PARKED, meta));
+    m.put(SagaErrorCode.SAGA_DEFINITION_NOT_SERVED, SagaDefinitionNotServedException::fromWire);
 
     // ── RETRYABLE_SERVER_ERROR (2xxxx) ────────────────────────────────
     m.put(
