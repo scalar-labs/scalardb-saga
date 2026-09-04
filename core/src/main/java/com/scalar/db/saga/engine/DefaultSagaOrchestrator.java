@@ -393,6 +393,29 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   }
 
   /**
+   * Runs everything that can reject this request on its own merits, before anything scarce is spent
+   * on it.
+   *
+   * <p>These checks also run inside the engine, which is where they authoritatively decide; running
+   * them here as well is about <b>order</b>, not about coverage. At a full cap the permit is the
+   * first thing a start meets, so without this a caller whose input holds a null, or whose ID could
+   * never be stored, would be told the server is busy and to try again — sending them round a loop
+   * that cannot terminate, for a request that was wrong on arrival.
+   *
+   * <p>Both are pure and cheap: a walk of the input map, and one regex. The payload-size limit is
+   * deliberately <b>not</b> hoisted — it needs the input serialized, and paying for that twice on
+   * every start to reorder one error at a full cap is the wrong trade. An oversized payload at a
+   * full cap therefore still reports overload; it is the one case where this ordering does not
+   * hold, and it is far rarer than a null.
+   */
+  private void validateBeforeAdmitting(@Nullable String sagaId, Map<String, Object> input) {
+    ExecutionContext.validateInput(input);
+    if (sagaId != null) {
+      store.validateSagaId(sagaId);
+    }
+  }
+
+  /**
    * Takes a permit for a drive about to start, or refuses the start.
    *
    * <p>Called after validation and definition resolution, deliberately: a malformed request and an
@@ -430,6 +453,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    */
   private String executeAdmitted(
       SagaDefinition def, @Nullable String sagaId, Map<String, Object> input) {
+    validateBeforeAdmitting(sagaId, input);
     AdmissionController.PermitLease lease = admit();
     try {
       return engine.execute(def, sagaId, input);
@@ -447,6 +471,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       @Nullable String sagaId,
       Map<String, Object> input,
       @Nullable SagaCallback callback) {
+    validateBeforeAdmitting(sagaId, input);
     // Admitted before the copy: a refused start should pay for nothing it does not need, and the
     // copy is the first thing here that costs anything per request.
     AdmissionController.PermitLease lease = admit();

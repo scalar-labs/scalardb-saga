@@ -45,6 +45,7 @@ import com.scalar.db.saga.store.StepEvent;
 import java.net.URL;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -1602,6 +1603,50 @@ class DefaultSagaOrchestratorTest {
         // Act & Assert
         assertThatThrownBy(() -> orchestrator.start("unknown", Map.of()))
             .isInstanceOf(SagaDefinitionNotFoundException.class);
+      }
+    }
+
+    @Test
+    void start_nullInputValueAtTheCap_reportsTheInputErrorNotOverload() {
+      // "Busy, try again" for a request that can never succeed sends the caller round a loop with
+      // no exit. Input is checked before the permit for exactly that reason.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any()))
+          .thenReturn(snapshot("saga-1", SagaStatus.RUNNING));
+      ExecutorService neverRuns = mock(ExecutorService.class);
+      Map<String, Object> nullValued = new HashMap<>();
+      nullValued.put("amount", null);
+
+      try (DefaultSagaOrchestrator orchestrator = capped(1, neverRuns)) {
+        orchestrator.startAsync("transfer", Map.of()); // fills the cap
+
+        // Act & Assert
+        assertThatThrownBy(() -> orchestrator.start("transfer", nullValued))
+            .isInstanceOf(IllegalArgumentException.class)
+            .isNotInstanceOf(SagaOverloadedException.class);
+      }
+    }
+
+    @Test
+    void start_unusableSagaIdAtTheCap_reportsTheIdErrorNotOverload() {
+      // Arrange — an ID the store could never accept, so retrying it is futile whatever the load.
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any()))
+          .thenReturn(snapshot("saga-1", SagaStatus.RUNNING));
+      doThrow(new SagaIllegalArgumentException("Invalid saga ID format"))
+          .when(store)
+          .validateSagaId("bad id!");
+      ExecutorService neverRuns = mock(ExecutorService.class);
+
+      try (DefaultSagaOrchestrator orchestrator = capped(1, neverRuns)) {
+        orchestrator.startAsync("transfer", Map.of()); // fills the cap
+
+        // Act & Assert
+        assertThatThrownBy(() -> orchestrator.start("bad id!", "transfer", Map.of()))
+            .isInstanceOf(SagaIllegalArgumentException.class);
       }
     }
 

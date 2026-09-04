@@ -132,8 +132,28 @@ final class AdmissionController {
       return;
     }
     long total = rejected.sum();
-    long delta = total - lastReportedCount.getAndSet(total);
-    logger.warn(summarize(delta, total, TimeUnit.NANOSECONDS.toSeconds(now - last)));
+    long delta = claimDelta(total);
+    if (delta > 0) {
+      logger.warn(summarize(delta, total, TimeUnit.NANOSECONDS.toSeconds(now - last)));
+    }
+  }
+
+  /**
+   * Claims the rejections not yet reported, and returns how many that is.
+   *
+   * <p>Monotonic on purpose. The election serializes writers within an interval but cannot stop one
+   * from being descheduled after reading its total and resuming an interval later, by which time a
+   * successor has already reported a higher figure. A plain {@code getAndSet} would then move the
+   * reported mark <b>backwards</b>, so that writer would log a negative delta and the next interval
+   * would count the same rejections a second time. Taking the maximum makes a late writer claim
+   * nothing instead, which is the honest outcome: its rejections were already reported by the
+   * successor that overtook it.
+   *
+   * @return the rejections this caller may report, or {@code 0} when a later writer already did
+   */
+  private long claimDelta(long total) {
+    long previouslyReported = lastReportedCount.getAndAccumulate(total, Math::max);
+    return Math.max(0, total - previouslyReported);
   }
 
   /** The summary as one line; the single place its field list is spelled out. */

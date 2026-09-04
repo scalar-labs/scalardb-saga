@@ -19,6 +19,21 @@ import org.jspecify.annotations.Nullable;
  */
 public interface SagaStore extends AutoCloseable {
 
+  /**
+   * Rejects a caller-supplied saga ID this store could not store, without touching it.
+   *
+   * <p>An early copy of a check {@link #createSaga} repeats authoritatively before it writes. It
+   * exists so a caller can answer a malformed request on its own merits <b>before</b> spending
+   * anything scarce on it — an admission permit, in the engine's case — since telling a caller to
+   * retry an ID that can never be accepted sends them round a loop with no exit.
+   *
+   * <p>Default no-op: a store with no ID constraints has nothing to say here, and the check inside
+   * {@code createSaga} remains the one that decides.
+   *
+   * @param sagaId the caller-supplied ID
+   */
+  default void validateSagaId(String sagaId) {}
+
   /** Releases resources held by this store (e.g., connection pools). Default is a no-op. */
   @Override
   default void close() {}

@@ -340,6 +340,39 @@ class GrpcSagaOrchestratorClientTest {
   }
 
   @Test
+  void start_overloadedAfterAnAmbiguousAttempt_reconcilesWithTheStore() {
+    // The first attempt may have created the saga before the connection dropped — and that saga
+    // may be exactly what is holding the last permit, which makes the refusal and the success the
+    // same request seen twice. Reporting "nothing was persisted" here would be false.
+    // Arrange
+    fake.failStartWith(
+        new StatusRuntimeException(Status.UNAVAILABLE)); // ambiguous: may have landed
+    fake.failStartWith(
+        statusWithReason(
+            Status.Code.UNAVAILABLE, SagaErrorCode.ENGINE_OVERLOADED.code(), Map.of()));
+    fake.getResponse = snapshot("s-1", SagaStatus.COMPLETED); // it had landed
+
+    // Act & Assert — the saga is adopted rather than the caller being told it never existed.
+    assertThatCode(() -> client.start("transfer", Map.of())).doesNotThrowAnyException();
+  }
+
+  @Test
+  void start_overloadedAfterAnAmbiguousAttemptThatDidNotLand_surfacesOverload() {
+    // The other half: once the store agrees nothing is there, the refusal is the honest answer and
+    // must not be softened into a wait for a saga that does not exist.
+    // Arrange
+    fake.failStartWith(new StatusRuntimeException(Status.UNAVAILABLE));
+    fake.failStartWith(
+        statusWithReason(
+            Status.Code.UNAVAILABLE, SagaErrorCode.ENGINE_OVERLOADED.code(), Map.of()));
+    fake.getError = Status.NOT_FOUND.asRuntimeException();
+
+    // Act & Assert
+    assertThatThrownBy(() -> client.start("transfer", Map.of()))
+        .isInstanceOf(SagaOverloadedException.class);
+  }
+
+  @Test
   void start_bareUnavailableGiven_isStillRetried() {
     // The other side of the same rule: an unreachable daemon may never have received the request,
     // so the client absorbs it. Excluding the refusal must not have disarmed this.
@@ -360,9 +393,8 @@ class GrpcSagaOrchestratorClientTest {
     fake.startError =
         statusWithReason(Status.Code.UNAVAILABLE, SagaErrorCode.ENGINE_OVERLOADED.code(), Map.of());
 
-    // Act & Assert — startAsync surfaces the refusal directly. The synchronous start does not:
-    // UNAVAILABLE is retryable, so it rides out its own bounded backoff first, which is the
-    // behavior the client-side guidance asks for and is exercised by the retry tests above.
+    // Act & Assert — the async path, pinned separately from the synchronous one above because the
+    // two reach the same answer by different routes: this one never enters the retry loop at all.
     assertThatThrownBy(() -> client.startAsync("transfer", Map.of()))
         .isInstanceOf(SagaOverloadedException.class)
         .extracting(e -> ((SagaRuntimeException) e).getErrorCode())

@@ -183,6 +183,11 @@ public abstract class ForwardingSagaStore implements SagaStore {
   }
 
   @Override
+  public void validateSagaId(String sagaId) {
+    delegate.validateSagaId(sagaId);
+  }
+
+  @Override
   public void close() {
     delegate.close();
   }

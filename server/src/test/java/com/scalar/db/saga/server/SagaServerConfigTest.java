@@ -202,7 +202,8 @@ class SagaServerConfigTest {
       strings = {
         SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY,
         SagaServerConfig.CALLBACK_MAX_AGE_SECONDS_KEY,
-        SagaServerConfig.TLS_ENABLED_KEY
+        SagaServerConfig.TLS_ENABLED_KEY,
+        SagaServerConfig.MAX_CONCURRENT_SAGA_EXECUTIONS_KEY
       })
   void load_blankProtectionDisablingKey_throwsIllegalArgumentException(String key) {
     Properties props = new Properties();
@@ -223,6 +224,8 @@ class SagaServerConfigTest {
     assertThat(config.callbackMaxAgeSeconds())
         .isEqualTo(SagaServerConfig.DEFAULT_CALLBACK_MAX_AGE_SECONDS);
     assertThat(config.tlsEnabled()).isEqualTo(SagaServerConfig.DEFAULT_TLS_ENABLED);
+    assertThat(config.maxConcurrentSagaExecutions())
+        .isEqualTo(DefaultSagaOrchestrator.DEFAULT_MAX_CONCURRENT_SAGA_EXECUTIONS);
   }
 
   @Test

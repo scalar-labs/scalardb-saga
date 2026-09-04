@@ -724,7 +724,12 @@ public final class SagaServerConfig {
             1);
     this.maxConcurrentSagaExecutions =
         parseBoundedInt(
-            resolved.getProperty(MAX_CONCURRENT_SAGA_EXECUTIONS_KEY),
+            // Blank is refused rather than read as unset: this key's default leaves the protection
+            // off, so a templated value that resolved empty would disable the cap silently. Same
+            // rule as the rate limit and the callback age.
+            requireNonBlankIfSet(
+                MAX_CONCURRENT_SAGA_EXECUTIONS_KEY,
+                resolved.getProperty(MAX_CONCURRENT_SAGA_EXECUTIONS_KEY)),
             MAX_CONCURRENT_SAGA_EXECUTIONS_KEY,
             DefaultSagaOrchestrator.DEFAULT_MAX_CONCURRENT_SAGA_EXECUTIONS,
             0);

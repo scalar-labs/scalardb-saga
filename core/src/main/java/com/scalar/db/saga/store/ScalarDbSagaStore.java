@@ -1737,7 +1737,8 @@ public final class ScalarDbSagaStore implements SagaStore {
         "load saga state " + sagaId);
   }
 
-  private void validateSagaId(String sagaId) {
+  @Override
+  public void validateSagaId(String sagaId) {
     if (!SAGA_ID_PATTERN.matcher(sagaId).matches()) {
       throw new SagaIllegalArgumentException(
           "Invalid saga ID format (must match [a-zA-Z0-9._-]{1,128})");

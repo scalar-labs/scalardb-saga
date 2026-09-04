@@ -301,6 +301,19 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
           backoff(retries++);
           continue;
         }
+        // An overload refusal is normally a definite answer: nothing was persisted, the ID is
+        // free. After an ambiguous attempt it is not. That attempt may well have created this
+        // saga — and a saga this client started may be the very thing holding the last permit, so
+        // the refusal and the success can be the same request seen twice. Reconcile the way the
+        // ALREADY_EXISTS path above does, and report overload only once the store agrees nothing
+        // is there.
+        if (attempted && GrpcClientSupport.isEngineOverloaded(e)) {
+          try {
+            return getSagaSnapshot(sagaId, loopDeadlineNanos);
+          } catch (SagaNotFoundException notFound) {
+            // Nothing landed, so the refusal was the honest answer after all.
+          }
+        }
         throw mapStartException(e, name, version, sagaId);
       }
     }

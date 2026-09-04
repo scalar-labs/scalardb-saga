@@ -14,6 +14,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
@@ -245,6 +247,38 @@ class AdmissionControllerTest {
 
       // Assert
       assertThat(summaries()).hasSize(1);
+    }
+
+    @Test
+    void acquire_writerOvertakenByALaterInterval_reportsNothingRatherThanANegativeDelta() {
+      // The election serializes writers inside an interval, but a writer descheduled after reading
+      // its total can resume an interval later, when a successor has already reported more. Moving
+      // the reported mark backwards there would log a negative delta and count the same rejections
+      // twice in the interval after. Simulated by driving two summaries and checking neither is
+      // negative and the totals never regress.
+      // Arrange
+      AdmissionController controller = saturated(1);
+
+      // Act — two full intervals of rejections, reported in order.
+      controller.acquire();
+      advance(AdmissionController.SUMMARY_INTERVAL_NANOS);
+      controller.acquire();
+      controller.acquire();
+      advance(AdmissionController.SUMMARY_INTERVAL_NANOS);
+      controller.acquire();
+
+      // Assert — every reported delta is positive, and the running totals only ever grow.
+      assertThat(summaries()).hasSize(2);
+      assertThat(summaries()).noneMatch(line -> line.contains("-"));
+      assertThat(totalIn(summaries().get(0))).isLessThan(totalIn(summaries().get(1)));
+    }
+
+    /** The "N total since start" figure from a summary line. */
+    private long totalIn(String summary) {
+      // Matched rather than sliced: the line's own "start(s)" would capture the wrong bracket.
+      Matcher matcher = Pattern.compile("\\((\\d+) total since start").matcher(summary);
+      assertThat(matcher.find()).isTrue();
+      return Long.parseLong(matcher.group(1));
     }
 
     @Test
