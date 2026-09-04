@@ -3,6 +3,7 @@ package com.scalar.db.saga.server.grpc;
 import static com.scalar.db.saga.server.grpc.ErrorInfos.errorInfo;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import ch.qos.logback.classic.Level;
 import com.google.rpc.ErrorInfo;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
@@ -16,9 +17,11 @@ import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaInvalidRequestException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.exception.SagaOverloadedException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
+import com.scalar.db.saga.server.LogCapture;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import java.time.Instant;
@@ -199,6 +202,10 @@ class GrpcErrorMapperTest {
             Status.Code.FAILED_PRECONDITION,
             SagaErrorCode.SAGA_DEFINITION_NOT_SERVED),
         new Arm(
+            new SagaOverloadedException(),
+            Status.Code.UNAVAILABLE,
+            SagaErrorCode.ENGINE_OVERLOADED),
+        new Arm(
             SagaPersistenceException.storeUnavailable(new RuntimeException("db down")),
             Status.Code.UNAVAILABLE,
             SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE),
@@ -330,5 +337,24 @@ class GrpcErrorMapperTest {
         .containsEntry("saga_id", "s-1")
         .containsEntry("current_state", "RUNNING")
         .containsEntry("requested_operation", "recover");
+  }
+
+  @Test
+  void toStatusRuntimeException_overloadedGiven_logsNothingAboveDebug() {
+    // A refusal is the cap working as configured, not a failure. It also arrives in storms, so a
+    // line per event — and the fallback arm writes a stack with it — would let any caller turn a
+    // saturated daemon into a log-disk problem. The controller summarizes once a minute instead.
+    try (LogCapture logs = LogCapture.of(GrpcErrorMapper.class)) {
+      // Act
+      for (int i = 0; i < 100; i++) {
+        GrpcErrorMapper.toStatusRuntimeException(new SagaOverloadedException());
+      }
+
+      // Assert
+      assertThat(logs.events())
+          .allSatisfy(
+              event ->
+                  assertThat(event.getLevel().toInt()).isLessThanOrEqualTo(Level.DEBUG.toInt()));
+    }
   }
 }

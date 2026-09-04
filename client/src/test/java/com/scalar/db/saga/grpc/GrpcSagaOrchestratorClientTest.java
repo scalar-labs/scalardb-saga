@@ -1,6 +1,7 @@
 package com.scalar.db.saga.grpc;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -19,6 +20,7 @@ import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.exception.SagaOverloadedException;
 import com.scalar.db.saga.exception.SagaPermissionDeniedException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaTimeoutException;
@@ -318,6 +320,99 @@ class GrpcSagaOrchestratorClientTest {
         .isInstanceOf(SagaRuntimeException.class)
         .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
         .isEqualTo(SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED);
+  }
+
+  @Test
+  void start_engineOverloadedGiven_surfacesAtOnceWithoutRetrying() {
+    // A refusal is a definite answer — nothing was persisted — so what to do about it is the
+    // caller's call: shed, queue, try another region, tell its own user. Retrying inside the SDK
+    // would spend their whole deadline on that decision and keep pressure on a saturated server.
+    // Arrange — the script fails once and would succeed on a second attempt, so a retry shows up
+    // as the absence of an exception rather than as a count.
+    fake.failStartWith(
+        statusWithReason(
+            Status.Code.UNAVAILABLE, SagaErrorCode.ENGINE_OVERLOADED.code(), Map.of()));
+    fake.succeedStartWith(snapshot("s-1", SagaStatus.COMPLETED));
+
+    // Act & Assert
+    assertThatThrownBy(() -> client.start("transfer", Map.of()))
+        .isInstanceOf(SagaOverloadedException.class);
+  }
+
+  @Test
+  void start_overloadedAfterAnAmbiguousAttempt_reconcilesWithTheStore() {
+    // The first attempt may have created the saga before the connection dropped — and that saga
+    // may be exactly what is holding the last permit, which makes the refusal and the success the
+    // same request seen twice. Reporting "nothing was persisted" here would be false.
+    // Arrange
+    fake.failStartWith(
+        new StatusRuntimeException(Status.UNAVAILABLE)); // ambiguous: may have landed
+    fake.failStartWith(
+        statusWithReason(
+            Status.Code.UNAVAILABLE, SagaErrorCode.ENGINE_OVERLOADED.code(), Map.of()));
+    fake.getResponse = snapshot("s-1", SagaStatus.COMPLETED); // it had landed
+
+    // Act & Assert — the saga is adopted rather than the caller being told it never existed.
+    assertThatCode(() -> client.start("transfer", Map.of())).doesNotThrowAnyException();
+  }
+
+  @Test
+  void start_overloadedAfterAnAmbiguousAttemptThatDidNotLand_surfacesOverload() {
+    // The other half: once the store agrees nothing is there, the refusal is the honest answer and
+    // must not be softened into a wait for a saga that does not exist.
+    // Arrange
+    fake.failStartWith(new StatusRuntimeException(Status.UNAVAILABLE));
+    fake.failStartWith(
+        statusWithReason(
+            Status.Code.UNAVAILABLE, SagaErrorCode.ENGINE_OVERLOADED.code(), Map.of()));
+    fake.getError = Status.NOT_FOUND.asRuntimeException();
+
+    // Act & Assert
+    assertThatThrownBy(() -> client.start("transfer", Map.of()))
+        .isInstanceOf(SagaOverloadedException.class);
+  }
+
+  @Test
+  void start_bareUnavailableGiven_isStillRetried() {
+    // The other side of the same rule: an unreachable daemon may never have received the request,
+    // so the client absorbs it. Excluding the refusal must not have disarmed this.
+    // Arrange
+    fake.failStartWith(new StatusRuntimeException(Status.UNAVAILABLE));
+    fake.succeedStartWith(snapshot("s-1", SagaStatus.COMPLETED));
+
+    // Act & Assert — the retry lands on the scripted success.
+    assertThatCode(() -> client.start("transfer", Map.of())).doesNotThrowAnyException();
+  }
+
+  @Test
+  void startAsync_engineOverloadedGiven_reconstructsSagaOverloadedException() {
+    // A refused start and an unreachable daemon both arrive as UNAVAILABLE, so only the code tells
+    // them apart — and they call for different handling: one means the server is full and the
+    // request is safe to repeat verbatim, the other that it may never have arrived.
+    // Arrange
+    fake.startError =
+        statusWithReason(Status.Code.UNAVAILABLE, SagaErrorCode.ENGINE_OVERLOADED.code(), Map.of());
+
+    // Act & Assert — the async path, pinned separately from the synchronous one above because the
+    // two reach the same answer by different routes: this one never enters the retry loop at all.
+    assertThatThrownBy(() -> client.startAsync("transfer", Map.of()))
+        .isInstanceOf(SagaOverloadedException.class)
+        .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.ENGINE_OVERLOADED);
+  }
+
+  @Test
+  void startAsync_bareUnavailableWithNoErrorInfo_staysSagaUnavailable() {
+    // The negative direction, pinned deliberately: a transport-level UNAVAILABLE carries no body,
+    // and must not be read as an admission refusal. Treating it as one would tell a caller the
+    // request was certainly refused when it may in fact have been executed.
+    // Arrange
+    fake.startError = new StatusRuntimeException(Status.UNAVAILABLE);
+
+    // Act & Assert
+    assertThatThrownBy(() -> client.startAsync("transfer", Map.of()))
+        .isInstanceOf(SagaUnavailableException.class)
+        .isNotInstanceOf(SagaOverloadedException.class);
   }
 
   @Test
@@ -845,6 +940,17 @@ class GrpcSagaOrchestratorClientTest {
   }
 
   private static final class FakeSagaService extends SagaServiceGrpc.SagaServiceImplBase {
+
+    /** Scripts the next start attempt to fail; a later attempt falls through to the next entry. */
+    void failStartWith(StatusRuntimeException error) {
+      startScript.add(observer -> observer.onError(error));
+    }
+
+    /** Scripts a start attempt to succeed, so a retry is observable as the absence of an error. */
+    void succeedStartWith(SagaSnapshot snapshot) {
+      startScript.add(observer -> respondWith(observer, snapshot));
+    }
+
     @Nullable StartSagaRequest lastStart;
     @Nullable AwaitSagaRequest lastAwait;
     @Nullable StatusRuntimeException startError;

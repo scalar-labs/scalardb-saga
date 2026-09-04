@@ -294,12 +294,25 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
           }
           throw mapStartException(e, name, version, sagaId);
         }
-        if (isRetryable(code)) {
+        if (isRetryable(e)) {
           attempted = true;
           throwIfClosed(sagaId);
           guardDeadline(loopDeadlineNanos);
           backoff(retries++);
           continue;
+        }
+        // An overload refusal is normally a definite answer: nothing was persisted, the ID is
+        // free. After an ambiguous attempt it is not. That attempt may well have created this
+        // saga — and a saga this client started may be the very thing holding the last permit, so
+        // the refusal and the success can be the same request seen twice. Reconcile the way the
+        // ALREADY_EXISTS path above does, and report overload only once the store agrees nothing
+        // is there.
+        if (attempted && GrpcClientSupport.isEngineOverloaded(e)) {
+          try {
+            return getSagaSnapshot(sagaId, loopDeadlineNanos);
+          } catch (SagaNotFoundException notFound) {
+            // Nothing landed, so the refusal was the honest answer after all.
+          }
         }
         throw mapStartException(e, name, version, sagaId);
       }
@@ -321,8 +334,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
         snapshot = callWithin(loopDeadlineNanos).awaitSaga(request);
         retries = 0;
       } catch (StatusRuntimeException e) {
-        Status.Code code = e.getStatus().getCode();
-        if (isRetryable(code)) {
+        if (isRetryable(e)) {
           throwIfClosed(sagaId);
           guardDeadline(loopDeadlineNanos);
           backoff(retries++);
@@ -353,10 +365,29 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
         || status == SagaStatus.SAGA_STATUS_ESCALATED;
   }
 
-  private static boolean isRetryable(Status.Code code) {
-    return code == Status.Code.UNAVAILABLE
-        || code == Status.Code.CANCELLED
-        || code == Status.Code.DEADLINE_EXCEEDED;
+  /**
+   * Whether the client should absorb {@code e} and try again.
+   *
+   * <p>An admission refusal is excluded deliberately, even though it arrives on a retryable status
+   * and is marked retryable on the wire. That marking is a statement about <b>safety</b> — nothing
+   * was persisted, so repeating the request cannot double-start a saga — not an instruction to
+   * repeat it now. Retrying inside the SDK would spend the caller's whole deadline on a condition
+   * only the caller can weigh: shedding the request, queueing it, trying another region, or telling
+   * its own user, are all better answers than waiting, and none of them are available to code
+   * buried in a transport client. It would also keep pressure on a server that has just said it is
+   * saturated.
+   *
+   * <p>So the refusal is surfaced at once as {@link
+   * com.scalar.db.saga.exception.SagaOverloadedException}, and the caller decides. Every other
+   * retryable failure is still absorbed here, where the request may never have arrived at all.
+   */
+  private static boolean isRetryable(StatusRuntimeException e) {
+    Status.Code code = e.getStatus().getCode();
+    boolean retryableStatus =
+        code == Status.Code.UNAVAILABLE
+            || code == Status.Code.CANCELLED
+            || code == Status.Code.DEADLINE_EXCEEDED;
+    return retryableStatus && !GrpcClientSupport.isEngineOverloaded(e);
   }
 
   /**

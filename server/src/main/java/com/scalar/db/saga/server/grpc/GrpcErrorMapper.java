@@ -14,6 +14,7 @@ import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaInvalidRequestException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.exception.SagaOverloadedException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
@@ -98,6 +99,14 @@ final class GrpcErrorMapper {
       case SagaIllegalArgumentException e -> respond(Status.Code.INVALID_ARGUMENT, e);
 
       // ── Server errors ──────────────────────────────────────────────
+      // Ahead of the fallback, which logs UNAVAILABLE at ERROR with a stack: a rejection storm
+      // would then write one stack per refused start, an amplifier any caller can reach. A refusal
+      // is the cap working as configured, not a failure, so it logs at DEBUG and the controller
+      // summarizes the storm once a minute.
+      case SagaOverloadedException e -> {
+        logger.debug("{} handling gRPC call", e.getMessage());
+        yield respond(Status.Code.UNAVAILABLE, e);
+      }
       case SagaPersistenceException pe -> {
         Status.Code code = pe.isRetryable() ? Status.Code.UNAVAILABLE : Status.Code.INTERNAL;
         logger.error("{} handling gRPC call", pe.getMessage(), pe);

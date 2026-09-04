@@ -388,6 +388,8 @@ public final class SagaServerConfig {
 
   static final String DETAIL_PREFIX = SERVER_PREFIX + "detail.";
   static final String DETAIL_MAX_TIMELINE_EVENTS_KEY = DETAIL_PREFIX + "max_timeline_events";
+  static final String MAX_CONCURRENT_SAGA_EXECUTIONS_KEY =
+      SERVER_PREFIX + "max_concurrent_saga_executions";
 
   static final String RECOVERY_PREFIX = SERVER_PREFIX + "recovery.";
   static final String RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY =
@@ -479,6 +481,34 @@ public final class SagaServerConfig {
   static final int DEFAULT_MAX_START_REQUESTS_PER_MINUTE = 0; // 0 = disabled (no rate limiting)
 
   /**
+   * Returns the maximum number of sagas that may execute concurrently, or {@code 0} for no cap (the
+   * default). A start arriving at the cap is refused with {@code DB-SAGA-20006} and HTTP 503 / gRPC
+   * {@code UNAVAILABLE}; nothing is persisted, so the saga does not exist and its ID stays free.
+   *
+   * <p>A permit is held per drive, so a parked saga holds none, and resumes, recovery and admin
+   * drives are never refused.
+   *
+   * <p><b>Sizing.</b> In-flight population is arrival rate times saga duration, so start from the
+   * rate you intend to serve and the duration you measure, add burst headroom, and bound the result
+   * so worst-case saga latency stays inside {@code recovery.staleness_threshold_millis} — past it,
+   * recovery starts claiming sagas that are still running, which is the collapse this prevents.
+   *
+   * <p><b>Size it together with {@code max_start_requests_per_minute}</b>, which bounds a different
+   * quantity: that limits how often one principal may ask; this limits how much work the engine is
+   * doing for everyone. Neither substitutes for the other — a rate limit cannot see duration, so a
+   * downstream slowdown multiplies the in-flight population at an unchanged arrival rate, while a
+   * cap alone leaves one caller free to spend everyone's capacity on cheap refusals. Both are off
+   * by default. The check that connects them: aggregate admitted arrival (principals times
+   * per-principal limit) times typical duration should sit comfortably below this cap, so the rate
+   * limiter does the everyday shaping and the cap is the backstop for a duration blowout. If it
+   * sits above, callers inside their limits are refused routinely and "server full" stops being an
+   * exceptional signal.
+   */
+  public int maxConcurrentSagaExecutions() {
+    return maxConcurrentSagaExecutions;
+  }
+
+  /**
    * Every key parsed here, for the unknown-key check. Keys the security package parses are listed
    * in {@link #SECURITY_PROVIDER_KEYS} instead, and a key under one of {@link #DELEGATED_PREFIXES}
    * carries an operator-chosen segment, so neither kind is in this set.
@@ -510,6 +540,7 @@ public final class SagaServerConfig {
           SHUTDOWN_MODE_KEY,
           SHUTDOWN_TIMEOUT_MILLIS_KEY,
           DETAIL_MAX_TIMELINE_EVENTS_KEY,
+          MAX_CONCURRENT_SAGA_EXECUTIONS_KEY,
           RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY,
           RECOVERY_INTERVAL_SECONDS_KEY,
           RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY,
@@ -585,6 +616,7 @@ public final class SagaServerConfig {
   private final ShutdownMode shutdownMode;
   private final long shutdownTimeoutMillis;
   private final int detailMaxTimelineEvents;
+  private final int maxConcurrentSagaExecutions;
   private final RecoveryConfig recoveryConfig;
   private final RetentionConfig retentionConfig;
   private final String securityProvider;
@@ -690,6 +722,17 @@ public final class SagaServerConfig {
             DETAIL_MAX_TIMELINE_EVENTS_KEY,
             DEFAULT_DETAIL_MAX_TIMELINE_EVENTS,
             1);
+    this.maxConcurrentSagaExecutions =
+        parseBoundedInt(
+            // Blank is refused rather than read as unset: this key's default leaves the protection
+            // off, so a templated value that resolved empty would disable the cap silently. Same
+            // rule as the rate limit and the callback age.
+            requireNonBlankIfSet(
+                MAX_CONCURRENT_SAGA_EXECUTIONS_KEY,
+                resolved.getProperty(MAX_CONCURRENT_SAGA_EXECUTIONS_KEY)),
+            MAX_CONCURRENT_SAGA_EXECUTIONS_KEY,
+            DefaultSagaOrchestrator.DEFAULT_MAX_CONCURRENT_SAGA_EXECUTIONS,
+            0);
     this.recoveryConfig = parseRecoveryConfig(resolved);
     this.retentionConfig = parseRetentionConfig(resolved);
     this.securityProvider = parseSecurityProvider(resolved.getProperty(SECURITY_PROVIDER_KEY));

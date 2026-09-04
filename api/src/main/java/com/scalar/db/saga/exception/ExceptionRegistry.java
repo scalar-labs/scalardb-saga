@@ -120,6 +120,7 @@ public final class ExceptionRegistry {
             SagaPersistenceException.fromWire(SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE, meta));
     m.put(SagaErrorCode.SERVICE_UNAVAILABLE, meta -> new SagaUnavailableException());
     m.put(SagaErrorCode.RATE_LIMIT_EXCEEDED, meta -> raw(SagaErrorCode.RATE_LIMIT_EXCEEDED, meta));
+    m.put(SagaErrorCode.ENGINE_OVERLOADED, meta -> new SagaOverloadedException());
     m.put(
         SagaErrorCode.OPERATION_ABORTED,
         meta -> SagaPersistenceException.fromWire(SagaErrorCode.OPERATION_ABORTED, meta));

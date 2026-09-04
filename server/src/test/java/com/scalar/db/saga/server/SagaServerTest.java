@@ -745,6 +745,7 @@ class SagaServerTest {
     props.setProperty(SagaServerConfig.SHUTDOWN_TIMEOUT_MILLIS_KEY, "7001");
     props.setProperty(SagaServerConfig.DEFAULT_SAGA_TIMEOUT_MILLIS_KEY, "7006");
     props.setProperty(SagaServerConfig.DETAIL_MAX_TIMELINE_EVENTS_KEY, "7005");
+    props.setProperty(SagaServerConfig.MAX_CONCURRENT_SAGA_EXECUTIONS_KEY, "7007");
     props.setProperty(SagaServerConfig.SYNC_TIMEOUT_MILLIS_KEY, "7002");
     props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "7003");
     props.setProperty(SagaServerConfig.RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY, "7004");
@@ -773,6 +774,7 @@ class SagaServerTest {
     verify(builder).shutdownTimeoutMillis(7001L);
     verify(builder).defaultSagaTimeoutMillis(7006L);
     verify(builder).maxTimelineEvents(7005);
+    verify(builder).maxConcurrentSagaExecutions(7007);
     verify(builder).recoveryConfig(config.recoveryConfig());
     verify(builder).retentionConfig(config.retentionConfig());
   }
