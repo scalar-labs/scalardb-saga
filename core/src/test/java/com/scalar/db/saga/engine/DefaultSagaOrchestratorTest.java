@@ -1586,13 +1586,12 @@ class DefaultSagaOrchestratorTest {
     }
 
     @Test
-    void start_unknownDefinitionAtTheCap_reportsTheDefinitionError() {
+    void start_unknownDefinitionAtTheCap_reportsOverloadBecauseTheNameIsNeverLookedUp() {
       // Validation answers first: telling a caller to retry a saga that does not exist would send
       // them into a loop that can never succeed.
       // Arrange
       SagaDefinition def = definition("transfer");
       when(definitionRegistry.resolve("transfer")).thenReturn(def);
-      when(definitionRegistry.resolve("unknown")).thenReturn(null);
       ExecutorService neverRuns = mock(ExecutorService.class);
       when(engine.createSaga(eq(def), isNull(), any()))
           .thenReturn(snapshot("saga-1", SagaStatus.RUNNING));
@@ -1602,7 +1601,9 @@ class DefaultSagaOrchestratorTest {
 
         // Act & Assert
         assertThatThrownBy(() -> orchestrator.start("unknown", Map.of()))
-            .isInstanceOf(SagaDefinitionNotFoundException.class);
+            .isInstanceOf(SagaOverloadedException.class);
+        // The store was never asked, which is the point.
+        verify(definitionRegistry, never()).resolve("unknown");
       }
     }
 

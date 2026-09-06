@@ -116,8 +116,10 @@ class SagaAdmissionIntegrationTest extends ServerIntegrationTestSupport {
   }
 
   @Test
-  void start_unknownSagaAtTheCap_returns404NotOverloaded() throws Exception {
-    // A full engine must not start answering "does this saga exist?" with "try again later".
+  void start_unknownSagaAtTheCap_returns503BecauseTheNameIsNeverLookedUp() throws Exception {
+    // Deliberate: resolving the name costs a store read, so it happens inside the permit and a
+    // full engine refuses before it discovers the name is wrong. Reads are unaffected — only a
+    // start pays this — which the next test pins.
     // Arrange
     saturate();
 
@@ -125,7 +127,8 @@ class SagaAdmissionIntegrationTest extends ServerIntegrationTestSupport {
     HttpResponse<String> unknown = post("/sagas", "{\"sagaName\":\"no-such-saga\",\"input\":{}}");
 
     // Assert
-    assertThat(unknown.statusCode()).isEqualTo(404);
+    assertThat(unknown.statusCode()).isEqualTo(503);
+    assertThat(unknown.body()).contains("DB-SAGA-20006");
   }
 
   @Test

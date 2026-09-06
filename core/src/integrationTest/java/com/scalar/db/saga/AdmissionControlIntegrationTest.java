@@ -10,7 +10,6 @@ import com.scalar.db.saga.api.Step;
 import com.scalar.db.saga.api.StepResult;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
-import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaOverloadedException;
 import com.scalar.db.saga.store.ScalarDbSagaStoreFactory;
@@ -193,9 +192,11 @@ class AdmissionControlIntegrationTest {
   }
 
   @Test
-  void start_unknownDefinitionAtTheCap_reportsTheDefinitionErrorNotOverload() throws Exception {
-    // Validation answers first even when the engine is full: a caller told to retry a saga that
-    // does not exist would loop forever on a request that can never succeed.
+  void start_unknownDefinitionAtTheCap_reportsOverloadBecauseTheNameIsNeverLookedUp()
+      throws Exception {
+    // Resolving a name reads the store on every call, so it now happens inside the permit: a
+    // refusal costs no query during the storm the cap exists to absorb. The price is that an
+    // unknown saga is refused before anyone notices the name is wrong.
     // Arrange
     try (DefaultSagaOrchestrator orchestrator =
             orchestrator(1, Map.of("only", new BlockingStep()));
@@ -205,7 +206,7 @@ class AdmissionControlIntegrationTest {
 
       // Act & Assert
       assertThatThrownBy(() -> orchestrator.start("no-such-saga", Map.of()))
-          .isInstanceOf(SagaDefinitionNotFoundException.class);
+          .isInstanceOf(SagaOverloadedException.class);
 
       stepRelease.countDown();
       caller.shutdown();

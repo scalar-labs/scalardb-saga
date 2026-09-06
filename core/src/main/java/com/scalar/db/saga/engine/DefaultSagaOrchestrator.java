@@ -37,6 +37,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import net.jcip.annotations.ThreadSafe;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -273,8 +274,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(sagaName, "sagaName must not be null");
     Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
-    SagaDefinition def = requireLatestDefinition(sagaName);
-    return executeAdmitted(def, null, input);
+    return executeAdmitted(() -> requireLatestDefinition(sagaName), null, input);
   }
 
   @Override
@@ -283,8 +283,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(sagaName, "sagaName must not be null");
     Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
-    SagaDefinition def = requireLatestDefinition(sagaName);
-    executeAdmitted(def, sagaId, input);
+    executeAdmitted(() -> requireLatestDefinition(sagaName), sagaId, input);
   }
 
   @Override
@@ -292,8 +291,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(id, "id must not be null");
     Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
-    SagaDefinition def = requireVersionedDefinition(id);
-    return executeAdmitted(def, null, input);
+    return executeAdmitted(() -> requireVersionedDefinition(id), null, input);
   }
 
   @Override
@@ -302,8 +300,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(id, "id must not be null");
     Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
-    SagaDefinition def = requireVersionedDefinition(id);
-    executeAdmitted(def, sagaId, input);
+    executeAdmitted(() -> requireVersionedDefinition(id), sagaId, input);
   }
 
   // ---------------------------------------------------------------------------
@@ -315,8 +312,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(sagaName, "sagaName must not be null");
     Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
-    SagaDefinition def = requireLatestDefinition(sagaName);
-    return startAsyncInternal(def, null, input, null).getSagaId();
+    return startAsyncInternal(() -> requireLatestDefinition(sagaName), null, input, null)
+        .getSagaId();
   }
 
   @Override
@@ -325,8 +322,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(input, "input must not be null");
     Objects.requireNonNull(callback, "callback must not be null");
     ensureOpen();
-    SagaDefinition def = requireLatestDefinition(sagaName);
-    return startAsyncInternal(def, null, input, callback).getSagaId();
+    return startAsyncInternal(() -> requireLatestDefinition(sagaName), null, input, callback)
+        .getSagaId();
   }
 
   @Override
@@ -335,8 +332,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(sagaName, "sagaName must not be null");
     Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
-    SagaDefinition def = requireLatestDefinition(sagaName);
-    startAsyncInternal(def, sagaId, input, null);
+    startAsyncInternal(() -> requireLatestDefinition(sagaName), sagaId, input, null);
   }
 
   @Override
@@ -347,8 +343,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(input, "input must not be null");
     Objects.requireNonNull(callback, "callback must not be null");
     ensureOpen();
-    SagaDefinition def = requireLatestDefinition(sagaName);
-    startAsyncInternal(def, sagaId, input, callback);
+    startAsyncInternal(() -> requireLatestDefinition(sagaName), sagaId, input, callback);
   }
 
   @Override
@@ -356,8 +351,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(id, "id must not be null");
     Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
-    SagaDefinition def = requireVersionedDefinition(id);
-    return startAsyncInternal(def, null, input, null).getSagaId();
+    return startAsyncInternal(() -> requireVersionedDefinition(id), null, input, null).getSagaId();
   }
 
   @Override
@@ -366,8 +360,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(input, "input must not be null");
     Objects.requireNonNull(callback, "callback must not be null");
     ensureOpen();
-    SagaDefinition def = requireVersionedDefinition(id);
-    return startAsyncInternal(def, null, input, callback).getSagaId();
+    return startAsyncInternal(() -> requireVersionedDefinition(id), null, input, callback)
+        .getSagaId();
   }
 
   @Override
@@ -376,8 +370,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(id, "id must not be null");
     Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
-    SagaDefinition def = requireVersionedDefinition(id);
-    startAsyncInternal(def, sagaId, input, null);
+    startAsyncInternal(() -> requireVersionedDefinition(id), sagaId, input, null);
   }
 
   @Override
@@ -388,18 +381,28 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(input, "input must not be null");
     Objects.requireNonNull(callback, "callback must not be null");
     ensureOpen();
-    SagaDefinition def = requireVersionedDefinition(id);
-    startAsyncInternal(def, sagaId, input, callback);
+    startAsyncInternal(() -> requireVersionedDefinition(id), sagaId, input, callback);
   }
 
   /**
    * Takes a permit for a drive about to start, or refuses the start.
    *
-   * <p>Called after validation and definition resolution, deliberately: a malformed request and an
-   * unknown saga are the caller's mistakes and must keep their own answers even at a full cap,
-   * where a 503 would tell them to retry something that can never succeed. It is called before
-   * anything is persisted, equally deliberately: a refused start leaves no saga and no consumed ID,
-   * which is what makes the advice to retry true.
+   * <p>Called before the definition is resolved, and that ordering is the deliberate part.
+   * Resolving a saga by name always reads the store — the registry never caches that lookup, so it
+   * cannot serve a stale version — so resolving first would make every refusal cost a store
+   * transaction, and refusals arrive in storms precisely when the store is the thing under strain.
+   * The same reasoning that keeps a log line off this path keeps a query off it.
+   *
+   * <p>What that costs, stated plainly: at a full cap a start naming a saga that does not exist is
+   * refused before anyone discovers the name is wrong, so it reports overload rather than
+   * not-found. The caller learns of the typo when capacity returns. That is the same trade already
+   * accepted for an oversized payload, and a mistyped saga name is a development-time mistake
+   * rather than a production one.
+   *
+   * <p>Checks that cost nothing keep their own answers: input and ID validation run in the refusal
+   * branch below, so a malformed request is still told what is wrong with it rather than to try
+   * again. And the refusal still precedes anything being persisted, which is what makes the advice
+   * to retry true.
    *
    * @return the lease to release when the drive ends, or {@code null} when no cap is configured
    * @throws SagaOverloadedException when the cap is full and the request is otherwise acceptable
@@ -439,10 +442,10 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * progressing, and a saga waiting on an outside system is not occupying the engine.
    */
   private String executeAdmitted(
-      SagaDefinition def, @Nullable String sagaId, Map<String, Object> input) {
+      Supplier<SagaDefinition> definition, @Nullable String sagaId, Map<String, Object> input) {
     AdmissionController.PermitLease lease = admit(sagaId, input);
     try {
-      return engine.execute(def, sagaId, input);
+      return engine.execute(definition.get(), sagaId, input);
     } finally {
       release(lease);
     }
@@ -453,7 +456,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * process crashes before the virtual thread starts), then submits execution to a virtual thread.
    */
   private SagaStateSnapshot startAsyncInternal(
-      SagaDefinition def,
+      Supplier<SagaDefinition> definition,
       @Nullable String sagaId,
       Map<String, Object> input,
       @Nullable SagaCallback callback) {
@@ -462,7 +465,10 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     AdmissionController.PermitLease lease = admit(sagaId, input);
     SagaStateSnapshot saga;
     Map<String, Object> copiedInput;
+    SagaDefinition def;
     try {
+      def = definition.get();
+
       // Defensive copy: the async thread reads this map after we return to the caller, so a caller
       // that mutates its map post-return would otherwise race the read (CME or a torn copy).
       copiedInput = new HashMap<>(input);
