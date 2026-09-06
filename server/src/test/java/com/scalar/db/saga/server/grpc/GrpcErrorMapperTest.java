@@ -1,10 +1,14 @@
 package com.scalar.db.saga.server.grpc;
 
 import static com.scalar.db.saga.server.grpc.ErrorInfos.errorInfo;
+import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import ch.qos.logback.classic.Level;
+import com.google.protobuf.Any;
+import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.rpc.ErrorInfo;
+import com.google.rpc.RetryInfo;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.exception.ErrorMetadata;
@@ -22,14 +26,17 @@ import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import com.scalar.db.saga.server.LogCapture;
+import com.scalar.db.saga.server.api.ErrorMapper;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
+import io.grpc.protobuf.StatusProto;
 import java.time.Instant;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -356,5 +363,50 @@ class GrpcErrorMapperTest {
               event ->
                   assertThat(event.getLevel().toInt()).isLessThanOrEqualTo(Level.DEBUG.toInt()));
     }
+  }
+
+  @Test
+  void toStatusRuntimeException_overloadedGiven_carriesTheSameWaitRestSends() {
+    // A caller refused for load should not get more help on one transport than the other. The rate
+    // limiter already sends RetryInfo here for its own refusals, so an admission refusal that sent
+    // none would be the odd one out on the same protocol.
+    // Act
+    StatusRuntimeException thrown =
+        GrpcErrorMapper.toStatusRuntimeException(new SagaOverloadedException());
+
+    // Assert
+    RetryInfo retryInfo = requireNonNull(retryInfoOf(thrown));
+    assertThat(
+            retryInfo.getRetryDelay().getSeconds() * 1000
+                + retryInfo.getRetryDelay().getNanos() / 1_000_000)
+        .isEqualTo(ErrorMapper.OVERLOAD_RETRY_AFTER_MILLIS);
+  }
+
+  @Test
+  void toStatusRuntimeException_anyOtherErrorGiven_carriesNoWait() {
+    // The hint is attached where the server has advice, not to every error: this pins that adding
+    // it did not change the shape of the statuses that flow through the same builder.
+    // Act
+    StatusRuntimeException thrown =
+        GrpcErrorMapper.toStatusRuntimeException(new SagaNotFoundException("s-1"));
+
+    // Assert
+    assertThat(retryInfoOf(thrown)).isNull();
+  }
+
+  /** The {@code RetryInfo} detail on a status, or {@code null} when it carries none. */
+  private static @Nullable RetryInfo retryInfoOf(StatusRuntimeException e) {
+    com.google.rpc.Status status = StatusProto.fromThrowable(e);
+    assertThat(status).isNotNull();
+    for (Any detail : status.getDetailsList()) {
+      if (detail.is(RetryInfo.class)) {
+        try {
+          return detail.unpack(RetryInfo.class);
+        } catch (InvalidProtocolBufferException unpackFailure) {
+          throw new AssertionError("RetryInfo detail did not unpack", unpackFailure);
+        }
+      }
+    }
+    return null;
   }
 }

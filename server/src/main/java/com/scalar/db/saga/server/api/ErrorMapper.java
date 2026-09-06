@@ -69,6 +69,17 @@ import org.slf4j.LoggerFactory;
  */
 public final class ErrorMapper {
 
+  /**
+   * The advisory wait sent with an admission refusal, in milliseconds.
+   *
+   * <p>Public, and read by the gRPC mapper rather than duplicated there, because the two transports
+   * answering the same refusal differently is the drift this codebase guards against elsewhere.
+   * Fixed rather than computed: unlike a rate-limit window, nothing here is counting down to a
+   * known reset — a permit frees when a saga finishes — so there is no honest deadline to name. One
+   * second is short enough to keep a queue draining and long enough not to be a hot loop.
+   */
+  public static final long OVERLOAD_RETRY_AFTER_MILLIS = 1_000L;
+
   private static final Logger logger = LoggerFactory.getLogger(ErrorMapper.class);
 
   /** Cap on the request line echoed by the unmatched-route 404 body. */
@@ -184,10 +195,7 @@ public final class ErrorMapper {
         SagaOverloadedException.class,
         (e, ctx) -> {
           logger.debug("{} on {} {}", e.getMessage(), ctx.method(), ctx.path());
-          // A fixed hint, unlike the rate limiter's: no window is closing here, only work
-          // finishing, so there is no honest deadline to name. One second is short enough to keep
-          // a queue draining and long enough that a compliant client is not hot-looping.
-          ctx.header("Retry-After", "1");
+          ctx.header("Retry-After", Long.toString((OVERLOAD_RETRY_AFTER_MILLIS + 999) / 1000));
           respond(ctx, 503, e);
         });
 
