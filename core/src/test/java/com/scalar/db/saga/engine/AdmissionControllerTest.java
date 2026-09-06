@@ -136,11 +136,29 @@ class AdmissionControllerTest {
       appender.stop();
     }
 
+    /** The periodic summaries only, excluding the line that announces a storm's onset. */
+    private List<String> intervalSummaries() {
+      return summaries().stream().filter(line -> line.contains("rejected in the last")).toList();
+    }
+
     private List<String> summaries() {
       return appender.list.stream()
           .filter(event -> event.getLevel() == Level.WARN)
           .map(ILoggingEvent::getFormattedMessage)
           .toList();
+    }
+
+    /**
+     * Keeps a storm running across an interval boundary: a refusal partway through so the storm
+     * never looks quiet, then one past the boundary, which is the one that reports. Spacing
+     * refusals a whole interval apart instead would make each a fresh storm, and each would
+     * announce its own onset rather than summarizing.
+     */
+    private void refuseAcrossAnIntervalBoundary(AdmissionController controller) {
+      advance(AdmissionController.SUMMARY_INTERVAL_NANOS / 2);
+      controller.acquire();
+      advance(AdmissionController.SUMMARY_INTERVAL_NANOS / 2 + 1);
+      controller.acquire();
     }
 
     /** Fills the cap so every later acquire is refused. */
@@ -153,10 +171,30 @@ class AdmissionControllerTest {
     }
 
     @Test
-    void acquire_rejectionsWithinOneInterval_logsNothing() {
-      // The storm is the moment a daemon can least afford a line per event.
+    void acquire_firstRejectionAfterAQuietSpell_saysSoAtOnce() {
+      // Without this the cap can refuse work for a whole interval in silence: the per-refusal lines
+      // are DEBUG and the image logs at INFO, so a burst shorter than the summary period leaves the
+      // operator with nothing but their callers' 503s.
       // Arrange
       AdmissionController controller = saturated(1);
+
+      // Act
+      controller.acquire();
+
+      // Assert
+      assertThat(summaries())
+          .singleElement()
+          .asString()
+          .contains("reached: starts are being refused");
+    }
+
+    @Test
+    void acquire_furtherRejectionsWithinTheInterval_addNothing() {
+      // The storm is the moment a daemon can least afford a line per event, so after the onset the
+      // interval summary is the only thing that speaks.
+      // Arrange
+      AdmissionController controller = saturated(1);
+      controller.acquire();
 
       // Act
       for (int i = 0; i < 100; i++) {
@@ -164,49 +202,61 @@ class AdmissionControllerTest {
       }
 
       // Assert
-      assertThat(summaries()).isEmpty();
+      assertThat(summaries()).hasSize(1);
+    }
+
+    @Test
+    void acquire_stormResumingAfterAQuietSpell_announcesItselfAgain() {
+      // A second burst an hour later is news again, not a continuation.
+      // Arrange
+      AdmissionController controller = saturated(1);
+      controller.acquire();
+
+      // Act — quiet for longer than an interval, then refusals resume.
+      advance(AdmissionController.SUMMARY_INTERVAL_NANOS * 2);
+      controller.acquire();
+
+      // Assert
+      assertThat(summaries()).hasSize(2);
+      assertThat(summaries().get(1)).contains("reached: starts are being refused");
     }
 
     @Test
     void acquire_rejectionsSpanningAnInterval_logsOneSummaryNamingTheCount() {
-      // Arrange
+      // Arrange — the onset line claims the first refusal, so the interval reports the rest.
       AdmissionController controller = saturated(1);
       for (int i = 0; i < 5; i++) {
         controller.acquire();
       }
 
-      // Act — the rejection that crosses the boundary is the one that reports.
-      advance(AdmissionController.SUMMARY_INTERVAL_NANOS);
-      controller.acquire();
+      // Act — the refusal that crosses the boundary is the one that reports.
+      refuseAcrossAnIntervalBoundary(controller);
 
       // Assert
-      assertThat(summaries())
+      assertThat(intervalSummaries())
           .singleElement()
           .asString()
           .contains("6 start(s) rejected")
-          .contains("6 total since start");
+          .contains("7 total since start");
     }
 
     @Test
     void acquire_secondInterval_reportsOnlyItsOwnDelta() {
-      // Counters are cumulative, so each interval has to subtract what was already reported;
-      // reporting the running total every time would make a quiet interval look like a storm.
-      // Arrange
+      // Counters are cumulative, so each interval subtracts what was already reported; repeating
+      // the running total would make a quiet interval look like a storm.
+      // Arrange — one continuous storm, so the periodic summary is what speaks after the onset.
       AdmissionController controller = saturated(1);
       controller.acquire();
-      advance(AdmissionController.SUMMARY_INTERVAL_NANOS);
-      controller.acquire();
+      refuseAcrossAnIntervalBoundary(controller);
 
       // Act
-      controller.acquire();
-      advance(AdmissionController.SUMMARY_INTERVAL_NANOS);
-      controller.acquire();
+      refuseAcrossAnIntervalBoundary(controller);
 
       // Assert
-      assertThat(summaries()).hasSize(2);
-      assertThat(summaries().get(1))
+      assertThat(intervalSummaries()).hasSize(2);
+      assertThat(intervalSummaries().get(1))
           .contains("2 start(s) rejected")
-          .contains("4 total since start");
+          .contains("5 total since start");
     }
 
     @Test
@@ -254,18 +304,16 @@ class AdmissionControllerTest {
       // Arrange
       AdmissionController controller = saturated(1);
 
-      // Act — two full intervals of rejections, reported in order.
+      // Act — one continuous storm crossing two interval boundaries.
       controller.acquire();
-      advance(AdmissionController.SUMMARY_INTERVAL_NANOS);
-      controller.acquire();
-      controller.acquire();
-      advance(AdmissionController.SUMMARY_INTERVAL_NANOS);
-      controller.acquire();
+      refuseAcrossAnIntervalBoundary(controller);
+      refuseAcrossAnIntervalBoundary(controller);
 
       // Assert — every reported delta is positive, and the running totals only ever grow.
-      assertThat(summaries()).hasSize(2);
-      assertThat(summaries()).noneMatch(line -> line.contains("-"));
-      assertThat(totalIn(summaries().get(0))).isLessThan(totalIn(summaries().get(1)));
+      assertThat(intervalSummaries()).hasSize(2);
+      assertThat(intervalSummaries()).noneMatch(line -> line.contains("-"));
+      assertThat(totalIn(intervalSummaries().get(0)))
+          .isLessThan(totalIn(intervalSummaries().get(1)));
     }
 
     /** The "N total since start" figure from a summary line. */
@@ -281,13 +329,13 @@ class AdmissionControllerTest {
       // The line has to stand on its own in a log an operator greps at 3am.
       // Arrange
       AdmissionController controller = saturated(2);
-
-      // Act
-      advance(AdmissionController.SUMMARY_INTERVAL_NANOS);
       controller.acquire();
 
+      // Act
+      refuseAcrossAnIntervalBoundary(controller);
+
       // Assert
-      assertThat(summaries())
+      assertThat(intervalSummaries())
           .singleElement()
           .asString()
           .contains("Admission cap 2")

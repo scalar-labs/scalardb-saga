@@ -399,16 +399,19 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * accepted for an oversized payload, and a mistyped saga name is a development-time mistake
    * rather than a production one.
    *
-   * <p>Checks that cost nothing keep their own answers: input and ID validation run in the refusal
-   * branch below, so a malformed request is still told what is wrong with it rather than to try
-   * again. And the refusal still precedes anything being persisted, which is what makes the advice
-   * to retry true.
+   * <p>Input validation runs in the refusal branch below, because it is a walk of a map the engine
+   * owns and costs nothing to repeat, so a request carrying a null is still told so rather than to
+   * try again. The saga ID is <b>not</b> checked here: its grammar belongs to the store, and
+   * reaching for it early meant a method on the store interface that would outlive its one caller.
+   * So a caller-supplied ID that the store could never accept is refused as overload at a full cap
+   * and reports its real error once capacity returns — the same shape as the unknown-name and
+   * oversized-payload cases above. And the refusal still precedes anything being persisted, which
+   * is what makes the advice to retry true.
    *
    * @return the lease to release when the drive ends, or {@code null} when no cap is configured
    * @throws SagaOverloadedException when the cap is full and the request is otherwise acceptable
    */
-  private AdmissionController.@Nullable PermitLease admit(
-      @Nullable String sagaId, Map<String, Object> input) {
+  private AdmissionController.@Nullable PermitLease admit(Map<String, Object> input) {
     AdmissionController controller = admissionController;
     if (controller == null) {
       return null;
@@ -421,9 +424,6 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       // creating a saga, so paying for them on every admitted start, and on every start at all when
       // no cap is configured, would buy nothing.
       ExecutionContext.validateInput(input);
-      if (sagaId != null) {
-        store.validateSagaId(sagaId);
-      }
       throw new SagaOverloadedException();
     }
     return lease;
@@ -443,7 +443,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    */
   private String executeAdmitted(
       Supplier<SagaDefinition> definition, @Nullable String sagaId, Map<String, Object> input) {
-    AdmissionController.PermitLease lease = admit(sagaId, input);
+    AdmissionController.PermitLease lease = admit(input);
     try {
       return engine.execute(definition.get(), sagaId, input);
     } finally {
@@ -462,7 +462,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       @Nullable SagaCallback callback) {
     // Admitted before the copy: a refused start should pay for nothing it does not need, and the
     // copy is the first thing here that costs anything per request.
-    AdmissionController.PermitLease lease = admit(sagaId, input);
+    AdmissionController.PermitLease lease = admit(input);
     SagaStateSnapshot saga;
     Map<String, Object> copiedInput;
     SagaDefinition def;

@@ -73,6 +73,12 @@ final class AdmissionController {
   /** Cumulative rejections already reported, so each interval logs its own delta. */
   private final AtomicLong lastReportedCount = new AtomicLong();
 
+  /**
+   * When a rejection was last seen, which is what separates a storm's first refusal from its
+   * hundredth.
+   */
+  private final AtomicLong lastRejectionNanos;
+
   AdmissionController(int maxConcurrent) {
     this(maxConcurrent, System::nanoTime);
   }
@@ -88,6 +94,10 @@ final class AdmissionController {
     // Seeded from the clock, not from 0: nanoTime's origin is arbitrary, so a 0 seed would make the
     // first rejection look one whole epoch overdue and emit a summary of one.
     this.lastSummaryNanos = new AtomicLong(nanoTime.getAsLong());
+    // Seeded a full interval in the past, so the very first refusal this process makes counts as
+    // the start of a storm and says so. Seeding it to now would silence the first minute after
+    // boot, which is when a mis-sized cap is most likely to be discovered.
+    this.lastRejectionNanos = new AtomicLong(nanoTime.getAsLong() - SUMMARY_INTERVAL_NANOS);
   }
 
   /**
@@ -128,6 +138,16 @@ final class AdmissionController {
    */
   private void maybeSummarize() {
     long now = nanoTime.getAsLong();
+    // getAndSet elects the announcer by construction: whichever thread swaps in `now` is the only
+    // one that can see a stale previous value, so concurrent rejectors at the same instant produce
+    // exactly one onset line between them.
+    if (now - lastRejectionNanos.getAndSet(now) >= SUMMARY_INTERVAL_NANOS) {
+      lastSummaryNanos.set(now);
+      long total = rejected.sum();
+      claimDelta(total);
+      logger.warn(announceOnset(total));
+      return;
+    }
     long last = lastSummaryNanos.get();
     // Subtraction, not comparison: nanoTime is signed and free to wrap.
     if (now - last < SUMMARY_INTERVAL_NANOS || !lastSummaryNanos.compareAndSet(last, now)) {
@@ -156,6 +176,27 @@ final class AdmissionController {
    */
   private long claimDelta(long total) {
     return total - lastReportedCount.getAndAccumulate(total, Math::max);
+  }
+
+  /**
+   * The line that breaks the silence when refusals begin.
+   *
+   * <p>Without it the cap can work for a full interval saying nothing: the per-refusal lines are
+   * DEBUG and the shipped image logs at INFO, so a burst shorter than the summary period leaves no
+   * server-side trace at all — the operator sees only their callers' 503s. A burst is also the
+   * common first encounter with this feature; the sustained storm the summary was built for is the
+   * rarer one. So refusals announce themselves once on the way in, and are summarized from then on.
+   */
+  private String announceOnset(long total) {
+    return "Admission cap "
+        + maxConcurrent
+        + " reached: starts are being refused ("
+        + total
+        + " total since start, "
+        + permits.availablePermits()
+        + " permits free). Further refusals are summarized every "
+        + TimeUnit.NANOSECONDS.toSeconds(SUMMARY_INTERVAL_NANOS)
+        + "s.";
   }
 
   /** The summary as one line; the single place its field list is spelled out. */

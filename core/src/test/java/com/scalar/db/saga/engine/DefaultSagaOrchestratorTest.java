@@ -1631,15 +1631,16 @@ class DefaultSagaOrchestratorTest {
     }
 
     @Test
-    void start_unusableSagaIdAtTheCap_reportsTheIdErrorNotOverload() {
-      // Arrange — an ID the store could never accept, so retrying it is futile whatever the load.
+    void start_unusableSagaIdAtTheCap_reportsOverloadBecauseTheIdIsNeverChecked() {
+      // The ID grammar belongs to the store, and reaching for it early meant a method on the store
+      // interface outliving its one caller. So a full cap refuses before the ID is examined, and
+      // the caller learns what is wrong with it once capacity returns — the same trade as an
+      // unknown saga name.
+      // Arrange
       SagaDefinition def = definition("transfer");
       when(definitionRegistry.resolve("transfer")).thenReturn(def);
       when(engine.createSaga(eq(def), isNull(), any()))
           .thenReturn(snapshot("saga-1", SagaStatus.RUNNING));
-      doThrow(new SagaIllegalArgumentException("Invalid saga ID format"))
-          .when(store)
-          .validateSagaId("bad id!");
       ExecutorService neverRuns = mock(ExecutorService.class);
 
       try (DefaultSagaOrchestrator orchestrator = capped(1, neverRuns)) {
@@ -1647,7 +1648,7 @@ class DefaultSagaOrchestratorTest {
 
         // Act & Assert
         assertThatThrownBy(() -> orchestrator.start("bad id!", "transfer", Map.of()))
-            .isInstanceOf(SagaIllegalArgumentException.class);
+            .isInstanceOf(SagaOverloadedException.class);
       }
     }
 
