@@ -458,10 +458,10 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       case COMPLETED -> callback.onCompleted(result);
       case COMPENSATED -> callback.onCompensated(result);
       case ESCALATED -> callback.onEscalated(result);
-      // Parked on an async step, waiting for that step's callback or its deadline. Report it
-      // rather than only logging: a caller in a bounded synchronous start has nothing else to
-      // wake on, and would otherwise wait out its whole bound for a saga that stopped progressing
-      // in milliseconds.
+      // Parked on an async step, waiting for that step's callback or its deadline. Reported as
+      // information for embedded callers that track saga lifecycle; it is deliberately not a
+      // release signal for a bounded synchronous start, which keeps waiting because the saga may
+      // still finish inside its bound.
       case WAITING -> callback.onParked(result);
       // Execution returned without the saga resting anywhere. Since this is execution's own
       // verdict rather than a later read of shared state, a resume landing elsewhere can no longer

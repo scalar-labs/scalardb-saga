@@ -55,14 +55,15 @@ import org.jspecify.annotations.Nullable;
  *
  * <p><b>Bounded synchronous start.</b> A synchronous start runs the saga on the engine's
  * (virtual-thread) executor and waits, never longer than the {@code sync.max_wait_millis} ceiling,
- * tightened by {@code sync.timeout_millis} when that is set. The wait ends as soon as the engine
- * stops driving the saga — it reached a terminal state, or it parked on an async step — and at the
- * bound at the latest, after which the request returns {@code 202} while the saga keeps running
- * (poll {@code GET /sagas/{id}}). This caps how long a single request can hold a thread, so a burst
- * of slow synchronous sagas cannot exhaust the request pool. Returning {@code 202} rather than an
- * error is the honest outcome: the saga is not cancelled, it is still being processed, and it
- * reuses the {@code 202} this endpoint already returns for a non-terminal outcome. The pattern
- * mirrors RFC 7240's {@code Prefer: respond-async, wait=N}, Azure Durable Functions' {@code
+ * tightened by {@code sync.timeout_millis} when that is set. The wait ends as soon as the saga
+ * reaches a terminal state, and at the bound at the latest, after which the request returns {@code
+ * 202} while the saga keeps running (poll {@code GET /sagas/{id}}). A saga that parks on an async
+ * step does not end the wait: it may still finish inside the bound, and the read at bound expiry
+ * reports that outcome. This caps how long a single request can hold a thread, so a burst of slow
+ * synchronous sagas cannot exhaust the request pool. Returning {@code 202} rather than an error is
+ * the honest outcome: the saga is not cancelled, it is still being processed, and it reuses the
+ * {@code 202} this endpoint already returns for a non-terminal outcome. The pattern mirrors RFC
+ * 7240's {@code Prefer: respond-async, wait=N}, Azure Durable Functions' {@code
  * WaitForCompletionOrCreateCheckStatusResponse}, and Conductor's {@code executeWorkflow} wait
  * timeout.
  *
@@ -144,12 +145,13 @@ public final class SagaResource {
   }
 
   /**
-   * A {@link SagaCallback} that captures the saga's outcome and releases {@code done} as soon as
-   * the engine stops driving it — in any terminal outcome, or when it parks on an async step — so a
-   * bounded synchronous start wakes then rather than always waiting the full bound.
+   * A {@link SagaCallback} that captures the saga's outcome and releases the wait when the saga
+   * reaches a terminal state.
    *
-   * <p>Parking counts: a saga waiting on an external callback has stopped progressing, and holding
-   * the request until the bound elapses would answer the same {@code 202} up to a minute later.
+   * <p>Parking deliberately does <b>not</b> release it. A parked saga is still live and may well
+   * finish inside the bound, and the bound-expiry read in {@link #respondBoundedSync} sees that
+   * outcome whichever replica produced it. Waking here would answer {@code 202} in milliseconds and
+   * throw away an answer the caller asked to wait for.
    */
   private static SagaCallback outcomeSignal(CompletableFuture<SagaStateSnapshot> outcome) {
     return new SagaCallback() {
@@ -167,20 +169,20 @@ public final class SagaResource {
       public void onEscalated(SagaStateSnapshot saga) {
         outcome.complete(saga);
       }
-
-      @Override
-      public void onParked(SagaStateSnapshot saga) {
-        outcome.complete(saga);
-      }
     };
   }
 
   /**
-   * Renders a bounded synchronous start. The wait ends at whichever comes first: the engine stops
-   * driving the saga (terminal, or parked on an async step), the server begins shutting down, or
-   * the bound elapses. Whatever ends it, the response carries the freshest state available and the
-   * status decides the code — terminal is {@code 200}, anything else {@code 202} with the saga
-   * still running (the client polls {@code GET /sagas/{id}}).
+   * Renders a bounded synchronous start. The wait ends at whichever comes first: the saga reaches a
+   * terminal state, the server begins shutting down, or the bound elapses. Whatever ends it, the
+   * response carries the freshest state available and the status decides the code — terminal is
+   * {@code 200}, anything else {@code 202} with the saga still running (the client polls {@code GET
+   * /sagas/{id}}).
+   *
+   * <p>A saga that parks on an async step does <b>not</b> end the wait. Parking is not an outcome:
+   * the saga is live and may finish well inside the bound, and it can be resumed by any replica, so
+   * the read below reports the outcome whichever one produced it. Ending the wait at the park would
+   * answer {@code 202} in milliseconds and discard the answer the caller asked to wait for.
    *
    * <p>Shutdown short-circuits the wait rather than letting it run to the bound. The bound is a
    * maximum, not a promise to wait, and a terminating server cannot advance the saga anyway — under

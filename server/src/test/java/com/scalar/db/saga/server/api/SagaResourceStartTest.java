@@ -138,28 +138,56 @@ class SagaResourceStartTest {
   }
 
   @Test
-  void postSagas_sagaParksOnAnAsyncStep_returns202WithoutWaitingOutTheBound() throws Exception {
-    // Arrange — the saga parks instead of finishing. setUp's bound is 30s, so if parking did not
-    // release the wait this request would hang for that long; asserting the elapsed time is what
-    // distinguishes "answered because it parked" from "answered because the bound elapsed".
+  void postSagas_sagaParksThenFinishesBeforeTheBound_returns200WithTheOutcome() throws Exception {
+    // Arrange — the saga parks on an async step, so the engine reports onParked, and finishes
+    // before the bound elapses. The resume carries no SagaCallback (and may happen on another
+    // replica), so the callback registered here never fires again: what decides the response is
+    // the read at bound expiry, which by then sees a completed saga.
+    app.stop();
+    startServer(300L);
     when(orchestrator.startAsync(eq(SAGA_NAME), anyMap(), any(SagaCallback.class)))
         .thenAnswer(
             invocation -> {
               invocation.getArgument(2, SagaCallback.class).onParked(snapshot(SagaStatus.WAITING));
               return SAGA_ID;
             });
+    when(orchestrator.getStateSnapshot(SAGA_ID)).thenReturn(snapshot(SagaStatus.COMPLETED));
 
     // Act
     long startNanos = System.nanoTime();
     HttpResponse<String> response = post("/sagas", "{\"sagaName\":\"" + SAGA_NAME + "\"}");
     long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
 
-    // Assert — a parked saga is still running, so 202 with its current state, delivered promptly.
+    // Assert — the outcome the caller asked to wait for, not a 202 delivered in milliseconds.
+    assertThat(response.statusCode()).isEqualTo(200);
+    assertThat(response.body()).contains("COMPLETED");
+    // Both of these fail if the park releases the wait: it would answer at once, well inside the
+    // bound, from the parked snapshot and without ever reading the store.
+    assertThat(elapsedMillis).isGreaterThanOrEqualTo(250L);
+    verify(orchestrator).getStateSnapshot(SAGA_ID);
+  }
+
+  @Test
+  void postSagas_sagaStillParkedWhenTheBoundElapses_returns202() throws Exception {
+    // Arrange — the async step has not reported back by the time the bound elapses, so the saga is
+    // genuinely unfinished and 202 is the honest answer. This is the case where waiting the bound
+    // buys nothing, and it must still answer correctly.
+    app.stop();
+    startServer(300L);
+    when(orchestrator.startAsync(eq(SAGA_NAME), anyMap(), any(SagaCallback.class)))
+        .thenAnswer(
+            invocation -> {
+              invocation.getArgument(2, SagaCallback.class).onParked(snapshot(SagaStatus.WAITING));
+              return SAGA_ID;
+            });
+    when(orchestrator.getStateSnapshot(SAGA_ID)).thenReturn(snapshot(SagaStatus.WAITING));
+
+    // Act
+    HttpResponse<String> response = post("/sagas", "{\"sagaName\":\"" + SAGA_NAME + "\"}");
+
+    // Assert
     assertThat(response.statusCode()).isEqualTo(202);
     assertThat(response.body()).contains("WAITING");
-    assertThat(elapsedMillis).isLessThan(5_000L);
-    // The park answered it; the resource never fell back to reading the snapshot itself.
-    verify(orchestrator, never()).getStateSnapshot(SAGA_ID);
   }
 
   @Test

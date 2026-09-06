@@ -383,10 +383,11 @@ class SagaServiceImplTest {
   }
 
   @Test
-  void startSaga_syncSagaParks_returnsWaitingSnapshotWithoutWaitingOutTheBound() {
-    // Arrange — the saga parks on an async step instead of finishing. The bound below is 30s, so a
-    // park that did not release the wait would hold the call for that long; the elapsed-time
-    // assertion is what separates "answered because it parked" from "answered at the bound".
+  void startSaga_syncSagaParksThenFinishesBeforeTheBound_returnsTheOutcome() {
+    // Arrange — the saga parks on an async step, so the engine reports onParked, and finishes
+    // before the bound elapses. The resume carries no SagaCallback (and may happen on another
+    // replica), so the callback registered here never fires again: what decides the response is
+    // the read at bound expiry, which by then sees a completed saga.
     SagaStateSnapshot parked = snapshot("gen-p", SagaStatus.WAITING);
     when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
         .thenAnswer(
@@ -394,17 +395,45 @@ class SagaServiceImplTest {
               invocation.getArgument(2, SagaCallback.class).onParked(parked);
               return "gen-p";
             });
+    when(orchestrator.getStateSnapshot("gen-p"))
+        .thenReturn(snapshot("gen-p", SagaStatus.COMPLETED));
 
     // Act
     long startNanos = System.nanoTime();
-    SagaSnapshot response = stub(30_000).startSaga(startByName("transfer", false));
+    SagaSnapshot response = stub(300).startSaga(startByName("transfer", false));
     long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
 
-    // Assert — non-terminal status is the gRPC analogue of REST's 202, and the saga keeps running.
+    // Assert — the outcome the caller asked to wait for, not the parked snapshot at once.
     assertThat(response.getSagaId()).isEqualTo("gen-p");
     assertThat(response.getStatus())
+        .isEqualTo(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_COMPLETED);
+    // Both of these fail if the park releases the wait: it would answer immediately, from the
+    // parked snapshot, without ever reading the store.
+    assertThat(elapsedMillis).isGreaterThanOrEqualTo(250L);
+    verify(orchestrator).getStateSnapshot("gen-p");
+  }
+
+  @Test
+  void startSaga_syncSagaStillParkedWhenTheBoundElapses_returnsWaitingSnapshot() {
+    // Arrange — the async step has not reported back by the time the bound elapses, so the saga is
+    // genuinely unfinished. Non-terminal is the gRPC analogue of REST's 202 and the saga keeps
+    // running.
+    SagaStateSnapshot parked = snapshot("gen-p2", SagaStatus.WAITING);
+    when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
+        .thenAnswer(
+            invocation -> {
+              invocation.getArgument(2, SagaCallback.class).onParked(parked);
+              return "gen-p2";
+            });
+    when(orchestrator.getStateSnapshot("gen-p2")).thenReturn(parked);
+
+    // Act
+    SagaSnapshot response = stub(300).startSaga(startByName("transfer", false));
+
+    // Assert
+    assertThat(response.getSagaId()).isEqualTo("gen-p2");
+    assertThat(response.getStatus())
         .isEqualTo(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_WAITING);
-    assertThat(elapsedMillis).isLessThan(5_000L);
   }
 
   @Test

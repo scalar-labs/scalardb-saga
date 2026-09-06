@@ -39,8 +39,9 @@ import org.jspecify.annotations.Nullable;
  * <p><b>Sync vs async.</b> {@code async=true} starts the saga and returns the running snapshot
  * immediately. {@code async=false} blocks until the saga is terminal, bounded by the {@code
  * sync.max_wait_millis} ceiling tightened by {@code sync.timeout_millis}, and then further by the
- * remaining gRPC call deadline. The wait also ends early if the saga parks on an async step, since
- * it has stopped progressing. When it ends without a terminal state it returns the in-flight
+ * remaining gRPC call deadline. A saga that parks on an async step does not end the wait early: it
+ * may still finish inside the bound, and the read at bound expiry reports that outcome whichever
+ * replica produced it. When the wait ends without a terminal state it returns the in-flight
  * snapshot (whose status — the source of truth — is non-terminal, the gRPC analogue of REST's
  * {@code 202}) and <b>the saga keeps running</b>. The wait runs on the server's virtual-thread
  * executor, so a blocked call is cheap.
@@ -272,7 +273,11 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
     return input;
   }
 
-  /** A {@link SagaCallback} that captures the terminal snapshot and releases {@code done}. */
+  /**
+   * A {@link SagaCallback} that captures the terminal snapshot and releases the wait. Parking does
+   * not release it: a parked saga may still finish inside the bound, and {@link
+   * #startBoundedSync}'s read at bound expiry sees that outcome whichever replica produced it.
+   */
   private static SagaCallback outcomeSignal(CompletableFuture<SagaStateSnapshot> outcome) {
     return new SagaCallback() {
       @Override
@@ -287,11 +292,6 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
 
       @Override
       public void onEscalated(SagaStateSnapshot saga) {
-        outcome.complete(saga);
-      }
-
-      @Override
-      public void onParked(SagaStateSnapshot saga) {
         outcome.complete(saga);
       }
     };
