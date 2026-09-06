@@ -27,9 +27,15 @@ import org.slf4j.LoggerFactory;
  *
  * <p>A permit is held per <b>drive</b>, not per saga: it is taken when a start is admitted and
  * returned when that drive stops occupying the engine — at a terminal state, at a park (a saga
- * waiting on an outside system holds nothing, possibly for hours), or when the drive dies. Resumes,
- * recovery and admin drives take no permit at all, so the budget always describes work this process
- * is doing now rather than work it has ever accepted.
+ * waiting on an outside system holds nothing, possibly for hours), or when the drive dies.
+ *
+ * <p><b>It counts admitted starts, not everything running.</b> Resumes, recovery and admin drives
+ * take no permit, so the budget is a bound on new work entering the engine rather than a measure of
+ * the work in it. That distinction matters most for sagas with parked steps, where a resume can be
+ * as much of the workload as the start was: those drives run outside the budget, and a process can
+ * be busy with them while the cap still admits its full allowance of fresh starts. {@code
+ * SagaEngine}'s own active-saga set is the complete picture; this is deliberately the narrower one,
+ * because refusing a resume is not an option — the step is already durably under way.
  */
 @ThreadSafe
 final class AdmissionController {
@@ -98,10 +104,6 @@ final class AdmissionController {
     return null;
   }
 
-  int maxConcurrent() {
-    return maxConcurrent;
-  }
-
   // Visible for testing: the leak and over-release assertions compare this against the cap.
   int availablePermits() {
     return permits.availablePermits();
@@ -149,11 +151,11 @@ final class AdmissionController {
    * nothing instead, which is the honest outcome: its rejections were already reported by the
    * successor that overtook it.
    *
-   * @return the rejections this caller may report, or {@code 0} when a later writer already did
+   * @return the rejections this caller may report; {@code 0} when a later writer already did, since
+   *     the accumulated maximum is then already at or above this caller's total
    */
   private long claimDelta(long total) {
-    long previouslyReported = lastReportedCount.getAndAccumulate(total, Math::max);
-    return Math.max(0, total - previouslyReported);
+    return total - lastReportedCount.getAndAccumulate(total, Math::max);
   }
 
   /** The summary as one line; the single place its field list is spelled out. */

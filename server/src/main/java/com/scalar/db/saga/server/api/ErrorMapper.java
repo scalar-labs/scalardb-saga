@@ -176,11 +176,10 @@ public final class ErrorMapper {
 
     // ── Admission cap (503) ──────────────────────────────────────────────
     // Its own arm rather than the category fallback below, for two reasons. The fallback logs a
-    // full stack at ERROR, and a rejection storm is precisely when the daemon can least afford a
-    // line — with a stack — per refused request; that is a log-flood amplifier reachable by any
-    // caller. And a refusal is not a failure: the engine is doing exactly what it was configured
-    // to do, so DEBUG is the honest level. The controller already summarizes the storm once a
-    // minute.
+    // full stack at ERROR, and a rejection storm is precisely when the daemon can least afford one
+    // line and one stack per refused request; that is a log-flood amplifier any caller can reach.
+    // And a refusal is not a failure: the engine is doing what it was configured to do, so DEBUG is
+    // the honest level, and the controller summarizes the storm once a minute.
     app.exception(
         SagaOverloadedException.class,
         (e, ctx) -> {

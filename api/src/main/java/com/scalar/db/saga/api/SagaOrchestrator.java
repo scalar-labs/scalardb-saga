@@ -98,11 +98,11 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @throws SagaDefinitionNotServedException if the definition is registered but this deployment
    *     does not serve it
    * @throws SagaDefinitionException if step resolution fails
-   * @throws SagaOverloadedException if the engine is at its concurrent saga limit; nothing was
-   *     persisted, so the request can be retried unchanged
    * @throws SagaAlreadyExistsException if a saga already exists with {@code sagaId}
    * @throws SagaIllegalArgumentException if {@code sagaId} is not of the form {@code
    *     [a-zA-Z0-9._-]{1,128}}
+   * @throws SagaOverloadedException if the engine is at its concurrent saga limit; nothing was
+   *     persisted, so the request can be retried unchanged
    */
   void start(String sagaId, String sagaName, Map<String, Object> input);
 
@@ -135,11 +135,11 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @throws SagaDefinitionNotServedException if the definition is registered but this deployment
    *     does not serve it
    * @throws SagaDefinitionException if step resolution fails
-   * @throws SagaOverloadedException if the engine is at its concurrent saga limit; nothing was
-   *     persisted, so the request can be retried unchanged
    * @throws SagaAlreadyExistsException if a saga already exists with {@code sagaId}
    * @throws SagaIllegalArgumentException if {@code sagaId} is not of the form {@code
    *     [a-zA-Z0-9._-]{1,128}}
+   * @throws SagaOverloadedException if the engine is at its concurrent saga limit; nothing was
+   *     persisted, so the request can be retried unchanged
    */
   void start(String sagaId, SagaDefinitionId id, Map<String, Object> input);
 

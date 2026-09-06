@@ -129,7 +129,7 @@ class SagaAdmissionIntegrationTest extends ServerIntegrationTestSupport {
   }
 
   @Test
-  void readsAtTheCap_areUnaffected() throws Exception {
+  void getSaga_atTheCap_stillAnswers() throws Exception {
     // The cap bounds new starts, not the whole API: a saturated engine still answers reads, which
     // is what an operator needs most while it is saturated.
     // Arrange

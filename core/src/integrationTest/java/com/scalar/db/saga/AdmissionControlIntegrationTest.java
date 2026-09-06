@@ -23,6 +23,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -54,6 +55,9 @@ class AdmissionControlIntegrationTest {
 
   private CountDownLatch stepStarted;
 
+  /** Drives currently inside the blocking step, so concurrency is asserted rather than assumed. */
+  private final AtomicInteger concurrentDrives = new AtomicInteger();
+
   @BeforeEach
   void setUp() {
     dbPath = tempDir.resolve("admission-control-it.db");
@@ -65,6 +69,7 @@ class AdmissionControlIntegrationTest {
     props.setProperty("scalar.db.saga.store.num_buckets", "1");
     stepRelease = new CountDownLatch(1);
     stepStarted = new CountDownLatch(1);
+    concurrentDrives.set(0);
   }
 
   @AfterEach
@@ -100,6 +105,14 @@ class AdmissionControlIntegrationTest {
         .build();
   }
 
+  /** Waits, bounded, for {@code expected} drives to be inside the step at the same time. */
+  private int awaitConcurrentDrives(int expected) throws InterruptedException {
+    for (int i = 0; i < 300 && concurrentDrives.get() < expected; i++) {
+      Thread.sleep(100);
+    }
+    return concurrentDrives.get();
+  }
+
   /** A step that pins its drive until the test lets go, so the cap can be saturated on purpose. */
   private final class BlockingStep implements Step {
 
@@ -110,6 +123,7 @@ class AdmissionControlIntegrationTest {
 
     @Override
     public StepResult execute(SagaContext context) {
+      concurrentDrives.incrementAndGet();
       stepStarted.countDown();
       try {
         if (!stepRelease.await(30, TimeUnit.SECONDS)) {
@@ -221,20 +235,25 @@ class AdmissionControlIntegrationTest {
   }
 
   @Test
-  void start_withNoCapConfigured_admitsBeyondAnyPlausibleCap() throws Exception {
-    // The default has to stay the old behavior exactly: no controller, no bound.
+  void startAsync_withNoCapConfigured_admitsFarBeyondAnyPlausibleCap() throws Exception {
+    // The drives are held open, so every admitted saga keeps its seat for the whole test. That is
+    // what makes this discriminating: with any finite cap the twenty-sixth start is refused. An
+    // earlier version parked instead, which handed each seat straight back and passed at a cap of
+    // one — it asserted nothing.
     // Arrange
-    FakeStep parking = FakeStep.newBuilder("only").executeReturns(StepResult.pending()).build();
+    int beyondAnyCap = 25;
 
-    try (DefaultSagaOrchestrator orchestrator = orchestrator(0, Map.of("only", parking))) {
-      // Act & Assert
-      for (int i = 0; i < 25; i++) {
-        String sagaId = "saga-" + i;
-        assertThatCode(() -> orchestrator.start(sagaId, SAGA_NAME, Map.of()))
-            .doesNotThrowAnyException();
+    try (DefaultSagaOrchestrator orchestrator =
+        orchestrator(0, Map.of("only", new BlockingStep()))) {
+      // Act
+      for (int i = 0; i < beyondAnyCap; i++) {
+        orchestrator.startAsync("saga-" + i, SAGA_NAME, Map.of());
       }
-      assertThat(orchestrator.getStateSnapshot("saga-24").getStatus())
-          .isEqualTo(SagaStatus.WAITING);
+
+      // Assert — all of them are executing at once, none refused. Waiting on the count rather
+      // than on stepStarted, which opens on the first drive and would let this race.
+      assertThat(awaitConcurrentDrives(beyondAnyCap)).isEqualTo(beyondAnyCap);
+      stepRelease.countDown();
     }
   }
 }

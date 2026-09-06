@@ -274,6 +274,10 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
    * ALREADY_EXISTS} on the <i>first</i> attempt is a genuine duplicate (surfaced as {@link
    * SagaAlreadyExistsException}); on a <i>retry</i> it means our earlier attempt landed, so we
    * fetch the snapshot and proceed to the await loop.
+   *
+   * <p>An admission refusal after a retry is reconciled the same way and for the same reason: the
+   * earlier attempt may have created the saga, and that saga may be what is holding the last
+   * permit. Overload is reported only once the store agrees nothing is there.
    */
   private SagaSnapshot firstStart(
       StartSagaRequest request,
@@ -312,6 +316,15 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
             return getSagaSnapshot(sagaId, loopDeadlineNanos);
           } catch (SagaNotFoundException notFound) {
             // Nothing landed, so the refusal was the honest answer after all.
+          } catch (RuntimeException reconcileFailure) {
+            // The reconcile itself failed, so it settled nothing. Overload is still the only thing
+            // the server actually told us, and it is what a caller keys backpressure on — losing it
+            // to a timeout on this second call would be worst exactly when it matters, since an
+            // overloaded daemon is when this call is slowest. Keep it and carry the failure along,
+            // as the ALREADY_EXISTS refetch does.
+            RuntimeException overloaded = mapStartException(e, name, version, sagaId);
+            overloaded.addSuppressed(reconcileFailure);
+            throw overloaded;
           }
         }
         throw mapStartException(e, name, version, sagaId);

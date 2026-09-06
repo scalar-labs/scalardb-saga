@@ -1,7 +1,5 @@
 package com.scalar.db.saga.exception;
 
-import java.util.Objects;
-
 /**
  * Thrown when a start is refused because the engine is already running as many sagas as its
  * admission cap allows. Always carries {@link SagaErrorCode#ENGINE_OVERLOADED}.
@@ -31,12 +29,5 @@ public class SagaOverloadedException extends SagaRuntimeException {
 
   public SagaOverloadedException() {
     super(SagaErrorCode.ENGINE_OVERLOADED, ErrorMetadata.of());
-  }
-
-  public SagaOverloadedException(Throwable cause) {
-    super(
-        SagaErrorCode.ENGINE_OVERLOADED,
-        ErrorMetadata.of(),
-        Objects.requireNonNull(cause, "cause must not be null"));
   }
 }

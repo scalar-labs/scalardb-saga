@@ -114,11 +114,6 @@ class AdmissionControllerTest {
       // Assert
       assertThat(controller.availablePermits()).isEqualTo(3);
     }
-
-    @Test
-    void maxConcurrent_returnsTheConfiguredCap() {
-      assertThat(controller(7).maxConcurrent()).isEqualTo(7);
-    }
   }
 
   @Nested

@@ -393,29 +393,6 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   }
 
   /**
-   * Runs everything that can reject this request on its own merits, before anything scarce is spent
-   * on it.
-   *
-   * <p>These checks also run inside the engine, which is where they authoritatively decide; running
-   * them here as well is about <b>order</b>, not about coverage. At a full cap the permit is the
-   * first thing a start meets, so without this a caller whose input holds a null, or whose ID could
-   * never be stored, would be told the server is busy and to try again — sending them round a loop
-   * that cannot terminate, for a request that was wrong on arrival.
-   *
-   * <p>Both are pure and cheap: a walk of the input map, and one regex. The payload-size limit is
-   * deliberately <b>not</b> hoisted — it needs the input serialized, and paying for that twice on
-   * every start to reorder one error at a full cap is the wrong trade. An oversized payload at a
-   * full cap therefore still reports overload; it is the one case where this ordering does not
-   * hold, and it is far rarer than a null.
-   */
-  private void validateBeforeAdmitting(@Nullable String sagaId, Map<String, Object> input) {
-    ExecutionContext.validateInput(input);
-    if (sagaId != null) {
-      store.validateSagaId(sagaId);
-    }
-  }
-
-  /**
    * Takes a permit for a drive about to start, or refuses the start.
    *
    * <p>Called after validation and definition resolution, deliberately: a malformed request and an
@@ -425,15 +402,25 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * which is what makes the advice to retry true.
    *
    * @return the lease to release when the drive ends, or {@code null} when no cap is configured
-   * @throws SagaOverloadedException when the cap is full
+   * @throws SagaOverloadedException when the cap is full and the request is otherwise acceptable
    */
-  private AdmissionController.@Nullable PermitLease admit() {
+  private AdmissionController.@Nullable PermitLease admit(
+      @Nullable String sagaId, Map<String, Object> input) {
     AdmissionController controller = admissionController;
     if (controller == null) {
       return null;
     }
     AdmissionController.PermitLease lease = controller.acquire();
     if (lease == null) {
+      // Only now, on the one path where the answer would otherwise be wrong. A request that was
+      // malformed on arrival must hear that rather than "busy, try again", which sends it round a
+      // loop with no exit — but the engine already makes both checks authoritatively on the way to
+      // creating a saga, so paying for them on every admitted start, and on every start at all when
+      // no cap is configured, would buy nothing.
+      ExecutionContext.validateInput(input);
+      if (sagaId != null) {
+        store.validateSagaId(sagaId);
+      }
       throw new SagaOverloadedException();
     }
     return lease;
@@ -453,8 +440,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    */
   private String executeAdmitted(
       SagaDefinition def, @Nullable String sagaId, Map<String, Object> input) {
-    validateBeforeAdmitting(sagaId, input);
-    AdmissionController.PermitLease lease = admit();
+    AdmissionController.PermitLease lease = admit(sagaId, input);
     try {
       return engine.execute(def, sagaId, input);
     } finally {
@@ -471,10 +457,9 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       @Nullable String sagaId,
       Map<String, Object> input,
       @Nullable SagaCallback callback) {
-    validateBeforeAdmitting(sagaId, input);
     // Admitted before the copy: a refused start should pay for nothing it does not need, and the
     // copy is the first thing here that costs anything per request.
-    AdmissionController.PermitLease lease = admit();
+    AdmissionController.PermitLease lease = admit(sagaId, input);
     SagaStateSnapshot saga;
     Map<String, Object> copiedInput;
     try {
