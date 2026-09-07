@@ -236,6 +236,11 @@ final class ConfigReconciler {
       try {
         candidates = snapshotAndValidate(errors, warnings);
       } catch (TornSnapshotException second) {
+        // The retry appended its own findings before tearing. They describe an attempt that was
+        // abandoned, so they must not reach the report beside the message saying the directory
+        // could not be judged; the first attempt's were cleared for the same reason.
+        errors.clear();
+        warnings.clear();
         errors.add(tornMessage());
       }
     }
