@@ -101,14 +101,17 @@ public final class SagaResource {
             respond(ctx, 202, orchestrator.getStateSnapshot(sagaId));
           } else {
             CompletableFuture<SagaStateSnapshot> outcome = new CompletableFuture<>();
+            CompletableFuture<Void> parked = new CompletableFuture<>();
             String sagaId =
-                orchestrator.startAsync(request.requireSagaName(), input, outcomeSignal(outcome));
+                orchestrator.startAsync(
+                    request.requireSagaName(), input, outcomeSignal(outcome, parked));
             respondBoundedSync(
                 ctx,
                 orchestrator,
                 waiterRegistry,
                 sagaId,
                 outcome,
+                parked,
                 shutdownSignal,
                 syncWaitBoundMillis);
           }
@@ -126,14 +129,16 @@ public final class SagaResource {
             respond(ctx, 202, orchestrator.getStateSnapshot(sagaId));
           } else {
             CompletableFuture<SagaStateSnapshot> outcome = new CompletableFuture<>();
+            CompletableFuture<Void> parked = new CompletableFuture<>();
             orchestrator.startAsync(
-                sagaId, request.requireSagaName(), input, outcomeSignal(outcome));
+                sagaId, request.requireSagaName(), input, outcomeSignal(outcome, parked));
             respondBoundedSync(
                 ctx,
                 orchestrator,
                 waiterRegistry,
                 sagaId,
                 outcome,
+                parked,
                 shutdownSignal,
                 syncWaitBoundMillis);
           }
@@ -165,8 +170,16 @@ public final class SagaResource {
    * outcome whichever replica produced it. Waking here would answer {@code 202} in milliseconds and
    * throw away an answer the caller asked to wait for.
    */
-  private static SagaCallback outcomeSignal(CompletableFuture<SagaStateSnapshot> outcome) {
+  private static SagaCallback outcomeSignal(
+      CompletableFuture<SagaStateSnapshot> outcome, CompletableFuture<Void> parked) {
     return new SagaCallback() {
+      @Override
+      public void onParked(SagaStateSnapshot saga) {
+        // Not an outcome — the wait continues. It only means the saga can now be resumed
+        // elsewhere, so the wait should start polling for what a local push can no longer catch.
+        parked.complete(null);
+      }
+
       @Override
       public void onCompleted(SagaStateSnapshot saga) {
         outcome.complete(saga);
@@ -208,6 +221,7 @@ public final class SagaResource {
       SagaWaiterRegistry waiterRegistry,
       String sagaId,
       CompletableFuture<SagaStateSnapshot> outcome,
+      CompletableFuture<Void> parked,
       CompletableFuture<Void> shutdownSignal,
       long timeoutMillis) {
     SagaStateSnapshot snapshot;
@@ -223,6 +237,7 @@ public final class SagaResource {
               settledLocally,
               outcome,
               shutdownSignal,
+              parked,
               timeoutMillis,
               () -> orchestrator.getStateSnapshot(sagaId));
     }

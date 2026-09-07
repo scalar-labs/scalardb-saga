@@ -1,6 +1,8 @@
 package com.scalar.db.saga.server;
 
 import com.scalar.db.saga.api.SagaStateSnapshot;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -86,28 +88,36 @@ public final class BoundedWait {
       CompletableFuture<SagaStateSnapshot> settledLocally,
       @Nullable CompletableFuture<SagaStateSnapshot> outcome,
       CompletableFuture<?> abort,
+      @Nullable CompletableFuture<?> pollFrom,
       long boundMillis,
       Supplier<SagaStateSnapshot> read) {
     long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(boundMillis);
     long intervalMillis = pollIntervalMillis(boundMillis);
-    CompletableFuture<?> settledHere =
-        outcome != null
-            ? CompletableFuture.anyOf(outcome, settledLocally, abort)
-            : CompletableFuture.anyOf(settledLocally, abort);
+    boolean polling = pollFrom == null || pollFrom.isDone();
+    CompletableFuture<?> wakeUp = wakeUp(settledLocally, outcome, abort, polling ? null : pollFrom);
 
     while (true) {
       long remainingMillis = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
       if (remainingMillis <= 0) {
         break;
       }
-      long sliceMillis = Math.min(intervalMillis, remainingMillis);
+      // Until the saga parks, it is being driven on this process, so a push reaches us and a poll
+      // can only find what the push would have delivered sooner. Wait out the whole remainder in
+      // one slice and read nothing.
+      long sliceMillis = polling ? Math.min(intervalMillis, remainingMillis) : remainingMillis;
       try {
-        settledHere.get(sliceMillis, TimeUnit.MILLISECONDS);
+        wakeUp.get(sliceMillis, TimeUnit.MILLISECONDS);
+        if (!polling && settledSnapshot(settledLocally, outcome) == null && !abort.isDone()) {
+          // Only the park fired. From here the saga can be resumed on another replica, where no
+          // push reaches us, so start polling for what is left of the bound.
+          polling = true;
+          wakeUp = wakeUp(settledLocally, outcome, abort, null);
+          continue;
+        }
         break;
       } catch (TimeoutException e) {
         // The bound cut this slice short, so there is no time left to poll for: fall through to the
-        // read below rather than reading twice in succession. This is the whole loop when the bound
-        // is shorter than one interval.
+        // read below rather than reading twice in succession.
         if (sliceMillis == remainingMillis) {
           break;
         }
@@ -133,13 +143,38 @@ public final class BoundedWait {
       }
     }
 
-    SagaStateSnapshot fromCallback = outcome != null ? outcome.getNow(null) : null;
-    if (fromCallback != null) {
-      return fromCallback;
-    }
-    SagaStateSnapshot fromRegistry = settledLocally.getNow(null);
+    SagaStateSnapshot settled = settledSnapshot(settledLocally, outcome);
     // The read is what makes an un-notified wait worth having: a saga resumed and settled on
     // another replica is invisible to both futures above, and visible here.
-    return fromRegistry != null ? fromRegistry : read.get();
+    return settled != null ? settled : read.get();
+  }
+
+  /**
+   * The signals that end a slice. Rebuilt once if polling begins mid-wait, because {@code anyOf}
+   * stays completed: reusing one that the park signal already completed would spin the loop.
+   */
+  private static CompletableFuture<?> wakeUp(
+      CompletableFuture<SagaStateSnapshot> settledLocally,
+      @Nullable CompletableFuture<SagaStateSnapshot> outcome,
+      CompletableFuture<?> abort,
+      @Nullable CompletableFuture<?> pollFrom) {
+    List<CompletableFuture<?>> signals = new ArrayList<>(4);
+    signals.add(settledLocally);
+    signals.add(abort);
+    if (outcome != null) {
+      signals.add(outcome);
+    }
+    if (pollFrom != null) {
+      signals.add(pollFrom);
+    }
+    return CompletableFuture.anyOf(signals.toArray(new CompletableFuture<?>[0]));
+  }
+
+  /** The saga's settled snapshot if either push mechanism delivered one, else {@code null}. */
+  private static @Nullable SagaStateSnapshot settledSnapshot(
+      CompletableFuture<SagaStateSnapshot> settledLocally,
+      @Nullable CompletableFuture<SagaStateSnapshot> outcome) {
+    SagaStateSnapshot fromCallback = outcome != null ? outcome.getNow(null) : null;
+    return fromCallback != null ? fromCallback : settledLocally.getNow(null);
   }
 }

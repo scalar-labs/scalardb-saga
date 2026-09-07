@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -453,6 +454,45 @@ class SagaServiceImplTest {
     assertThat(response.getStatus())
         .isEqualTo(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_COMPLETED);
     assertThat(elapsedMillis).isLessThan(10_000L);
+  }
+
+  @Test
+  void startSaga_syncSagaNeverParks_doesNotPollTheStore() {
+    // A saga with no asynchronous step runs start-to-finish on this replica, so the callback or the
+    // registry always delivers its outcome. A poll could only find what a push would have delivered
+    // sooner, so the wait must not read the store at all — only the one read that decides the
+    // response when the bound elapses. A 2s bound derives the 1s interval floor, so polling would
+    // be plainly visible as extra reads.
+    when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
+        .thenReturn("gen-np");
+    when(orchestrator.getStateSnapshot("gen-np"))
+        .thenReturn(snapshot("gen-np", SagaStatus.RUNNING));
+
+    // Act
+    stub(2_000).startSaga(startByName("transfer", false));
+
+    // Assert
+    verify(orchestrator, times(1)).getStateSnapshot("gen-np");
+  }
+
+  @Test
+  void startSaga_sagaParks_startsPollingForWhatAPushCanNoLongerCatch() {
+    // The mirror of the above. Once parked, the saga can be resumed on another replica, where no
+    // push reaches this process — so polling becomes the only way to notice before the bound.
+    SagaStateSnapshot parked = snapshot("gen-pk", SagaStatus.WAITING);
+    when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
+        .thenAnswer(
+            invocation -> {
+              invocation.getArgument(2, SagaCallback.class).onParked(parked);
+              return "gen-pk";
+            });
+    when(orchestrator.getStateSnapshot("gen-pk")).thenReturn(parked);
+
+    // Act
+    stub(2_000).startSaga(startByName("transfer", false));
+
+    // Assert — more than the single bound-expiry read, i.e. the wait polled.
+    verify(orchestrator, atLeast(2)).getStateSnapshot("gen-pk");
   }
 
   @Test

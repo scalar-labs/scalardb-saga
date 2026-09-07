@@ -146,10 +146,13 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
       if (snapshot.getStatus().isTerminal()) {
         return snapshot;
       }
+      // Polling from the start, unlike a start: an awaited saga may be driven on any replica, so
+      // no push can be assumed to reach us and there is no park signal to wait for.
       return BoundedWait.awaitWithin(
           settledLocally,
           null,
           abortSignal(),
+          null,
           boundMillis,
           () -> orchestrator.getStateSnapshot(sagaId));
     }
@@ -179,11 +182,15 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
 
   private SagaStateSnapshot startBoundedSync(StartSagaRequest request, Map<String, Object> input) {
     CompletableFuture<SagaStateSnapshot> outcome = new CompletableFuture<>();
+    // Completed when the saga parks, which is the first moment it can be resumed somewhere no push
+    // reaches us. Until then the drive is here and a poll could only find what the callback or the
+    // registry will deliver sooner, so the wait does not read the store at all.
+    CompletableFuture<Void> parked = new CompletableFuture<>();
     // The callback is registered before the saga id exists, and the registry after: on a
     // server-generated id there is no id to register under until dispatchStart returns, by which
     // time the saga may already have settled. The callback closes that window for the first drive;
     // the registry covers the drives that carry none.
-    String sagaId = dispatchStart(request, input, outcomeSignal(outcome));
+    String sagaId = dispatchStart(request, input, outcomeSignal(outcome, parked));
     SagaStateSnapshot settled;
     CompletableFuture<SagaStateSnapshot> settledLocally = new CompletableFuture<>();
     try (SagaWaiterRegistry.Waiter waiter = waiterRegistry.register(sagaId, settledLocally)) {
@@ -192,6 +199,7 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
               settledLocally,
               outcome,
               abortSignal(),
+              parked,
               computeBoundMillis(Long.MAX_VALUE),
               () -> snapshotAfterStart(sagaId));
     }
@@ -297,8 +305,16 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
    * not release it: a parked saga may still finish inside the bound, and {@link
    * #startBoundedSync}'s read at bound expiry sees that outcome whichever replica produced it.
    */
-  private static SagaCallback outcomeSignal(CompletableFuture<SagaStateSnapshot> outcome) {
+  private static SagaCallback outcomeSignal(
+      CompletableFuture<SagaStateSnapshot> outcome, CompletableFuture<Void> parked) {
     return new SagaCallback() {
+      @Override
+      public void onParked(SagaStateSnapshot saga) {
+        // Not an outcome — the wait continues. It only means the saga can now be resumed
+        // elsewhere, so the wait should start polling for what a local push can no longer catch.
+        parked.complete(null);
+      }
+
       @Override
       public void onCompleted(SagaStateSnapshot saga) {
         outcome.complete(saga);
