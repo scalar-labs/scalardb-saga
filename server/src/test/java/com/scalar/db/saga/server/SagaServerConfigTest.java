@@ -203,7 +203,7 @@ class SagaServerConfigTest {
         SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY,
         SagaServerConfig.CALLBACK_MAX_AGE_SECONDS_KEY,
         SagaServerConfig.TLS_ENABLED_KEY,
-        SagaServerConfig.MAX_CONCURRENT_SAGA_EXECUTIONS_KEY
+        SagaServerConfig.MAX_CONCURRENT_SAGA_STARTS_KEY
       })
   void load_blankProtectionDisablingKey_throwsIllegalArgumentException(String key) {
     Properties props = new Properties();
@@ -224,8 +224,8 @@ class SagaServerConfigTest {
     assertThat(config.callbackMaxAgeSeconds())
         .isEqualTo(SagaServerConfig.DEFAULT_CALLBACK_MAX_AGE_SECONDS);
     assertThat(config.tlsEnabled()).isEqualTo(SagaServerConfig.DEFAULT_TLS_ENABLED);
-    assertThat(config.maxConcurrentSagaExecutions())
-        .isEqualTo(DefaultSagaOrchestrator.DEFAULT_MAX_CONCURRENT_SAGA_EXECUTIONS);
+    assertThat(config.maxConcurrentSagaStarts())
+        .isEqualTo(DefaultSagaOrchestrator.DEFAULT_MAX_CONCURRENT_SAGA_STARTS);
   }
 
   @Test
@@ -1579,17 +1579,17 @@ class SagaServerConfigTest {
     public void load_notSet_defaultsToNoCap() {
       SagaServerConfig config = SagaServerConfig.load(new Properties());
 
-      assertThat(config.maxConcurrentSagaExecutions())
-          .isEqualTo(DefaultSagaOrchestrator.DEFAULT_MAX_CONCURRENT_SAGA_EXECUTIONS)
+      assertThat(config.maxConcurrentSagaStarts())
+          .isEqualTo(DefaultSagaOrchestrator.DEFAULT_MAX_CONCURRENT_SAGA_STARTS)
           .isZero();
     }
 
     @Test
     public void load_positiveValueGiven_returnsIt() {
       Properties props = new Properties();
-      props.setProperty(SagaServerConfig.MAX_CONCURRENT_SAGA_EXECUTIONS_KEY, "250");
+      props.setProperty(SagaServerConfig.MAX_CONCURRENT_SAGA_STARTS_KEY, "250");
 
-      assertThat(SagaServerConfig.load(props).maxConcurrentSagaExecutions()).isEqualTo(250);
+      assertThat(SagaServerConfig.load(props).maxConcurrentSagaStarts()).isEqualTo(250);
     }
 
     @Test
@@ -1597,16 +1597,16 @@ class SagaServerConfigTest {
       // 0 is the documented way to turn it off, so it must parse rather than being rejected as a
       // cap nobody could satisfy.
       Properties props = new Properties();
-      props.setProperty(SagaServerConfig.MAX_CONCURRENT_SAGA_EXECUTIONS_KEY, "0");
+      props.setProperty(SagaServerConfig.MAX_CONCURRENT_SAGA_STARTS_KEY, "0");
 
-      assertThat(SagaServerConfig.load(props).maxConcurrentSagaExecutions()).isZero();
+      assertThat(SagaServerConfig.load(props).maxConcurrentSagaStarts()).isZero();
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"-1", "not-a-number"})
     public void load_invalidValueGiven_throwsIllegalArgumentException(String value) {
       Properties props = new Properties();
-      props.setProperty(SagaServerConfig.MAX_CONCURRENT_SAGA_EXECUTIONS_KEY, value);
+      props.setProperty(SagaServerConfig.MAX_CONCURRENT_SAGA_STARTS_KEY, value);
 
       assertThatThrownBy(() -> SagaServerConfig.load(props))
           .isInstanceOf(IllegalArgumentException.class);

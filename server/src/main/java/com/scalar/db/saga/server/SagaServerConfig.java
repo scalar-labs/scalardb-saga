@@ -65,11 +65,13 @@ import org.jspecify.annotations.Nullable;
  * not name the same fixed port.
  *
  * <ul>
- *   <li>{@code max_concurrent_saga_executions} — maximum sagas executing at once; {@code 0}
- *       (default) means no cap. At the cap a start is refused with {@code DB-SAGA-20006} before
- *       anything is persisted, so the saga does not exist and its ID stays free. Size it together
- *       with {@code max_start_requests_per_minute}, which bounds arrivals rather than occupancy;
- *       see {@link #maxConcurrentSagaExecutions()}
+ *   <li>{@code max_concurrent_saga_starts} — maximum sagas starting at once; {@code 0} (default)
+ *       means no cap. A permit is held per drive, so a parked saga holds none, and resumes,
+ *       recovery and admin drives are never refused. At the cap a start is refused with {@code
+ *       DB-SAGA-20006} before anything is persisted, so the saga does not exist and its ID stays
+ *       free. Size it together with {@code max_start_requests_per_minute}, which bounds how often
+ *       one principal may ask rather than how many starts run at once; see {@link
+ *       #maxConcurrentSagaStarts()}
  *   <li>{@code http.enabled} / {@code grpc.enabled} — whether to serve that transport (default
  *       {@code true} each); set one to {@code false} to run single-transport
  *   <li>{@code http.port} — HTTP listen port (default {@value #DEFAULT_HTTP_PORT}; {@code 0} binds
@@ -325,7 +327,7 @@ import org.jspecify.annotations.Nullable;
  * is never a deliberate way to disable a control, since omitting the key already says that, so an
  * empty value there is far more likely a template that failed to resolve than an intent to run
  * without the protection. That covers {@code callback.max_age_seconds}, {@code
- * max_start_requests_per_minute}, {@code max_concurrent_saga_executions}, and {@code tls.enabled},
+ * max_start_requests_per_minute}, {@code max_concurrent_saga_starts}, and {@code tls.enabled},
  * whose defaults disable the check outright, plus, inside a service file, the settings whose blank
  * fallback would be open ({@code allowed_hosts} would admit any host; a {@code header.<HeaderName>}
  * would send an empty header, and an empty {@code Authorization} is an unauthenticated call) or
@@ -357,8 +359,7 @@ public final class SagaServerConfig {
   static final String DEFINITIONS_PATH_KEY = SERVER_PREFIX + "definitions_path";
   static final String DEFAULT_SAGA_TIMEOUT_MILLIS_KEY =
       SERVER_PREFIX + "default_saga_timeout_millis";
-  static final String MAX_CONCURRENT_SAGA_EXECUTIONS_KEY =
-      SERVER_PREFIX + "max_concurrent_saga_executions";
+  static final String MAX_CONCURRENT_SAGA_STARTS_KEY = SERVER_PREFIX + "max_concurrent_saga_starts";
   static final String MAX_START_REQUESTS_PER_MINUTE_KEY =
       SERVER_PREFIX + "max_start_requests_per_minute";
 
@@ -484,9 +485,8 @@ public final class SagaServerConfig {
   static final long DEFAULT_SAGA_TIMEOUT_MILLIS =
       DefaultSagaOrchestrator.DEFAULT_SAGA_TIMEOUT_MILLIS;
   static final int DEFAULT_MAX_START_REQUESTS_PER_MINUTE = 0;
-  static final int DEFAULT_MAX_CONCURRENT_SAGA_EXECUTIONS =
-      DefaultSagaOrchestrator
-          .DEFAULT_MAX_CONCURRENT_SAGA_EXECUTIONS; // 0 = disabled (no rate limiting)
+  static final int DEFAULT_MAX_CONCURRENT_SAGA_STARTS =
+      DefaultSagaOrchestrator.DEFAULT_MAX_CONCURRENT_SAGA_STARTS; // 0 = disabled (no rate limiting)
 
   /**
    * Returns the maximum number of timeline events a single {@code getSagaDetail} read returns
@@ -576,9 +576,10 @@ public final class SagaServerConfig {
   }
 
   /**
-   * Returns the maximum number of sagas that may execute concurrently, or {@code 0} for no cap (the
-   * default). A start arriving at the cap is refused with {@code DB-SAGA-20006} and HTTP 503 / gRPC
-   * {@code UNAVAILABLE}; nothing is persisted, so the saga does not exist and its ID stays free.
+   * Returns the maximum number of starts that may be executing at once, or {@code 0} for no cap
+   * (the default). A start arriving at the cap is refused with {@code DB-SAGA-20006} and HTTP 503 /
+   * gRPC {@code UNAVAILABLE}; nothing is persisted, so the saga does not exist and its ID stays
+   * free.
    *
    * <p>A permit is held per drive, so a parked saga holds none, and resumes, recovery and admin
    * drives are never refused.
@@ -599,8 +600,8 @@ public final class SagaServerConfig {
    * sits above, callers inside their limits are refused routinely and "server full" stops being an
    * exceptional signal.
    */
-  public int maxConcurrentSagaExecutions() {
-    return maxConcurrentSagaExecutions;
+  public int maxConcurrentSagaStarts() {
+    return maxConcurrentSagaStarts;
   }
 
   /**
@@ -635,7 +636,7 @@ public final class SagaServerConfig {
           SHUTDOWN_MODE_KEY,
           SHUTDOWN_TIMEOUT_MILLIS_KEY,
           DETAIL_MAX_TIMELINE_EVENTS_KEY,
-          MAX_CONCURRENT_SAGA_EXECUTIONS_KEY,
+          MAX_CONCURRENT_SAGA_STARTS_KEY,
           RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY,
           RECOVERY_INTERVAL_SECONDS_KEY,
           RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY,
@@ -711,7 +712,7 @@ public final class SagaServerConfig {
   private final ShutdownMode shutdownMode;
   private final long shutdownTimeoutMillis;
   private final int detailMaxTimelineEvents;
-  private final int maxConcurrentSagaExecutions;
+  private final int maxConcurrentSagaStarts;
   private final RecoveryConfig recoveryConfig;
   private final RetentionConfig retentionConfig;
   private final String securityProvider;
@@ -817,16 +818,16 @@ public final class SagaServerConfig {
             DETAIL_MAX_TIMELINE_EVENTS_KEY,
             DEFAULT_DETAIL_MAX_TIMELINE_EVENTS,
             1);
-    this.maxConcurrentSagaExecutions =
+    this.maxConcurrentSagaStarts =
         parseBoundedInt(
             // Blank is refused rather than read as unset: this key's default leaves the protection
             // off, so a templated value that resolved empty would disable the cap silently. Same
             // rule as the rate limit and the callback age.
             requireNonBlankIfSet(
-                MAX_CONCURRENT_SAGA_EXECUTIONS_KEY,
-                resolved.getProperty(MAX_CONCURRENT_SAGA_EXECUTIONS_KEY)),
-            MAX_CONCURRENT_SAGA_EXECUTIONS_KEY,
-            DEFAULT_MAX_CONCURRENT_SAGA_EXECUTIONS,
+                MAX_CONCURRENT_SAGA_STARTS_KEY,
+                resolved.getProperty(MAX_CONCURRENT_SAGA_STARTS_KEY)),
+            MAX_CONCURRENT_SAGA_STARTS_KEY,
+            DEFAULT_MAX_CONCURRENT_SAGA_STARTS,
             0);
     this.recoveryConfig = parseRecoveryConfig(resolved);
     this.retentionConfig = parseRetentionConfig(resolved);

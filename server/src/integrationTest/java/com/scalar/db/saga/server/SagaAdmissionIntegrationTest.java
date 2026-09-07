@@ -43,7 +43,7 @@ class SagaAdmissionIntegrationTest extends ServerIntegrationTestSupport {
 
   @Override
   protected void configureProperties(Properties props) {
-    props.setProperty(SagaServerConfig.MAX_CONCURRENT_SAGA_EXECUTIONS_KEY, "1");
+    props.setProperty(SagaServerConfig.MAX_CONCURRENT_SAGA_STARTS_KEY, "1");
   }
 
   @Override

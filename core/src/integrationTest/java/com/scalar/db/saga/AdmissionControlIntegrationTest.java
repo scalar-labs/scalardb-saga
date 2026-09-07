@@ -81,7 +81,7 @@ class AdmissionControlIntegrationTest {
     DefaultSagaOrchestrator orchestrator =
         DefaultSagaOrchestrator.newBuilder()
             .storeFactory(ScalarDbSagaStoreFactory.create(props))
-            .maxConcurrentSagaExecutions(cap)
+            .maxConcurrentSagaStarts(cap)
             .stepResolver(
                 (name, cls, ctx) -> {
                   Object step = steps.get(name);

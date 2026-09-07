@@ -84,15 +84,15 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   public static final int DEFAULT_MAX_TIMELINE_EVENTS = Integer.MAX_VALUE;
 
   /**
-   * The concurrent-execution cap applied when {@link Builder#maxConcurrentSagaExecutions(int)} is
-   * not called: {@code 0}, meaning no cap.
+   * The concurrent-start cap applied when {@link Builder#maxConcurrentSagaStarts(int)} is not
+   * called: {@code 0}, meaning no cap.
    *
    * <p>Off by default because the right value is a property of a deployment's store, hosts and saga
    * durations, and a wrong one is worse than none: too low refuses work the daemon could have done,
    * and too high is the unbounded behavior with extra machinery. The sizing method is on the
    * builder setter.
    */
-  public static final int DEFAULT_MAX_CONCURRENT_SAGA_EXECUTIONS = 0;
+  public static final int DEFAULT_MAX_CONCURRENT_SAGA_STARTS = 0;
 
   private static final Logger logger = LoggerFactory.getLogger(DefaultSagaOrchestrator.class);
 
@@ -142,7 +142,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       SagaRetentionManager retentionManager,
       long shutdownTimeoutMillis,
       int maxTimelineEvents,
-      int maxConcurrentSagaExecutions) {
+      int maxConcurrentSagaStarts) {
     this(
         engine,
         store,
@@ -151,7 +151,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
         retentionManager,
         shutdownTimeoutMillis,
         maxTimelineEvents,
-        maxConcurrentSagaExecutions,
+        maxConcurrentSagaStarts,
         Executors.newVirtualThreadPerTaskExecutor());
   }
 
@@ -164,7 +164,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       SagaRetentionManager retentionManager,
       long shutdownTimeoutMillis,
       int maxTimelineEvents,
-      int maxConcurrentSagaExecutions,
+      int maxConcurrentSagaStarts,
       ExecutorService asyncExecutor) {
     this.engine = engine;
     this.store = store;
@@ -176,9 +176,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     // No cap means no controller, rather than a controller with an unreachable cap: the seams then
     // hold a null and skip the semaphore entirely, so the default costs nothing.
     this.admissionController =
-        maxConcurrentSagaExecutions > 0
-            ? new AdmissionController(maxConcurrentSagaExecutions)
-            : null;
+        maxConcurrentSagaStarts > 0 ? new AdmissionController(maxConcurrentSagaStarts) : null;
     this.asyncExecutor = asyncExecutor;
   }
 
@@ -963,7 +961,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     private long shutdownTimeoutMillis = DEFAULT_SHUTDOWN_TIMEOUT_MILLIS;
     private long defaultSagaTimeoutMillis = DEFAULT_SAGA_TIMEOUT_MILLIS;
     private int maxTimelineEvents = DEFAULT_MAX_TIMELINE_EVENTS;
-    private int maxConcurrentSagaExecutions = DEFAULT_MAX_CONCURRENT_SAGA_EXECUTIONS;
+    private int maxConcurrentSagaStarts = DEFAULT_MAX_CONCURRENT_SAGA_STARTS;
     private Clock clock = Clock.systemUTC();
     private ResourceRegistry.@Nullable Builder resourceRegistryBuilder;
     private @Nullable StepResolver customStepResolver;
@@ -975,9 +973,9 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     private Builder() {}
 
     /**
-     * Caps how many sagas may be executing at once; a start arriving at the cap is refused
+     * Caps how many sagas may be starting at once; a start arriving at the cap is refused
      * immediately with {@link SagaOverloadedException} rather than queued. Defaults to {@link
-     * #DEFAULT_MAX_CONCURRENT_SAGA_EXECUTIONS} (0, no cap).
+     * #DEFAULT_MAX_CONCURRENT_SAGA_STARTS} (0, no cap).
      *
      * <p>A permit is held per drive, so a saga parked on an outside system holds nothing, and
      * resumes, recovery and admin drives are never refused. The refusal happens after validation
@@ -1003,16 +1001,16 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
      * fires only when duration blows out. If it sits above, callers within their limits are refused
      * routinely and "server full" stops being an exceptional signal.
      *
-     * @param maxConcurrentSagaExecutions the maximum number of concurrently executing sagas, or 0
-     *     for no cap; must not be negative
+     * @param maxConcurrentSagaStarts the maximum number of starts that may be executing at once, or
+     *     0 for no cap; must not be negative
      * @return this builder
      */
-    public Builder maxConcurrentSagaExecutions(int maxConcurrentSagaExecutions) {
-      if (maxConcurrentSagaExecutions < 0) {
+    public Builder maxConcurrentSagaStarts(int maxConcurrentSagaStarts) {
+      if (maxConcurrentSagaStarts < 0) {
         throw new IllegalArgumentException(
-            "maxConcurrentSagaExecutions must not be negative, got " + maxConcurrentSagaExecutions);
+            "maxConcurrentSagaStarts must not be negative, got " + maxConcurrentSagaStarts);
       }
-      this.maxConcurrentSagaExecutions = maxConcurrentSagaExecutions;
+      this.maxConcurrentSagaStarts = maxConcurrentSagaStarts;
       return this;
     }
 
@@ -1317,7 +1315,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
             retentionManager,
             shutdownTimeoutMillis,
             maxTimelineEvents,
-            maxConcurrentSagaExecutions);
+            maxConcurrentSagaStarts);
       } catch (Throwable t) {
         // Roll back the resources that hold real external connections: the store (DB sessions) and
         // the HTTP endpoint manager (holds HTTP clients). Each is null if its own creation threw,

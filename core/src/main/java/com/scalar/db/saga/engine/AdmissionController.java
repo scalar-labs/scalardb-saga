@@ -12,18 +12,19 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Bounds how many sagas may be executing at once, so intake cannot outrun completion.
+ * Bounds how many sagas may be starting at once, so intake cannot outrun completion.
  *
  * <p>Pure mechanism: it hands out permits and counts refusals. What a refusal means on the wire is
  * the orchestrator's to decide, which is why nothing here depends on the {@code api} exception
  * types.
  *
- * <p>The bound is on <b>occupancy</b>, not on flow, and that is the whole reason it exists
- * alongside the daemon's request rate limiter. In-flight population is arrival rate times duration,
- * so a rate limit alone bounds it only while duration holds still: when a downstream slows, the
- * same permitted arrival rate produces an unboundedly larger population, which is what drives saga
- * latency past the recovery staleness threshold and starts recovery claiming sagas that are still
- * running. Duration does not appear in a rate limiter's arithmetic. It appears here.
+ * <p>The bound is on <b>how many drives are in progress</b>, not on flow, and that is the whole
+ * reason it exists alongside the daemon's request rate limiter. In-flight population is arrival
+ * rate times duration, so a rate limit alone bounds it only while duration holds still: when a
+ * downstream slows, the same permitted arrival rate produces an unboundedly larger population,
+ * which is what drives saga latency past the recovery staleness threshold and starts recovery
+ * claiming sagas that are still running. Duration does not appear in a rate limiter's arithmetic.
+ * It appears here.
  *
  * <p>A permit is held per <b>drive</b>, not per saga: it is taken when a start is admitted and
  * returned when that drive stops occupying the engine — at a terminal state, at a park (a saga
