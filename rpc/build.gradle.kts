@@ -13,7 +13,7 @@ description =
 
 // The Java-8 gRPC wire contract: the `.proto` plus the generated message + service stubs, shared by
 // the server and the client SDK. Generated under --release 8 so the Java 8 client can consume it;
-// the Java 21 server consumes it too (newer-uses-older).
+// the Java 25 server consumes it too (newer-uses-older).
 dependencies {
     api(platform(libs.grpc.bom))
     api(libs.grpc.protobuf)

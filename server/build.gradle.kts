@@ -28,6 +28,13 @@ application {
         // picks up in-flight sagas on the next start, whereas a livelocked process holds saga leases
         // without making progress.
         "-XX:+ExitOnOutOfMemoryError",
+        // Two dependencies load a native library through JNI: sqlite-jdbc, and Netty's epoll
+        // transport. JDK 24 made System.load a restricted method, so without this the JVM prints a
+        // warning naming whichever of them reaches it first, and a future release will block the
+        // call outright. Netty would then fall back to NIO and SQLite would fail to load at all.
+        // ALL-UNNAMED is the only granularity available, because the distribution ships a flat
+        // classpath rather than named modules.
+        "--enable-native-access=ALL-UNNAMED",
     )
 }
 

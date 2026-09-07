@@ -41,7 +41,7 @@ import org.mockito.ArgumentCaptor;
 /**
  * Guards that the daemon's server-side {@link ProtoMappers} and the client's {@code
  * ClientProtoMappers} stay exact mirror images. The two are hand-maintained in separate modules
- * (the Java 21 daemon and the Java 8 client) and each module's unit tests exercise only its own
+ * (the Java 25 daemon and the Java 8 client) and each module's unit tests exercise only its own
  * side, so a wire field wired in one direction but not the other would leave both suites green
  * while the field silently drops on the round trip.
  *
@@ -68,7 +68,12 @@ class ProtoMapperRoundTripIntegrationTest {
 
     server =
         NettyServerBuilder.forPort(0)
-            .addService(new SagaServiceImpl(orchestrator, 0L, 0L))
+            .addService(
+                // This suite only round-trips protos, so a synchronous start need not wait
+                // at all. Stated as a zero bound rather than as the old 0/0 key pair, which
+                // encoded a sync.max_wait_millis the config layer rejects (it must be >= 1).
+                new SagaServiceImpl(
+                    orchestrator, cap -> 0L, new java.util.concurrent.CompletableFuture<>()))
             .addService(
                 ServerInterceptors.intercept(new AdminServiceImpl(orchestrator, 0L), identity()))
             .build()

@@ -37,6 +37,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -185,6 +186,21 @@ class SagaEngineTest {
       // Assert
       assertThat(result).isEqualTo(expected);
       verify(store).createSaga("saga-1", "test-saga", OWNER_ID, Map.of(), "1.0");
+    }
+
+    @Test
+    void createSaga_inputWithANullValue_throwsBeforePersisting() {
+      // Arrange — a null value cannot live in a saga context, and a JSON null in a request body
+      // produces one. Validation used to run only when execution began, so an asynchronous caller
+      // got a saga id, waited out its full bound, and a doomed saga was left in the store.
+      SagaDefinition def = sagaDefinition("s1");
+      Map<String, Object> input = new HashMap<>();
+      input.put("k", null);
+
+      // Act & Assert — IllegalArgumentException so the wire layers render it 400, not 500.
+      assertThatThrownBy(() -> engine.createSaga(def, "saga-1", input))
+          .isInstanceOf(IllegalArgumentException.class);
+      verify(store, never()).createSaga(any(), any(), any(), any(), any());
     }
 
     @Test

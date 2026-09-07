@@ -75,7 +75,9 @@ final class ConfigReconciler {
   private final boolean asyncCallbacksConfigured;
   private final ServiceSecretResolver secretResolver;
   private final HttpEndpointRegistrar registrar;
-  private final Consumer<SagaDefinition> definitionRegistrar;
+  private final DefinitionStore definitionStore;
+  // Where this replica publishes the saga names it serves, after every pass that concluded.
+  private final Consumer<Set<String>> servedDefinitions;
 
   // ── Inter-pass state (guarded by the pass serialization) ─────────────────
 
@@ -88,11 +90,14 @@ final class ConfigReconciler {
   // walking the step and CallSpec graph of every definition, every pass. Anything that copies a
   // cached definition on the way out would keep the cache and lose that.
   private final Map<String, CachedParse> definitionParseCache = new HashMap<>();
-  // Definitions whose files vanished while their registered version stays startable in the store,
-  // keyed by name → the services they reference. Deleting a file retires nothing, so these
-  // references outlive the file and must still be honored when a later pass removes a service.
+  // Definitions whose files are gone, keyed by name → the services they reference. Removing the
+  // file stops new starts, but the registration outlives it and so do the sagas still running
+  // under it; those resolve their services on every call, so these references must still be
+  // honored when a later pass removes a service.
   private final Map<String, Set<String>> vanishedDefinitionServices = new HashMap<>();
   private @Nullable String lastFailureSignature;
+
+  private @Nullable String lastRollbackSignature;
   private volatile ReloadStatus status;
 
   /** One applied definition: the file it came from and its parsed (raw, un-defaulted) form. */
@@ -100,8 +105,33 @@ final class ConfigReconciler {
 
   private record CachedParse(String contentSha256, SagaDefinition definition) {}
 
-  /** A parsed candidate definition with its origin file, for error attribution. */
-  private record CandidateDefinition(String fileName, SagaDefinition definition) {}
+  /**
+   * A parsed candidate definition with its origin file, for error attribution.
+   *
+   * <p>{@code fileVersion} is the version the file names, and is null unless it differs from {@code
+   * definition} — which happens only when {@code servingInsteadOf} adopted a rollback, leaving the
+   * serving version to validate against a file that no longer contains it. Every message built from
+   * a candidate has to say so, or it attributes the serving version's steps to a file the operator
+   * will open and not find them in.
+   */
+  private record CandidateDefinition(
+      String fileName, SagaDefinition definition, @Nullable String fileVersion) {
+
+    /** Names what the steps being reported came from, and where the file disagrees with it. */
+    String describeSource() {
+      return fileVersion == null
+          ? "Definition file '" + fileName + "'"
+          : "Serving version "
+              + definition.getVersion()
+              + " of saga '"
+              + definition.getName()
+              + "' (adopted because file '"
+              + fileName
+              + "' names version "
+              + fileVersion
+              + ", which is already registered)";
+    }
+  }
 
   /**
    * Thrown internally when a pass is rejected; carries the aggregated reason and whether clearing
@@ -137,13 +167,15 @@ final class ConfigReconciler {
       @Nullable Path definitionsPath,
       boolean asyncCallbacksConfigured,
       HttpEndpointRegistrar registrar,
-      Consumer<SagaDefinition> definitionRegistrar) {
+      DefinitionStore definitionStore,
+      Consumer<Set<String>> servedDefinitions) {
     this.reloadConfig = reloadConfig;
     this.definitionsPath = definitionsPath;
     this.asyncCallbacksConfigured = asyncCallbacksConfigured;
     this.secretResolver = new ServiceSecretResolver(reloadConfig.secretsRoot());
     this.registrar = registrar;
-    this.definitionRegistrar = definitionRegistrar;
+    this.definitionStore = definitionStore;
+    this.servedDefinitions = servedDefinitions;
     this.appliedServices = Map.of();
     this.status = ReloadStatus.initial();
   }
@@ -230,7 +262,7 @@ final class ConfigReconciler {
     // and every file in it can still be individually valid.
     requireUntornSnapshot(servicesRead, definitionsRead, candidateSha);
 
-    validateCrossChecks(candidateServices, candidateDefinitions, errors);
+    validateCrossChecks(candidateServices, candidateDefinitions, errors, candidateSha);
 
     if (!errors.isEmpty()) {
       throw new PassRejectedException(
@@ -242,12 +274,24 @@ final class ConfigReconciler {
     warnOnVanishedDefinitions(candidateDefinitions);
     warnOnRemovedServicesStillReferenced(candidateServices);
 
-    // 2. APPLY services first. A definition is startable fleet-wide the moment it registers, so
-    // this replica installs the services it names before publishing it. That orders the change
-    // within this replica, which is as far as ordering reaches: a replica whose files have not
-    // synced yet still sees the definition first, and its resolve fails retryably and self-heals
-    // on its next pass. That bounded skew is accepted by design — a fleet-wide barrier would need
-    // coordination this feature deliberately does not have.
+    // 2. STOP SERVING what this pass drops, BEFORE its endpoints go. The mirror of applying
+    // services first: a replica installs endpoints before publishing the definitions that need
+    // them, so it must stop offering a definition before removing the endpoints it needs. Doing it
+    // the other way round leaves a saga startable against an endpoint already gone, and a
+    // registration failure below would strand that state until some later pass concludes — the
+    // swap has committed by then, so the previous configuration is no longer serving to fall back
+    // on. Additions wait until step 4, once their definitions are actually registered.
+    Set<String> stillServed = new TreeSet<>(appliedDefinitions.keySet());
+    if (stillServed.retainAll(candidateDefinitions.keySet())) {
+      servedDefinitions.accept(Set.copyOf(stillServed));
+    }
+
+    // 3. APPLY services. A definition is startable fleet-wide the moment it registers, so this
+    // replica installs the services it names before publishing it. That orders the change within
+    // this replica, which is as far as ordering reaches: a replica whose files have not synced yet
+    // still sees the definition first, and its resolve fails retryably and self-heals on its next
+    // pass. That bounded skew is accepted by design — a fleet-wide barrier would need coordination
+    // this feature deliberately does not have.
     List<String> serviceChanges = diffServices(candidateServices);
     if (!serviceChanges.isEmpty()) {
       try {
@@ -272,8 +316,8 @@ final class ConfigReconciler {
               status.rejection());
     }
 
-    // 3. APPLY definitions, advancing the applied entry per definition so a mid-apply failure
-    // retries only what remains.
+    // 4. APPLY definitions, advancing the applied entry per definition so a mid-apply failure
+    // retries only what remains, then publish what ended up served.
     List<String> definitionChanges = new ArrayList<>();
     try {
       registerChangedDefinitions(candidateDefinitions, definitionChanges, candidateSha);
@@ -283,9 +327,17 @@ final class ConfigReconciler {
       // as though the pass changed nothing.
       logAppliedIfChanged(serviceChanges, definitionChanges);
       throw e;
+    } finally {
+      // On both paths, because a registration failure does not abandon the ones that succeeded: a
+      // definition can be registered, endpointed and audited as applied by a pass that then
+      // rejects. Publishing only on success would leave that saga refused as unserved until some
+      // later pass concludes — which never comes if the failure is permanent. appliedDefinitions
+      // is already correct here either way: it gains a name only when that registration committed,
+      // and the withdrawal sweep runs before the throw.
+      servedDefinitions.accept(Set.copyOf(appliedDefinitions.keySet()));
     }
 
-    // 4. Status + audit. The INFO apply line is the audit record: names and versions only, never
+    // 5. Status + audit. The INFO apply line is the audit record: names and versions only, never
     // values. A pass that found nothing to change keeps the previous applied timestamp: it
     // verified the applied state, it did not apply anything.
     Instant appliedAt =
@@ -318,7 +370,7 @@ final class ConfigReconciler {
         continue; // unchanged — no store round-trip
       }
       try {
-        definitionRegistrar.accept(definition);
+        definitionStore.register(definition);
       } catch (RuntimeException e) {
         // Collect and carry on. Definitions are independent rows, so one that cannot register —
         // above all one whose conflict is permanent — must not decide the fate of the rest:
@@ -381,11 +433,122 @@ final class ConfigReconciler {
         + candidate.definition().getName()
         + " "
         + candidate.definition().getVersion()
-        + " (file '"
-        + candidate.fileName()
-        + "'): "
+        + (candidate.fileVersion() == null
+            ? " (file '" + candidate.fileName() + "')"
+            : " (serving; file '"
+                + candidate.fileName()
+                + "' names "
+                + candidate.fileVersion()
+                + ")")
+        + ": "
         + e.getMessage()
         + registrationHint(e, needsOperator);
+  }
+
+  /**
+   * The definition this pass should reason about in place of {@code candidate}, or {@code null}
+   * when the file and the store agree and the candidate stands.
+   *
+   * <p>A file naming an already-stored version that is not the one serving is a rollback of the
+   * definitions directory: the file reverted, the store did not, and re-registering old content is
+   * a no-op. The rollback simply does not take, whatever this pass decides — so the pass adopts
+   * what serves and carries on. Refusing instead would refuse the only configuration the daemon can
+   * actually run, and at boot that means refusing to start over a state no restart can improve.
+   *
+   * <p>Adopting it is also what keeps the guards pointed at the right version. Every check
+   * downstream reads the candidate, so substituting here is what makes the service cross-check
+   * protect the endpoints the SERVING version needs rather than the ones the reverted file happens
+   * to name. An outstanding rollback costs these two reads every pass, because the candidate is
+   * rebuilt from the unchanged file while the applied entry holds what was adopted.
+   *
+   * <p>The two store reads are the only ones validation makes, and a failing one has to become a
+   * rejection rather than escape: {@code run()} contains a rejected pass and nothing else, so a
+   * routine store outage would otherwise surface as an unexpected scheduler failure, record no
+   * rejection, and leave {@code lastPassAt} frozen — which is the signal a wedged pass thread is
+   * supposed to have to itself.
+   */
+  private @Nullable CandidateDefinition servingInsteadOf(
+      CandidateDefinition candidate, List<String> rollbacks, String candidateSha) {
+    SagaDefinition definition = candidate.definition();
+    @Nullable SagaDefinition serving;
+    boolean rolledBack;
+    try {
+      serving = definitionStore.latest(definition.getName());
+      rolledBack =
+          serving != null
+              && !serving.getVersion().equals(definition.getVersion())
+              && definitionStore.isRegistered(definition.getName(), definition.getVersion());
+    } catch (RuntimeException e) {
+      // Classified, not assumed transient. A store outage clears on its own, but a stored
+      // definition that cannot be deserialized fails identically forever — reporting that as a
+      // retry would leave it repeating with nobody told to look at it.
+      boolean needsOperator = needsOperatorAction(e);
+      throw new PassRejectedException(
+          "Could not read the registered versions of saga '"
+              + Redaction.oneLine(definition.getName())
+              + "' ("
+              + e.getClass().getSimpleName()
+              + "), so this pass cannot tell whether the definition files still describe what is"
+              + " serving."
+              + (needsOperator
+                  ? " [permanent: retrying fails the same way; the stored definition needs looking"
+                      + " at]"
+                  : " [will retry next pass]"),
+          candidateSha,
+          needsOperator);
+    }
+    if (!rolledBack) {
+      return null;
+    }
+    rollbacks.add(
+        Redaction.oneLine(
+            describeNotServing(candidate, Objects.requireNonNull(serving).getVersion())));
+    return new CandidateDefinition(candidate.fileName(), serving, definition.getVersion());
+  }
+
+  /**
+   * Describes a definition file that does not name the version currently serving, for the warning
+   * that says so.
+   */
+  private static String describeNotServing(CandidateDefinition candidate, String serving) {
+    return "definition "
+        + candidate.definition().getName()
+        + " (file '"
+        + candidate.fileName()
+        + "') is version "
+        + candidate.definition().getVersion()
+        + ", but version "
+        + serving
+        + " is what the store serves. Registered content is immutable, so re-registering an older"
+        + " version changes nothing and the newer one keeps running; this daemon goes on serving"
+        + " and validating "
+        + serving
+        + ". To go back to the older content, register it as a NEW version";
+  }
+
+  /**
+   * Warns about the rollbacks this pass adopted, once per distinct set.
+   *
+   * <p>A rolled-back file stays rolled back until an operator edits it, so the finding repeats
+   * every interval. It is a warning rather than a rejection, which means nothing else in the log
+   * marks it as still-open; repeating it every pass would bury the log exactly as a repeated
+   * rejection would, so it follows the same state-change rule those use.
+   */
+  private void noteRollbacks(List<String> rollbacks) {
+    if (rollbacks.isEmpty()) {
+      lastRollbackSignature = null;
+      return;
+    }
+    String signature = String.join("; ", rollbacks);
+    if (signature.equals(lastRollbackSignature)) {
+      logger.debug("Definition files still name versions that are not serving: {}", signature);
+    } else {
+      logger.warn(
+          "Definition files name versions that are not serving, so the stored versions keep"
+              + " running: {}",
+          signature);
+      lastRollbackSignature = signature;
+    }
   }
 
   /** The operator-facing half of a registration failure: wait, or go and do something. */
@@ -535,7 +698,8 @@ final class ConfigReconciler {
           }
         }
         CandidateDefinition previous =
-            candidates.put(definition.getName(), new CandidateDefinition(fileName, definition));
+            candidates.put(
+                definition.getName(), new CandidateDefinition(fileName, definition, null));
         if (previous != null) {
           errors.add(
               "Definition files '"
@@ -636,8 +800,23 @@ final class ConfigReconciler {
   private void validateCrossChecks(
       Map<String, ServiceConfig> candidateServices,
       Map<String, CandidateDefinition> candidateDefinitions,
-      List<String> errors) {
-    for (CandidateDefinition candidate : candidateDefinitions.values()) {
+      List<String> errors,
+      String candidateSha) {
+    List<String> rollbacks = new ArrayList<>();
+    for (Map.Entry<String, CandidateDefinition> entry : candidateDefinitions.entrySet()) {
+      CandidateDefinition candidate = entry.getValue();
+      AppliedDefinition applied = appliedDefinitions.get(entry.getKey());
+      // A file naming an already-stored version that is not the serving one is a rollback; adopt
+      // what serves, so every check below validates the version that actually runs rather than the
+      // one the reverted file names. Only a changed candidate is looked up. See
+      // {@link #servingInsteadOf} for why it adopts rather than rejects, and what it costs.
+      if (applied == null || !applied.definition().equals(candidate.definition())) {
+        CandidateDefinition serving = servingInsteadOf(candidate, rollbacks, candidateSha);
+        if (serving != null) {
+          candidate = serving;
+          entry.setValue(serving);
+        }
+      }
       SagaDefinition definition = candidate.definition();
       // Every declarative step's service must exist in THIS candidate set: definitions propagate
       // fleet-wide through the store the moment they register, so registering one whose service
@@ -646,9 +825,8 @@ final class ConfigReconciler {
         if (step instanceof SagaDefinition.ServiceStep serviceStep) {
           if (!candidateServices.containsKey(serviceStep.getService())) {
             errors.add(
-                "Definition file '"
-                    + candidate.fileName()
-                    + "' step '"
+                candidate.describeSource()
+                    + " step '"
                     + step.getName()
                     + "' references service '"
                     + serviceStep.getService()
@@ -657,9 +835,8 @@ final class ConfigReconciler {
           if (!asyncCallbacksConfigured
               && serviceStep.getPhases().values().stream().anyMatch(CallSpec::isAsync)) {
             errors.add(
-                "Definition file '"
-                    + candidate.fileName()
-                    + "' step '"
+                candidate.describeSource()
+                    + " step '"
                     + step.getName()
                     + "' declares an async phase, but async completion is not configured on this"
                     + " daemon (missing callback URL / secret) — registration would fail on every"
@@ -668,7 +845,6 @@ final class ConfigReconciler {
         }
       }
       // Un-bumped change: same name and version as the applied definition, different content.
-      AppliedDefinition applied = appliedDefinitions.get(definition.getName());
       if (applied != null
           && applied.definition().getVersion().equals(definition.getVersion())
           && !applied.definition().equals(definition)) {
@@ -682,19 +858,23 @@ final class ConfigReconciler {
                 + "). Registered content is immutable: bump the version, never amend.");
       }
     }
+    noteRollbacks(rollbacks);
   }
 
   /**
-   * Warns when a definition's file is gone while its registered version stays startable.
+   * Records what a definition referenced before its file went, and notes the retirement.
+   *
+   * <p>Removing the file is how a saga is retired, so this is an ordinary operator action rather
+   * than a hazard, and it is logged at INFO: nothing else in the pass reports it, because a pure
+   * deletion registers nothing and swaps nothing. What survives the file is the registration, and
+   * with it the sagas still running under it — which is why the services it named are remembered
+   * here for {@link #warnOnRemovedServicesStillReferenced}.
    *
    * <p>Best effort by construction, and worth knowing exactly how: the applied set is rebuilt from
    * the directory at every boot, so only a process that observes both the definition and its
    * deletion can notice one. A replica that starts after the file was already deleted sees a
-   * directory that simply never contained it, and never warns. Hot reload is what makes this the
-   * normal case rather than the exception — a config-only change no longer restarts anything — but
-   * a rolling restart between the two edits still silences the warning, and does so per replica.
-   * The retirement marker that makes deletion mean something replaces this mechanism rather than
-   * patching it.
+   * directory that simply never contained it, and remembers nothing. A rolling restart between the
+   * two edits therefore loses the reference, per replica.
    */
   private void warnOnVanishedDefinitions(Map<String, CandidateDefinition> candidateDefinitions) {
     // A file that came back is a candidate again, and validation covers it from here.
@@ -706,37 +886,37 @@ final class ConfigReconciler {
         // version stays startable, so removing one of its services later would break starts of it
         // with nothing left to notice.
         vanishedDefinitionServices.put(name, serviceNamesOf(entry.getValue().definition()));
-        // Deleting a file retires nothing: the store's latest version keeps serving starts on
-        // every replica. Delete-without-disable silently recreates the dangling-service hazard
-        // validation exists to prevent, so it is the one flow that earns a loud warning.
-        logger.warn(
-            "Definition file for saga '{}' vanished from definitions_path, but the saga remains"
-                + " registered in the store and startable. Deleting a file retires nothing;"
-                + " disable the saga first, then delete its file.",
+        // The audit record for a retirement. A pure deletion registers nothing and swaps nothing,
+        // so without this the pass that takes a saga out of service says nothing at all.
+        logger.info(
+            "Saga '{}' is no longer served by this replica: its definition file is gone from"
+                + " definitions_path. The registered version stays in the store, so sagas already"
+                + " running under it finish normally.",
             name);
       }
     }
   }
 
   /**
-   * Warns when a service about to be removed is still referenced by a definition whose file is gone
-   * but whose registered version remains startable. Deleting a definition file retires nothing, so
-   * this is the one flow that can strand a registered saga with nothing rejecting the change: the
-   * candidate cross-check only covers definitions that still have files.
+   * Warns when a service about to be removed is still referenced by a definition whose file is
+   * gone. New starts of that saga are already refused, so the hazard is not them: it is the sagas
+   * still running under it, whose declarative steps resolve the service on every call, compensation
+   * and recovery included. The candidate cross-check cannot see this, because it only covers
+   * definitions that still have files.
    *
-   * <p>It warns rather than rejects deliberately — refusing would leave no way to retire a service
-   * at all until a retirement marker exists — and the runbook's rule stays disable-then-delete.
-   * Once a definition can be marked retired, a retired one needs no warning here.
+   * <p>It warns rather than rejects deliberately: retiring a saga and dropping the service only it
+   * used is one change and has to be able to converge as one. Whether anything is still in flight
+   * is a question about saga state, which this pass does not read.
    */
   private void warnOnRemovedServicesStillReferenced(Map<String, ServiceConfig> candidateServices) {
     for (Map.Entry<String, Set<String>> entry : vanishedDefinitionServices.entrySet()) {
       for (String service : entry.getValue()) {
         if (!candidateServices.containsKey(service) && appliedServices.containsKey(service)) {
           logger.warn(
-              "Service '{}' is being removed, but saga '{}' still references it: that saga's"
-                  + " definition file is gone while its registered version remains startable, so"
-                  + " new starts of it will fail to resolve the service. Retire the saga before"
-                  + " deleting the services it names.",
+              "Service '{}' is being removed, but saga '{}' still references it: that saga is no"
+                  + " longer served here, yet any of its sagas still running resolve the service on"
+                  + " every call, compensation included. Those will fail mid-way. Let them drain"
+                  + " before deleting the services the saga names.",
               service,
               entry.getKey());
         }

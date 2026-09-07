@@ -8,7 +8,7 @@ container image to `ghcr.io/scalar-labs/scalardb-saga-server`.
 | Artifact | Coordinate | Consumed by |
 | --- | --- | --- |
 | API | `com.scalar-labs:scalardb-saga-api` | Everyone, transitively |
-| Engine | `com.scalar-labs:scalardb-saga-core` | Applications embedding the engine in-process |
+| Engine | `com.scalar-labs:scalardb-saga-core` | Java 25+ applications embedding the engine in-process |
 | Wire contract | `com.scalar-labs:scalardb-saga-rpc` | The gRPC client, transitively |
 | Client SDK | `com.scalar-labs:scalardb-saga-java-client-sdk` | Java 8+ applications calling the daemon |
 | BOM | `com.scalar-labs:scalardb-saga-bom` | Anyone pinning several of the above |

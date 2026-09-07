@@ -214,6 +214,14 @@ public enum SagaErrorCode {
       "The saga is WAITING on an async callback and resolves via the callback or its timeout — not via admin action.",
       "Wait for the callback or the timeout; do not attempt to drive the saga manually."),
 
+  SAGA_DEFINITION_NOT_SERVED(
+      "DB-SAGA-10403",
+      Category.USER_ERROR,
+      "Saga definition is registered but not served by this daemon",
+      ErrorMetadataSchema.of("saga_name"),
+      "The saga is registered in the store but is not part of this daemon's configuration: either it was retired by removing its definition file, or this replica's configuration has not caught up with a newly added one. Sagas already running under it finish normally.",
+      "If the saga was retired, stop starting it. If it was just added, retry — another replica may already serve it, and this one will once its configuration syncs."),
+
   // ── RETRYABLE_SERVER_ERROR (2xxxx) ───────────────────────────────────
   SAGA_CONCURRENT_MODIFICATION(
       "DB-SAGA-20001",

@@ -30,6 +30,7 @@ import com.scalar.db.saga.rpc.SagaServiceGrpc;
 import com.scalar.db.saga.rpc.SagaServiceGrpc.SagaServiceBlockingStub;
 import com.scalar.db.saga.rpc.SagaSnapshot;
 import com.scalar.db.saga.rpc.StartSagaRequest;
+import com.scalar.db.saga.server.SagaServerConfig;
 import io.grpc.ManagedChannel;
 import io.grpc.Server;
 import io.grpc.Status;
@@ -41,7 +42,10 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.LongUnaryOperator;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -379,6 +383,31 @@ class SagaServiceImplTest {
   }
 
   @Test
+  void startSaga_syncSagaParks_returnsWaitingSnapshotWithoutWaitingOutTheBound() {
+    // Arrange — the saga parks on an async step instead of finishing. The bound below is 30s, so a
+    // park that did not release the wait would hold the call for that long; the elapsed-time
+    // assertion is what separates "answered because it parked" from "answered at the bound".
+    SagaStateSnapshot parked = snapshot("gen-p", SagaStatus.WAITING);
+    when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
+        .thenAnswer(
+            invocation -> {
+              invocation.getArgument(2, SagaCallback.class).onParked(parked);
+              return "gen-p";
+            });
+
+    // Act
+    long startNanos = System.nanoTime();
+    SagaSnapshot response = stub(30_000).startSaga(startByName("transfer", false));
+    long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+
+    // Assert — non-terminal status is the gRPC analogue of REST's 202, and the saga keeps running.
+    assertThat(response.getSagaId()).isEqualTo("gen-p");
+    assertThat(response.getStatus())
+        .isEqualTo(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_WAITING);
+    assertThat(elapsedMillis).isLessThan(5_000L);
+  }
+
+  @Test
   void startSaga_syncCompletesWithinBound_returnsTerminalSnapshot() {
     // Arrange — the saga completes after a short delay (~20ms) that is well within the 5s bound.
     // The
@@ -555,12 +584,22 @@ class SagaServiceImplTest {
   }
 
   private SagaServiceBlockingStub stub(long syncTimeoutMillis, long syncMaxWaitMillis) {
+    return stub(syncTimeoutMillis, syncMaxWaitMillis, new CompletableFuture<>());
+  }
+
+  /** As above, but with a shutdown signal the caller can complete to end a bounded wait early. */
+  private SagaServiceBlockingStub stub(
+      long syncTimeoutMillis, long syncMaxWaitMillis, CompletableFuture<Void> shutdownSignal) {
     String name = InProcessServerBuilder.generateName();
     try {
       servers.add(
           InProcessServerBuilder.forName(name)
               .directExecutor()
-              .addService(new SagaServiceImpl(orchestrator, syncTimeoutMillis, syncMaxWaitMillis))
+              .addService(
+                  new SagaServiceImpl(
+                      orchestrator,
+                      waitBound(syncTimeoutMillis, syncMaxWaitMillis),
+                      shutdownSignal))
               .build()
               .start());
     } catch (IOException e) {
@@ -569,6 +608,20 @@ class SagaServiceImplTest {
     ManagedChannel channel = InProcessChannelBuilder.forName(name).directExecutor().build();
     channels.add(channel);
     return SagaServiceGrpc.newBlockingStub(channel);
+  }
+
+  /**
+   * The wait-bound policy the server would apply for these two keys, resolved through a real {@link
+   * SagaServerConfig} rather than restated here — restating it in a test is how the transports
+   * diverged in the first place, and this suite is where a divergence would show up.
+   */
+  private static LongUnaryOperator waitBound(long syncTimeoutMillis, long syncMaxWaitMillis) {
+    Properties props = new Properties();
+    props.setProperty(
+        "scalar.db.saga.server.sync.timeout_millis", Long.toString(syncTimeoutMillis));
+    props.setProperty(
+        "scalar.db.saga.server.sync.max_wait_millis", Long.toString(syncMaxWaitMillis));
+    return SagaServerConfig.load(props)::syncWaitBoundMillis;
   }
 
   private static StartSagaRequest startByName(String name, boolean async) {

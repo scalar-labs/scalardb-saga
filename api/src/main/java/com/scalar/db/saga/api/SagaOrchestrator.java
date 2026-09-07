@@ -3,6 +3,7 @@ package com.scalar.db.saga.api;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaDefinitionNotServedException;
 import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import java.util.Map;
@@ -45,7 +46,11 @@ import java.util.Map;
  * against a secured server, {@link com.scalar.db.saga.exception.SagaUnauthenticatedException} and
  * {@link com.scalar.db.saga.exception.SagaPermissionDeniedException}, plus the client SDK's
  * fallback codes ({@code UNRECOGNIZED_SERVER_ERROR} and friends) under version skew or an
- * intermediary failure. The embedded implementation never throws any of those.
+ * intermediary failure. The embedded implementation never throws any of those. {@link
+ * com.scalar.db.saga.exception.SagaDefinitionNotServedException} is not among them: it is declared
+ * on every start overload and both implementations throw it — the embedded one once the application
+ * has published a served set, a saga server whenever its definition files no longer describe the
+ * saga.
  *
  * <p>Construct the embedded implementation via its builder:
  *
@@ -69,6 +74,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @param input initial data for the saga context
    * @return the generated saga ID
    * @throws SagaDefinitionNotFoundException if no definition matches the given name
+   * @throws SagaDefinitionNotServedException if the definition is registered but this deployment
+   *     does not serve it
    * @throws SagaDefinitionException if step resolution fails
    */
   String start(String sagaName, Map<String, Object> input);
@@ -85,6 +92,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @param sagaName the registered saga definition name
    * @param input initial data for the saga context
    * @throws SagaDefinitionNotFoundException if no definition matches the given name
+   * @throws SagaDefinitionNotServedException if the definition is registered but this deployment
+   *     does not serve it
    * @throws SagaDefinitionException if step resolution fails
    * @throws SagaAlreadyExistsException if a saga already exists with {@code sagaId}
    * @throws SagaIllegalArgumentException if {@code sagaId} is not of the form {@code
@@ -101,6 +110,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @param input initial data for the saga context
    * @return the generated saga ID
    * @throws SagaDefinitionNotFoundException if no definition matches the given name and version
+   * @throws SagaDefinitionNotServedException if the definition is registered but this deployment
+   *     does not serve it
    * @throws SagaDefinitionException if step resolution fails
    */
   String start(SagaDefinitionId id, Map<String, Object> input);
@@ -114,6 +125,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @param id the saga definition name and version
    * @param input initial data for the saga context
    * @throws SagaDefinitionNotFoundException if no definition matches the given name and version
+   * @throws SagaDefinitionNotServedException if the definition is registered but this deployment
+   *     does not serve it
    * @throws SagaDefinitionException if step resolution fails
    * @throws SagaAlreadyExistsException if a saga already exists with {@code sagaId}
    * @throws SagaIllegalArgumentException if {@code sagaId} is not of the form {@code
@@ -132,6 +145,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @param input initial data for the saga context
    * @return the generated saga ID
    * @throws SagaDefinitionNotFoundException if no definition matches the given name
+   * @throws SagaDefinitionNotServedException if the definition is registered but this deployment
+   *     does not serve it
    */
   String startAsync(String sagaName, Map<String, Object> input);
 
@@ -147,6 +162,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @param callback callback for completion/compensation/escalation
    * @return the generated saga ID
    * @throws SagaDefinitionNotFoundException if no definition matches the given name
+   * @throws SagaDefinitionNotServedException if the definition is registered but this deployment
+   *     does not serve it
    * @throws UnsupportedOperationException if the implementation cannot deliver a local completion
    *     callback (e.g. a remote client with no server-streaming callback channel)
    */
@@ -163,6 +180,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @param sagaName the registered saga definition name
    * @param input initial data for the saga context
    * @throws SagaDefinitionNotFoundException if no definition matches the given name
+   * @throws SagaDefinitionNotServedException if the definition is registered but this deployment
+   *     does not serve it
    * @throws SagaAlreadyExistsException if a saga already exists with {@code sagaId}
    * @throws SagaIllegalArgumentException if {@code sagaId} is not of the form {@code
    *     [a-zA-Z0-9._-]{1,128}}
@@ -181,6 +200,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @param input initial data for the saga context
    * @param callback callback for completion/compensation/escalation
    * @throws SagaDefinitionNotFoundException if no definition matches the given name
+   * @throws SagaDefinitionNotServedException if the definition is registered but this deployment
+   *     does not serve it
    * @throws UnsupportedOperationException if the implementation cannot deliver a local completion
    *     callback (e.g. a remote client with no server-streaming callback channel)
    * @throws SagaAlreadyExistsException if a saga already exists with {@code sagaId}
@@ -198,6 +219,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @param input initial data for the saga context
    * @return the generated saga ID
    * @throws SagaDefinitionNotFoundException if no definition matches the given name and version
+   * @throws SagaDefinitionNotServedException if the definition is registered but this deployment
+   *     does not serve it
    */
   String startAsync(SagaDefinitionId id, Map<String, Object> input);
 
@@ -211,6 +234,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @param callback callback for completion/compensation/escalation
    * @return the generated saga ID
    * @throws SagaDefinitionNotFoundException if no definition matches the given name and version
+   * @throws SagaDefinitionNotServedException if the definition is registered but this deployment
+   *     does not serve it
    * @throws UnsupportedOperationException if the implementation cannot deliver a local completion
    *     callback (e.g. a remote client with no server-streaming callback channel)
    */
@@ -225,6 +250,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @param id the saga definition name and version
    * @param input initial data for the saga context
    * @throws SagaDefinitionNotFoundException if no definition matches the given name and version
+   * @throws SagaDefinitionNotServedException if the definition is registered but this deployment
+   *     does not serve it
    * @throws SagaAlreadyExistsException if a saga already exists with {@code sagaId}
    * @throws SagaIllegalArgumentException if {@code sagaId} is not of the form {@code
    *     [a-zA-Z0-9._-]{1,128}}
@@ -241,6 +268,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @param input initial data for the saga context
    * @param callback callback for completion/compensation/escalation
    * @throws SagaDefinitionNotFoundException if no definition matches the given name and version
+   * @throws SagaDefinitionNotServedException if the definition is registered but this deployment
+   *     does not serve it
    * @throws UnsupportedOperationException if the implementation cannot deliver a local completion
    *     callback (e.g. a remote client with no server-streaming callback channel)
    * @throws SagaAlreadyExistsException if a saga already exists with {@code sagaId}

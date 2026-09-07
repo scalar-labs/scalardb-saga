@@ -17,11 +17,16 @@ import io.grpc.MethodDescriptor;
 import io.javalin.Javalin;
 import io.javalin.router.Endpoint;
 import io.javalin.security.RouteRole;
+import java.io.ByteArrayInputStream;
+import java.io.DataInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.time.Clock;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
@@ -159,7 +164,8 @@ class TransportPolicyParityTest {
     Javalin app = Javalin.create();
     DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
     HealthResource.register(app);
-    SagaResource.register(app, mock(SagaOrchestrator.class), 0L);
+    SagaResource.register(
+        app, mock(SagaOrchestrator.class), 0L, new java.util.concurrent.CompletableFuture<>());
     SagaAdminResource.register(app, orchestrator, 0L);
     CallbackResource.register(app, orchestrator, "test-secret", 0L, Clock.systemUTC());
 
@@ -213,5 +219,113 @@ class TransportPolicyParityTest {
       }
     }
     return null;
+  }
+
+  /**
+   * No code path in {@link SagaResource} may call a {@link SagaOrchestrator} {@code start}
+   * overload.
+   *
+   * <p>Asserted structurally, by reading the compiled class's constant pool, rather than by driving
+   * the routes: a behavioural check only covers the routes a test happens to exercise, so a newly
+   * added start route would pass it while reintroducing the defect. This is the guard {@code
+   * docs/plans/2026-08-30-001-...-plan.md} asked for and {@code todos/082} recorded as missing.
+   *
+   * <p>Why it matters: the synchronous {@code start} overloads run the entire saga on the calling
+   * thread, which on this layer is a request thread. That was the P1 in {@code todos/076} — ~200
+   * concurrent slow sagas exhausted the Jetty pool. Every REST start must go through {@code
+   * startAsync} with a bound. {@code start} remains correct API for embedded callers, which is why
+   * it still exists and why this guard is scoped to this one class.
+   */
+  @Test
+  void sagaResource_containsNoReferenceToASynchronousStartOverload() throws Exception {
+    // Arrange — the compiled form of the class, including its lambdas (route handlers are compiled
+    // into SagaResource$$Lambda bodies as private synthetic methods of the same class file).
+    byte[] classFile;
+    try (InputStream in =
+        SagaResource.class.getResourceAsStream(SagaResource.class.getSimpleName() + ".class")) {
+      classFile = Objects.requireNonNull(in, "SagaResource.class not found").readAllBytes();
+    }
+
+    // Act — collect every method name this class file references on SagaOrchestrator.
+    Set<String> orchestratorCalls = referencedMethodsOn(classFile, SagaOrchestrator.class);
+
+    // Assert — startAsync is expected; start is the regression.
+    assertThat(orchestratorCalls)
+        .as(
+            "SagaResource must not call SagaOrchestrator.start(...) — it runs the saga on the "
+                + "request thread. Use startAsync with a bound (todos/076).")
+        .doesNotContain("start");
+    assertThat(orchestratorCalls)
+        .as("sanity: the scan must actually be seeing the orchestrator calls it inspects")
+        .contains("startAsync");
+  }
+
+  /**
+   * Returns the method names {@code classFile} references on {@code owner}, read from its constant
+   * pool. Lambdas do not hide a call from this: a lambda body compiles to a synthetic method of the
+   * same class, so its calls land in the same constant pool.
+   *
+   * <p>The pool has to be walked in full rather than scanned for a string, because entries are
+   * variable-length and {@code Long}/{@code Double} occupy two slots each — a naive scan
+   * desynchronises. Only {@code Methodref} (10) and {@code InterfaceMethodref} (11) encode a call;
+   * each points at a {@code Class} entry for the owner and a {@code NameAndType} entry for the
+   * method, both of which resolve to {@code Utf8} entries.
+   */
+  private static Set<String> referencedMethodsOn(byte[] classFile, Class<?> owner)
+      throws IOException {
+    Map<Integer, String> utf8 = new HashMap<>();
+    Map<Integer, Integer> classNameIndex = new HashMap<>();
+    Map<Integer, int[]> memberRefs = new HashMap<>(); // -> {classIndex, nameAndTypeIndex}
+    Map<Integer, Integer> nameIndexOfNameAndType = new HashMap<>();
+
+    try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(classFile))) {
+      in.readInt(); // magic
+      in.readUnsignedShort(); // minor
+      in.readUnsignedShort(); // major
+      int count = in.readUnsignedShort();
+      for (int i = 1; i < count; i++) {
+        int tag = in.readUnsignedByte();
+        switch (tag) {
+          case 1 -> utf8.put(i, in.readUTF());
+          case 7, 8, 16, 19, 20 -> {
+            int index = in.readUnsignedShort();
+            if (tag == 7) {
+              classNameIndex.put(i, index);
+            }
+          }
+          case 9, 10, 11, 17, 18 -> {
+            int first = in.readUnsignedShort();
+            int second = in.readUnsignedShort();
+            if (tag == 10 || tag == 11) {
+              memberRefs.put(i, new int[] {first, second});
+            }
+          }
+          case 12 -> {
+            nameIndexOfNameAndType.put(i, in.readUnsignedShort());
+            in.readUnsignedShort(); // descriptor
+          }
+          case 3, 4 -> in.readInt();
+          case 5, 6 -> {
+            in.readLong();
+            i++; // long and double take two constant-pool slots
+          }
+          case 15 -> {
+            in.readUnsignedByte();
+            in.readUnsignedShort();
+          }
+          default -> throw new IOException("unknown constant pool tag " + tag + " at " + i);
+        }
+      }
+    }
+
+    String ownerInternalName = owner.getName().replace('.', '/');
+    Set<String> methods = new LinkedHashSet<>();
+    for (int[] ref : memberRefs.values()) {
+      String refOwner = utf8.get(classNameIndex.get(ref[0]));
+      if (ownerInternalName.equals(refOwner)) {
+        methods.add(utf8.get(nameIndexOfNameAndType.get(ref[1])));
+      }
+    }
+    return methods;
   }
 }

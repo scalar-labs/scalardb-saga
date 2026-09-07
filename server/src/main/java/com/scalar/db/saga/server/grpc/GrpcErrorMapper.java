@@ -9,6 +9,7 @@ import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaDefinitionNotServedException;
 import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaInvalidRequestException;
@@ -79,6 +80,10 @@ final class GrpcErrorMapper {
 
       // ── Precondition ───────────────────────────────────────────────
       case SagaStatePreconditionException e -> respond(Status.Code.FAILED_PRECONDITION, e);
+      // A saga this daemon does not serve is a stable precondition failure, not a transient race:
+      // retrying the same start against this replica never succeeds, which is what separates
+      // FAILED_PRECONDITION from ABORTED here.
+      case SagaDefinitionNotServedException e -> respond(Status.Code.FAILED_PRECONDITION, e);
 
       // ── Bad request ────────────────────────────────────────────────
       // SAGA_DEFINITION_VERSION_CONTENT_CONFLICT is the one definition code that is not a bad

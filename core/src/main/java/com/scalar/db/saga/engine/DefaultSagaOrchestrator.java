@@ -11,6 +11,7 @@ import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.definition.SagaDefinitionParser;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaDefinitionNotServedException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
@@ -30,6 +31,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
@@ -95,6 +97,26 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   private final ExecutorService asyncExecutor;
   private volatile boolean closed;
 
+  /**
+   * The saga names this deployment currently serves, or {@code null} when nothing has published a
+   * set.
+   *
+   * <p>Null is the embedded default: an application that registers a definition means to run it,
+   * and has its own call sites to stop calling. A front end whose configuration decides what is
+   * served — the daemon, whose definition files do — publishes a snapshot here after each
+   * configuration pass, which is what makes removing a definition file retire the saga.
+   *
+   * <p>Pushed rather than pulled, and an immutable snapshot rather than a live view: a start reads
+   * it without a lock, so it cannot contend with a configuration pass on the hot path.
+   *
+   * <p>A pass rejected before it applied anything publishes nothing, so the previously served set
+   * keeps serving. One rejected after that point does publish: what it committed before failing is
+   * live, and a definition registered by a pass that then fails on an unrelated one has to be
+   * served rather than refused until some later pass concludes. So the served set can narrow
+   * mid-pass, and anything added between the withdrawal and the registration has to keep that true.
+   */
+  private volatile @Nullable Set<String> servedDefinitions;
+
   DefaultSagaOrchestrator(
       SagaEngine engine,
       SagaStore store,
@@ -149,6 +171,53 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     // This must happen before persisting to the store, so invalid definitions are never stored.
     engine.getOrBuildPlan(definition);
     definitionRegistry.register(definition);
+  }
+
+  /**
+   * Publishes the set of saga names this deployment serves; every other registered saga is refused
+   * at start with {@link SagaDefinitionNotServedException}.
+   *
+   * <p>For a front end whose configuration decides what runs. The store is append-only, so a
+   * definition stays registered long after the configuration that introduced it is gone; without
+   * this, nothing could ever be taken out of service. Sagas already running are unaffected — they
+   * resume by version and never come through the start check.
+   *
+   * <p>Call it after each configuration change, with the complete set.
+   *
+   * @param sagaNames the saga names to serve, copied defensively
+   */
+  public void serve(Set<String> sagaNames) {
+    this.servedDefinitions = Set.copyOf(sagaNames);
+  }
+
+  /**
+   * The definition of {@code sagaName} that a name-only start would run — the store's latest — or
+   * {@code null} when nothing is registered under that name.
+   *
+   * <p>For a caller that maintains definition files and needs to know whether they still describe
+   * what is serving. Registered content is immutable and the store is append-only, so re-writing an
+   * older version's file registers nothing and leaves the newer version winning; without asking,
+   * such a caller cannot tell that its files and the fleet disagree. It gets the whole definition
+   * rather than the version alone because, on finding them disagreeing, what serves is the only
+   * thing left worth validating.
+   */
+  public @Nullable SagaDefinition latestDefinition(String sagaName) {
+    Objects.requireNonNull(sagaName, "sagaName must not be null");
+    return definitionRegistry.resolve(sagaName);
+  }
+
+  /**
+   * Whether {@code version} of {@code sagaName} is already registered.
+   *
+   * <p>With {@link #latestDefinition} this distinguishes the two ways a definition file can name a
+   * version that is not serving: a NEW version, which is an ordinary upgrade about to become the
+   * latest, and an OLDER one that is already stored, which is a rollback that will register nothing
+   * and leave the newer version running.
+   */
+  public boolean isDefinitionRegistered(String sagaName, String version) {
+    Objects.requireNonNull(sagaName, "sagaName must not be null");
+    Objects.requireNonNull(version, "version must not be null");
+    return definitionRegistry.resolve(sagaName, version) != null;
   }
 
   public void register(Path definitionFile) {
@@ -333,14 +402,18 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       // is the backstop.
       asyncExecutor.execute(
           () -> {
+            // What execution decided, or null if it threw before deciding anything. Recorded
+            // rather than branched on, because the dispatch below must stay in the finally: a saga
+            // that reached a terminal state and then threw still owes its caller that callback.
+            SagaStateSnapshot executed = null;
             try {
-              engine.executeSaga(def, saga, input);
+              executed = engine.executeSaga(def, saga, input);
             } catch (Throwable t) {
               // Saga state is persisted — recovery will pick it up
               logger.error("Async saga {} failed unexpectedly", saga.getSagaId(), t);
             } finally {
               try {
-                dispatchCallback(saga.getSagaId(), callback);
+                dispatchCallback(saga.getSagaId(), callback, executed);
               } catch (Throwable t) {
                 logger.error("Failed to dispatch callback for saga {}", saga.getSagaId(), t);
               }
@@ -355,18 +428,66 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     }
   }
 
-  private void dispatchCallback(String sagaId, @Nullable SagaCallback callback) {
+  /**
+   * Reports what execution did to the caller's callback, if it supplied one.
+   *
+   * @param executed the state execution left the saga in, or {@code null} when it threw before
+   *     reaching one — in which case the cause is already logged and there is no outcome to report
+   */
+  private void dispatchCallback(
+      String sagaId, @Nullable SagaCallback callback, @Nullable SagaStateSnapshot executed) {
     if (callback == null) {
       return;
     }
-    SagaStateSnapshot result =
-        store.getStateSnapshot(sagaId).orElseThrow(() -> new SagaNotFoundException(sagaId));
+    // Execution threw before reaching a verdict, so there is no local answer. Fall back to the
+    // store — it may well have completed the saga and failed afterwards, and that caller is still
+    // owed its terminal callback. This read carries the staleness the verdict exists to avoid, but
+    // it is the only source available, and it is confined to the exceptional path.
+    boolean aborted = executed == null;
+    SagaStateSnapshot result;
+    if (executed == null) {
+      result = store.getStateSnapshot(sagaId).orElseThrow(() -> new SagaNotFoundException(sagaId));
+    } else {
+      result = executed;
+    }
+    // Every status is listed and there is no default, deliberately: a new SagaStatus must not
+    // silently inherit another one's callback. Without a default arm, Error Prone's
+    // MissingCasesInEnumSwitch — escalated to an error in the java conventions — fails the build
+    // when one is added, forcing the choice here.
     switch (result.getStatus()) {
       case COMPLETED -> callback.onCompleted(result);
       case COMPENSATED -> callback.onCompensated(result);
       case ESCALATED -> callback.onEscalated(result);
-      default ->
-          logger.warn("Saga {} ended in non-terminal status: {}", sagaId, result.getStatus());
+      // Parked on an async step, waiting for that step's callback or its deadline. Report it
+      // rather than only logging: a caller in a bounded synchronous start has nothing else to
+      // wake on, and would otherwise wait out its whole bound for a saga that stopped progressing
+      // in milliseconds.
+      case WAITING -> callback.onParked(result);
+      // Execution returned without the saga resting anywhere. Since this is execution's own
+      // verdict rather than a later read of shared state, a resume landing elsewhere can no longer
+      // masquerade as either case below — which is what makes the error worth acting on.
+      case RUNNING, COMPENSATING -> {
+        if (aborted) {
+          logger.warn(
+              "Saga {} was left in {} by a failed execution; recovery will reclaim it",
+              sagaId,
+              result.getStatus());
+        } else if (engine.isShuttingDown()) {
+          // The designed hand-off: under WAIT_CURRENT_STEP the engine finishes the running step,
+          // marks the saga for recovery, and returns with it still RUNNING. Debug rather than warn,
+          // because a rolling restart produces one per in-flight saga and none is actionable.
+          logger.debug(
+              "Saga {} left in {} by shutdown; recovery will reclaim it",
+              sagaId,
+              result.getStatus());
+        } else {
+          logger.error(
+              "Saga {} finished executing but is still {} — this is an engine invariant violation,"
+                  + " please report it; recovery will reclaim the saga",
+              sagaId,
+              result.getStatus());
+        }
+      }
     }
   }
 
@@ -642,6 +763,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     if (def == null) {
       throw SagaDefinitionNotFoundException.byName(sagaName);
     }
+    requireServed(sagaName);
     return def;
   }
 
@@ -650,7 +772,29 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     if (def == null) {
       throw SagaDefinitionNotFoundException.byId(id);
     }
+    // Whether a saga is served is a property of the NAME, so pinning a version is refused on the
+    // same basis as a name-only start rather than being a way around it.
+    requireServed(id.name());
     return def;
+  }
+
+  /**
+   * Refuses a start of a saga this deployment does not serve.
+   *
+   * <p>Checked after the definition resolves, so a name nobody ever registered stays a not-found
+   * rather than becoming this: the two are different problems with different fixes. Resolving first
+   * also means the check costs nothing — the served set is an in-memory snapshot and the store read
+   * had to happen anyway.
+   *
+   * <p>Only new starts come through here. In-flight sagas resume through {@link
+   * #resolveDefinition}, so ceasing to serve a saga stops new work without stranding work already
+   * running, or the admin operations that drive it to a conclusion.
+   */
+  private void requireServed(String sagaName) {
+    Set<String> served = servedDefinitions;
+    if (served != null && !served.contains(sagaName)) {
+      throw SagaDefinitionNotServedException.of(sagaName);
+    }
   }
 
   private SagaDefinition resolveDefinition(SagaStateSnapshot saga) {

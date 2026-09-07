@@ -9,6 +9,7 @@ import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaDefinitionNotServedException;
 import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaInvalidRequestException;
@@ -314,6 +315,10 @@ class ErrorMapperTest {
             422,
             SagaErrorCode.SAGA_WRONG_STATE),
         new Arm(SagaStatePreconditionException.parked("s-1"), 422, SagaErrorCode.SAGA_PARKED),
+        new Arm(
+            SagaDefinitionNotServedException.of("order-saga"),
+            422,
+            SagaErrorCode.SAGA_DEFINITION_NOT_SERVED),
         new Arm(
             SagaPersistenceException.storeUnavailable(new RuntimeException("db down")),
             503,

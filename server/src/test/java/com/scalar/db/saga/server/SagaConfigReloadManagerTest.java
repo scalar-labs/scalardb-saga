@@ -10,15 +10,19 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import ch.qos.logback.classic.Level;
+import com.scalar.db.saga.definition.SagaDefinition;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
@@ -40,8 +44,32 @@ class SagaConfigReloadManagerTest {
         Clock.fixed(Instant.parse("2026-08-22T12:00:00Z"), ZoneOffset.UTC));
   }
 
+  /** A store that accepts everything and reports each registration as the serving version. */
+  private static DefinitionStore acceptingStore() {
+    return new DefinitionStore() {
+      private final Map<String, SagaDefinition> serving = new HashMap<>();
+
+      @Override
+      public void register(SagaDefinition definition) {
+        serving.put(definition.getName(), definition);
+      }
+
+      @Override
+      public @Nullable SagaDefinition latest(String sagaName) {
+        return serving.get(sagaName);
+      }
+
+      @Override
+      public boolean isRegistered(String sagaName, String version) {
+        SagaDefinition latest = serving.get(sagaName);
+        return latest != null && version.equals(latest.getVersion());
+      }
+    };
+  }
+
   private ConfigReconciler reconciler(ReloadConfig config) {
-    return new ConfigReconciler(config, definitionsDir, false, services -> {}, definition -> {});
+    return new ConfigReconciler(
+        config, definitionsDir, false, services -> {}, acceptingStore(), names -> {});
   }
 
   @Test
@@ -100,7 +128,8 @@ class SagaConfigReloadManagerTest {
             services -> {
               throw new Error("registrar blew up");
             },
-            definition -> {});
+            acceptingStore(),
+            names -> {});
     SagaConfigReloadManager manager = new SagaConfigReloadManager(reconciler, config, scheduler);
     manager.start();
     ArgumentCaptor<Runnable> task = ArgumentCaptor.forClass(Runnable.class);

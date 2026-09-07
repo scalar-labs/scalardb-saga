@@ -461,15 +461,20 @@ class HttpEndpointManagerTest {
 
     @Test
     void swapHttpEndpoints_retiredListSweptOnceClientsTerminate() throws Exception {
+      // The property is that the retired list does not grow without bound: an entry goes once its
+      // client has terminated. How long that takes is a JDK implementation detail — an idle client
+      // may terminate the instant it is shut down, in which case the sweep at the end of the very
+      // swap that retired it already removes the entry. So nothing here asserts an intermediate
+      // count; that is what made this test flake on CI while passing locally.
       // Arrange — a topology change retires the original endpoint
       HttpEndpointManager manager = managerOf("svc", config("http://svc:8080", Map.of()));
       HttpEndpoint before = java.util.Objects.requireNonNull(manager.endpointOrNull("svc"));
       manager.swapHttpEndpoints(Map.of("svc", config("http://svc:8081", Map.of())));
-      assertThat(manager.retiredCount()).isEqualTo(1);
+      // The retirement itself is what a count would have been standing in for, and this says it
+      // without depending on timing: the endpoint was replaced, not reused.
+      assertThat(manager.endpointOrNull("svc")).isNotSameAs(before);
 
-      // Act — force the retiree's client to terminate (an idle client's graceful termination
-      // latency is a JDK implementation detail and flakes on CI), then the next swap — even a
-      // no-op one — sweeps the entry
+      // Act — force the retiree's client to terminate, then swap again; even a no-op swap sweeps
       before.shutdownNow();
       assertThat(before.awaitTermination(Duration.ofSeconds(10))).isTrue();
       manager.swapHttpEndpoints(Map.of("svc", config("http://svc:8081", Map.of())));

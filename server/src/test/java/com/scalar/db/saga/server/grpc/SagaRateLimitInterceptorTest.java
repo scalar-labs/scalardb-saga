@@ -69,7 +69,10 @@ class SagaRateLimitInterceptorTest {
             .directExecutor()
             .addService(
                 ServerInterceptors.interceptForward(
-                    new SagaServiceImpl(orchestrator, 0L, 60_000L),
+                    new SagaServiceImpl(
+                        orchestrator,
+                        cap -> Math.min(60_000L, cap),
+                        new java.util.concurrent.CompletableFuture<>()),
                     new SagaSecurityInterceptor(new WriteProvider()),
                     new SagaRateLimitInterceptor(new RateLimiter(limit, 60_000L))))
             .build()

@@ -51,7 +51,7 @@ public class ExecutionContext implements SagaContext {
 
   ExecutionContext(String sagaId, Map<String, Object> input, SagaStateSnapshot currentState) {
     this.sagaId = sagaId;
-    input.values().forEach(this::validateType);
+    validateInput(input);
     this.data = new HashMap<>(input);
     this.currentState = currentState;
   }
@@ -137,7 +137,7 @@ public class ExecutionContext implements SagaContext {
   }
 
   void merge(StepResult result) {
-    result.getOutput().values().forEach(this::validateType);
+    result.getOutput().values().forEach(ExecutionContext::validateType);
     data.putAll(result.getOutput());
   }
 
@@ -145,7 +145,22 @@ public class ExecutionContext implements SagaContext {
     return Map.copyOf(data);
   }
 
-  private void validateType(Object value) {
+  /**
+   * Rejects input a saga context cannot hold. Package-private and static so the engine can apply it
+   * <em>before</em> persisting a saga: this used to run only here, on the execution thread, which
+   * left a caller of the asynchronous start path waiting out its whole wait bound for input that
+   * was invalid on arrival.
+   */
+  static void validateInput(Map<String, Object> input) {
+    input.values().forEach(ExecutionContext::validateType);
+  }
+
+  private static void validateType(@Nullable Object value) {
+    if (value == null) {
+      // Reachable from a JSON null in a request body. An IllegalArgumentException maps to a 400;
+      // dereferencing it below would surface a client mistake as a 500.
+      throw new IllegalArgumentException("SagaContext does not allow null values");
+    }
     if (ALLOWED_TYPES.contains(value.getClass())) {
       return;
     }
