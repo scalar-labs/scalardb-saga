@@ -248,13 +248,26 @@ public class SagaServerCommand implements Callable<Integer> {
     if (problems.isEmpty() && result.definitionCount() == 0) {
       problems.add(SagaServer.noDefinitionsMessage());
     }
+    List<String> warnings = unresolvedWarnings(unresolved);
     // The other guard that refuses a boot on configuration alone. Reported alongside the rest
     // rather than instead of them: it is independent of anything the reconciler found.
-    String insecureBinding = SagaServer.insecureBindingRefusal(config);
-    if (insecureBinding != null) {
-      problems.add(insecureBinding);
+    //
+    // Skipped when a setting it reads is standing in for a value this machine could not read. The
+    // rule turns on whether the provider is noop and the host is a loopback address, and reference
+    // text answers neither; judging it anyway breaks both ways, reporting a refusal for a
+    // configuration that boots or none for one that does not.
+    if (unresolved.reasonsByKey().keySet().stream()
+        .anyMatch(SagaServer.insecureBindingKeys()::contains)) {
+      warnings.add(
+          "Whether the server would refuse to start unauthenticated on a network-reachable"
+              + " interface was not checked: a setting that rule reads could not be read on this"
+              + " machine.");
+    } else {
+      String insecureBinding = SagaServer.insecureBindingRefusal(config);
+      if (insecureBinding != null) {
+        problems.add(insecureBinding);
+      }
     }
-    List<String> warnings = unresolvedWarnings(unresolved);
     // Authentication is the startup check an operator most wants covered, so it is always performed
     // here rather than enumerated as skipped. The keys whose secret this machine could not read go
     // with it, so the handful of rules that judge a resolved value stand down for those settings

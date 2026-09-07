@@ -33,6 +33,7 @@ import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -495,13 +496,28 @@ public final class SagaServer implements AutoCloseable {
   }
 
   /**
+   * The settings {@link #insecureBindingRefusal} reads, so an offline check can tell whether its
+   * verdict would rest on a value that machine could not read. Stated beside the rule rather than
+   * at the call site: a rule that comes to read another setting has to name it here too, and both
+   * are in view at once.
+   */
+  static Set<String> insecureBindingKeys() {
+    return Set.of(
+        SagaServerConfig.SECURITY_PROVIDER_KEY,
+        SagaServerConfig.HOST_KEY,
+        SagaServerConfig.INSECURE_MODE_ENABLED_KEY);
+  }
+
+  /**
    * The refusal message for starting unauthenticated on a network-reachable interface, or {@code
    * null} when the binding is acceptable.
    *
    * <p>Shared with {@code --validate-config}, like {@link #noDefinitionsMessage()}: the rule reads
    * three configuration values and nothing else, so an offline check can reach the same verdict,
    * and a configuration this refuses must not be one the validator calls acceptable. Stated once so
-   * the two cannot come to disagree.
+   * the two cannot come to disagree. The settings it reads are named by {@link
+   * #insecureBindingKeys()}, so a caller holding values it could not resolve can tell whether this
+   * verdict would rest on one.
    */
   static @Nullable String insecureBindingRefusal(SagaServerConfig config) {
     if (config.securityProvider().equals("noop")

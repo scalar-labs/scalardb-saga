@@ -445,6 +445,43 @@ class SagaServerCommandTest {
     }
 
     @Test
+    void execute_hostItselfUnreadable_doesNotReportAnInsecureBindingRefusal() throws IOException {
+      // Arrange — the bind address written as a secret reference this machine cannot read. The
+      // rule turns on whether it is a loopback address, which the reference text cannot answer, so
+      // the stand-in would be reported as a public interface and refuse a configuration that boots.
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("order-saga", "account");
+      StringWriter out = new StringWriter();
+      Path config = writeConfig("scalar.db.saga.server.host=${file:UTF-8:/nonexistent/host}");
+
+      // Act
+      int exitCode = validate(out, config);
+
+      // Assert
+      assertThat(exitCode).isEqualTo(0);
+      assertThat(out.toString())
+          .doesNotContain("Refusing to start unauthenticated")
+          .contains("was not checked");
+    }
+
+    @Test
+    void execute_hostReadableAndPublic_stillReportsTheInsecureBindingRefusal() throws IOException {
+      // Arrange — nothing unreadable, so the guard must still fire; skipping it is conditional on
+      // a stand-in and must not have become the general case.
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("order-saga", "account");
+      StringWriter out = new StringWriter();
+      Path config = writeConfig("scalar.db.saga.server.host=0.0.0.0");
+
+      // Act
+      int exitCode = validate(out, config);
+
+      // Assert
+      assertThat(exitCode).isEqualTo(1);
+      assertThat(out.toString()).contains("Refusing to start unauthenticated");
+    }
+
+    @Test
     void execute_providerNameItselfUnreadable_isAcceptedRatherThanCalledUnknown()
         throws IOException {
       // Arrange — the provider name written as a secret reference this machine cannot read. Judging
