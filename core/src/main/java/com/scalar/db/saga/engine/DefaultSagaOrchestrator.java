@@ -466,8 +466,18 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   private void dispatchOutcome(
       String sagaId, @Nullable SagaCallback callback, @Nullable SagaStateSnapshot executed) {
     // Asked once and reused: the answer decides whether this drive does any work at all, and a
-    // second call could disagree with the first if the waiter deregistered in between.
-    boolean watched = settlementListener.isWatching(sagaId);
+    // second call could disagree with the first if the waiter deregistered in between. Guarded for
+    // the same reason as the notification below — a listener that throws here must not cost the
+    // caller its callback, which would leave it waiting out its whole bound for an answer already
+    // in hand. Treated as "nobody is waiting", which is the safe reading: the caller still gets
+    // its callback, and anything that was waiting falls back to its own poll.
+    boolean watched;
+    try {
+      watched = settlementListener.isWatching(sagaId);
+    } catch (Throwable t) {
+      logger.error("Settlement listener failed for saga {}", sagaId, t);
+      watched = false;
+    }
     if (callback == null && !watched) {
       return;
     }
@@ -1076,13 +1086,14 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     }
 
     /**
-     * Installs a listener notified when a saga settles on this process, whichever drive settled it.
+     * Installs a listener notified when a saga settles on this process, on a start or a resume.
      * Defaults to {@link SettlementListener#NO_OP}.
      *
      * <p>A front end uses this to wake a caller waiting on a saga that parked and later resumed:
      * the resume is a separate drive carrying no {@link com.scalar.db.saga.api.SagaCallback}, so
      * the callback from the original start cannot fire again. See {@link SettlementListener} for
-     * what it does and does not guarantee.
+     * what it does and does not guarantee — in particular that it is best-effort, and that a saga
+     * settled by <em>recovery</em> does not reach it even when recovery ran on this process.
      *
      * <p><b>No properties key accompanies this knob, deliberately.</b> Daemon mode gives every
      * builder knob with an operator analogue a {@code scalar.db.saga.*} key, so that running as a

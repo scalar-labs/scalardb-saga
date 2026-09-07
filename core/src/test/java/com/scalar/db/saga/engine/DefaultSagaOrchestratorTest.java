@@ -671,6 +671,43 @@ class DefaultSagaOrchestratorTest {
     }
 
     @Test
+    void startAsync_settlementListenerThrows_stillDispatchesCallback() throws Exception {
+      // Arrange — a front end's listener is third-party code from the engine's point of view, and a
+      // throwing one must not cost the caller its callback: that caller would otherwise wait out
+      // its whole bound for an answer the engine already had. isWatching is asked before anything
+      // else, so it is the one that can swallow the dispatch entirely.
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot runningSaga = snapshot("saga-1", SagaStatus.RUNNING);
+      SagaStateSnapshot completedSaga = snapshot("saga-1", SagaStatus.COMPLETED);
+      SagaCallback callback = mock(SagaCallback.class);
+      SettlementListener listener = mock(SettlementListener.class);
+      when(listener.isWatching("saga-1")).thenThrow(new RuntimeException("listener failure"));
+
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(runningSaga);
+      when(engine.executeSaga(eq(def), any(), any())).thenReturn(completedSaga);
+
+      try (DefaultSagaOrchestrator watched =
+          new DefaultSagaOrchestrator(
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              Integer.MAX_VALUE,
+              Executors.newVirtualThreadPerTaskExecutor(),
+              listener)) {
+        // Act
+        watched.startAsync("transfer", Map.of(), callback);
+
+        // Assert
+        verify(callback, timeout(5000)).onCompleted(completedSaga);
+        verify(listener, never()).onSagaSettled(any());
+      }
+    }
+
+    @Test
     void startAsync_clientSuppliedIdWithCallback_persistsAndDispatchesCallback() throws Exception {
       // Arrange
       SagaDefinition def = definition("transfer");

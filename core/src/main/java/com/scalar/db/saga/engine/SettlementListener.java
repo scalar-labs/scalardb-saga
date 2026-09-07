@@ -22,6 +22,14 @@ import com.scalar.db.saga.api.SagaStateSnapshot;
  * therefore keep a fallback that does not depend on being notified. It is an optimisation that
  * removes latency, not a delivery guarantee.
  *
+ * <p><b>Recovery drives are excluded.</b> A saga settled by the recovery manager does not reach
+ * this listener even when recovery ran on this process, so "whichever drive" above means a start or
+ * a resume, not every drive. Deliberate: every recovery timescale sits at or above a synchronous
+ * wait bound — sixty seconds of staleness, parked deadlines in minutes to hours, a four-hour
+ * compensation grace — so a waiter is almost never still present when recovery settles a saga, and
+ * wiring it would mean carrying this listener to three more drive sites for a case the fallback
+ * already covers.
+ *
  * <p>Implementations must be thread-safe: drives run concurrently on the async executor. They must
  * also be quick and must not block — this runs on the drive's own thread, and a slow listener
  * delays the callback dispatch behind it.

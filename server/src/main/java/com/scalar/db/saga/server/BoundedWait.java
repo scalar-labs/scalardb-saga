@@ -116,6 +116,14 @@ public final class BoundedWait {
         if (polled.getStatus().isTerminal()) {
           return polled;
         }
+        // The read can itself outlive the deadline on a slow store. It is then already the freshest
+        // answer there is, and falling through would read again in the same breath — two
+        // transactions for one answer, on exactly the store this is meant to spare. Only this case:
+        // a tick that finished well before the deadline goes stale by the time the deadline
+        // arrives, and the read below is what makes the bound-expiry answer worth having.
+        if (System.nanoTime() - deadlineNanos >= 0) {
+          return polled;
+        }
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
         break;
