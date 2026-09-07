@@ -195,8 +195,21 @@ docker run --rm --volume "$PWD/conf:/scalardb-saga/conf:ro" \
   --validate-config --config /scalardb-saga/conf/server.properties
 ```
 
-Reads the same files a boot reads and applies the same checks a reload pass applies, then exits:
-`0` when the configuration is acceptable, `1` when it is not, with every problem listed on stdout.
+Reads the same files a boot reads and applies the same checks a reload pass applies, then exits with
+one of:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | The configuration is acceptable. |
+| `1` | It was read and judged, and it is not acceptable. Every problem is listed on stdout. |
+| `2` | The command line was wrong — a missing or unknown option. |
+| `3` | The check did not happen: the file could not be read, or the command failed while running. |
+
+`1` is the only code meaning the configuration was checked and found wanting, so a CI gate should
+test for it specifically. Treating any non-zero as a refusal would let a broken mount, which exits
+`3` without reading the file at all, pass as a successful check. The server itself also exits `3`
+when it fails to start.
+
 It opens no store connection, binds no port, and sends no request, so it is safe to run in CI, in an
 init container, or from a laptop against a configuration destined for production.
 

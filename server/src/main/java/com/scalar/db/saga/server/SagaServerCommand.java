@@ -69,12 +69,34 @@ public class SagaServerCommand implements Callable<Integer> {
   private @Nullable Path configFile;
 
   /**
-   * The exit code for "I checked it and it is not acceptable", kept distinct from picocli's {@code
-   * SOFTWARE} (70), which this command already returns when it fails unexpectedly. A validator that
-   * reported a rejected configuration the same way it reports its own crash would be unusable in a
-   * CI gate, where those two need different handling. 1 is what a linter returns for findings.
+   * The exit code for "I read your configuration and it is not acceptable": at least one problem
+   * was found in a file this command was able to read and judge. 1 is what a linter returns for
+   * findings.
+   *
+   * <p>This is the only code meaning the check ran and reached a verdict. Every other non-zero code
+   * means it did not: {@link CommandLine.ExitCode#USAGE} (2) for arguments picocli rejected, and
+   * {@link #EXECUTION_FAILURE} (3) for a file that could not be read or a failure while running. A
+   * CI gate asserting only that the command exited non-zero therefore asserts nothing; it has to
+   * test for this value specifically.
+   *
+   * <p>Deliberately not picocli's {@code ExitCode.SOFTWARE}, which despite the name is 1 rather
+   * than one of the sysexits.h codes. Returning that for an unexpected failure is exactly what
+   * would collapse the two cases into one number.
    */
   private static final int INVALID_CONFIGURATION = 1;
+
+  /**
+   * The exit code for "the check did not happen": the configuration file could not be read, or the
+   * command failed while running. Also what the server returns when it fails to start, since {@link
+   * #reportStartupFailure} handles both.
+   *
+   * <p>3 rather than 70. 70 is {@code EX_SOFTWARE} from sysexits.h, which reserves it for an
+   * internal error and gives an unreadable input and a bad configuration their own codes (66 and
+   * 78); one code standing for all three would borrow a precision this does not have. Nothing in
+   * the runtime reads either number, so the only property that matters is that it is not {@link
+   * #INVALID_CONFIGURATION}.
+   */
+  private static final int EXECUTION_FAILURE = 3;
 
   @CommandLine.Option(
       names = "--validate-config",
@@ -334,7 +356,7 @@ public class SagaServerCommand implements Callable<Integer> {
       Exception e, CommandLine commandLine, CommandLine.ParseResult parseResult) {
     logger.error("Failed to start the server: {}", describeChain(e));
     logger.debug("Startup failure detail", e);
-    return CommandLine.ExitCode.SOFTWARE;
+    return EXECUTION_FAILURE;
   }
 
   /**

@@ -184,10 +184,15 @@ jobs:
           cp -R .github/smoke/. /tmp/smoke-unacknowledged/
           grep -v 'insecure_mode' .github/smoke/server.properties \
             > /tmp/smoke-unacknowledged/server.properties
-          if docker run --rm \
-              --volume "/tmp/smoke-unacknowledged:/smoke:ro" \
-              scalardb-saga-server:ci --validate-config --config /smoke/server.properties; then
-            echo "::error::--validate-config accepted a configuration the daemon refuses to boot"
+          code=0
+          docker run --rm \
+            --volume "/tmp/smoke-unacknowledged:/smoke:ro" \
+            scalardb-saga-server:ci --validate-config --config /smoke/server.properties || code=$?
+          # 1 is the only code meaning the configuration was read and rejected. Accepting any
+          # non-zero would let a run that never read the file at all — a broken mount exits 3 —
+          # pass this step while asserting nothing about the guard it exists to test.
+          if [ "${code}" -ne 1 ]; then
+            echo "::error::expected exit 1 (configuration rejected), got ${code}"
             exit 1
           fi
 

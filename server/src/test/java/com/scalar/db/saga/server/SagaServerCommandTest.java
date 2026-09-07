@@ -112,7 +112,7 @@ class SagaServerCommandTest {
     // Assert — one ERROR naming the file, carrying no throwable. Logback prints frames only for an
     // event that carries one, so a null throwable is precisely "no stack trace". Asserting the
     // formatted text instead would pass on a pattern that happens not to include %ex.
-    assertThat(exitCode).isEqualTo(CommandLine.ExitCode.SOFTWARE);
+    assertThat(exitCode).isEqualTo(3);
     assertThat(errorEvents())
         .singleElement()
         .satisfies(
@@ -145,7 +145,7 @@ class SagaServerCommandTest {
     // never the value itself: it may be a resolved secret reference, so the parse error carries
     // neither the value nor a NumberFormatException cause, whose message would embed it via
     // describeChain.
-    assertThat(exitCode).isEqualTo(CommandLine.ExitCode.SOFTWARE);
+    assertThat(exitCode).isEqualTo(3);
     assertThat(errorEvents())
         .singleElement()
         .satisfies(
@@ -369,9 +369,30 @@ class SagaServerCommandTest {
       // Act
       int exitCode = validate(out, writeConfig());
 
-      // Assert — 1, not picocli's SOFTWARE: a rejected configuration is a finding, not a crash.
+      // Assert — 1, the code reserved for a verdict: a rejected configuration is a finding, not
+      // a crash, and a crash exits 3.
       assertThat(exitCode).isEqualTo(1);
       assertThat(out.toString()).contains("billing").contains("Configuration is rejected.");
+    }
+
+    @Test
+    void execute_rejectedAndUnreadableConfigsGiven_returnDifferentExitCodes() throws IOException {
+      // Arrange — one configuration the command reads and rejects, and one it cannot read at all.
+      StringWriter out = new StringWriter();
+      StringWriter err = new StringWriter();
+      writeService("account", "base_url=http://account:8080\n");
+
+      // Act
+      int rejected = validate(out, writeConfig());
+      int unreadable =
+          executeCapturingErr(
+              err, "--validate-config", "--config", "/nonexistent/server.properties");
+
+      // Assert — a CI gate reads the code to tell "read it and refused it" apart from "never got
+      // that far", so these two must not collide. Asserted as literals rather than through the
+      // constants: the numbers themselves are the contract with a caller that cannot see them.
+      assertThat(rejected).isEqualTo(1);
+      assertThat(unreadable).isEqualTo(3);
     }
 
     @Test
