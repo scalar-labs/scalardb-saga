@@ -1225,6 +1225,19 @@ public final class SagaServerConfig {
    * transports. {@link #syncTimeoutMillis()} and a gRPC client's call deadline can only tighten
    * this bound, never exceed it, so a synchronous start can never block indefinitely. Defaults to
    * {@value #DEFAULT_SYNC_MAX_WAIT_MILLIS} ms.
+   *
+   * <p>It also sets the cadence of the poll behind a bounded wait: the interval is a sixth of the
+   * effective bound, floored at a second and capped at thirty. Raising the bound therefore does two
+   * things at once — more sagas finish inside it and never reach the poll at all, and those that do
+   * are polled less often. A deployment whose ingress tolerates a longer request can raise it.
+   *
+   * <p><b>It bounds one server-side call, not how long a caller waits.</b> A REST or raw-gRPC
+   * client receives its answer when the bound elapses and decides for itself whether to ask again.
+   * The Java client SDK's blocking {@code start()} keeps re-issuing {@code AwaitSaga} until the
+   * saga is terminal, because it delivers the embedded orchestrator's contract over a bounded
+   * server; raising or lowering this value changes how long the server is occupied per call, not
+   * how long that caller blocks. The bound on that is the SDK's own default deadline, which is
+   * unset — and so unbounded — unless the application configures one.
    */
   public long syncMaxWaitMillis() {
     return syncMaxWaitMillis;

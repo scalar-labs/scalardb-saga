@@ -31,6 +31,7 @@ import com.scalar.db.saga.rpc.SagaServiceGrpc.SagaServiceBlockingStub;
 import com.scalar.db.saga.rpc.SagaSnapshot;
 import com.scalar.db.saga.rpc.StartSagaRequest;
 import com.scalar.db.saga.server.SagaServerConfig;
+import com.scalar.db.saga.server.SagaWaiterRegistry;
 import io.grpc.ManagedChannel;
 import io.grpc.Server;
 import io.grpc.Status;
@@ -67,6 +68,9 @@ class SagaServiceImplTest {
   private static final Instant TS = Instant.ofEpochSecond(1_700_000_000L, 123);
 
   private SagaOrchestrator orchestrator;
+  // The registry every stub in a test shares, so a test can play the part of a drive that settles
+  // the saga without going through the orchestrator — which is exactly what a resumed drive does.
+  private final SagaWaiterRegistry waiterRegistry = new SagaWaiterRegistry();
   private final List<ManagedChannel> channels = new ArrayList<>();
   private final List<Server> servers = new ArrayList<>();
 
@@ -414,6 +418,106 @@ class SagaServiceImplTest {
   }
 
   @Test
+  void startSaga_parkedSagaIsResumedOnThisReplica_returnsOutcomeWithoutWaitingOutTheBound() {
+    // Arrange — the saga parks, then a resumed drive settles it on this process. That drive carries
+    // no SagaCallback, so the registry is the only thing that can wake the waiter. The bound is 30s
+    // and the store would report WAITING, so answering COMPLETED promptly is only possible if the
+    // registry did the waking.
+    SagaStateSnapshot parked = snapshot("gen-r", SagaStatus.WAITING);
+    when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
+        .thenAnswer(
+            invocation -> {
+              invocation.getArgument(2, SagaCallback.class).onParked(parked);
+              return "gen-r";
+            });
+    when(orchestrator.getStateSnapshot("gen-r")).thenReturn(parked);
+    Thread resume =
+        new Thread(
+            () -> {
+              try {
+                Thread.sleep(200L);
+              } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+              }
+              waiterRegistry.onSagaSettled(snapshot("gen-r", SagaStatus.COMPLETED));
+            });
+
+    // Act
+    long startNanos = System.nanoTime();
+    resume.start();
+    SagaSnapshot response = stub(30_000).startSaga(startByName("transfer", false));
+    long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+
+    // Assert — the outcome, delivered when the saga settled rather than when the bound elapsed.
+    assertThat(response.getStatus())
+        .isEqualTo(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_COMPLETED);
+    assertThat(elapsedMillis).isLessThan(10_000L);
+  }
+
+  @Test
+  void startSaga_parkedSagaSettlesElsewhere_isSeenByAPollTickBeforeTheBound() {
+    // Arrange — the saga parks and is then resumed on *another* replica, so nothing on this process
+    // notifies the waiter: neither the start callback (dead at the park) nor the registry (the
+    // resumed drive ran elsewhere). The poll tick is the only thing that can answer before the
+    // bound. A 6s bound derives the 1s floor, so a tick lands well inside it; without the tick this
+    // would answer at 6s from the read at bound expiry.
+    SagaStateSnapshot parked = snapshot("gen-e", SagaStatus.WAITING);
+    when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
+        .thenAnswer(
+            invocation -> {
+              invocation.getArgument(2, SagaCallback.class).onParked(parked);
+              return "gen-e";
+            });
+    when(orchestrator.getStateSnapshot("gen-e"))
+        .thenReturn(snapshot("gen-e", SagaStatus.COMPLETED));
+
+    // Act
+    long startNanos = System.nanoTime();
+    SagaSnapshot response = stub(6_000).startSaga(startByName("transfer", false));
+    long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+
+    // Assert
+    assertThat(response.getStatus())
+        .isEqualTo(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_COMPLETED);
+    // Answering this far inside the bound is only possible via a tick.
+    assertThat(elapsedMillis).isLessThan(4_000L);
+  }
+
+  @Test
+  void awaitSaga_sagaSettlesOnThisReplica_returnsWithoutPolling() {
+    // Arrange — AwaitSaga's long-poll is the path finding 5 is about. A saga settled through the
+    // registry must end the window at once, and the only store read is the one before the wait.
+    when(orchestrator.getStateSnapshot("await-1"))
+        .thenReturn(snapshot("await-1", SagaStatus.RUNNING));
+    Thread settle =
+        new Thread(
+            () -> {
+              try {
+                Thread.sleep(200L);
+              } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+              }
+              waiterRegistry.onSagaSettled(snapshot("await-1", SagaStatus.COMPENSATED));
+            });
+
+    // Act
+    long startNanos = System.nanoTime();
+    settle.start();
+    SagaSnapshot response =
+        stub(30_000).awaitSaga(AwaitSagaRequest.newBuilder().setSagaId("await-1").build());
+    long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+
+    // Assert
+    assertThat(response.getStatus())
+        .isEqualTo(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_COMPENSATED);
+    assertThat(elapsedMillis).isLessThan(10_000L);
+    // One read: the existence check before the wait. Waking through the registry means no poll.
+    verify(orchestrator).getStateSnapshot("await-1");
+  }
+
+  @Test
   void startSaga_syncSagaStillParkedWhenTheBoundElapses_returnsWaitingSnapshot() {
     // Arrange — the async step has not reported back by the time the bound elapses, so the saga is
     // genuinely unfinished. Non-terminal is the gRPC analogue of REST's 202 and the saga keeps
@@ -572,7 +676,10 @@ class SagaServiceImplTest {
         .thenReturn(snapshot("s-2", SagaStatus.RUNNING))
         .thenReturn(snapshot("s-2", SagaStatus.COMPENSATED));
 
-    SagaSnapshot response = stub(0).awaitSaga(awaitRequest("s-2"));
+    // A bounded window, because the poll interval derives from the bound: the 60s default would
+    // put the first tick 10s away and cost this test ten seconds of wall clock. 6s derives the 1s
+    // floor instead, which is what the tick below waits for.
+    SagaSnapshot response = stub(0).awaitSaga(awaitRequest("s-2", 6_000L));
 
     assertThat(response.getStatus())
         .isEqualTo(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_COMPENSATED);
@@ -628,7 +735,8 @@ class SagaServiceImplTest {
                   new SagaServiceImpl(
                       orchestrator,
                       waitBound(syncTimeoutMillis, syncMaxWaitMillis),
-                      shutdownSignal))
+                      shutdownSignal,
+                      waiterRegistry))
               .build()
               .start());
     } catch (IOException e) {

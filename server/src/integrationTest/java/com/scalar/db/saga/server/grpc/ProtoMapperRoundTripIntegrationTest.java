@@ -73,7 +73,10 @@ class ProtoMapperRoundTripIntegrationTest {
                 // at all. Stated as a zero bound rather than as the old 0/0 key pair, which
                 // encoded a sync.max_wait_millis the config layer rejects (it must be >= 1).
                 new SagaServiceImpl(
-                    orchestrator, cap -> 0L, new java.util.concurrent.CompletableFuture<>()))
+                    orchestrator,
+                    cap -> 0L,
+                    new java.util.concurrent.CompletableFuture<>(),
+                    new com.scalar.db.saga.server.SagaWaiterRegistry()))
             .addService(
                 ServerInterceptors.intercept(new AdminServiceImpl(orchestrator, 0L), identity()))
             .build()

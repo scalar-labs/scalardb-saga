@@ -16,6 +16,7 @@ import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
+import com.scalar.db.saga.server.SagaWaiterRegistry;
 import com.scalar.db.saga.server.security.SagaAuthRequest;
 import com.scalar.db.saga.server.security.SagaAuthenticationException;
 import com.scalar.db.saga.server.security.SagaIdentity;
@@ -55,14 +56,17 @@ class SagaResourceStartTest {
   private Javalin app;
   private SagaOrchestrator orchestrator;
   private CompletableFuture<Void> shutdownSignal;
+  // Held so a test can settle a saga through it, which is what a resumed drive does.
+  private SagaWaiterRegistry waiterRegistry;
 
   private void startServer(long syncWaitBoundMillis) {
     shutdownSignal = new CompletableFuture<>();
     orchestrator = mock(SagaOrchestrator.class);
+    waiterRegistry = new SagaWaiterRegistry();
     app = Javalin.create();
     SagaSecurityHandler.register(app, new RoleHeaderProvider());
     ErrorMapper.register(app);
-    SagaResource.register(app, orchestrator, syncWaitBoundMillis, shutdownSignal);
+    SagaResource.register(app, orchestrator, syncWaitBoundMillis, shutdownSignal, waiterRegistry);
     app.start(0);
   }
 
@@ -165,6 +169,74 @@ class SagaResourceStartTest {
     // bound, from the parked snapshot and without ever reading the store.
     assertThat(elapsedMillis).isGreaterThanOrEqualTo(250L);
     verify(orchestrator).getStateSnapshot(SAGA_ID);
+  }
+
+  @Test
+  void postSagas_parkedSagaIsResumedOnThisReplica_returns200WithoutWaitingOutTheBound()
+      throws Exception {
+    // Arrange — the saga parks, then a resumed drive settles it on this process. That drive carries
+    // no SagaCallback, so the registry is the only thing that can wake the waiter. The bound is 30s
+    // and the store would report WAITING, so answering COMPLETED promptly is only possible if the
+    // registry did the waking.
+    when(orchestrator.startAsync(eq(SAGA_NAME), anyMap(), any(SagaCallback.class)))
+        .thenAnswer(
+            invocation -> {
+              invocation.getArgument(2, SagaCallback.class).onParked(snapshot(SagaStatus.WAITING));
+              return SAGA_ID;
+            });
+    when(orchestrator.getStateSnapshot(SAGA_ID)).thenReturn(snapshot(SagaStatus.WAITING));
+    Thread resume =
+        new Thread(
+            () -> {
+              try {
+                Thread.sleep(200L);
+              } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+              }
+              waiterRegistry.onSagaSettled(snapshot(SagaStatus.COMPLETED));
+            });
+
+    // Act
+    long startNanos = System.nanoTime();
+    resume.start();
+    HttpResponse<String> response = post("/sagas", "{\"sagaName\":\"" + SAGA_NAME + "\"}");
+    long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+    resume.join();
+
+    // Assert — the outcome, delivered when the saga settled rather than when the bound elapsed.
+    assertThat(response.statusCode()).isEqualTo(200);
+    assertThat(response.body()).contains("COMPLETED");
+    assertThat(elapsedMillis).isLessThan(10_000L);
+  }
+
+  @Test
+  void postSagas_parkedSagaSettlesElsewhere_isSeenByAPollTickBeforeTheBound() throws Exception {
+    // Arrange — the saga parks and is then resumed on *another* replica, so nothing on this process
+    // notifies the waiter: neither the start callback (dead at the park) nor the registry (the
+    // resumed drive ran elsewhere). The poll tick is the only thing that can answer before the
+    // bound. A 6s bound derives the 1s floor, so a tick lands well inside it; without the tick this
+    // would answer at 6s from the read at bound expiry.
+    app.stop();
+    startServer(6_000L);
+    when(orchestrator.startAsync(eq(SAGA_NAME), anyMap(), any(SagaCallback.class)))
+        .thenAnswer(
+            invocation -> {
+              invocation.getArgument(2, SagaCallback.class).onParked(snapshot(SagaStatus.WAITING));
+              return SAGA_ID;
+            });
+    when(orchestrator.getStateSnapshot(SAGA_ID)).thenReturn(snapshot(SagaStatus.COMPLETED));
+
+    // Act
+    long startNanos = System.nanoTime();
+    HttpResponse<String> response = post("/sagas", "{\"sagaName\":\"" + SAGA_NAME + "\"}");
+    long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(200);
+    assertThat(response.body()).contains("COMPLETED");
+    // Answering this far inside the bound is only possible via a tick.
+    assertThat(elapsedMillis).isLessThan(4_000L);
   }
 
   @Test

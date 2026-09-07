@@ -4,14 +4,13 @@ import com.scalar.db.saga.api.SagaCallback;
 import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.exception.SagaInvalidRequestException;
+import com.scalar.db.saga.server.BoundedWait;
+import com.scalar.db.saga.server.SagaWaiterRegistry;
 import com.scalar.db.saga.server.security.SagaOperation;
 import io.javalin.Javalin;
 import io.javalin.http.Context;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -90,7 +89,8 @@ public final class SagaResource {
       Javalin app,
       SagaOrchestrator orchestrator,
       long syncWaitBoundMillis,
-      CompletableFuture<Void> shutdownSignal) {
+      CompletableFuture<Void> shutdownSignal,
+      SagaWaiterRegistry waiterRegistry) {
     app.post(
         "/sagas",
         ctx -> {
@@ -104,7 +104,13 @@ public final class SagaResource {
             String sagaId =
                 orchestrator.startAsync(request.requireSagaName(), input, outcomeSignal(outcome));
             respondBoundedSync(
-                ctx, orchestrator, sagaId, outcome, shutdownSignal, syncWaitBoundMillis);
+                ctx,
+                orchestrator,
+                waiterRegistry,
+                sagaId,
+                outcome,
+                shutdownSignal,
+                syncWaitBoundMillis);
           }
         },
         SagaOperation.START_SAGA);
@@ -123,7 +129,13 @@ public final class SagaResource {
             orchestrator.startAsync(
                 sagaId, request.requireSagaName(), input, outcomeSignal(outcome));
             respondBoundedSync(
-                ctx, orchestrator, sagaId, outcome, shutdownSignal, syncWaitBoundMillis);
+                ctx,
+                orchestrator,
+                waiterRegistry,
+                sagaId,
+                outcome,
+                shutdownSignal,
+                syncWaitBoundMillis);
           }
         },
         SagaOperation.START_SAGA);
@@ -193,23 +205,27 @@ public final class SagaResource {
   private static void respondBoundedSync(
       Context ctx,
       SagaOrchestrator orchestrator,
+      SagaWaiterRegistry waiterRegistry,
       String sagaId,
       CompletableFuture<SagaStateSnapshot> outcome,
       CompletableFuture<Void> shutdownSignal,
       long timeoutMillis) {
-    try {
-      CompletableFuture.anyOf(outcome, shutdownSignal).get(timeoutMillis, TimeUnit.MILLISECONDS);
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-    } catch (TimeoutException | ExecutionException e) {
-      // The bound elapsed, or the shutdown signal completed exceptionally. Either way the saga's
-      // own state below is the answer, so there is nothing to handle here.
+    SagaStateSnapshot snapshot;
+    // The callback was registered before the saga id existed, and the registry only after: on a
+    // server-generated id there is nothing to register under until startAsync returns, by which
+    // time the saga may already have settled. The callback closes that window for the first drive;
+    // the registry covers the drives that carry none, above all the one that resumes the saga after
+    // an asynchronous step.
+    CompletableFuture<SagaStateSnapshot> settledLocally = new CompletableFuture<>();
+    try (SagaWaiterRegistry.Waiter waiter = waiterRegistry.register(sagaId, settledLocally)) {
+      snapshot =
+          BoundedWait.awaitWithin(
+              settledLocally,
+              outcome,
+              shutdownSignal,
+              timeoutMillis,
+              () -> orchestrator.getStateSnapshot(sagaId));
     }
-    // The callback's snapshot when it arrived; otherwise read the current one. Reading covers both
-    // the elapsed bound and shutdown, and means a saga that reached a terminal state in the
-    // meantime still answers 200 rather than a blanket 202.
-    SagaStateSnapshot settled = outcome.getNow(null);
-    SagaStateSnapshot snapshot = settled != null ? settled : orchestrator.getStateSnapshot(sagaId);
     respond(ctx, snapshot.getStatus().isTerminal() ? 200 : 202, snapshot);
   }
 

@@ -8,6 +8,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
@@ -46,6 +47,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.AfterEach;
@@ -1094,6 +1096,109 @@ class DefaultSagaOrchestratorTest {
       assertThat(captor.getValue().getStepName()).isEqualTo("s1");
       assertThat(result).isSameAs(running);
       verify(engine, timeout(2_000)).resumeFrom(def, context, 2);
+    }
+
+    @Test
+    void completeStepAsync_watchedSagaSettles_notifiesTheSettlementListener() {
+      // Arrange — the same parked saga, resumed by a drive that carries no SagaCallback. The
+      // callback from the original start died at the park, so the listener is the only path by
+      // which a caller still waiting can learn the saga finished.
+      SettlementListener listener = mock(SettlementListener.class);
+      when(listener.isWatching("saga-1")).thenReturn(true);
+      SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
+      SagaDefinition def = definition("test-saga");
+      SagaStateSnapshot running = snapshot("saga-1", SagaStatus.RUNNING);
+      SagaStateSnapshot completed = snapshot("saga-1", SagaStatus.COMPLETED);
+      List<SagaEvent> events =
+          List.of(
+              StatusEvent.started(null),
+              StepEvent.completed(0, "s0", null),
+              StepEvent.pending(1, "s1"));
+      ExecutionContext context = new ExecutionContext("saga-1", Map.of(), running);
+
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(waiting));
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(store.getEvents("saga-1")).thenReturn(events);
+      when(store.resumeParkedStep(eq(waiting), eq(events.size()), any(StepEvent.class)))
+          .thenReturn(running);
+      when(engine.replayEvents(eq(running), any())).thenReturn(context);
+      // The forward drive completes the saga, which is what the context carries afterwards.
+      doAnswer(
+              invocation -> {
+                context.setCurrentState(completed);
+                return null;
+              })
+          .when(engine)
+          .resumeFrom(def, context, 2);
+
+      try (DefaultSagaOrchestrator watched =
+          new DefaultSagaOrchestrator(
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              Integer.MAX_VALUE,
+              Executors.newVirtualThreadPerTaskExecutor(),
+              listener)) {
+        // Act
+        watched.completeStepAsync("saga-1", "s1", Map.of());
+
+        // Assert
+        verify(listener, timeout(2_000)).onSagaSettled(completed);
+      }
+    }
+
+    @Test
+    void completeStepAsync_sagaParksAgain_doesNotNotifyTheSettlementListener() {
+      // Arrange — a saga with a second asynchronous step parks again instead of settling. The
+      // waiter has nothing to act on, so it must keep waiting rather than be woken with a
+      // non-terminal state.
+      SettlementListener listener = mock(SettlementListener.class);
+      when(listener.isWatching("saga-1")).thenReturn(true);
+      SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
+      SagaDefinition def = definition("test-saga");
+      SagaStateSnapshot running = snapshot("saga-1", SagaStatus.RUNNING);
+      List<SagaEvent> events =
+          List.of(
+              StatusEvent.started(null),
+              StepEvent.completed(0, "s0", null),
+              StepEvent.pending(1, "s1"));
+      ExecutionContext context = new ExecutionContext("saga-1", Map.of(), running);
+
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(waiting));
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(store.getEvents("saga-1")).thenReturn(events);
+      when(store.resumeParkedStep(eq(waiting), eq(events.size()), any(StepEvent.class)))
+          .thenReturn(running);
+      when(engine.replayEvents(eq(running), any())).thenReturn(context);
+      doAnswer(
+              invocation -> {
+                context.setCurrentState(snapshot("saga-1", SagaStatus.WAITING));
+                return null;
+              })
+          .when(engine)
+          .resumeFrom(def, context, 2);
+
+      try (DefaultSagaOrchestrator watched =
+          new DefaultSagaOrchestrator(
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              Integer.MAX_VALUE,
+              Executors.newVirtualThreadPerTaskExecutor(),
+              listener)) {
+        // Act
+        watched.completeStepAsync("saga-1", "s1", Map.of());
+
+        // Assert
+        verify(engine, timeout(2_000)).resumeFrom(def, context, 2);
+        verify(listener, never()).onSagaSettled(any());
+      }
     }
 
     @Test

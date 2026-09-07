@@ -16,6 +16,8 @@ import com.scalar.db.saga.rpc.SagaDetail;
 import com.scalar.db.saga.rpc.SagaServiceGrpc;
 import com.scalar.db.saga.rpc.SagaSnapshot;
 import com.scalar.db.saga.rpc.StartSagaRequest;
+import com.scalar.db.saga.server.BoundedWait;
+import com.scalar.db.saga.server.SagaWaiterRegistry;
 import io.grpc.Context;
 import io.grpc.stub.StreamObserver;
 import java.io.IOException;
@@ -23,9 +25,6 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.function.LongUnaryOperator;
 import net.jcip.annotations.ThreadSafe;
 import org.jspecify.annotations.Nullable;
@@ -55,11 +54,6 @@ import org.jspecify.annotations.Nullable;
 @ThreadSafe
 public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
 
-  /**
-   * Store-poll interval for {@link #awaitSaga} while waiting for an existing saga to go terminal.
-   */
-  private static final long AWAIT_POLL_INTERVAL_MILLIS = 200L;
-
   private static final TypeReference<LinkedHashMap<String, Object>> MAP_TYPE =
       new TypeReference<>() {};
 
@@ -70,15 +64,20 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
   // Completed when the server begins shutting down; ends a bounded wait early. See
   // startBoundedSync.
   private final CompletableFuture<Void> shutdownSignal;
+  // Wakes a bounded wait the moment the saga settles on this process, including on the drive that
+  // resumes it after an asynchronous step, which carries no SagaCallback.
+  private final SagaWaiterRegistry waiterRegistry;
   private final ObjectMapper objectMapper = new ObjectMapper();
 
   public SagaServiceImpl(
       SagaOrchestrator orchestrator,
       LongUnaryOperator syncWaitBound,
-      CompletableFuture<Void> shutdownSignal) {
+      CompletableFuture<Void> shutdownSignal,
+      SagaWaiterRegistry waiterRegistry) {
     this.orchestrator = Objects.requireNonNull(orchestrator, "orchestrator must not be null");
     this.syncWaitBound = Objects.requireNonNull(syncWaitBound, "syncWaitBound must not be null");
     this.shutdownSignal = Objects.requireNonNull(shutdownSignal, "shutdownSignal must not be null");
+    this.waiterRegistry = Objects.requireNonNull(waiterRegistry, "waiterRegistry must not be null");
   }
 
   @Override
@@ -131,30 +130,45 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
   }
 
   /**
-   * Polls the store until {@code sagaId} is terminal or {@code boundMillis} elapses, returning the
-   * latest snapshot either way. The first {@link SagaOrchestrator#getStateSnapshot} also validates
+   * Waits until {@code sagaId} is terminal or {@code boundMillis} elapses, returning the latest
+   * snapshot either way. The first {@link SagaOrchestrator#getStateSnapshot} also validates
    * existence (throws {@link com.scalar.db.saga.exception.SagaNotFoundException} → {@code
-   * NOT_FOUND}). Runs on a virtual thread, so the polling sleep is cheap. Stops early if the client
-   * cancels or its connection drops ({@link Context#isCancelled()}), so we do not keep polling the
-   * store for a caller that is gone.
+   * NOT_FOUND}).
+   *
+   * <p>Registration precedes that first read, deliberately: a saga settling in between would
+   * otherwise notify nobody, and the caller would wait out its whole bound for an outcome that had
+   * already happened. Runs on a virtual thread, so a blocked wait is cheap.
    */
   private SagaStateSnapshot awaitTerminalOrBound(String sagaId, long boundMillis) {
-    long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(boundMillis);
-    SagaStateSnapshot snapshot = orchestrator.getStateSnapshot(sagaId);
-    while (!snapshot.getStatus().isTerminal() && !Context.current().isCancelled()) {
-      long remainingMillis = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
-      if (remainingMillis <= 0L) {
-        break;
+    CompletableFuture<SagaStateSnapshot> settledLocally = new CompletableFuture<>();
+    try (SagaWaiterRegistry.Waiter waiter = waiterRegistry.register(sagaId, settledLocally)) {
+      SagaStateSnapshot snapshot = orchestrator.getStateSnapshot(sagaId);
+      if (snapshot.getStatus().isTerminal()) {
+        return snapshot;
       }
-      try {
-        Thread.sleep(Math.min(AWAIT_POLL_INTERVAL_MILLIS, remainingMillis));
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        break;
-      }
-      snapshot = orchestrator.getStateSnapshot(sagaId);
+      return BoundedWait.awaitWithin(
+          settledLocally,
+          null,
+          abortSignal(),
+          boundMillis,
+          () -> orchestrator.getStateSnapshot(sagaId));
     }
-    return snapshot;
+  }
+
+  /**
+   * Ends a bounded wait early when the server begins shutting down, or when the client cancels or
+   * its connection drops.
+   *
+   * <p>The cancellation half is why this is a listener rather than a per-tick {@link
+   * Context#isCancelled()} check: the poll interval scales with the bound and reaches tens of
+   * seconds, so a departed caller would otherwise hold its thread until the next tick.
+   */
+  private CompletableFuture<?> abortSignal() {
+    CompletableFuture<Void> cancelled = new CompletableFuture<>();
+    // Fires immediately if the context is already cancelled. The listener is scoped to this call's
+    // context, so it is discarded with the call and needs no explicit removal.
+    Context.current().addListener(context -> cancelled.complete(null), Runnable::run);
+    return CompletableFuture.anyOf(shutdownSignal, cancelled);
   }
 
   private SagaStateSnapshot startAsyncAndSnapshot(
@@ -165,22 +179,27 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
 
   private SagaStateSnapshot startBoundedSync(StartSagaRequest request, Map<String, Object> input) {
     CompletableFuture<SagaStateSnapshot> outcome = new CompletableFuture<>();
+    // The callback is registered before the saga id exists, and the registry after: on a
+    // server-generated id there is no id to register under until dispatchStart returns, by which
+    // time the saga may already have settled. The callback closes that window for the first drive;
+    // the registry covers the drives that carry none.
     String sagaId = dispatchStart(request, input, outcomeSignal(outcome));
-    try {
-      CompletableFuture.anyOf(outcome, shutdownSignal)
-          .get(computeBoundMillis(Long.MAX_VALUE), TimeUnit.MILLISECONDS);
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-    } catch (TimeoutException | ExecutionException e) {
-      // The bound elapsed, or the shutdown signal completed exceptionally; the snapshot below is
-      // the answer either way.
+    SagaStateSnapshot settled;
+    CompletableFuture<SagaStateSnapshot> settledLocally = new CompletableFuture<>();
+    try (SagaWaiterRegistry.Waiter waiter = waiterRegistry.register(sagaId, settledLocally)) {
+      settled =
+          BoundedWait.awaitWithin(
+              settledLocally,
+              outcome,
+              abortSignal(),
+              computeBoundMillis(Long.MAX_VALUE),
+              () -> snapshotAfterStart(sagaId));
     }
     // Never cancel the saga. Shutdown short-circuits the wait rather than letting it run to the
     // bound: the bound is a maximum, not a promise to wait, and a terminating server cannot advance
-    // the saga anyway. Whatever ended the wait, return the freshest state — its status is the
+    // the saga anyway. Whatever ended the wait, this is the freshest state — its status is the
     // source of truth, and a non-terminal one is the gRPC analogue of REST's 202.
-    SagaStateSnapshot settled = outcome.getNow(null);
-    return settled != null ? settled : snapshotAfterStart(sagaId);
+    return settled;
   }
 
   /**

@@ -17,6 +17,7 @@ import com.scalar.db.saga.rpc.SagaServiceGrpc;
 import com.scalar.db.saga.rpc.SagaServiceGrpc.SagaServiceBlockingStub;
 import com.scalar.db.saga.rpc.SagaSnapshot;
 import com.scalar.db.saga.rpc.StartSagaRequest;
+import com.scalar.db.saga.server.SagaWaiterRegistry;
 import com.scalar.db.saga.server.security.SagaAuthRequest;
 import com.scalar.db.saga.server.security.SagaAuthUnavailableException;
 import com.scalar.db.saga.server.security.SagaAuthenticationException;
@@ -72,7 +73,8 @@ class SagaSecurityInterceptorTest {
                     new SagaServiceImpl(
                         orchestrator,
                         cap -> Math.min(60_000L, cap),
-                        new java.util.concurrent.CompletableFuture<>()),
+                        new java.util.concurrent.CompletableFuture<>(),
+                        new SagaWaiterRegistry()),
                     new SagaSecurityInterceptor(new RoleHeaderProvider())))
             .build()
             .start();
@@ -207,7 +209,8 @@ class SagaSecurityInterceptorTest {
                     new SagaServiceImpl(
                         orchestrator,
                         cap -> Math.min(60_000L, cap),
-                        new java.util.concurrent.CompletableFuture<>()),
+                        new java.util.concurrent.CompletableFuture<>(),
+                        new SagaWaiterRegistry()),
                     new SagaSecurityInterceptor(provider)))
             .build()
             .start();

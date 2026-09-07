@@ -95,6 +95,8 @@ public final class SagaServer implements AutoCloseable {
 
   private final SagaServerConfig config;
   private final DefaultSagaOrchestrator orchestrator;
+  // Shared by the engine, which notifies it, and both transports, whose waiters register on it.
+  private final SagaWaiterRegistry waiterRegistry;
   private final SagaSecurityProvider securityProvider;
   // The shared per-principal saga-start limiter, or null when rate limiting is disabled. Shared by
   // both transports (REST before-handler and gRPC interceptor) so a caller's budget spans both.
@@ -125,17 +127,34 @@ public final class SagaServer implements AutoCloseable {
    * @param config the server configuration
    */
   public SagaServer(SagaServerConfig config) {
-    this(config, buildDefaultSagaOrchestrator(config));
+    // The registry is created here rather than inside the orchestrator build so that one instance
+    // reaches both the engine (as a settlement listener) and the two transports (as the place their
+    // waiters register). Passing it as an argument lets the delegating constructor below use it
+    // twice without needing a local.
+    this(config, new SagaWaiterRegistry());
+  }
+
+  private SagaServer(SagaServerConfig config, SagaWaiterRegistry waiterRegistry) {
+    this(config, buildDefaultSagaOrchestrator(config, waiterRegistry), waiterRegistry);
   }
 
   /**
    * Visible for testing: builds the server around an already-constructed {@link
    * DefaultSagaOrchestrator}, so a test can inject a mock to exercise definition loading and route
-   * wiring without a database.
+   * wiring without a database. The orchestrator supplied here is not wired to the registry, so a
+   * saga settling on it notifies no waiter — which is what a mock orchestrator does anyway.
    */
   SagaServer(SagaServerConfig config, DefaultSagaOrchestrator orchestrator) {
+    this(config, orchestrator, new SagaWaiterRegistry());
+  }
+
+  private SagaServer(
+      SagaServerConfig config,
+      DefaultSagaOrchestrator orchestrator,
+      SagaWaiterRegistry waiterRegistry) {
     this.config = Objects.requireNonNull(config, "config must not be null");
     this.orchestrator = Objects.requireNonNull(orchestrator, "orchestrator must not be null");
+    this.waiterRegistry = Objects.requireNonNull(waiterRegistry, "waiterRegistry must not be null");
     // TLS material is validated first, in its own guarded step: the orchestrator is the only
     // resource alive yet, and both transports below consume the result.
     TlsMaterial tlsMaterial = null;
@@ -270,7 +289,8 @@ public final class SagaServer implements AutoCloseable {
    */
   private Server buildGrpcServer(ExecutorService executor, HealthStatusManager health) {
     SagaServiceImpl service =
-        new SagaServiceImpl(orchestrator, config::syncWaitBoundMillis, shutdownSignal);
+        new SagaServiceImpl(
+            orchestrator, config::syncWaitBoundMillis, shutdownSignal, waiterRegistry);
     AdminServiceImpl adminService = new AdminServiceImpl(orchestrator, adminDriveDeadlineMillis());
     SagaSecurityInterceptor security = new SagaSecurityInterceptor(securityProvider);
     NettyServerBuilder builder =
@@ -337,11 +357,13 @@ public final class SagaServer implements AutoCloseable {
     return ServerInterceptors.interceptForward(service, interceptors);
   }
 
-  private static DefaultSagaOrchestrator buildDefaultSagaOrchestrator(SagaServerConfig config) {
+  private static DefaultSagaOrchestrator buildDefaultSagaOrchestrator(
+      SagaServerConfig config, SagaWaiterRegistry waiterRegistry) {
     Objects.requireNonNull(config, "config must not be null");
     DefaultSagaOrchestrator.Builder builder =
         DefaultSagaOrchestrator.newBuilder()
-            .storeFactory(ScalarDbSagaStoreFactory.create(config.properties()));
+            .storeFactory(ScalarDbSagaStoreFactory.create(config.properties()))
+            .settlementListener(waiterRegistry);
     applyEngineSettings(builder, config);
     return builder.build();
   }
@@ -495,7 +517,11 @@ public final class SagaServer implements AutoCloseable {
     HealthResource.register(httpServer);
     ErrorMapper.register(httpServer);
     SagaResource.register(
-        httpServer, orchestrator, config.syncWaitBoundMillis(Long.MAX_VALUE), shutdownSignal);
+        httpServer,
+        orchestrator,
+        config.syncWaitBoundMillis(Long.MAX_VALUE),
+        shutdownSignal,
+        waiterRegistry);
     SagaAdminResource.register(httpServer, orchestrator, adminDriveDeadlineMillis());
     // The async-callback route exists only when a callback secret is configured; without it there
     // is nothing to authenticate callbacks against, so async completion is not enabled.
