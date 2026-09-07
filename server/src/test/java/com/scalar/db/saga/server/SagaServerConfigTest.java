@@ -1587,6 +1587,31 @@ class SagaServerConfigTest {
     }
 
     @Test
+    public void load_validatedSettingUnreadableEitherWay_reachesTheSameOutcome() {
+      // Arrange — the two ways a secret can be unavailable, on a setting that checks its own shape.
+      // Both must land in the same place, or the report would call one of them a value that failed
+      // its range check and the other a value it could not read.
+      SagaServerConfig.UnresolvedSecrets viaEnv = new SagaServerConfig.UnresolvedSecrets();
+      SagaServerConfig.UnresolvedSecrets viaFile = new SagaServerConfig.UnresolvedSecrets();
+
+      // Act
+      SagaServerConfig fromEnv =
+          SagaServerConfig.load(
+              propertiesWith(SagaServerConfig.HTTP_PORT_KEY, "${env:NO_SUCH_PORT_VARIABLE}"),
+              viaEnv);
+      SagaServerConfig fromFile =
+          SagaServerConfig.load(
+              propertiesWith(SagaServerConfig.HTTP_PORT_KEY, "${file:UTF-8:/nonexistent/port}"),
+              viaFile);
+
+      // Assert — both recorded, both dropped to the default rather than parsed from a stand-in.
+      assertThat(viaEnv.reasonsByKey()).containsOnlyKeys(SagaServerConfig.HTTP_PORT_KEY);
+      assertThat(viaFile.reasonsByKey()).containsOnlyKeys(SagaServerConfig.HTTP_PORT_KEY);
+      assertThat(fromEnv.httpPort()).isEqualTo(SagaServerConfig.DEFAULT_HTTP_PORT);
+      assertThat(fromFile.httpPort()).isEqualTo(SagaServerConfig.DEFAULT_HTTP_PORT);
+    }
+
+    @Test
     public void load_unprefixedPlaceholderGiven_recordsNothing() {
       // A ${NAME} with no lookup prefix resolves on no machine, so calling it absent here would
       // soften something wrong everywhere. It stands as written, exactly as the daemon leaves it.
