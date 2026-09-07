@@ -89,4 +89,25 @@ final class SecretResolver {
   String resolve(String value) {
     return substitutor.replace(value);
   }
+
+  /**
+   * Whether {@code value} is written entirely as one {@code ${env:...}} reference. Paired with a
+   * resolution that returned the value unchanged, this is what tells an undefined environment
+   * variable from an ordinary literal: such a reference is left verbatim rather than raised, so
+   * without this nothing marks it and the reference text stands in as though it were a value.
+   *
+   * <p>Only {@code env}. A {@code ${file:...}} reference that cannot be read raises instead of
+   * passing through, so it is already recorded; an unknown prefix ({@code ${script:...}}) or an
+   * unprefixed {@code ${NAME}} resolves on no machine, and calling that "absent here" would soften
+   * something wrong everywhere.
+   *
+   * <p>Whole-value by design: a reference surrounded by other text would have to be located inside
+   * the value before it could be named, and the rest of that value may be an inline secret.
+   */
+  static boolean isEnvReference(String value) {
+    String trimmed = value.trim();
+    return trimmed.length() > "${env:}".length()
+        && trimmed.startsWith("${env:")
+        && trimmed.endsWith("}");
+  }
 }

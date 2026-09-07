@@ -997,7 +997,17 @@ public final class SagaServerConfig {
         continue;
       }
       try {
-        resolved.setProperty(key, resolver.resolve(value));
+        String resolvedValue = resolver.resolve(value);
+        resolved.setProperty(key, resolvedValue);
+        // An undefined ${env:NAME} is left verbatim rather than raised, so the catch below never
+        // sees it and the reference text would stand in as though it were a value. Record it the
+        // way an unreadable file is recorded: the variable is absent from this machine, not from
+        // the configuration, so a check run against the stand-in would be judging the machine.
+        if (unresolved != null
+            && resolvedValue.equals(value)
+            && SecretResolver.isEnvReference(value)) {
+          unresolved.record(key, "no such environment variable");
+        }
       } catch (PermanentReferenceException e) {
         // Wrong wherever it runs, so never softened: tolerating it would pass a configuration that
         // cannot start a server.

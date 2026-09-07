@@ -81,11 +81,11 @@ final class ApiKeyConfig {
    *     reference, a reference did not resolve (unchanged after resolution), a resolved key is
    *     blank, or a role is unknown/missing
    */
-  static ApiKeyConfig from(Properties resolved, Properties raw) {
+  static ApiKeyConfig from(Properties resolved, Properties raw, Set<String> unresolvedKeys) {
     String header = valueOrDefault(resolved.getProperty(HEADER_KEY), DEFAULT_HEADER);
     List<Definition> definitions = new ArrayList<>();
     for (String name : keyNames(resolved)) {
-      definitions.add(parseDefinition(name, resolved, raw));
+      definitions.add(parseDefinition(name, resolved, raw, unresolvedKeys));
     }
     if (definitions.isEmpty()) {
       throw new IllegalArgumentException(
@@ -120,7 +120,8 @@ final class ApiKeyConfig {
     return names;
   }
 
-  private static Definition parseDefinition(String name, Properties resolved, Properties raw) {
+  private static Definition parseDefinition(
+      String name, Properties resolved, Properties raw, Set<String> unresolvedKeys) {
     String secretKey = KEY_PREFIX + name + SECRET_SUFFIX;
     String rawSecret = raw.getProperty(secretKey);
     if (rawSecret == null || !isSecretReference(rawSecret)) {
@@ -138,7 +139,13 @@ final class ApiKeyConfig {
     // resolver leaves verbatim). Fail fast rather than silently treating the reference text as the
     // key — otherwise a typo'd or unset variable becomes a literal-string key no client can
     // present.
-    if (secret.equals(rawSecret)) {
+    //
+    // Skipped for a key the caller has already established this machine cannot read, which is the
+    // ordinary case for an offline check: there the stand-in IS the reference text, so this would
+    // fire on every run and describe the machine rather than the configuration. Every other rule
+    // here needs no resolved value and still applies, which is the point of scoping it this
+    // narrowly. Empty above stays unconditional: a stand-in is the reference text, never blank.
+    if (!unresolvedKeys.contains(secretKey) && secret.equals(rawSecret)) {
       throw new IllegalArgumentException(
           "'"
               + secretKey

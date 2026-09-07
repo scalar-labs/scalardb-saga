@@ -255,21 +255,17 @@ public class SagaServerCommand implements Callable<Integer> {
       problems.add(insecureBinding);
     }
     List<String> warnings = unresolvedWarnings(unresolved);
-    // Authentication is the startup check an operator most wants covered, so it is performed here
-    // rather than enumerated as skipped — except when a secret it reads could not be read on this
-    // machine, where the API-key rules would report a reference as unresolved and be describing
-    // this machine rather than the configuration.
-    if (unresolved.reasonsByKey().keySet().stream()
-        .anyMatch(key -> key.startsWith(SagaServerConfig.SECURITY_PREFIX))) {
-      warnings.add(
-          "The authentication settings were not checked: a secret they use could not be read on"
-              + " this machine.");
-    } else {
-      try {
-        SecurityProviderFactory.validate(config);
-      } catch (RuntimeException e) {
-        problems.add(describeChain(e));
-      }
+    // Authentication is the startup check an operator most wants covered, so it is always performed
+    // here rather than enumerated as skipped. The keys whose secret this machine could not read go
+    // with it, so the handful of rules that judge a resolved value stand down for those settings
+    // alone; every rule that needs no value still runs. Skipping the whole check instead would
+    // switch authentication validation off entirely for API-key deployments, which are required to
+    // write every key as a secret reference and therefore always have an unreadable one here. Each
+    // such setting is already named by its own warning, so nothing goes unsaid.
+    try {
+      SecurityProviderFactory.validate(config, unresolved.reasonsByKey().keySet());
+    } catch (RuntimeException e) {
+      problems.add(describeChain(e));
     }
     warnings.addAll(result.warnings());
     return report(

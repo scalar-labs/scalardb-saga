@@ -396,6 +396,78 @@ class SagaServerCommandTest {
     }
 
     @Test
+    void execute_typoedProviderWithAnUnreadableApiKey_stillReportsTheProvider() throws IOException {
+      // Arrange — the shape every API-key deployment has offline: keys must be secret references,
+      // so one is always unreadable on a machine without the secrets, which is this command's
+      // machine. The provider name is wrong and needs no secret to judge.
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("order-saga", "account");
+      StringWriter out = new StringWriter();
+      Path config =
+          writeConfig(
+              "scalar.db.saga.server.security.provider=bogus-typo",
+              "scalar.db.saga.server.security.apikey.key.svc.secret=${file:UTF-8:/nonexistent/k}",
+              "scalar.db.saga.server.security.apikey.key.svc.roles=saga:read");
+
+      // Act
+      int exitCode = validate(out, config);
+
+      // Assert — the unreadable key must not take the rest of the check with it.
+      assertThat(exitCode).isEqualTo(1);
+      assertThat(out.toString()).contains("Unknown security provider").contains("Supported:");
+    }
+
+    @Test
+    void execute_apiKeyReferencingAnUnsetEnvVariable_isAcceptedAndSaysWhatWasSkipped()
+        throws IOException {
+      // Arrange — a configuration that is correct where it will run; the variable is simply not set
+      // on the machine validating it, which is the ordinary case for this command.
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("order-saga", "account");
+      StringWriter out = new StringWriter();
+      Path config =
+          writeConfig(
+              "scalar.db.saga.server.security.provider=apikey",
+              "scalar.db.saga.server.security.apikey.key.svc.secret=${env:NO_SUCH_VAR_FOR_TEST}",
+              "scalar.db.saga.server.security.apikey.key.svc.roles=saga:read");
+
+      // Act
+      int exitCode = validate(out, config);
+
+      // Assert — accepted, and the setting whose value could not be read is named rather than
+      // reported as a broken reference.
+      assertThat(exitCode).isEqualTo(0);
+      assertThat(out.toString())
+          .contains("Configuration is acceptable.")
+          .contains("scalar.db.saga.server.security.apikey.key.svc.secret")
+          .contains("no such environment variable")
+          .doesNotContain("did not resolve");
+    }
+
+    @Test
+    void execute_inlineApiKeyWithAnotherUnreadableKey_isStillRejected() throws IOException {
+      // Arrange — the inline-key rule reads the raw value only, so an unreadable secret elsewhere
+      // must not excuse a key written in plaintext.
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("order-saga", "account");
+      StringWriter out = new StringWriter();
+      Path config =
+          writeConfig(
+              "scalar.db.saga.server.security.provider=apikey",
+              "scalar.db.saga.server.security.apikey.key.svc.secret=plaintext-key",
+              "scalar.db.saga.server.security.apikey.key.svc.roles=saga:read",
+              "scalar.db.saga.server.security.apikey.key.other.secret=${file:UTF-8:/nonexistent/k}",
+              "scalar.db.saga.server.security.apikey.key.other.roles=saga:read");
+
+      // Act
+      int exitCode = validate(out, config);
+
+      // Assert
+      assertThat(exitCode).isEqualTo(1);
+      assertThat(out.toString()).contains("must be a secret reference");
+    }
+
+    @Test
     void execute_noDefinitionsGiven_exitsOneMirroringTheBootGuard() throws IOException {
       // Arrange — a daemon refuses to start with nothing registered, so a validator that passed
       // this would bless a configuration that cannot boot.

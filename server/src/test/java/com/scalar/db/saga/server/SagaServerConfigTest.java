@@ -1558,6 +1558,48 @@ class SagaServerConfigTest {
     }
 
     @Test
+    public void load_undefinedEnvReferenceGiven_recordsTheKey() {
+      // Arrange — an undefined ${env:...} is left verbatim rather than raised, so nothing else
+      // marks it and the reference text would stand in as though it were the host. Uses a setting
+      // with no value rules, so what is observed is the recording rather than a parse rejection.
+      Properties properties =
+          propertiesWith(SagaServerConfig.HOST_KEY, "${env:NO_SUCH_VARIABLE_FOR_THIS_TEST}");
+      SagaServerConfig.UnresolvedSecrets unresolved = new SagaServerConfig.UnresolvedSecrets();
+
+      // Act
+      SagaServerConfig config = SagaServerConfig.load(properties, unresolved);
+
+      // Assert — named like an unreadable file, so a caller knows its verdict does not cover it.
+      assertThat(config).isNotNull();
+      assertThat(unresolved.reasonsByKey()).containsOnlyKeys(SagaServerConfig.HOST_KEY);
+    }
+
+    @Test
+    public void load_undefinedEnvReferenceGiven_passesThroughWithoutACollector() {
+      // The daemon's mode is unchanged by that recording: nothing is raised and the value stands as
+      // written, which is what the reference-did-not-expand rules downstream detect.
+      Properties properties =
+          propertiesWith(SagaServerConfig.HOST_KEY, "${env:NO_SUCH_VARIABLE_FOR_THIS_TEST}");
+
+      SagaServerConfig config = SagaServerConfig.load(properties);
+
+      assertThat(config.host()).isEqualTo("${env:NO_SUCH_VARIABLE_FOR_THIS_TEST}");
+    }
+
+    @Test
+    public void load_unprefixedPlaceholderGiven_recordsNothing() {
+      // A ${NAME} with no lookup prefix resolves on no machine, so calling it absent here would
+      // soften something wrong everywhere. It stands as written, exactly as the daemon leaves it.
+      Properties properties = propertiesWith(SagaServerConfig.HOST_KEY, "${NO_PREFIX_HERE}");
+      SagaServerConfig.UnresolvedSecrets unresolved = new SagaServerConfig.UnresolvedSecrets();
+
+      SagaServerConfig config = SagaServerConfig.load(properties, unresolved);
+
+      assertThat(config.host()).isEqualTo("${NO_PREFIX_HERE}");
+      assertThat(unresolved.isEmpty()).isTrue();
+    }
+
+    @Test
     public void load_readableSecretGiven_recordsNothing(@TempDir Path dir) throws IOException {
       // Arrange — leniency is invisible where the secret is present.
       Path token = Files.writeString(dir.resolve("owner"), "replica-7");

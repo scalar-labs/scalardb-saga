@@ -4,6 +4,7 @@ import com.scalar.db.saga.server.security.ApiKeySecurityProvider;
 import com.scalar.db.saga.server.security.JwtSecurityProvider;
 import com.scalar.db.saga.server.security.NoopSecurityProvider;
 import com.scalar.db.saga.server.security.SagaSecurityProvider;
+import java.util.Set;
 
 /**
  * Builds the configured {@link SagaSecurityProvider} from a {@link SagaServerConfig}, selected by
@@ -28,15 +29,26 @@ final class SecurityProviderFactory {
    * as {@link #create}'s and sit beside them so a new provider cannot be added to one and forgotten
    * in the other.
    *
+   * <p>{@code unresolvedKeys} names the settings whose secret this machine could not read, so the
+   * few rules that judge a resolved value can stand down for those alone. Every other rule — the
+   * provider name, the JWKS scheme, a key given inline rather than as a reference — needs no
+   * resolved value and runs regardless, which is what keeps an unreadable secret from taking the
+   * whole check with it. Only the API-key provider is given the set: nothing under {@code
+   * security.jwt.} is a secret (a JWKS URL, an issuer, an audience are all public identifiers), so
+   * no JWT rule reads a value that could be standing in.
+   *
    * @param config the server configuration
+   * @param unresolvedKeys the settings whose secret this machine could not read
    * @throws IllegalArgumentException if the provider name or its settings are not valid
    */
-  static void validate(SagaServerConfig config) {
+  static void validate(SagaServerConfig config, Set<String> unresolvedKeys) {
     String name = config.securityProvider();
     switch (name) {
       case "noop" -> {}
       case "jwt" -> JwtSecurityProvider.validate(config.properties());
-      case "apikey" -> ApiKeySecurityProvider.validate(config.properties(), config.rawProperties());
+      case "apikey" ->
+          ApiKeySecurityProvider.validate(
+              config.properties(), config.rawProperties(), unresolvedKeys);
       default -> throw unknownProvider(name);
     }
   }
