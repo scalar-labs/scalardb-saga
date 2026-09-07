@@ -445,6 +445,30 @@ class SagaServerCommandTest {
     }
 
     @Test
+    void execute_providerNameItselfUnreadable_isAcceptedRatherThanCalledUnknown()
+        throws IOException {
+      // Arrange — the provider name written as a secret reference this machine cannot read. Judging
+      // the stand-in would report an unknown provider in the same report that says the value was
+      // not checked, and refuse a configuration that starts where the secret is present.
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("order-saga", "account");
+      StringWriter out = new StringWriter();
+      Path config =
+          writeConfig(
+              "scalar.db.saga.server.security.provider=${file:UTF-8:/nonexistent/provider}");
+
+      // Act
+      int exitCode = validate(out, config);
+
+      // Assert
+      assertThat(exitCode).isEqualTo(0);
+      assertThat(out.toString())
+          .doesNotContain("Unknown security provider")
+          .contains("scalar.db.saga.server.security.provider")
+          .contains("Configuration is acceptable.");
+    }
+
+    @Test
     void execute_inlineApiKeyWithAnotherUnreadableKey_isStillRejected() throws IOException {
       // Arrange — the inline-key rule reads the raw value only, so an unreadable secret elsewhere
       // must not excuse a key written in plaintext.

@@ -42,6 +42,14 @@ final class SecurityProviderFactory {
    * @throws IllegalArgumentException if the provider name or its settings are not valid
    */
   static void validate(SagaServerConfig config, Set<String> unresolvedKeys) {
+    if (unresolvedKeys.contains(SagaServerConfig.SECURITY_PROVIDER_KEY)) {
+      // The provider name is itself standing in for a value this machine could not read, so
+      // neither it nor the settings belonging to whichever provider it names can be judged. The
+      // caller already warns that the setting went unchecked; reporting the reference text as an
+      // unknown provider would contradict that warning in the same report and refuse a
+      // configuration that starts wherever the value can be read.
+      return;
+    }
     String name = config.securityProvider();
     switch (name) {
       case "noop" -> {}
