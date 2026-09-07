@@ -76,6 +76,34 @@ final class ServiceSecretResolver implements ServiceValueResolver {
   }
 
   /**
+   * Where {@code path} lands once symlinks are followed, defined for a target that does not exist:
+   * the deepest ancestor that does exist is resolved, and the segments walked past are re-attached
+   * to it. For a target that exists this is exactly {@link Path#toRealPath}.
+   *
+   * <p>This is what lets containment be judged for a reference to a file that is not on this
+   * machine, which is the ordinary case offline. Comparing such a path as written instead would
+   * reject a reference reaching the root through a symlinked ancestor, an everyday container shape
+   * ({@code /var/run} is usually a link to {@code /run}).
+   *
+   * <p>Deliberately not normalized before the walk: {@code /var/run/..} is {@code /var} as text but
+   * names {@code /} once {@code /var/run} is followed, so simplifying here would place the
+   * reference somewhere it does not land.
+   */
+  private static Path landingPath(Path path) throws IOException {
+    Path absolute = path.toAbsolutePath();
+    Path existing = absolute;
+    while (existing != null && !Files.exists(existing)) {
+      existing = existing.getParent();
+    }
+    if (existing == null) {
+      // No component of the path is on this machine, so there is nothing to follow and the path as
+      // written is the best statement of where it lands.
+      return absolute;
+    }
+    return existing.toRealPath().resolve(existing.relativize(absolute));
+  }
+
+  /**
    * The containment check for a secrets root that does not resolve: compares the paths as written,
    * after normalizing {@code .} and {@code ..} away.
    *
@@ -136,10 +164,14 @@ final class ServiceSecretResolver implements ServiceValueResolver {
                     + "; ${file:...} references in service files resolve only inside it",
                 e));
       }
-      // toRealPath resolves symlinks, so a link inside the root pointing outside it lands on the
-      // real target and fails the startsWith check — the escape this confinement exists to stop.
-      Path real = path.toRealPath();
-      if (!real.startsWith(realRoot)) {
+      // Where the reference lands once symlinks are followed, so a link inside the root pointing
+      // outside it is judged by its real target and not by its location — the escape this
+      // confinement exists to stop. Computed from the deepest ancestor that exists, because
+      // toRealPath needs the target itself and on the machine an offline check runs the secret is
+      // usually absent; without that, a reference naming no existing file would reach neither
+      // containment check and an escape would pass as merely missing here.
+      Path landing = landingPath(path);
+      if (!landing.startsWith(realRoot)) {
         // Not an UncheckedIOException like its neighbours: this one must stay fatal even for a
         // caller that tolerates unresolvable references. See PermanentReferenceException.
         throw new PermanentReferenceException(
@@ -150,6 +182,9 @@ final class ServiceSecretResolver implements ServiceValueResolver {
                 + "' "
                 + Redaction.redacted(secretsRoot.toString()));
       }
+      // Containment is settled, so a target that is not here is now only a fact about this
+      // machine, and the handler below reports it as one.
+      Path real = path.toRealPath();
       if (!Files.isRegularFile(real)) {
         throw new UncheckedIOException(new IOException("'" + path + "' is not a regular file"));
       }

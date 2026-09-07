@@ -92,6 +92,35 @@ class ServiceSecretResolverTest {
   }
 
   @Test
+  void resolve_escapingReferenceNamingNoExistingFile_throwsPermanent() throws IOException {
+    // The gap every other containment test misses: they all write the escaping file first, so the
+    // symlink-following lookup succeeds and the check runs. Here the target does not exist, which
+    // is the ordinary state of a machine validating a configuration — and a mount path typed wrong
+    // ("/run/secret" for "/run/secrets") names no file either. Wrong wherever it runs, so it must
+    // not soften into "absent from this machine".
+    Path absentOutside = outsideDir.resolve("no-such-token");
+
+    assertThatThrownBy(() -> resolver().resolve("${file:UTF-8:" + absentOutside + "}"))
+        .isInstanceOf(PermanentReferenceException.class)
+        .hasMessageContaining("resolves outside");
+  }
+
+  @Test
+  void resolve_missingFileReachedThroughASymlinkedAncestor_reportsUnreadableNotEscaping()
+      throws IOException {
+    // The shape that a path-as-written comparison would reject: a container's /var/run is a link to
+    // /run, so this reference is inside the root even though the text does not match. It must stay
+    // an ordinary "not on this machine", or an offline check would refuse a configuration the
+    // daemon starts on.
+    Path link = Files.createSymbolicLink(outsideDir.resolve("link-to-secrets"), secretsDir);
+
+    assertThatThrownBy(() -> resolver().resolve("${file:UTF-8:" + link.resolve("absent") + "}"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .isNotInstanceOf(PermanentReferenceException.class)
+        .hasMessageContaining("cannot be read");
+  }
+
+  @Test
   void resolve_missingFile_throwsWithoutContents() {
     assertThatThrownBy(() -> resolver().resolve("${file:UTF-8:" + secretsDir.resolve("nope") + "}"))
         .isInstanceOf(IllegalArgumentException.class)
