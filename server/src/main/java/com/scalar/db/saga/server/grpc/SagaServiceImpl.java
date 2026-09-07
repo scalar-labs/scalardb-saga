@@ -148,13 +148,20 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
       }
       // Polling from the start, unlike a start: an awaited saga may be driven on any replica, so
       // no push can be assumed to reach us and there is no park signal to wait for.
+      //
+      // A cancelled call answers from the snapshot above rather than reading again. The response is
+      // discarded — the caller is gone — so paying a store transaction for it is waste, and waste
+      // on the path a departing client takes, which is where a struggling deployment sheds load.
+      // This is what the poll loop this replaced did implicitly, by returning the last snapshot it
+      // held; expressing it in the read itself keeps it out of BoundedWait, which has no business
+      // knowing why a wait ended.
       return BoundedWait.awaitWithin(
           settledLocally,
           null,
           abortSignal(),
           null,
           boundMillis,
-          () -> orchestrator.getStateSnapshot(sagaId));
+          () -> Context.current().isCancelled() ? snapshot : orchestrator.getStateSnapshot(sagaId));
     }
   }
 

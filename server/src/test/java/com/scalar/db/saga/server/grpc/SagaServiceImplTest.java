@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -476,6 +477,36 @@ class SagaServiceImplTest {
   }
 
   @Test
+  void startSaga_pollReadOutlivesTheBound_answersFromItRatherThanReadingAgain() {
+    // A poll tick can itself outlive the deadline when the store is slow. The wait must then answer
+    // from that read: falling through to the bound-expiry read would issue two transactions in the
+    // same breath, on exactly the store this is meant to spare, and at the moment it is least able
+    // to serve them. Bound 2s, interval 1s, and the single tick at 1s takes 1.5s — so it returns
+    // half a second past the deadline.
+    SagaStateSnapshot parked = snapshot("gen-slow", SagaStatus.WAITING);
+    when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
+        .thenAnswer(
+            invocation -> {
+              invocation.getArgument(2, SagaCallback.class).onParked(parked);
+              return "gen-slow";
+            });
+    when(orchestrator.getStateSnapshot("gen-slow"))
+        .thenAnswer(
+            invocation -> {
+              Thread.sleep(1_500L);
+              return parked;
+            });
+
+    // Act
+    SagaSnapshot response = stub(2_000).startSaga(startByName("transfer", false));
+
+    // Assert — the tick's own answer, and only the one read that produced it.
+    assertThat(response.getStatus())
+        .isEqualTo(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_WAITING);
+    verify(orchestrator, times(1)).getStateSnapshot("gen-slow");
+  }
+
+  @Test
   void startSaga_sagaParks_startsPollingForWhatAPushCanNoLongerCatch() {
     // The mirror of the above. Once parked, the saga can be resumed on another replica, where no
     // push reaches this process — so polling becomes the only way to notice before the bound.
@@ -522,6 +553,43 @@ class SagaServiceImplTest {
         .isEqualTo(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_COMPLETED);
     // Answering this far inside the bound is only possible via a tick.
     assertThat(elapsedMillis).isLessThan(4_000L);
+  }
+
+  @Test
+  void awaitSaga_callerCancels_doesNotReadTheStoreAgain() throws Exception {
+    // A cancelled call's response is discarded, so a store read to build it is pure waste. The poll
+    // loop this replaced returned the last snapshot it held; the rewrite must not lose that.
+    //
+    // Its own server, on a real executor: the shared helper uses directExecutor, which runs the
+    // handler inline on the calling thread, so nothing could cancel the call while it was in
+    // flight. A 12s bound derives a 2s interval, so an unhandled cancellation would be plainly
+    // visible as several extra reads.
+    when(orchestrator.getStateSnapshot("await-c"))
+        .thenReturn(snapshot("await-c", SagaStatus.RUNNING));
+
+    String name = InProcessServerBuilder.generateName();
+    servers.add(
+        InProcessServerBuilder.forName(name)
+            .addService(
+                new SagaServiceImpl(
+                    orchestrator,
+                    waitBound(12_000, 12_000),
+                    new CompletableFuture<>(),
+                    waiterRegistry))
+            .build()
+            .start());
+    ManagedChannel channel = InProcessChannelBuilder.forName(name).build();
+    channels.add(channel);
+
+    // Act — start the call, then cancel it from this thread while the server is waiting.
+    com.google.common.util.concurrent.ListenableFuture<SagaSnapshot> call =
+        SagaServiceGrpc.newFutureStub(channel).awaitSaga(awaitRequest("await-c"));
+    Thread.sleep(500L);
+    call.cancel(true);
+
+    // Assert — the existence check only. Give the server a moment to observe the cancellation and
+    // unwind; a second read would mean paying for an answer nobody will see.
+    verify(orchestrator, timeout(5_000).times(1)).getStateSnapshot("await-c");
   }
 
   @Test
