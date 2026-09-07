@@ -5,6 +5,7 @@ import java.io.UncheckedIOException;
 import java.nio.charset.Charset;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Map;
 import org.apache.commons.text.StringSubstitutor;
 import org.apache.commons.text.lookup.StringLookup;
@@ -182,18 +183,21 @@ final class ServiceSecretResolver implements ServiceValueResolver {
                 + "' "
                 + Redaction.redacted(secretsRoot.toString()));
       }
-      // Containment is settled, so a target that is not here is now only a fact about this
-      // machine, and the handler below reports it as one.
-      Path real = path.toRealPath();
-      if (!Files.isRegularFile(real)) {
+      // Read through the path just judged instead of resolving the reference a second time: two
+      // resolutions can disagree if a symlink is swapped between them, which would check one file
+      // and read another. Containment being settled is also what makes a target that is not here
+      // safe to report as a fact about this machine, which the attribute read raises and the
+      // handler below words.
+      BasicFileAttributes attributes = Files.readAttributes(landing, BasicFileAttributes.class);
+      if (!attributes.isRegularFile()) {
         throw new UncheckedIOException(new IOException("'" + path + "' is not a regular file"));
       }
-      if (Files.size(real) > MAX_SECRET_FILE_BYTES) {
+      if (attributes.size() > MAX_SECRET_FILE_BYTES) {
         throw new UncheckedIOException(
             new IOException(
                 "'" + path + "' exceeds the " + MAX_SECRET_FILE_BYTES + "-byte secret cap"));
       }
-      return Files.readString(real, charset);
+      return Files.readString(landing, charset);
     } catch (IOException e) {
       // The cause is named by class rather than quoted: a filesystem exception's message is the
       // path it failed on, which after symlink resolution need not be the one the operator wrote.
