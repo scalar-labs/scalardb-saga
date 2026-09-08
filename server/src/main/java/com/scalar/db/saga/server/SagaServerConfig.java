@@ -56,6 +56,13 @@ import org.jspecify.annotations.Nullable;
  *       authenticated principal, so it is only per-caller once a real provider (jwt or apikey) is
  *       configured; under {@code noop} every request is the same {@code "anonymous"} principal and
  *       the limit acts as one global bucket shared by all callers
+ *   <li>{@code max_concurrent_saga_starts} — maximum sagas starting at once; {@code 0} (default)
+ *       means no cap. A permit is held per drive, so a parked saga holds none, and resumes,
+ *       recovery and admin drives are never refused. At the cap a start is refused with {@code
+ *       DB-SAGA-20006} before anything is persisted, so the saga does not exist and its ID stays
+ *       free. Size it together with {@code max_start_requests_per_minute}, which bounds how often
+ *       one principal may ask rather than how many starts run at once; see {@link
+ *       #maxConcurrentSagaStarts()}
  * </ul>
  *
  * <h2>Transports ({@code http.*} / {@code grpc.*})</h2>
@@ -65,13 +72,6 @@ import org.jspecify.annotations.Nullable;
  * not name the same fixed port.
  *
  * <ul>
- *   <li>{@code max_concurrent_saga_starts} — maximum sagas starting at once; {@code 0} (default)
- *       means no cap. A permit is held per drive, so a parked saga holds none, and resumes,
- *       recovery and admin drives are never refused. At the cap a start is refused with {@code
- *       DB-SAGA-20006} before anything is persisted, so the saga does not exist and its ID stays
- *       free. Size it together with {@code max_start_requests_per_minute}, which bounds how often
- *       one principal may ask rather than how many starts run at once; see {@link
- *       #maxConcurrentSagaStarts()}
  *   <li>{@code http.enabled} / {@code grpc.enabled} — whether to serve that transport (default
  *       {@code true} each); set one to {@code false} to run single-transport
  *   <li>{@code http.port} — HTTP listen port (default {@value #DEFAULT_HTTP_PORT}; {@code 0} binds
@@ -82,7 +82,9 @@ import org.jspecify.annotations.Nullable;
  *       (defaults {@value #DEFAULT_MAX_THREADS} / {@value #DEFAULT_MIN_THREADS}). Handlers run on
  *       virtual threads, so the max caps how many requests are <em>dispatched</em> at once, not how
  *       many are in flight: a request waiting on its saga costs no pool thread. It therefore does
- *       not bound concurrent saga execution — nothing does yet
+ *       not bound concurrent saga execution: {@code max_concurrent_saga_starts} bounds admitted
+ *       starts and {@code recovery.max_concurrent_recoveries} bounds a recovery pass, while resume
+ *       and admin drives are bounded by neither
  *   <li>{@code http.max_queued_requests} — cap on the pool's job queue, so the dispatch backlog is
  *       memory-bounded and the pool rejects rather than growing without limit. Defaults to {@value
  *       #DEFAULT_MAX_QUEUED_REQUESTS_PER_THREAD} × {@code http.max_threads}. Because a blocking
@@ -486,7 +488,7 @@ public final class SagaServerConfig {
       DefaultSagaOrchestrator.DEFAULT_SAGA_TIMEOUT_MILLIS;
   static final int DEFAULT_MAX_START_REQUESTS_PER_MINUTE = 0;
   static final int DEFAULT_MAX_CONCURRENT_SAGA_STARTS =
-      DefaultSagaOrchestrator.DEFAULT_MAX_CONCURRENT_SAGA_STARTS; // 0 = disabled (no rate limiting)
+      DefaultSagaOrchestrator.DEFAULT_MAX_CONCURRENT_SAGA_STARTS; // 0 = disabled (no admission cap)
 
   /**
    * Returns the maximum number of timeline events a single {@code getSagaDetail} read returns
