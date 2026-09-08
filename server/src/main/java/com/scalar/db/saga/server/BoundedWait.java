@@ -91,76 +91,109 @@ public final class BoundedWait {
       @Nullable CompletableFuture<?> pollFrom,
       long boundMillis,
       Supplier<SagaStateSnapshot> read) {
-    long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(boundMillis);
-    long intervalMillis = pollIntervalMillis(boundMillis);
-    boolean polling = pollFrom == null || pollFrom.isDone();
-    CompletableFuture<?> wakeUp = wakeUp(settledLocally, outcome, abort, polling ? null : pollFrom);
+    // Every other signal here describes the saga; this one describes the wait, and only this one is
+    // guaranteed to fire. A wait that ends for a reason the saga knows nothing about, because a
+    // poll tick found the answer or the bound elapsed, would otherwise leave its `anyOf` node on
+    // the caller's abort future with no source that can ever complete it. That matters because REST
+    // passes the server-lifetime shutdown signal as `abort`, so such a node is retained until the
+    // process exits. Completed in the finally, which every exit runs, including the two returns
+    // from inside the loop.
+    CompletableFuture<Void> finished = new CompletableFuture<>();
+    try {
+      long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(boundMillis);
+      long intervalMillis = pollIntervalMillis(boundMillis);
+      boolean polling = pollFrom == null || pollFrom.isDone();
+      CompletableFuture<?> wakeUp =
+          wakeUp(settledLocally, outcome, abort, polling ? null : pollFrom, finished);
 
-    while (true) {
-      long remainingMillis = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
-      if (remainingMillis <= 0) {
-        break;
-      }
-      // Until the saga parks, it is being driven on this process, so a push reaches us and a poll
-      // can only find what the push would have delivered sooner. Wait out the whole remainder in
-      // one slice and read nothing.
-      long sliceMillis = polling ? Math.min(intervalMillis, remainingMillis) : remainingMillis;
-      try {
-        wakeUp.get(sliceMillis, TimeUnit.MILLISECONDS);
-        if (!polling && settledSnapshot(settledLocally, outcome) == null && !abort.isDone()) {
-          // Only the park fired. From here the saga can be resumed on another replica, where no
-          // push reaches us, so start polling for what is left of the bound.
-          polling = true;
-          wakeUp = wakeUp(settledLocally, outcome, abort, null);
-          continue;
-        }
-        break;
-      } catch (TimeoutException e) {
-        // The bound cut this slice short, so there is no time left to poll for: fall through to the
-        // read below rather than reading twice in succession.
-        if (sliceMillis == remainingMillis) {
+      while (true) {
+        long remainingMillis = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
+        if (remainingMillis <= 0) {
           break;
         }
-        // A poll tick. The saga may have settled on another replica, where nothing can notify us.
-        SagaStateSnapshot polled = read.get();
-        if (polled.getStatus().isTerminal()) {
-          return polled;
+        // Until the saga parks it is being driven on this process, so in the ordinary case a push
+        // reaches us and a poll could only find what the push delivers sooner. Wait out the whole
+        // remainder in one slice and read nothing.
+        //
+        // One case gets no push: a drive that dies before reaching a verdict leaves the saga
+        // RUNNING, and the engine logs that rather than reporting it, so neither the callback nor
+        // the park signal fires. Such a wait runs to its bound and answers from the read below,
+        // which is what it did before polling existed. Recovery reclaims the saga on its own
+        // schedule, and at the default bound that schedule starts no earlier than the bound
+        // expires, so polling here would find nothing. It is only worth revisiting for a bound set
+        // well above the recovery staleness threshold; see todos/096.
+        long sliceMillis = polling ? Math.min(intervalMillis, remainingMillis) : remainingMillis;
+        try {
+          wakeUp.get(sliceMillis, TimeUnit.MILLISECONDS);
+          if (!polling && settledSnapshot(settledLocally, outcome) == null && !abort.isDone()) {
+            // Only the park fired. From here the saga can be resumed on another replica, where no
+            // push reaches us, so start polling for what is left of the bound.
+            polling = true;
+            wakeUp = wakeUp(settledLocally, outcome, abort, null, finished);
+            continue;
+          }
+          break;
+        } catch (TimeoutException e) {
+          // The bound cut this slice short, so there is no time left to poll for: fall through to
+          // the read below rather than reading twice in succession.
+          if (sliceMillis == remainingMillis) {
+            break;
+          }
+          // A poll tick. The saga may have settled on another replica, where nothing can notify us.
+          SagaStateSnapshot polled = read.get();
+          // Answer now if the poll found a terminal state, or if the read itself outlived the
+          // deadline. The second case exists so that a slow read is not followed by the bound
+          // expiry read in the same breath; two transactions for one answer, on exactly the store
+          // this is meant to spare. It is only that case: a tick that finished well before the
+          // deadline goes stale by the time the deadline arrives, and the read below is what makes
+          // the bound expiry answer worth having.
+          if (polled.getStatus().isTerminal() || System.nanoTime() - deadlineNanos >= 0) {
+            // A drive on this process may have settled the saga while that read was in flight,
+            // which the read cannot see but the futures already hold. Consulting them costs no
+            // I/O, and it keeps every exit from this method answering from the same place; without
+            // it a slow read returns its stale non-terminal state and the caller is told the saga
+            // is still running when its outcome was in hand.
+            SagaStateSnapshot settled = settledSnapshot(settledLocally, outcome);
+            return settled != null ? settled : polled;
+          }
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          break;
+        } catch (ExecutionException e) {
+          // The abort signal completed exceptionally; the state below is the answer either way.
+          break;
         }
-        // The read can itself outlive the deadline on a slow store. It is then already the freshest
-        // answer there is, and falling through would read again in the same breath — two
-        // transactions for one answer, on exactly the store this is meant to spare. Only this case:
-        // a tick that finished well before the deadline goes stale by the time the deadline
-        // arrives, and the read below is what makes the bound-expiry answer worth having.
-        if (System.nanoTime() - deadlineNanos >= 0) {
-          return polled;
-        }
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        break;
-      } catch (ExecutionException e) {
-        // The abort signal completed exceptionally; the state below is the answer either way.
-        break;
       }
-    }
 
-    SagaStateSnapshot settled = settledSnapshot(settledLocally, outcome);
-    // The read is what makes an un-notified wait worth having: a saga resumed and settled on
-    // another replica is invisible to both futures above, and visible here.
-    return settled != null ? settled : read.get();
+      SagaStateSnapshot settled = settledSnapshot(settledLocally, outcome);
+      // The read is what makes an un-notified wait worth having: a saga resumed and settled on
+      // another replica is invisible to both futures above, and visible here.
+      return settled != null ? settled : read.get();
+    } finally {
+      // Retires every `anyOf` built above, whichever exit brought us here. Completing a source of
+      // an `anyOf` is what makes the JDK unlink its node from the other sources' stacks.
+      finished.complete(null);
+    }
   }
 
   /**
    * The signals that end a slice. Rebuilt once if polling begins mid-wait, because {@code anyOf}
    * stays completed: reusing one that the park signal already completed would spin the loop.
+   *
+   * <p>{@code finished} belongs in every set this builds, the rebuilt one included. It is what
+   * retires the resulting node once the wait is over; the rebuilt set is the one that would
+   * otherwise be retained, since the park has already fired and cleared the first.
    */
   private static CompletableFuture<?> wakeUp(
       CompletableFuture<SagaStateSnapshot> settledLocally,
       @Nullable CompletableFuture<SagaStateSnapshot> outcome,
       CompletableFuture<?> abort,
-      @Nullable CompletableFuture<?> pollFrom) {
-    List<CompletableFuture<?>> signals = new ArrayList<>(4);
+      @Nullable CompletableFuture<?> pollFrom,
+      CompletableFuture<?> finished) {
+    List<CompletableFuture<?>> signals = new ArrayList<>(5);
     signals.add(settledLocally);
     signals.add(abort);
+    signals.add(finished);
     if (outcome != null) {
       signals.add(outcome);
     }
