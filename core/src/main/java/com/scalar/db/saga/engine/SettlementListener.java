@@ -24,11 +24,17 @@ import com.scalar.db.saga.api.SagaStateSnapshot;
  *
  * <p><b>Recovery drives are excluded.</b> A saga settled by the recovery manager does not reach
  * this listener even when recovery ran on this process, so "whichever drive" above means a start or
- * a resume, not every drive. Deliberate: every recovery timescale sits at or above a synchronous
- * wait bound — sixty seconds of staleness, parked deadlines in minutes to hours, a four-hour
- * compensation grace — so a waiter is almost never still present when recovery settles a saga, and
- * wiring it would mean carrying this listener to three more drive sites for a case the fallback
- * already covers.
+ * a resume, not every drive. Deliberate, because recovery is slow to start relative to a
+ * synchronous wait: staleness defaults to sixty seconds, which is also the default wait bound, so a
+ * waiter has usually answered from its own read before recovery claims anything. The compensation
+ * grace period is four hours, further still.
+ *
+ * <p>That reasoning is a default, not an invariant, and two things weaken it. A parked deadline is
+ * derived from the step's own timeout, so a definition author can make it short. And a deployment
+ * that raises {@code sync.max_wait_millis} well above the staleness threshold gives recovery time
+ * to settle a saga while a waiter is still present, which this listener would not report. The
+ * fallback still answers correctly in both cases, at the bound rather than at completion. See
+ * {@code todos/096}.
  *
  * <p>Implementations must be thread-safe: drives run concurrently on the async executor. They must
  * also be quick and must not block — this runs on the drive's own thread, and a slow listener

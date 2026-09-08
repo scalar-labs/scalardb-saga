@@ -1229,7 +1229,17 @@ public final class SagaServerConfig {
    * <p>It also sets the cadence of the poll behind a bounded wait: the interval is a sixth of the
    * effective bound, floored at a second and capped at thirty. Raising the bound therefore does two
    * things at once — more sagas finish inside it and never reach the poll at all, and those that do
-   * are polled less often. A deployment whose ingress tolerates a longer request can raise it.
+   * are polled less often. A deployment whose ingress tolerates a longer request can raise it, up
+   * to that timeout: a REST wait does not end when a client disconnects, so a bound set past the
+   * ingress spends the difference waiting to answer a socket that is already closed.
+   *
+   * <p><b>The interval is also the notice latency for a saga settled on another replica.</b> A saga
+   * settled on this process wakes its waiter at once, but one resumed elsewhere is seen only by the
+   * next poll, so at the default bound that notice takes up to ten seconds against the 200 ms of
+   * the fixed poll this replaced. It is the trade the read reduction is bought with, and it lands
+   * on the cross-replica case, which is the common one for a saga with an asynchronous step: a
+   * participant callback dials a service address and reaches an arbitrary replica. Lowering the
+   * bound tightens the notice and the wait together; the two cannot be tuned apart.
    *
    * <p><b>It bounds one server-side call, not how long a caller waits.</b> A REST or raw-gRPC
    * client receives its answer when the bound elapses and decides for itself whether to ask again.

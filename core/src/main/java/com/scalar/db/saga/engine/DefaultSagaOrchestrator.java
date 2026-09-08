@@ -118,6 +118,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    */
   private volatile @Nullable Set<String> servedDefinitions;
 
+  // Visible for testing: no production caller remains since build() moved to the 9-arg form.
   DefaultSagaOrchestrator(
       SagaEngine engine,
       SagaStore store,
@@ -507,11 +508,15 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     // A resumed drive carries no callback; notifying the listener is all it owes.
     //
     // Recovery drives are deliberately not wired to this. They run in SagaRecoveryManager, which
-    // would have to carry the listener to its three drive sites, and every recovery timescale sits
-    // at or above the synchronous wait bound: staleness is 60s by default, parked deadlines are
-    // minutes to hours, and the compensation grace period is four hours. A waiter is therefore
-    // almost never still present when recovery settles a saga, and the narrow overlap is covered by
-    // the caller's own poll, the same fallback that covers a saga resumed on another replica.
+    // would have to carry the listener to its three drive sites, and recovery is slow to start
+    // relative to a synchronous wait: staleness defaults to 60s, which is also the default wait
+    // bound, so a waiter has usually answered from its own read before recovery claims anything.
+    //
+    // A default, not an invariant. A parked deadline comes from the step's own timeout, so it can
+    // be short, and raising sync.max_wait_millis well above the staleness threshold leaves a waiter
+    // present while recovery settles the saga. Both cases still answer correctly, from the caller's
+    // own poll or its read at the bound, the same fallback that covers a saga resumed on another
+    // replica. See todos/096.
     if (callback == null) {
       return;
     }
@@ -531,6 +536,11 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       // Execution returned without the saga resting anywhere. Since this is execution's own
       // verdict rather than a later read of shared state, a resume landing elsewhere can no longer
       // masquerade as either case below — which is what makes the error worth acting on.
+      //
+      // This arm reports nothing to the caller, only to the log, so a front end waiting on this
+      // saga is told neither that it settled nor that it parked. Its wait therefore runs to its
+      // bound and answers from the read there. That is the one path on which a bounded wait gets
+      // no push at all; see todos/096 for why polling before the park would not currently help.
       case RUNNING, COMPENSATING -> {
         if (aborted) {
           logger.warn(
