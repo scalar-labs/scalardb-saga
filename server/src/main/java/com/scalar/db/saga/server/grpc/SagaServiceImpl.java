@@ -160,7 +160,6 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
       // knowing why a wait ended.
       return BoundedWait.awaitWithin(
           settledLocally,
-          null,
           abortSignal(),
           null,
           boundMillis,
@@ -191,23 +190,22 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
   }
 
   private SagaStateSnapshot startBoundedSync(StartSagaRequest request, Map<String, Object> input) {
-    CompletableFuture<SagaStateSnapshot> outcome = new CompletableFuture<>();
+    CompletableFuture<SagaStateSnapshot> settled = new CompletableFuture<>();
     // Completed when the saga parks, which is the first moment it can be resumed somewhere no push
     // reaches us. Until then the drive is here and a poll could only find what the callback or the
     // registry will deliver sooner, so the wait does not read the store at all.
     CompletableFuture<Void> parked = new CompletableFuture<>();
-    // The callback is registered before the saga id exists, and the registry after: on a
-    // server-generated id there is no id to register under until dispatchStart returns, by which
-    // time the saga may already have settled. The callback closes that window for the first drive;
-    // the registry covers the drives that carry none.
-    String sagaId = dispatchStart(request, input, outcomeSignal(outcome, parked));
-    SagaStateSnapshot settled;
-    CompletableFuture<SagaStateSnapshot> settledLocally = new CompletableFuture<>();
-    try (SagaWaiterRegistry.Waiter waiter = waiterRegistry.register(sagaId, settledLocally)) {
-      settled =
+    // One future, completed by whichever mechanism sees the saga settle first. The callback is
+    // handed out before the saga id exists and covers the window until the registration below — on
+    // a server-generated id there is no id to register under until dispatchStart returns, by which
+    // time the saga may already have settled. The registry covers every drive after that, above all
+    // the one that resumes the saga after an asynchronous step and carries no callback.
+    String sagaId = dispatchStart(request, input, outcomeSignal(settled, parked));
+    SagaStateSnapshot answer;
+    try (SagaWaiterRegistry.Waiter waiter = waiterRegistry.register(sagaId, settled)) {
+      answer =
           BoundedWait.awaitWithin(
-              settledLocally,
-              outcome,
+              settled,
               abortSignal(),
               parked,
               computeBoundMillis(Long.MAX_VALUE),
@@ -217,7 +215,7 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
     // bound: the bound is a maximum, not a promise to wait, and a terminating server cannot advance
     // the saga anyway. Whatever ended the wait, this is the freshest state — its status is the
     // source of truth, and a non-terminal one is the gRPC analogue of REST's 202.
-    return settled;
+    return answer;
   }
 
   /**
@@ -316,7 +314,7 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
    * #startBoundedSync}'s read at bound expiry sees that outcome whichever replica produced it.
    */
   private static SagaCallback outcomeSignal(
-      CompletableFuture<SagaStateSnapshot> outcome, CompletableFuture<Void> parked) {
+      CompletableFuture<SagaStateSnapshot> settled, CompletableFuture<Void> parked) {
     return new SagaCallback() {
       @Override
       public void onParked(SagaStateSnapshot saga) {
@@ -327,17 +325,17 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
 
       @Override
       public void onCompleted(SagaStateSnapshot saga) {
-        outcome.complete(saga);
+        settled.complete(saga);
       }
 
       @Override
       public void onCompensated(SagaStateSnapshot saga) {
-        outcome.complete(saga);
+        settled.complete(saga);
       }
 
       @Override
       public void onEscalated(SagaStateSnapshot saga) {
-        outcome.complete(saga);
+        settled.complete(saga);
       }
     };
   }

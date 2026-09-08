@@ -15,11 +15,16 @@ import org.jspecify.annotations.Nullable;
  * {@code AwaitSaga} long-poll.
  *
  * <p>One implementation rather than three, because the rule has three sources of truth to reconcile
- * and hand-kept copies drift. It ends on whichever comes first: the saga settles on this process
- * (the per-start callback, or the {@link SagaWaiterRegistry} for a drive that carries none), a poll
- * tick observes it settled elsewhere, the caller aborts, or the bound elapses. Whatever ends it,
- * the answer is the freshest state available — which is why a wait that is never notified is not
- * wasted.
+ * and hand-kept copies drift. It ends on whichever comes first: the saga settles on this process, a
+ * poll tick observes it settled elsewhere, the caller aborts, or the bound elapses. Whatever ends
+ * it, the answer is the freshest state available — which is why a wait that is never notified is
+ * not wasted.
+ *
+ * <p>Two mechanisms report a local settle — the {@link SagaWaiterRegistry} for any drive, and the
+ * start callback for the window before a server-generated id exists to register under — but they
+ * share one future rather than taking one each. They cannot disagree: a single dispatch hands both
+ * the same snapshot, and only one of them can carry a terminal state for a given saga, since the
+ * callback belonging to the first drive dies when that drive parks.
  */
 public final class BoundedWait {
 
@@ -57,7 +62,7 @@ public final class BoundedWait {
    * @return the poll interval in milliseconds, within {@value #MIN_POLL_INTERVAL_MILLIS} and
    *     {@value #MAX_POLL_INTERVAL_MILLIS}
    */
-  public static long pollIntervalMillis(long boundMillis) {
+  static long pollIntervalMillis(long boundMillis) {
     long derived = boundMillis / POLLS_PER_WINDOW;
     return Math.min(Math.max(derived, MIN_POLL_INTERVAL_MILLIS), MAX_POLL_INTERVAL_MILLIS);
   }
@@ -71,22 +76,23 @@ public final class BoundedWait {
    * just created the saga and needs none, while a long-poll on an existing saga may find it already
    * terminal.
    *
-   * @param settledLocally the future registered with the registry, completed if a drive on this
-   *     process settles the saga
-   * @param outcome the per-start callback's future, or {@code null} when there is no start callback
-   *     (the long-poll path). It is kept alongside the registry because a start with a
-   *     server-generated id cannot register before {@code startAsync} returns the id, by which time
-   *     the saga may already have settled
+   * @param settled completed with the saga's terminal snapshot by whichever mechanism on this
+   *     process sees it settle: the registry, or the start callback for a start whose
+   *     server-generated id does not exist to register under until {@code startAsync} returns. Both
+   *     deliver the same snapshot from the same dispatch, and {@code complete} is first-wins, so
+   *     one future serves both
    * @param abort completes when the caller should stop waiting early — server shutdown, or a
    *     cancelled call
+   * @param pollFrom completes when the saga parks, which is the first moment a resume can land
+   *     where no push reaches this process; polling starts then. {@code null} polls from the
+   *     outset, for a long-poll on a saga that may already be being driven anywhere
    * @param boundMillis the effective bound, already tightened by any per-call deadline
    * @param read reads the saga's current state; called on each poll tick and once at the end
    * @return the settled snapshot if the saga settled, otherwise the state as read when the wait
    *     ended
    */
   public static SagaStateSnapshot awaitWithin(
-      CompletableFuture<SagaStateSnapshot> settledLocally,
-      @Nullable CompletableFuture<SagaStateSnapshot> outcome,
+      CompletableFuture<SagaStateSnapshot> settled,
       CompletableFuture<?> abort,
       @Nullable CompletableFuture<?> pollFrom,
       long boundMillis,
@@ -103,8 +109,7 @@ public final class BoundedWait {
       long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(boundMillis);
       long intervalMillis = pollIntervalMillis(boundMillis);
       boolean polling = pollFrom == null || pollFrom.isDone();
-      CompletableFuture<?> wakeUp =
-          wakeUp(settledLocally, outcome, abort, polling ? null : pollFrom, finished);
+      CompletableFuture<?> wakeUp = wakeUp(settled, abort, polling ? null : pollFrom, finished);
 
       while (true) {
         long remainingMillis = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
@@ -125,11 +130,11 @@ public final class BoundedWait {
         long sliceMillis = polling ? Math.min(intervalMillis, remainingMillis) : remainingMillis;
         try {
           wakeUp.get(sliceMillis, TimeUnit.MILLISECONDS);
-          if (!polling && settledSnapshot(settledLocally, outcome) == null && !abort.isDone()) {
+          if (!polling && settled.getNow(null) == null && !abort.isDone()) {
             // Only the park fired. From here the saga can be resumed on another replica, where no
             // push reaches us, so start polling for what is left of the bound.
             polling = true;
-            wakeUp = wakeUp(settledLocally, outcome, abort, null, finished);
+            wakeUp = wakeUp(settled, abort, null, finished);
             continue;
           }
           break;
@@ -153,8 +158,8 @@ public final class BoundedWait {
             // I/O, and it keeps every exit from this method answering from the same place; without
             // it a slow read returns its stale non-terminal state and the caller is told the saga
             // is still running when its outcome was in hand.
-            SagaStateSnapshot settled = settledSnapshot(settledLocally, outcome);
-            return settled != null ? settled : polled;
+            SagaStateSnapshot pushed = settled.getNow(null);
+            return pushed != null ? pushed : polled;
           }
         } catch (InterruptedException e) {
           Thread.currentThread().interrupt();
@@ -165,10 +170,10 @@ public final class BoundedWait {
         }
       }
 
-      SagaStateSnapshot settled = settledSnapshot(settledLocally, outcome);
+      SagaStateSnapshot pushed = settled.getNow(null);
       // The read is what makes an un-notified wait worth having: a saga resumed and settled on
-      // another replica is invisible to both futures above, and visible here.
-      return settled != null ? settled : read.get();
+      // another replica is invisible to the future above, and visible here.
+      return pushed != null ? pushed : read.get();
     } finally {
       // Retires every `anyOf` built above, whichever exit brought us here. Completing a source of
       // an `anyOf` is what makes the JDK unlink its node from the other sources' stacks.
@@ -185,29 +190,17 @@ public final class BoundedWait {
    * otherwise be retained, since the park has already fired and cleared the first.
    */
   private static CompletableFuture<?> wakeUp(
-      CompletableFuture<SagaStateSnapshot> settledLocally,
-      @Nullable CompletableFuture<SagaStateSnapshot> outcome,
+      CompletableFuture<SagaStateSnapshot> settled,
       CompletableFuture<?> abort,
       @Nullable CompletableFuture<?> pollFrom,
       CompletableFuture<?> finished) {
-    List<CompletableFuture<?>> signals = new ArrayList<>(5);
-    signals.add(settledLocally);
+    List<CompletableFuture<?>> signals = new ArrayList<>(4);
+    signals.add(settled);
     signals.add(abort);
     signals.add(finished);
-    if (outcome != null) {
-      signals.add(outcome);
-    }
     if (pollFrom != null) {
       signals.add(pollFrom);
     }
     return CompletableFuture.anyOf(signals.toArray(new CompletableFuture<?>[0]));
-  }
-
-  /** The saga's settled snapshot if either push mechanism delivered one, else {@code null}. */
-  private static @Nullable SagaStateSnapshot settledSnapshot(
-      CompletableFuture<SagaStateSnapshot> settledLocally,
-      @Nullable CompletableFuture<SagaStateSnapshot> outcome) {
-    SagaStateSnapshot fromCallback = outcome != null ? outcome.getNow(null) : null;
-    return fromCallback != null ? fromCallback : settledLocally.getNow(null);
   }
 }

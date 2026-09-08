@@ -63,18 +63,15 @@ class BoundedWaitTest {
     // without a signal for the wait itself the anyOf node stays attached to `abort` for the life of
     // the process. Nothing here completes, exactly as in that case.
     CompletableFuture<Void> abort = new CompletableFuture<>();
-    CompletableFuture<SagaStateSnapshot> settledLocally = new CompletableFuture<>();
-    CompletableFuture<SagaStateSnapshot> outcome = new CompletableFuture<>();
+    CompletableFuture<SagaStateSnapshot> settled = new CompletableFuture<>();
     CompletableFuture<Void> parked = new CompletableFuture<>();
     parked.complete(null);
     SagaStateSnapshot waiting = snapshot(SagaStatus.WAITING);
-    WeakReference<CompletableFuture<SagaStateSnapshot>> ref = new WeakReference<>(settledLocally);
+    WeakReference<CompletableFuture<SagaStateSnapshot>> ref = new WeakReference<>(settled);
 
     // Act — the bound elapses with the saga still parked.
-    SagaStateSnapshot answer =
-        BoundedWait.awaitWithin(settledLocally, outcome, abort, parked, 50L, () -> waiting);
-    settledLocally = null;
-    outcome = null;
+    SagaStateSnapshot answer = BoundedWait.awaitWithin(settled, abort, parked, 50L, () -> waiting);
+    settled = null;
     parked = null;
 
     // Assert — the wait still answers from the read, and leaves the request's futures collectable.
@@ -91,21 +88,20 @@ class BoundedWaitTest {
     // flight, so the store's answer is stale the moment it arrives and the terminal snapshot is
     // already in memory. Polling from the start, as AwaitSaga does, so no park signal is needed.
     CompletableFuture<Void> abort = new CompletableFuture<>();
-    CompletableFuture<SagaStateSnapshot> settledLocally = new CompletableFuture<>();
+    CompletableFuture<SagaStateSnapshot> settled = new CompletableFuture<>();
     SagaStateSnapshot waiting = snapshot(SagaStatus.WAITING);
     SagaStateSnapshot completed = snapshot(SagaStatus.COMPLETED);
 
     // Act
     SagaStateSnapshot answer =
         BoundedWait.awaitWithin(
-            settledLocally,
-            null,
+            settled,
             abort,
             null,
             1_200L,
             () -> {
               // The registry completes the waiter mid-read, which is what the read cannot see.
-              settledLocally.complete(completed);
+              settled.complete(completed);
               sleep(400L);
               return waiting;
             });
@@ -124,7 +120,6 @@ class BoundedWaitTest {
     SagaStateSnapshot answer =
         BoundedWait.awaitWithin(
             new CompletableFuture<>(),
-            null,
             new CompletableFuture<>(),
             null,
             0L,
@@ -152,7 +147,6 @@ class BoundedWaitTest {
     SagaStateSnapshot answer =
         BoundedWait.awaitWithin(
             new CompletableFuture<>(),
-            null,
             abort,
             null,
             30_000L,
@@ -177,8 +171,7 @@ class BoundedWaitTest {
     // Act
     long startNanos = System.nanoTime();
     SagaStateSnapshot answer =
-        BoundedWait.awaitWithin(
-            new CompletableFuture<>(), null, abort, null, 30_000L, () -> running);
+        BoundedWait.awaitWithin(new CompletableFuture<>(), abort, null, 30_000L, () -> running);
     long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
 
     // Assert — the bound is a maximum, not a promise to wait.
@@ -200,7 +193,6 @@ class BoundedWaitTest {
       SagaStateSnapshot answer =
           BoundedWait.awaitWithin(
               new CompletableFuture<>(),
-              null,
               new CompletableFuture<>(),
               null,
               30_000L,
@@ -236,7 +228,6 @@ class BoundedWaitTest {
     // Act
     SagaStateSnapshot answer =
         BoundedWait.awaitWithin(
-            new CompletableFuture<>(),
             new CompletableFuture<>(),
             new CompletableFuture<>(),
             parked,

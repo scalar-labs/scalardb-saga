@@ -42,10 +42,16 @@ class SagaSettlementNotificationIntegrationTest extends ServerIntegrationTestSup
   private static final String SAGA_NAME = "notify";
   private static final String SECRET = "integration-settlement-secret";
 
-  /** Six polls per window, so the fallback's first tick lands at ~3.3s against a push at ~0. */
-  private static final long SYNC_BOUND_MILLIS = 20_000L;
+  /**
+   * Six polls per window, so the fallback's first tick lands at ~10s while a push answers in well
+   * under a second. The gap has to absorb a loaded CI box: this test shares a run with the rest of
+   * the suite, and an earlier 20s bound put the tick at 3.3s against a 2s ceiling, which was too
+   * tight and failed there while passing alone.
+   */
+  private static final long SYNC_BOUND_MILLIS = 60_000L;
 
-  private static final long PUSH_CEILING_MILLIS = 2_000L;
+  /** Half the fallback's first tick, so neither a slow push nor an early tick can be mistaken. */
+  private static final long PUSH_CEILING_MILLIS = 5_000L;
 
   private final AtomicReference<String> capturedCallbackUrl = new AtomicReference<>();
   private final HttpClient http = HttpClient.newHttpClient();
@@ -107,7 +113,7 @@ class SagaSettlementNotificationIntegrationTest extends ServerIntegrationTestSup
     callbackFired.join();
 
     // Assert — the outcome, and soon enough that only the registry can explain it. Unwired, this
-    // same request answers COMPLETED at the first poll tick instead, a little over three seconds.
+    // same request answers COMPLETED at the first poll tick instead, about ten seconds in.
     assertThat(start.statusCode()).isEqualTo(200);
     assertThat(status(start)).isEqualTo("COMPLETED");
     assertThat(elapsedMillis).isLessThan(PUSH_CEILING_MILLIS);

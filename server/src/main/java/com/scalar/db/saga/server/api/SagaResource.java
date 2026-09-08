@@ -84,6 +84,10 @@ public final class SagaResource {
    * @param syncWaitBoundMillis how long a synchronous start may wait before answering {@code 202},
    *     already resolved from the {@code sync.*} keys. Always finite, so no start can block
    *     indefinitely.
+   * @param shutdownSignal completes when the server begins shutting down, ending a bounded wait
+   *     early rather than letting it run to its bound on a server that cannot advance the saga
+   * @param waiterRegistry where a bounded wait registers, so any drive settling the saga on this
+   *     process wakes it; shared with the engine and the gRPC transport
    */
   public static void register(
       Javalin app,
@@ -100,17 +104,17 @@ public final class SagaResource {
             String sagaId = orchestrator.startAsync(request.requireSagaName(), input);
             respond(ctx, 202, orchestrator.getStateSnapshot(sagaId));
           } else {
-            CompletableFuture<SagaStateSnapshot> outcome = new CompletableFuture<>();
+            CompletableFuture<SagaStateSnapshot> settled = new CompletableFuture<>();
             CompletableFuture<Void> parked = new CompletableFuture<>();
             String sagaId =
                 orchestrator.startAsync(
-                    request.requireSagaName(), input, outcomeSignal(outcome, parked));
+                    request.requireSagaName(), input, outcomeSignal(settled, parked));
             respondBoundedSync(
                 ctx,
                 orchestrator,
                 waiterRegistry,
                 sagaId,
-                outcome,
+                settled,
                 parked,
                 shutdownSignal,
                 syncWaitBoundMillis);
@@ -128,16 +132,16 @@ public final class SagaResource {
             orchestrator.startAsync(sagaId, request.requireSagaName(), input);
             respond(ctx, 202, orchestrator.getStateSnapshot(sagaId));
           } else {
-            CompletableFuture<SagaStateSnapshot> outcome = new CompletableFuture<>();
+            CompletableFuture<SagaStateSnapshot> settled = new CompletableFuture<>();
             CompletableFuture<Void> parked = new CompletableFuture<>();
             orchestrator.startAsync(
-                sagaId, request.requireSagaName(), input, outcomeSignal(outcome, parked));
+                sagaId, request.requireSagaName(), input, outcomeSignal(settled, parked));
             respondBoundedSync(
                 ctx,
                 orchestrator,
                 waiterRegistry,
                 sagaId,
-                outcome,
+                settled,
                 parked,
                 shutdownSignal,
                 syncWaitBoundMillis);
@@ -171,7 +175,7 @@ public final class SagaResource {
    * throw away an answer the caller asked to wait for.
    */
   private static SagaCallback outcomeSignal(
-      CompletableFuture<SagaStateSnapshot> outcome, CompletableFuture<Void> parked) {
+      CompletableFuture<SagaStateSnapshot> settled, CompletableFuture<Void> parked) {
     return new SagaCallback() {
       @Override
       public void onParked(SagaStateSnapshot saga) {
@@ -182,17 +186,17 @@ public final class SagaResource {
 
       @Override
       public void onCompleted(SagaStateSnapshot saga) {
-        outcome.complete(saga);
+        settled.complete(saga);
       }
 
       @Override
       public void onCompensated(SagaStateSnapshot saga) {
-        outcome.complete(saga);
+        settled.complete(saga);
       }
 
       @Override
       public void onEscalated(SagaStateSnapshot saga) {
-        outcome.complete(saga);
+        settled.complete(saga);
       }
     };
   }
@@ -220,22 +224,20 @@ public final class SagaResource {
       SagaOrchestrator orchestrator,
       SagaWaiterRegistry waiterRegistry,
       String sagaId,
-      CompletableFuture<SagaStateSnapshot> outcome,
+      CompletableFuture<SagaStateSnapshot> settled,
       CompletableFuture<Void> parked,
       CompletableFuture<Void> shutdownSignal,
       long timeoutMillis) {
     SagaStateSnapshot snapshot;
-    // The callback was registered before the saga id existed, and the registry only after: on a
-    // server-generated id there is nothing to register under until startAsync returns, by which
-    // time the saga may already have settled. The callback closes that window for the first drive;
-    // the registry covers the drives that carry none, above all the one that resumes the saga after
-    // an asynchronous step.
-    CompletableFuture<SagaStateSnapshot> settledLocally = new CompletableFuture<>();
-    try (SagaWaiterRegistry.Waiter waiter = waiterRegistry.register(sagaId, settledLocally)) {
+    // One future, completed by whichever mechanism sees the saga settle first. The callback was
+    // handed out before the saga id existed and covers the window until the registration below —
+    // on a server-generated id there is nothing to register under until startAsync returns, by
+    // which time the saga may already have settled. The registry covers every drive after that,
+    // above all the one that resumes the saga after an asynchronous step and carries no callback.
+    try (SagaWaiterRegistry.Waiter waiter = waiterRegistry.register(sagaId, settled)) {
       snapshot =
           BoundedWait.awaitWithin(
-              settledLocally,
-              outcome,
+              settled,
               shutdownSignal,
               parked,
               timeoutMillis,
