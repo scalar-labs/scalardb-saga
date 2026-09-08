@@ -34,10 +34,14 @@ public interface SagaCallback {
    * the eventual outcome; an implementation that waits for a terminal method instead waits forever.
    *
    * <p>Parking is a normal outcome, not a failure. This method exists because it is the only notice
-   * that no terminal callback is coming: an implementation that signals completion from {@link
-   * #onCompleted} and its siblings — counting down a latch, completing a future — must do the same
-   * here, or it waits forever on a saga that is alive and still progressing. Having been told, poll
-   * for the eventual outcome.
+   * that no terminal callback is coming. An implementation that signals completion from {@link
+   * #onCompleted} and its siblings — counting down a latch, completing a future — must therefore
+   * not go on waiting for one of those to fire, or it waits forever on a saga that is alive and
+   * still progressing. Two shapes satisfy that. Release the caller here and let it poll {@link
+   * SagaOrchestrator#getStateSnapshot} for the outcome; or keep waiting, but under a bound, and
+   * poll from this point rather than depending on a callback that cannot arrive. The bounded shape
+   * is what this project's own daemon does, because a saga that parks may still finish while the
+   * caller is willing to wait, and answering at the park would discard that outcome.
    *
    * <p>Defaults to doing nothing because observing a park is optional: a saga with no asynchronous
    * step never parks, and such a caller should not be made to write an empty method for it.

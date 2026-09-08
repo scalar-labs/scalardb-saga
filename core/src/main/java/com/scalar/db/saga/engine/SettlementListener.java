@@ -13,9 +13,15 @@ import com.scalar.db.saga.api.SagaStateSnapshot;
  * so the resumed drive reaches it.
  *
  * <p>The intended implementation is a registry of in-flight waiters keyed by saga id — a daemon's
- * bounded synchronous start, or its long-poll — which is why {@link #isWatching} exists: settling a
- * saga nobody is waiting for must cost nothing, and in particular must not provoke the store read
- * that {@code dispatchOutcome} falls back on when a drive dies before reaching a verdict.
+ * bounded synchronous start, or its long-poll.
+ *
+ * <p>{@link #isWatching} exists for one narrow case rather than as a general cheapness guard. On
+ * almost every drive the answer changes nothing: the settled snapshot is already in hand, so
+ * notifying an implementation that is watching nobody costs the same map lookup either way. What it
+ * gates is the fallback in {@code dispatchOutcome} — a drive that dies before reaching a verdict
+ * has no snapshot to report and reads the store for one, and asking first keeps that read off a
+ * callback-less drive nobody is waiting for. Everywhere else it is a duplicate lookup kept for the
+ * one path that pays.
  *
  * <p><b>Best-effort, never a correctness mechanism.</b> It fires only for a drive on this process,
  * so a saga resumed on another replica settles without any local notification. Every caller must
@@ -56,7 +62,9 @@ public interface SettlementListener {
 
   /**
    * Whether anything on this process is waiting for the given saga. Called on every drive's
-   * completion, so it must be cheap — a map lookup, not a store read.
+   * completion, so it must be cheap — a map lookup, not a store read. Answering {@code false} when
+   * unsure is safe: the caller keeps its own fallback, so the only cost is notice arriving at its
+   * poll rather than at once.
    *
    * @param sagaId the saga that is settling
    * @return {@code true} if {@link #onSagaSettled} should be called for it
