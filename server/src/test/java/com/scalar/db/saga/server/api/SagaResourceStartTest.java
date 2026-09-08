@@ -16,6 +16,8 @@ import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
+import com.scalar.db.saga.exception.SagaErrorCode;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.server.security.SagaAuthRequest;
 import com.scalar.db.saga.server.security.SagaAuthenticationException;
 import com.scalar.db.saga.server.security.SagaIdentity;
@@ -266,15 +268,20 @@ class SagaResourceStartTest {
     // where nothing reports it. Before this, such a request waited out the full bound and answered
     // 202 for a saga that could never run — with setUp's 30s bound, a 30s wait for bad JSON.
     when(orchestrator.startAsync(eq(SAGA_NAME), anyMap(), any(SagaCallback.class)))
-        .thenThrow(new IllegalArgumentException("SagaContext does not allow null values"));
+        .thenThrow(new SagaIllegalArgumentException("SagaContext does not allow null values"));
 
     // Act
     long startNanos = System.nanoTime();
     HttpResponse<String> response = post("/sagas", "{\"sagaName\":\"" + SAGA_NAME + "\"}");
     long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
 
-    // Assert
+    // Assert — the body names which value the context refused. A blanket IllegalArgumentException
+    // handler answers this same input with the same 400 and code but a fixed detail, so the detail
+    // is what distinguishes the engine's typed rejection from that fallback.
     assertThat(response.statusCode()).isEqualTo(400);
+    assertThat(response.body())
+        .contains(SagaErrorCode.INVALID_ARGUMENT.code())
+        .contains("does not allow null values");
     assertThat(elapsedMillis).isLessThan(5_000L);
   }
 

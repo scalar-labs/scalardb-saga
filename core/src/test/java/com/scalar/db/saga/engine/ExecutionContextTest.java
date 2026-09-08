@@ -540,6 +540,9 @@ class ExecutionContextTest {
     Map<String, Object> input = Map.of("bad", new Object());
 
     // Act & Assert
+    // Stdlib, not SagaIllegalArgumentException: this constructor also runs on the recovery path
+    // over input read back from the store, where a rejection is a corrupt row and not a caller's
+    // bad request. SagaEngine.createSaga converts for the caller who actually supplied the map.
     assertThatThrownBy(() -> new ExecutionContext("saga-1", input, DEFAULT_STATE))
         .isInstanceOf(IllegalArgumentException.class);
   }

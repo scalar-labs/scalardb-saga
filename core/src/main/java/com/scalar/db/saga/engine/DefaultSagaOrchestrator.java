@@ -12,6 +12,7 @@ import com.scalar.db.saga.definition.SagaDefinitionParser;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaDefinitionNotServedException;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
@@ -667,7 +668,10 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       throw new IllegalStateException("Saga " + sagaId + " has no parked step to complete");
     }
     if (!parked.getStepName().equals(stepName)) {
-      throw new IllegalArgumentException(
+      // Caller input rather than a server fault, so it carries INVALID_ARGUMENT: the step name
+      // comes from the callback URL, and a participant replaying a token issued for an earlier
+      // step of the same saga arrives here with a signature that verifies.
+      throw new SagaIllegalArgumentException(
           "Callback step '"
               + stepName
               + "' does not match the parked step '"

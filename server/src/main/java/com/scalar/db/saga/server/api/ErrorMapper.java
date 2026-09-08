@@ -112,19 +112,19 @@ public final class ErrorMapper {
                 e));
     app.exception(SagaInvalidRequestException.class, (e, ctx) -> respond(ctx, 400, e));
     app.exception(SagaIllegalArgumentException.class, (e, ctx) -> respond(ctx, 400, e));
-    // A client-supplied value the engine rejects surfaces as a stdlib IllegalArgumentException from
-    // the engine sites not yet migrated to SagaIllegalArgumentException. Wrap it in the latter with
-    // a fixed daemon-owned detail (do not echo the engine's wording) so it flows through the same
-    // code path as every other exception. INVALID_ARGUMENT, not INVALID_REQUEST: the request
-    // message was well-formed; a value inside it was rejected.
+    // Every request-reachable caller-input rejection carries SagaIllegalArgumentException and is
+    // handled above, so what still lands here is a server fault: ScalarDB's operation checkers on a
+    // dropped table or a stale schema, ErrorMetadataSchema's fail-fast on a malformed metadata map,
+    // and the engine's internal contract checks. The 400 is wrong for all three; the branch stays
+    // only so that a caller-input site the audit missed keeps its status rather than flipping to a
+    // 500, and the WARN below is the evidence that decides when it can go.
     app.exception(
         IllegalArgumentException.class,
         (e, ctx) -> {
-          // The engine's wording and cause are replaced on the wire, so log them: a server-side
-          // bug surfacing as IllegalArgumentException (NumberFormatException, say) would otherwise
-          // be reported to the caller as their fault with no evidence left anywhere. WARN, visible
-          // at the production default: every hit is either a misattributed server bug or an
-          // unmigrated caller-input site — the branch's shrink-to-zero to-do list.
+          // The wording and cause are replaced on the wire, so log them. A server fault reported
+          // to the caller as their own bad request would otherwise leave no evidence anywhere,
+          // which is how a total store outage stays invisible. WARN prints at the production
+          // logging default.
           logger.warn(
               "Replacing a bare IllegalArgumentException on {} {}", ctx.method(), ctx.path(), e);
           respond(ctx, 400, new SagaIllegalArgumentException("invalid request parameter"));

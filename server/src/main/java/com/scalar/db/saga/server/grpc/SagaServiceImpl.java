@@ -7,6 +7,7 @@ import com.scalar.db.saga.api.SagaCallback;
 import com.scalar.db.saga.api.SagaDefinitionId;
 import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaInvalidRequestException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.rpc.AwaitSagaRequest;
@@ -220,7 +221,7 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
       StartSagaRequest request, Map<String, Object> input, @Nullable SagaCallback callback) {
     boolean clientSupplied = request.hasSagaId();
     if (request.hasVersion()) {
-      SagaDefinitionId id = new SagaDefinitionId(request.getName(), request.getVersion());
+      SagaDefinitionId id = definitionId(request.getName(), request.getVersion());
       if (clientSupplied) {
         String sagaId = request.getSagaId();
         if (callback == null) {
@@ -247,6 +248,24 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
     return callback == null
         ? orchestrator.startAsync(name, input)
         : orchestrator.startAsync(name, input, callback);
+  }
+
+  /**
+   * Builds the versioned definition id, converting {@link SagaDefinitionId}'s stdlib {@link
+   * IllegalArgumentException} into {@link SagaIllegalArgumentException}.
+   *
+   * <p>The conversion lives here rather than in {@code SagaDefinitionId} because that is api-module
+   * surface an embedded caller constructs directly, where a stdlib rejection is idiomatic; only a
+   * name or version that arrived over the wire needs an error code attached. The constructor's
+   * wording already names the offending value, so echoing it is both safe and the point.
+   */
+  private static SagaDefinitionId definitionId(String name, String version) {
+    try {
+      return new SagaDefinitionId(name, version);
+    } catch (IllegalArgumentException e) {
+      throw new SagaIllegalArgumentException(
+          e.getMessage() == null ? e.toString() : e.getMessage(), e);
+    }
   }
 
   private static void requireName(String name) {

@@ -150,6 +150,11 @@ public class ExecutionContext implements SagaContext {
    * <em>before</em> persisting a saga: this used to run only here, on the execution thread, which
    * left a caller of the asynchronous start path waiting out its whole wait bound for input that
    * was invalid on arrival.
+   *
+   * <p>Rejects with a stdlib {@link IllegalArgumentException}. {@code SagaEngine.createSaga}
+   * converts it for the caller who supplied the map; the constructor below deliberately does not,
+   * because it also runs on the recovery path over input read back from the store, where a
+   * rejection is a corrupt row rather than anyone's bad request.
    */
   static void validateInput(Map<String, Object> input) {
     input.values().forEach(ExecutionContext::validateType);
@@ -157,8 +162,8 @@ public class ExecutionContext implements SagaContext {
 
   private static void validateType(@Nullable Object value) {
     if (value == null) {
-      // Reachable from a JSON null in a request body. An IllegalArgumentException maps to a 400;
-      // dereferencing it below would surface a client mistake as a 500.
+      // Reachable from a JSON null in a request body, which the engine converts to a 400 at the
+      // start boundary; dereferencing it below would surface a client mistake as a 500.
       throw new IllegalArgumentException("SagaContext does not allow null values");
     }
     if (ALLOWED_TYPES.contains(value.getClass())) {

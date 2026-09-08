@@ -34,25 +34,27 @@ public record BulkResetRequest(
 
   /**
    * Builds the {@link SagaQuery} selecting the sweep window. The engine pins the status to
-   * escalated and applies its own bounds; a malformed timestamp or out-of-range page size fails
-   * with {@link SagaInvalidRequestException} ({@code 400}).
+   * escalated and applies its own bounds. A malformed timestamp fails with {@link
+   * SagaInvalidRequestException}; an out-of-range page size or an empty window fails with {@link
+   * SagaIllegalArgumentException} naming the bound and the offending value. Both are {@code 400}.
    *
    * @return the query
    */
   public SagaQuery toQuery() {
-    SagaQuery.Builder builder = SagaQuery.newBuilder();
-    if (updatedAfter != null) {
-      builder.updatedAfter(RequestParsing.parseInstant(updatedAfter, "updatedAfter"));
-    }
-    if (updatedBefore != null) {
-      builder.updatedBefore(RequestParsing.parseInstant(updatedBefore, "updatedBefore"));
-    }
-    if (pageSize != null) {
-      builder.pageSize(pageSize); // out-of-range -> IllegalArgumentException -> 400
-    }
-    if (pageToken != null) {
-      builder.pageToken(pageToken);
-    }
-    return builder.build(); // an empty window -> IllegalArgumentException -> 400
+    return RequestParsing.buildQuery(
+        builder -> {
+          if (updatedAfter != null) {
+            builder.updatedAfter(RequestParsing.parseInstant(updatedAfter, "updatedAfter"));
+          }
+          if (updatedBefore != null) {
+            builder.updatedBefore(RequestParsing.parseInstant(updatedBefore, "updatedBefore"));
+          }
+          if (pageSize != null) {
+            builder.pageSize(pageSize);
+          }
+          if (pageToken != null) {
+            builder.pageToken(pageToken);
+          }
+        });
   }
 }

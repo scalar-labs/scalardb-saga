@@ -292,6 +292,55 @@ class SagaAdminResourceTest {
     assertThat(response.statusCode()).isEqualTo(400);
   }
 
+  // The next three assert the response *detail*, not just the status. A blanket
+  // IllegalArgumentException handler answers these same inputs with the same 400 and the same
+  // INVALID_ARGUMENT code, and differs only in replacing the builder's wording with a fixed
+  // "invalid request parameter". The detail is therefore the only thing that distinguishes a
+  // typed rejection from that fallback, which is what these pin.
+
+  @Test
+  void list_pageSizeAboveTheBound_returns400NamingTheBoundAndValue() throws Exception {
+    // Act
+    HttpResponse<String> response = send("GET", "/sagas?pageSize=9999", "admin", null);
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(400);
+    assertThat(response.body())
+        .contains(SagaErrorCode.INVALID_ARGUMENT.code())
+        .contains(String.valueOf(SagaQuery.MAX_PAGE_SIZE))
+        .contains("9999");
+  }
+
+  @Test
+  void list_emptyUpdatedAtWindow_returns400NamingBothBounds() throws Exception {
+    // Arrange — updatedAfter strictly after updatedBefore selects nothing
+    String path = "/sagas?updatedAfter=2026-07-18T11:00:00Z&updatedBefore=2026-07-18T10:00:00Z";
+
+    // Act
+    HttpResponse<String> response = send("GET", path, "admin", null);
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(400);
+    assertThat(response.body())
+        .contains(SagaErrorCode.INVALID_ARGUMENT.code())
+        .contains("2026-07-18T11:00:00Z")
+        .contains("2026-07-18T10:00:00Z");
+  }
+
+  @Test
+  void bulkReset_pageSizeAboveTheBound_returns400NamingTheBoundAndValue() throws Exception {
+    // Act — the sweep builds the same query from a JSON body rather than the query string
+    HttpResponse<String> response =
+        send("POST", "/admin/reset-escalated", "admin", "{\"reason\":\"sweep\",\"pageSize\":9999}");
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(400);
+    assertThat(response.body())
+        .contains(SagaErrorCode.INVALID_ARGUMENT.code())
+        .contains(String.valueOf(SagaQuery.MAX_PAGE_SIZE))
+        .contains("9999");
+  }
+
   private HttpResponse<String> send(
       String method, String path, @Nullable String role, @Nullable String body) throws Exception {
     HttpRequest.BodyPublisher publisher =

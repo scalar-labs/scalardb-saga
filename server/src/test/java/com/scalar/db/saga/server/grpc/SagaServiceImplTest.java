@@ -271,6 +271,26 @@ class SagaServiceImplTest {
   }
 
   @Test
+  void startSaga_blankVersion_returnsInvalidArgumentNamingTheField() {
+    // Arrange — a present-but-blank version pins the request to a version that cannot exist.
+    // SagaDefinitionId rejects it, and the description is what distinguishes that typed rejection
+    // from the mapper's blanket fallback, which answers the same code with a fixed detail.
+    StartSagaRequest request =
+        StartSagaRequest.newBuilder().setName("transfer").setVersion("  ").setAsync(true).build();
+
+    // Act & Assert
+    assertThatThrownBy(() -> stub(0).startSaga(request))
+        .isInstanceOfSatisfying(
+            StatusRuntimeException.class,
+            e -> {
+              assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
+              assertThat(e.getStatus().getDescription())
+                  .contains(SagaErrorCode.INVALID_ARGUMENT.code())
+                  .contains("version must not be blank");
+            });
+  }
+
+  @Test
   void startSaga_engineRejectsArgument_returnsInvalidArgumentWithoutEchoingEngineWording() {
     when(orchestrator.startAsync("transfer", Map.of()))
         .thenThrow(new IllegalArgumentException("engine-internal wording about the bad value"));

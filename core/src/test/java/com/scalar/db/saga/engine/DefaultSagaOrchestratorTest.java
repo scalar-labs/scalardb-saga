@@ -1110,7 +1110,7 @@ class DefaultSagaOrchestratorTest {
     }
 
     @Test
-    void completeStepAsync_stepNameMismatch_throwsIllegalArgument() {
+    void completeStepAsync_stepNameMismatch_throwsSagaIllegalArgument() {
       // Arrange — saga is parked on "s1" but the callback names a different step
       SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
       List<SagaEvent> events = List.of(StatusEvent.started(null), StepEvent.pending(1, "s1"));
@@ -1119,7 +1119,7 @@ class DefaultSagaOrchestratorTest {
 
       // Act & Assert
       assertThatThrownBy(() -> orchestrator.completeStepAsync("saga-1", "other", Map.of()))
-          .isInstanceOf(IllegalArgumentException.class);
+          .isInstanceOf(SagaIllegalArgumentException.class);
     }
 
     @Test
