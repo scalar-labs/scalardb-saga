@@ -14,6 +14,7 @@ import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -708,6 +709,45 @@ class DefaultSagaOrchestratorTest {
     }
 
     @Test
+    void startAsync_settlementListenerFailsOnNotification_stillDispatchesCallback()
+        throws Exception {
+      // Arrange — the mirror of the test above, and the half its comment calls "vice versa". There
+      // the listener throws from isWatching; here it throws while being notified, which is after
+      // the engine has the answer and before the callback gets it. Swallowing the callback would
+      // leave an embedded caller waiting on a latch for a saga that finished.
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot runningSaga = snapshot("saga-1", SagaStatus.RUNNING);
+      SagaStateSnapshot completedSaga = snapshot("saga-1", SagaStatus.COMPLETED);
+      SagaCallback callback = mock(SagaCallback.class);
+      SettlementListener listener = mock(SettlementListener.class);
+      when(listener.isWatching("saga-1")).thenReturn(true);
+      doThrow(new RuntimeException("listener failure")).when(listener).onSagaSettled(any());
+
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(runningSaga);
+      when(engine.executeSaga(eq(def), any(), any())).thenReturn(completedSaga);
+
+      try (DefaultSagaOrchestrator watched =
+          new DefaultSagaOrchestrator(
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              Integer.MAX_VALUE,
+              Executors.newVirtualThreadPerTaskExecutor(),
+              listener)) {
+        // Act
+        watched.startAsync("transfer", Map.of(), callback);
+
+        // Assert — both were attempted, and the one that threw cost the other nothing.
+        verify(listener, timeout(5000)).onSagaSettled(completedSaga);
+        verify(callback, timeout(5000)).onCompleted(completedSaga);
+      }
+    }
+
+    @Test
     void startAsync_clientSuppliedIdWithCallback_persistsAndDispatchesCallback() throws Exception {
       // Arrange
       SagaDefinition def = definition("transfer");
@@ -1184,6 +1224,106 @@ class DefaultSagaOrchestratorTest {
 
         // Assert
         verify(listener, timeout(2_000)).onSagaSettled(completed);
+      }
+    }
+
+    @Test
+    void completeStepAsync_driveDiesWithNoWaiter_doesNotReadTheStoreForAnAnswerNobodyWants() {
+      // Arrange — a resumed drive carries no SagaCallback, so when it dies before reaching a
+      // verdict there is nothing to report it with except a fresh store read. isWatching exists to
+      // keep that read off this path: with nobody waiting the answer would be discarded, and this
+      // is the one place the method earns its keep. The only read here should be the WAITING check
+      // completeStepAsync makes before resuming.
+      SettlementListener listener = mock(SettlementListener.class);
+      when(listener.isWatching("saga-1")).thenReturn(false);
+      SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
+      SagaDefinition def = definition("test-saga");
+      SagaStateSnapshot running = snapshot("saga-1", SagaStatus.RUNNING);
+      List<SagaEvent> events =
+          List.of(
+              StatusEvent.started(null),
+              StepEvent.completed(0, "s0", null),
+              StepEvent.pending(1, "s1"));
+      ExecutionContext context = new ExecutionContext("saga-1", Map.of(), running);
+
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(waiting));
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(store.getEvents("saga-1")).thenReturn(events);
+      when(store.resumeParkedStep(eq(waiting), eq(events.size()), any(StepEvent.class)))
+          .thenReturn(running);
+      when(engine.replayEvents(eq(running), any())).thenReturn(context);
+      doThrow(new RuntimeException("drive died")).when(engine).resumeFrom(def, context, 2);
+
+      try (DefaultSagaOrchestrator unwatched =
+          new DefaultSagaOrchestrator(
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              Integer.MAX_VALUE,
+              Executors.newVirtualThreadPerTaskExecutor(),
+              listener)) {
+        // Act
+        unwatched.completeStepAsync("saga-1", "s1", Map.of());
+
+        // Assert — the drive ran and died, and nothing was read to describe a death nobody awaits.
+        verify(engine, timeout(2_000)).resumeFrom(def, context, 2);
+        verify(listener, timeout(2_000)).isWatching("saga-1");
+        verify(store, times(1)).getStateSnapshot("saga-1");
+        verify(listener, never()).onSagaSettled(any());
+      }
+    }
+
+    @Test
+    void completeStepAsync_driveDiesWhileWatched_readsTheStoreAndNotifiesFromIt() {
+      // Arrange — the mirror. With a waiter present the same death is worth a read: the drive has
+      // no verdict to offer, but the store may hold a terminal state it reached before failing, and
+      // that caller is owed it. The second read is the fallback; the first is the WAITING check.
+      SettlementListener listener = mock(SettlementListener.class);
+      when(listener.isWatching("saga-1")).thenReturn(true);
+      SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
+      SagaDefinition def = definition("test-saga");
+      SagaStateSnapshot running = snapshot("saga-1", SagaStatus.RUNNING);
+      SagaStateSnapshot completed = snapshot("saga-1", SagaStatus.COMPLETED);
+      List<SagaEvent> events =
+          List.of(
+              StatusEvent.started(null),
+              StepEvent.completed(0, "s0", null),
+              StepEvent.pending(1, "s1"));
+      ExecutionContext context = new ExecutionContext("saga-1", Map.of(), running);
+
+      // The saga is parked when completeStepAsync checks, and terminal by the time the fallback
+      // read runs — the drive committed the completion and then threw.
+      when(store.getStateSnapshot("saga-1"))
+          .thenReturn(Optional.of(waiting), Optional.of(completed));
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(store.getEvents("saga-1")).thenReturn(events);
+      when(store.resumeParkedStep(eq(waiting), eq(events.size()), any(StepEvent.class)))
+          .thenReturn(running);
+      when(engine.replayEvents(eq(running), any())).thenReturn(context);
+      doThrow(new RuntimeException("drive died after committing"))
+          .when(engine)
+          .resumeFrom(def, context, 2);
+
+      try (DefaultSagaOrchestrator watched =
+          new DefaultSagaOrchestrator(
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              Integer.MAX_VALUE,
+              Executors.newVirtualThreadPerTaskExecutor(),
+              listener)) {
+        // Act
+        watched.completeStepAsync("saga-1", "s1", Map.of());
+
+        // Assert — the waiter learns the outcome the dead drive never reported.
+        verify(listener, timeout(2_000)).onSagaSettled(completed);
+        verify(store, timeout(2_000).times(2)).getStateSnapshot("saga-1");
       }
     }
 
