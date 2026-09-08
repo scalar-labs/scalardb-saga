@@ -33,6 +33,7 @@ import java.time.Instant;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -185,21 +186,11 @@ class SagaResourceStartTest {
               return SAGA_ID;
             });
     when(orchestrator.getStateSnapshot(SAGA_ID)).thenReturn(snapshot(SagaStatus.WAITING));
-    Thread resume =
-        new Thread(
-            () -> {
-              try {
-                Thread.sleep(200L);
-              } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return;
-              }
-              waiterRegistry.onSagaSettled(snapshot(SagaStatus.COMPLETED));
-            });
+    CompletableFuture<Void> resume =
+        settleOnceWatched(SAGA_ID, () -> snapshot(SagaStatus.COMPLETED));
 
     // Act
     long startNanos = System.nanoTime();
-    resume.start();
     HttpResponse<String> response = post("/sagas", "{\"sagaName\":\"" + SAGA_NAME + "\"}");
     long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
     resume.join();
@@ -400,6 +391,37 @@ class SagaResourceStartTest {
     assertThat(response.body()).doesNotContain("someone-elses-saga");
     assertThat(response.body()).doesNotContain("victim");
     assertThat(response.body()).doesNotContain("RUNNING");
+  }
+
+  /**
+   * Settles the saga through the registry, but only once the request thread has actually registered
+   * its waiter. A notification that arrives first lands on an empty registry and is dropped by
+   * design, which the test would discover only when the bound elapsed, seconds later and as the
+   * wrong status. {@code isWatching} is the registry's own published signal for this, so the wait
+   * is on the condition rather than on a guess at how long registration takes.
+   */
+  private CompletableFuture<Void> settleOnceWatched(
+      String sagaId, Supplier<SagaStateSnapshot> settled) {
+    return CompletableFuture.runAsync(
+        () -> {
+          awaitWatching(sagaId);
+          waiterRegistry.onSagaSettled(settled.get());
+        });
+  }
+
+  private void awaitWatching(String sagaId) {
+    for (int attempt = 0; attempt < 1_000; attempt++) {
+      if (waiterRegistry.isWatching(sagaId)) {
+        return;
+      }
+      try {
+        Thread.sleep(5L);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new IllegalStateException("interrupted waiting for a waiter on " + sagaId, e);
+      }
+    }
+    throw new IllegalStateException("no waiter ever registered for saga " + sagaId);
   }
 
   private SagaStateSnapshot snapshot(SagaStatus status) {

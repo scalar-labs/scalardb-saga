@@ -49,6 +49,7 @@ import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongUnaryOperator;
+import java.util.function.Supplier;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -433,23 +434,14 @@ class SagaServiceImplTest {
               return "gen-r";
             });
     when(orchestrator.getStateSnapshot("gen-r")).thenReturn(parked);
-    Thread resume =
-        new Thread(
-            () -> {
-              try {
-                Thread.sleep(200L);
-              } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return;
-              }
-              waiterRegistry.onSagaSettled(snapshot("gen-r", SagaStatus.COMPLETED));
-            });
+    CompletableFuture<Void> resume =
+        settleOnceWatched("gen-r", () -> snapshot("gen-r", SagaStatus.COMPLETED));
 
     // Act
     long startNanos = System.nanoTime();
-    resume.start();
     SagaSnapshot response = stub(30_000).startSaga(startByName("transfer", false));
     long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+    resume.join();
 
     // Assert — the outcome, delivered when the saga settled rather than when the bound elapsed.
     assertThat(response.getStatus())
@@ -601,24 +593,15 @@ class SagaServiceImplTest {
     // and the only store read is the one before the wait.
     when(orchestrator.getStateSnapshot("await-1"))
         .thenReturn(snapshot("await-1", SagaStatus.RUNNING));
-    Thread settle =
-        new Thread(
-            () -> {
-              try {
-                Thread.sleep(200L);
-              } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return;
-              }
-              waiterRegistry.onSagaSettled(snapshot("await-1", SagaStatus.COMPENSATED));
-            });
+    CompletableFuture<Void> settle =
+        settleOnceWatched("await-1", () -> snapshot("await-1", SagaStatus.COMPENSATED));
 
     // Act
     long startNanos = System.nanoTime();
-    settle.start();
     SagaSnapshot response =
         stub(30_000).awaitSaga(AwaitSagaRequest.newBuilder().setSagaId("await-1").build());
     long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+    settle.join();
 
     // Assert
     assertThat(response.getStatus())
@@ -818,6 +801,37 @@ class SagaServiceImplTest {
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
+
+  /**
+   * Settles the saga through the registry, but only once the request thread has actually registered
+   * its waiter. A notification that arrives first lands on an empty registry and is dropped by
+   * design, which the test would discover only when the bound elapsed, seconds later and as the
+   * wrong status. {@code isWatching} is the registry's own published signal for this, so the wait
+   * is on the condition rather than on a guess at how long registration takes.
+   */
+  private CompletableFuture<Void> settleOnceWatched(
+      String sagaId, Supplier<SagaStateSnapshot> settled) {
+    return CompletableFuture.runAsync(
+        () -> {
+          awaitWatching(sagaId);
+          waiterRegistry.onSagaSettled(settled.get());
+        });
+  }
+
+  private void awaitWatching(String sagaId) {
+    for (int attempt = 0; attempt < 1_000; attempt++) {
+      if (waiterRegistry.isWatching(sagaId)) {
+        return;
+      }
+      try {
+        Thread.sleep(5L);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new IllegalStateException("interrupted waiting for a waiter on " + sagaId, e);
+      }
+    }
+    throw new IllegalStateException("no waiter ever registered for saga " + sagaId);
+  }
 
   private void assertCode(ThrowingCallable call, Status.Code expected) {
     assertThatThrownBy(call)
