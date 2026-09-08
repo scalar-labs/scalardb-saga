@@ -274,7 +274,12 @@ public final class SagaResource {
   /**
    * Parses the {@code ?async} flag. Absent → synchronous (the default). Accepts {@code true}/{@code
    * false} (case-insensitive); any other value is rejected with {@code 400} rather than silently
-   * taking the (riskier, thread-pinning) synchronous path.
+   * taking the (riskier, request-holding) synchronous path.
+   *
+   * <p>Request-holding, not thread-pinning: the synchronous branch hands the saga to {@code
+   * startAsync} and parks a virtual thread, where it once drove it inline on the calling Jetty
+   * worker. What {@code ?async=true} still avoids is holding the request at all, for up to the
+   * whole bound now that a park no longer ends the wait.
    */
   private static boolean isAsync(@Nullable String value) {
     if (value == null) {
