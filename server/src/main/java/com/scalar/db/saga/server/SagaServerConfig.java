@@ -1231,7 +1231,25 @@ public final class SagaServerConfig {
    * things at once — more sagas finish inside it and never reach the poll at all, and those that do
    * are polled less often. A deployment whose ingress tolerates a longer request can raise it, up
    * to that timeout: a REST wait does not end when a client disconnects, so a bound set past the
-   * ingress spends the difference waiting to answer a socket that is already closed.
+   * ingress spends the difference waiting to answer a socket that is already closed. Leave margin
+   * rather than matching it exactly, or the proxy can cut the connection as the server answers —
+   * and note that the {@value #DEFAULT_SYNC_MAX_WAIT_MILLIS} ms default already equals a common
+   * ingress default.
+   *
+   * <p><b>When the wait is worth taking at all.</b> It pays off for a saga with a real chance of
+   * settling inside it, which is answered in one round trip and, when it settles on this server, at
+   * the moment it does. For a saga whose steps routinely outlast the bound the wait cannot succeed:
+   * it answers {@code 202} and the caller has to check afterwards anyway, so such a saga should be
+   * started asynchronously and checked when its work is due. The axis is the saga's duration
+   * relative to this value, not whether it is "long-running" — a deployment whose sagas settle just
+   * outside the bound should raise the bound rather than change how callers call.
+   *
+   * <p><b>One key, deliberately.</b> There is no separate bound for the parked case, and there will
+   * not be one: the alternative to holding a request is the caller polling, which occupies this
+   * server anyway and costs it more store reads over the same window, so the shorter parked bound
+   * would buy a frozen configuration key for a cost that is not there. A caller who wants less than
+   * the deployment's bound has {@code async=true}, and a gRPC caller can also tighten a single
+   * call. See {@code docs/plans/2026-09-05-001-fix-bounded-sync-bound-and-await-polling-plan.md}.
    *
    * <p><b>The interval is also the notice latency for a saga settled on another replica.</b> A saga
    * settled on this process wakes its waiter at once, but one resumed elsewhere is seen only by the
