@@ -2,10 +2,13 @@ package com.scalar.db.saga.server;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.PrintWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
+import java.util.List;
 import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
@@ -65,6 +68,50 @@ public class SagaServerCommand implements Callable<Integer> {
       description = "A configuration file in properties format.")
   private @Nullable Path configFile;
 
+  /**
+   * The exit code for "I read your configuration and it is not acceptable": at least one problem
+   * was found in a file this command was able to read and judge. 1 is what a linter returns for
+   * findings.
+   *
+   * <p>This is the only code meaning the check ran and reached a verdict. Every other non-zero code
+   * means it did not: {@link CommandLine.ExitCode#USAGE} (2) for arguments picocli rejected, and
+   * {@link #EXECUTION_FAILURE} (3) for a file that could not be read or a failure while running. A
+   * CI gate asserting only that the command exited non-zero therefore asserts nothing; it has to
+   * test for this value specifically.
+   *
+   * <p>Deliberately not picocli's {@code ExitCode.SOFTWARE}, which despite the name is 1 rather
+   * than one of the sysexits.h codes. Returning that for an unexpected failure is exactly what
+   * would collapse the two cases into one number.
+   */
+  private static final int INVALID_CONFIGURATION = 1;
+
+  /**
+   * The exit code for "the check did not happen": the configuration file could not be read, or the
+   * command failed while running. Also what the server returns when it fails to start, since {@link
+   * #reportStartupFailure} handles both.
+   *
+   * <p>3 rather than 70. 70 is {@code EX_SOFTWARE} from sysexits.h, which reserves it for an
+   * internal error and gives an unreadable input and a bad configuration their own codes (66 and
+   * 78); one code standing for all three would borrow a precision this does not have. Nothing in
+   * the runtime reads either number, so the only property that matters is that it is not {@link
+   * #INVALID_CONFIGURATION}.
+   */
+  private static final int EXECUTION_FAILURE = 3;
+
+  @CommandLine.Option(
+      names = "--validate-config",
+      description =
+          "Check the configuration and exit without starting the server. Reads no store, opens no"
+              + " connection, and calls no service. Exit 0 when the configuration is acceptable, 1"
+              + " when it is not.")
+  private boolean validateConfig;
+
+  /**
+   * picocli's own output stream, so the validation report goes where the command's other output
+   * goes and a test can capture it without reassigning the JVM's {@code System.out}.
+   */
+  @CommandLine.Spec private CommandLine.Model.@Nullable CommandSpec spec;
+
   @Override
   public Integer call() throws Exception {
     // Unreachable in practice: picocli rejects a missing required option before it calls this, so a
@@ -85,6 +132,12 @@ public class SagaServerCommand implements Callable<Integer> {
               : e.getMessage();
       throw new IllegalArgumentException(
           "Cannot read the configuration file '" + path + "': " + reason, e);
+    }
+
+    if (validateConfig) {
+      // Unreachable null, like configFile above: picocli injects the spec before it calls this.
+      return validateConfiguration(
+          path, properties, Objects.requireNonNull(spec).commandLine().getOut());
     }
 
     SagaServer server = new SagaServer(SagaServerConfig.load(properties)).start();
@@ -120,6 +173,185 @@ public class SagaServerCommand implements Callable<Integer> {
   }
 
   /**
+   * The checks an offline run cannot perform, printed with every report so a clean result is not
+   * read as a promise that the daemon will start.
+   *
+   * <p>The first three are all the same absence — there is no store here, so nothing can be
+   * compared against what is already registered — but they are listed separately because they are
+   * three different mistakes an operator makes, and a reader looking for their own case should find
+   * it worded the way they would word it.
+   */
+  private static final List<String> UNCHECKABLE_OFFLINE =
+      List.of(
+          "whether a definition changed without bumping its version (compared against what a"
+              + " running replica has applied)",
+          "whether a version is already registered, and which version is actually serving",
+          "whether a version's stored content conflicts with the file",
+          "whether a service's base_url or the callback URL is reachable, or whether the callback"
+              + " secret is the one the participant expects (no request is made, and the callback"
+              + " URL's syntax is checked only when TLS is enabled)",
+          "the ScalarDB settings: neither the store connection nor the scalar.db.* and"
+              + " scalar.db.saga.store.* values are parsed here",
+          "whether the configured host and ports can actually be bound",
+          "the TLS certificate and key pair, which is validated at startup");
+
+  /**
+   * Validates the configuration without starting anything, and prints a report.
+   *
+   * <p>Secret resolution is lenient here, and only here; {@link LenientServiceValueResolver}
+   * documents the policy and where it stops. What this method owes the reader is that every check
+   * skipped because a value could not be read is named in the report, so a clean run never means
+   * less than it says.
+   *
+   * @return 0 when the configuration is acceptable, 1 when it is not
+   */
+  private static int validateConfiguration(Path path, Properties properties, PrintWriter out) {
+    SagaServerConfig.UnresolvedSecrets unresolved = new SagaServerConfig.UnresolvedSecrets();
+    SagaServerConfig config;
+    try {
+      config = SagaServerConfig.load(properties, unresolved);
+    } catch (RuntimeException e) {
+      // Not an artefact of an unreadable secret — load() retries without those itself. The server
+      // settings are read in order and stop at the first refusal, so this is one problem rather
+      // than the list, and the report says as much instead of implying the file has exactly one.
+      return report(
+          out,
+          path,
+          List.of(describeChain(e)),
+          unresolvedWarnings(unresolved),
+          0,
+          0,
+          "The server settings are read in order and reading stopped here, so there may be more"
+              + " problems after this one.");
+    }
+    ConfigReconciler reconciler =
+        new ConfigReconciler(
+            config.reloadConfig(),
+            config.definitionsPath().orElse(null),
+            config.callbackBaseUrl().isPresent() && config.callbackSecret().isPresent(),
+            new LenientServiceValueResolver(config.reloadConfig().secretsRoot()),
+            // Validation stops before a pass applies anything, so neither of these is reached.
+            // They throw rather than doing nothing so that a change which applies during
+            // validation fails loudly here instead of acting on a daemon that is not running.
+            services -> {
+              throw new AssertionError("A configuration validation must not swap endpoints");
+            },
+            new NoDefinitionStore(),
+            served -> {
+              throw new AssertionError("A configuration validation must not publish served sagas");
+            });
+    ConfigReconciler.ValidationReport result = reconciler.validate();
+    List<String> problems = new ArrayList<>(result.problems());
+    // The daemon refuses to start with nothing registered, and that guard lives in SagaServer
+    // rather than in the pass — so a validator that did not mirror it would pass a configuration
+    // that cannot boot, which is the one thing this command exists to prevent.
+    if (problems.isEmpty() && result.definitionCount() == 0) {
+      problems.add(SagaServer.noDefinitionsMessage());
+    }
+    List<String> warnings = unresolvedWarnings(unresolved);
+    // The other guard that refuses a boot on configuration alone. Reported alongside the rest
+    // rather than instead of them: it is independent of anything the reconciler found.
+    //
+    // Skipped when a setting it reads is standing in for a value this machine could not read. The
+    // rule turns on whether the provider is noop and the host is a loopback address, and reference
+    // text answers neither; judging it anyway breaks both ways, reporting a refusal for a
+    // configuration that boots or none for one that does not.
+    if (unresolved.reasonsByKey().keySet().stream()
+        .anyMatch(SagaServer.insecureBindingKeys()::contains)) {
+      warnings.add(
+          "Whether the server would refuse to start unauthenticated on a network-reachable"
+              + " interface was not checked: a setting that rule reads could not be read on this"
+              + " machine.");
+    } else {
+      String insecureBinding = SagaServer.insecureBindingRefusal(config);
+      if (insecureBinding != null) {
+        problems.add(insecureBinding);
+      }
+    }
+    // Authentication is the startup check an operator most wants covered, so it is always performed
+    // here rather than enumerated as skipped. The keys whose secret this machine could not read go
+    // with it, so the handful of rules that judge a resolved value stand down for those settings
+    // alone; every rule that needs no value still runs. Skipping the whole check instead would
+    // switch authentication validation off entirely for API-key deployments, which are required to
+    // write every key as a secret reference and therefore always have an unreadable one here. Each
+    // such setting is already named by its own warning, so nothing goes unsaid.
+    try {
+      SecurityProviderFactory.validate(config, unresolved.reasonsByKey().keySet());
+    } catch (RuntimeException e) {
+      problems.add(describeChain(e));
+    }
+    warnings.addAll(result.warnings());
+    return report(
+        out, path, problems, warnings, result.serviceCount(), result.definitionCount(), null);
+  }
+
+  /**
+   * One warning per setting whose secret this machine could not read, saying what was skipped
+   * rather than what was substituted.
+   */
+  private static List<String> unresolvedWarnings(SagaServerConfig.UnresolvedSecrets unresolved) {
+    List<String> warnings = new ArrayList<>();
+    unresolved
+        .reasonsByKey()
+        .forEach(
+            (key, reason) ->
+                warnings.add(
+                    "'"
+                        + key
+                        + "' could not be read on this machine ("
+                        + reason
+                        + "), so its value was not checked."));
+    return warnings;
+  }
+
+  /**
+   * Prints the report and returns the exit code. Problems first, because that is what the reader
+   * came for; the enumeration of what could not be checked comes last, where it qualifies the
+   * verdict above it.
+   */
+  private static int report(
+      PrintWriter out,
+      Path path,
+      List<String> problems,
+      List<String> warnings,
+      int serviceCount,
+      int definitionCount,
+      @Nullable String truncationNote) {
+    out.println("Validating " + path);
+    out.println();
+    if (problems.isEmpty()) {
+      out.println(
+          "Checked "
+              + serviceCount
+              + " service file(s) and "
+              + definitionCount
+              + " saga definition(s). No problems found.");
+    } else {
+      out.println(problems.size() + " problem(s) found:");
+      // One line per problem, whatever the message carries. These are composed from mounted files:
+      // a parse error puts its source location on a second line, and a ${file:...} reference may
+      // itself contain a newline, either of which would break the list or forge output lines.
+      problems.forEach(problem -> out.println("  - " + Redaction.oneLine(problem)));
+      if (truncationNote != null) {
+        out.println();
+        out.println(truncationNote);
+      }
+    }
+    if (!warnings.isEmpty()) {
+      out.println();
+      out.println(warnings.size() + " warning(s):");
+      warnings.forEach(warning -> out.println("  - " + Redaction.oneLine(warning)));
+    }
+    out.println();
+    out.println("Not checked without a running daemon:");
+    UNCHECKABLE_OFFLINE.forEach(check -> out.println("  - " + check));
+    out.println();
+    out.println(problems.isEmpty() ? "Configuration is acceptable." : "Configuration is rejected.");
+    out.flush();
+    return problems.isEmpty() ? CommandLine.ExitCode.OK : INVALID_CONFIGURATION;
+  }
+
+  /**
    * Reports a startup failure as one log line instead of a stack trace, and returns the exit code
    * for it.
    *
@@ -133,7 +365,7 @@ public class SagaServerCommand implements Callable<Integer> {
       Exception e, CommandLine commandLine, CommandLine.ParseResult parseResult) {
     logger.error("Failed to start the server: {}", describeChain(e));
     logger.debug("Startup failure detail", e);
-    return CommandLine.ExitCode.SOFTWARE;
+    return EXECUTION_FAILURE;
   }
 
   /**

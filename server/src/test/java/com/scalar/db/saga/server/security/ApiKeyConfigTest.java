@@ -8,6 +8,7 @@ import com.scalar.db.saga.server.SagaServerConfig;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.util.Properties;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 class ApiKeyConfigTest {
@@ -35,7 +36,7 @@ class ApiKeyConfigTest {
     Properties[] p = keyProps("svc", "${env:SVC_KEY}", "s3cr3t", "saga:read,saga:write");
 
     // Act
-    ApiKeyConfig config = ApiKeyConfig.from(p[0], p[1]);
+    ApiKeyConfig config = ApiKeyConfig.from(p[0], p[1], Set.of());
 
     // Assert
     assertThat(config.header()).isEqualTo(ApiKeyConfig.DEFAULT_HEADER);
@@ -55,7 +56,7 @@ class ApiKeyConfigTest {
         ApiKeyConfig.KEY_PREFIX + "svc" + ApiKeyConfig.PRINCIPAL_SUFFIX, "svc-account");
 
     // Act
-    ApiKeyConfig config = ApiKeyConfig.from(p[0], p[1]);
+    ApiKeyConfig config = ApiKeyConfig.from(p[0], p[1], Set.of());
 
     // Assert
     assertThat(config.header()).isEqualTo("X-Saga-Key");
@@ -68,7 +69,7 @@ class ApiKeyConfigTest {
     Properties[] p = keyProps("svc", "${env:K}", "s3cr3t", " saga:read , saga:admin ");
 
     // Act
-    ApiKeyConfig config = ApiKeyConfig.from(p[0], p[1]);
+    ApiKeyConfig config = ApiKeyConfig.from(p[0], p[1], Set.of());
 
     // Assert
     assertThat(config.definitions().get(0).roles())
@@ -84,7 +85,7 @@ class ApiKeyConfigTest {
     a[1].putAll(b[1]);
 
     // Act
-    ApiKeyConfig config = ApiKeyConfig.from(a[0], a[1]);
+    ApiKeyConfig config = ApiKeyConfig.from(a[0], a[1], Set.of());
 
     // Assert
     assertThat(config.definitions()).hasSize(2);
@@ -99,7 +100,7 @@ class ApiKeyConfigTest {
     Properties[] p = keyProps("svc", "plaintext-key", "plaintext-key", "saga:read");
 
     // Act / Assert
-    assertThatThrownBy(() -> ApiKeyConfig.from(p[0], p[1]))
+    assertThatThrownBy(() -> ApiKeyConfig.from(p[0], p[1], Set.of()))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
@@ -109,7 +110,7 @@ class ApiKeyConfigTest {
     Properties[] p = keyProps("svc", "prefix-${env:K}", "prefix-resolved", "saga:read");
 
     // Act / Assert
-    assertThatThrownBy(() -> ApiKeyConfig.from(p[0], p[1]))
+    assertThatThrownBy(() -> ApiKeyConfig.from(p[0], p[1], Set.of()))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
@@ -120,7 +121,7 @@ class ApiKeyConfigTest {
     Properties[] p = keyProps("svc", "${env:MISSING}", "${env:MISSING}", "saga:read");
 
     // Act / Assert
-    assertThatThrownBy(() -> ApiKeyConfig.from(p[0], p[1]))
+    assertThatThrownBy(() -> ApiKeyConfig.from(p[0], p[1], Set.of()))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
@@ -130,7 +131,7 @@ class ApiKeyConfigTest {
     Properties[] p = keyProps("svc", "${file:UTF-8:/run/secrets/svc}", "", "saga:read");
 
     // Act / Assert
-    assertThatThrownBy(() -> ApiKeyConfig.from(p[0], p[1]))
+    assertThatThrownBy(() -> ApiKeyConfig.from(p[0], p[1], Set.of()))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
@@ -141,7 +142,7 @@ class ApiKeyConfigTest {
     Properties[] p = keyProps("svc", "${env:K}", "s3cr3t", "saga:superuser");
 
     // Act / Assert
-    assertThatThrownBy(() -> ApiKeyConfig.from(p[0], p[1]))
+    assertThatThrownBy(() -> ApiKeyConfig.from(p[0], p[1], Set.of()))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining(ApiKeyConfig.KEY_PREFIX + "svc" + ApiKeyConfig.ROLES_SUFFIX)
         .hasMessageNotContaining("superuser")
@@ -154,14 +155,52 @@ class ApiKeyConfigTest {
     Properties[] p = keyProps("svc", "${env:K}", "s3cr3t", null);
 
     // Act / Assert
-    assertThatThrownBy(() -> ApiKeyConfig.from(p[0], p[1]))
+    assertThatThrownBy(() -> ApiKeyConfig.from(p[0], p[1], Set.of()))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void from_unresolvedKeyGiven_acceptsTheStandInWithoutJudgingIt() {
+    // Arrange — what an offline check sees: the reference did not expand, so the resolved value is
+    // the reference text, and the caller has established the machine could not read it.
+    Properties[] p = keyProps("svc", "${env:SVC_KEY}", "${env:SVC_KEY}", "saga:read");
+    String secretKey = ApiKeyConfig.KEY_PREFIX + "svc" + ApiKeyConfig.SECRET_SUFFIX;
+
+    // Act
+    ApiKeyConfig config = ApiKeyConfig.from(p[0], p[1], Set.of(secretKey));
+
+    // Assert — parsed, with the rules that need no resolved value still applied.
+    assertThat(config.definitions()).hasSize(1);
+    assertThat(config.definitions().get(0).roles()).containsExactly(SagaRole.READ);
+  }
+
+  @Test
+  void from_unresolvedKeyNotListed_rejectsTheUnexpandedReference() {
+    // Arrange — the same properties, but nothing says the machine could not read it, which is the
+    // daemon's situation: a reference that did not expand is then a configuration error.
+    Properties[] p = keyProps("svc", "${env:SVC_KEY}", "${env:SVC_KEY}", "saga:read");
+
+    // Act / Assert
+    assertThatThrownBy(() -> ApiKeyConfig.from(p[0], p[1], Set.of()))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void from_unresolvedKeyGiven_stillRejectsAnInlineKey() {
+    // Arrange — an inline key, with that same setting listed as unreadable. The inline rule reads
+    // the raw value only, so being unable to read a secret must not excuse it.
+    Properties[] p = keyProps("svc", "inline-key", "inline-key", "saga:read");
+    String secretKey = ApiKeyConfig.KEY_PREFIX + "svc" + ApiKeyConfig.SECRET_SUFFIX;
+
+    // Act / Assert
+    assertThatThrownBy(() -> ApiKeyConfig.from(p[0], p[1], Set.of(secretKey)))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
   void from_noKeys_throwsException() {
     // Act / Assert — provider selected but nothing configured
-    assertThatThrownBy(() -> ApiKeyConfig.from(new Properties(), new Properties()))
+    assertThatThrownBy(() -> ApiKeyConfig.from(new Properties(), new Properties(), Set.of()))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
