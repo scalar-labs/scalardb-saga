@@ -17,6 +17,7 @@ import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
+import com.scalar.db.saga.server.LogCapture;
 import com.scalar.db.saga.server.security.SagaAuthUnavailableException;
 import com.scalar.db.saga.server.security.SagaAuthenticationException;
 import com.scalar.db.saga.server.security.SagaAuthorizationException;
@@ -423,6 +424,33 @@ class ErrorMapperTest {
     assertThat(covered)
         .as("every SagaErrorCode needs a dispatch-table row or a commented exclusion above")
         .isEqualTo(EnumSet.complementOf(excluded));
+  }
+
+  @Test
+  void illegalArgument_logsTheThrowableTheWireBodyDrops() throws Exception {
+    // Arrange — the response replaces the engine's wording with a fixed detail and carries no
+    // cause, so this log line is the only surviving record of what actually failed. Without it a
+    // store fault answering 400s is invisible on both sides.
+    toThrow = new IllegalArgumentException("engine-internal wording");
+
+    try (LogCapture logs = LogCapture.of(ErrorMapper.class)) {
+      // Act
+      HttpResponse<String> response = get("/throw-dispatch");
+
+      // Assert — that the throwable reaches the log, and deliberately not at what level: the
+      // severity is a separate judgement that can be raised without weakening this property.
+      assertThat(response.statusCode()).isEqualTo(400);
+      assertThat(response.body()).doesNotContain("engine-internal wording");
+      assertThat(logs.events())
+          .anySatisfy(
+              event -> {
+                assertThat(event.getThrowableProxy()).isNotNull();
+                assertThat(event.getThrowableProxy().getClassName())
+                    .isEqualTo(IllegalArgumentException.class.getName());
+                assertThat(event.getThrowableProxy().getMessage())
+                    .isEqualTo("engine-internal wording");
+              });
+    }
   }
 
   private HttpResponse<String> get(String path) throws Exception {

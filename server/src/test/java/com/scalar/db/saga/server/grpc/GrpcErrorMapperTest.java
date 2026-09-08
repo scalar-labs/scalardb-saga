@@ -19,6 +19,7 @@ import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
+import com.scalar.db.saga.server.LogCapture;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import java.time.Instant;
@@ -65,6 +66,30 @@ class GrpcErrorMapperTest {
     // it was rejected. INVALID_REQUEST is reserved for the message itself failing validation.
     assertThat(info.getReason()).isEqualTo(SagaErrorCode.INVALID_ARGUMENT.code());
     assertThat(info.getMetadataMap()).containsEntry("detail", "invalid request parameter");
+  }
+
+  @Test
+  void toStatusRuntimeException_illegalArgumentGiven_logsTheThrowableTheWireDrops() {
+    // The status description replaces the engine's wording with a fixed detail and carries no
+    // cause, so this log line is the only surviving record of what actually failed. Asserted on
+    // the throwable rather than the level: the severity is a separate judgement that can be
+    // raised without weakening this property.
+    try (LogCapture logs = LogCapture.of(GrpcErrorMapper.class)) {
+      // Act
+      GrpcErrorMapper.toStatusRuntimeException(
+          new IllegalArgumentException("engine-internal wording"));
+
+      // Assert
+      assertThat(logs.events())
+          .anySatisfy(
+              event -> {
+                assertThat(event.getThrowableProxy()).isNotNull();
+                assertThat(event.getThrowableProxy().getClassName())
+                    .isEqualTo(IllegalArgumentException.class.getName());
+                assertThat(event.getThrowableProxy().getMessage())
+                    .isEqualTo("engine-internal wording");
+              });
+    }
   }
 
   @Test
