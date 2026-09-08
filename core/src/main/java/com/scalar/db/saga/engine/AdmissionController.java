@@ -129,9 +129,9 @@ final class AdmissionController {
    * a second thread elect itself in the gap.
    *
    * <p>Counters are cumulative and never reset — the Prometheus convention, and it also avoids the
-   * race a {@code sumThenReset} would introduce with concurrent rejectors. The elected writer takes
-   * its delta with a {@code getAndSet}, so two writers can never report the same rejection twice
-   * even if one is descheduled mid-summary.
+   * race a {@code sumThenReset} would introduce with concurrent rejectors. The elected writer
+   * claims its delta through {@link #claimDelta}, whose mark only ever advances, so two writers can
+   * never report the same rejection twice even if one is descheduled mid-summary.
    *
    * <p>Summarizing from the rejection path rather than a scheduler means a storm's final partial
    * count waits for the next rejection to be reported. That trailing edge is deliberate: it costs
@@ -167,16 +167,19 @@ final class AdmissionController {
    * <p>Monotonic on purpose. The election serializes writers within an interval but cannot stop one
    * from being descheduled after reading its total and resuming an interval later, by which time a
    * successor has already reported a higher figure. A plain {@code getAndSet} would then move the
-   * reported mark <b>backwards</b>, so that writer would log a negative delta and the next interval
-   * would count the same rejections a second time. Taking the maximum makes a late writer claim
-   * nothing instead, which is the honest outcome: its rejections were already reported by the
-   * successor that overtook it.
+   * reported mark <b>backwards</b>, and the next interval would count the same rejections a second
+   * time. Taking the maximum makes a late writer claim nothing instead, which is the honest
+   * outcome: its rejections were already reported by the successor that overtook it. The floor at
+   * zero keeps that literal, so an overtaken writer answers with nothing rather than a negative
+   * count no caller could use.
    *
    * @return the rejections this caller may report; {@code 0} when a later writer already did, since
    *     the accumulated maximum is then already at or above this caller's total
    */
-  private long claimDelta(long total) {
-    return total - lastReportedCount.getAndAccumulate(total, Math::max);
+  // Visible for testing: calling it directly is the only way to drive an overtaken writer, since
+  // nothing can hold a thread between reading the total and claiming it.
+  long claimDelta(long total) {
+    return Math.max(0, total - lastReportedCount.getAndAccumulate(total, Math::max));
   }
 
   /**

@@ -295,12 +295,11 @@ class AdmissionControllerTest {
     }
 
     @Test
-    void acquire_writerOvertakenByALaterInterval_reportsNothingRatherThanANegativeDelta() {
-      // The election serializes writers inside an interval, but a writer descheduled after reading
-      // its total can resume an interval later, when a successor has already reported more. Moving
-      // the reported mark backwards there would log a negative delta and count the same rejections
-      // twice in the interval after. Simulated by driving two summaries and checking neither is
-      // negative and the totals never regress.
+    void acquire_stormSpanningTwoIntervals_reportsAPositiveDeltaEachWithGrowingTotals() {
+      // One storm, two boundaries, one line each: the delta an operator reads is what arrived in
+      // that interval, and the cumulative figure beside it only ever climbs. This says nothing
+      // about a writer overtaken by a later interval; that guard is driven directly in
+      // claimDelta_totalLowerThanAlreadyReportedGiven_leavesTheMarkWhereItWas.
       // Arrange
       AdmissionController controller = saturated(1);
 
@@ -314,6 +313,25 @@ class AdmissionControllerTest {
       assertThat(intervalSummaries()).noneMatch(line -> line.contains("-"));
       assertThat(totalIn(intervalSummaries().get(0)))
           .isLessThan(totalIn(intervalSummaries().get(1)));
+    }
+
+    @Test
+    void claimDelta_totalLowerThanAlreadyReportedGiven_leavesTheMarkWhereItWas() {
+      // The one case threads cannot stage: a writer that read its total, lost the processor for a
+      // whole interval, and returned after a successor reported more. Nothing can hold a thread
+      // between reading the total and claiming it, so the claim is driven directly. Were the mark
+      // to follow the late writer down, the interval after would count 10 through 20 a second
+      // time.
+      // Arrange
+      AdmissionController controller = controller(1);
+      controller.claimDelta(20);
+
+      // Act
+      long overtaken = controller.claimDelta(10);
+
+      // Assert
+      assertThat(overtaken).isZero();
+      assertThat(controller.claimDelta(25)).isEqualTo(5);
     }
 
     /** The "N total since start" figure from a summary line. */
