@@ -29,13 +29,12 @@ class SagaWaiterRegistryTest {
     SagaStateSnapshot settledSnapshot = snapshot(SAGA_ID, SagaStatus.COMPLETED);
     CompletableFuture<SagaStateSnapshot> settled = new CompletableFuture<>();
 
-    try (SagaWaiterRegistry.Waiter waiter = registry.register(SAGA_ID, settled)) {
+    try (var _ = registry.register(SAGA_ID, settled)) {
       // Act
       registry.onSagaSettled(settledSnapshot);
 
       // Assert
       assertThat(settled).isCompletedWithValue(settledSnapshot);
-      assertThat(waiter).isNotNull();
     }
   }
 
@@ -46,20 +45,19 @@ class SagaWaiterRegistryTest {
     CompletableFuture<SagaStateSnapshot> first = new CompletableFuture<>();
     CompletableFuture<SagaStateSnapshot> second = new CompletableFuture<>();
 
-    try (SagaWaiterRegistry.Waiter firstWaiter = registry.register(SAGA_ID, first);
-        SagaWaiterRegistry.Waiter secondWaiter = registry.register(SAGA_ID, second)) {
+    try (var _ = registry.register(SAGA_ID, first);
+        var _ = registry.register(SAGA_ID, second)) {
       // Act
       registry.onSagaSettled(settledSnapshot);
 
       // Assert
       assertThat(first).isCompletedWithValue(settledSnapshot);
       assertThat(second).isCompletedWithValue(settledSnapshot);
-      assertThat(firstWaiter).isNotSameAs(secondWaiter);
     }
   }
 
   @Test
-  void onSagaSettled_forAnUnwatchedSaga_doesNothing() {
+  void onSagaSettled_unwatchedSaga_doesNothing() {
     // Arrange & Act — the common case: nobody is waiting, so settling must cost nothing.
     registry.onSagaSettled(snapshot("other", SagaStatus.COMPLETED));
 
@@ -74,10 +72,9 @@ class SagaWaiterRegistryTest {
     CompletableFuture<SagaStateSnapshot> settled = new CompletableFuture<>();
 
     // Act & Assert
-    try (SagaWaiterRegistry.Waiter waiter = registry.register(SAGA_ID, settled)) {
+    try (var _ = registry.register(SAGA_ID, settled)) {
       assertThat(registry.isWatching(SAGA_ID)).isTrue();
       assertThat(settled).isNotDone();
-      assertThat(waiter).isNotNull();
     }
   }
 
@@ -102,16 +99,15 @@ class SagaWaiterRegistryTest {
     SagaWaiterRegistry.Waiter leaving = registry.register(SAGA_ID, leavingFuture);
     SagaStateSnapshot settledSnapshot = snapshot(SAGA_ID, SagaStatus.COMPENSATED);
 
-    try (SagaWaiterRegistry.Waiter staying = registry.register(SAGA_ID, stayingFuture)) {
+    try (var _ = registry.register(SAGA_ID, stayingFuture)) {
       // Act
       leaving.close();
-
-      // Assert
-      assertThat(registry.isWatching(SAGA_ID)).isTrue();
       registry.onSagaSettled(settledSnapshot);
+
+      // Assert — the saga is still watched for the waiter that stayed, and only that one is woken.
+      assertThat(registry.isWatching(SAGA_ID)).isTrue();
       assertThat(stayingFuture).isCompletedWithValue(settledSnapshot);
       assertThat(leavingFuture).isNotDone();
-      assertThat(staying).isNotNull();
     }
   }
 
@@ -137,12 +133,11 @@ class SagaWaiterRegistryTest {
     CompletableFuture<SagaStateSnapshot> settled = new CompletableFuture<>();
 
     // Act
-    try (SagaWaiterRegistry.Waiter waiter = registry.register(SAGA_ID, settled)) {
+    try (var _ = registry.register(SAGA_ID, settled)) {
       registry.onSagaSettled(settledSnapshot);
 
       // Assert
       assertThat(settled).isCompletedWithValue(settledSnapshot);
-      assertThat(waiter).isNotNull();
     }
   }
 
@@ -153,14 +148,13 @@ class SagaWaiterRegistryTest {
     SagaStateSnapshot second = snapshot(SAGA_ID, SagaStatus.COMPENSATED);
     CompletableFuture<SagaStateSnapshot> settled = new CompletableFuture<>();
 
-    try (SagaWaiterRegistry.Waiter waiter = registry.register(SAGA_ID, settled)) {
+    try (var _ = registry.register(SAGA_ID, settled)) {
       // Act
       registry.onSagaSettled(first);
       registry.onSagaSettled(second);
 
       // Assert
       assertThat(settled).isCompletedWithValue(first);
-      assertThat(waiter).isNotNull();
     }
   }
 }

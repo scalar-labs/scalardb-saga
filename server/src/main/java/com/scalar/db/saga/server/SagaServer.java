@@ -129,12 +129,8 @@ public final class SagaServer implements AutoCloseable {
   public SagaServer(SagaServerConfig config) {
     // The registry is created here rather than inside the orchestrator build so that one instance
     // reaches both the engine (as a settlement listener) and the two transports (as the place their
-    // waiters register). Passing it as an argument lets the delegating constructor below use it
-    // twice without needing a local.
-    this(config, new SagaWaiterRegistry());
-  }
-
-  private SagaServer(SagaServerConfig config, SagaWaiterRegistry waiterRegistry) {
+    // waiters register). Naming it takes a statement ahead of this(...), which JEP 513 allows.
+    SagaWaiterRegistry waiterRegistry = new SagaWaiterRegistry();
     this(config, buildDefaultSagaOrchestrator(config, waiterRegistry), waiterRegistry);
   }
 
@@ -154,7 +150,8 @@ public final class SagaServer implements AutoCloseable {
       SagaWaiterRegistry waiterRegistry) {
     this.config = Objects.requireNonNull(config, "config must not be null");
     this.orchestrator = Objects.requireNonNull(orchestrator, "orchestrator must not be null");
-    this.waiterRegistry = Objects.requireNonNull(waiterRegistry, "waiterRegistry must not be null");
+    // No null check: unlike the two above, this argument reaches no caller outside this class.
+    this.waiterRegistry = waiterRegistry;
     // TLS material is validated first, in its own guarded step: the orchestrator is the only
     // resource alive yet, and both transports below consume the result.
     TlsMaterial tlsMaterial = null;

@@ -10,6 +10,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
+import net.jcip.annotations.ThreadSafe;
 
 /**
  * The in-flight requests on this process that are waiting for a saga to settle, keyed by saga id.
@@ -26,6 +27,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>More than one waiter per saga is legal — two clients may await the same id — so registrations
  * are a collection and all of them are completed.
  */
+@ThreadSafe
 public final class SagaWaiterRegistry implements SettlementListener {
 
   // Registrations are distinguished by identity, not by value: two waiters on one saga are distinct
@@ -34,9 +36,9 @@ public final class SagaWaiterRegistry implements SettlementListener {
   // does not specify, so keying on the future itself would rest on an undefined contract.
   private final AtomicLong nextRegistrationId = new AtomicLong();
 
-  // The value map is only ever touched inside a compute function, which ConcurrentHashMap runs
-  // under
-  // the key's bin lock, so a plain LinkedHashMap is safe and needs no synchronization of its own.
+  // The value map is only ever touched inside a compute function. ConcurrentHashMap runs those
+  // holding the key's bin lock, so a plain LinkedHashMap is safe here and needs no synchronization
+  // of its own.
   // onSagaSettled copies the futures out and completes them *outside* that lock: completing a
   // CompletableFuture can run dependent actions on the completing thread, and running those under a
   // map lock would let one waiter's continuation block every other saga hashing to the same bin.

@@ -459,11 +459,11 @@ class SagaServiceImplTest {
 
   @Test
   void startSaga_syncSagaNeverParks_doesNotPollTheStore() {
-    // A saga with no asynchronous step runs start-to-finish on this replica, so the callback or the
-    // registry always delivers its outcome. A poll could only find what a push would have delivered
-    // sooner, so the wait must not read the store at all — only the one read that decides the
-    // response when the bound elapses. A 2s bound derives the 1s interval floor, so polling would
-    // be plainly visible as extra reads.
+    // Arrange — a saga with no asynchronous step runs start-to-finish on this replica, so the
+    // callback or the registry always delivers its outcome. A poll could only find what a push
+    // would have delivered sooner, so the wait must not read the store at all — only the one read
+    // that decides the response when the bound elapses. A 2s bound derives the 1s interval floor,
+    // so polling would be plainly visible as extra reads.
     when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
         .thenReturn("gen-np");
     when(orchestrator.getStateSnapshot("gen-np"))
@@ -478,11 +478,11 @@ class SagaServiceImplTest {
 
   @Test
   void startSaga_pollReadOutlivesTheBound_answersFromItRatherThanReadingAgain() {
-    // A poll tick can itself outlive the deadline when the store is slow. The wait must then answer
-    // from that read: falling through to the bound-expiry read would issue two transactions in the
-    // same breath, on exactly the store this is meant to spare, and at the moment it is least able
-    // to serve them. Bound 2s, interval 1s, and the single tick at 1s takes 1.5s — so it returns
-    // half a second past the deadline.
+    // Arrange — a poll tick can itself outlive the deadline when the store is slow. The wait must
+    // then answer from that read: falling through to the bound-expiry read would issue two
+    // transactions in the same breath, on exactly the store this is meant to spare, and at the
+    // moment it is least able to serve them. Bound 2s, interval 1s, and the single tick at 1s
+    // takes 1.5s — so it returns half a second past the deadline.
     SagaStateSnapshot parked = snapshot("gen-slow", SagaStatus.WAITING);
     when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
         .thenAnswer(
@@ -508,8 +508,9 @@ class SagaServiceImplTest {
 
   @Test
   void startSaga_sagaParks_startsPollingForWhatAPushCanNoLongerCatch() {
-    // The mirror of the above. Once parked, the saga can be resumed on another replica, where no
-    // push reaches this process — so polling becomes the only way to notice before the bound.
+    // Arrange — the mirror of the above. Once parked, the saga can be resumed on another replica,
+    // where no push reaches this process — so polling becomes the only way to notice before the
+    // bound.
     SagaStateSnapshot parked = snapshot("gen-pk", SagaStatus.WAITING);
     when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
         .thenAnswer(
@@ -557,8 +558,9 @@ class SagaServiceImplTest {
 
   @Test
   void awaitSaga_callerCancels_doesNotReadTheStoreAgain() throws Exception {
-    // A cancelled call's response is discarded, so a store read to build it is pure waste. The poll
-    // loop this replaced returned the last snapshot it held; the rewrite must not lose that.
+    // Arrange — a cancelled call's response is discarded, so a store read to build it is pure
+    // waste. The poll loop this replaced returned the last snapshot it held; the rewrite must not
+    // lose that.
     //
     // Its own server, on a real executor: the shared helper uses directExecutor, which runs the
     // handler inline on the calling thread, so nothing could cancel the call while it was in
@@ -594,8 +596,9 @@ class SagaServiceImplTest {
 
   @Test
   void awaitSaga_sagaSettlesOnThisReplica_returnsWithoutPolling() {
-    // Arrange — AwaitSaga's long-poll is the path finding 5 is about. A saga settled through the
-    // registry must end the window at once, and the only store read is the one before the wait.
+    // Arrange — AwaitSaga is the long-poll behind the SDK's blocking start(), the path that used to
+    // read the store every 200ms. A saga settled through the registry must end the window at once,
+    // and the only store read is the one before the wait.
     when(orchestrator.getStateSnapshot("await-1"))
         .thenReturn(snapshot("await-1", SagaStatus.RUNNING));
     Thread settle =

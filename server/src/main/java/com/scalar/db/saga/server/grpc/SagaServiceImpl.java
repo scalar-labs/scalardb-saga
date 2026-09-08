@@ -31,9 +31,10 @@ import org.jspecify.annotations.Nullable;
 
 /**
  * The gRPC rendering of the saga lifecycle API — the wire-protocol parallel of {@link
- * com.scalar.db.saga.server.api.SagaResource} (REST). Stateless except for the injected {@link
- * SagaOrchestrator} (the same instance the REST routes use); any per-request latch/reference is
- * local to the call.
+ * com.scalar.db.saga.server.api.SagaResource} (REST). Holds no per-request state: the injected
+ * {@link SagaOrchestrator} (the same instance the REST routes use), the server's shutdown signal,
+ * and the {@link com.scalar.db.saga.server.SagaWaiterRegistry} are all shared and process-wide;
+ * every latch or reference belonging to one call is local to it.
  *
  * <p><b>Sync vs async.</b> {@code async=true} starts the saga and returns the running snapshot
  * immediately. {@code async=false} blocks until the saga is terminal, bounded by the {@code
@@ -49,7 +50,9 @@ import org.jspecify.annotations.Nullable;
  * returns the terminal snapshot if reached, else the current non-terminal snapshot. The client
  * loops it (after a bounded {@code StartSaga}) to deliver a block-until-terminal {@code start()}
  * over short, resumable calls. Unlike the start path it cannot attach the saga's in-process
- * completion callback (the saga may run on another replica), so it observes via store polling.
+ * completion callback, which belongs to the drive that started the saga, so it waits on the
+ * registry instead: a drive settling the saga here wakes it at once, and a saga settled on another
+ * replica is caught by the poll behind the wait.
  */
 @ThreadSafe
 public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
