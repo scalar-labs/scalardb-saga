@@ -5,6 +5,7 @@ pluginManagement {
 rootProject.name = "scalardb-saga"
 
 include("api")
+include("benchmark")
 include("bom")
 include("client")
 include("core")
