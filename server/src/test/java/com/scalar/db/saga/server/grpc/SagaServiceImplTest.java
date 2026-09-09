@@ -291,18 +291,23 @@ class SagaServiceImplTest {
   }
 
   @Test
-  void startSaga_engineRejectsArgument_returnsInvalidArgumentWithoutEchoingEngineWording() {
+  void startSaga_storeRejectsWithBareIllegalArgument_returnsInternalNotTheCallersFault() {
+    // Arrange — the shape a dropped saga table takes on the way out of the store: ScalarDB's
+    // operation checker throws a bare IllegalArgumentException and nothing between here and the
+    // mapper wraps it. Every caller-input rejection on this path carries a typed exception, so a
+    // stdlib one is the server's problem and must not be attributed to whoever happened to call.
     when(orchestrator.startAsync("transfer", Map.of()))
-        .thenThrow(new IllegalArgumentException("engine-internal wording about the bad value"));
+        .thenThrow(new IllegalArgumentException("Table not found: saga.saga_state"));
 
+    // Act & Assert
     assertThatThrownBy(() -> stub(0).startSaga(startByName("transfer", true)))
         .isInstanceOfSatisfying(
             StatusRuntimeException.class,
             e -> {
-              assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
+              assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INTERNAL);
               assertThat(e.getStatus().getDescription())
-                  .contains(SagaErrorCode.INVALID_ARGUMENT.code())
-                  .doesNotContain("engine-internal");
+                  .contains(SagaErrorCode.INTERNAL_ERROR.code())
+                  .doesNotContain("saga_state");
             });
   }
 

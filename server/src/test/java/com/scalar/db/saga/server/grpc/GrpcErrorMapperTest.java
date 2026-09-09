@@ -3,6 +3,7 @@ package com.scalar.db.saga.server.grpc;
 import static com.scalar.db.saga.server.grpc.ErrorInfos.errorInfo;
 import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 
 import ch.qos.logback.classic.Level;
 import com.google.protobuf.Any;
@@ -61,20 +62,51 @@ class GrpcErrorMapperTest {
   }
 
   @Test
-  void toStatusRuntimeException_illegalArgumentGiven_mapsToArgumentInvalid() {
-    StatusRuntimeException e =
-        GrpcErrorMapper.toStatusRuntimeException(new IllegalArgumentException("bad client value"));
+  void toStatusRuntimeException_droppedSagaTableGiven_isInternalAndLoggedAtError() {
+    // ScalarDB's operation checkers throw a bare IllegalArgumentException for a missing table, and
+    // ConsensusCommit wraps only the checked ExecutionException, so it reaches the mapper
+    // unwrapped. Answering it with INVALID_ARGUMENT told every caller its own request was
+    // malformed, and INVALID_ARGUMENT is USER_ERROR, so the retry contract also told them not to
+    // retry and not to alert while the store was down.
+    try (LogCapture logs = LogCapture.of(GrpcErrorMapper.class)) {
+      // Act
+      StatusRuntimeException e =
+          GrpcErrorMapper.toStatusRuntimeException(
+              new IllegalArgumentException("Table not found: saga.saga_state"));
 
-    assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
-    // Engine's wording is not echoed; a fixed daemon-owned detail is.
-    assertThat(e.getStatus().getDescription())
-        .contains(SagaErrorCode.INVALID_ARGUMENT.code())
-        .doesNotContain("bad client value");
-    ErrorInfo info = errorInfo(e);
-    // INVALID_ARGUMENT, not INVALID_REQUEST: the request message was well-formed; a value inside
-    // it was rejected. INVALID_REQUEST is reserved for the message itself failing validation.
-    assertThat(info.getReason()).isEqualTo(SagaErrorCode.INVALID_ARGUMENT.code());
-    assertThat(info.getMetadataMap()).containsEntry("detail", "invalid request parameter");
+      // Assert
+      assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INTERNAL);
+      // The table name is internal topology and stays server-side.
+      assertThat(e.getStatus().getDescription()).doesNotContain("saga_state");
+      ErrorInfo info = errorInfo(e);
+      assertThat(info.getReason()).isEqualTo(SagaErrorCode.INTERNAL_ERROR.code());
+      assertThat(logs.events())
+          .anySatisfy(
+              event -> {
+                assertThat(event.getLevel()).isEqualTo(Level.ERROR);
+                assertThat(event.getThrowableProxy()).isNotNull();
+                assertThat(event.getThrowableProxy().getMessage())
+                    .isEqualTo("Table not found: saga.saga_state");
+              });
+    }
+  }
+
+  @Test
+  void toStatusRuntimeException_malformedErrorMetadataGiven_isInternalNotTheCallersFault() {
+    // A throw site whose metadata map does not match its code's schema fails inside the
+    // SagaRuntimeException constructor, as a bare IllegalArgumentException. It is our bug, and it
+    // used to replace whatever error was being reported with the caller's own INVALID_ARGUMENT.
+    IllegalArgumentException schemaMismatch =
+        catchThrowableOfType(
+            IllegalArgumentException.class,
+            () -> new SagaRuntimeException(SagaErrorCode.SAGA_NOT_FOUND, Map.of("wrong_key", "x")));
+
+    // Act
+    StatusRuntimeException e = GrpcErrorMapper.toStatusRuntimeException(schemaMismatch);
+
+    // Assert
+    assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INTERNAL);
+    assertThat(errorInfo(e).getReason()).isEqualTo(SagaErrorCode.INTERNAL_ERROR.code());
   }
 
   @Test
@@ -158,10 +190,12 @@ class GrpcErrorMapperTest {
             Instant.ofEpochSecond(1_700_000_000L),
             Instant.ofEpochSecond(1_700_000_000L));
     return List.of(
+        // No case: a bare IllegalArgumentException is a server fault, so it takes the default
+        // arm's INTERNAL rather than the caller's INVALID_ARGUMENT.
         new Arm(
             new IllegalArgumentException("bad"),
-            Status.Code.INVALID_ARGUMENT,
-            SagaErrorCode.INVALID_ARGUMENT),
+            Status.Code.INTERNAL,
+            SagaErrorCode.INTERNAL_ERROR),
         new Arm(
             new SagaInvalidRequestException("x"),
             Status.Code.INVALID_ARGUMENT,
