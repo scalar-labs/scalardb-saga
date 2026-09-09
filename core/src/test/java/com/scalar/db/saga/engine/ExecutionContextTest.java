@@ -540,9 +540,10 @@ class ExecutionContextTest {
     Map<String, Object> input = Map.of("bad", new Object());
 
     // Act & Assert
-    // Stdlib, not SagaIllegalArgumentException: this constructor also runs on the recovery path
-    // over input read back from the store, where a rejection is a corrupt row and not a caller's
-    // bad request. SagaEngine.createSaga converts for the caller who actually supplied the map.
+    // Stdlib, not SagaIllegalArgumentException: validateType is shared with put and merge, which
+    // run over store-read input and over a participant's reply, where a rejection is a server
+    // fault. The entry points that know the map is a caller's convert it themselves — createSaga
+    // for a saga's input, resumeParked for a callback's output.
     assertThatThrownBy(() -> new ExecutionContext("saga-1", input, DEFAULT_STATE))
         .isInstanceOf(IllegalArgumentException.class);
   }

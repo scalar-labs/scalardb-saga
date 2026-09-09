@@ -151,10 +151,16 @@ public class ExecutionContext implements SagaContext {
    * left a caller of the asynchronous start path waiting out its whole wait bound for input that
    * was invalid on arrival.
    *
-   * <p>Rejects with a stdlib {@link IllegalArgumentException}. {@code SagaEngine.createSaga}
-   * converts it for the caller who supplied the map; the constructor below deliberately does not,
-   * because it also runs on the recovery path over input read back from the store, where a
-   * rejection is a corrupt row rather than anyone's bad request.
+   * <p>Rejects with a stdlib {@link IllegalArgumentException}, which the two entry points that know
+   * the map came from a caller convert to a typed one: {@code SagaEngine.createSaga} for a saga's
+   * input, {@code DefaultSagaOrchestrator.resumeParked} for a callback's output.
+   *
+   * <p>The conversion is deliberately theirs rather than this method's, because {@link
+   * #validateType} is shared with {@link #put} and {@link #merge}. Those run over input read back
+   * from the store during a replay and over a participant's reply, where a rejection is a corrupt
+   * row or a malformed downstream response — a server fault, not anyone's bad request. Note the
+   * constructor above is not that path: {@code SagaEngine.replayEvents} passes it an empty map and
+   * feeds the stored input through {@code put}.
    */
   static void validateInput(Map<String, Object> input) {
     input.values().forEach(ExecutionContext::validateType);
