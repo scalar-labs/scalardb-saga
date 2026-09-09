@@ -1740,7 +1740,7 @@ class DefaultSagaOrchestratorTest {
 
         // Act & Assert
         assertThatThrownBy(() -> orchestrator.start("transfer", nullValued))
-            .isInstanceOf(IllegalArgumentException.class)
+            .isInstanceOf(SagaIllegalArgumentException.class)
             .isNotInstanceOf(SagaOverloadedException.class);
       }
     }
