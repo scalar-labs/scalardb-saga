@@ -1125,6 +1125,24 @@ class DefaultSagaOrchestratorTest {
     }
 
     @Test
+    void completeStepAsync_stepNameMismatch_doesNotNameTheParkedStepInTheMessage() {
+      // Arrange — the message reaches a caller holding a callback URL for one step of this saga.
+      // Naming the step it is parked on would answer an unthrottled, non-expiring token with the
+      // saga's current position, so the parked name belongs in the log and not in the message.
+      SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
+      List<SagaEvent> events =
+          List.of(StatusEvent.started(null), StepEvent.pending(1, "reserve-stock"));
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(waiting));
+      when(store.getEvents("saga-1")).thenReturn(events);
+
+      // Act & Assert — the caller's own step name is still named, so it can see what was refused.
+      assertThatThrownBy(() -> orchestrator.completeStepAsync("saga-1", "charge", Map.of()))
+          .isInstanceOf(SagaIllegalArgumentException.class)
+          .hasMessageContaining("charge")
+          .hasMessageNotContaining("reserve-stock");
+    }
+
+    @Test
     void completeStepAsync_stepNameMismatch_logsTheParkedStep() {
       // Arrange — the response carries no server-side trace, so this log is the only record that a
       // callback for a step the saga is no longer parked on arrived with a signature that verified.

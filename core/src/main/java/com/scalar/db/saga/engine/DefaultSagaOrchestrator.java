@@ -695,6 +695,14 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       // comes from the callback URL, and a participant replaying a token issued for an earlier
       // step of the same saga arrives here with a signature that verifies.
       //
+      // That replay is also why the parked step's name goes to the log and not into the message.
+      // The holder of one step's callback URL can call it as often as it likes; the route is not
+      // rate limited and the token has no TTL unless one is configured. Naming the step the saga
+      // is parked on would answer each of those calls with the saga's current position, which is
+      // how a participant scoped to one step maps out the rest. The 200 on the duplicate-callback
+      // path withholds step names for the same reason, and reading them is otherwise an admin
+      // operation. The caller still learns which of its own values was refused.
+      //
       // Logged because a typed rejection is answered without one, and a replayed or leaked
       // callback URL would otherwise leave no server-side trace at all. WARN prints at the
       // production logging default.
@@ -704,12 +712,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
           stepName,
           parked.getStepName());
       throw new SagaIllegalArgumentException(
-          "Callback step '"
-              + stepName
-              + "' does not match the parked step '"
-              + parked.getStepName()
-              + "' for saga "
-              + sagaId);
+          "Callback step '" + stepName + "' is not the parked step for saga " + sagaId);
     }
     return parked.getStepIndex();
   }
