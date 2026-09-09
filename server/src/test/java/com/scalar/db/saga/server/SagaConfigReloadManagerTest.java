@@ -69,7 +69,13 @@ class SagaConfigReloadManagerTest {
 
   private ConfigReconciler reconciler(ReloadConfig config) {
     return new ConfigReconciler(
-        config, definitionsDir, false, services -> {}, acceptingStore(), names -> {});
+        config,
+        definitionsDir,
+        false,
+        new ServiceSecretResolver(config.secretsRoot()),
+        services -> {},
+        acceptingStore(),
+        names -> {});
   }
 
   @Test
@@ -125,6 +131,7 @@ class SagaConfigReloadManagerTest {
             config,
             definitionsDir,
             false,
+            new ServiceSecretResolver(config.secretsRoot()),
             services -> {
               throw new Error("registrar blew up");
             },

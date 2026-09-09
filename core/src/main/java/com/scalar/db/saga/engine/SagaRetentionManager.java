@@ -134,9 +134,9 @@ class SagaRetentionManager {
 
   /**
    * Single cleanup pass: scan purgeable statuses for entries older than the retention period and
-   * delete each expired saga, repeating in rounds until the batch budget is spent.
+   * delete each expired saga, repeating in rounds until the pass budget is spent.
    *
-   * <p>The batch budget counts <i>successful</i> purges only: a delete that turns out to be a no-op
+   * <p>The pass budget counts <i>successful</i> purges only: a delete that turns out to be a no-op
    * (another replica already purged the saga) refunds its budget, and because purged rows are
    * physically gone, the next round's re-scan surfaces fresh candidates for the refunded budget
    * instead of the same rows — so under multi-replica contention a pass still purges up to {@code
@@ -146,7 +146,7 @@ class SagaRetentionManager {
    * their deletes — and failing rows stay in place, so re-scanning would refetch them forever.
    * Failed deletes also refund budget, so total attempted operations may exceed {@code
    * maxPurgesPerPass}; this is acceptable — widespread delete failures indicate a store-level
-   * issue, not a batch-sizing problem.
+   * issue, not a budget-sizing problem.
    *
    * <p>Each pass starts the bucket sweep one position further into the replica's scattered order
    * (the rotation below), so when a sustained backlog lets the front buckets fill the whole budget,
@@ -163,7 +163,7 @@ class SagaRetentionManager {
       for (SagaStatus status : PURGEABLE_STATUSES) {
         purged += purgeByStatus(status, threshold, config.maxPurgesPerPass() - purged, rotation);
         if (purged >= config.maxPurgesPerPass()) {
-          return; // batch limit reached — continue in next pass
+          return; // pass budget reached — continue in next pass
         }
         if (Thread.currentThread().isInterrupted()) {
           return; // pass interrupted mid-await; its remaining work was cancelled and drained
@@ -239,7 +239,7 @@ class SagaRetentionManager {
     }
     try {
       // False when the saga was already purged (a concurrent replica won the race); such no-ops
-      // must not consume the batch budget, or intersecting sweeps would spend it deleting nothing.
+      // must not consume the pass budget, or intersecting sweeps would spend it deleting nothing.
       return store.deleteSaga(saga.getSagaId());
     } catch (Throwable t) {
       // Log and continue — one failed purge shouldn't block others. Throwable, not Exception: an
