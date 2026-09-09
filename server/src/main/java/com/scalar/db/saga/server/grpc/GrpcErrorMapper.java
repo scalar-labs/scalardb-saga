@@ -14,9 +14,11 @@ import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaInvalidRequestException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.exception.SagaOverloadedException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
+import com.scalar.db.saga.server.api.ErrorMapper;
 import io.grpc.Metadata;
 import io.grpc.ServerCall;
 import io.grpc.Status;
@@ -24,6 +26,7 @@ import io.grpc.StatusRuntimeException;
 import io.grpc.protobuf.StatusProto;
 import java.util.EnumMap;
 import java.util.Map;
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -98,6 +101,22 @@ final class GrpcErrorMapper {
       case SagaIllegalArgumentException e -> respond(Status.Code.INVALID_ARGUMENT, e);
 
       // ── Server errors ──────────────────────────────────────────────
+      // Ahead of the fallback, which logs UNAVAILABLE at ERROR with a stack: a rejection storm
+      // would then write one stack per refused start, an amplifier any caller can reach. A refusal
+      // is the cap working as configured, not a failure, so it logs at DEBUG and the controller
+      // summarizes the storm once a minute.
+      case SagaOverloadedException e -> {
+        logger.debug("{} handling gRPC call", e.getMessage());
+        // With the same advisory wait REST sends as Retry-After: a caller refused for load should
+        // not get more help on one transport than the other, and the rate limiter already sends
+        // RetryInfo here for its own refusals.
+        yield status(
+            Status.Code.UNAVAILABLE,
+            e.getErrorCode(),
+            e.getMetadata(),
+            e.getMessage(),
+            ErrorMapper.OVERLOAD_RETRY_AFTER_MILLIS);
+      }
       case SagaPersistenceException pe -> {
         Status.Code code = pe.isRetryable() ? Status.Code.UNAVAILABLE : Status.Code.INTERNAL;
         logger.error("{} handling gRPC call", pe.getMessage(), pe);
@@ -119,6 +138,17 @@ final class GrpcErrorMapper {
         yield status(Status.Code.INTERNAL, SagaErrorCode.INTERNAL_ERROR, ErrorMetadata.of());
       }
     };
+  }
+
+  /** The advisory wait as gRPC carries one; shared so both refusal paths express it identically. */
+  private static RetryInfo retryInfo(long retryAfterMillis) {
+    return RetryInfo.newBuilder()
+        .setRetryDelay(
+            Duration.newBuilder()
+                .setSeconds(retryAfterMillis / 1000)
+                .setNanos((int) ((retryAfterMillis % 1000) * 1_000_000L))
+                .build())
+        .build();
   }
 
   /** Builds a status carrying an ErrorInfo detail for a {@link SagaRuntimeException}. */
@@ -190,15 +220,8 @@ final class GrpcErrorMapper {
    */
   static void close(ServerCall<?, ?> call, SagaErrorCode code, long retryAfterMillis) {
     Refusal refusal = refusalFor(code);
-    RetryInfo retryInfo =
-        RetryInfo.newBuilder()
-            .setRetryDelay(
-                Duration.newBuilder()
-                    .setSeconds(retryAfterMillis / 1000)
-                    .setNanos((int) ((retryAfterMillis % 1000) * 1_000_000L))
-                    .build())
-            .build();
-    com.google.rpc.Status proto = refusal.proto.toBuilder().addDetails(Any.pack(retryInfo)).build();
+    com.google.rpc.Status proto =
+        refusal.proto.toBuilder().addDetails(Any.pack(retryInfo(retryAfterMillis))).build();
     Metadata trailers = new Metadata();
     trailers.put(STATUS_DETAILS_BIN, proto.toByteArray());
     call.close(refusal.status, trailers);
@@ -258,18 +281,34 @@ final class GrpcErrorMapper {
 
   private static StatusRuntimeException status(
       Status.Code statusCode, SagaErrorCode code, Map<String, String> metadata, String message) {
+    return status(statusCode, code, metadata, message, null);
+  }
+
+  /**
+   * As above, appending a {@code RetryInfo} detail when the server has advice about when to come
+   * back. Only refusals that carry such advice pass one; every other error builds the same status
+   * it always did.
+   */
+  private static StatusRuntimeException status(
+      Status.Code statusCode,
+      SagaErrorCode code,
+      Map<String, String> metadata,
+      String message,
+      @Nullable Long retryAfterMillis) {
     ErrorInfo info =
         ErrorInfo.newBuilder()
             .setReason(code.code())
             .setDomain(SagaErrorCode.WIRE_DOMAIN)
             .putAllMetadata(metadata)
             .build();
-    com.google.rpc.Status status =
+    com.google.rpc.Status.Builder status =
         com.google.rpc.Status.newBuilder()
             .setCode(statusCode.value())
             .setMessage(message)
-            .addDetails(Any.pack(info))
-            .build();
-    return StatusProto.toStatusRuntimeException(status);
+            .addDetails(Any.pack(info));
+    if (retryAfterMillis != null) {
+      status.addDetails(Any.pack(retryInfo(retryAfterMillis)));
+    }
+    return StatusProto.toStatusRuntimeException(status.build());
   }
 }

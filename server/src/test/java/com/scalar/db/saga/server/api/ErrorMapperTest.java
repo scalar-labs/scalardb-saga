@@ -2,6 +2,7 @@ package com.scalar.db.saga.server.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import ch.qos.logback.classic.Level;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.exception.ErrorMetadata;
@@ -14,6 +15,7 @@ import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaInvalidRequestException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.exception.SagaOverloadedException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
@@ -320,6 +322,7 @@ class ErrorMapperTest {
             SagaDefinitionNotServedException.of("order-saga"),
             422,
             SagaErrorCode.SAGA_DEFINITION_NOT_SERVED),
+        new Arm(new SagaOverloadedException(), 503, SagaErrorCode.ENGINE_OVERLOADED),
         new Arm(
             SagaPersistenceException.storeUnavailable(new RuntimeException("db down")),
             503,
@@ -451,6 +454,43 @@ class ErrorMapperTest {
                     .isEqualTo("engine-internal wording");
               });
     }
+  }
+
+  @Test
+  void dispatch_overloadedGiven_returns503AndLogsNothingAboveDebug() throws Exception {
+    // A refusal is the cap working as configured, not a failure, and it arrives in storms — the
+    // fallback arm would write a line and a stack per refused request, which any caller could use
+    // to fill an operator's disk during exactly the overload the cap is absorbing.
+    // Arrange
+    toThrow = new SagaOverloadedException();
+
+    try (LogCapture logs = LogCapture.of(ErrorMapper.class)) {
+      // Act
+      for (int i = 0; i < 50; i++) {
+        HttpResponse<String> response = get("/throw-dispatch");
+        assertThat(response.statusCode()).isEqualTo(503);
+      }
+
+      // Assert
+      assertThat(logs.events())
+          .allSatisfy(
+              event ->
+                  assertThat(event.getLevel().toInt()).isLessThanOrEqualTo(Level.DEBUG.toInt()));
+    }
+  }
+
+  @Test
+  void dispatch_overloadedGiven_carriesRetryAfter() throws Exception {
+    // Without it a client's retry loop has no pacing hint and becomes a hot loop against a server
+    // that is already full.
+    // Arrange
+    toThrow = new SagaOverloadedException();
+
+    // Act
+    HttpResponse<String> response = get("/throw-dispatch");
+
+    // Assert
+    assertThat(response.headers().firstValue("Retry-After")).contains("1");
   }
 
   private HttpResponse<String> get(String path) throws Exception {

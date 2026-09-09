@@ -6,6 +6,7 @@ import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaDefinitionNotServedException;
 import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.exception.SagaOverloadedException;
 import java.util.Map;
 
 /**
@@ -79,6 +80,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @throws SagaDefinitionException if step resolution fails
    * @throws SagaIllegalArgumentException if {@code input} holds a value a saga context cannot carry
    *     (only primitives, strings, BigDecimal, and collections thereof)
+   * @throws SagaOverloadedException if the engine is at its concurrent saga limit; nothing was
+   *     persisted, so the request can be retried unchanged
    */
   String start(String sagaName, Map<String, Object> input);
 
@@ -101,6 +104,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @throws SagaIllegalArgumentException if {@code sagaId} is not of the form {@code
    *     [a-zA-Z0-9._-]{1,128}}, or if {@code input} holds a value a saga context cannot carry (only
    *     primitives, strings, BigDecimal, and collections thereof)
+   * @throws SagaOverloadedException if the engine is at its concurrent saga limit; nothing was
+   *     persisted, so the request can be retried unchanged
    */
   void start(String sagaId, String sagaName, Map<String, Object> input);
 
@@ -118,6 +123,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @throws SagaDefinitionException if step resolution fails
    * @throws SagaIllegalArgumentException if {@code input} holds a value a saga context cannot carry
    *     (only primitives, strings, BigDecimal, and collections thereof)
+   * @throws SagaOverloadedException if the engine is at its concurrent saga limit; nothing was
+   *     persisted, so the request can be retried unchanged
    */
   String start(SagaDefinitionId id, Map<String, Object> input);
 
@@ -137,6 +144,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @throws SagaIllegalArgumentException if {@code sagaId} is not of the form {@code
    *     [a-zA-Z0-9._-]{1,128}}, or if {@code input} holds a value a saga context cannot carry (only
    *     primitives, strings, BigDecimal, and collections thereof)
+   * @throws SagaOverloadedException if the engine is at its concurrent saga limit; nothing was
+   *     persisted, so the request can be retried unchanged
    */
   void start(String sagaId, SagaDefinitionId id, Map<String, Object> input);
 
@@ -155,6 +164,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    *     does not serve it
    * @throws SagaIllegalArgumentException if {@code input} holds a value a saga context cannot carry
    *     (only primitives, strings, BigDecimal, and collections thereof)
+   * @throws SagaOverloadedException if the engine is at its concurrent saga limit; nothing was
+   *     persisted, so the request can be retried unchanged
    */
   String startAsync(String sagaName, Map<String, Object> input);
 
@@ -176,6 +187,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    *     callback (e.g. a remote client with no server-streaming callback channel)
    * @throws SagaIllegalArgumentException if {@code input} holds a value a saga context cannot carry
    *     (only primitives, strings, BigDecimal, and collections thereof)
+   * @throws SagaOverloadedException if the engine is at its concurrent saga limit; nothing was
+   *     persisted, so the request can be retried unchanged
    */
   String startAsync(String sagaName, Map<String, Object> input, SagaCallback callback);
 
@@ -196,6 +209,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @throws SagaIllegalArgumentException if {@code sagaId} is not of the form {@code
    *     [a-zA-Z0-9._-]{1,128}}, or if {@code input} holds a value a saga context cannot carry (only
    *     primitives, strings, BigDecimal, and collections thereof)
+   * @throws SagaOverloadedException if the engine is at its concurrent saga limit; nothing was
+   *     persisted, so the request can be retried unchanged
    */
   void startAsync(String sagaId, String sagaName, Map<String, Object> input);
 
@@ -219,6 +234,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @throws SagaIllegalArgumentException if {@code sagaId} is not of the form {@code
    *     [a-zA-Z0-9._-]{1,128}}, or if {@code input} holds a value a saga context cannot carry (only
    *     primitives, strings, BigDecimal, and collections thereof)
+   * @throws SagaOverloadedException if the engine is at its concurrent saga limit; nothing was
+   *     persisted, so the request can be retried unchanged
    */
   void startAsync(String sagaId, String sagaName, Map<String, Object> input, SagaCallback callback);
 
@@ -235,6 +252,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    *     does not serve it
    * @throws SagaIllegalArgumentException if {@code input} holds a value a saga context cannot carry
    *     (only primitives, strings, BigDecimal, and collections thereof)
+   * @throws SagaOverloadedException if the engine is at its concurrent saga limit; nothing was
+   *     persisted, so the request can be retried unchanged
    */
   String startAsync(SagaDefinitionId id, Map<String, Object> input);
 
@@ -254,6 +273,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    *     callback (e.g. a remote client with no server-streaming callback channel)
    * @throws SagaIllegalArgumentException if {@code input} holds a value a saga context cannot carry
    *     (only primitives, strings, BigDecimal, and collections thereof)
+   * @throws SagaOverloadedException if the engine is at its concurrent saga limit; nothing was
+   *     persisted, so the request can be retried unchanged
    */
   String startAsync(SagaDefinitionId id, Map<String, Object> input, SagaCallback callback);
 
@@ -272,6 +293,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @throws SagaIllegalArgumentException if {@code sagaId} is not of the form {@code
    *     [a-zA-Z0-9._-]{1,128}}, or if {@code input} holds a value a saga context cannot carry (only
    *     primitives, strings, BigDecimal, and collections thereof)
+   * @throws SagaOverloadedException if the engine is at its concurrent saga limit; nothing was
+   *     persisted, so the request can be retried unchanged
    */
   void startAsync(String sagaId, SagaDefinitionId id, Map<String, Object> input);
 
@@ -293,6 +316,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @throws SagaIllegalArgumentException if {@code sagaId} is not of the form {@code
    *     [a-zA-Z0-9._-]{1,128}}, or if {@code input} holds a value a saga context cannot carry (only
    *     primitives, strings, BigDecimal, and collections thereof)
+   * @throws SagaOverloadedException if the engine is at its concurrent saga limit; nothing was
+   *     persisted, so the request can be retried unchanged
    */
   void startAsync(
       String sagaId, SagaDefinitionId id, Map<String, Object> input, SagaCallback callback);
