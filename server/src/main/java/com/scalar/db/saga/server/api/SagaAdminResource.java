@@ -168,26 +168,26 @@ public final class SagaAdminResource {
 
   private static SagaQuery parseQuery(Context ctx) {
     return RequestParsing.buildQuery(
-        builder -> {
+        params -> {
           String status = ctx.queryParam("status");
           if (status != null) {
-            builder.status(parseStatus(status));
+            params.status(parseStatus(status));
           }
           String updatedAfter = ctx.queryParam("updatedAfter");
           if (updatedAfter != null) {
-            builder.updatedAfter(RequestParsing.parseInstant(updatedAfter, "updatedAfter"));
+            params.updatedAfter(RequestParsing.parseInstant(updatedAfter, "updatedAfter"));
           }
           String updatedBefore = ctx.queryParam("updatedBefore");
           if (updatedBefore != null) {
-            builder.updatedBefore(RequestParsing.parseInstant(updatedBefore, "updatedBefore"));
+            params.updatedBefore(RequestParsing.parseInstant(updatedBefore, "updatedBefore"));
           }
           String pageSize = ctx.queryParam("pageSize");
           if (pageSize != null) {
-            builder.pageSize(parsePageSize(pageSize));
+            params.pageSize(parsePageSize(pageSize));
           }
           String pageToken = ctx.queryParam("pageToken");
           if (pageToken != null) {
-            builder.pageToken(pageToken);
+            params.pageToken(pageToken);
           }
         });
   }

@@ -42,18 +42,18 @@ public record BulkResetRequest(
    */
   public SagaQuery toQuery() {
     return RequestParsing.buildQuery(
-        builder -> {
+        params -> {
           if (updatedAfter != null) {
-            builder.updatedAfter(RequestParsing.parseInstant(updatedAfter, "updatedAfter"));
+            params.updatedAfter(RequestParsing.parseInstant(updatedAfter, "updatedAfter"));
           }
           if (updatedBefore != null) {
-            builder.updatedBefore(RequestParsing.parseInstant(updatedBefore, "updatedBefore"));
+            params.updatedBefore(RequestParsing.parseInstant(updatedBefore, "updatedBefore"));
           }
           if (pageSize != null) {
-            builder.pageSize(pageSize);
+            params.pageSize(pageSize);
           }
           if (pageToken != null) {
-            builder.pageToken(pageToken);
+            params.pageToken(pageToken);
           }
         });
   }

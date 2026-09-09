@@ -112,21 +112,21 @@ final class ProtoMappers {
    */
   static SagaQuery toSagaQuery(ListSagasRequest request) {
     return RequestParsing.buildQuery(
-        builder -> {
+        params -> {
           if (request.hasStatus()) {
-            builder.status(fromProtoStatus(request.getStatus()));
+            params.status(fromProtoStatus(request.getStatus()));
           }
           if (request.hasUpdatedAfter()) {
-            builder.updatedAfter(toInstant(request.getUpdatedAfter()));
+            params.updatedAfter(toInstant(request.getUpdatedAfter()));
           }
           if (request.hasUpdatedBefore()) {
-            builder.updatedBefore(toInstant(request.getUpdatedBefore()));
+            params.updatedBefore(toInstant(request.getUpdatedBefore()));
           }
           if (request.hasPageSize()) {
-            builder.pageSize(request.getPageSize());
+            params.pageSize(request.getPageSize());
           }
           if (request.hasPageToken()) {
-            builder.pageToken(request.getPageToken());
+            params.pageToken(request.getPageToken());
           }
         });
   }
@@ -140,18 +140,18 @@ final class ProtoMappers {
    */
   static SagaQuery toSagaQuery(ResetEscalatedBulkRequest request) {
     return RequestParsing.buildQuery(
-        builder -> {
+        params -> {
           if (request.hasUpdatedAfter()) {
-            builder.updatedAfter(toInstant(request.getUpdatedAfter()));
+            params.updatedAfter(toInstant(request.getUpdatedAfter()));
           }
           if (request.hasUpdatedBefore()) {
-            builder.updatedBefore(toInstant(request.getUpdatedBefore()));
+            params.updatedBefore(toInstant(request.getUpdatedBefore()));
           }
           if (request.hasPageSize()) {
-            builder.pageSize(request.getPageSize());
+            params.pageSize(request.getPageSize());
           }
           if (request.hasPageToken()) {
-            builder.pageToken(request.getPageToken());
+            params.pageToken(request.getPageToken());
           }
         });
   }
