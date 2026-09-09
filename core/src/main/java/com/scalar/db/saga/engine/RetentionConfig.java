@@ -47,7 +47,7 @@ public record RetentionConfig(
     Objects.requireNonNull(clock, "clock must not be null");
   }
 
-  /** Default: 7-day retention, cleanup every 60 seconds, 10,000 sagas per batch. */
+  /** Default: 7-day retention, cleanup every 60 seconds, 10,000 purges per pass. */
   public static RetentionConfig defaults() {
     return defaults(Clock.systemUTC());
   }

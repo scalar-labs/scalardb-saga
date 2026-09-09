@@ -3,6 +3,7 @@ package com.scalar.db.saga.server;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.engine.RecoveryConfig;
 import com.scalar.db.saga.engine.RetentionConfig;
 import com.scalar.db.saga.engine.ShutdownMode;
@@ -12,6 +13,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Properties;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -200,7 +202,8 @@ class SagaServerConfigTest {
       strings = {
         SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY,
         SagaServerConfig.CALLBACK_MAX_AGE_SECONDS_KEY,
-        SagaServerConfig.TLS_ENABLED_KEY
+        SagaServerConfig.TLS_ENABLED_KEY,
+        SagaServerConfig.MAX_CONCURRENT_SAGA_STARTS_KEY
       })
   void load_blankProtectionDisablingKey_throwsIllegalArgumentException(String key) {
     Properties props = new Properties();
@@ -221,6 +224,8 @@ class SagaServerConfigTest {
     assertThat(config.callbackMaxAgeSeconds())
         .isEqualTo(SagaServerConfig.DEFAULT_CALLBACK_MAX_AGE_SECONDS);
     assertThat(config.tlsEnabled()).isEqualTo(SagaServerConfig.DEFAULT_TLS_ENABLED);
+    assertThat(config.maxConcurrentSagaStarts())
+        .isEqualTo(DefaultSagaOrchestrator.DEFAULT_MAX_CONCURRENT_SAGA_STARTS);
   }
 
   @Test
@@ -925,7 +930,7 @@ class SagaServerConfigTest {
   @Test
   void recoveryConfig_maxRecoveriesPerSweepAboveIntRange_throwsIllegalArgumentException() {
     // Parsed as a long and range-checked: a bare (int) cast would wrap this to a small or negative
-    // batch size instead of rejecting it.
+    // budget instead of rejecting it.
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY, "4294967296");
 
@@ -999,9 +1004,8 @@ class SagaServerConfigTest {
 
   @Test
   void load_everyRecoveryAndRetentionBoundAtOne_isAccepted() {
-    // The other half of the pin above: rejecting 0 alone would still allow a bound to drift to 2
-    // and
-    // refuse a value the engine takes. 1 is the smallest the engine accepts on all nine, so setting
+    // The other half of the pin above. Rejecting 0 alone would still let a bound drift to 2 and
+    // refuse a value the engine accepts. 1 is the smallest the engine takes on all nine, so setting
     // them together proves no daemon bound sits above it.
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY, "1");
@@ -1561,5 +1565,185 @@ class SagaServerConfigTest {
     // flatten.
     assertThat(config.rawProperties().getProperty(SagaServerConfig.SECURITY_PROVIDER_KEY))
         .isEqualTo("${env:UNSET_NO_SUCH_VAR}");
+  }
+
+  /**
+   * Lenient loading, which only {@code --validate-config} uses. The rule it has to keep is that a
+   * secret this machine cannot read is recorded rather than substituted-and-believed, and that a
+   * reference which is wrong everywhere still fails.
+   */
+  @Nested
+  class LenientSecretResolution {
+
+    private Properties propertiesWith(String key, String value) {
+      Properties properties = new Properties();
+      properties.setProperty(key, value);
+      return properties;
+    }
+
+    @Test
+    public void load_unreadableSecretGiven_failsWithoutACollector() {
+      // The daemon's mode: a value it cannot resolve is a value it cannot serve with.
+      Properties properties =
+          propertiesWith(SagaServerConfig.OWNER_ID_KEY, "${file:UTF-8:/nonexistent/owner-id}");
+
+      assertThatThrownBy(() -> SagaServerConfig.load(properties))
+          .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    public void load_unreadableSecretGiven_recordsTheKeyAndCarriesOn() {
+      // Arrange
+      Properties properties =
+          propertiesWith(SagaServerConfig.OWNER_ID_KEY, "${file:UTF-8:/nonexistent/owner-id}");
+      SagaServerConfig.UnresolvedSecrets unresolved = new SagaServerConfig.UnresolvedSecrets();
+
+      // Act
+      SagaServerConfig config = SagaServerConfig.load(properties, unresolved);
+
+      // Assert — the key is named, so a caller knows which settings its verdict does not cover.
+      assertThat(config).isNotNull();
+      assertThat(unresolved.reasonsByKey()).containsOnlyKeys(SagaServerConfig.OWNER_ID_KEY);
+    }
+
+    @Test
+    public void load_malformedSecretReferenceGiven_failsEvenWithACollector() {
+      // No charset segment: wrong wherever it runs, so leniency must not swallow it.
+      Properties properties =
+          propertiesWith(SagaServerConfig.OWNER_ID_KEY, "${file:/nonexistent/owner-id}");
+
+      assertThatThrownBy(
+              () -> SagaServerConfig.load(properties, new SagaServerConfig.UnresolvedSecrets()))
+          .isInstanceOf(PermanentReferenceException.class);
+    }
+
+    @Test
+    public void load_undefinedEnvReferenceGiven_recordsTheKey() {
+      // Arrange — an undefined ${env:...} is left verbatim rather than raised, so nothing else
+      // marks it and the reference text would stand in as though it were the host. Uses a setting
+      // with no value rules, so what is observed is the recording rather than a parse rejection.
+      Properties properties =
+          propertiesWith(SagaServerConfig.HOST_KEY, "${env:NO_SUCH_VARIABLE_FOR_THIS_TEST}");
+      SagaServerConfig.UnresolvedSecrets unresolved = new SagaServerConfig.UnresolvedSecrets();
+
+      // Act
+      SagaServerConfig config = SagaServerConfig.load(properties, unresolved);
+
+      // Assert — named like an unreadable file, so a caller knows its verdict does not cover it.
+      assertThat(config).isNotNull();
+      assertThat(unresolved.reasonsByKey()).containsOnlyKeys(SagaServerConfig.HOST_KEY);
+    }
+
+    @Test
+    public void load_undefinedEnvReferenceGiven_passesThroughWithoutACollector() {
+      // The daemon's mode is unchanged by that recording: nothing is raised and the value stands as
+      // written, which is what the reference-did-not-expand rules downstream detect.
+      Properties properties =
+          propertiesWith(SagaServerConfig.HOST_KEY, "${env:NO_SUCH_VARIABLE_FOR_THIS_TEST}");
+
+      SagaServerConfig config = SagaServerConfig.load(properties);
+
+      assertThat(config.host()).isEqualTo("${env:NO_SUCH_VARIABLE_FOR_THIS_TEST}");
+    }
+
+    @Test
+    public void load_validatedSettingUnreadableEitherWay_reachesTheSameOutcome() {
+      // Arrange — the two ways a secret can be unavailable, on a setting that checks its own shape.
+      // Both must land in the same place, or the report would call one of them a value that failed
+      // its range check and the other a value it could not read.
+      SagaServerConfig.UnresolvedSecrets viaEnv = new SagaServerConfig.UnresolvedSecrets();
+      SagaServerConfig.UnresolvedSecrets viaFile = new SagaServerConfig.UnresolvedSecrets();
+
+      // Act
+      SagaServerConfig fromEnv =
+          SagaServerConfig.load(
+              propertiesWith(SagaServerConfig.HTTP_PORT_KEY, "${env:NO_SUCH_PORT_VARIABLE}"),
+              viaEnv);
+      SagaServerConfig fromFile =
+          SagaServerConfig.load(
+              propertiesWith(SagaServerConfig.HTTP_PORT_KEY, "${file:UTF-8:/nonexistent/port}"),
+              viaFile);
+
+      // Assert — both recorded, both dropped to the default rather than parsed from a stand-in.
+      assertThat(viaEnv.reasonsByKey()).containsOnlyKeys(SagaServerConfig.HTTP_PORT_KEY);
+      assertThat(viaFile.reasonsByKey()).containsOnlyKeys(SagaServerConfig.HTTP_PORT_KEY);
+      assertThat(fromEnv.httpPort()).isEqualTo(SagaServerConfig.DEFAULT_HTTP_PORT);
+      assertThat(fromFile.httpPort()).isEqualTo(SagaServerConfig.DEFAULT_HTTP_PORT);
+    }
+
+    @Test
+    public void load_unprefixedPlaceholderGiven_recordsNothing() {
+      // A ${NAME} with no lookup prefix resolves on no machine, so calling it absent here would
+      // soften something wrong everywhere. It stands as written, exactly as the daemon leaves it.
+      Properties properties = propertiesWith(SagaServerConfig.HOST_KEY, "${NO_PREFIX_HERE}");
+      SagaServerConfig.UnresolvedSecrets unresolved = new SagaServerConfig.UnresolvedSecrets();
+
+      SagaServerConfig config = SagaServerConfig.load(properties, unresolved);
+
+      assertThat(config.host()).isEqualTo("${NO_PREFIX_HERE}");
+      assertThat(unresolved.isEmpty()).isTrue();
+    }
+
+    @Test
+    public void load_readableSecretGiven_recordsNothing(@TempDir Path dir) throws IOException {
+      // Arrange — leniency is invisible where the secret is present.
+      Path token = Files.writeString(dir.resolve("owner"), "replica-7");
+      SagaServerConfig.UnresolvedSecrets unresolved = new SagaServerConfig.UnresolvedSecrets();
+
+      // Act
+      SagaServerConfig config =
+          SagaServerConfig.load(
+              propertiesWith(SagaServerConfig.OWNER_ID_KEY, "${file:UTF-8:" + token + "}"),
+              unresolved);
+
+      // Assert
+      assertThat(config.ownerId()).isEqualTo("replica-7");
+      assertThat(unresolved.isEmpty()).isTrue();
+    }
+  }
+
+  /**
+   * The admission cap key. It is off by default and freezes at first release, so both the default
+   * and the rejection of a value that cannot mean anything are worth pinning.
+   */
+  @Nested
+  class MaxConcurrentSagaStarts {
+
+    @Test
+    public void load_notSet_defaultsToNoCap() {
+      SagaServerConfig config = SagaServerConfig.load(new Properties());
+
+      assertThat(config.maxConcurrentSagaStarts())
+          .isEqualTo(DefaultSagaOrchestrator.DEFAULT_MAX_CONCURRENT_SAGA_STARTS)
+          .isZero();
+    }
+
+    @Test
+    public void load_positiveValueGiven_returnsIt() {
+      Properties props = new Properties();
+      props.setProperty(SagaServerConfig.MAX_CONCURRENT_SAGA_STARTS_KEY, "250");
+
+      assertThat(SagaServerConfig.load(props).maxConcurrentSagaStarts()).isEqualTo(250);
+    }
+
+    @Test
+    public void load_zeroGiven_meansNoCap() {
+      // 0 is the documented way to turn it off, so it must parse rather than being rejected as a
+      // cap nobody could satisfy.
+      Properties props = new Properties();
+      props.setProperty(SagaServerConfig.MAX_CONCURRENT_SAGA_STARTS_KEY, "0");
+
+      assertThat(SagaServerConfig.load(props).maxConcurrentSagaStarts()).isZero();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"-1", "not-a-number"})
+    public void load_invalidValueGiven_throwsIllegalArgumentException(String value) {
+      Properties props = new Properties();
+      props.setProperty(SagaServerConfig.MAX_CONCURRENT_SAGA_STARTS_KEY, value);
+
+      assertThatThrownBy(() -> SagaServerConfig.load(props))
+          .isInstanceOf(IllegalArgumentException.class);
+    }
   }
 }
