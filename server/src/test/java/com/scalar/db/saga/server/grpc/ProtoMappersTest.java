@@ -48,8 +48,7 @@ class ProtoMappersTest {
   @Test
   void toProtoSkipReason_everyApiReason_mapsByNameToANonUnspecifiedWireReason() {
     // Every api skip reason must have a wire counterpart named SKIP_REASON_<name>; an unmapped one
-    // now throws IllegalStateException (mapped to INTERNAL), failing loudly rather than
-    // mislabelled.
+    // throws from valueOf and the mappers report INTERNAL, failing loudly rather than mislabelled.
     for (ResetResult.SkipReason reason : ResetResult.SkipReason.values()) {
       com.scalar.db.saga.rpc.SkipReason wire = ProtoMappers.toProtoSkipReason(reason);
       assertThat(wire.name()).isEqualTo("SKIP_REASON_" + reason.name());
