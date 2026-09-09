@@ -568,6 +568,9 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * @return the {@code RUNNING} snapshot immediately after the parked step is resumed
    * @throws IllegalStateException if the saga is not {@code WAITING}
    * @throws IllegalArgumentException if {@code stepName} is not the currently parked step
+   * @throws SagaIllegalArgumentException if {@code output} holds a value a saga context cannot
+   *     carry; thrown before anything is recorded, so the step stays parked and the callback can be
+   *     retried with a corrected body
    * @throws SagaConcurrentModificationException if a concurrent deadline-timeout sweep resolves the
    *     parked step first (the callback lost the race)
    */
@@ -599,11 +602,12 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   }
 
   /**
-   * Phase 1 of completing a parked step: validates the saga is {@code WAITING} and {@code stepName}
-   * is the parked step, atomically records {@code STEP_COMPLETED} + {@code WAITING -> RUNNING} and
-   * deletes the {@code saga_parked} row, then rebuilds the execution context. Kept separate from
-   * the forward drive so {@link #completeStepAsync} can return once this synchronous phase commits
-   * and run the drive on the async executor. Returns everything the forward drive needs.
+   * Phase 1 of completing a parked step: validates the saga is {@code WAITING}, that {@code
+   * stepName} is the parked step and that {@code output} is a value a context can hold, atomically
+   * records {@code STEP_COMPLETED} + {@code WAITING -> RUNNING} and deletes the {@code saga_parked}
+   * row, then rebuilds the execution context. Kept separate from the forward drive so {@link
+   * #completeStepAsync} can return once this synchronous phase commits and run the drive on the
+   * async executor. Returns everything the forward drive needs.
    */
   private ResumedStep resumeParked(String sagaId, String stepName, Map<String, Object> output) {
     Objects.requireNonNull(sagaId, "sagaId must not be null");
@@ -619,6 +623,25 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
 
     List<SagaEvent> events = store.getEvents(sagaId);
     int stepIndex = parkedStepIndex(events, sagaId, stepName);
+
+    // Before the commit, for the same reason SagaEngine.createSaga validates before persisting: the
+    // replay below folds this map into the context and rejects what a context cannot hold, and by
+    // then STEP_COMPLETED is durable. The caller would get a 400 for a step the store already
+    // records as completed, on a saga left RUNNING with no forward drive, and recovery would replay
+    // the same rejection. Serialization does not reject these values, so this is the only guard.
+    // Ahead of the definition lookup too, so the caller's own body is judged before any work that
+    // can fail for reasons that are not theirs.
+    try {
+      ExecutionContext.validateInput(output);
+    } catch (IllegalArgumentException e) {
+      // The output arrived on the callback request, so the rejection is attributable to its sender.
+      // ExecutionContext authors the wording and it names the offending type.
+      logger.warn(
+          "Rejecting callback output for saga {} step '{}': {}", sagaId, stepName, e.getMessage());
+      throw new SagaIllegalArgumentException(
+          e.getMessage() == null ? e.toString() : e.getMessage(), e);
+    }
+
     SagaDefinition def = resolveDefinition(saga);
 
     // Atomic: STEP_COMPLETED + WAITING -> RUNNING + delete the saga_parked row. The optimistic
@@ -671,6 +694,15 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       // Caller input rather than a server fault, so it carries INVALID_ARGUMENT: the step name
       // comes from the callback URL, and a participant replaying a token issued for an earlier
       // step of the same saga arrives here with a signature that verifies.
+      //
+      // Logged because a typed rejection is answered without one, and a replayed or leaked
+      // callback URL would otherwise leave no server-side trace at all. WARN prints at the
+      // production logging default.
+      logger.warn(
+          "Callback for saga {} names step '{}' but the parked step is '{}'",
+          sagaId,
+          stepName,
+          parked.getStepName());
       throw new SagaIllegalArgumentException(
           "Callback step '"
               + stepName

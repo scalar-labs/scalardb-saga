@@ -53,13 +53,13 @@ final class GrpcErrorMapper {
 
   static StatusRuntimeException toStatusRuntimeException(Throwable t) {
     return switch (t) {
-      // Every request-reachable caller-input rejection carries SagaIllegalArgumentException and is
-      // handled below, so what still reaches this case is a server fault: ScalarDB's operation
-      // checkers on a dropped table or a stale schema, ErrorMetadataSchema's fail-fast on a
-      // malformed metadata map, and the engine's internal contract checks. INVALID_ARGUMENT is
-      // wrong for all three; the case stays only so that a caller-input site the audit missed keeps
-      // its status rather than flipping to INTERNAL, and the WARN below is the evidence that
-      // decides when it can go.
+      // Every request-reachable caller-input rejection carries a typed exception
+      // (SagaIllegalArgumentException or SagaInvalidRequestException) and is handled below, so what
+      // still reaches this case is a server fault: ScalarDB's operation checkers on a dropped table
+      // or a stale schema, ErrorMetadataSchema's fail-fast on a malformed metadata map, and the
+      // engine's internal contract checks. INVALID_ARGUMENT is wrong for all three; the case stays
+      // only so that a caller-input site the audit missed keeps its status rather than flipping to
+      // INTERNAL, and the WARN below is the evidence that decides when it can go.
       case IllegalArgumentException iae -> {
         // The wording and cause are replaced on the wire, so log them. A server fault reported to
         // the caller as their own bad request would otherwise leave no evidence anywhere, which is

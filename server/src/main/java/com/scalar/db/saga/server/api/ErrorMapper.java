@@ -112,12 +112,13 @@ public final class ErrorMapper {
                 e));
     app.exception(SagaInvalidRequestException.class, (e, ctx) -> respond(ctx, 400, e));
     app.exception(SagaIllegalArgumentException.class, (e, ctx) -> respond(ctx, 400, e));
-    // Every request-reachable caller-input rejection carries SagaIllegalArgumentException and is
-    // handled above, so what still lands here is a server fault: ScalarDB's operation checkers on a
-    // dropped table or a stale schema, ErrorMetadataSchema's fail-fast on a malformed metadata map,
-    // and the engine's internal contract checks. The 400 is wrong for all three; the branch stays
-    // only so that a caller-input site the audit missed keeps its status rather than flipping to a
-    // 500, and the WARN below is the evidence that decides when it can go.
+    // Every request-reachable caller-input rejection carries a typed exception (this one or
+    // SagaInvalidRequestException) and is handled above, so what still lands here is a server
+    // fault: ScalarDB's operation checkers on a dropped table or a stale schema,
+    // ErrorMetadataSchema's fail-fast on a malformed metadata map, and the engine's internal
+    // contract checks. The 400 is wrong for all three; the branch stays only so that a
+    // caller-input site the audit missed keeps its status rather than flipping to a 500, and the
+    // WARN below is the evidence that decides when it can go.
     app.exception(
         IllegalArgumentException.class,
         (e, ctx) -> {
