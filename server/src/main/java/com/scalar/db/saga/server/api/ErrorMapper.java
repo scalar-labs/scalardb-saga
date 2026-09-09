@@ -62,9 +62,9 @@ import org.slf4j.LoggerFactory;
  * else — where the wire body already tells the whole story — is not logged: the client already saw
  * the error and a duplicate server-side log adds nothing. Severity: 5xx → {@code ERROR} (operator
  * must investigate); authorization denials → {@code INFO} (security audit); the replaced bare
- * {@code IllegalArgumentException} → {@code WARN} (a misattributed server bug or a migration
- * candidate — evidence that must print at the production default); everything else that logs →
- * {@code DEBUG} (usually high-volume probing traffic).
+ * {@code IllegalArgumentException} → {@code WARN} (a server fault the wire reports as the caller's
+ * mistake, so the log is the only record of it; must print at the production default); everything
+ * else that logs → {@code DEBUG} (usually high-volume probing traffic).
  */
 public final class ErrorMapper {
 

@@ -567,10 +567,11 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * @param output the step's output, merged into the saga context for downstream steps
    * @return the {@code RUNNING} snapshot immediately after the parked step is resumed
    * @throws IllegalStateException if the saga is not {@code WAITING}
-   * @throws IllegalArgumentException if {@code stepName} is not the currently parked step
-   * @throws SagaIllegalArgumentException if {@code output} holds a value a saga context cannot
-   *     carry; thrown before anything is recorded, so the step stays parked and the callback can be
-   *     retried with a corrected body
+   * @throws SagaIllegalArgumentException if {@code stepName} is not the currently parked step, or
+   *     if {@code output} holds a value a saga context cannot carry. Both are thrown before
+   *     anything is recorded, so the step stays parked and the callback can be retried once
+   *     corrected. Note this does <em>not</em> extend {@link IllegalArgumentException}, so a caller
+   *     filtering by that type will not see it
    * @throws SagaConcurrentModificationException if a concurrent deadline-timeout sweep resolves the
    *     parked step first (the callback lost the race)
    */

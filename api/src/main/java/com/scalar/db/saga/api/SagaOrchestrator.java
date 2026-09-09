@@ -77,6 +77,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @throws SagaDefinitionNotServedException if the definition is registered but this deployment
    *     does not serve it
    * @throws SagaDefinitionException if step resolution fails
+   * @throws SagaIllegalArgumentException if {@code input} holds a value a saga context cannot carry
+   *     (only primitives, strings, BigDecimal, and collections thereof)
    */
   String start(String sagaName, Map<String, Object> input);
 
@@ -97,7 +99,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @throws SagaDefinitionException if step resolution fails
    * @throws SagaAlreadyExistsException if a saga already exists with {@code sagaId}
    * @throws SagaIllegalArgumentException if {@code sagaId} is not of the form {@code
-   *     [a-zA-Z0-9._-]{1,128}}
+   *     [a-zA-Z0-9._-]{1,128}}, or if {@code input} holds a value a saga context cannot carry (only
+   *     primitives, strings, BigDecimal, and collections thereof)
    */
   void start(String sagaId, String sagaName, Map<String, Object> input);
 
@@ -113,6 +116,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @throws SagaDefinitionNotServedException if the definition is registered but this deployment
    *     does not serve it
    * @throws SagaDefinitionException if step resolution fails
+   * @throws SagaIllegalArgumentException if {@code input} holds a value a saga context cannot carry
+   *     (only primitives, strings, BigDecimal, and collections thereof)
    */
   String start(SagaDefinitionId id, Map<String, Object> input);
 
@@ -130,7 +135,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @throws SagaDefinitionException if step resolution fails
    * @throws SagaAlreadyExistsException if a saga already exists with {@code sagaId}
    * @throws SagaIllegalArgumentException if {@code sagaId} is not of the form {@code
-   *     [a-zA-Z0-9._-]{1,128}}
+   *     [a-zA-Z0-9._-]{1,128}}, or if {@code input} holds a value a saga context cannot carry (only
+   *     primitives, strings, BigDecimal, and collections thereof)
    */
   void start(String sagaId, SagaDefinitionId id, Map<String, Object> input);
 
@@ -147,6 +153,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @throws SagaDefinitionNotFoundException if no definition matches the given name
    * @throws SagaDefinitionNotServedException if the definition is registered but this deployment
    *     does not serve it
+   * @throws SagaIllegalArgumentException if {@code input} holds a value a saga context cannot carry
+   *     (only primitives, strings, BigDecimal, and collections thereof)
    */
   String startAsync(String sagaName, Map<String, Object> input);
 
@@ -166,6 +174,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    *     does not serve it
    * @throws UnsupportedOperationException if the implementation cannot deliver a local completion
    *     callback (e.g. a remote client with no server-streaming callback channel)
+   * @throws SagaIllegalArgumentException if {@code input} holds a value a saga context cannot carry
+   *     (only primitives, strings, BigDecimal, and collections thereof)
    */
   String startAsync(String sagaName, Map<String, Object> input, SagaCallback callback);
 
@@ -184,7 +194,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    *     does not serve it
    * @throws SagaAlreadyExistsException if a saga already exists with {@code sagaId}
    * @throws SagaIllegalArgumentException if {@code sagaId} is not of the form {@code
-   *     [a-zA-Z0-9._-]{1,128}}
+   *     [a-zA-Z0-9._-]{1,128}}, or if {@code input} holds a value a saga context cannot carry (only
+   *     primitives, strings, BigDecimal, and collections thereof)
    */
   void startAsync(String sagaId, String sagaName, Map<String, Object> input);
 
@@ -206,7 +217,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    *     callback (e.g. a remote client with no server-streaming callback channel)
    * @throws SagaAlreadyExistsException if a saga already exists with {@code sagaId}
    * @throws SagaIllegalArgumentException if {@code sagaId} is not of the form {@code
-   *     [a-zA-Z0-9._-]{1,128}}
+   *     [a-zA-Z0-9._-]{1,128}}, or if {@code input} holds a value a saga context cannot carry (only
+   *     primitives, strings, BigDecimal, and collections thereof)
    */
   void startAsync(String sagaId, String sagaName, Map<String, Object> input, SagaCallback callback);
 
@@ -221,6 +233,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @throws SagaDefinitionNotFoundException if no definition matches the given name and version
    * @throws SagaDefinitionNotServedException if the definition is registered but this deployment
    *     does not serve it
+   * @throws SagaIllegalArgumentException if {@code input} holds a value a saga context cannot carry
+   *     (only primitives, strings, BigDecimal, and collections thereof)
    */
   String startAsync(SagaDefinitionId id, Map<String, Object> input);
 
@@ -238,6 +252,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    *     does not serve it
    * @throws UnsupportedOperationException if the implementation cannot deliver a local completion
    *     callback (e.g. a remote client with no server-streaming callback channel)
+   * @throws SagaIllegalArgumentException if {@code input} holds a value a saga context cannot carry
+   *     (only primitives, strings, BigDecimal, and collections thereof)
    */
   String startAsync(SagaDefinitionId id, Map<String, Object> input, SagaCallback callback);
 
@@ -254,7 +270,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    *     does not serve it
    * @throws SagaAlreadyExistsException if a saga already exists with {@code sagaId}
    * @throws SagaIllegalArgumentException if {@code sagaId} is not of the form {@code
-   *     [a-zA-Z0-9._-]{1,128}}
+   *     [a-zA-Z0-9._-]{1,128}}, or if {@code input} holds a value a saga context cannot carry (only
+   *     primitives, strings, BigDecimal, and collections thereof)
    */
   void startAsync(String sagaId, SagaDefinitionId id, Map<String, Object> input);
 
@@ -274,7 +291,8 @@ public interface SagaOrchestrator extends AutoCloseable {
    *     callback (e.g. a remote client with no server-streaming callback channel)
    * @throws SagaAlreadyExistsException if a saga already exists with {@code sagaId}
    * @throws SagaIllegalArgumentException if {@code sagaId} is not of the form {@code
-   *     [a-zA-Z0-9._-]{1,128}}
+   *     [a-zA-Z0-9._-]{1,128}}, or if {@code input} holds a value a saga context cannot carry (only
+   *     primitives, strings, BigDecimal, and collections thereof)
    */
   void startAsync(
       String sagaId, SagaDefinitionId id, Map<String, Object> input, SagaCallback callback);
