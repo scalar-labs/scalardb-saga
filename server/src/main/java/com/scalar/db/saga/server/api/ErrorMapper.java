@@ -10,6 +10,7 @@ import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaInvalidRequestException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.exception.SagaOverloadedException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
@@ -67,6 +68,17 @@ import org.slf4j.LoggerFactory;
  * {@code DEBUG} (usually high-volume probing traffic).
  */
 public final class ErrorMapper {
+
+  /**
+   * The advisory wait sent with an admission refusal, in milliseconds.
+   *
+   * <p>Public, and read by the gRPC mapper rather than duplicated there, because the two transports
+   * answering the same refusal differently is the drift this codebase guards against elsewhere.
+   * Fixed rather than computed: unlike a rate-limit window, nothing here is counting down to a
+   * known reset — a permit frees when a saga finishes — so there is no honest deadline to name. One
+   * second is short enough to keep a queue draining and long enough not to be a hot loop.
+   */
+  public static final long OVERLOAD_RETRY_AFTER_MILLIS = 1_000L;
 
   private static final Logger logger = LoggerFactory.getLogger(ErrorMapper.class);
 
@@ -171,6 +183,20 @@ public final class ErrorMapper {
           // window actually resets.
           ctx.header("Retry-After", Long.toString((e.getRetryAfterMillis() + 999) / 1000));
           respond(ctx, 429, e);
+        });
+
+    // ── Admission cap (503) ──────────────────────────────────────────────
+    // Its own arm rather than the category fallback below, for two reasons. The fallback logs a
+    // full stack at ERROR, and a rejection storm is precisely when the daemon can least afford one
+    // line and one stack per refused request; that is a log-flood amplifier any caller can reach.
+    // And a refusal is not a failure: the engine is doing what it was configured to do, so DEBUG is
+    // the honest level, and the controller summarizes the storm once a minute.
+    app.exception(
+        SagaOverloadedException.class,
+        (e, ctx) -> {
+          logger.debug("{} on {} {}", e.getMessage(), ctx.method(), ctx.path());
+          ctx.header("Retry-After", Long.toString((OVERLOAD_RETRY_AFTER_MILLIS + 999) / 1000));
+          respond(ctx, 503, e);
         });
 
     // ── Server errors (500 / 503) ────────────────────────────────────────

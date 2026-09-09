@@ -57,6 +57,13 @@ import org.jspecify.annotations.Nullable;
  *       authenticated principal, so it is only per-caller once a real provider (jwt or apikey) is
  *       configured; under {@code noop} every request is the same {@code "anonymous"} principal and
  *       the limit acts as one global bucket shared by all callers
+ *   <li>{@code max_concurrent_saga_starts} — maximum sagas starting at once; {@code 0} (default)
+ *       means no cap. A permit is held per drive, so a parked saga holds none, and resumes,
+ *       recovery and admin drives are never refused. At the cap a start is refused with {@code
+ *       DB-SAGA-20006} before anything is persisted, so the saga does not exist and its ID stays
+ *       free. Size it together with {@code max_start_requests_per_minute}, which bounds how often
+ *       one principal may ask rather than how many starts run at once; see {@link
+ *       #maxConcurrentSagaStarts()}
  * </ul>
  *
  * <h2>Transports ({@code http.*} / {@code grpc.*})</h2>
@@ -76,7 +83,9 @@ import org.jspecify.annotations.Nullable;
  *       (defaults {@value #DEFAULT_MAX_THREADS} / {@value #DEFAULT_MIN_THREADS}). Handlers run on
  *       virtual threads, so the max caps how many requests are <em>dispatched</em> at once, not how
  *       many are in flight: a request waiting on its saga costs no pool thread. It therefore does
- *       not bound concurrent saga execution — nothing does yet
+ *       not bound concurrent saga execution: {@code max_concurrent_saga_starts} bounds admitted
+ *       starts and {@code recovery.max_concurrent_recoveries} bounds a recovery pass, while resume
+ *       and admin drives are bounded by neither
  *   <li>{@code http.max_queued_requests} — cap on the pool's job queue, so the dispatch backlog is
  *       memory-bounded and the pool rejects rather than growing without limit. Defaults to {@value
  *       #DEFAULT_MAX_QUEUED_REQUESTS_PER_THREAD} × {@code http.max_threads}. Because a blocking
@@ -321,13 +330,13 @@ import org.jspecify.annotations.Nullable;
  * is never a deliberate way to disable a control, since omitting the key already says that, so an
  * empty value there is far more likely a template that failed to resolve than an intent to run
  * without the protection. That covers {@code callback.max_age_seconds}, {@code
- * max_start_requests_per_minute}, and {@code tls.enabled}, whose defaults disable the check
- * outright, plus, inside a service file, the settings whose blank fallback would be open ({@code
- * allowed_hosts} would admit any host; a {@code header.<HeaderName>} would send an empty header,
- * and an empty {@code Authorization} is an unauthenticated call) or meaningless ({@code base_url}
- * has no default to fall back to). A service file's {@code max_body_bytes} sits on the other side
- * of that line deliberately: unset leaves the engine's own 1 MiB cap in place, so the body stays
- * bounded either way.
+ * max_start_requests_per_minute}, {@code max_concurrent_saga_starts}, and {@code tls.enabled},
+ * whose defaults disable the check outright, plus, inside a service file, the settings whose blank
+ * fallback would be open ({@code allowed_hosts} would admit any host; a {@code header.<HeaderName>}
+ * would send an empty header, and an empty {@code Authorization} is an unauthenticated call) or
+ * meaningless ({@code base_url} has no default to fall back to). A service file's {@code
+ * max_body_bytes} sits on the other side of that line deliberately: unset leaves the engine's own 1
+ * MiB cap in place, so the body stays bounded either way.
  *
  * <p>All other properties configure the saga engine's persistence (e.g. ScalarDB connection
  * settings and the {@code scalar.db.saga.store.*} keys documented on {@code
@@ -353,6 +362,7 @@ public final class SagaServerConfig {
   static final String DEFINITIONS_PATH_KEY = SERVER_PREFIX + "definitions_path";
   static final String DEFAULT_SAGA_TIMEOUT_MILLIS_KEY =
       SERVER_PREFIX + "default_saga_timeout_millis";
+  static final String MAX_CONCURRENT_SAGA_STARTS_KEY = SERVER_PREFIX + "max_concurrent_saga_starts";
   static final String MAX_START_REQUESTS_PER_MINUTE_KEY =
       SERVER_PREFIX + "max_start_requests_per_minute";
 
@@ -477,7 +487,125 @@ public final class SagaServerConfig {
   static final int DEFAULT_MAX_QUEUED_REQUESTS_PER_THREAD = 2;
   static final long DEFAULT_SAGA_TIMEOUT_MILLIS =
       DefaultSagaOrchestrator.DEFAULT_SAGA_TIMEOUT_MILLIS;
-  static final int DEFAULT_MAX_START_REQUESTS_PER_MINUTE = 0; // 0 = disabled (no rate limiting)
+  static final int DEFAULT_MAX_START_REQUESTS_PER_MINUTE = 0;
+  static final int DEFAULT_MAX_CONCURRENT_SAGA_STARTS =
+      DefaultSagaOrchestrator.DEFAULT_MAX_CONCURRENT_SAGA_STARTS; // 0 = disabled (no admission cap)
+
+  /**
+   * Returns the maximum number of timeline events a single {@code getSagaDetail} read returns
+   * (default {@value #DEFAULT_DETAIL_MAX_TIMELINE_EVENTS}). When a saga's history is longer, the
+   * newest events are returned and the detail is flagged truncated; the full history remains in the
+   * store.
+   */
+  public int detailMaxTimelineEvents() {
+    return detailMaxTimelineEvents;
+  }
+
+  /**
+   * Returns the crash-recovery configuration: how stale a saga must be to be reclaimed, how often
+   * the scan runs, and how much work one pass may do.
+   */
+  public RecoveryConfig recoveryConfig() {
+    return recoveryConfig;
+  }
+
+  /**
+   * Returns the retention configuration: how long a terminal saga is kept, and the shape of the
+   * purge that removes it afterwards.
+   */
+  public RetentionConfig retentionConfig() {
+    return retentionConfig;
+  }
+
+  /**
+   * Returns the configured security-provider name (normalized to lower case), defaulting to {@value
+   * #DEFAULT_SECURITY_PROVIDER} — no authentication. Selects which {@link
+   * com.scalar.db.saga.server.security.SagaSecurityProvider} the server authenticates requests
+   * with; the value is validated against the known providers when the provider is built.
+   */
+  public String securityProvider() {
+    return securityProvider;
+  }
+
+  /**
+   * Whether the operator has acknowledged running without authentication on a network-reachable
+   * interface (the {@code insecure_mode.enabled} key). Consulted by {@link SagaServer} at startup
+   * to gate the {@code noop} provider on a non-loopback host. Defaults to {@value
+   * #DEFAULT_INSECURE_MODE_ENABLED}.
+   */
+  public boolean insecureModeEnabled() {
+    return insecureModeEnabled;
+  }
+
+  /**
+   * Returns the HMAC secret used to authenticate async-callback requests, or empty when unset. When
+   * empty, the daemon registers no callback route (async completion is not enabled). The value may
+   * be supplied as a {@code ${file:}}/{@code ${env:}} secret reference. Present exactly when {@link
+   * #callbackBaseUrl()} is.
+   */
+  public Optional<String> callbackSecret() {
+    return Optional.ofNullable(callbackSecret);
+  }
+
+  /**
+   * Returns the daemon's externally-reachable base URL used to build async-step callback URLs, or
+   * empty when unset. Any trailing {@code /} is stripped so a callback path can be appended
+   * directly. Present exactly when {@link #callbackSecret()} is.
+   */
+  public Optional<String> callbackBaseUrl() {
+    return Optional.ofNullable(callbackBaseUrl);
+  }
+
+  /**
+   * Returns the TTL (seconds) applied to an async callback token's {@code iat}: a callback whose
+   * token is older than this is rejected as expired. {@code 0} (the default) disables the check.
+   * When enabled it must exceed the longest a step can stay parked (its callback timeout), or a
+   * genuine late callback is rejected.
+   */
+  public long callbackMaxAgeSeconds() {
+    return callbackMaxAgeSeconds;
+  }
+
+  /**
+   * Returns the server-wide default saga timeout (ms) enforced at execution for definitions that
+   * specified none ({@code 0} = unbounded); {@code 0} (the default) disables it. A definition's own
+   * timeout always takes precedence — this only fills in for definitions that left it unset, so a
+   * daemon-hosted saga cannot run without a deadline. Forwarded to the engine (which applies it at
+   * deadline computation on every execution entry) instead of being baked into the stored
+   * definition, so changing it never conflicts with stored content.
+   */
+  public long defaultSagaTimeoutMillis() {
+    return defaultSagaTimeoutMillis;
+  }
+
+  /**
+   * Returns the maximum number of starts that may be executing at once, or {@code 0} for no cap
+   * (the default). A start arriving at the cap is refused with {@code DB-SAGA-20006} and HTTP 503 /
+   * gRPC {@code UNAVAILABLE}; nothing is persisted, so the saga does not exist and its ID stays
+   * free.
+   *
+   * <p>A permit is held per drive, so a parked saga holds none, and resumes, recovery and admin
+   * drives are never refused.
+   *
+   * <p><b>Sizing.</b> In-flight population is arrival rate times saga duration, so start from the
+   * rate you intend to serve and the duration you measure, add burst headroom, and bound the result
+   * so worst-case saga latency stays inside {@code recovery.staleness_threshold_millis} — past it,
+   * recovery starts claiming sagas that are still running, which is the collapse this prevents.
+   *
+   * <p><b>Size it together with {@code max_start_requests_per_minute}</b>, which bounds a different
+   * quantity: that limits how often one principal may ask; this limits how much work the engine is
+   * doing for everyone. Neither substitutes for the other — a rate limit cannot see duration, so a
+   * downstream slowdown multiplies the in-flight population at an unchanged arrival rate, while a
+   * cap alone leaves one caller free to spend everyone's capacity on cheap refusals. Both are off
+   * by default. The check that connects them: aggregate admitted arrival (principals times
+   * per-principal limit) times typical duration should sit comfortably below this cap, so the rate
+   * limiter does the everyday shaping and the cap is the backstop for a duration blowout. If it
+   * sits above, callers inside their limits are refused routinely and "server full" stops being an
+   * exceptional signal.
+   */
+  public int maxConcurrentSagaStarts() {
+    return maxConcurrentSagaStarts;
+  }
 
   /**
    * Every key parsed here, for the unknown-key check. Keys the security package parses are listed
@@ -511,6 +639,7 @@ public final class SagaServerConfig {
           SHUTDOWN_MODE_KEY,
           SHUTDOWN_TIMEOUT_MILLIS_KEY,
           DETAIL_MAX_TIMELINE_EVENTS_KEY,
+          MAX_CONCURRENT_SAGA_STARTS_KEY,
           RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY,
           RECOVERY_INTERVAL_SECONDS_KEY,
           RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY,
@@ -586,6 +715,7 @@ public final class SagaServerConfig {
   private final ShutdownMode shutdownMode;
   private final long shutdownTimeoutMillis;
   private final int detailMaxTimelineEvents;
+  private final int maxConcurrentSagaStarts;
   private final RecoveryConfig recoveryConfig;
   private final RetentionConfig retentionConfig;
   private final String securityProvider;
@@ -691,6 +821,17 @@ public final class SagaServerConfig {
             DETAIL_MAX_TIMELINE_EVENTS_KEY,
             DEFAULT_DETAIL_MAX_TIMELINE_EVENTS,
             1);
+    this.maxConcurrentSagaStarts =
+        parseBoundedInt(
+            // Blank is refused rather than read as unset: this key's default leaves the protection
+            // off, so a templated value that resolved empty would disable the cap silently. Same
+            // rule as the rate limit and the callback age.
+            requireNonBlankIfSet(
+                MAX_CONCURRENT_SAGA_STARTS_KEY,
+                resolved.getProperty(MAX_CONCURRENT_SAGA_STARTS_KEY)),
+            MAX_CONCURRENT_SAGA_STARTS_KEY,
+            DEFAULT_MAX_CONCURRENT_SAGA_STARTS,
+            0);
     this.recoveryConfig = parseRecoveryConfig(resolved);
     this.retentionConfig = parseRetentionConfig(resolved);
     this.securityProvider = parseSecurityProvider(resolved.getProperty(SECURITY_PROVIDER_KEY));
@@ -1370,93 +1511,6 @@ public final class SagaServerConfig {
    */
   public long shutdownTimeoutMillis() {
     return shutdownTimeoutMillis;
-  }
-
-  /**
-   * Returns the maximum number of timeline events a single {@code getSagaDetail} read returns
-   * (default {@value #DEFAULT_DETAIL_MAX_TIMELINE_EVENTS}). When a saga's history is longer, the
-   * newest events are returned and the detail is flagged truncated; the full history remains in the
-   * store.
-   */
-  public int detailMaxTimelineEvents() {
-    return detailMaxTimelineEvents;
-  }
-
-  /**
-   * Returns the crash-recovery configuration: how stale a saga must be to be reclaimed, how often
-   * the scan runs, and how much work one pass may do.
-   */
-  public RecoveryConfig recoveryConfig() {
-    return recoveryConfig;
-  }
-
-  /**
-   * Returns the retention configuration: how long a terminal saga is kept, and the shape of the
-   * purge that removes it afterwards.
-   */
-  public RetentionConfig retentionConfig() {
-    return retentionConfig;
-  }
-
-  /**
-   * Returns the configured security-provider name (normalized to lower case), defaulting to {@value
-   * #DEFAULT_SECURITY_PROVIDER} — no authentication. Selects which {@link
-   * com.scalar.db.saga.server.security.SagaSecurityProvider} the server authenticates requests
-   * with; the value is validated against the known providers when the provider is built.
-   */
-  public String securityProvider() {
-    return securityProvider;
-  }
-
-  /**
-   * Whether the operator has acknowledged running without authentication on a network-reachable
-   * interface (the {@code insecure_mode.enabled} key). Consulted by {@link SagaServer} at startup
-   * to gate the {@code noop} provider on a non-loopback host. Defaults to {@value
-   * #DEFAULT_INSECURE_MODE_ENABLED}.
-   */
-  public boolean insecureModeEnabled() {
-    return insecureModeEnabled;
-  }
-
-  /**
-   * Returns the HMAC secret used to authenticate async-callback requests, or empty when unset. When
-   * empty, the daemon registers no callback route (async completion is not enabled). The value may
-   * be supplied as a {@code ${file:}}/{@code ${env:}} secret reference. Present exactly when {@link
-   * #callbackBaseUrl()} is.
-   */
-  public Optional<String> callbackSecret() {
-    return Optional.ofNullable(callbackSecret);
-  }
-
-  /**
-   * Returns the daemon's externally-reachable base URL used to build async-step callback URLs, or
-   * empty when unset. Any trailing {@code /} is stripped so a callback path can be appended
-   * directly. Present exactly when {@link #callbackSecret()} is.
-   */
-  public Optional<String> callbackBaseUrl() {
-    return Optional.ofNullable(callbackBaseUrl);
-  }
-
-  /**
-   * Returns the TTL (seconds) applied to an async callback token's {@code iat}: a callback whose
-   * token is older than this is rejected as expired. {@code 0} (the default) disables the check.
-   * When enabled it must exceed the longest a step can stay parked (its callback timeout), or a
-   * genuine late callback is rejected.
-   */
-  public long callbackMaxAgeSeconds() {
-    return callbackMaxAgeSeconds;
-  }
-
-  /**
-   * Returns the server-wide default saga timeout (ms) enforced at execution for definitions that
-   * specified none ({@code 0} = unbounded); {@code 0} (the default) disables it. A definition's own
-   * timeout always takes precedence — this only fills in for definitions that left it unset, so a
-   * daemon-hosted saga cannot run without a deadline. Forwarded to the engine (which applies it at
-   * deadline computation on every execution entry) instead of being baked into the stored
-   * definition, so changing it never conflicts with stored content.
-   */
-  public long defaultSagaTimeoutMillis() {
-    return defaultSagaTimeoutMillis;
   }
 
   /**

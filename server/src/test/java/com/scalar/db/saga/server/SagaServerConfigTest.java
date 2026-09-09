@@ -3,6 +3,7 @@ package com.scalar.db.saga.server;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.engine.RecoveryConfig;
 import com.scalar.db.saga.engine.RetentionConfig;
 import com.scalar.db.saga.engine.ShutdownMode;
@@ -201,7 +202,8 @@ class SagaServerConfigTest {
       strings = {
         SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY,
         SagaServerConfig.CALLBACK_MAX_AGE_SECONDS_KEY,
-        SagaServerConfig.TLS_ENABLED_KEY
+        SagaServerConfig.TLS_ENABLED_KEY,
+        SagaServerConfig.MAX_CONCURRENT_SAGA_STARTS_KEY
       })
   void load_blankProtectionDisablingKey_throwsIllegalArgumentException(String key) {
     Properties props = new Properties();
@@ -222,6 +224,8 @@ class SagaServerConfigTest {
     assertThat(config.callbackMaxAgeSeconds())
         .isEqualTo(SagaServerConfig.DEFAULT_CALLBACK_MAX_AGE_SECONDS);
     assertThat(config.tlsEnabled()).isEqualTo(SagaServerConfig.DEFAULT_TLS_ENABLED);
+    assertThat(config.maxConcurrentSagaStarts())
+        .isEqualTo(DefaultSagaOrchestrator.DEFAULT_MAX_CONCURRENT_SAGA_STARTS);
   }
 
   @Test
@@ -1695,6 +1699,51 @@ class SagaServerConfigTest {
       // Assert
       assertThat(config.ownerId()).isEqualTo("replica-7");
       assertThat(unresolved.isEmpty()).isTrue();
+    }
+  }
+
+  /**
+   * The admission cap key. It is off by default and freezes at first release, so both the default
+   * and the rejection of a value that cannot mean anything are worth pinning.
+   */
+  @Nested
+  class MaxConcurrentSagaStarts {
+
+    @Test
+    public void load_notSet_defaultsToNoCap() {
+      SagaServerConfig config = SagaServerConfig.load(new Properties());
+
+      assertThat(config.maxConcurrentSagaStarts())
+          .isEqualTo(DefaultSagaOrchestrator.DEFAULT_MAX_CONCURRENT_SAGA_STARTS)
+          .isZero();
+    }
+
+    @Test
+    public void load_positiveValueGiven_returnsIt() {
+      Properties props = new Properties();
+      props.setProperty(SagaServerConfig.MAX_CONCURRENT_SAGA_STARTS_KEY, "250");
+
+      assertThat(SagaServerConfig.load(props).maxConcurrentSagaStarts()).isEqualTo(250);
+    }
+
+    @Test
+    public void load_zeroGiven_meansNoCap() {
+      // 0 is the documented way to turn it off, so it must parse rather than being rejected as a
+      // cap nobody could satisfy.
+      Properties props = new Properties();
+      props.setProperty(SagaServerConfig.MAX_CONCURRENT_SAGA_STARTS_KEY, "0");
+
+      assertThat(SagaServerConfig.load(props).maxConcurrentSagaStarts()).isZero();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"-1", "not-a-number"})
+    public void load_invalidValueGiven_throwsIllegalArgumentException(String value) {
+      Properties props = new Properties();
+      props.setProperty(SagaServerConfig.MAX_CONCURRENT_SAGA_STARTS_KEY, value);
+
+      assertThatThrownBy(() -> SagaServerConfig.load(props))
+          .isInstanceOf(IllegalArgumentException.class);
     }
   }
 }

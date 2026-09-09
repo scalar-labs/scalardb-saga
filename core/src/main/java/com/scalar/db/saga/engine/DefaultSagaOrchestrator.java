@@ -13,6 +13,7 @@ import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaDefinitionNotServedException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.exception.SagaOverloadedException;
 import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaStore;
@@ -36,6 +37,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import net.jcip.annotations.ThreadSafe;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -81,6 +83,17 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    */
   public static final int DEFAULT_MAX_TIMELINE_EVENTS = Integer.MAX_VALUE;
 
+  /**
+   * The concurrent-start cap applied when {@link Builder#maxConcurrentSagaStarts(int)} is not
+   * called: {@code 0}, meaning no cap.
+   *
+   * <p>Off by default because the right value is a property of a deployment's store, hosts and saga
+   * durations, and a wrong one is worse than none: too low refuses work the daemon could have done,
+   * and too high is the unbounded behavior with extra machinery. The sizing method is on the
+   * builder setter.
+   */
+  public static final int DEFAULT_MAX_CONCURRENT_SAGA_STARTS = 0;
+
   private static final Logger logger = LoggerFactory.getLogger(DefaultSagaOrchestrator.class);
 
   // Embedded mode has no authenticated user, so admin interventions are attributed to this fixed
@@ -94,6 +107,10 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   private final SagaRetentionManager retentionManager;
   private final long shutdownTimeoutMillis;
   private final int maxTimelineEvents;
+
+  /** The admission cap, or {@code null} when none is configured — the default. */
+  private final @Nullable AdmissionController admissionController;
+
   private final ExecutorService asyncExecutor;
   private volatile boolean closed;
 
@@ -124,7 +141,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       SagaRecoveryManager recoveryManager,
       SagaRetentionManager retentionManager,
       long shutdownTimeoutMillis,
-      int maxTimelineEvents) {
+      int maxTimelineEvents,
+      int maxConcurrentSagaStarts) {
     this(
         engine,
         store,
@@ -133,6 +151,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
         retentionManager,
         shutdownTimeoutMillis,
         maxTimelineEvents,
+        maxConcurrentSagaStarts,
         Executors.newVirtualThreadPerTaskExecutor());
   }
 
@@ -145,6 +164,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       SagaRetentionManager retentionManager,
       long shutdownTimeoutMillis,
       int maxTimelineEvents,
+      int maxConcurrentSagaStarts,
       ExecutorService asyncExecutor) {
     this.engine = engine;
     this.store = store;
@@ -153,6 +173,10 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     this.retentionManager = retentionManager;
     this.shutdownTimeoutMillis = shutdownTimeoutMillis;
     this.maxTimelineEvents = maxTimelineEvents;
+    // No cap means no controller, rather than a controller with an unreachable cap: the seams then
+    // hold a null and skip the semaphore entirely, so the default costs nothing.
+    this.admissionController =
+        maxConcurrentSagaStarts > 0 ? new AdmissionController(maxConcurrentSagaStarts) : null;
     this.asyncExecutor = asyncExecutor;
   }
 
@@ -248,8 +272,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(sagaName, "sagaName must not be null");
     Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
-    SagaDefinition def = requireLatestDefinition(sagaName);
-    return engine.execute(def, null, input);
+    return executeAdmitted(() -> requireLatestDefinition(sagaName), null, input);
   }
 
   @Override
@@ -258,8 +281,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(sagaName, "sagaName must not be null");
     Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
-    SagaDefinition def = requireLatestDefinition(sagaName);
-    engine.execute(def, sagaId, input);
+    executeAdmitted(() -> requireLatestDefinition(sagaName), sagaId, input);
   }
 
   @Override
@@ -267,8 +289,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(id, "id must not be null");
     Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
-    SagaDefinition def = requireVersionedDefinition(id);
-    return engine.execute(def, null, input);
+    return executeAdmitted(() -> requireVersionedDefinition(id), null, input);
   }
 
   @Override
@@ -277,8 +298,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(id, "id must not be null");
     Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
-    SagaDefinition def = requireVersionedDefinition(id);
-    engine.execute(def, sagaId, input);
+    executeAdmitted(() -> requireVersionedDefinition(id), sagaId, input);
   }
 
   // ---------------------------------------------------------------------------
@@ -290,8 +310,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(sagaName, "sagaName must not be null");
     Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
-    SagaDefinition def = requireLatestDefinition(sagaName);
-    return startAsyncInternal(def, null, input, null).getSagaId();
+    return startAsyncInternal(() -> requireLatestDefinition(sagaName), null, input, null)
+        .getSagaId();
   }
 
   @Override
@@ -300,8 +320,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(input, "input must not be null");
     Objects.requireNonNull(callback, "callback must not be null");
     ensureOpen();
-    SagaDefinition def = requireLatestDefinition(sagaName);
-    return startAsyncInternal(def, null, input, callback).getSagaId();
+    return startAsyncInternal(() -> requireLatestDefinition(sagaName), null, input, callback)
+        .getSagaId();
   }
 
   @Override
@@ -310,8 +330,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(sagaName, "sagaName must not be null");
     Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
-    SagaDefinition def = requireLatestDefinition(sagaName);
-    startAsyncInternal(def, sagaId, input, null);
+    startAsyncInternal(() -> requireLatestDefinition(sagaName), sagaId, input, null);
   }
 
   @Override
@@ -322,8 +341,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(input, "input must not be null");
     Objects.requireNonNull(callback, "callback must not be null");
     ensureOpen();
-    SagaDefinition def = requireLatestDefinition(sagaName);
-    startAsyncInternal(def, sagaId, input, callback);
+    startAsyncInternal(() -> requireLatestDefinition(sagaName), sagaId, input, callback);
   }
 
   @Override
@@ -331,8 +349,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(id, "id must not be null");
     Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
-    SagaDefinition def = requireVersionedDefinition(id);
-    return startAsyncInternal(def, null, input, null).getSagaId();
+    return startAsyncInternal(() -> requireVersionedDefinition(id), null, input, null).getSagaId();
   }
 
   @Override
@@ -341,8 +358,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(input, "input must not be null");
     Objects.requireNonNull(callback, "callback must not be null");
     ensureOpen();
-    SagaDefinition def = requireVersionedDefinition(id);
-    return startAsyncInternal(def, null, input, callback).getSagaId();
+    return startAsyncInternal(() -> requireVersionedDefinition(id), null, input, callback)
+        .getSagaId();
   }
 
   @Override
@@ -351,8 +368,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(id, "id must not be null");
     Objects.requireNonNull(input, "input must not be null");
     ensureOpen();
-    SagaDefinition def = requireVersionedDefinition(id);
-    startAsyncInternal(def, sagaId, input, null);
+    startAsyncInternal(() -> requireVersionedDefinition(id), sagaId, input, null);
   }
 
   @Override
@@ -363,8 +379,74 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(input, "input must not be null");
     Objects.requireNonNull(callback, "callback must not be null");
     ensureOpen();
-    SagaDefinition def = requireVersionedDefinition(id);
-    startAsyncInternal(def, sagaId, input, callback);
+    startAsyncInternal(() -> requireVersionedDefinition(id), sagaId, input, callback);
+  }
+
+  /**
+   * Takes a permit for a drive about to start, or refuses the start.
+   *
+   * <p>Called before the definition is resolved, and that ordering is the deliberate part.
+   * Resolving a saga by name always reads the store — the registry never caches that lookup, so it
+   * cannot serve a stale version — so resolving first would make every refusal cost a store
+   * transaction, and refusals arrive in storms precisely when the store is the thing under strain.
+   * The same reasoning that keeps a log line off this path keeps a query off it.
+   *
+   * <p>What that costs, stated plainly: at a full cap a start naming a saga that does not exist is
+   * refused before anyone discovers the name is wrong, so it reports overload rather than
+   * not-found. The caller learns of the typo when capacity returns. That is the same trade already
+   * accepted for an oversized payload, and a mistyped saga name is a development-time mistake
+   * rather than a production one.
+   *
+   * <p>Input validation runs in the refusal branch below, because it is a walk of a map the engine
+   * owns and costs nothing to repeat, so a request carrying a null is still told so rather than to
+   * try again. The saga ID is <b>not</b> checked here: its grammar belongs to the store, and
+   * reaching for it early meant a method on the store interface that would outlive its one caller.
+   * So a caller-supplied ID that the store could never accept is refused as overload at a full cap
+   * and reports its real error once capacity returns — the same shape as the unknown-name and
+   * oversized-payload cases above. And the refusal still precedes anything being persisted, which
+   * is what makes the advice to retry true.
+   *
+   * @return the lease to release when the drive ends, or {@code null} when no cap is configured
+   * @throws SagaOverloadedException when the cap is full and the request is otherwise acceptable
+   */
+  private AdmissionController.@Nullable PermitLease admit(Map<String, Object> input) {
+    AdmissionController controller = admissionController;
+    if (controller == null) {
+      return null;
+    }
+    AdmissionController.PermitLease lease = controller.acquire();
+    if (lease == null) {
+      // Only now, on the one path where the answer would otherwise be wrong. A request that was
+      // malformed on arrival must hear that rather than "busy, try again", which sends it round a
+      // loop with no exit — but the engine already makes both checks authoritatively on the way to
+      // creating a saga, so paying for them on every admitted start, and on every start at all when
+      // no cap is configured, would buy nothing.
+      ExecutionContext.validateInput(input);
+      throw new SagaOverloadedException();
+    }
+    return lease;
+  }
+
+  /** Returns a permit, tolerating the no-cap case so both seams keep one shape. */
+  private static void release(AdmissionController.@Nullable PermitLease lease) {
+    if (lease != null) {
+      lease.release();
+    }
+  }
+
+  /**
+   * Shared synchronous-start path: the drive holds a permit for exactly as long as it occupies this
+   * thread. A saga that parks releases here too — {@code execute} returns when the saga stops
+   * progressing, and a saga waiting on an outside system is not occupying the engine.
+   */
+  private String executeAdmitted(
+      Supplier<SagaDefinition> definition, @Nullable String sagaId, Map<String, Object> input) {
+    AdmissionController.PermitLease lease = admit(input);
+    try {
+      return engine.execute(definition.get(), sagaId, input);
+    } finally {
+      release(lease);
+    }
   }
 
   /**
@@ -372,20 +454,34 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * process crashes before the virtual thread starts), then submits execution to a virtual thread.
    */
   private SagaStateSnapshot startAsyncInternal(
-      SagaDefinition def,
+      Supplier<SagaDefinition> definition,
       @Nullable String sagaId,
       Map<String, Object> input,
       @Nullable SagaCallback callback) {
-    // Defensive copy: the async thread reads this map after we return to the caller, so a caller
-    // that mutates its map post-return would otherwise race the read (CME or a torn copy).
-    Map<String, Object> copiedInput = new HashMap<>(input);
+    // Admitted before the copy: a refused start should pay for nothing it does not need, and the
+    // copy is the first thing here that costs anything per request.
+    AdmissionController.PermitLease lease = admit(input);
+    SagaStateSnapshot saga;
+    Map<String, Object> copiedInput;
+    SagaDefinition def;
+    try {
+      def = definition.get();
 
-    // Persist synchronously — saga is recoverable from this point
-    SagaStateSnapshot saga = engine.createSaga(def, sagaId, copiedInput);
+      // Defensive copy: the async thread reads this map after we return to the caller, so a caller
+      // that mutates its map post-return would otherwise race the read (CME or a torn copy).
+      copiedInput = new HashMap<>(input);
+
+      // Persist synchronously — saga is recoverable from this point
+      saga = engine.createSaga(def, sagaId, copiedInput);
+    } catch (Throwable t) {
+      // Nothing was handed to the executor, so this thread still owns the permit.
+      release(lease);
+      throw t;
+    }
 
     // Dispatch execution to a virtual thread; fire-and-forget, saga state is persisted so
-    // recovery handles failures.
-    submitAsync(def, saga, copiedInput, callback);
+    // recovery handles failures. The lease goes with it: from here the drive owns it.
+    submitAsync(def, saga, copiedInput, callback, lease);
 
     return saga;
   }
@@ -394,7 +490,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       SagaDefinition def,
       SagaStateSnapshot saga,
       Map<String, Object> input,
-      @Nullable SagaCallback callback) {
+      @Nullable SagaCallback callback,
+      AdmissionController.@Nullable PermitLease lease) {
     try {
       // execute() (not submit()) because the result is ignored: submit() would return a Future we
       // drop, which both trips Error Prone and silently swallows failures. The inner catches handle
@@ -412,6 +509,11 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
               // Saga state is persisted — recovery will pick it up
               logger.error("Async saga {} failed unexpectedly", saga.getSagaId(), t);
             } finally {
+              // Released before the callback runs, and that order is load-bearing: a client told
+              // its saga completed or parked may start the next one immediately, and would be
+              // refused by a permit this drive has finished with. It also means a callback that
+              // throws or blocks forever cannot hold capacity hostage.
+              release(lease);
               try {
                 dispatchCallback(saga.getSagaId(), callback, executed);
               } catch (Throwable t) {
@@ -420,11 +522,19 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
             }
           });
     } catch (RejectedExecutionException e) {
+      // The task will never run, so nothing else will return this permit.
+      release(lease);
       // Race between close() and execute() — saga is already persisted, recovery will handle it
       logger.warn(
           "Async executor rejected saga {} (shutting down); recovery will handle it",
           saga.getSagaId(),
           e);
+    } catch (Throwable t) {
+      // An executor that fails some other way owes the same accounting. A pathological one that
+      // both schedules the task and throws would release twice; the lease absorbs that, which is
+      // why it is release-once rather than a bare semaphore call.
+      release(lease);
+      throw t;
     }
   }
 
@@ -851,6 +961,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     private long shutdownTimeoutMillis = DEFAULT_SHUTDOWN_TIMEOUT_MILLIS;
     private long defaultSagaTimeoutMillis = DEFAULT_SAGA_TIMEOUT_MILLIS;
     private int maxTimelineEvents = DEFAULT_MAX_TIMELINE_EVENTS;
+    private int maxConcurrentSagaStarts = DEFAULT_MAX_CONCURRENT_SAGA_STARTS;
     private Clock clock = Clock.systemUTC();
     private ResourceRegistry.@Nullable Builder resourceRegistryBuilder;
     private @Nullable StepResolver customStepResolver;
@@ -860,6 +971,48 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     private @Nullable CallbackUrlProvider callbackUrlProvider;
 
     private Builder() {}
+
+    /**
+     * Caps how many sagas may be starting at once; a start arriving at the cap is refused
+     * immediately with {@link SagaOverloadedException} rather than queued. Defaults to {@link
+     * #DEFAULT_MAX_CONCURRENT_SAGA_STARTS} (0, no cap).
+     *
+     * <p>A permit is held per drive, so a saga parked on an outside system holds nothing, and
+     * resumes, recovery and admin drives are never refused. The refusal happens after validation
+     * and before anything is persisted: the saga does not exist and its ID is still free.
+     *
+     * <p><b>Sizing.</b> Steady-state in-flight population is arrival rate times saga duration
+     * (Little's law), so start from the arrival rate you intend to serve and the duration you
+     * measure, add headroom for bursts, and bound the result so that worst-case saga latency stays
+     * inside the recovery staleness threshold — beyond it, recovery begins claiming sagas that are
+     * still running, which is the collapse this cap exists to prevent. Measure rather than guess:
+     * the benchmark harness reports in-flight population and worst-case latency for a given
+     * workload, and that output is the sizing method.
+     *
+     * <p><b>Size it together with the daemon's request rate limit</b> ({@code
+     * scalar.db.saga.server.max_start_requests_per_minute}), which bounds a different quantity:
+     * that limits how often one principal may ask, at the transport; this limits how much work the
+     * engine is doing for everyone. Neither substitutes for the other — a rate limit cannot see
+     * duration, so a downstream slowdown multiplies the in-flight population at an unchanged
+     * arrival rate, while a cap alone leaves one caller free to spend everyone's capacity on cheap
+     * refusals. Both are off by default. The check that connects them: aggregate admitted arrival
+     * (principals times per-principal limit) times typical duration should sit comfortably below
+     * this cap, so the rate limiter does the everyday shaping and the cap is the backstop that
+     * fires only when duration blows out. If it sits above, callers within their limits are refused
+     * routinely and "server full" stops being an exceptional signal.
+     *
+     * @param maxConcurrentSagaStarts the maximum number of starts that may be executing at once, or
+     *     0 for no cap; must not be negative
+     * @return this builder
+     */
+    public Builder maxConcurrentSagaStarts(int maxConcurrentSagaStarts) {
+      if (maxConcurrentSagaStarts < 0) {
+        throw new IllegalArgumentException(
+            "maxConcurrentSagaStarts must not be negative, got " + maxConcurrentSagaStarts);
+      }
+      this.maxConcurrentSagaStarts = maxConcurrentSagaStarts;
+      return this;
+    }
 
     /**
      * Sets the store factory. The factory's {@link SagaStoreFactory#createStore()} method is called
@@ -1161,7 +1314,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
             recoveryManager,
             retentionManager,
             shutdownTimeoutMillis,
-            maxTimelineEvents);
+            maxTimelineEvents,
+            maxConcurrentSagaStarts);
       } catch (Throwable t) {
         // Roll back the resources that hold real external connections: the store (DB sessions) and
         // the HTTP endpoint manager (holds HTTP clients). Each is null if its own creation threw,

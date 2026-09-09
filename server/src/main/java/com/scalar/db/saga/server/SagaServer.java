@@ -363,6 +363,7 @@ public final class SagaServer implements AutoCloseable {
         .shutdownTimeoutMillis(config.shutdownTimeoutMillis())
         .defaultSagaTimeoutMillis(config.defaultSagaTimeoutMillis())
         .maxTimelineEvents(config.detailMaxTimelineEvents())
+        .maxConcurrentSagaStarts(config.maxConcurrentSagaStarts())
         .recoveryConfig(config.recoveryConfig())
         .retentionConfig(config.retentionConfig());
     // No endpoints here: the orchestrator is built with none, and the boot configuration pass
