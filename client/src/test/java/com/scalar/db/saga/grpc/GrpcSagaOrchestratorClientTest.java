@@ -826,6 +826,29 @@ class GrpcSagaOrchestratorClientTest {
   }
 
   @Test
+  void start_withDeadline_startKeepsFailing_throwsSagaTimeoutCarryingTheMintedId() {
+    // The other deadline site: firstStart's retry loop, where StartSaga itself never gets through
+    // and the loop never reaches awaitLoop. Here the id is not yet known to name anything; it is
+    // the idempotency key the attempts were sent under, and the caller's only way to find out
+    // whether one of them landed after all.
+    // Arrange
+    GrpcSagaOrchestratorClient deadlineClient =
+        new GrpcSagaOrchestratorClient(SagaServiceGrpc.newBlockingStub(channel), null, 100L);
+    fake.startError = Status.UNAVAILABLE.withDescription("still down").asRuntimeException();
+
+    // Act
+    SagaTimeoutException timeout =
+        catchThrowableOfType(
+            SagaTimeoutException.class, () -> deadlineClient.start("transfer", Map.of()));
+
+    // Assert — no AwaitSaga was ever issued, so this is firstStart's guardDeadline and not
+    // awaitLoop's; the minted id survives that path too.
+    assertThat(fake.awaitCalls).isZero();
+    assertThat(timeout.getErrorCode()).isEqualTo(SagaErrorCode.SAGA_AWAIT_TIMEOUT);
+    assertThat(timeout.getSagaId()).isEqualTo(fake.lastStart().getSagaId());
+  }
+
+  @Test
   void start_withDeadline_byDefinitionIdAwaitKeepsFailing_throwsSagaTimeoutCarryingTheMintedId() {
     // The other generated-id overload mints its own id; it must lose it no more than the by-name
     // one does.

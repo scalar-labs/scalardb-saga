@@ -17,9 +17,15 @@ import org.jspecify.annotations.Nullable;
  * </ul>
  *
  * <p>Only the await flavour carries a saga ID, and it always does: a blocking {@code start} that
- * mints the ID itself has not returned it yet, so this exception is the caller's only copy of the
- * handle to work that is still running. A request timeout is mapped from a bare transport status
- * with no saga in view, so {@link #getSagaId()} is null there.
+ * mints the ID itself has not returned it yet, so this exception is the caller's only copy of it. A
+ * request timeout is mapped from a bare transport status with no saga in view, so {@link
+ * #getSagaId()} is null there.
+ *
+ * <p>The ID does not promise that a saga exists. The wait budget usually expires with the saga
+ * known to be running, but it can also expire while the first start request is still being retried,
+ * where whether anything was persisted is exactly what is unknown. The ID answers that too: it is
+ * the idempotency key the start was sent under, so polling it either finds the saga or reports it
+ * missing.
  *
  * <p>This is an unchecked exception in a separate hierarchy from {@link StepTimeoutException}
  * because saga-level and step-level timeouts are semantically different.
@@ -46,17 +52,18 @@ public class SagaTimeoutException extends SagaRuntimeException {
   }
 
   /**
-   * The saga did not reach a terminal state within the client-side wait bound — the saga keeps
-   * running and nothing failed, so the caller should poll {@code sagaId}, not re-send the request.
+   * The saga did not reach a terminal state within the client-side wait bound. Nothing failed, so
+   * the caller should poll {@code sagaId} rather than re-send the request.
    *
-   * @param sagaId the saga still running server-side; the handle the caller needs to poll it
+   * @param sagaId the ID the saga was started under: the handle to poll it by, and the key that
+   *     resolves whether an ambiguous start landed
    */
   public static SagaTimeoutException awaitExpired(String sagaId) {
     return new SagaTimeoutException(sagaId);
   }
 
   /**
-   * The saga the expired wait was waiting for, or null when this is a {@link
+   * The ID the expired wait was waiting on, or null when this is a {@link
    * SagaErrorCode#REQUEST_TIMEOUT}. Non-null for {@link SagaErrorCode#SAGA_AWAIT_TIMEOUT}, where it
    * is what the code's remediation tells the caller to poll.
    */
