@@ -1828,7 +1828,7 @@ public final class ScalarDbSagaStore implements SagaStore {
    *
    * <p>Encoded as an opaque, versioned Base64URL token; decoding is fail-closed — any malformed,
    * out-of-range, unknown-version, or filter-mismatched token throws {@link
-   * IllegalArgumentException} (mapped to 400) rather than silently scanning the wrong data. The
+   * SagaIllegalArgumentException} (mapped to 400) rather than silently scanning the wrong data. The
    * token carries only a scan position and filter key within already-authorized data, so it is not
    * signed.
    */
