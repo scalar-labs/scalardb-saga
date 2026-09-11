@@ -273,8 +273,8 @@ class SagaServiceImplTest {
   @Test
   void startSaga_blankVersion_returnsInvalidArgumentNamingTheField() {
     // Arrange — a present-but-blank version pins the request to a version that cannot exist.
-    // SagaDefinitionId rejects it, and the description is what distinguishes that typed rejection
-    // from the mapper's blanket fallback, which answers the same code with a fixed detail.
+    // SagaDefinitionId rejects it, and the description is asserted because it names the field at
+    // fault, which is what makes the rejection actionable for the caller.
     StartSagaRequest request =
         StartSagaRequest.newBuilder().setName("transfer").setVersion("  ").setAsync(true).build();
 

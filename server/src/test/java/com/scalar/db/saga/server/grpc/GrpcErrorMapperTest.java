@@ -93,7 +93,7 @@ class GrpcErrorMapperTest {
 
   @Test
   void toStatusRuntimeException_malformedErrorMetadataGiven_isInternalNotTheCallersFault() {
-    // A throw site whose metadata map does not match its code's schema fails inside the
+    // Arrange — a throw site whose metadata map does not match its code's schema fails inside the
     // SagaRuntimeException constructor, as a bare IllegalArgumentException. It is our bug, and it
     // used to replace whatever error was being reported with the caller's own INVALID_ARGUMENT.
     IllegalArgumentException schemaMismatch =
@@ -110,11 +110,10 @@ class GrpcErrorMapperTest {
   }
 
   @Test
-  void toStatusRuntimeException_illegalArgumentGiven_logsTheThrowableTheWireDrops() {
-    // The status description replaces the engine's wording with a fixed detail and carries no
-    // cause, so this log line is the only surviving record of what actually failed. Asserted on
-    // the throwable rather than the level: the severity is a separate judgement that can be
-    // raised without weakening this property.
+  void toStatusRuntimeException_unmappedThrowableGiven_logsTheThrowableTheWireDrops() {
+    // The wire carries the generic INTERNAL_ERROR message and no cause, so this log line is the
+    // only surviving record of what actually failed. Held apart from the dropped-table case above
+    // because this arm is reached by any unmapped throwable, not only the store's.
     try (LogCapture logs = LogCapture.of(GrpcErrorMapper.class)) {
       // Act
       GrpcErrorMapper.toStatusRuntimeException(

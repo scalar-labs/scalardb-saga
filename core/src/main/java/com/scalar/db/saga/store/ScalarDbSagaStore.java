@@ -1754,9 +1754,9 @@ public final class ScalarDbSagaStore implements SagaStore {
     if (limit > 0 && payload != null) {
       int byteSize = payload.getBytes(StandardCharsets.UTF_8).length;
       if (byteSize > limit) {
-        // SagaIllegalArgumentException, not the bare stdlib type: the wire mappers replace a bare
-        // IllegalArgumentException with a fixed detail, and the limit is configurable, so the
-        // actual size and bound are exactly what a remote caller cannot guess.
+        // SagaIllegalArgumentException, not the bare stdlib type: the wire mappers answer a bare
+        // one with a 500 carrying no detail at all, and the limit is configurable, so the actual
+        // size and bound are exactly what a remote caller cannot guess.
         throw new SagaIllegalArgumentException(
             "Event payload exceeds limit: " + byteSize + " bytes > " + limit);
       }

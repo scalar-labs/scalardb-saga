@@ -275,9 +275,8 @@ class SagaResourceStartTest {
     HttpResponse<String> response = post("/sagas", "{\"sagaName\":\"" + SAGA_NAME + "\"}");
     long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
 
-    // Assert — the body names which value the context refused. A blanket IllegalArgumentException
-    // handler answers this same input with the same 400 and code but a fixed detail, so the detail
-    // is what distinguishes the engine's typed rejection from that fallback.
+    // Assert — the body names which value the context refused. The status and code say only that
+    // the input was rejected; the detail is what tells the caller which value to fix.
     assertThat(response.statusCode()).isEqualTo(400);
     assertThat(response.body())
         .contains(SagaErrorCode.INVALID_ARGUMENT.code())
