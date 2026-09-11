@@ -62,7 +62,9 @@ final class GrpcErrorMapper {
       // ScalarDB's operation checkers on a dropped table or a stale schema, ErrorMetadataSchema's
       // fail-fast on a malformed metadata map, an engine internal-contract check. A case for it
       // would answer all three with INVALID_ARGUMENT, the caller's own fault. Unmatched, it falls
-      // to the default arm: INTERNAL, INTERNAL_ERROR, and an ERROR log carrying the throwable.
+      // to the default arm: INTERNAL, INTERNAL_ERROR, and an ERROR log carrying the throwable. The
+      // bare-IllegalArgumentException row in GrpcErrorMapperTest's allArms() fails the build if a
+      // case is added here again.
 
       // ── Not found ──────────────────────────────────────────────────
       case SagaNotFoundException e -> respond(Status.Code.NOT_FOUND, e);

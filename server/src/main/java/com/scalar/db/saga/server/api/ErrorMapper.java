@@ -130,7 +130,8 @@ public final class ErrorMapper {
     // check. Registering it would answer all three with the caller's own 400, which is how a
     // total store outage came to be reported to every client as its own bad request. Unhandled,
     // it resolves to the Exception catch-all below: 500, INTERNAL_ERROR, and an ERROR log
-    // carrying the throwable.
+    // carrying the throwable. The bare-IllegalArgumentException row in ErrorMapperTest's
+    // allArms() fails the build if a handler is registered here again.
 
     // ── Auth (401 / 403) ─────────────────────────────────────────────────
     app.exception(
