@@ -71,9 +71,6 @@ class GrpcSagaOrchestratorClientTest {
 
         @Override
         public void onCompensated(SagaStateSnapshot snapshot) {}
-
-        @Override
-        public void onEscalated(SagaStateSnapshot snapshot) {}
       };
 
   private FakeSagaService fake;
