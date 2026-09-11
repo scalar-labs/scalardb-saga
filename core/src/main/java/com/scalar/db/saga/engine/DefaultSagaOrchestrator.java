@@ -451,7 +451,16 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       // loop with no exit — but the engine already makes both checks authoritatively on the way to
       // creating a saga, so paying for them on every admitted start, and on every start at all when
       // no cap is configured, would buy nothing.
-      ExecutionContext.validateInput(input);
+      try {
+        ExecutionContext.validateInput(input);
+      } catch (IllegalArgumentException e) {
+        // Typed, so the rejection is attributed to the caller rather than to the server. A bare
+        // IllegalArgumentException is a server fault to the wire mappers and takes the catch-all's
+        // 500, which would answer the same malformed request 400 below the cap and 500 at it.
+        // ExecutionContext authors the wording and it names the offending type.
+        throw new SagaIllegalArgumentException(
+            e.getMessage() == null ? e.toString() : e.getMessage(), e);
+      }
       throw new SagaOverloadedException();
     }
     return lease;

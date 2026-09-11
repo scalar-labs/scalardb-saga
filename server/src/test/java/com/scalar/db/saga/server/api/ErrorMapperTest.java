@@ -107,6 +107,14 @@ class ErrorMapperTest {
         ctx -> {
           throw toThrow;
         });
+    app.get(
+        "/bad-metadata",
+        ctx -> {
+          // Constructing it is the failure: SagaRuntimeException validates the metadata against
+          // its code's schema in the constructor, so this throws IllegalArgumentException before
+          // any SagaRuntimeException exists to be thrown.
+          throw new SagaRuntimeException(SagaErrorCode.SAGA_NOT_FOUND, Map.of("wrong_key", "x"));
+        });
     app.post(
         "/read-body",
         ctx -> {
@@ -241,7 +249,9 @@ class ErrorMapperTest {
             Instant.ofEpochSecond(1_700_000_000L),
             Instant.ofEpochSecond(1_700_000_000L));
     return List.of(
-        new Arm(new IllegalArgumentException("bad"), 400, SagaErrorCode.INVALID_ARGUMENT),
+        // No handler: a bare IllegalArgumentException is a server fault, so it takes the
+        // Exception catch-all's 500 rather than the caller's 400.
+        new Arm(new IllegalArgumentException("bad"), 500, SagaErrorCode.INTERNAL_ERROR),
         new Arm(new SagaInvalidRequestException("x"), 400, SagaErrorCode.INVALID_REQUEST),
         new Arm(new SagaIllegalArgumentException("x"), 400, SagaErrorCode.INVALID_ARGUMENT),
         new Arm(
@@ -430,28 +440,59 @@ class ErrorMapperTest {
   }
 
   @Test
-  void illegalArgument_logsTheThrowableTheWireBodyDrops() throws Exception {
-    // Arrange — the response replaces the engine's wording with a fixed detail and carries no
-    // cause, so this log line is the only surviving record of what actually failed. Without it a
-    // store fault answering 400s is invisible on both sides.
-    toThrow = new IllegalArgumentException("engine-internal wording");
+  void droppedSagaTable_returns500AndLogsTheThrowableAtError() throws Exception {
+    // Arrange — ScalarDB's operation checkers throw a bare IllegalArgumentException for a missing
+    // table, and ConsensusCommit wraps only the checked ExecutionException, so it reaches the
+    // mapper unwrapped. Answering it with the caller's 400 told every client its own request was
+    // malformed while a total outage went unrecorded; INVALID_ARGUMENT is USER_ERROR, so the retry
+    // contract also told them not to retry and not to alert.
+    toThrow = new IllegalArgumentException("Table not found: saga.saga_state");
 
     try (LogCapture logs = LogCapture.of(ErrorMapper.class)) {
       // Act
       HttpResponse<String> response = get("/throw-dispatch");
 
-      // Assert — that the throwable reaches the log, and deliberately not at what level: the
-      // severity is a separate judgement that can be raised without weakening this property.
-      assertThat(response.statusCode()).isEqualTo(400);
-      assertThat(response.body()).doesNotContain("engine-internal wording");
+      // Assert
+      assertThat(response.statusCode()).isEqualTo(500);
+      assertThat(response.body()).contains(SagaErrorCode.INTERNAL_ERROR.code());
+      // The table name is internal topology and stays server-side.
+      assertThat(response.body()).doesNotContain("saga_state");
       assertThat(logs.events())
           .anySatisfy(
               event -> {
+                assertThat(event.getLevel()).isEqualTo(Level.ERROR);
                 assertThat(event.getThrowableProxy()).isNotNull();
                 assertThat(event.getThrowableProxy().getClassName())
                     .isEqualTo(IllegalArgumentException.class.getName());
                 assertThat(event.getThrowableProxy().getMessage())
-                    .isEqualTo("engine-internal wording");
+                    .isEqualTo("Table not found: saga.saga_state");
+              });
+    }
+  }
+
+  @Test
+  void malformedErrorMetadata_returns500RatherThanBlamingTheCaller() throws Exception {
+    // A throw site whose metadata map does not match its code's schema fails inside the
+    // SagaRuntimeException constructor. The compiler cannot catch this: metadata is a
+    // Map<String,String>, so a schema gaining a key with one throw site missed is a runtime-only
+    // failure. It is our bug, and it used to replace whatever error was being reported with a 400
+    // blaming the caller.
+    try (LogCapture logs = LogCapture.of(ErrorMapper.class)) {
+      // Act
+      HttpResponse<String> response = get("/bad-metadata");
+
+      // Assert
+      assertThat(response.statusCode()).isEqualTo(500);
+      assertThat(response.body()).contains(SagaErrorCode.INTERNAL_ERROR.code());
+      // The offending key is ours, not the caller's, so it stays server-side.
+      assertThat(response.body()).doesNotContain("wrong_key");
+      assertThat(logs.events())
+          .anySatisfy(
+              event -> {
+                assertThat(event.getLevel()).isEqualTo(Level.ERROR);
+                assertThat(event.getThrowableProxy()).isNotNull();
+                assertThat(event.getThrowableProxy().getClassName())
+                    .isEqualTo(IllegalArgumentException.class.getName());
               });
     }
   }

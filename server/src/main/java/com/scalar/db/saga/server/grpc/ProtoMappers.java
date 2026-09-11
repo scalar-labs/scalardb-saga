@@ -49,14 +49,11 @@ final class ProtoMappers {
    * counterpart — failing loudly rather than silently degrading to {@code UNSPECIFIED}.
    */
   static com.scalar.db.saga.rpc.SagaStatus toProtoStatus(SagaStatus status) {
-    try {
-      return com.scalar.db.saga.rpc.SagaStatus.valueOf("SAGA_STATUS_" + status.name());
-    } catch (IllegalArgumentException e) {
-      // No wire counterpart for a server-internal status is api/proto version skew, a server fault.
-      // Throw IllegalStateException so the error mapper reports INTERNAL, not the client-facing
-      // INVALID_ARGUMENT (this is a response-path conversion, never client input).
-      throw new IllegalStateException("No wire SagaStatus for api status " + status.name(), e);
-    }
+    // A status with no wire counterpart is skew between the api and proto enums, a server fault.
+    // valueOf's IllegalArgumentException is left to propagate: the mappers give a bare one
+    // INTERNAL, which is what this is, and its message names the exact missing constant. The two
+    // sibling conversions below leave theirs to propagate for the same reason.
+    return com.scalar.db.saga.rpc.SagaStatus.valueOf("SAGA_STATUS_" + status.name());
   }
 
   /** Maps an api detail (snapshot + redacted timeline + truncation flag) to the wire detail. */
@@ -199,13 +196,9 @@ final class ProtoMappers {
   }
 
   static com.scalar.db.saga.rpc.SkipReason toProtoSkipReason(ResetResult.SkipReason reason) {
-    try {
-      return com.scalar.db.saga.rpc.SkipReason.valueOf("SKIP_REASON_" + reason.name());
-    } catch (IllegalArgumentException e) {
-      // As with toProtoStatus: a missing wire counterpart is api/proto version skew, a server
-      // fault, so INTERNAL rather than INVALID_ARGUMENT.
-      throw new IllegalStateException("No wire SkipReason for api reason " + reason.name(), e);
-    }
+    // As with toProtoStatus: a missing wire counterpart is enum skew, so the propagating
+    // IllegalArgumentException reports INTERNAL rather than blaming the caller.
+    return com.scalar.db.saga.rpc.SkipReason.valueOf("SKIP_REASON_" + reason.name());
   }
 
   private static Instant toInstant(Timestamp timestamp) {

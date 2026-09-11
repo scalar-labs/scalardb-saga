@@ -292,11 +292,9 @@ class SagaAdminResourceTest {
     assertThat(response.statusCode()).isEqualTo(400);
   }
 
-  // The next three assert the response *detail*, not just the status. A blanket
-  // IllegalArgumentException handler answers these same inputs with the same 400 and the same
-  // INVALID_ARGUMENT code, and differs only in replacing the builder's wording with a fixed
-  // "invalid request parameter". The detail is therefore the only thing that distinguishes a
-  // typed rejection from that fallback, which is what these pin.
+  // The next three assert the response *detail*, not just the status. The status and code say
+  // only that something in the query was rejected; the detail names the bound and the offending
+  // value, which is what a remote caller cannot guess and cannot fix without.
 
   @Test
   void list_pageSizeAboveTheBound_returns400NamingTheBoundAndValue() throws Exception {

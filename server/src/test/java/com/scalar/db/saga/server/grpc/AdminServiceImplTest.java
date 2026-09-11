@@ -254,12 +254,11 @@ class AdminServiceImplTest {
 
   // --- caller-input rejection ------------------------------------------------
 
-  // Both assert the status *description*, not just the code. A blanket IllegalArgumentException
-  // case answers these same inputs with the same INVALID_ARGUMENT and the same error code, and
-  // differs only in replacing the builder's wording with a fixed "invalid request parameter". The
-  // description is therefore the only thing that distinguishes a typed rejection from that
-  // fallback. Both overloads are covered because they build the query separately, and the two
-  // drifting apart is exactly what this transport pair guards against elsewhere.
+  // Both assert the status *description*, not just the code. The code says only that something in
+  // the query was rejected; the description names the bound and the offending value, which is what
+  // a remote caller cannot guess and cannot fix without. Both overloads are covered because they
+  // build the query separately, and the two drifting apart is exactly what this transport pair
+  // guards against elsewhere.
 
   @Test
   void listSagas_pageSizeAboveTheBound_invalidArgumentNamingTheBoundAndValue() {

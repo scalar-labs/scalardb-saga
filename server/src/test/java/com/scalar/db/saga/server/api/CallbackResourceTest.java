@@ -149,12 +149,11 @@ class CallbackResourceTest {
   @Test
   void wrongStepName_propagatesAs400NamingTheSubmittedStep() throws Exception {
     // Caller input, not a server fault: a participant replaying a token issued for an earlier step
-    // of the same saga arrives here with a valid signature. Asserting the body detail is what
-    // distinguishes the orchestrator's typed rejection from the mapper's blanket
-    // IllegalArgumentException fallback, which answers the same 400 with a fixed detail.
+    // of the same saga arrives here with a valid signature. The body detail is asserted because it
+    // names the step the participant submitted, which is what tells them which call was stale.
     //
-    // The exception is stubbed, so what this pins is the mapper echoing the detail rather than
-    // replacing it. That the detail withholds the parked step name is the orchestrator's property,
+    // The exception is stubbed, so what this pins is the mapper echoing that detail onto the wire.
+    // That the detail withholds the parked step name is the orchestrator's property,
     // pinned against the real one in DefaultSagaOrchestratorTest.
     when(orchestrator.completeStepAsync(any(), any(), any()))
         .thenThrow(
