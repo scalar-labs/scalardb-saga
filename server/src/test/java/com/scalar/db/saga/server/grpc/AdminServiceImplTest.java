@@ -18,6 +18,7 @@ import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.engine.OperatorContext;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import com.scalar.db.saga.rpc.AdminServiceGrpc;
 import com.scalar.db.saga.rpc.AdminServiceGrpc.AdminServiceBlockingStub;
@@ -249,6 +250,50 @@ class AdminServiceImplTest {
     assertThat(response.getSagasCount()).isEqualTo(1);
     assertThat(response.getSagas(0).getSagaId()).isEqualTo("s-1");
     assertThat(response.getNextPageToken()).isEqualTo("next-token");
+  }
+
+  // --- caller-input rejection ------------------------------------------------
+
+  // Both assert the status *description*, not just the code. A blanket IllegalArgumentException
+  // case answers these same inputs with the same INVALID_ARGUMENT and the same error code, and
+  // differs only in replacing the builder's wording with a fixed "invalid request parameter". The
+  // description is therefore the only thing that distinguishes a typed rejection from that
+  // fallback. Both overloads are covered because they build the query separately, and the two
+  // drifting apart is exactly what this transport pair guards against elsewhere.
+
+  @Test
+  void listSagas_pageSizeAboveTheBound_invalidArgumentNamingTheBoundAndValue() {
+    assertThatThrownBy(
+            () -> stub("admin").listSagas(ListSagasRequest.newBuilder().setPageSize(9999).build()))
+        .isInstanceOfSatisfying(
+            StatusRuntimeException.class,
+            e -> {
+              assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
+              assertThat(e.getStatus().getDescription())
+                  .contains(SagaErrorCode.INVALID_ARGUMENT.code())
+                  .contains(String.valueOf(SagaQuery.MAX_PAGE_SIZE))
+                  .contains("9999");
+            });
+  }
+
+  @Test
+  void resetEscalatedBulk_pageSizeAboveTheBound_invalidArgumentNamingTheBoundAndValue() {
+    com.scalar.db.saga.rpc.ResetEscalatedBulkRequest request =
+        com.scalar.db.saga.rpc.ResetEscalatedBulkRequest.newBuilder()
+            .setReason("sweep")
+            .setPageSize(9999)
+            .build();
+
+    assertThatThrownBy(() -> stub("admin").resetEscalatedBulk(request))
+        .isInstanceOfSatisfying(
+            StatusRuntimeException.class,
+            e -> {
+              assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
+              assertThat(e.getStatus().getDescription())
+                  .contains(SagaErrorCode.INVALID_ARGUMENT.code())
+                  .contains(String.valueOf(SagaQuery.MAX_PAGE_SIZE))
+                  .contains("9999");
+            });
   }
 
   // --- exception -> status mapping -------------------------------------------

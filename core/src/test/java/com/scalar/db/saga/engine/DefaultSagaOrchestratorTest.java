@@ -42,9 +42,11 @@ import com.scalar.db.saga.store.SagaStateAndEvents;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.StatusEvent;
 import com.scalar.db.saga.store.StepEvent;
+import java.math.BigInteger;
 import java.net.URL;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -1415,7 +1417,7 @@ class DefaultSagaOrchestratorTest {
     }
 
     @Test
-    void completeStepAsync_stepNameMismatch_throwsIllegalArgument() {
+    void completeStepAsync_stepNameMismatch_throwsSagaIllegalArgument() {
       // Arrange — saga is parked on "s1" but the callback names a different step
       SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
       List<SagaEvent> events = List.of(StatusEvent.started(null), StepEvent.pending(1, "s1"));
@@ -1424,7 +1426,120 @@ class DefaultSagaOrchestratorTest {
 
       // Act & Assert
       assertThatThrownBy(() -> orchestrator.completeStepAsync("saga-1", "other", Map.of()))
-          .isInstanceOf(IllegalArgumentException.class);
+          .isInstanceOf(SagaIllegalArgumentException.class);
+    }
+
+    @Test
+    void completeStepAsync_stepNameMismatch_doesNotNameTheParkedStepInTheMessage() {
+      // Arrange — the message reaches a caller holding a callback URL for one step of this saga.
+      // Naming the step it is parked on would answer an unthrottled, non-expiring token with the
+      // saga's current position, so the parked name belongs in the log and not in the message.
+      SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
+      List<SagaEvent> events =
+          List.of(StatusEvent.started(null), StepEvent.pending(1, "reserve-stock"));
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(waiting));
+      when(store.getEvents("saga-1")).thenReturn(events);
+
+      // Act & Assert — the caller's own step name is still named, so it can see what was refused.
+      assertThatThrownBy(() -> orchestrator.completeStepAsync("saga-1", "charge", Map.of()))
+          .isInstanceOf(SagaIllegalArgumentException.class)
+          .hasMessageContaining("charge")
+          .hasMessageNotContaining("reserve-stock");
+    }
+
+    @Test
+    void completeStepAsync_stepNameMismatch_logsTheParkedStep() {
+      // Arrange — the response carries no server-side trace, so this log is the only record that a
+      // callback for a step the saga is no longer parked on arrived with a signature that verified.
+      SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
+      List<SagaEvent> events = List.of(StatusEvent.started(null), StepEvent.pending(1, "s1"));
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(waiting));
+      when(store.getEvents("saga-1")).thenReturn(events);
+
+      ListAppender<ILoggingEvent> logs = attachLogCapture();
+      try {
+        // Act
+        assertThatThrownBy(() -> orchestrator.completeStepAsync("saga-1", "other", Map.of()))
+            .isInstanceOf(SagaIllegalArgumentException.class);
+
+        // Assert — both step names, so the record identifies which callback was replayed. Asserted
+        // on the message rather than the level: the severity is a separate judgement.
+        assertThat(logs.list)
+            .anySatisfy(
+                e -> {
+                  assertThat(e.getFormattedMessage()).contains("other");
+                  assertThat(e.getFormattedMessage()).contains("s1");
+                });
+      } finally {
+        orchestratorLogger().detachAppender(logs);
+      }
+    }
+
+    // The next three cover callback output the saga context cannot hold. The rejection itself is
+    // not new; what these pin is that it happens *before* the resume is recorded. Validated after
+    // the commit, a rejected body left STEP_COMPLETED durable and the saga RUNNING with no forward
+    // drive, and recovery replayed the same rejection forever — so the never() on resumeParkedStep
+    // is the assertion that matters, not the exception type.
+
+    @Test
+    void completeStepAsync_outputHoldsNullInsideList_throwsWithoutRecordingCompletion() {
+      // Arrange — reachable from a JSON body of {"k":[null]}, which Jackson binds to a list holding
+      // null and the event serializer accepts without complaint.
+      SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
+      List<SagaEvent> events = List.of(StatusEvent.started(null), StepEvent.pending(1, "s1"));
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(waiting));
+      when(store.getEvents("saga-1")).thenReturn(events);
+      Map<String, Object> output = Map.of("k", Collections.singletonList(null));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.completeStepAsync("saga-1", "s1", output))
+          .isInstanceOf(SagaIllegalArgumentException.class);
+      verify(store, never()).resumeParkedStep(any(), anyInt(), any());
+      verify(engine, never()).resumeFrom(any(), any(), anyInt());
+    }
+
+    @Test
+    void completeStepAsync_outputHoldsUnsupportedType_throwsWithoutRecordingCompletion() {
+      // Arrange — a JSON integer beyond long's range binds to BigInteger, which a context cannot
+      // hold.
+      SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
+      List<SagaEvent> events = List.of(StatusEvent.started(null), StepEvent.pending(1, "s1"));
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(waiting));
+      when(store.getEvents("saga-1")).thenReturn(events);
+      Map<String, Object> output = Map.of("k", new BigInteger("99999999999999999999"));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.completeStepAsync("saga-1", "s1", output))
+          .isInstanceOf(SagaIllegalArgumentException.class);
+      verify(store, never()).resumeParkedStep(any(), anyInt(), any());
+      verify(engine, never()).resumeFrom(any(), any(), anyInt());
+    }
+
+    @Test
+    void completeStepAsync_outputHoldsUnsupportedType_logsTheRejection() {
+      // Arrange
+      SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
+      List<SagaEvent> events = List.of(StatusEvent.started(null), StepEvent.pending(1, "s1"));
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(waiting));
+      when(store.getEvents("saga-1")).thenReturn(events);
+      Map<String, Object> output = Map.of("k", new BigInteger("99999999999999999999"));
+
+      ListAppender<ILoggingEvent> logs = attachLogCapture();
+      try {
+        // Act
+        assertThatThrownBy(() -> orchestrator.completeStepAsync("saga-1", "s1", output))
+            .isInstanceOf(SagaIllegalArgumentException.class);
+
+        // Assert — names the saga and the step, so the record ties the rejection to one callback.
+        assertThat(logs.list)
+            .anySatisfy(
+                e -> {
+                  assertThat(e.getFormattedMessage()).contains("saga-1");
+                  assertThat(e.getFormattedMessage()).contains("s1");
+                });
+      } finally {
+        orchestratorLogger().detachAppender(logs);
+      }
     }
 
     @Test

@@ -8,9 +8,11 @@ import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.api.TimelineEvent;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.rpc.ListSagasRequest;
 import com.scalar.db.saga.rpc.ListSagasResponse;
 import com.scalar.db.saga.rpc.ResetEscalatedBulkRequest;
+import com.scalar.db.saga.server.api.RequestParsing;
 import java.time.DateTimeException;
 import java.time.Instant;
 
@@ -105,49 +107,53 @@ final class ProtoMappers {
   /**
    * Builds the api {@link SagaQuery} a {@code ListSagas} request selects. An out-of-range page
    * size, an out-of-range {@code updatedAt} timestamp, or an empty {@code updatedAt} window
-   * surfaces as {@link IllegalArgumentException} (mapped to {@code INVALID_ARGUMENT}).
+   * surfaces as {@link SagaIllegalArgumentException} ({@code INVALID_ARGUMENT}), carrying the bound
+   * and the offending value.
    */
   static SagaQuery toSagaQuery(ListSagasRequest request) {
-    SagaQuery.Builder builder = SagaQuery.newBuilder();
-    if (request.hasStatus()) {
-      builder.status(fromProtoStatus(request.getStatus()));
-    }
-    if (request.hasUpdatedAfter()) {
-      builder.updatedAfter(toInstant(request.getUpdatedAfter()));
-    }
-    if (request.hasUpdatedBefore()) {
-      builder.updatedBefore(toInstant(request.getUpdatedBefore()));
-    }
-    if (request.hasPageSize()) {
-      builder.pageSize(request.getPageSize());
-    }
-    if (request.hasPageToken()) {
-      builder.pageToken(request.getPageToken());
-    }
-    return builder.build();
+    return RequestParsing.buildQuery(
+        params -> {
+          if (request.hasStatus()) {
+            params.status(fromProtoStatus(request.getStatus()));
+          }
+          if (request.hasUpdatedAfter()) {
+            params.updatedAfter(toInstant(request.getUpdatedAfter()));
+          }
+          if (request.hasUpdatedBefore()) {
+            params.updatedBefore(toInstant(request.getUpdatedBefore()));
+          }
+          if (request.hasPageSize()) {
+            params.pageSize(request.getPageSize());
+          }
+          if (request.hasPageToken()) {
+            params.pageToken(request.getPageToken());
+          }
+        });
   }
 
   /**
    * Builds the api {@link SagaQuery} a bulk-reset sweep selects. The status filter is not accepted
    * — the sweep is defined as escalated sagas, which the engine pins — so only the window and
    * paging are mapped. An out-of-range page size or {@code updatedAt} timestamp, or an empty
-   * window, surfaces as {@link IllegalArgumentException} (mapped to {@code INVALID_ARGUMENT}).
+   * window, surfaces as {@link SagaIllegalArgumentException} ({@code INVALID_ARGUMENT}), carrying
+   * the bound and the offending value.
    */
   static SagaQuery toSagaQuery(ResetEscalatedBulkRequest request) {
-    SagaQuery.Builder builder = SagaQuery.newBuilder();
-    if (request.hasUpdatedAfter()) {
-      builder.updatedAfter(toInstant(request.getUpdatedAfter()));
-    }
-    if (request.hasUpdatedBefore()) {
-      builder.updatedBefore(toInstant(request.getUpdatedBefore()));
-    }
-    if (request.hasPageSize()) {
-      builder.pageSize(request.getPageSize());
-    }
-    if (request.hasPageToken()) {
-      builder.pageToken(request.getPageToken());
-    }
-    return builder.build();
+    return RequestParsing.buildQuery(
+        params -> {
+          if (request.hasUpdatedAfter()) {
+            params.updatedAfter(toInstant(request.getUpdatedAfter()));
+          }
+          if (request.hasUpdatedBefore()) {
+            params.updatedBefore(toInstant(request.getUpdatedBefore()));
+          }
+          if (request.hasPageSize()) {
+            params.pageSize(request.getPageSize());
+          }
+          if (request.hasPageToken()) {
+            params.pageToken(request.getPageToken());
+          }
+        });
   }
 
   /** Maps a page of snapshots to the wire list response. */
@@ -187,7 +193,7 @@ final class ProtoMappers {
     String name = status.name();
     String prefix = "SAGA_STATUS_";
     if (!name.startsWith(prefix) || name.equals(prefix + "UNSPECIFIED")) {
-      throw new IllegalArgumentException("unrecognized saga status filter");
+      throw new SagaIllegalArgumentException("unrecognized saga status filter: " + name);
     }
     return SagaStatus.valueOf(name.substring(prefix.length()));
   }
@@ -207,9 +213,10 @@ final class ProtoMappers {
       return Instant.ofEpochSecond(timestamp.getSeconds(), timestamp.getNanos());
     } catch (DateTimeException | ArithmeticException e) {
       // A client-supplied seconds value outside Instant's range (or one that overflows the nano
-      // carry) is bad input, not a server fault; surface it as IllegalArgumentException so the
-      // error mapper reports INVALID_ARGUMENT rather than INTERNAL.
-      throw new IllegalArgumentException("timestamp out of range", e);
+      // carry) is bad input, not a server fault, so it carries INVALID_ARGUMENT rather than
+      // reaching the mapper's catch-all as an internal error.
+      throw new SagaIllegalArgumentException(
+          "timestamp out of range: seconds=" + timestamp.getSeconds(), e);
     }
   }
 

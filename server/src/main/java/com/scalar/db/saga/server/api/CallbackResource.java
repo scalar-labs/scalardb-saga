@@ -156,8 +156,14 @@ public final class CallbackResource {
    * cases map to an idempotent snapshot read: a duplicate callback ({@link IllegalStateException} —
    * already resumed) or a callback that lost the race to the timeout sweep ({@link
    * SagaConcurrentModificationException}) returns the saga's current state instead of failing. A
-   * wrong step name ({@link IllegalArgumentException}) and an unknown saga ({@code
-   * SagaNotFoundException}) propagate to the error mapper (400 / 404).
+   * wrong step name or an output value a context cannot carry ({@code
+   * SagaIllegalArgumentException}) and an unknown saga ({@code SagaNotFoundException}) propagate to
+   * the error mapper (400 / 404).
+   *
+   * <p>Only the two idempotent cases are caught below, and they are caught by type. {@code
+   * SagaIllegalArgumentException} extends {@code SagaRuntimeException}, not {@link
+   * IllegalArgumentException}, so widening this catch to the latter would add a clause that never
+   * fires.
    */
   private static SagaStateSnapshot complete(
       DefaultSagaOrchestrator orchestrator,

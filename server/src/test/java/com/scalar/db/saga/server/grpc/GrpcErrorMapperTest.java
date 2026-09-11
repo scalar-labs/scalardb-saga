@@ -78,6 +78,30 @@ class GrpcErrorMapperTest {
   }
 
   @Test
+  void toStatusRuntimeException_illegalArgumentGiven_logsTheThrowableTheWireDrops() {
+    // The status description replaces the engine's wording with a fixed detail and carries no
+    // cause, so this log line is the only surviving record of what actually failed. Asserted on
+    // the throwable rather than the level: the severity is a separate judgement that can be
+    // raised without weakening this property.
+    try (LogCapture logs = LogCapture.of(GrpcErrorMapper.class)) {
+      // Act
+      GrpcErrorMapper.toStatusRuntimeException(
+          new IllegalArgumentException("engine-internal wording"));
+
+      // Assert
+      assertThat(logs.events())
+          .anySatisfy(
+              event -> {
+                assertThat(event.getThrowableProxy()).isNotNull();
+                assertThat(event.getThrowableProxy().getClassName())
+                    .isEqualTo(IllegalArgumentException.class.getName());
+                assertThat(event.getThrowableProxy().getMessage())
+                    .isEqualTo("engine-internal wording");
+              });
+    }
+  }
+
+  @Test
   void toStatusRuntimeException_sagaNotFoundGiven_mapsToNotFoundWithCodeReason() {
     StatusRuntimeException e =
         GrpcErrorMapper.toStatusRuntimeException(new SagaNotFoundException("s-1"));

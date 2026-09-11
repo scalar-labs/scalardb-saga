@@ -12,6 +12,8 @@ import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
+import com.scalar.db.saga.exception.SagaErrorCode;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import io.javalin.Javalin;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -145,13 +147,24 @@ class CallbackResourceTest {
   }
 
   @Test
-  void wrongStepName_propagatesAs400() throws Exception {
+  void wrongStepName_propagatesAs400NamingTheSubmittedStep() throws Exception {
+    // Caller input, not a server fault: a participant replaying a token issued for an earlier step
+    // of the same saga arrives here with a valid signature. Asserting the body detail is what
+    // distinguishes the orchestrator's typed rejection from the mapper's blanket
+    // IllegalArgumentException fallback, which answers the same 400 with a fixed detail.
+    //
+    // The exception is stubbed, so what this pins is the mapper echoing the detail rather than
+    // replacing it. That the detail withholds the parked step name is the orchestrator's property,
+    // pinned against the real one in DefaultSagaOrchestratorTest.
     when(orchestrator.completeStepAsync(any(), any(), any()))
-        .thenThrow(new IllegalArgumentException("not the parked step"));
+        .thenThrow(
+            new SagaIllegalArgumentException(
+                "Callback step 'refund' is not the parked step for saga saga-1"));
 
     HttpResponse<String> response = post("?token=" + validToken() + "&iat=" + IAT, "{}");
 
     assertThat(response.statusCode()).isEqualTo(400);
+    assertThat(response.body()).contains(SagaErrorCode.INVALID_ARGUMENT.code()).contains("refund");
   }
 
   @Test

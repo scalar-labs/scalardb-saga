@@ -430,6 +430,33 @@ class ErrorMapperTest {
   }
 
   @Test
+  void illegalArgument_logsTheThrowableTheWireBodyDrops() throws Exception {
+    // Arrange — the response replaces the engine's wording with a fixed detail and carries no
+    // cause, so this log line is the only surviving record of what actually failed. Without it a
+    // store fault answering 400s is invisible on both sides.
+    toThrow = new IllegalArgumentException("engine-internal wording");
+
+    try (LogCapture logs = LogCapture.of(ErrorMapper.class)) {
+      // Act
+      HttpResponse<String> response = get("/throw-dispatch");
+
+      // Assert — that the throwable reaches the log, and deliberately not at what level: the
+      // severity is a separate judgement that can be raised without weakening this property.
+      assertThat(response.statusCode()).isEqualTo(400);
+      assertThat(response.body()).doesNotContain("engine-internal wording");
+      assertThat(logs.events())
+          .anySatisfy(
+              event -> {
+                assertThat(event.getThrowableProxy()).isNotNull();
+                assertThat(event.getThrowableProxy().getClassName())
+                    .isEqualTo(IllegalArgumentException.class.getName());
+                assertThat(event.getThrowableProxy().getMessage())
+                    .isEqualTo("engine-internal wording");
+              });
+    }
+  }
+
+  @Test
   void dispatch_overloadedGiven_returns503AndLogsNothingAboveDebug() throws Exception {
     // A refusal is the cap working as configured, not a failure, and it arrives in storms — the
     // fallback arm would write a line and a stack per refused request, which any caller could use

@@ -540,6 +540,10 @@ class ExecutionContextTest {
     Map<String, Object> input = Map.of("bad", new Object());
 
     // Act & Assert
+    // Stdlib, not SagaIllegalArgumentException: validateType is shared with put and merge, which
+    // run over store-read input and over a participant's reply, where a rejection is a server
+    // fault. The entry points that know the map is a caller's convert it themselves — createSaga
+    // for a saga's input, resumeParked for a callback's output.
     assertThatThrownBy(() -> new ExecutionContext("saga-1", input, DEFAULT_STATE))
         .isInstanceOf(IllegalArgumentException.class);
   }
