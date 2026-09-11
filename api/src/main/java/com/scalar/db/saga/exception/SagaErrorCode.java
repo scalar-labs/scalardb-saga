@@ -374,9 +374,9 @@ public enum SagaErrorCode {
       "DB-SAGA-40005",
       Category.CLIENT_ERROR,
       "The wait for the saga to finish timed out",
-      ErrorMetadataSchema.none(),
+      ErrorMetadataSchema.of("saga_id"),
       "The saga did not reach a terminal state within the client-side wait bound. Nothing failed: every request succeeded and the saga keeps running; the caller's wait budget expired. Distinct from REQUEST_TIMEOUT, where the request itself did not complete.",
-      "Poll the saga by its ID (getStateSnapshot or awaitSaga) until it settles; do not re-send the request."),
+      "Poll saga_id (getStateSnapshot or awaitSaga) until it settles; do not re-send the request. The saga is still running, and saga_id is the only handle to it — a caller that started the saga without supplying an ID has no other copy."),
 
   UNRECOGNIZED_SERVER_ERROR(
       "DB-SAGA-49999",

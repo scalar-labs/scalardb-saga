@@ -301,7 +301,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
         if (isRetryable(e)) {
           attempted = true;
           throwIfClosed(sagaId);
-          guardDeadline(loopDeadlineNanos);
+          guardDeadline(sagaId, loopDeadlineNanos);
           backoff(retries++);
           continue;
         }
@@ -341,7 +341,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
   private SagaSnapshot awaitLoop(String sagaId, SagaSnapshot snapshot, long loopDeadlineNanos) {
     int retries = 0;
     while (!isTerminal(snapshot)) {
-      guardDeadline(loopDeadlineNanos);
+      guardDeadline(sagaId, loopDeadlineNanos);
       AwaitSagaRequest request = AwaitSagaRequest.newBuilder().setSagaId(sagaId).build();
       try {
         snapshot = callWithin(loopDeadlineNanos).awaitSaga(request);
@@ -349,7 +349,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
       } catch (StatusRuntimeException e) {
         if (isRetryable(e)) {
           throwIfClosed(sagaId);
-          guardDeadline(loopDeadlineNanos);
+          guardDeadline(sagaId, loopDeadlineNanos);
           backoff(retries++);
           continue;
         }
@@ -407,10 +407,15 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
    * Throws when the overall client deadline (if any) has elapsed. SAGA_AWAIT_TIMEOUT, not
    * REQUEST_TIMEOUT: every request so far succeeded and the saga keeps running — only the
    * wait-for-terminal budget expired, so the caller should poll by ID rather than re-send.
+   *
+   * <p>The exception carries {@code sagaId} because on the generated-id overloads it is the
+   * caller's only copy: the id was minted here and the {@code return sagaId} that would hand it
+   * over is never reached. Without it the caller is left with a saga still running server-side and
+   * no way to poll, inspect, or compensate it.
    */
-  private void guardDeadline(long loopDeadlineNanos) {
+  private void guardDeadline(String sagaId, long loopDeadlineNanos) {
     if (loopDeadlineNanos != 0L && System.nanoTime() >= loopDeadlineNanos) {
-      throw SagaTimeoutException.awaitExpired();
+      throw SagaTimeoutException.awaitExpired(sagaId);
     }
   }
 
@@ -656,7 +661,25 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
     }
 
     /**
-     * A default per-call deadline (ms) applied to the blocking start/get calls; {@code 0} disables.
+     * How long a call may take, in milliseconds; {@code 0} (the default) is no bound. On the
+     * one-shot RPCs ({@code startAsync}, {@code getStateSnapshot}, {@code getSagaDetail}) it is a
+     * per-call deadline. On the blocking {@code start} it is the whole wait-for-terminal budget,
+     * spanning the start and every {@code AwaitSaga} the loop issues after it.
+     *
+     * <p>That second role bounds the caller, not the server: {@code
+     * scalar.db.saga.server.sync.max_wait_millis} caps how long one server call holds a connection,
+     * and the blocking {@code start} re-issues {@code AwaitSaga} past it until the saga is
+     * terminal. With no bound set here, a saga that parks and never settles — which is possible
+     * whenever neither a step timeout nor a saga timeout is configured — blocks the calling thread
+     * indefinitely.
+     *
+     * <p>When the budget elapses the blocking {@code start} throws {@link SagaTimeoutException}
+     * with {@link SagaErrorCode#SAGA_AWAIT_TIMEOUT}; the saga keeps running, and {@link
+     * SagaTimeoutException#getSagaId()} is the handle to poll it with.
+     *
+     * @param defaultDeadlineMillis the bound in milliseconds, or {@code 0} for no bound
+     * @return this builder
+     * @throws IllegalArgumentException if negative
      */
     public Builder defaultDeadlineMillis(long defaultDeadlineMillis) {
       if (defaultDeadlineMillis < 0L) {

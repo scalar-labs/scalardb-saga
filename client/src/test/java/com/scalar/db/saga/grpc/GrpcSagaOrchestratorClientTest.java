@@ -3,6 +3,7 @@ package com.scalar.db.saga.grpc;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.protobuf.Any;
@@ -795,7 +796,7 @@ class GrpcSagaOrchestratorClientTest {
   }
 
   @Test
-  void start_withDeadline_awaitKeepsFailing_throwsSagaTimeout() {
+  void start_withDeadline_awaitKeepsFailing_throwsSagaTimeoutCarryingTheMintedId() {
     // Arrange — a client with a small overall deadline; start returns RUNNING, then AwaitSaga keeps
     // returning UNAVAILABLE. The loop absorbs each retryable failure with backoff until the client
     // deadline elapses, at which point guardDeadline aborts the bounded wait.
@@ -804,12 +805,66 @@ class GrpcSagaOrchestratorClientTest {
     fake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
     fake.awaitError = Status.UNAVAILABLE.withDescription("still down").asRuntimeException();
 
-    // Act + Assert — SAGA_AWAIT_TIMEOUT, not REQUEST_TIMEOUT: the start succeeded and the saga
-    // keeps running; only the wait budget expired, so the caller should poll by ID.
-    assertThatThrownBy(() -> deadlineClient.start("transfer", Map.of()))
-        .isInstanceOf(SagaTimeoutException.class)
-        .extracting(e -> ((SagaTimeoutException) e).getErrorCode())
-        .isEqualTo(SagaErrorCode.SAGA_AWAIT_TIMEOUT);
+    // Act — SAGA_AWAIT_TIMEOUT, not REQUEST_TIMEOUT: the start succeeded and the saga keeps
+    // running; only the wait budget expired, so the caller should poll by ID.
+    SagaTimeoutException timeout =
+        catchThrowableOfType(
+            SagaTimeoutException.class, () -> deadlineClient.start("transfer", Map.of()));
+
+    // Assert — this overload mints the id, and the `return sagaId` that would hand it over is never
+    // reached, so the exception is the caller's only copy. Without it the saga runs to completion
+    // with nobody able to poll, inspect, or compensate it.
+    assertThat(timeout.getErrorCode()).isEqualTo(SagaErrorCode.SAGA_AWAIT_TIMEOUT);
+    String sagaId = Objects.requireNonNull(timeout.getSagaId());
+    assertThat(sagaId).isEqualTo(fake.lastStart().getSagaId());
+
+    // Assert — and the id is the working handle the code's remediation promises: polling it reaches
+    // the saga this start left running.
+    fake.getResponse = snapshot(sagaId, SagaStatus.RUNNING);
+    assertThat(deadlineClient.getStateSnapshot(sagaId).getSagaId()).isEqualTo(sagaId);
+    assertThat(fake.lastGet().getSagaId()).isEqualTo(sagaId);
+  }
+
+  @Test
+  void start_withDeadline_byDefinitionIdAwaitKeepsFailing_throwsSagaTimeoutCarryingTheMintedId() {
+    // The other generated-id overload mints its own id; it must lose it no more than the by-name
+    // one does.
+    // Arrange
+    GrpcSagaOrchestratorClient deadlineClient =
+        new GrpcSagaOrchestratorClient(SagaServiceGrpc.newBlockingStub(channel), null, 100L);
+    fake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
+    fake.awaitError = Status.UNAVAILABLE.withDescription("still down").asRuntimeException();
+
+    // Act
+    SagaTimeoutException timeout =
+        catchThrowableOfType(
+            SagaTimeoutException.class,
+            () -> deadlineClient.start(new SagaDefinitionId("transfer", "v1"), Map.of()));
+
+    // Assert
+    assertThat(timeout.getErrorCode()).isEqualTo(SagaErrorCode.SAGA_AWAIT_TIMEOUT);
+    assertThat(timeout.getSagaId()).isEqualTo(fake.lastStart().getSagaId());
+  }
+
+  @Test
+  void start_withDeadline_clientSuppliedIdAwaitKeepsFailing_throwsSagaTimeoutCarryingThatId() {
+    // The caller already holds this id, so nothing is orphaned here — but the exception must name
+    // the saga it gave up on rather than leaving the caller to assume which one it was.
+    // Arrange
+    GrpcSagaOrchestratorClient deadlineClient =
+        new GrpcSagaOrchestratorClient(SagaServiceGrpc.newBlockingStub(channel), null, 100L);
+    fake.startResponse = snapshot("s-supplied", SagaStatus.RUNNING);
+    fake.awaitError = Status.UNAVAILABLE.withDescription("still down").asRuntimeException();
+
+    // Act
+    SagaTimeoutException timeout =
+        catchThrowableOfType(
+            SagaTimeoutException.class,
+            () -> deadlineClient.start("s-supplied", "transfer", Map.of()));
+
+    // Assert
+    assertThat(timeout.getErrorCode()).isEqualTo(SagaErrorCode.SAGA_AWAIT_TIMEOUT);
+    assertThat(timeout.getSagaId()).isEqualTo("s-supplied");
   }
 
   @Test
@@ -962,6 +1017,7 @@ class GrpcSagaOrchestratorClientTest {
 
     @Nullable StartSagaRequest lastStart;
     @Nullable AwaitSagaRequest lastAwait;
+    @Nullable GetSagaRequest lastGet;
     @Nullable StatusRuntimeException startError;
     SagaSnapshot startResponse = SagaSnapshot.getDefaultInstance();
     @Nullable StatusRuntimeException getError;
@@ -985,6 +1041,10 @@ class GrpcSagaOrchestratorClientTest {
 
     AwaitSagaRequest lastAwait() {
       return Objects.requireNonNull(lastAwait);
+    }
+
+    GetSagaRequest lastGet() {
+      return Objects.requireNonNull(lastGet);
     }
 
     void enqueueStartSnapshot(SagaSnapshot snapshot) {
@@ -1040,6 +1100,7 @@ class GrpcSagaOrchestratorClientTest {
 
     @Override
     public void getSaga(GetSagaRequest request, StreamObserver<SagaSnapshot> responseObserver) {
+      lastGet = request;
       if (getError != null) {
         responseObserver.onError(getError);
         return;
