@@ -62,8 +62,9 @@ import org.slf4j.LoggerFactory;
  * internalDetail}, principal, required role, or a cause chain with internal specifics). Everything
  * else — where the wire body already tells the whole story — is not logged: the client already saw
  * the error and a duplicate server-side log adds nothing. Severity: 5xx → {@code ERROR} (operator
- * must investigate); authorization denials → {@code INFO} (security audit); everything else that
- * logs → {@code DEBUG} (usually high-volume probing traffic). A bare {@code
+ * must investigate), except the admission cap's 503, which is a refusal rather than a failure and
+ * logs at {@code DEBUG}; authorization denials → {@code INFO} (security audit); everything else
+ * that logs → {@code DEBUG} (usually high-volume probing traffic). A bare {@code
  * IllegalArgumentException} has no handler and so takes the 5xx rule through the catch-all.
  */
 public final class ErrorMapper {

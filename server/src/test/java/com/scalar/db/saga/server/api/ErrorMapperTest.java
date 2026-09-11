@@ -484,6 +484,8 @@ class ErrorMapperTest {
       // Assert
       assertThat(response.statusCode()).isEqualTo(500);
       assertThat(response.body()).contains(SagaErrorCode.INTERNAL_ERROR.code());
+      // The offending key is ours, not the caller's, so it stays server-side.
+      assertThat(response.body()).doesNotContain("wrong_key");
       assertThat(logs.events())
           .anySatisfy(
               event -> {

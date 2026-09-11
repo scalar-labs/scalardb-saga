@@ -101,12 +101,25 @@ class GrpcErrorMapperTest {
             IllegalArgumentException.class,
             () -> new SagaRuntimeException(SagaErrorCode.SAGA_NOT_FOUND, Map.of("wrong_key", "x")));
 
-    // Act
-    StatusRuntimeException e = GrpcErrorMapper.toStatusRuntimeException(schemaMismatch);
+    try (LogCapture logs = LogCapture.of(GrpcErrorMapper.class)) {
+      // Act
+      StatusRuntimeException e = GrpcErrorMapper.toStatusRuntimeException(schemaMismatch);
 
-    // Assert
-    assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INTERNAL);
-    assertThat(errorInfo(e).getReason()).isEqualTo(SagaErrorCode.INTERNAL_ERROR.code());
+      // Assert
+      assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INTERNAL);
+      assertThat(errorInfo(e).getReason()).isEqualTo(SagaErrorCode.INTERNAL_ERROR.code());
+      // The offending key is ours, not the caller's, so it stays server-side.
+      assertThat(e.getStatus().getDescription()).doesNotContain("wrong_key");
+      assertThat(errorInfo(e).getMetadataMap()).isEmpty();
+      assertThat(logs.events())
+          .anySatisfy(
+              event -> {
+                assertThat(event.getLevel()).isEqualTo(Level.ERROR);
+                assertThat(event.getThrowableProxy()).isNotNull();
+                assertThat(event.getThrowableProxy().getClassName())
+                    .isEqualTo(IllegalArgumentException.class.getName());
+              });
+    }
   }
 
   @Test
