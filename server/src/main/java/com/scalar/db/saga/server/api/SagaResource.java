@@ -196,6 +196,9 @@ public final class SagaResource {
 
       @Override
       public void onEscalated(SagaStateSnapshot saga) {
+        // Terminal, so it settles the wait. It all but never fires (see SagaCallback#onEscalated);
+        // overridden anyway because without it this wait would run out its whole bound and only
+        // then read the same outcome back.
         settled.complete(saga);
       }
     };
