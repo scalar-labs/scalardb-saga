@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
 import com.scalar.db.saga.api.SagaOrchestrator;
+import com.scalar.db.saga.server.SagaWaiterRegistry;
 import com.scalar.db.saga.server.security.SagaAuthRequest;
 import com.scalar.db.saga.server.security.SagaIdentity;
 import com.scalar.db.saga.server.security.SagaRole;
@@ -43,7 +44,11 @@ class HeadMethodTest {
     ErrorMapper.register(app);
     HealthResource.register(app);
     SagaResource.register(
-        app, mock(SagaOrchestrator.class), 0L, new java.util.concurrent.CompletableFuture<>());
+        app,
+        mock(SagaOrchestrator.class),
+        0L,
+        new java.util.concurrent.CompletableFuture<>(),
+        new SagaWaiterRegistry());
     // A route registered with no operation, to prove the HEAD branch did not weaken the fail-closed
     // rejection of an untagged route on its normal (GET) path.
     app.get("/untagged", ctx -> ctx.result("should never be served"));

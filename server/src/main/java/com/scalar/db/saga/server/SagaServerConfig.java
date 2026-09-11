@@ -1465,6 +1465,47 @@ public final class SagaServerConfig {
    * transports. {@link #syncTimeoutMillis()} and a gRPC client's call deadline can only tighten
    * this bound, never exceed it, so a synchronous start can never block indefinitely. Defaults to
    * {@value #DEFAULT_SYNC_MAX_WAIT_MILLIS} ms.
+   *
+   * <p>It also sets the cadence of the poll behind a bounded wait: the interval is a sixth of the
+   * effective bound, floored at a second and capped at thirty. Raising the bound therefore does two
+   * things at once — more sagas finish inside it and never reach the poll at all, and those that do
+   * are polled less often. A deployment whose ingress tolerates a longer request can raise it, up
+   * to that timeout: a REST wait does not end when a client disconnects, so a bound set past the
+   * ingress spends the difference waiting to answer a socket that is already closed. Leave margin
+   * rather than matching it exactly, or the proxy can cut the connection as the server answers —
+   * and note that the {@value #DEFAULT_SYNC_MAX_WAIT_MILLIS} ms default already equals a common
+   * ingress default.
+   *
+   * <p><b>When the wait is worth taking at all.</b> It pays off for a saga with a real chance of
+   * settling inside it, which is answered in one round trip and, when it settles on this server, at
+   * the moment it does. For a saga whose steps routinely outlast the bound the wait cannot succeed:
+   * it answers {@code 202} and the caller has to check afterwards anyway, so such a saga should be
+   * started asynchronously and checked when its work is due. The axis is the saga's duration
+   * relative to this value, not whether it is "long-running" — a deployment whose sagas settle just
+   * outside the bound should raise the bound rather than change how callers call.
+   *
+   * <p><b>One key, deliberately.</b> There is no separate bound for the parked case, and there will
+   * not be one: the alternative to holding a request is the caller polling, which occupies this
+   * server anyway and costs it more store reads over the same window, so the shorter parked bound
+   * would buy a frozen configuration key for a cost that is not there. A caller who wants less than
+   * the deployment's bound has {@code async=true}, and a gRPC caller can also tighten a single
+   * call. See {@code docs/plans/2026-09-05-001-fix-bounded-sync-bound-and-await-polling-plan.md}.
+   *
+   * <p><b>The interval is also the notice latency for a saga settled on another replica.</b> A saga
+   * settled on this process wakes its waiter at once, but one resumed elsewhere is seen only by the
+   * next poll, so at the default bound that notice takes up to ten seconds against the 200 ms of
+   * the fixed poll this replaced. It is the trade the read reduction is bought with, and it lands
+   * on the cross-replica case, which is the common one for a saga with an asynchronous step: a
+   * participant callback dials a service address and reaches an arbitrary replica. Lowering the
+   * bound tightens the notice and the wait together; the two cannot be tuned apart.
+   *
+   * <p><b>It bounds one server-side call, not how long a caller waits.</b> A REST or raw-gRPC
+   * client receives its answer when the bound elapses and decides for itself whether to ask again.
+   * The Java client SDK's blocking {@code start()} keeps re-issuing {@code AwaitSaga} until the
+   * saga is terminal, because it delivers the embedded orchestrator's contract over a bounded
+   * server; raising or lowering this value changes how long the server is occupied per call, not
+   * how long that caller blocks. The bound on that is the SDK's own default deadline, which is
+   * unset — and so unbounded — unless the application configures one.
    */
   public long syncMaxWaitMillis() {
     return syncMaxWaitMillis;

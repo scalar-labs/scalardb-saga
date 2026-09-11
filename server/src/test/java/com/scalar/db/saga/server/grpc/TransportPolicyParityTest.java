@@ -7,6 +7,7 @@ import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.rpc.AdminServiceGrpc;
 import com.scalar.db.saga.rpc.SagaServiceGrpc;
+import com.scalar.db.saga.server.SagaWaiterRegistry;
 import com.scalar.db.saga.server.api.CallbackResource;
 import com.scalar.db.saga.server.api.HealthResource;
 import com.scalar.db.saga.server.api.SagaAdminResource;
@@ -165,7 +166,11 @@ class TransportPolicyParityTest {
     DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
     HealthResource.register(app);
     SagaResource.register(
-        app, mock(SagaOrchestrator.class), 0L, new java.util.concurrent.CompletableFuture<>());
+        app,
+        mock(SagaOrchestrator.class),
+        0L,
+        new java.util.concurrent.CompletableFuture<>(),
+        new SagaWaiterRegistry());
     SagaAdminResource.register(app, orchestrator, 0L);
     CallbackResource.register(app, orchestrator, "test-secret", 0L, Clock.systemUTC());
 
