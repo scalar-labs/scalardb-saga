@@ -112,6 +112,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   private final @Nullable AdmissionController admissionController;
 
   private final ExecutorService asyncExecutor;
+  private final SettlementListener settlementListener;
   private volatile boolean closed;
 
   /**
@@ -134,6 +135,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    */
   private volatile @Nullable Set<String> servedDefinitions;
 
+  // Visible for testing: no production caller remains since build() moved to the 10-arg form.
   DefaultSagaOrchestrator(
       SagaEngine engine,
       SagaStore store,
@@ -152,7 +154,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
         shutdownTimeoutMillis,
         maxTimelineEvents,
         maxConcurrentSagaStarts,
-        Executors.newVirtualThreadPerTaskExecutor());
+        Executors.newVirtualThreadPerTaskExecutor(),
+        SettlementListener.NO_OP);
   }
 
   // Visible for testing
@@ -166,6 +169,31 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       int maxTimelineEvents,
       int maxConcurrentSagaStarts,
       ExecutorService asyncExecutor) {
+    this(
+        engine,
+        store,
+        definitionRegistry,
+        recoveryManager,
+        retentionManager,
+        shutdownTimeoutMillis,
+        maxTimelineEvents,
+        maxConcurrentSagaStarts,
+        asyncExecutor,
+        SettlementListener.NO_OP);
+  }
+
+  // Visible for testing
+  DefaultSagaOrchestrator(
+      SagaEngine engine,
+      SagaStore store,
+      SagaDefinitionRegistry definitionRegistry,
+      SagaRecoveryManager recoveryManager,
+      SagaRetentionManager retentionManager,
+      long shutdownTimeoutMillis,
+      int maxTimelineEvents,
+      int maxConcurrentSagaStarts,
+      ExecutorService asyncExecutor,
+      SettlementListener settlementListener) {
     this.engine = engine;
     this.store = store;
     this.definitionRegistry = definitionRegistry;
@@ -178,6 +206,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     this.admissionController =
         maxConcurrentSagaStarts > 0 ? new AdmissionController(maxConcurrentSagaStarts) : null;
     this.asyncExecutor = asyncExecutor;
+    this.settlementListener = settlementListener;
   }
 
   /** Creates a new builder for constructing a {@link DefaultSagaOrchestrator}. */
@@ -515,9 +544,9 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
               // throws or blocks forever cannot hold capacity hostage.
               release(lease);
               try {
-                dispatchCallback(saga.getSagaId(), callback, executed);
+                dispatchOutcome(saga.getSagaId(), callback, executed);
               } catch (Throwable t) {
-                logger.error("Failed to dispatch callback for saga {}", saga.getSagaId(), t);
+                logger.error("Failed to dispatch outcome for saga {}", saga.getSagaId(), t);
               }
             }
           });
@@ -539,26 +568,69 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   }
 
   /**
-   * Reports what execution did to the caller's callback, if it supplied one.
+   * Reports what a drive did to everything on this process that should hear it: the {@link
+   * SettlementListener}, when something is waiting for this saga, and the caller's own {@link
+   * SagaCallback}, when the start supplied one. A resumed drive carries no callback and reaches the
+   * listener alone, which is the only way a caller waiting on a parked saga learns it settled.
    *
    * @param executed the state execution left the saga in, or {@code null} when it threw before
    *     reaching one — in which case the cause is already logged and there is no outcome to report
    */
-  private void dispatchCallback(
+  private void dispatchOutcome(
       String sagaId, @Nullable SagaCallback callback, @Nullable SagaStateSnapshot executed) {
-    if (callback == null) {
+    // Asked once and reused: the answer decides whether this drive does any work at all, and a
+    // second call could disagree with the first if the waiter deregistered in between. Guarded for
+    // the same reason as the notification below — a listener that throws here must not cost the
+    // caller its callback, which would leave it waiting out its whole bound for an answer already
+    // in hand. Treated as "nobody is waiting", which is the safe reading: the caller still gets
+    // its callback, and anything that was waiting falls back to its own poll.
+    boolean watched;
+    try {
+      watched = settlementListener.isWatching(sagaId);
+    } catch (Throwable t) {
+      logger.error("Settlement listener failed for saga {}", sagaId, t);
+      watched = false;
+    }
+    if (callback == null && !watched) {
       return;
     }
     // Execution threw before reaching a verdict, so there is no local answer. Fall back to the
     // store — it may well have completed the saga and failed afterwards, and that caller is still
     // owed its terminal callback. This read carries the staleness the verdict exists to avoid, but
-    // it is the only source available, and it is confined to the exceptional path.
+    // it is the only source available, and it is confined to the exceptional path. Gating it on
+    // `watched` above keeps it off the path of a start nobody is waiting for.
     boolean aborted = executed == null;
     SagaStateSnapshot result;
     if (executed == null) {
       result = store.getStateSnapshot(sagaId).orElseThrow(() -> new SagaNotFoundException(sagaId));
     } else {
       result = executed;
+    }
+    // The listener first: it is a request holder with a client attached, where the callback is
+    // application code that may be slow. Guarded on its own so a misbehaving listener cannot cost
+    // the callback its dispatch, and vice versa. Terminal only — a parked saga is still live and a
+    // waiter has nothing to act on until it settles.
+    if (watched && result.getStatus().isTerminal()) {
+      try {
+        settlementListener.onSagaSettled(result);
+      } catch (Throwable t) {
+        logger.error("Settlement listener failed for saga {}", sagaId, t);
+      }
+    }
+    // A resumed drive carries no callback; notifying the listener is all it owes.
+    //
+    // Recovery drives are deliberately not wired to this. They run in SagaRecoveryManager, which
+    // would have to carry the listener to its three drive sites, and recovery is slow to start
+    // relative to a synchronous wait: staleness defaults to 60s, which is also the default wait
+    // bound, so a waiter has usually answered from its own read before recovery claims anything.
+    //
+    // A default, not an invariant. A parked deadline comes from the step's own timeout, so it can
+    // be short, and raising sync.max_wait_millis well above the staleness threshold leaves a waiter
+    // present while recovery settles the saga. Both cases still answer correctly, from the caller's
+    // own poll or its read at the bound, the same fallback that covers a saga resumed on another
+    // replica. See todos/096.
+    if (callback == null) {
+      return;
     }
     // Every status is listed and there is no default, deliberately: a new SagaStatus must not
     // silently inherit another one's callback. Without a default arm, Error Prone's
@@ -568,14 +640,19 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       case COMPLETED -> callback.onCompleted(result);
       case COMPENSATED -> callback.onCompensated(result);
       case ESCALATED -> callback.onEscalated(result);
-      // Parked on an async step, waiting for that step's callback or its deadline. Report it
-      // rather than only logging: a caller in a bounded synchronous start has nothing else to
-      // wake on, and would otherwise wait out its whole bound for a saga that stopped progressing
-      // in milliseconds.
+      // Parked on an async step, waiting for that step's callback or its deadline. Reported as
+      // information for embedded callers that track saga lifecycle; it is deliberately not a
+      // release signal for a bounded synchronous start, which keeps waiting because the saga may
+      // still finish inside its bound.
       case WAITING -> callback.onParked(result);
       // Execution returned without the saga resting anywhere. Since this is execution's own
       // verdict rather than a later read of shared state, a resume landing elsewhere can no longer
       // masquerade as either case below — which is what makes the error worth acting on.
+      //
+      // This arm reports nothing to the caller, only to the log, so a front end waiting on this
+      // saga is told neither that it settled nor that it parked. Its wait therefore runs to its
+      // bound and answers from the read there. That is the one path on which a bounded wait gets
+      // no push at all; see todos/096 for why polling before the park would not currently help.
       case RUNNING, COMPENSATING -> {
         if (aborted) {
           logger.warn(
@@ -690,10 +767,22 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       // recovery is the backstop.
       asyncExecutor.execute(
           () -> {
+            // Mirrors submitAsync: record the verdict rather than branching on it, and dispatch in
+            // the finally, so a drive that settled the saga and then threw still notifies. The
+            // resume carries no SagaCallback — the one from the original start died at the park —
+            // so this reaches the settlement listener alone.
+            SagaStateSnapshot executed = null;
             try {
               engine.resumeFrom(resumed.def(), resumed.context(), resumed.stepIndex() + 1);
+              executed = resumed.context().getCurrentState();
             } catch (Throwable t) {
               logger.error("Async completion drive for saga {} failed unexpectedly", sagaId, t);
+            } finally {
+              try {
+                dispatchOutcome(sagaId, null, executed);
+              } catch (Throwable t) {
+                logger.error("Failed to dispatch outcome for saga {}", sagaId, t);
+              }
             }
           });
     } catch (RejectedExecutionException e) {
@@ -963,6 +1052,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     private int maxTimelineEvents = DEFAULT_MAX_TIMELINE_EVENTS;
     private int maxConcurrentSagaStarts = DEFAULT_MAX_CONCURRENT_SAGA_STARTS;
     private Clock clock = Clock.systemUTC();
+    private SettlementListener settlementListener = SettlementListener.NO_OP;
     private ResourceRegistry.@Nullable Builder resourceRegistryBuilder;
     private @Nullable StepResolver customStepResolver;
     private final Map<String, HttpServiceConfig> httpEndpoints = new HashMap<>();
@@ -1161,6 +1251,31 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     }
 
     /**
+     * Installs a listener notified when a saga settles on this process, on a start or a resume.
+     * Defaults to {@link SettlementListener#NO_OP}.
+     *
+     * <p>A front end uses this to wake a caller waiting on a saga that parked and later resumed:
+     * the resume is a separate drive carrying no {@link com.scalar.db.saga.api.SagaCallback}, so
+     * the callback from the original start cannot fire again. See {@link SettlementListener} for
+     * what it does and does not guarantee — in particular that it is best-effort, and that a saga
+     * settled by <em>recovery</em> does not reach it even when recovery ran on this process.
+     *
+     * <p><b>No properties key accompanies this knob, deliberately.</b> Daemon mode gives every
+     * builder knob with an operator analogue a {@code scalar.db.saga.*} key, so that running as a
+     * container is never less capable than running embedded. This one has no analogue: like {@link
+     * #stepResolver} and {@link #resource}, it injects code rather than configuration, and a
+     * properties file cannot name an object.
+     *
+     * @param settlementListener the listener to notify
+     * @return this builder
+     */
+    public Builder settlementListener(SettlementListener settlementListener) {
+      this.settlementListener =
+          Objects.requireNonNull(settlementListener, "settlementListener must not be null");
+      return this;
+    }
+
+    /**
      * Sets a custom step resolver for full control over step instantiation. Mutually exclusive with
      * {@link #resource}.
      *
@@ -1315,7 +1430,9 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
             retentionManager,
             shutdownTimeoutMillis,
             maxTimelineEvents,
-            maxConcurrentSagaStarts);
+            maxConcurrentSagaStarts,
+            Executors.newVirtualThreadPerTaskExecutor(),
+            settlementListener);
       } catch (Throwable t) {
         // Roll back the resources that hold real external connections: the store (DB sessions) and
         // the HTTP endpoint manager (holds HTTP clients). Each is null if its own creation threw,

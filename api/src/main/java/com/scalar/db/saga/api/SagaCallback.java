@@ -33,12 +33,19 @@ public interface SagaCallback {
    * {@link SagaOrchestrator#getStateSnapshot} or {@link SagaOrchestrator#getSagaDetail} to observe
    * the eventual outcome; an implementation that waits for a terminal method instead waits forever.
    *
-   * <p>Parking is a normal outcome, not a failure. It is reported because a caller waiting for the
-   * saga needs to know the wait is over: without it, a bounded synchronous start has nothing to
-   * wake on and waits out its entire bound for a saga that stopped progressing in milliseconds.
+   * <p>Parking is a normal outcome, not a failure. This method exists because it is the only notice
+   * that no terminal callback is coming. An implementation that signals completion from {@link
+   * #onCompleted} and its siblings — counting down a latch, completing a future — must therefore
+   * not go on waiting for one of those to fire, or it waits forever on a saga that is alive and
+   * still progressing. Two shapes satisfy that. Release the caller here and let it poll {@link
+   * SagaOrchestrator#getStateSnapshot} for the outcome; or keep waiting, but under a bound, and
+   * poll from this point rather than depending on a callback that cannot arrive. The bounded shape
+   * is what this project's own daemon does, because a saga that parks may still finish while the
+   * caller is willing to wait, and answering at the park would discard that outcome.
    *
-   * <p>Defaults to doing nothing, so an existing implementation keeps compiling and keeps its
-   * previous behaviour. Override it when the caller must be released as soon as the saga parks.
+   * <p>Defaults to doing nothing because observing a park is optional: a saga with no asynchronous
+   * step never parks, and such a caller should not be made to write an empty method for it.
+   * Override it whenever a saga may contain an asynchronous step.
    */
   default void onParked(SagaStateSnapshot saga) {}
 }

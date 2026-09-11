@@ -10,6 +10,7 @@ import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.api.TimelineEvent;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.server.SagaWaiterRegistry;
 import com.scalar.db.saga.server.security.SagaAuthRequest;
 import com.scalar.db.saga.server.security.SagaAuthenticationException;
 import com.scalar.db.saga.server.security.SagaIdentity;
@@ -51,7 +52,12 @@ class SagaResourceDetailTest {
     app = Javalin.create();
     SagaSecurityHandler.register(app, new RoleHeaderProvider());
     ErrorMapper.register(app);
-    SagaResource.register(app, orchestrator, 0L, new java.util.concurrent.CompletableFuture<>());
+    SagaResource.register(
+        app,
+        orchestrator,
+        0L,
+        new java.util.concurrent.CompletableFuture<>(),
+        new SagaWaiterRegistry());
     app.start(0);
   }
 

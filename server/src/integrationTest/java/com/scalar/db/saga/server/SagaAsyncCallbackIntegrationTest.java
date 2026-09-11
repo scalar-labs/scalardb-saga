@@ -67,6 +67,11 @@ class SagaAsyncCallbackIntegrationTest extends ServerIntegrationTestSupport {
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, String.valueOf(daemonPort));
     props.setProperty(SagaServerConfig.CALLBACK_BASE_URL_KEY, "http://localhost:" + daemonPort);
     props.setProperty(SagaServerConfig.CALLBACK_SECRET_KEY, SECRET);
+    // A parked saga no longer ends a synchronous start's wait, so each start below runs the bound
+    // to completion before answering WAITING. At the 60s default that is a minute of wall clock per
+    // test for an assertion about the status, not about how long it took to arrive. Two seconds
+    // proves the same thing. See todos/105.
+    props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "2000");
   }
 
   @Test

@@ -16,6 +16,7 @@ import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
+import com.scalar.db.saga.server.SagaWaiterRegistry;
 import com.scalar.db.saga.server.security.SagaAuthRequest;
 import com.scalar.db.saga.server.security.SagaAuthenticationException;
 import com.scalar.db.saga.server.security.SagaIdentity;
@@ -32,6 +33,7 @@ import java.time.Instant;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -55,14 +57,17 @@ class SagaResourceStartTest {
   private Javalin app;
   private SagaOrchestrator orchestrator;
   private CompletableFuture<Void> shutdownSignal;
+  // Held so a test can settle a saga through it, which is what a resumed drive does.
+  private SagaWaiterRegistry waiterRegistry;
 
   private void startServer(long syncWaitBoundMillis) {
     shutdownSignal = new CompletableFuture<>();
     orchestrator = mock(SagaOrchestrator.class);
+    waiterRegistry = new SagaWaiterRegistry();
     app = Javalin.create();
     SagaSecurityHandler.register(app, new RoleHeaderProvider());
     ErrorMapper.register(app);
-    SagaResource.register(app, orchestrator, syncWaitBoundMillis, shutdownSignal);
+    SagaResource.register(app, orchestrator, syncWaitBoundMillis, shutdownSignal, waiterRegistry);
     app.start(0);
   }
 
@@ -138,28 +143,114 @@ class SagaResourceStartTest {
   }
 
   @Test
-  void postSagas_sagaParksOnAnAsyncStep_returns202WithoutWaitingOutTheBound() throws Exception {
-    // Arrange — the saga parks instead of finishing. setUp's bound is 30s, so if parking did not
-    // release the wait this request would hang for that long; asserting the elapsed time is what
-    // distinguishes "answered because it parked" from "answered because the bound elapsed".
+  void postSagas_sagaParksThenFinishesBeforeTheBound_returns200WithTheOutcome() throws Exception {
+    // Arrange — the saga parks on an async step, so the engine reports onParked, and finishes
+    // before the bound elapses. The resume carries no SagaCallback (and may happen on another
+    // replica), so the callback registered here never fires again: what decides the response is
+    // the read at bound expiry, which by then sees a completed saga.
+    app.stop();
+    startServer(300L);
     when(orchestrator.startAsync(eq(SAGA_NAME), anyMap(), any(SagaCallback.class)))
         .thenAnswer(
             invocation -> {
               invocation.getArgument(2, SagaCallback.class).onParked(snapshot(SagaStatus.WAITING));
               return SAGA_ID;
             });
+    when(orchestrator.getStateSnapshot(SAGA_ID)).thenReturn(snapshot(SagaStatus.COMPLETED));
 
     // Act
     long startNanos = System.nanoTime();
     HttpResponse<String> response = post("/sagas", "{\"sagaName\":\"" + SAGA_NAME + "\"}");
     long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
 
-    // Assert — a parked saga is still running, so 202 with its current state, delivered promptly.
+    // Assert — the outcome the caller asked to wait for, not a 202 delivered in milliseconds.
+    assertThat(response.statusCode()).isEqualTo(200);
+    assertThat(response.body()).contains("COMPLETED");
+    // Both of these fail if the park releases the wait: it would answer at once, well inside the
+    // bound, from the parked snapshot and without ever reading the store.
+    assertThat(elapsedMillis).isGreaterThanOrEqualTo(250L);
+    verify(orchestrator).getStateSnapshot(SAGA_ID);
+  }
+
+  @Test
+  void postSagas_parkedSagaIsResumedOnThisReplica_returns200WithoutWaitingOutTheBound()
+      throws Exception {
+    // Arrange — the saga parks, then a resumed drive settles it on this process. That drive carries
+    // no SagaCallback, so the registry is the only thing that can wake the waiter. The bound is 30s
+    // and the store would report WAITING, so answering COMPLETED promptly is only possible if the
+    // registry did the waking.
+    when(orchestrator.startAsync(eq(SAGA_NAME), anyMap(), any(SagaCallback.class)))
+        .thenAnswer(
+            invocation -> {
+              invocation.getArgument(2, SagaCallback.class).onParked(snapshot(SagaStatus.WAITING));
+              return SAGA_ID;
+            });
+    when(orchestrator.getStateSnapshot(SAGA_ID)).thenReturn(snapshot(SagaStatus.WAITING));
+    CompletableFuture<Void> resume =
+        settleOnceWatched(SAGA_ID, () -> snapshot(SagaStatus.COMPLETED));
+
+    // Act
+    long startNanos = System.nanoTime();
+    HttpResponse<String> response = post("/sagas", "{\"sagaName\":\"" + SAGA_NAME + "\"}");
+    long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+    resume.join();
+
+    // Assert — the outcome, delivered when the saga settled rather than when the bound elapsed.
+    assertThat(response.statusCode()).isEqualTo(200);
+    assertThat(response.body()).contains("COMPLETED");
+    assertThat(elapsedMillis).isLessThan(10_000L);
+  }
+
+  @Test
+  void postSagas_parkedSagaSettlesElsewhere_isSeenByAPollTickBeforeTheBound() throws Exception {
+    // Arrange — the saga parks and is then resumed on *another* replica, so nothing on this process
+    // notifies the waiter: neither the start callback (dead at the park) nor the registry (the
+    // resumed drive ran elsewhere). The poll tick is the only thing that can answer before the
+    // bound. A 6s bound derives the 1s floor, so a tick lands well inside it; without the tick this
+    // would answer at 6s from the read at bound expiry.
+    app.stop();
+    startServer(6_000L);
+    when(orchestrator.startAsync(eq(SAGA_NAME), anyMap(), any(SagaCallback.class)))
+        .thenAnswer(
+            invocation -> {
+              invocation.getArgument(2, SagaCallback.class).onParked(snapshot(SagaStatus.WAITING));
+              return SAGA_ID;
+            });
+    when(orchestrator.getStateSnapshot(SAGA_ID)).thenReturn(snapshot(SagaStatus.COMPLETED));
+
+    // Act
+    long startNanos = System.nanoTime();
+    HttpResponse<String> response = post("/sagas", "{\"sagaName\":\"" + SAGA_NAME + "\"}");
+    long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(200);
+    assertThat(response.body()).contains("COMPLETED");
+    // Answering this far inside the bound is only possible via a tick.
+    assertThat(elapsedMillis).isLessThan(4_000L);
+  }
+
+  @Test
+  void postSagas_sagaStillParkedWhenTheBoundElapses_returns202() throws Exception {
+    // Arrange — the async step has not reported back by the time the bound elapses, so the saga is
+    // genuinely unfinished and 202 is the honest answer. This is the case where waiting the bound
+    // buys nothing, and it must still answer correctly.
+    app.stop();
+    startServer(300L);
+    when(orchestrator.startAsync(eq(SAGA_NAME), anyMap(), any(SagaCallback.class)))
+        .thenAnswer(
+            invocation -> {
+              invocation.getArgument(2, SagaCallback.class).onParked(snapshot(SagaStatus.WAITING));
+              return SAGA_ID;
+            });
+    when(orchestrator.getStateSnapshot(SAGA_ID)).thenReturn(snapshot(SagaStatus.WAITING));
+
+    // Act
+    HttpResponse<String> response = post("/sagas", "{\"sagaName\":\"" + SAGA_NAME + "\"}");
+
+    // Assert
     assertThat(response.statusCode()).isEqualTo(202);
     assertThat(response.body()).contains("WAITING");
-    assertThat(elapsedMillis).isLessThan(5_000L);
-    // The park answered it; the resource never fell back to reading the snapshot itself.
-    verify(orchestrator, never()).getStateSnapshot(SAGA_ID);
   }
 
   @Test
@@ -300,6 +391,37 @@ class SagaResourceStartTest {
     assertThat(response.body()).doesNotContain("someone-elses-saga");
     assertThat(response.body()).doesNotContain("victim");
     assertThat(response.body()).doesNotContain("RUNNING");
+  }
+
+  /**
+   * Settles the saga through the registry, but only once the request thread has actually registered
+   * its waiter. A notification that arrives first lands on an empty registry and is dropped by
+   * design, which the test would discover only when the bound elapsed, seconds later and as the
+   * wrong status. {@code isWatching} is the registry's own published signal for this, so the wait
+   * is on the condition rather than on a guess at how long registration takes.
+   */
+  private CompletableFuture<Void> settleOnceWatched(
+      String sagaId, Supplier<SagaStateSnapshot> settled) {
+    return CompletableFuture.runAsync(
+        () -> {
+          awaitWatching(sagaId);
+          waiterRegistry.onSagaSettled(settled.get());
+        });
+  }
+
+  private void awaitWatching(String sagaId) {
+    for (int attempt = 0; attempt < 1_000; attempt++) {
+      if (waiterRegistry.isWatching(sagaId)) {
+        return;
+      }
+      try {
+        Thread.sleep(5L);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new IllegalStateException("interrupted waiting for a waiter on " + sagaId, e);
+      }
+    }
+    throw new IllegalStateException("no waiter ever registered for saga " + sagaId);
   }
 
   private SagaStateSnapshot snapshot(SagaStatus status) {
