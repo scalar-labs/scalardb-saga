@@ -29,6 +29,8 @@ import com.scalar.db.saga.server.security.SagaAuthenticationException;
 import com.scalar.db.saga.server.security.SagaIdentity;
 import com.scalar.db.saga.server.security.SagaRole;
 import com.scalar.db.saga.server.security.SagaSecurityProvider;
+import io.grpc.Context;
+import io.grpc.Deadline;
 import io.grpc.ManagedChannel;
 import io.grpc.Metadata;
 import io.grpc.Server;
@@ -38,12 +40,15 @@ import io.grpc.StatusRuntimeException;
 import io.grpc.inprocess.InProcessChannelBuilder;
 import io.grpc.inprocess.InProcessServerBuilder;
 import io.grpc.stub.MetadataUtils;
+import io.grpc.stub.StreamObserver;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
@@ -65,6 +70,20 @@ class AdminServiceImplTest {
   private static final Metadata.Key<String> ROLE_HEADER =
       Metadata.Key.of("x-test-role", Metadata.ASCII_STRING_MARSHALLER);
   private static final Instant TS = Instant.parse("2026-07-18T10:00:00Z");
+
+  /**
+   * The slack GrpcDeadlines subtracts; a deadline exactly this far away leaves nothing after it.
+   */
+  private static final long SLACK_MILLIS = 100L;
+
+  /** A stopped clock, so the deadline above cannot shrink while the call is being set up. */
+  private static final Deadline.Ticker FROZEN_TICKER =
+      new Deadline.Ticker() {
+        @Override
+        public long nanoTime() {
+          return 0L;
+        }
+      };
 
   private final List<ManagedChannel> channels = new ArrayList<>();
   private final List<Server> servers = new ArrayList<>();
@@ -165,21 +184,57 @@ class AdminServiceImplTest {
   }
 
   @Test
-  void recoverSaga_tightClientDeadline_boundsDriveInsteadOfGoingUnbounded() {
-    // Arrange
+  void recoverSaga_deadlineAtTheSlack_passesTheBoundedFloorNotZero() throws Exception {
+    // Arrange — the floor is the call site's choice, not the helper's: GrpcDeadlinesTest proves the
+    // arithmetic honours whatever floor it is handed, and this proves AdminServiceImpl hands it 1.
+    // Passing 0 here would make an already-tight client deadline flip the drive to "unbounded, on
+    // the calling thread" downstream in DefaultSagaAdminService — the gRPC request thread this
+    // bound exists to protect.
+    //
+    // Invoked directly rather than over a stub, under a deadline built on a frozen ticker. A served
+    // call cannot express "a deadline at or under the slack" except with a genuinely tiny
+    // wall-clock
+    // one, which under build load expires before the server answers; that is the flake this class
+    // used to carry.
     when(adminService.recoverSaga(eq("s-1"), any())).thenReturn(snapshot(SagaStatus.COMPENSATED));
+    AdminServiceImpl impl = new AdminServiceImpl(orchestrator, DRIVE_DEADLINE_MILLIS);
+    ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    Context.CancellableContext context =
+        Context.current()
+            .withValue(SagaSecurityInterceptor.IDENTITY, SagaIdentity.of("admin", Set.of()))
+            .withDeadline(
+                Deadline.after(SLACK_MILLIS, TimeUnit.MILLISECONDS, FROZEN_TICKER), scheduler);
 
-    // Act — a client deadline at or under the slack (100ms). timeRemaining - slack is <= 0, which
-    // must floor to a bounded 1ms rather than 0; 0 or less means "unbounded, drive on the calling
-    // thread" downstream, so this is the case that would block the gRPC request thread.
-    stub("admin")
-        .withDeadlineAfter(100, TimeUnit.MILLISECONDS)
-        .recoverSaga(InterventionRequest.newBuilder().setSagaId("s-1").setReason("stuck").build());
+    // Act
+    try {
+      context.run(
+          () ->
+              impl.recoverSaga(
+                  InterventionRequest.newBuilder().setSagaId("s-1").setReason("stuck").build(),
+                  new NoOpObserver<>()));
+    } finally {
+      context.close();
+      scheduler.shutdownNow();
+    }
 
-    // Assert — the drive bound handed to the factory is the floored 1ms (bounded), never 0
+    // Assert — bounded at the floor, never 0
     ArgumentCaptor<Long> bound = ArgumentCaptor.forClass(Long.class);
     verify(orchestrator).adminService(any(OperatorContext.class), bound.capture());
     assertThat(bound.getValue()).isEqualTo(1L);
+  }
+
+  /**
+   * Discards the response; this test asserts on the bound handed to the orchestrator, not on it.
+   */
+  private static final class NoOpObserver<T> implements StreamObserver<T> {
+    @Override
+    public void onNext(T value) {}
+
+    @Override
+    public void onError(Throwable t) {}
+
+    @Override
+    public void onCompleted() {}
   }
 
   @Test

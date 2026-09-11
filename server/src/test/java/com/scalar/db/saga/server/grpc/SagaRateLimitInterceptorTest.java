@@ -18,6 +18,7 @@ import com.scalar.db.saga.rpc.SagaServiceGrpc;
 import com.scalar.db.saga.rpc.SagaServiceGrpc.SagaServiceBlockingStub;
 import com.scalar.db.saga.rpc.SagaSnapshot;
 import com.scalar.db.saga.rpc.StartSagaRequest;
+import com.scalar.db.saga.server.SagaWaiterRegistry;
 import com.scalar.db.saga.server.api.RateLimiter;
 import com.scalar.db.saga.server.security.SagaAuthRequest;
 import com.scalar.db.saga.server.security.SagaAuthenticationException;
@@ -72,7 +73,8 @@ class SagaRateLimitInterceptorTest {
                     new SagaServiceImpl(
                         orchestrator,
                         cap -> Math.min(60_000L, cap),
-                        new java.util.concurrent.CompletableFuture<>()),
+                        new java.util.concurrent.CompletableFuture<>(),
+                        new SagaWaiterRegistry()),
                     new SagaSecurityInterceptor(new WriteProvider()),
                     new SagaRateLimitInterceptor(new RateLimiter(limit, 60_000L))))
             .build()

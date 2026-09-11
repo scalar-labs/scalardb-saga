@@ -4,14 +4,13 @@ import com.scalar.db.saga.api.SagaCallback;
 import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.exception.SagaInvalidRequestException;
+import com.scalar.db.saga.server.BoundedWait;
+import com.scalar.db.saga.server.SagaWaiterRegistry;
 import com.scalar.db.saga.server.security.SagaOperation;
 import io.javalin.Javalin;
 import io.javalin.http.Context;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -55,14 +54,15 @@ import org.jspecify.annotations.Nullable;
  *
  * <p><b>Bounded synchronous start.</b> A synchronous start runs the saga on the engine's
  * (virtual-thread) executor and waits, never longer than the {@code sync.max_wait_millis} ceiling,
- * tightened by {@code sync.timeout_millis} when that is set. The wait ends as soon as the engine
- * stops driving the saga — it reached a terminal state, or it parked on an async step — and at the
- * bound at the latest, after which the request returns {@code 202} while the saga keeps running
- * (poll {@code GET /sagas/{id}}). This caps how long a single request can hold a thread, so a burst
- * of slow synchronous sagas cannot exhaust the request pool. Returning {@code 202} rather than an
- * error is the honest outcome: the saga is not cancelled, it is still being processed, and it
- * reuses the {@code 202} this endpoint already returns for a non-terminal outcome. The pattern
- * mirrors RFC 7240's {@code Prefer: respond-async, wait=N}, Azure Durable Functions' {@code
+ * tightened by {@code sync.timeout_millis} when that is set. The wait ends as soon as the saga
+ * reaches a terminal state, and at the bound at the latest, after which the request returns {@code
+ * 202} while the saga keeps running (poll {@code GET /sagas/{id}}). A saga that parks on an async
+ * step does not end the wait: it may still finish inside the bound, and the read at bound expiry
+ * reports that outcome. This caps how long a single request can hold a thread, so a burst of slow
+ * synchronous sagas cannot exhaust the request pool. Returning {@code 202} rather than an error is
+ * the honest outcome: the saga is not cancelled, it is still being processed, and it reuses the
+ * {@code 202} this endpoint already returns for a non-terminal outcome. The pattern mirrors RFC
+ * 7240's {@code Prefer: respond-async, wait=N}, Azure Durable Functions' {@code
  * WaitForCompletionOrCreateCheckStatusResponse}, and Conductor's {@code executeWorkflow} wait
  * timeout.
  *
@@ -84,12 +84,17 @@ public final class SagaResource {
    * @param syncWaitBoundMillis how long a synchronous start may wait before answering {@code 202},
    *     already resolved from the {@code sync.*} keys. Always finite, so no start can block
    *     indefinitely.
+   * @param shutdownSignal completes when the server begins shutting down, ending a bounded wait
+   *     early rather than letting it run to its bound on a server that cannot advance the saga
+   * @param waiterRegistry where a bounded wait registers, so any drive settling the saga on this
+   *     process wakes it; shared with the engine and the gRPC transport
    */
   public static void register(
       Javalin app,
       SagaOrchestrator orchestrator,
       long syncWaitBoundMillis,
-      CompletableFuture<Void> shutdownSignal) {
+      CompletableFuture<Void> shutdownSignal,
+      SagaWaiterRegistry waiterRegistry) {
     app.post(
         "/sagas",
         ctx -> {
@@ -99,11 +104,20 @@ public final class SagaResource {
             String sagaId = orchestrator.startAsync(request.requireSagaName(), input);
             respond(ctx, 202, orchestrator.getStateSnapshot(sagaId));
           } else {
-            CompletableFuture<SagaStateSnapshot> outcome = new CompletableFuture<>();
+            CompletableFuture<SagaStateSnapshot> settled = new CompletableFuture<>();
+            CompletableFuture<Void> parked = new CompletableFuture<>();
             String sagaId =
-                orchestrator.startAsync(request.requireSagaName(), input, outcomeSignal(outcome));
+                orchestrator.startAsync(
+                    request.requireSagaName(), input, outcomeSignal(settled, parked));
             respondBoundedSync(
-                ctx, orchestrator, sagaId, outcome, shutdownSignal, syncWaitBoundMillis);
+                ctx,
+                orchestrator,
+                waiterRegistry,
+                sagaId,
+                settled,
+                parked,
+                shutdownSignal,
+                syncWaitBoundMillis);
           }
         },
         SagaOperation.START_SAGA);
@@ -118,11 +132,19 @@ public final class SagaResource {
             orchestrator.startAsync(sagaId, request.requireSagaName(), input);
             respond(ctx, 202, orchestrator.getStateSnapshot(sagaId));
           } else {
-            CompletableFuture<SagaStateSnapshot> outcome = new CompletableFuture<>();
+            CompletableFuture<SagaStateSnapshot> settled = new CompletableFuture<>();
+            CompletableFuture<Void> parked = new CompletableFuture<>();
             orchestrator.startAsync(
-                sagaId, request.requireSagaName(), input, outcomeSignal(outcome));
+                sagaId, request.requireSagaName(), input, outcomeSignal(settled, parked));
             respondBoundedSync(
-                ctx, orchestrator, sagaId, outcome, shutdownSignal, syncWaitBoundMillis);
+                ctx,
+                orchestrator,
+                waiterRegistry,
+                sagaId,
+                settled,
+                parked,
+                shutdownSignal,
+                syncWaitBoundMillis);
           }
         },
         SagaOperation.START_SAGA);
@@ -144,43 +166,52 @@ public final class SagaResource {
   }
 
   /**
-   * A {@link SagaCallback} that captures the saga's outcome and releases {@code done} as soon as
-   * the engine stops driving it — in any terminal outcome, or when it parks on an async step — so a
-   * bounded synchronous start wakes then rather than always waiting the full bound.
+   * A {@link SagaCallback} that captures the saga's outcome and releases the wait when the saga
+   * reaches a terminal state.
    *
-   * <p>Parking counts: a saga waiting on an external callback has stopped progressing, and holding
-   * the request until the bound elapses would answer the same {@code 202} up to a minute later.
+   * <p>Parking deliberately does <b>not</b> release it. A parked saga is still live and may well
+   * finish inside the bound, and the bound-expiry read in {@link #respondBoundedSync} sees that
+   * outcome whichever replica produced it. Waking here would answer {@code 202} in milliseconds and
+   * throw away an answer the caller asked to wait for.
    */
-  private static SagaCallback outcomeSignal(CompletableFuture<SagaStateSnapshot> outcome) {
+  private static SagaCallback outcomeSignal(
+      CompletableFuture<SagaStateSnapshot> settled, CompletableFuture<Void> parked) {
     return new SagaCallback() {
       @Override
+      public void onParked(SagaStateSnapshot saga) {
+        // Not an outcome — the wait continues. It only means the saga can now be resumed
+        // elsewhere, so the wait should start polling for what a local push can no longer catch.
+        parked.complete(null);
+      }
+
+      @Override
       public void onCompleted(SagaStateSnapshot saga) {
-        outcome.complete(saga);
+        settled.complete(saga);
       }
 
       @Override
       public void onCompensated(SagaStateSnapshot saga) {
-        outcome.complete(saga);
+        settled.complete(saga);
       }
 
       @Override
       public void onEscalated(SagaStateSnapshot saga) {
-        outcome.complete(saga);
-      }
-
-      @Override
-      public void onParked(SagaStateSnapshot saga) {
-        outcome.complete(saga);
+        settled.complete(saga);
       }
     };
   }
 
   /**
-   * Renders a bounded synchronous start. The wait ends at whichever comes first: the engine stops
-   * driving the saga (terminal, or parked on an async step), the server begins shutting down, or
-   * the bound elapses. Whatever ends it, the response carries the freshest state available and the
-   * status decides the code — terminal is {@code 200}, anything else {@code 202} with the saga
-   * still running (the client polls {@code GET /sagas/{id}}).
+   * Renders a bounded synchronous start. The wait ends at whichever comes first: the saga reaches a
+   * terminal state, the server begins shutting down, or the bound elapses. Whatever ends it, the
+   * response carries the freshest state available and the status decides the code — terminal is
+   * {@code 200}, anything else {@code 202} with the saga still running (the client polls {@code GET
+   * /sagas/{id}}).
+   *
+   * <p>A saga that parks on an async step does <b>not</b> end the wait. Parking is not an outcome:
+   * the saga is live and may finish well inside the bound, and it can be resumed by any replica, so
+   * the read below reports the outcome whichever one produced it. Ending the wait at the park would
+   * answer {@code 202} in milliseconds and discard the answer the caller asked to wait for.
    *
    * <p>Shutdown short-circuits the wait rather than letting it run to the bound. The bound is a
    * maximum, not a promise to wait, and a terminating server cannot advance the saga anyway — under
@@ -191,23 +222,27 @@ public final class SagaResource {
   private static void respondBoundedSync(
       Context ctx,
       SagaOrchestrator orchestrator,
+      SagaWaiterRegistry waiterRegistry,
       String sagaId,
-      CompletableFuture<SagaStateSnapshot> outcome,
+      CompletableFuture<SagaStateSnapshot> settled,
+      CompletableFuture<Void> parked,
       CompletableFuture<Void> shutdownSignal,
       long timeoutMillis) {
-    try {
-      CompletableFuture.anyOf(outcome, shutdownSignal).get(timeoutMillis, TimeUnit.MILLISECONDS);
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-    } catch (TimeoutException | ExecutionException e) {
-      // The bound elapsed, or the shutdown signal completed exceptionally. Either way the saga's
-      // own state below is the answer, so there is nothing to handle here.
+    SagaStateSnapshot snapshot;
+    // One future, completed by whichever mechanism sees the saga settle first. The callback was
+    // handed out before the saga id existed and covers the window until the registration below —
+    // on a server-generated id there is nothing to register under until startAsync returns, by
+    // which time the saga may already have settled. The registry covers every drive after that,
+    // above all the one that resumes the saga after an asynchronous step and carries no callback.
+    try (SagaWaiterRegistry.Waiter waiter = waiterRegistry.register(sagaId, settled)) {
+      snapshot =
+          BoundedWait.awaitWithin(
+              settled,
+              shutdownSignal,
+              parked,
+              timeoutMillis,
+              () -> orchestrator.getStateSnapshot(sagaId));
     }
-    // The callback's snapshot when it arrived; otherwise read the current one. Reading covers both
-    // the elapsed bound and shutdown, and means a saga that reached a terminal state in the
-    // meantime still answers 200 rather than a blanket 202.
-    SagaStateSnapshot settled = outcome.getNow(null);
-    SagaStateSnapshot snapshot = settled != null ? settled : orchestrator.getStateSnapshot(sagaId);
     respond(ctx, snapshot.getStatus().isTerminal() ? 200 : 202, snapshot);
   }
 
@@ -239,7 +274,12 @@ public final class SagaResource {
   /**
    * Parses the {@code ?async} flag. Absent → synchronous (the default). Accepts {@code true}/{@code
    * false} (case-insensitive); any other value is rejected with {@code 400} rather than silently
-   * taking the (riskier, thread-pinning) synchronous path.
+   * taking the (riskier, request-holding) synchronous path.
+   *
+   * <p>Request-holding, not thread-pinning: the synchronous branch hands the saga to {@code
+   * startAsync} and parks a virtual thread, where it once drove it inline on the calling Jetty
+   * worker. What {@code ?async=true} still avoids is holding the request at all, for up to the
+   * whole bound now that a park no longer ends the wait.
    */
   private static boolean isAsync(@Nullable String value) {
     if (value == null) {

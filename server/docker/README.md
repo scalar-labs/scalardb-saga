@@ -77,11 +77,11 @@ no `--disable-native-access`, and repeating the flag accumulates rather than rep
 
 ## Virtual-thread pinning
 
-The daemon drives sagas on virtual threads on the gRPC, asynchronous, bounded-synchronous, recovery,
-and retention paths, so anything that pins a carrier throttles the whole server: pinned carriers cap
-effective concurrency at the size of the carrier pool. A plain synchronous `POST /sagas` is the
-exception; with `sync.timeout_millis` at its default of `0` it drives the saga to a terminal state on
-the calling Jetty worker, which is a platform thread.
+The daemon drives sagas on virtual threads on every path — the gRPC and REST starts, synchronous and
+asynchronous alike, plus recovery and retention — so anything that pins a carrier throttles the whole
+server: pinned carriers cap effective concurrency at the size of the carrier pool. There is no path
+that escapes this. Jetty's request handlers run on virtual threads too, so a request waiting on its
+saga parks a virtual thread and returns its OS thread to the pool.
 
 On the Java 25 runtime this image ships, a virtual thread does not pin its carrier while it blocks on
 a monitor, `Object.wait` included; JEP 491 is what makes that true. Native frames do pin, so a driver
