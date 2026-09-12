@@ -166,6 +166,81 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
+  void createSaga_unknownStatusAndForeignAppendIdAtSequenceZero_throwsSagaAlreadyExists()
+      throws Exception {
+    // The bug this guards (todos/089). Our commit's status is unknown AND the id is already taken,
+    // so the verifier's read-back finds a seq-0 event carrying somebody else's append_id. A
+    // state-row verifier could not tell that from our own insert landing: it would confirm the
+    // commit and return the other caller's snapshot, which the REST layer then answers 200/202
+    // with. The append_id makes the difference visible, and at sequence 0 it means "this id
+    // belongs to another saga", so the honest answer is the duplicate, not a retryable conflict.
+    // Arrange
+    ScalarDbSagaStore singleAttemptStore = singleAttemptStore();
+    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
+    DistributedTransaction lookupTx = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx).thenReturn(lookupTx);
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    Result foreignEvent = mock(Result.class);
+    when(foreignEvent.getText("append_id")).thenReturn(OTHER_APPEND_ID);
+    when(verifyTx.get(any(Get.class))).thenReturn(Optional.of(foreignEvent));
+    Result foreignState = mockStateResult("saga-1", SagaStatus.RUNNING);
+    when(lookupTx.scan(any(Scan.class))).thenReturn(List.of(foreignState));
+
+    // Act & Assert — the duplicate, not SagaConcurrentModificationException: retrying an id that
+    // another saga permanently owns can never succeed, so "typically transient" would misdirect.
+    assertThatThrownBy(
+            () -> singleAttemptStore.createSaga("saga-1", "order-saga", "engine-1", Map.of(), "v1"))
+        .isInstanceOf(SagaAlreadyExistsException.class)
+        .isNotInstanceOf(SagaConcurrentModificationException.class);
+  }
+
+  @Test
+  void createSaga_unknownStatusAndOwnAppendIdAtSequenceZero_returnsOurSnapshot() throws Exception {
+    // The other side of the same read: our own append_id proves the insert did land, so the create
+    // succeeds rather than reporting a failure for work that is durably there.
+    // Arrange
+    ScalarDbSagaStore singleAttemptStore = singleAttemptStore();
+    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
+    DistributedTransaction loadTx = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx).thenReturn(loadTx);
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    Result ownEvent = mock(Result.class);
+    when(ownEvent.getText("append_id")).thenReturn(OWN_APPEND_ID);
+    when(verifyTx.get(any(Get.class))).thenReturn(Optional.of(ownEvent));
+    Result ownState = mockStateResult("saga-1", SagaStatus.RUNNING);
+    when(loadTx.scan(any(Scan.class))).thenReturn(List.of(ownState));
+
+    // Act
+    SagaStateSnapshot result =
+        singleAttemptStore.createSaga("saga-1", "order-saga", "engine-1", Map.of(), "v1");
+
+    // Assert
+    assertThat(result.getSagaId()).isEqualTo("saga-1");
+    assertThat(result.getStatus()).isEqualTo(SagaStatus.RUNNING);
+  }
+
+  @Test
+  void createSaga_unknownStatusAndNoEventAtSequenceZero_throwsRetryablePersistenceException()
+      throws Exception {
+    // Absent means our insert did not land. With a single attempt configured there is no retry
+    // left, so this surfaces as the retryable store failure — not as a duplicate, and not as a
+    // success built on a row nobody wrote.
+    // Arrange
+    ScalarDbSagaStore singleAttemptStore = singleAttemptStore();
+    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
+    DistributedTransaction lookupTx = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx).thenReturn(lookupTx);
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    when(verifyTx.get(any(Get.class))).thenReturn(Optional.empty());
+    when(lookupTx.scan(any(Scan.class))).thenReturn(List.of());
+
+    // Act & Assert
+    assertThatThrownBy(
+            () -> singleAttemptStore.createSaga("saga-1", "order-saga", "engine-1", Map.of(), "v1"))
+        .isInstanceOf(SagaPersistenceException.class);
+  }
+
+  @Test
   void createSaga_payloadWithinLimit_succeeds() throws Exception {
     // Arrange
     ScalarDbSagaStore limitedStore =
@@ -2677,13 +2752,18 @@ class ScalarDbSagaStoreTest {
   @Test
   void runInTransaction_unknownStatusWithVerifierConfirmsCommitted_returnsResult()
       throws Exception {
-    // Arrange — commit throws UTSE, but verifier confirms saga was created
+    // Arrange — commit throws UTSE, but the verifier confirms the saga was created. It takes two
+    // further transactions: tx2 reads the seq-0 event to check the append_id is ours, then tx3
+    // loads the state row to return.
     doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
-    // loadFromDb (used as verifier) will use a new transaction
     DistributedTransaction tx2 = mock(DistributedTransaction.class);
-    when(txManager.begin()).thenReturn(tx).thenReturn(tx2);
+    DistributedTransaction tx3 = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(tx2).thenReturn(tx3);
+    Result ownEvent = mock(Result.class);
+    when(ownEvent.getText("append_id")).thenReturn(OWN_APPEND_ID);
+    when(tx2.get(any(Get.class))).thenReturn(Optional.of(ownEvent));
     Result stateResult = mockStateResult("saga-1", SagaStatus.RUNNING);
-    when(tx2.scan(any(Scan.class))).thenReturn(List.of(stateResult));
+    when(tx3.scan(any(Scan.class))).thenReturn(List.of(stateResult));
 
     // Act
     SagaStateSnapshot result = store.createSaga("saga-1", "order-saga", "engine-1", Map.of(), "v1");
@@ -2700,8 +2780,8 @@ class ScalarDbSagaStoreTest {
     DistributedTransaction tx3 = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(tx2).thenReturn(tx3);
     doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
-    // Verifier (loadFromDb via tx2): saga not found → not committed
-    when(tx2.scan(any(Scan.class))).thenReturn(List.of());
+    // Verifier (tx2): no event at sequence 0 → our insert did not land, so retry
+    when(tx2.get(any(Get.class))).thenReturn(Optional.empty());
     // Retry (tx3): succeeds
 
     // Act
@@ -2727,8 +2807,8 @@ class ScalarDbSagaStoreTest {
     DistributedTransaction tx2 = mock(DistributedTransaction.class);
     DistributedTransaction tx3 = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(tx2).thenReturn(tx3);
-    when(tx2.scan(any(Scan.class))).thenThrow(mock(CrudException.class));
-    when(tx3.scan(any(Scan.class))).thenThrow(mock(CrudException.class));
+    when(tx2.get(any(Get.class))).thenThrow(mock(CrudException.class));
+    when(tx3.get(any(Get.class))).thenThrow(mock(CrudException.class));
 
     // Act & Assert — the exhaustion path throws a retryable (store-unavailable) exception with
     // the code's fixed message; the per-attempt cause chain carries the underlying UTSE and any
