@@ -111,11 +111,13 @@ class ScalarDbSagaStoreTest {
     assertThat(result.getSagaId()).isNotNull().isNotEmpty();
     assertThat(result.getSagaName()).isEqualTo("order-saga");
     assertThat(result.getStatus()).isEqualTo(SagaStatus.RUNNING);
-    assertThat(result.getOwnerId()).isEqualTo("engine-1");
     assertThat(result.getDefinitionVersion()).isEqualTo("v1");
     // event insert + state insert
     verify(tx, times(2)).insert(any(Insert.class));
     verify(tx).commit();
+    // The owner is not a component of the snapshot; it is stamped on the state row, so that is
+    // where stamping it is verified.
+    assertThat(stampedOwnerId()).isEqualTo("engine-1");
   }
 
   @Test
@@ -787,8 +789,7 @@ class ScalarDbSagaStoreTest {
     // Arrange
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
     StatusEvent event = StatusEvent.completed();
     Result existingRow = mock(Result.class);
     when(tx.get(any(Get.class))).thenReturn(Optional.of(existingRow));
@@ -799,13 +800,15 @@ class ScalarDbSagaStoreTest {
     // Assert
     assertThat(result.getSagaId()).isEqualTo("saga-1");
     assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPLETED);
-    assertThat(result.getOwnerId()).isEqualTo("engine-2");
     assertThat(result.getUpdatedAt()).isAfterOrEqualTo(now);
     verify(tx).get(any(Get.class));
     // event insert + state insert
     verify(tx, times(2)).insert(any(Insert.class));
     verify(tx).delete(any(Delete.class));
     verify(tx).commit();
+    // The re-stamp is the point of this test: engine-2 recorded the transition, so the state row's
+    // owner_id becomes engine-2. Asserted on the column, which is where the owner lives.
+    assertThat(stampedOwnerId()).isEqualTo("engine-2");
   }
 
   @Test
@@ -813,8 +816,7 @@ class ScalarDbSagaStoreTest {
     // Arrange
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.ESCALATED, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.ESCALATED, "v1", now, now);
     StatusEvent event = StatusEvent.reset(SagaStatus.COMPENSATING, "op", "sweep");
     Result existingRow = mock(Result.class);
     when(tx.get(any(Get.class))).thenReturn(Optional.of(existingRow));
@@ -826,7 +828,6 @@ class ScalarDbSagaStoreTest {
     // Assert — the transition applies, and the state row's recovery-scan key is EPOCH (immediate
     // pickup by the sweeper), all within a single transaction: event insert + state insert + commit
     assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPENSATING);
-    assertThat(result.getOwnerId()).isEqualTo("engine-2");
     assertThat(result.getUpdatedAt()).isEqualTo(Instant.EPOCH);
     verify(tx, times(2)).insert(any(Insert.class));
     verify(tx).delete(any(Delete.class));
@@ -838,8 +839,7 @@ class ScalarDbSagaStoreTest {
     // Arrange
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
     when(tx.get(any(Get.class))).thenReturn(Optional.empty());
 
     // Act & Assert
@@ -857,8 +857,7 @@ class ScalarDbSagaStoreTest {
     // writer's append_id holds the sequence, so this is a proven collision and a 409.
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
     ScalarDbSagaStore singleAttemptStore = singleAttemptStore();
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
@@ -884,8 +883,7 @@ class ScalarDbSagaStoreTest {
     // The transition stays a retryable 503 rather than claiming a collision it cannot prove.
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
     ScalarDbSagaStore singleAttemptStore = singleAttemptStore();
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
@@ -912,8 +910,7 @@ class ScalarDbSagaStoreTest {
     // and a 409, the same answer a commit conflict would have produced on the same evidence.
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
     ScalarDbSagaStore singleAttemptStore = singleAttemptStore();
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
@@ -939,8 +936,7 @@ class ScalarDbSagaStoreTest {
     // still abort, so nobody has won yet. It stays a retryable 503.
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
     ScalarDbSagaStore singleAttemptStore = singleAttemptStore();
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
@@ -966,8 +962,7 @@ class ScalarDbSagaStoreTest {
     // SagaConcurrentModificationException at once rather than reporting a retryable failure.
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
     // Attempt 1: the optimistic CK check passes, then commit is ambiguous.
@@ -991,8 +986,7 @@ class ScalarDbSagaStoreTest {
     // persist at the sequence, so the verifier confirms the commit and returns the snapshot.
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     DistributedTransaction loadTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx).thenReturn(loadTx);
@@ -1021,8 +1015,7 @@ class ScalarDbSagaStoreTest {
     // Arrange
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
     when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
 
     // Act
@@ -1043,8 +1036,7 @@ class ScalarDbSagaStoreTest {
     // Arrange
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
     when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
 
     // Act
@@ -1062,8 +1054,7 @@ class ScalarDbSagaStoreTest {
     // Arrange
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
     when(tx.get(any(Get.class))).thenReturn(Optional.empty());
 
     // Act & Assert
@@ -1077,8 +1068,7 @@ class ScalarDbSagaStoreTest {
     // Arrange
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
     when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
     Result parkedRow = mock(Result.class);
     when(parkedRow.getTimestampTZ("parked_deadline")).thenReturn(now.plusSeconds(600));
@@ -1104,8 +1094,7 @@ class ScalarDbSagaStoreTest {
     // saga_parked row, so the resume finds nothing to delete
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
     when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
     when(tx.scan(any(Scan.class))).thenReturn(List.of());
 
@@ -1126,8 +1115,7 @@ class ScalarDbSagaStoreTest {
     // Arrange
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
     when(tx.get(any(Get.class))).thenReturn(Optional.empty());
 
     // Act & Assert
@@ -1147,8 +1135,7 @@ class ScalarDbSagaStoreTest {
     // writes no saga_parked row, so nothing would ever re-deliver it.
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
     ScalarDbSagaStore singleAttemptStore = singleAttemptStore();
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
@@ -1175,8 +1162,7 @@ class ScalarDbSagaStoreTest {
     // idempotent 200 for a saga someone else resolved is then correct.
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
     ScalarDbSagaStore singleAttemptStore = singleAttemptStore();
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
@@ -1205,8 +1191,7 @@ class ScalarDbSagaStoreTest {
     // SagaConcurrentModificationException at once rather than reporting a retryable failure.
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
     // Attempt 1: the optimistic WAITING-CK check passes, then commit is ambiguous.
@@ -1231,8 +1216,7 @@ class ScalarDbSagaStoreTest {
     // RUNNING snapshot.
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     DistributedTransaction loadTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx).thenReturn(loadTx);
@@ -1263,8 +1247,7 @@ class ScalarDbSagaStoreTest {
     // Arrange — pre-pivot timeout: WAITING -> COMPENSATING, STEP_FAILED, delete the parked row
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
     when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
     Result parkedRow = mock(Result.class);
     when(parkedRow.getTimestampTZ("parked_deadline")).thenReturn(now.plusSeconds(600));
@@ -1289,8 +1272,7 @@ class ScalarDbSagaStoreTest {
     // Arrange — post-pivot timeout of an unbounded park: WAITING -> ESCALATED, no parked row
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
     when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
     when(tx.scan(any(Scan.class))).thenReturn(List.of());
 
@@ -1311,8 +1293,7 @@ class ScalarDbSagaStoreTest {
     // Arrange
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
 
     // Act & Assert — only COMPENSATING / ESCALATED are valid targets
     assertThatThrownBy(
@@ -1327,8 +1308,7 @@ class ScalarDbSagaStoreTest {
     // Arrange — a concurrent callback won the WAITING CK
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
     when(tx.get(any(Get.class))).thenReturn(Optional.empty());
 
     // Act & Assert
@@ -1349,8 +1329,7 @@ class ScalarDbSagaStoreTest {
     // SagaConcurrentModificationException at once.
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
     when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
@@ -1379,8 +1358,7 @@ class ScalarDbSagaStoreTest {
     // the parked row.
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
     when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
     Result parkedRow = mock(Result.class);
     when(parkedRow.getTimestampTZ("parked_deadline")).thenReturn(now.plusSeconds(600));
@@ -1404,8 +1382,7 @@ class ScalarDbSagaStoreTest {
     // Arrange — a concurrent callback / timeout won the WAITING CK
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
     when(tx.get(any(Get.class))).thenReturn(Optional.empty());
 
     // Act & Assert
@@ -1423,8 +1400,7 @@ class ScalarDbSagaStoreTest {
     // throws SagaConcurrentModificationException at once rather than reporting a retryable failure.
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
     // Attempt 1: the optimistic WAITING-CK check passes, then commit is ambiguous.
@@ -1448,8 +1424,7 @@ class ScalarDbSagaStoreTest {
     // RUNNING snapshot.
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     DistributedTransaction loadTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx).thenReturn(loadTx);
@@ -1492,8 +1467,7 @@ class ScalarDbSagaStoreTest {
     // Arrange
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
     when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
 
     // Act
@@ -1508,8 +1482,7 @@ class ScalarDbSagaStoreTest {
     // Arrange
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
     when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
 
     // Act
@@ -1524,8 +1497,7 @@ class ScalarDbSagaStoreTest {
     // Arrange
     Instant now = Instant.now();
     SagaStateSnapshot current =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.WAITING, "engine-1", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
     when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
     when(tx.scan(any(Scan.class))).thenReturn(List.of());
 
@@ -1797,10 +1769,29 @@ class ScalarDbSagaStoreTest {
     assertThat(s.getSagaId()).isEqualTo("saga-1");
     assertThat(s.getSagaName()).isEqualTo("order-saga");
     assertThat(s.getStatus()).isEqualTo(SagaStatus.RUNNING);
-    assertThat(s.getOwnerId()).isEqualTo("engine-1");
     assertThat(s.getDefinitionVersion()).isEqualTo("v1");
     assertThat(s.getCreatedAt()).isEqualTo(Instant.parse("2026-01-01T00:00:00Z"));
     assertThat(s.getUpdatedAt()).isEqualTo(Instant.parse("2026-01-01T00:00:00Z"));
+  }
+
+  @Test
+  void getOwnerId_sagaExists_returnsTheOwnerStampedOnTheRow() throws Exception {
+    // The owner is not a component of SagaStateSnapshot, so the store answers it from the column.
+    // Arrange
+    Result row = mockStateResult("saga-1", SagaStatus.RUNNING);
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(row));
+
+    // Act & Assert
+    assertThat(store.getOwnerId("saga-1")).hasValue("engine-1");
+  }
+
+  @Test
+  void getOwnerId_sagaNotFound_returnsEmpty() throws Exception {
+    // Arrange
+    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+
+    // Act & Assert
+    assertThat(store.getOwnerId("missing")).isEmpty();
   }
 
   @Test
@@ -2023,8 +2014,7 @@ class ScalarDbSagaStoreTest {
     // Arrange
     Instant now = Instant.now();
     SagaStateSnapshot saga =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "old-owner", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
     Result currentRow = mock(Result.class);
     when(tx.get(any(Get.class))).thenReturn(Optional.of(currentRow));
 
@@ -2033,9 +2023,11 @@ class ScalarDbSagaStoreTest {
 
     // Assert
     assertThat(claimed).isPresent();
-    assertThat(claimed.get().getOwnerId()).isEqualTo("new-owner");
     verify(tx).delete(any(Delete.class));
     verify(tx).commit();
+    // Taking the claim is precisely a change of owner, so this is the assertion that matters. It
+    // reads the state row's column, which is where the owner lives now.
+    assertThat(stampedOwnerId()).isEqualTo("new-owner");
   }
 
   @Test
@@ -2043,8 +2035,7 @@ class ScalarDbSagaStoreTest {
     // Arrange
     Instant now = Instant.now();
     SagaStateSnapshot saga =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "old-owner", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
     when(tx.get(any(Get.class))).thenReturn(Optional.empty());
 
     // Act
@@ -2059,8 +2050,7 @@ class ScalarDbSagaStoreTest {
     // Arrange — commit conflict on first attempt; retry finds row gone (other replica claimed)
     Instant now = Instant.now();
     SagaStateSnapshot saga =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "old-owner", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
 
     DistributedTransaction tx2 = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx, tx2);
@@ -2084,8 +2074,7 @@ class ScalarDbSagaStoreTest {
     // Arrange
     Instant now = Instant.now();
     SagaStateSnapshot saga =
-        new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "old-owner", "v1", now, now);
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
     when(tx.get(any(Get.class))).thenThrow(mock(CrudException.class));
 
     // Act & Assert
@@ -2111,7 +2100,7 @@ class ScalarDbSagaStoreTest {
     Instant createdAt = Instant.parse("2026-01-01T00:00:00Z");
     SagaStateSnapshot saga =
         new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "old-owner", "v1", createdAt, createdAt);
+            "saga-1", "order-saga", SagaStatus.RUNNING, "v1", createdAt, createdAt);
     Result currentRow = mock(Result.class);
     when(tx.get(any(Get.class))).thenReturn(Optional.of(currentRow));
 
@@ -3451,6 +3440,22 @@ class ScalarDbSagaStoreTest {
         schema,
         ScalarDbSagaStoreConfig.builder().transactionRetryCount(1).build(),
         () -> OWN_APPEND_ID);
+  }
+
+  /**
+   * The {@code owner_id} stamped on the state row this call wrote. {@link SagaStateSnapshot} no
+   * longer carries the owner, so stamping it is verified where the owner actually lives: the
+   * column. Picks the first insert that carries the column, since the event insert does not.
+   */
+  private String stampedOwnerId() throws Exception {
+    ArgumentCaptor<Insert> captor = ArgumentCaptor.forClass(Insert.class);
+    verify(tx, atLeastOnce()).insert(captor.capture());
+    return captor.getAllValues().stream()
+        .map(insert -> insert.getColumns().get("owner_id"))
+        .filter(java.util.Objects::nonNull)
+        .findFirst()
+        .orElseThrow(() -> new AssertionError("no insert carried an owner_id column"))
+        .getTextValue();
   }
 
   private Result mockEventResult(String eventType, int stepIndex, String stepName, String payload) {

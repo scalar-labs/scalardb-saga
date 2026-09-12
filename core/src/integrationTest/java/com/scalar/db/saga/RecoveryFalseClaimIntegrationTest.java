@@ -257,8 +257,7 @@ class RecoveryFalseClaimIntegrationTest {
       replicaB.recover();
 
       // Assert — B left it alone; the row still belongs to A
-      assertThat(storeB.getStateSnapshot(sagaId.get()).orElseThrow().getOwnerId())
-          .isEqualTo(OWNER_ID);
+      assertThat(storeB.getOwnerId(sagaId.get())).hasValue(OWNER_ID);
       assertThat(driveFailure.get()).isNull();
 
       // Act — release A and let it finish

@@ -129,7 +129,6 @@ class GrpcErrorMapperTest {
             "s-1",
             "transfer",
             SagaStatus.RUNNING,
-            "owner-1",
             "v1",
             Instant.ofEpochSecond(1_700_000_000L),
             Instant.ofEpochSecond(1_700_000_000L));

@@ -192,8 +192,8 @@ public final class ScalarDbSagaStore implements SagaStore {
             tx.insert(buildEventInsert(id, 0, startedEvent, appendId, now));
             SagaStateSnapshot snapshot =
                 new SagaStateSnapshot(
-                    id, sagaName, SagaStatus.RUNNING, ownerId, definitionVersion, now, now);
-            tx.insert(buildStateInsert(bucket, snapshot));
+                    id, sagaName, SagaStatus.RUNNING, definitionVersion, now, now);
+            tx.insert(buildStateInsert(bucket, snapshot, ownerId));
             return snapshot;
           },
           verifyOwnAppendCommitted(id, 0, appendId),
@@ -346,8 +346,8 @@ public final class ScalarDbSagaStore implements SagaStore {
           // recovery-scan key, so a caller passes EPOCH to hand the saga to the sweeper immediately
           // (null = the transition time).
           Instant rowUpdatedAt = stateUpdatedAt != null ? stateUpdatedAt : now;
-          SagaStateSnapshot updated = current.withTransition(newStatus, ownerId, rowUpdatedAt);
-          tx.insert(buildStateInsert(bucket, updated));
+          SagaStateSnapshot updated = current.withTransition(newStatus, rowUpdatedAt);
+          tx.insert(buildStateInsert(bucket, updated, ownerId));
           return updated;
         },
         verifyOwnAppendCommitted(sagaId, sequence, appendId),
@@ -375,14 +375,19 @@ public final class ScalarDbSagaStore implements SagaStore {
 
           // Optimistic check: the row must still be at the snapshot's (RUNNING) CK.
           int oldStatus = current.getStatus().getStatusCode();
-          if (tx.get(buildStateGet(bucket, oldStatus, current.getUpdatedAt(), sagaId)).isEmpty()) {
+          Optional<Result> row =
+              tx.get(buildStateGet(bucket, oldStatus, current.getUpdatedAt(), sagaId));
+          if (row.isEmpty()) {
             throw new SagaConcurrentModificationException(sagaId);
           }
+          // The owner is carried by the row, not the snapshot, and this transition does not change
+          // it: preserve whatever the row being replaced held.
+          String ownerId = row.get().getText("owner_id");
 
           tx.insert(buildEventInsert(sagaId, sequence, pendingEvent, appendId, now));
           tx.delete(buildStateDelete(bucket, oldStatus, current.getUpdatedAt(), sagaId));
           SagaStateSnapshot updated = current.withTransition(SagaStatus.WAITING, now);
-          tx.insert(buildStateInsert(bucket, updated));
+          tx.insert(buildStateInsert(bucket, updated, ownerId));
           // A bounded park records its deadline for the recovery sweeper; an unbounded park
           // (null deadline) writes no row and is never timed out.
           if (parkedDeadline != null) {
@@ -451,14 +456,19 @@ public final class ScalarDbSagaStore implements SagaStore {
           // Fail-fast pre-check on the WAITING CK; the state-row delete below is the real
           // exclusion.
           int oldStatus = current.getStatus().getStatusCode();
-          if (tx.get(buildStateGet(bucket, oldStatus, current.getUpdatedAt(), sagaId)).isEmpty()) {
+          Optional<Result> row =
+              tx.get(buildStateGet(bucket, oldStatus, current.getUpdatedAt(), sagaId));
+          if (row.isEmpty()) {
             throw new SagaConcurrentModificationException(sagaId);
           }
+          // The owner is carried by the row, not the snapshot, and this transition does not change
+          // it: preserve whatever the row being replaced held.
+          String ownerId = row.get().getText("owner_id");
 
           tx.insert(buildEventInsert(sagaId, sequence, event, appendId, now));
           tx.delete(buildStateDelete(bucket, oldStatus, current.getUpdatedAt(), sagaId));
           SagaStateSnapshot updated = current.withTransition(targetStatus, now);
-          tx.insert(buildStateInsert(bucket, updated));
+          tx.insert(buildStateInsert(bucket, updated, ownerId));
 
           for (Result parked : tx.scan(buildParkedIndexScan(sagaId))) {
             tx.delete(buildParkedDelete(bucket, parked.getTimestampTZ("parked_deadline"), sagaId));
@@ -986,20 +996,13 @@ public final class ScalarDbSagaStore implements SagaStore {
                         sagaId,
                         saga.getSagaName(),
                         saga.getStatus(),
-                        newOwnerId,
                         saga.getDefinitionVersion(),
                         saga.getCreatedAt(),
                         now);
-                tx.insert(buildStateInsert(bucket, claimed));
+                tx.insert(buildStateInsert(bucket, claimed, newOwnerId));
                 return claimed;
               },
-              () -> {
-                Optional<SagaStateSnapshot> state = loadStateSnapshot(sagaId);
-                if (state.isPresent() && newOwnerId.equals(state.get().getOwnerId())) {
-                  return state;
-                }
-                return Optional.empty();
-              },
+              () -> loadStateClaimedBy(sagaId, newOwnerId),
               "claim saga " + sagaId + " for recovery");
       return Optional.of(result);
     } catch (SagaConcurrentModificationException e) {
@@ -1030,11 +1033,10 @@ public final class ScalarDbSagaStore implements SagaStore {
                     sagaId,
                     current.getSagaName(),
                     current.getStatus(),
-                    current.getOwnerId(),
                     current.getDefinitionVersion(),
                     current.getCreatedAt(),
                     Instant.EPOCH);
-            tx.insert(buildStateInsert(bucket, marked));
+            tx.insert(buildStateInsert(bucket, marked, r.getText("owner_id")));
             return Boolean.TRUE;
           },
           null, // best-effort — no verifier
@@ -1460,7 +1462,12 @@ public final class ScalarDbSagaStore implements SagaStore {
         .build();
   }
 
-  private Insert buildStateInsert(int bucket, SagaStateSnapshot snapshot) {
+  /**
+   * The owner is passed separately because it is server-internal and deliberately absent from
+   * {@link SagaStateSnapshot} (see that class). Callers either hold it as a parameter or read it
+   * off the row they are replacing.
+   */
+  private Insert buildStateInsert(int bucket, SagaStateSnapshot snapshot, String ownerId) {
     return Insert.newBuilder()
         .namespace(SagaSchema.NAMESPACE)
         .table(SagaSchema.STATE_TABLE)
@@ -1471,7 +1478,7 @@ public final class ScalarDbSagaStore implements SagaStore {
                 snapshot.getUpdatedAt(),
                 snapshot.getSagaId()))
         .textValue("saga_name", snapshot.getSagaName())
-        .textValue("owner_id", snapshot.getOwnerId())
+        .textValue("owner_id", ownerId)
         .textValue("definition_version", snapshot.getDefinitionVersion())
         .timestampTZValue("created_at", snapshot.getCreatedAt())
         .build();
@@ -1745,10 +1752,36 @@ public final class ScalarDbSagaStore implements SagaStore {
         r.getText("saga_id"),
         r.getText("saga_name"),
         SagaStatus.fromStatusCode(r.getInt("status")),
-        r.getText("owner_id"),
         r.getText("definition_version"),
         r.getTimestampTZ("created_at"),
         r.getTimestampTZ("updated_at"));
+  }
+
+  @Override
+  public Optional<String> getOwnerId(String sagaId) {
+    return runInTransaction(
+        tx ->
+            tx.scan(buildStateIndexScan(sagaId)).stream()
+                .findFirst()
+                .map(r -> r.getText("owner_id")),
+        null,
+        "load owner of saga " + sagaId);
+  }
+
+  /**
+   * The saga's state row if {@code expectedOwnerId} currently owns it, else empty. Reads the owner
+   * from the row because {@link SagaStateSnapshot} does not carry it; one scan serves both the
+   * ownership test and the snapshot it returns.
+   */
+  private Optional<SagaStateSnapshot> loadStateClaimedBy(String sagaId, String expectedOwnerId) {
+    return runInTransaction(
+        tx ->
+            tx.scan(buildStateIndexScan(sagaId)).stream()
+                .findFirst()
+                .filter(r -> expectedOwnerId.equals(r.getText("owner_id")))
+                .map(this::toSagaStateSnapshot),
+        null,
+        "verify claim of saga " + sagaId);
   }
 
   private Optional<SagaStateSnapshot> loadStateSnapshot(String sagaId) {

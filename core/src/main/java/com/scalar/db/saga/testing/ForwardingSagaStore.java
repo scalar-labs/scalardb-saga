@@ -132,6 +132,11 @@ public abstract class ForwardingSagaStore implements SagaStore {
   }
 
   @Override
+  public Optional<String> getOwnerId(String sagaId) {
+    return delegate.getOwnerId(sagaId);
+  }
+
+  @Override
   public Optional<SagaStateAndEvents> getStateWithEvents(String sagaId, int maxEvents) {
     return delegate.getStateWithEvents(sagaId, maxEvents);
   }

@@ -83,7 +83,7 @@ class SagaAdminResourceTest {
   }
 
   private static SagaStateSnapshot snapshot(SagaStatus status) {
-    return new SagaStateSnapshot(SAGA_ID, "order-saga", status, "owner", "v1", TS, TS);
+    return new SagaStateSnapshot(SAGA_ID, "order-saga", status, "v1", TS, TS);
   }
 
   // --- negative authorization (the priority surface) -------------------------

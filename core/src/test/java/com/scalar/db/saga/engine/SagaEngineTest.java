@@ -100,12 +100,11 @@ class SagaEngineTest {
   }
 
   private SagaStateSnapshot runningSnapshot(String sagaId) {
-    return new SagaStateSnapshot(sagaId, "test-saga", SagaStatus.RUNNING, OWNER_ID, "v1", NOW, NOW);
+    return new SagaStateSnapshot(sagaId, "test-saga", SagaStatus.RUNNING, "v1", NOW, NOW);
   }
 
   private SagaStateSnapshot compensatingSnapshot(String sagaId) {
-    return new SagaStateSnapshot(
-        sagaId, "test-saga", SagaStatus.COMPENSATING, OWNER_ID, "v1", NOW, NOW);
+    return new SagaStateSnapshot(sagaId, "test-saga", SagaStatus.COMPENSATING, "v1", NOW, NOW);
   }
 
   private Step successStep(String name) {
@@ -409,8 +408,7 @@ class SagaEngineTest {
       SagaDefinition def = sagaDefinitionWithRetry("s0", "s1", "s2");
       SagaStateSnapshot saga = runningSnapshot("saga-1");
       SagaStateSnapshot completedSaga =
-          new SagaStateSnapshot(
-              "saga-1", "test-saga", SagaStatus.COMPLETED, OWNER_ID, "v1", NOW, NOW);
+          new SagaStateSnapshot("saga-1", "test-saga", SagaStatus.COMPLETED, "v1", NOW, NOW);
       when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(completedSaga);
       ExecutionContext context = new ExecutionContext("saga-1", Map.of(), saga);
 

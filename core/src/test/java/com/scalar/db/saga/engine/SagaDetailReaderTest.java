@@ -33,7 +33,7 @@ class SagaDetailReaderTest {
   private final SagaStore store = mock(SagaStore.class);
 
   private static SagaStateSnapshot snapshot(SagaStatus status) {
-    return new SagaStateSnapshot(SAGA_ID, "order-saga", status, "owner", "v1", TS, TS);
+    return new SagaStateSnapshot(SAGA_ID, "order-saga", status, "v1", TS, TS);
   }
 
   /** Stubs the store with the given events and reads back the resulting timeline. */

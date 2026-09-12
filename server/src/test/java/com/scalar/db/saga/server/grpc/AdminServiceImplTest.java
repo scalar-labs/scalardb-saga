@@ -122,7 +122,7 @@ class AdminServiceImplTest {
   }
 
   private static SagaStateSnapshot snapshot(SagaStatus status) {
-    return new SagaStateSnapshot("s-1", "order-saga", status, "owner", "v1", TS, TS);
+    return new SagaStateSnapshot("s-1", "order-saga", status, "v1", TS, TS);
   }
 
   private AdminServiceBlockingStub stub(@Nullable String role) {

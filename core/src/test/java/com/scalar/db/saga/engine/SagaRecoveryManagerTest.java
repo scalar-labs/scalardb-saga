@@ -126,7 +126,7 @@ class SagaRecoveryManagerTest {
 
   private static SagaStateSnapshot snapshot(SagaStatus status) {
     return new SagaStateSnapshot(
-        SAGA_ID, SAGA_NAME, status, OWNER_ID, DEF_VERSION, NOW.minusSeconds(300), STALE);
+        SAGA_ID, SAGA_NAME, status, DEF_VERSION, NOW.minusSeconds(300), STALE);
   }
 
   private static SagaDefinition definition() {
@@ -211,13 +211,7 @@ class SagaRecoveryManagerTest {
       SagaStateSnapshot saga1 = snapshot(SagaStatus.RUNNING);
       SagaStateSnapshot saga2 =
           new SagaStateSnapshot(
-              "saga-002",
-              SAGA_NAME,
-              SagaStatus.RUNNING,
-              OWNER_ID,
-              DEF_VERSION,
-              NOW.minusSeconds(300),
-              STALE);
+              "saga-002", SAGA_NAME, SagaStatus.RUNNING, DEF_VERSION, NOW.minusSeconds(300), STALE);
       ScanCursor cursor = mock(ScanCursor.class);
       SagaDefinition def = definition();
       ExecutionContext ctx1 = mock(ExecutionContext.class);
@@ -273,22 +267,10 @@ class SagaRecoveryManagerTest {
       SagaStateSnapshot saga1 = snapshot(SagaStatus.RUNNING);
       SagaStateSnapshot saga2 =
           new SagaStateSnapshot(
-              "saga-002",
-              SAGA_NAME,
-              SagaStatus.RUNNING,
-              OWNER_ID,
-              DEF_VERSION,
-              NOW.minusSeconds(300),
-              STALE);
+              "saga-002", SAGA_NAME, SagaStatus.RUNNING, DEF_VERSION, NOW.minusSeconds(300), STALE);
       SagaStateSnapshot saga3 =
           new SagaStateSnapshot(
-              "saga-003",
-              SAGA_NAME,
-              SagaStatus.RUNNING,
-              OWNER_ID,
-              DEF_VERSION,
-              NOW.minusSeconds(300),
-              STALE);
+              "saga-003", SAGA_NAME, SagaStatus.RUNNING, DEF_VERSION, NOW.minusSeconds(300), STALE);
       ScanCursor cursor = mock(ScanCursor.class);
       SagaDefinition def = definition();
       ExecutionContext ctx1 = mock(ExecutionContext.class);
@@ -324,13 +306,7 @@ class SagaRecoveryManagerTest {
       SagaStateSnapshot saga1 = snapshot(SagaStatus.RUNNING);
       SagaStateSnapshot saga2 =
           new SagaStateSnapshot(
-              "saga-002",
-              SAGA_NAME,
-              SagaStatus.RUNNING,
-              OWNER_ID,
-              DEF_VERSION,
-              NOW.minusSeconds(300),
-              STALE);
+              "saga-002", SAGA_NAME, SagaStatus.RUNNING, DEF_VERSION, NOW.minusSeconds(300), STALE);
       SagaDefinition def = definition();
       ExecutionContext ctx2 = mock(ExecutionContext.class);
 
@@ -359,13 +335,7 @@ class SagaRecoveryManagerTest {
       SagaStateSnapshot saga1 = snapshot(SagaStatus.RUNNING);
       SagaStateSnapshot saga2 =
           new SagaStateSnapshot(
-              "saga-002",
-              SAGA_NAME,
-              SagaStatus.RUNNING,
-              OWNER_ID,
-              DEF_VERSION,
-              NOW.minusSeconds(300),
-              STALE);
+              "saga-002", SAGA_NAME, SagaStatus.RUNNING, DEF_VERSION, NOW.minusSeconds(300), STALE);
       SagaDefinition def = definition();
       ExecutionContext ctx2 = mock(ExecutionContext.class);
 
@@ -428,7 +398,6 @@ class SagaRecoveryManagerTest {
           SAGA_ID,
           SAGA_NAME,
           SagaStatus.RUNNING,
-          OWNER_ID,
           DEF_VERSION,
           NOW.minusSeconds(300),
           Instant.EPOCH);
@@ -757,13 +726,7 @@ class SagaRecoveryManagerTest {
       SagaStateSnapshot skipped = snapshot(SagaStatus.RUNNING);
       SagaStateSnapshot claimable =
           new SagaStateSnapshot(
-              "saga-002",
-              SAGA_NAME,
-              SagaStatus.RUNNING,
-              OWNER_ID,
-              DEF_VERSION,
-              NOW.minusSeconds(300),
-              STALE);
+              "saga-002", SAGA_NAME, SagaStatus.RUNNING, DEF_VERSION, NOW.minusSeconds(300), STALE);
       // The sweep starts from the owner's scattered cursor, not null, so page one is keyed on it.
       ScanCursor first = mock(ScanCursor.class);
       ScanCursor next = mock(ScanCursor.class);
@@ -1945,7 +1908,7 @@ class SagaRecoveryManagerTest {
 
     private SagaStateSnapshot snapshotWithId(String sagaId, SagaStatus status) {
       return new SagaStateSnapshot(
-          sagaId, SAGA_NAME, status, OWNER_ID, DEF_VERSION, NOW.minusSeconds(300), NOW);
+          sagaId, SAGA_NAME, status, DEF_VERSION, NOW.minusSeconds(300), NOW);
     }
 
     /**

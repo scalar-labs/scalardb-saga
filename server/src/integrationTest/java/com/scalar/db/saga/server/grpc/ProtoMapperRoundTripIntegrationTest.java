@@ -209,7 +209,6 @@ class ProtoMapperRoundTripIntegrationTest {
         "s-1",
         "order-saga",
         status,
-        "",
         "v3",
         Instant.ofEpochSecond(1_700_000_000L, 1),
         Instant.ofEpochSecond(1_700_000_050L, 2));

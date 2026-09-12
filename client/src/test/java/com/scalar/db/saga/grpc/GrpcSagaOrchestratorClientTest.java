@@ -176,13 +176,18 @@ class GrpcSagaOrchestratorClientTest {
   // ---------------------------------------------------------------------------
 
   @Test
-  void getStateSnapshot_mapsByNameWithEmptyOwner() {
+  void getStateSnapshot_wireSnapshotGiven_mapsEveryField() {
+    // Was getStateSnapshot_mapsByNameWithEmptyOwner: it asserted the empty owner the api type
+    // forced this mapper to invent. With ownerId off SagaStateSnapshot there is no such field to
+    // fabricate, so the name and that assertion both go.
     fake.getResponse = snapshot("s-9", SagaStatus.COMPENSATED);
     SagaStateSnapshot snapshot = client.getStateSnapshot("s-9");
     assertThat(snapshot.getSagaId()).isEqualTo("s-9");
+    assertThat(snapshot.getSagaName()).isEqualTo("transfer");
     assertThat(snapshot.getStatus()).isEqualTo(SagaStatus.COMPENSATED);
-    assertThat(snapshot.getOwnerId()).isEmpty();
+    assertThat(snapshot.getDefinitionVersion()).isEqualTo("v1");
     assertThat(snapshot.getCreatedAt().getEpochSecond()).isEqualTo(1000L);
+    assertThat(snapshot.getUpdatedAt().getEpochSecond()).isEqualTo(2000L);
   }
 
   @Test
