@@ -75,8 +75,7 @@ class ProtoMappersTest {
     Instant created = Instant.ofEpochSecond(1_700_000_000L, 250);
     Instant updated = Instant.ofEpochSecond(1_700_000_500L, 0);
     SagaStateSnapshot snapshot =
-        new SagaStateSnapshot(
-            "s-1", "transfer", SagaStatus.COMPENSATING, "owner-7", "v3", created, updated);
+        new SagaStateSnapshot("s-1", "transfer", SagaStatus.COMPENSATING, "v3", created, updated);
 
     // Act
     com.scalar.db.saga.rpc.SagaSnapshot proto = ProtoMappers.toProto(snapshot);

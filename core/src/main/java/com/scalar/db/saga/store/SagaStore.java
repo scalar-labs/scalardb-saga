@@ -16,6 +16,11 @@ import org.jspecify.annotations.Nullable;
  *
  * <p>Implementations must guarantee atomicity: {@link #createSaga} and {@link #recordStatusEvent}
  * write to both the event stream and the state table in a single transaction.
+ *
+ * <p>This interface carries {@link SagaStateSnapshot} as its currency, and that is a published
+ * {@code api} type. Server-internal bookkeeping therefore stops here rather than riding it: an
+ * implementation reads such a field from its own rows and hands it to the engine directly. See
+ * {@link SagaStateSnapshot} for the rule and its one historical exception.
  */
 public interface SagaStore extends AutoCloseable {
 
@@ -263,6 +268,18 @@ public interface SagaStore extends AutoCloseable {
 
   /** Looks up the current state snapshot for the given saga. */
   Optional<SagaStateSnapshot> getStateSnapshot(String sagaId);
+
+  /**
+   * The replica currently stamped as this saga's owner, or empty if the saga is not present.
+   *
+   * <p>Separate from {@link #getStateSnapshot} because the owner is server-internal and therefore
+   * not a component of {@link SagaStateSnapshot} (see that class). It is recovery-coordination
+   * state, not something an application acts on, so it is asked of the store rather than carried on
+   * a published value type. Note the owner does not arbitrate conflicts: two replicas racing the
+   * same saga are separated by the state row's clustering key, and the loser sees {@link
+   * com.scalar.db.saga.exception.SagaConcurrentModificationException}.
+   */
+  Optional<String> getOwnerId(String sagaId);
 
   /**
    * Reads a saga's state snapshot and its event stream in a single transaction, so the two are a

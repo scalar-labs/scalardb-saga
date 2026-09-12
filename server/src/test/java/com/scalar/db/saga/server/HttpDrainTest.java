@@ -73,8 +73,7 @@ class HttpDrainTest {
     AtomicLong handlerFinishedAt = new AtomicLong();
     AtomicLong storeClosedAt = new AtomicLong();
     SagaStateSnapshot running =
-        new SagaStateSnapshot(
-            "s1", "saga", SagaStatus.RUNNING, "owner", "v1", Instant.EPOCH, Instant.EPOCH);
+        new SagaStateSnapshot("s1", "saga", SagaStatus.RUNNING, "v1", Instant.EPOCH, Instant.EPOCH);
 
     DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
     lenient().when(orchestrator.httpEndpointRegistrar()).thenReturn(endpoints -> {});

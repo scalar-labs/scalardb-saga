@@ -141,7 +141,7 @@ class SagaRateLimitInterceptorTest {
 
   private static SagaStateSnapshot snapshot(String sagaId, SagaStatus status) {
     Instant now = Instant.ofEpochSecond(1_700_000_000L);
-    return new SagaStateSnapshot(sagaId, "transfer", status, "owner-1", "v1", now, now);
+    return new SagaStateSnapshot(sagaId, "transfer", status, "v1", now, now);
   }
 
   /** A stub provider mapping the {@code x-test-role=write} header to a single WRITE identity. */

@@ -68,7 +68,7 @@ class ScalarDbSagaStoreAdminEventsIntegrationTest {
             running,
             1,
             StatusEvent.recovering(SagaStatus.COMPENSATING, "alice", "rolling back"),
-            running.getOwnerId());
+            "owner");
 
     // Assert — status transitioned, and the event reconstructs with the right variable target +
     // audit
@@ -85,8 +85,7 @@ class ScalarDbSagaStoreAdminEventsIntegrationTest {
     // Arrange — a RUNNING saga escalated by the engine, then reset by an operator
     SagaStateSnapshot running = newRunningSaga("saga-reset");
     SagaStateSnapshot escalated =
-        store.recordStatusEvent(
-            running, 1, StatusEvent.escalated("retries exhausted"), running.getOwnerId());
+        store.recordStatusEvent(running, 1, StatusEvent.escalated("retries exhausted"), "owner");
 
     // Act — un-escalate in the resume-forward direction
     SagaStateSnapshot after =
@@ -94,7 +93,7 @@ class ScalarDbSagaStoreAdminEventsIntegrationTest {
             escalated,
             2,
             StatusEvent.reset(SagaStatus.RUNNING, "bob", "downstream restored"),
-            escalated.getOwnerId());
+            "owner");
 
     // Assert
     assertThat(after.getStatus()).isEqualTo(SagaStatus.RUNNING);
@@ -109,15 +108,12 @@ class ScalarDbSagaStoreAdminEventsIntegrationTest {
     // Arrange — a RUNNING saga escalated by the engine
     SagaStateSnapshot running = newRunningSaga("saga-forced");
     SagaStateSnapshot escalated =
-        store.recordStatusEvent(running, 1, StatusEvent.escalated("stuck"), running.getOwnerId());
+        store.recordStatusEvent(running, 1, StatusEvent.escalated("stuck"), "owner");
 
     // Act — an operator force-completes it
     SagaStateSnapshot after =
         store.recordStatusEvent(
-            escalated,
-            2,
-            StatusEvent.forceCompleted("carol", "confirmed done"),
-            escalated.getOwnerId());
+            escalated, 2, StatusEvent.forceCompleted("carol", "confirmed done"), "owner");
 
     // Assert — a distinct event type survives, so the forced override is never mistaken for a
     // genuine completion, and the prior ESCALATED history remains in the stream
@@ -134,7 +130,7 @@ class ScalarDbSagaStoreAdminEventsIntegrationTest {
   void getStateWithEvents_returnsSnapshotAndFullEventStreamAtomically() {
     // Arrange — a saga escalated by the engine (SAGA_STARTED @ seq 0, SAGA_ESCALATED @ seq 1)
     SagaStateSnapshot running = newRunningSaga("saga-detail");
-    store.recordStatusEvent(running, 1, StatusEvent.escalated("stuck"), running.getOwnerId());
+    store.recordStatusEvent(running, 1, StatusEvent.escalated("stuck"), "owner");
 
     // Act
     Optional<SagaStateAndEvents> result =
@@ -153,12 +149,11 @@ class ScalarDbSagaStoreAdminEventsIntegrationTest {
   void getStateWithEvents_streamLongerThanMax_returnsNewestEventsAscendingAndFlagsTruncated() {
     // Arrange — four events: STARTED @ 0, ESCALATED @ 1, RECOVERING @ 2, ESCALATED @ 3
     SagaStateSnapshot s0 = newRunningSaga("saga-truncated");
-    SagaStateSnapshot s1 =
-        store.recordStatusEvent(s0, 1, StatusEvent.escalated("stuck"), s0.getOwnerId());
+    SagaStateSnapshot s1 = store.recordStatusEvent(s0, 1, StatusEvent.escalated("stuck"), "owner");
     SagaStateSnapshot s2 =
         store.recordStatusEvent(
-            s1, 2, StatusEvent.recovering(SagaStatus.RUNNING, "bob", "retry"), s1.getOwnerId());
-    store.recordStatusEvent(s2, 3, StatusEvent.escalated("stuck again"), s2.getOwnerId());
+            s1, 2, StatusEvent.recovering(SagaStatus.RUNNING, "bob", "retry"), "owner");
+    store.recordStatusEvent(s2, 3, StatusEvent.escalated("stuck again"), "owner");
 
     // Act
     Optional<SagaStateAndEvents> result = store.getStateWithEvents("saga-truncated", 2);
@@ -177,7 +172,7 @@ class ScalarDbSagaStoreAdminEventsIntegrationTest {
   void getStateWithEvents_streamExactlyMax_returnsAllNotTruncated() {
     // Arrange — two events, bound of two: the extra-row probe must not report truncation
     SagaStateSnapshot running = newRunningSaga("saga-exact");
-    store.recordStatusEvent(running, 1, StatusEvent.escalated("stuck"), running.getOwnerId());
+    store.recordStatusEvent(running, 1, StatusEvent.escalated("stuck"), "owner");
 
     // Act
     Optional<SagaStateAndEvents> result = store.getStateWithEvents("saga-exact", 2);

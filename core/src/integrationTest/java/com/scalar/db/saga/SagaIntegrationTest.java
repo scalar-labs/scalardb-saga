@@ -1361,7 +1361,8 @@ class SagaIntegrationTest {
         failingStore.failEventReads.set(false);
         long claimed =
             sagaIds.stream()
-                .filter(id -> "replica-fail".equals(orchestrator.getStateSnapshot(id).getOwnerId()))
+                .filter(
+                    id -> failingStore.getOwnerId(id).filter("replica-fail"::equals).isPresent())
                 .count();
         assertThat(claimed).isEqualTo(1);
         assertThat(completedCount(orchestrator, sagaIds)).isZero();

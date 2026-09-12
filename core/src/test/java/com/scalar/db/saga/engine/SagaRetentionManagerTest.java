@@ -62,7 +62,6 @@ class SagaRetentionManagerTest {
         sagaId,
         "test-saga",
         status,
-        "owner-1",
         "1.0",
         Instant.parse("2024-12-25T00:00:00Z"),
         Instant.parse("2024-12-25T00:00:00Z"));

@@ -900,6 +900,6 @@ class SagaServiceImplTest {
 
   private static SagaStateSnapshot snapshot(String sagaId, SagaStatus status) {
     Instant now = Instant.ofEpochSecond(1_700_000_000L, 123);
-    return new SagaStateSnapshot(sagaId, "transfer", status, "owner-1", "v1", now, now);
+    return new SagaStateSnapshot(sagaId, "transfer", status, "v1", now, now);
   }
 }

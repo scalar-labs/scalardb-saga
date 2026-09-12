@@ -178,7 +178,7 @@ class DefaultSagaOrchestratorBuilderTest {
     SagaStore store = mock(SagaStore.class);
     Instant ts = Instant.parse("2026-08-10T10:00:00Z");
     SagaStateSnapshot snapshot =
-        new SagaStateSnapshot("s1", "order", SagaStatus.RUNNING, "owner", "v1", ts, ts);
+        new SagaStateSnapshot("s1", "order", SagaStatus.RUNNING, "v1", ts, ts);
     when(store.getStateWithEvents("s1", 250))
         .thenReturn(Optional.of(new SagaStateAndEvents(snapshot, List.of(), true)));
 

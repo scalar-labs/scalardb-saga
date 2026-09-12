@@ -100,7 +100,6 @@ class SagaGrpcIntegrationTest extends ServerIntegrationTestSupport {
     assertThat(snapshot.getCreatedAt()).isNotNull();
     assertThat(snapshot.getUpdatedAt()).isNotNull();
     // owner_id is a server-internal field dropped from the wire; the client fills it with "".
-    assertThat(snapshot.getOwnerId()).isEmpty();
   }
 
   @Test

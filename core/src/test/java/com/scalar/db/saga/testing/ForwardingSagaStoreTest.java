@@ -153,8 +153,7 @@ class ForwardingSagaStoreTest {
     }
     if (type == SagaStateSnapshot.class) {
       Instant t = Instant.ofEpochSecond(2_000_000L + position);
-      return new SagaStateSnapshot(
-          "saga-" + position, "saga-name", SagaStatus.RUNNING, "owner-" + position, "v1", t, t);
+      return new SagaStateSnapshot("saga-" + position, "saga-name", SagaStatus.RUNNING, "v1", t, t);
     }
     if (type == StepEvent.class) {
       return StepEvent.completed(position, "step-" + position, null);

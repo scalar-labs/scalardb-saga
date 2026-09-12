@@ -23,11 +23,7 @@ final class ProtoMappers {
 
   private ProtoMappers() {}
 
-  /**
-   * Maps an api snapshot to the wire snapshot. {@code ownerId} is deliberately dropped — it is a
-   * server-internal recovery-coordination field, not surfaced over the remote API (parity with the
-   * REST {@code SagaSnapshotResponse}).
-   */
+  /** Maps an api snapshot to the wire snapshot. */
   static com.scalar.db.saga.rpc.SagaSnapshot toProto(SagaStateSnapshot snapshot) {
     return com.scalar.db.saga.rpc.SagaSnapshot.newBuilder()
         .setSagaId(snapshot.getSagaId())
