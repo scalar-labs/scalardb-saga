@@ -9,6 +9,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 import org.jspecify.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * The wait shared by every bounded synchronous path: the REST and gRPC saga starts, and gRPC's
@@ -25,8 +27,14 @@ import org.jspecify.annotations.Nullable;
  * share one future rather than taking one each. They cannot disagree: a single dispatch hands both
  * the same snapshot, and only one of them can carry a terminal state for a given saga, since the
  * callback belonging to the first drive dies when that drive parks.
+ *
+ * <p>The two do not tile the timeline, though. A drive that parks before the registration ends
+ * there, and the drive that later resumes the saga carries no callback, so a settle inside that
+ * window reaches neither. What covers it is the read where polling begins.
  */
 public final class BoundedWait {
+
+  private static final Logger logger = LoggerFactory.getLogger(BoundedWait.class);
 
   /**
    * Lower bound on the poll interval, so a pathologically small wait bound cannot produce a tight
@@ -72,9 +80,10 @@ public final class BoundedWait {
    * when the wait ends.
    *
    * <p>The caller registers with the {@link SagaWaiterRegistry} and closes that registration
-   * itself, because only the caller knows whether a read must happen before the wait: a start has
-   * just created the saga and needs none, while a long-poll on an existing saga may find it already
-   * terminal.
+   * itself. A long-poll reads before it registers, since the saga it names may already be terminal.
+   * A start does not, having just created the saga; instead this wait reads for itself where
+   * polling begins, because a start registers only once it has a saga id and a saga that parks and
+   * is resumed in that window settles with nothing listening.
    *
    * @param settled completed with the saga's terminal snapshot by whichever mechanism on this
    *     process sees it settle: the registry, or the start callback for a start whose
@@ -85,9 +94,14 @@ public final class BoundedWait {
    *     cancelled call
    * @param pollFrom completes when the saga parks, which is the first moment a resume can land
    *     where no push reaches this process; polling starts then. {@code null} polls from the
-   *     outset, for a long-poll on a saga that may already be being driven anywhere
+   *     outset, for a long-poll on a saga that may already be being driven anywhere. A non-null
+   *     value is also taken to mean the caller registered with the registry only after dispatching
+   *     the saga, so a settle in that window could have reached no one; that is what the read where
+   *     polling begins is for. A caller that registers before dispatching has no such window and
+   *     should pass {@code null} if it has nothing to poll from
    * @param boundMillis the effective bound, already tightened by any per-call deadline
-   * @param read reads the saga's current state; called on each poll tick and once at the end
+   * @param read reads the saga's current state; called where polling begins, on each poll tick, and
+   *     once at the end
    * @return the settled snapshot if the saga settled, otherwise the state as read when the wait
    *     ended
    */
@@ -110,6 +124,22 @@ public final class BoundedWait {
       long intervalMillis = pollIntervalMillis(boundMillis);
       boolean polling = pollFrom == null || pollFrom.isDone();
       CompletableFuture<?> wakeUp = wakeUp(settled, abort, polling ? null : pollFrom, finished);
+
+      // The saga had already parked when this wait began, so its resume may have settled it before
+      // the caller could register. That settle reached nobody, and the first tick is a whole
+      // interval away. Read once now rather than waiting that out. Only a start reaches this; a
+      // long-poll passes no park signal and has read already.
+      //
+      // Not when the caller is already leaving, which the branch that starts polling mid-wait
+      // guards for the same reason: there is no tick left to save it from, and the read at the end
+      // still answers. A second transaction for a departing request is waste on exactly the path a
+      // shutting-down server sheds load through.
+      if (polling && pollFrom != null && !abort.isDone()) {
+        SagaStateSnapshot early = earlyAnswer(settled, read, deadlineNanos);
+        if (early != null) {
+          return early;
+        }
+      }
 
       while (true) {
         long remainingMillis = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
@@ -135,6 +165,12 @@ public final class BoundedWait {
             // push reaches us, so start polling for what is left of the bound.
             polling = true;
             wakeUp = wakeUp(settled, abort, null, finished);
+            // The resume can equally have landed before the caller registered, which is the one
+            // way a settle on this process reaches no one. Same read, same reason as on entry.
+            SagaStateSnapshot early = earlyAnswer(settled, read, deadlineNanos);
+            if (early != null) {
+              return early;
+            }
             continue;
           }
           break;
@@ -179,6 +215,59 @@ public final class BoundedWait {
       // an `anyOf` is what makes the JDK unlink its node from the other sources' stacks.
       finished.complete(null);
     }
+  }
+
+  /**
+   * The answer to return now, or {@code null} to keep waiting. Two things end a wait here: the saga
+   * is terminal, or the read outlived the bound and is therefore the freshest state there will be.
+   *
+   * <p>Consulted where polling begins, which is the first moment a settle can have happened without
+   * reaching this wait. A start registers only once it has a saga id, so a saga that parks and is
+   * resumed in that window settles with nothing listening: the callback belonging to the first
+   * drive died at the park, and the registration had not happened yet. Neither reports it, and
+   * without this read the wait would sit until a tick found what was already decided.
+   *
+   * <p>The push is consulted first, so a wait that was notified pays no read. A read that fails is
+   * treated as "not settled": this is an optimisation, and it must not turn a request whose answer
+   * was already on its way into a failure.
+   *
+   * @param settled the future a local push completes
+   * @param read reads the saga's current state
+   * @param deadlineNanos when the bound expires, so a read that outlives it answers rather than
+   *     being followed by a second one
+   * @return the settled snapshot, or {@code null} when the saga has not settled
+   */
+  private static @Nullable SagaStateSnapshot earlyAnswer(
+      CompletableFuture<SagaStateSnapshot> settled,
+      Supplier<SagaStateSnapshot> read,
+      long deadlineNanos) {
+    SagaStateSnapshot pushed = settled.getNow(null);
+    if (pushed != null) {
+      return pushed;
+    }
+    SagaStateSnapshot current;
+    try {
+      current = read.get();
+    } catch (RuntimeException e) {
+      // This read only ever saves the wait a tick; the push and the read at the end still answer.
+      // Letting its failure out would cost the caller the outcome of a saga that is running
+      // perfectly well, and on a start whose id the engine generated the error body carries no
+      // saga id, so the caller could not even poll for it and a retry would start a second saga.
+      // Treat a failed read as "not settled" and wait on, which is what this wait did before the
+      // read existed. The engine guards its settlement listener the same way.
+      logger.debug("Read where polling begins failed; waiting on without it", e);
+      return null;
+    }
+    // Terminal, or this read itself outlived the bound. The second case is the poll tick's rule,
+    // for the same reason: a slow read followed by the bound expiry read would spend two
+    // transactions on one answer, on exactly the store this is meant to spare.
+    if (current.getStatus().isTerminal() || System.nanoTime() - deadlineNanos >= 0) {
+      // A drive may have settled the saga while that read was in flight, which the read cannot see
+      // but the future already holds.
+      SagaStateSnapshot raced = settled.getNow(null);
+      return raced != null ? raced : current;
+    }
+    return null;
   }
 
   /**

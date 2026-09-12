@@ -241,9 +241,232 @@ class BoundedWaitTest {
     park.join();
 
     // Assert — polling began. Without the flip the whole bound is one slice and the store is read
-    // exactly once, at the end; the range absorbs a tick either way without admitting that case.
+    // exactly once, at the end. Four reads are expected here: the one where polling begins, two
+    // ticks, and the read at the bound. The range keeps a tick of slack either way and still
+    // excludes the one-read case that would mean polling never started.
     assertThat(answer).isEqualTo(waiting);
-    assertThat(reads).hasValueBetween(2, 4);
+    assertThat(reads).hasValueBetween(3, 5);
+  }
+
+  @Test
+  void awaitWithin_sagaSettledBeforeTheWaitBegan_answersWithoutWaitingForATick() {
+    // Arrange — the lost-push case. A start registers only once startAsync hands back a saga id;
+    // if the saga parks and its resume settles it in that window, the settle reaches nobody: the
+    // first drive's callback died at the park and the registration had not happened. `settled`
+    // therefore never completes, and the store already holds the outcome.
+    CompletableFuture<Void> parked = new CompletableFuture<>();
+    parked.complete(null);
+    SagaStateSnapshot completed = snapshot(SagaStatus.COMPLETED);
+    AtomicInteger reads = new AtomicInteger();
+
+    // Act
+    long startNanos = System.nanoTime();
+    SagaStateSnapshot answer =
+        BoundedWait.awaitWithin(
+            new CompletableFuture<>(),
+            new CompletableFuture<>(),
+            parked,
+            30_000L,
+            () -> {
+              reads.incrementAndGet();
+              return completed;
+            });
+    long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+
+    // Assert — answered from the one read where polling begins. Without it the wait sits until the
+    // first tick, a full 5s at this bound, for an outcome that was already decided.
+    assertThat(answer).isEqualTo(completed);
+    assertThat(reads).hasValue(1);
+    assertThat(elapsedMillis).isLessThan(1_000L);
+  }
+
+  @Test
+  void
+      awaitWithin_sagaSettledBeforeRegistrationAndParkFiresMidWait_answersWithoutWaitingForATick() {
+    // Arrange — the same lost push, reached by the other order: the park signal had not fired when
+    // the wait began, so polling starts mid-wait instead of on entry. The read belongs at both
+    // points, because which one runs is a matter of how onParked raced the resume.
+    CompletableFuture<Void> parked = new CompletableFuture<>();
+    SagaStateSnapshot completed = snapshot(SagaStatus.COMPLETED);
+    AtomicInteger reads = new AtomicInteger();
+    CompletableFuture<Void> parkSignal =
+        CompletableFuture.runAsync(
+            () -> {
+              sleep(100L);
+              parked.complete(null);
+            });
+
+    // Act
+    long startNanos = System.nanoTime();
+    SagaStateSnapshot answer =
+        BoundedWait.awaitWithin(
+            new CompletableFuture<>(),
+            new CompletableFuture<>(),
+            parked,
+            30_000L,
+            () -> {
+              reads.incrementAndGet();
+              return completed;
+            });
+    long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+    parkSignal.join();
+
+    // Assert — the park starts polling, and the read there ends the wait at once.
+    assertThat(answer).isEqualTo(completed);
+    assertThat(reads).hasValue(1);
+    assertThat(elapsedMillis).isLessThan(1_000L);
+  }
+
+  @Test
+  void awaitWithin_parkedSagaHasNotSettled_keepsWaitingPastTheReadWherePollingBegins() {
+    // Arrange — the ordinary parked saga, still waiting on its participant. The read where polling
+    // begins must not be mistaken for an answer, or every parked start would return 202 at once
+    // instead of waiting out the bound it was given.
+    CompletableFuture<Void> parked = new CompletableFuture<>();
+    parked.complete(null);
+    SagaStateSnapshot waiting = snapshot(SagaStatus.WAITING);
+    AtomicInteger reads = new AtomicInteger();
+
+    // Act — a bound short enough to run out in one slice.
+    SagaStateSnapshot answer =
+        BoundedWait.awaitWithin(
+            new CompletableFuture<>(),
+            new CompletableFuture<>(),
+            parked,
+            300L,
+            () -> {
+              reads.incrementAndGet();
+              return waiting;
+            });
+
+    // Assert — the non-terminal read left the wait running, which the second read at bound expiry
+    // is the evidence for.
+    assertThat(answer).isEqualTo(waiting);
+    assertThat(reads.get()).isGreaterThanOrEqualTo(2);
+  }
+
+  @Test
+  void awaitWithin_pushLandedBeforeTheWaitBegan_answersFromItWithoutReading() {
+    // Arrange — the saga settled before the wait began and the push did reach the registry, so the
+    // terminal snapshot is already in hand. Reading the store for what memory holds would spend a
+    // transaction on the answer it already has.
+    CompletableFuture<Void> parked = new CompletableFuture<>();
+    parked.complete(null);
+    CompletableFuture<SagaStateSnapshot> settled = new CompletableFuture<>();
+    SagaStateSnapshot completed = snapshot(SagaStatus.COMPLETED);
+    settled.complete(completed);
+    AtomicInteger reads = new AtomicInteger();
+
+    // Act
+    SagaStateSnapshot answer =
+        BoundedWait.awaitWithin(
+            settled,
+            new CompletableFuture<>(),
+            parked,
+            30_000L,
+            () -> {
+              reads.incrementAndGet();
+              return completed;
+            });
+
+    // Assert
+    assertThat(answer).isEqualTo(completed);
+    assertThat(reads).hasValue(0);
+  }
+
+  @Test
+  void awaitWithin_longPollGiven_readsAtTheFirstTickRatherThanOnEntry() {
+    // Arrange — a long-poll passes no park signal and has already read before registering, so the
+    // read where polling begins is not owed to it; adding one would make AwaitSaga read twice for
+    // one answer. Polling is on from the outset here, so only the park signal distinguishes the
+    // two, which is what the guard keys off.
+    SagaStateSnapshot completed = snapshot(SagaStatus.COMPLETED);
+    AtomicInteger reads = new AtomicInteger();
+
+    // Act — the floor puts the first tick at 1s.
+    long startNanos = System.nanoTime();
+    SagaStateSnapshot answer =
+        BoundedWait.awaitWithin(
+            new CompletableFuture<>(),
+            new CompletableFuture<>(),
+            null,
+            2_000L,
+            () -> {
+              reads.incrementAndGet();
+              return completed;
+            });
+    long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+
+    // Assert — the terminal state was readable throughout, so an entry read would have answered
+    // immediately. Waiting the tick out is the evidence that none happened.
+    assertThat(answer).isEqualTo(completed);
+    assertThat(reads).hasValue(1);
+    assertThat(elapsedMillis).isGreaterThanOrEqualTo(900L);
+  }
+
+  @Test
+  void awaitWithin_abortAlreadyDoneForAParkedSaga_readsOnceWithoutTheEagerCheck() {
+    // Arrange — shutdown, or a cancelled call, reaching a wait whose saga has already parked. The
+    // read where polling begins is there to save the wait a whole tick; a wait that is over before
+    // it starts has no tick to be saved from, and the read at the end answers anyway. Two
+    // transactions for a departing request is waste on the path a struggling deployment sheds load
+    // through.
+    CompletableFuture<Void> parked = new CompletableFuture<>();
+    parked.complete(null);
+    CompletableFuture<Void> abort = new CompletableFuture<>();
+    abort.complete(null);
+    SagaStateSnapshot waiting = snapshot(SagaStatus.WAITING);
+    AtomicInteger reads = new AtomicInteger();
+
+    // Act
+    SagaStateSnapshot answer =
+        BoundedWait.awaitWithin(
+            new CompletableFuture<>(),
+            abort,
+            parked,
+            30_000L,
+            () -> {
+              reads.incrementAndGet();
+              return waiting;
+            });
+
+    // Assert — the one read that produces the answer, not that one behind an eager check.
+    assertThat(answer).isEqualTo(waiting);
+    assertThat(reads).hasValue(1);
+  }
+
+  @Test
+  void awaitWithin_readWherePollingBeginsThrows_answersFromThePushRatherThanFailing() {
+    // Arrange — the read where polling begins is an optimisation: it saves the wait a tick, and
+    // the push and the bound-expiry read still answer without it. A store that fails it must
+    // therefore not fail the request, which before this guard is exactly what happened — a saga
+    // running perfectly well answered 503, and on a generated id the error body carries no saga
+    // id, so the caller could not even poll for it. Here the push lands while that failed read is
+    // being handled, which is the answer the caller was always going to get.
+    CompletableFuture<Void> parked = new CompletableFuture<>();
+    parked.complete(null);
+    CompletableFuture<SagaStateSnapshot> settled = new CompletableFuture<>();
+    SagaStateSnapshot completed = snapshot(SagaStatus.COMPLETED);
+    AtomicInteger reads = new AtomicInteger();
+
+    // Act
+    SagaStateSnapshot answer =
+        BoundedWait.awaitWithin(
+            settled,
+            new CompletableFuture<>(),
+            parked,
+            30_000L,
+            () -> {
+              if (reads.incrementAndGet() == 1) {
+                settled.complete(completed);
+                throw new IllegalStateException("store unavailable");
+              }
+              return completed;
+            });
+
+    // Assert — the outcome, not the store's failure, and without a second read to get it.
+    assertThat(answer).isEqualTo(completed);
+    assertThat(reads).hasValue(1);
   }
 
   private static void sleep(long millis) {
