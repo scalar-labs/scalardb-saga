@@ -94,7 +94,11 @@ public final class BoundedWait {
    *     cancelled call
    * @param pollFrom completes when the saga parks, which is the first moment a resume can land
    *     where no push reaches this process; polling starts then. {@code null} polls from the
-   *     outset, for a long-poll on a saga that may already be being driven anywhere
+   *     outset, for a long-poll on a saga that may already be being driven anywhere. A non-null
+   *     value is also taken to mean the caller registered with the registry only after dispatching
+   *     the saga, so a settle in that window could have reached no one; that is what the read where
+   *     polling begins is for. A caller that registers before dispatching has no such window and
+   *     should pass {@code null} if it has nothing to poll from
    * @param boundMillis the effective bound, already tightened by any per-call deadline
    * @param read reads the saga's current state; called where polling begins, on each poll tick, and
    *     once at the end
@@ -131,9 +135,9 @@ public final class BoundedWait {
       // still answers. A second transaction for a departing request is waste on exactly the path a
       // shutting-down server sheds load through.
       if (polling && pollFrom != null && !abort.isDone()) {
-        SagaStateSnapshot alreadySettled = settledAnswer(settled, read, deadlineNanos);
-        if (alreadySettled != null) {
-          return alreadySettled;
+        SagaStateSnapshot early = earlyAnswer(settled, read, deadlineNanos);
+        if (early != null) {
+          return early;
         }
       }
 
@@ -163,9 +167,9 @@ public final class BoundedWait {
             wakeUp = wakeUp(settled, abort, null, finished);
             // The resume can equally have landed before the caller registered, which is the one
             // way a settle on this process reaches no one. Same read, same reason as on entry.
-            SagaStateSnapshot alreadySettled = settledAnswer(settled, read, deadlineNanos);
-            if (alreadySettled != null) {
-              return alreadySettled;
+            SagaStateSnapshot early = earlyAnswer(settled, read, deadlineNanos);
+            if (early != null) {
+              return early;
             }
             continue;
           }
@@ -214,7 +218,8 @@ public final class BoundedWait {
   }
 
   /**
-   * The answer when the saga has already settled, or {@code null} when it has not.
+   * The answer to return now, or {@code null} to keep waiting. Two things end a wait here: the saga
+   * is terminal, or the read outlived the bound and is therefore the freshest state there will be.
    *
    * <p>Consulted where polling begins, which is the first moment a settle can have happened without
    * reaching this wait. A start registers only once it has a saga id, so a saga that parks and is
@@ -232,7 +237,7 @@ public final class BoundedWait {
    *     being followed by a second one
    * @return the settled snapshot, or {@code null} when the saga has not settled
    */
-  private static @Nullable SagaStateSnapshot settledAnswer(
+  private static @Nullable SagaStateSnapshot earlyAnswer(
       CompletableFuture<SagaStateSnapshot> settled,
       Supplier<SagaStateSnapshot> read,
       long deadlineNanos) {

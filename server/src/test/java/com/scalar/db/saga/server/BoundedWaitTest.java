@@ -241,9 +241,11 @@ class BoundedWaitTest {
     park.join();
 
     // Assert — polling began. Without the flip the whole bound is one slice and the store is read
-    // exactly once, at the end; the range absorbs a tick either way without admitting that case.
+    // exactly once, at the end. Four reads are expected here: the one where polling begins, two
+    // ticks, and the read at the bound. The range keeps a tick of slack either way and still
+    // excludes the one-read case that would mean polling never started.
     assertThat(answer).isEqualTo(waiting);
-    assertThat(reads).hasValueBetween(2, 4);
+    assertThat(reads).hasValueBetween(3, 5);
   }
 
   @Test
