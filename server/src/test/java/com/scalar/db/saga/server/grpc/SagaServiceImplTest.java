@@ -485,7 +485,11 @@ class SagaServiceImplTest {
               invocation.getArgument(2, SagaCallback.class).onParked(parked);
               return "gen-slow";
             });
+    // Fast where polling begins, slow at the tick. The read that has to outlive the bound is the
+    // tick's; making the first one slow instead would spend the whole bound before any tick ran,
+    // and the rule below would never be reached.
     when(orchestrator.getStateSnapshot("gen-slow"))
+        .thenReturn(parked)
         .thenAnswer(
             invocation -> {
               Thread.sleep(1_500L);
@@ -495,11 +499,11 @@ class SagaServiceImplTest {
     // Act
     SagaSnapshot response = stub(2_000).startSaga(startByName("transfer", false));
 
-    // Assert — a parked wait opens with a read where polling begins, which is what closes the
-    // window before the caller could register. That one finds the saga parked half a second inside
-    // the bound, so the wait goes on and the expiry read is the second. What the rule still
-    // forbids is the pair in one breath: a read that outlives the deadline answers from itself
-    // rather than being followed by another, which is why this is two reads and not three.
+    // Assert — the tick's own answer, and no read after it. Two reads: the one where polling
+    // begins, which returns at once and leaves the wait running, then the tick's, which starts at
+    // 1s and returns half a second past the 2s bound. That second one is the rule under test —
+    // having outlived the deadline it answers from itself, so the bound-expiry read never runs. A
+    // third read here would mean the rule was gone.
     assertThat(response.getStatus())
         .isEqualTo(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_WAITING);
     verify(orchestrator, times(2)).getStateSnapshot("gen-slow");

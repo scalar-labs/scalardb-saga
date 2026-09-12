@@ -9,6 +9,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 import org.jspecify.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * The wait shared by every bounded synchronous path: the REST and gRPC saga starts, and gRPC's
@@ -27,6 +29,8 @@ import org.jspecify.annotations.Nullable;
  * callback belonging to the first drive dies when that drive parks.
  */
 public final class BoundedWait {
+
+  private static final Logger logger = LoggerFactory.getLogger(BoundedWait.class);
 
   /**
    * Lower bound on the poll interval, so a pathologically small wait bound cannot produce a tight
@@ -214,7 +218,9 @@ public final class BoundedWait {
    * drive died at the park, and the registration had not happened yet. Neither reports it, and
    * without this read the wait would sit until a tick found what was already decided.
    *
-   * <p>The push is consulted first, so a wait that was notified pays no read.
+   * <p>The push is consulted first, so a wait that was notified pays no read. A read that fails is
+   * treated as "not settled": this is an optimisation, and it must not turn a request whose answer
+   * was already on its way into a failure.
    *
    * @param settled the future a local push completes
    * @param read reads the saga's current state
@@ -230,7 +236,19 @@ public final class BoundedWait {
     if (pushed != null) {
       return pushed;
     }
-    SagaStateSnapshot current = read.get();
+    SagaStateSnapshot current;
+    try {
+      current = read.get();
+    } catch (RuntimeException e) {
+      // This read only ever saves the wait a tick; the push and the read at the end still answer.
+      // Letting its failure out would cost the caller the outcome of a saga that is running
+      // perfectly well, and on a start whose id the engine generated the error body carries no
+      // saga id, so the caller could not even poll for it and a retry would start a second saga.
+      // Treat a failed read as "not settled" and wait on, which is what this wait did before the
+      // read existed. The engine guards its settlement listener the same way.
+      logger.debug("Read where polling begins failed; waiting on without it", e);
+      return null;
+    }
     // Terminal, or this read itself outlived the bound. The second case is the poll tick's rule,
     // for the same reason: a slow read followed by the bound expiry read would spend two
     // transactions on one answer, on exactly the store this is meant to spare.

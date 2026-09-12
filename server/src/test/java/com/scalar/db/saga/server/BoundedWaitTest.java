@@ -433,6 +433,40 @@ class BoundedWaitTest {
     assertThat(reads).hasValue(1);
   }
 
+  @Test
+  void awaitWithin_readWherePollingBeginsThrows_answersFromThePushRatherThanFailing() {
+    // Arrange — the read where polling begins is an optimisation: it saves the wait a tick, and
+    // the push and the bound-expiry read still answer without it. A store that fails it must
+    // therefore not fail the request, which before this guard is exactly what happened — a saga
+    // running perfectly well answered 503, and on a generated id the error body carries no saga
+    // id, so the caller could not even poll for it. Here the push lands while that failed read is
+    // being handled, which is the answer the caller was always going to get.
+    CompletableFuture<Void> parked = new CompletableFuture<>();
+    parked.complete(null);
+    CompletableFuture<SagaStateSnapshot> settled = new CompletableFuture<>();
+    SagaStateSnapshot completed = snapshot(SagaStatus.COMPLETED);
+    AtomicInteger reads = new AtomicInteger();
+
+    // Act
+    SagaStateSnapshot answer =
+        BoundedWait.awaitWithin(
+            settled,
+            new CompletableFuture<>(),
+            parked,
+            30_000L,
+            () -> {
+              if (reads.incrementAndGet() == 1) {
+                settled.complete(completed);
+                throw new IllegalStateException("store unavailable");
+              }
+              return completed;
+            });
+
+    // Assert — the outcome, not the store's failure, and without a second read to get it.
+    assertThat(answer).isEqualTo(completed);
+    assertThat(reads).hasValue(1);
+  }
+
   private static void sleep(long millis) {
     try {
       Thread.sleep(millis);
