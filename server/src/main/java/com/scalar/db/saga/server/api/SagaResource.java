@@ -230,10 +230,13 @@ public final class SagaResource {
       long timeoutMillis) {
     SagaStateSnapshot snapshot;
     // One future, completed by whichever mechanism sees the saga settle first. The callback was
-    // handed out before the saga id existed and covers the window until the registration below —
-    // on a server-generated id there is nothing to register under until startAsync returns, by
-    // which time the saga may already have settled. The registry covers every drive after that,
-    // above all the one that resumes the saga after an asynchronous step and carries no callback.
+    // handed out before the saga id existed; on a server-generated id there is nothing to register
+    // under until startAsync returns. The registry covers every drive after the registration
+    // below, including the resume that follows an asynchronous step and carries none.
+    //
+    // Neither covers a drive that parks before that registration. Its callback ends at the park
+    // and its resume carries none, so a settle in that window reaches no one; the wait reads once
+    // where polling begins to catch it.
     try (SagaWaiterRegistry.Waiter waiter = waiterRegistry.register(sagaId, settled)) {
       snapshot =
           BoundedWait.awaitWithin(

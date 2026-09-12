@@ -196,10 +196,13 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
     // registry will deliver sooner, so the wait does not read the store at all.
     CompletableFuture<Void> parked = new CompletableFuture<>();
     // One future, completed by whichever mechanism sees the saga settle first. The callback is
-    // handed out before the saga id exists and covers the window until the registration below — on
-    // a server-generated id there is no id to register under until dispatchStart returns, by which
-    // time the saga may already have settled. The registry covers every drive after that, above all
-    // the one that resumes the saga after an asynchronous step and carries no callback.
+    // handed out before the saga id exists; on a server-generated id there is no id to register
+    // under until dispatchStart returns. The registry covers every drive after the registration
+    // below, including the resume that follows an asynchronous step and carries none.
+    //
+    // Neither covers a drive that parks before that registration. Its callback ends at the park
+    // and its resume carries none, so a settle in that window reaches no one; the wait reads once
+    // where polling begins to catch it.
     String sagaId = dispatchStart(request, input, outcomeSignal(settled, parked));
     SagaStateSnapshot answer;
     try (SagaWaiterRegistry.Waiter waiter = waiterRegistry.register(sagaId, settled)) {

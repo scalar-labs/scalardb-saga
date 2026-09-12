@@ -27,6 +27,10 @@ import org.slf4j.LoggerFactory;
  * share one future rather than taking one each. They cannot disagree: a single dispatch hands both
  * the same snapshot, and only one of them can carry a terminal state for a given saga, since the
  * callback belonging to the first drive dies when that drive parks.
+ *
+ * <p>The two do not tile the timeline, though. A drive that parks before the registration ends
+ * there, and the drive that later resumes the saga carries no callback, so a settle inside that
+ * window reaches neither. What covers it is the read where polling begins.
  */
 public final class BoundedWait {
 
