@@ -402,8 +402,10 @@ class SagaServiceImplTest {
               invocation.getArgument(2, SagaCallback.class).onParked(parked);
               return "gen-p";
             });
+    // Parked in the store until the bound expires, so the read where polling begins finds it
+    // still running and the wait continues rather than answering from it.
     when(orchestrator.getStateSnapshot("gen-p"))
-        .thenReturn(snapshot("gen-p", SagaStatus.COMPLETED));
+        .thenReturn(snapshot("gen-p", SagaStatus.WAITING), snapshot("gen-p", SagaStatus.COMPLETED));
 
     // Act
     long startNanos = System.nanoTime();
@@ -417,7 +419,8 @@ class SagaServiceImplTest {
     // Both of these fail if the park releases the wait: it would answer immediately, from the
     // parked snapshot, without ever reading the store.
     assertThat(elapsedMillis).isGreaterThanOrEqualTo(250L);
-    verify(orchestrator).getStateSnapshot("gen-p");
+    // Twice: once where polling begins, which found it still parked, and once at bound expiry.
+    verify(orchestrator, times(2)).getStateSnapshot("gen-p");
   }
 
   @Test
@@ -492,10 +495,14 @@ class SagaServiceImplTest {
     // Act
     SagaSnapshot response = stub(2_000).startSaga(startByName("transfer", false));
 
-    // Assert — the tick's own answer, and only the one read that produced it.
+    // Assert — a parked wait opens with a read where polling begins, which is what closes the
+    // window before the caller could register. That one finds the saga parked half a second inside
+    // the bound, so the wait goes on and the expiry read is the second. What the rule still
+    // forbids is the pair in one breath: a read that outlives the deadline answers from itself
+    // rather than being followed by another, which is why this is two reads and not three.
     assertThat(response.getStatus())
         .isEqualTo(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_WAITING);
-    verify(orchestrator, times(1)).getStateSnapshot("gen-slow");
+    verify(orchestrator, times(2)).getStateSnapshot("gen-slow");
   }
 
   @Test

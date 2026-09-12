@@ -8,6 +8,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -147,7 +148,8 @@ class SagaResourceStartTest {
     // Arrange — the saga parks on an async step, so the engine reports onParked, and finishes
     // before the bound elapses. The resume carries no SagaCallback (and may happen on another
     // replica), so the callback registered here never fires again: what decides the response is
-    // the read at bound expiry, which by then sees a completed saga.
+    // the read at bound expiry, which by then sees a completed saga. The store reports it parked
+    // until then, so the read where polling begins finds it still running and the wait continues.
     app.stop();
     startServer(300L);
     when(orchestrator.startAsync(eq(SAGA_NAME), anyMap(), any(SagaCallback.class)))
@@ -156,7 +158,8 @@ class SagaResourceStartTest {
               invocation.getArgument(2, SagaCallback.class).onParked(snapshot(SagaStatus.WAITING));
               return SAGA_ID;
             });
-    when(orchestrator.getStateSnapshot(SAGA_ID)).thenReturn(snapshot(SagaStatus.COMPLETED));
+    when(orchestrator.getStateSnapshot(SAGA_ID))
+        .thenReturn(snapshot(SagaStatus.WAITING), snapshot(SagaStatus.COMPLETED));
 
     // Act
     long startNanos = System.nanoTime();
@@ -169,7 +172,8 @@ class SagaResourceStartTest {
     // Both of these fail if the park releases the wait: it would answer at once, well inside the
     // bound, from the parked snapshot and without ever reading the store.
     assertThat(elapsedMillis).isGreaterThanOrEqualTo(250L);
-    verify(orchestrator).getStateSnapshot(SAGA_ID);
+    // Twice: once where polling begins, which found it still parked, and once at bound expiry.
+    verify(orchestrator, times(2)).getStateSnapshot(SAGA_ID);
   }
 
   @Test

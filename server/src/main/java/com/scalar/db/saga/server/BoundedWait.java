@@ -72,9 +72,10 @@ public final class BoundedWait {
    * when the wait ends.
    *
    * <p>The caller registers with the {@link SagaWaiterRegistry} and closes that registration
-   * itself, because only the caller knows whether a read must happen before the wait: a start has
-   * just created the saga and needs none, while a long-poll on an existing saga may find it already
-   * terminal.
+   * itself. A long-poll reads before it registers, since the saga it names may already be terminal.
+   * A start does not, having just created the saga; instead this wait reads for itself where
+   * polling begins, because a start registers only once it has a saga id and a saga that parks and
+   * is resumed in that window settles with nothing listening.
    *
    * @param settled completed with the saga's terminal snapshot by whichever mechanism on this
    *     process sees it settle: the registry, or the start callback for a start whose
@@ -87,7 +88,8 @@ public final class BoundedWait {
    *     where no push reaches this process; polling starts then. {@code null} polls from the
    *     outset, for a long-poll on a saga that may already be being driven anywhere
    * @param boundMillis the effective bound, already tightened by any per-call deadline
-   * @param read reads the saga's current state; called on each poll tick and once at the end
+   * @param read reads the saga's current state; called where polling begins, on each poll tick, and
+   *     once at the end
    * @return the settled snapshot if the saga settled, otherwise the state as read when the wait
    *     ended
    */
@@ -110,6 +112,17 @@ public final class BoundedWait {
       long intervalMillis = pollIntervalMillis(boundMillis);
       boolean polling = pollFrom == null || pollFrom.isDone();
       CompletableFuture<?> wakeUp = wakeUp(settled, abort, polling ? null : pollFrom, finished);
+
+      // The saga had already parked when this wait began, so its resume may have settled it before
+      // the caller could register. That settle reached nobody, and the first tick is a whole
+      // interval away. Read once now rather than waiting that out. Only a start reaches this; a
+      // long-poll passes no park signal and has read already.
+      if (polling && pollFrom != null) {
+        SagaStateSnapshot alreadySettled = settledAnswer(settled, read, deadlineNanos);
+        if (alreadySettled != null) {
+          return alreadySettled;
+        }
+      }
 
       while (true) {
         long remainingMillis = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
@@ -135,6 +148,12 @@ public final class BoundedWait {
             // push reaches us, so start polling for what is left of the bound.
             polling = true;
             wakeUp = wakeUp(settled, abort, null, finished);
+            // The resume can equally have landed before the caller registered, which is the one
+            // way a settle on this process reaches no one. Same read, same reason as on entry.
+            SagaStateSnapshot alreadySettled = settledAnswer(settled, read, deadlineNanos);
+            if (alreadySettled != null) {
+              return alreadySettled;
+            }
             continue;
           }
           break;
@@ -179,6 +198,44 @@ public final class BoundedWait {
       // an `anyOf` is what makes the JDK unlink its node from the other sources' stacks.
       finished.complete(null);
     }
+  }
+
+  /**
+   * The answer when the saga has already settled, or {@code null} when it has not.
+   *
+   * <p>Consulted where polling begins, which is the first moment a settle can have happened without
+   * reaching this wait. A start registers only once it has a saga id, so a saga that parks and is
+   * resumed in that window settles with nothing listening: the callback belonging to the first
+   * drive died at the park, and the registration had not happened yet. Neither reports it, and
+   * without this read the wait would sit until a tick found what was already decided.
+   *
+   * <p>The push is consulted first, so a wait that was notified pays no read.
+   *
+   * @param settled the future a local push completes
+   * @param read reads the saga's current state
+   * @param deadlineNanos when the bound expires, so a read that outlives it answers rather than
+   *     being followed by a second one
+   * @return the settled snapshot, or {@code null} when the saga has not settled
+   */
+  private static @Nullable SagaStateSnapshot settledAnswer(
+      CompletableFuture<SagaStateSnapshot> settled,
+      Supplier<SagaStateSnapshot> read,
+      long deadlineNanos) {
+    SagaStateSnapshot pushed = settled.getNow(null);
+    if (pushed != null) {
+      return pushed;
+    }
+    SagaStateSnapshot current = read.get();
+    // Terminal, or this read itself outlived the bound. The second case is the poll tick's rule,
+    // for the same reason: a slow read followed by the bound expiry read would spend two
+    // transactions on one answer, on exactly the store this is meant to spare.
+    if (current.getStatus().isTerminal() || System.nanoTime() - deadlineNanos >= 0) {
+      // A drive may have settled the saga while that read was in flight, which the read cannot see
+      // but the future already holds.
+      SagaStateSnapshot raced = settled.getNow(null);
+      return raced != null ? raced : current;
+    }
+    return null;
   }
 
   /**
