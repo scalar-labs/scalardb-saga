@@ -1,10 +1,13 @@
 package com.scalar.db.saga.grpc;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.protobuf.Any;
 import com.google.protobuf.Timestamp;
+import com.google.rpc.ErrorInfo;
 import com.scalar.db.saga.api.SagaCallback;
 import com.scalar.db.saga.api.SagaDefinitionId;
 import com.scalar.db.saga.api.SagaDetail;
@@ -12,8 +15,12 @@ import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.api.TimelineEvent;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
+import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaErrorCode;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.exception.SagaOverloadedException;
 import com.scalar.db.saga.exception.SagaPermissionDeniedException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaTimeoutException;
@@ -31,8 +38,11 @@ import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.inprocess.InProcessChannelBuilder;
 import io.grpc.inprocess.InProcessServerBuilder;
+import io.grpc.protobuf.StatusProto;
 import io.grpc.stub.StreamObserver;
 import java.io.IOException;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.Map;
@@ -48,6 +58,7 @@ import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class GrpcSagaOrchestratorClientTest {
 
@@ -195,6 +206,7 @@ class GrpcSagaOrchestratorClientTest {
                     .setResultingStatus(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_COMPENSATING)
                     .setDetail("rolling back")
                     .setOperator("bob"))
+            .setTruncated(true)
             .build();
 
     // Act
@@ -202,6 +214,7 @@ class GrpcSagaOrchestratorClientTest {
 
     // Assert — snapshot maps, and set/unset optionals round-trip to value/null
     assertThat(detail.getSnapshot().getStatus()).isEqualTo(SagaStatus.COMPENSATED);
+    assertThat(detail.isTruncated()).isTrue();
     assertThat(detail.getTimeline()).hasSize(2);
 
     TimelineEvent step = detail.getTimeline().get(0);
@@ -249,6 +262,22 @@ class GrpcSagaOrchestratorClientTest {
         .isInstanceOf(SagaUnauthenticatedException.class);
   }
 
+  // CANCELLED is retryable on the synchronous start path, where an interrupt already surfaces as
+  // REQUEST_ABORTED from backoff(); the mapping is asserted on a single-shot read, which reaches
+  // mapCommon directly.
+  @Test
+  void getStateSnapshot_cancelled_throwsRequestAborted() {
+    // Arrange — the blocking stub reports a caller interrupt (and an in-flight call killed by a
+    // concurrent shutdownNow) as CANCELLED.
+    fake.getError = Status.CANCELLED.withDescription("Thread interrupted").asRuntimeException();
+
+    // Act + Assert — a caller-side abort, not the version skew the catch-all would report.
+    assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
+        .isExactlyInstanceOf(SagaRuntimeException.class)
+        .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.REQUEST_ABORTED);
+  }
+
   @Test
   void start_notFound_throwsSagaDefinitionNotFound() {
     fake.startError = Status.NOT_FOUND.withDescription("no def").asRuntimeException();
@@ -257,11 +286,313 @@ class GrpcSagaOrchestratorClientTest {
   }
 
   @Test
-  void start_invalidArgument_throwsIllegalArgument() {
+  void start_definitionInvalidWithErrorInfo_throwsSagaDefinitionException() {
+    // Arrange — SagaOrchestrator.start declares @throws SagaDefinitionException, and the daemon
+    // maps
+    // it to INVALID_ARGUMENT with the exact code in the ErrorInfo. Before reconstruction reached
+    // this path the client flattened every INVALID_ARGUMENT alike, so the declared type never
+    // arrived and a caller's catch block could not fire.
+    fake.startError =
+        statusWithReason(
+            Status.Code.INVALID_ARGUMENT,
+            SagaErrorCode.INVALID_DEFINITION.code(),
+            Map.of("saga_name", "transfer", "detail", "duplicate step name 'debit'"));
+
+    // Act + Assert
+    assertThatThrownBy(() -> client.start("transfer", Map.of()))
+        .isInstanceOf(SagaDefinitionException.class)
+        .extracting(e -> ((SagaDefinitionException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.INVALID_DEFINITION);
+  }
+
+  @Test
+  void getStateSnapshot_internalWithErrorInfo_reconstructsTheServerCode() {
+    // Arrange — INTERNAL has no transport-dispatch case, so it used to fall to the catch-all and
+    // report UNRECOGNIZED_SERVER_ERROR ("upgrade the client SDK") even though the daemon sent a
+    // code
+    // this client understands.
+    fake.getError =
+        statusWithReason(
+            Status.Code.INTERNAL, SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED.code(), Map.of());
+
+    // Act + Assert
+    assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
+        .isInstanceOf(SagaRuntimeException.class)
+        .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED);
+  }
+
+  @Test
+  void start_engineOverloadedGiven_surfacesAtOnceWithoutRetrying() {
+    // A refusal is a definite answer — nothing was persisted — so what to do about it is the
+    // caller's call: shed, queue, try another region, tell its own user. Retrying inside the SDK
+    // would spend their whole deadline on that decision and keep pressure on a saturated server.
+    // Arrange — the script fails once and would succeed on a second attempt, so a retry shows up
+    // as the absence of an exception rather than as a count.
+    fake.enqueueStartError(
+        statusWithReason(
+            Status.Code.UNAVAILABLE, SagaErrorCode.ENGINE_OVERLOADED.code(), Map.of()));
+    fake.enqueueStartSnapshot(snapshot("s-1", SagaStatus.COMPLETED));
+
+    // Act & Assert
+    assertThatThrownBy(() -> client.start("transfer", Map.of()))
+        .isInstanceOf(SagaOverloadedException.class);
+  }
+
+  @Test
+  void start_overloadedAfterAnAmbiguousAttempt_reconcilesWithTheStore() {
+    // The first attempt may have created the saga before the connection dropped — and that saga
+    // may be exactly what is holding the last permit, which makes the refusal and the success the
+    // same request seen twice. Reporting "nothing was persisted" here would be false.
+    // Arrange
+    fake.enqueueStartError(
+        new StatusRuntimeException(Status.UNAVAILABLE)); // ambiguous: may have landed
+    fake.enqueueStartError(
+        statusWithReason(
+            Status.Code.UNAVAILABLE, SagaErrorCode.ENGINE_OVERLOADED.code(), Map.of()));
+    fake.getResponse = snapshot("s-1", SagaStatus.COMPLETED); // it had landed
+
+    // Act & Assert — the saga is adopted rather than the caller being told it never existed.
+    assertThatCode(() -> client.start("transfer", Map.of())).doesNotThrowAnyException();
+  }
+
+  @Test
+  void start_overloadedAndTheReconcileItselfFails_stillSurfacesOverload() {
+    // The reconcile settles nothing when it fails, so overload remains the only thing the server
+    // actually said — and it is what a caller keys backpressure on. Losing it to a timeout here
+    // would be worst exactly when it matters, since an overloaded daemon is when this call is
+    // slowest.
+    // Arrange
+    fake.enqueueStartError(new StatusRuntimeException(Status.UNAVAILABLE));
+    fake.enqueueStartError(
+        statusWithReason(
+            Status.Code.UNAVAILABLE, SagaErrorCode.ENGINE_OVERLOADED.code(), Map.of()));
+    fake.getError = Status.DEADLINE_EXCEEDED.asRuntimeException();
+
+    // Act & Assert
+    assertThatThrownBy(() -> client.start("transfer", Map.of()))
+        .isInstanceOf(SagaOverloadedException.class)
+        .satisfies(e -> assertThat(e.getSuppressed()).isNotEmpty());
+  }
+
+  @Test
+  void start_overloadedAfterAnAmbiguousAttemptThatDidNotLand_surfacesOverload() {
+    // The other half: once the store agrees nothing is there, the refusal is the honest answer and
+    // must not be softened into a wait for a saga that does not exist.
+    // Arrange
+    fake.enqueueStartError(new StatusRuntimeException(Status.UNAVAILABLE));
+    fake.enqueueStartError(
+        statusWithReason(
+            Status.Code.UNAVAILABLE, SagaErrorCode.ENGINE_OVERLOADED.code(), Map.of()));
+    fake.getError = Status.NOT_FOUND.asRuntimeException();
+
+    // Act & Assert
+    assertThatThrownBy(() -> client.start("transfer", Map.of()))
+        .isInstanceOf(SagaOverloadedException.class);
+  }
+
+  @Test
+  void start_bareUnavailableGiven_isStillRetried() {
+    // The other side of the same rule: an unreachable daemon may never have received the request,
+    // so the client absorbs it. Excluding the refusal must not have disarmed this.
+    // Arrange
+    fake.enqueueStartError(new StatusRuntimeException(Status.UNAVAILABLE));
+    fake.enqueueStartSnapshot(snapshot("s-1", SagaStatus.COMPLETED));
+
+    // Act & Assert — the retry lands on the scripted success.
+    assertThatCode(() -> client.start("transfer", Map.of())).doesNotThrowAnyException();
+  }
+
+  @Test
+  void startAsync_engineOverloadedGiven_reconstructsSagaOverloadedException() {
+    // A refused start and an unreachable daemon both arrive as UNAVAILABLE, so only the code tells
+    // them apart — and they call for different handling: one means the server is full and the
+    // request is safe to repeat verbatim, the other that it may never have arrived.
+    // Arrange
+    fake.startError =
+        statusWithReason(Status.Code.UNAVAILABLE, SagaErrorCode.ENGINE_OVERLOADED.code(), Map.of());
+
+    // Act & Assert — the async path, pinned separately from the synchronous one above because the
+    // two reach the same answer by different routes: this one never enters the retry loop at all.
+    assertThatThrownBy(() -> client.startAsync("transfer", Map.of()))
+        .isInstanceOf(SagaOverloadedException.class)
+        .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.ENGINE_OVERLOADED);
+  }
+
+  @Test
+  void startAsync_bareUnavailableWithNoErrorInfo_staysSagaUnavailable() {
+    // The negative direction, pinned deliberately: a transport-level UNAVAILABLE carries no body,
+    // and must not be read as an admission refusal. Treating it as one would tell a caller the
+    // request was certainly refused when it may in fact have been executed.
+    // Arrange
+    fake.startError = new StatusRuntimeException(Status.UNAVAILABLE);
+
+    // Act & Assert
+    assertThatThrownBy(() -> client.startAsync("transfer", Map.of()))
+        .isInstanceOf(SagaUnavailableException.class)
+        .isNotInstanceOf(SagaOverloadedException.class);
+  }
+
+  @Test
+  void startAsync_unknownCodeWithUnavailableStatus_throwsSagaUnavailable() {
+    // Arrange — a rolling upgrade: a newer daemon sends a code this client does not know, on a
+    // retryable UNAVAILABLE. Degrading it to UNRECOGNIZED_SERVER_ERROR (CLIENT_ERROR) here used to
+    // stop a caller keying retries on Category.RETRYABLE_SERVER_ERROR; the status the daemon set
+    // correctly must win instead.
+    fake.startError = statusWithReason(Status.Code.UNAVAILABLE, "DB-SAGA-99999", Map.of());
+
+    // Act + Assert — classified by the transport status, not the unresolvable code.
+    assertThatThrownBy(() -> client.startAsync("transfer", Map.of()))
+        .isInstanceOf(SagaUnavailableException.class);
+  }
+
+  @Test
+  void getStateSnapshot_unknownRetryableCodeUnderAborted_throwsRetryableSentinel() {
+    // Arrange — a rolling upgrade again, but under ABORTED, a status the transport dispatch has
+    // no arm for. The reason's category digit (2 = retryable) is a frozen wire contract, so the
+    // retry signal must survive even though the code itself is unknown.
+    fake.getError = statusWithReason(Status.Code.ABORTED, "DB-SAGA-20099", Map.of());
+
+    // Act + Assert — the retryable sentinel carrying the real code, not the CLIENT_ERROR
+    // catch-all that would stop a caller's retries.
+    assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
+        .isExactlyInstanceOf(SagaRuntimeException.class)
+        .isInstanceOfSatisfying(
+            SagaRuntimeException.class,
+            e -> {
+              assertThat(e.getErrorCode())
+                  .isEqualTo(SagaErrorCode.UNRECOGNIZED_RETRYABLE_SERVER_ERROR);
+              assertThat(e.getMetadata()).containsEntry("server_value", "DB-SAGA-20099");
+            });
+  }
+
+  @Test
+  void getStateSnapshot_serverSentUnrecognizedCode_keepsIt() {
+    // Arrange — a genuine DB-SAGA-49999 from the server is a registered code, not a degradation,
+    // so it must round-trip with the server's own metadata rather than fall to the status.
+    fake.getError =
+        statusWithReason(
+            Status.Code.INTERNAL,
+            SagaErrorCode.UNRECOGNIZED_SERVER_ERROR.code(),
+            Map.of("server_value", "SOME_ENUM_VALUE"));
+
+    // Act + Assert
+    assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
+        .isExactlyInstanceOf(SagaRuntimeException.class)
+        .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.UNRECOGNIZED_SERVER_ERROR);
+  }
+
+  @Test
+  void getStateSnapshot_foreignDomainErrorInfo_isIgnored() {
+    // Arrange — an intermediary (mesh sidecar, gateway) generated the failure and attached its own
+    // ErrorInfo. Its reason means nothing in the saga vocabulary; reading it as one used to
+    // discard the status the infrastructure set correctly and claim a version skew.
+    ErrorInfo foreign =
+        ErrorInfo.newBuilder().setReason("upstream_connect_failure").setDomain("envoy.io").build();
+    fake.getError =
+        StatusProto.toStatusRuntimeException(
+            com.google.rpc.Status.newBuilder()
+                .setCode(Status.Code.UNAVAILABLE.value())
+                .addDetails(Any.pack(foreign))
+                .build());
+
+    // Act + Assert — classified by the transport status, as if no ErrorInfo were present.
+    assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
+        .isInstanceOf(SagaUnavailableException.class);
+  }
+
+  @Test
+  void getStateSnapshot_foreignErrorInfoAheadOfOurs_readsOurs() {
+    // Arrange — a proxy prepended its own ErrorInfo before the daemon's. The scan must skip the
+    // foreign one and keep going, not stop at the first detail it sees.
+    ErrorInfo foreign =
+        ErrorInfo.newBuilder().setReason("proxy_error").setDomain("envoy.io").build();
+    ErrorInfo ours =
+        ErrorInfo.newBuilder()
+            .setReason(SagaErrorCode.SAGA_NOT_FOUND.code())
+            .setDomain(SagaErrorCode.WIRE_DOMAIN)
+            .putMetadata("saga_id", "s-1")
+            .build();
+    fake.getError =
+        StatusProto.toStatusRuntimeException(
+            com.google.rpc.Status.newBuilder()
+                .setCode(Status.Code.NOT_FOUND.value())
+                .addDetails(Any.pack(foreign))
+                .addDetails(Any.pack(ours))
+                .build());
+
+    // Act + Assert
+    assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
+        .isInstanceOf(SagaNotFoundException.class);
+  }
+
+  @Test
+  void getStateSnapshot_errorInfoGiven_attachesTheGrpcStatusAsCause() {
+    // Arrange — the registry builds every exception cause-free, so without an explicit initCause
+    // the
+    // gRPC status (and its description and trailers) would be lost to anyone debugging.
+    fake.getError =
+        statusWithReason(Status.Code.INTERNAL, SagaErrorCode.INTERNAL_ERROR.code(), Map.of());
+
+    // Act + Assert
+    assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
+        .hasCauseInstanceOf(StatusRuntimeException.class);
+  }
+
+  @Test
+  void start_alreadyExistsWithErrorInfo_stillRefetchesTheExistingSnapshot() {
+    // Arrange — SAGA_ALREADY_EXISTS is deliberately not reconstructible, since the typed exception
+    // needs the existing snapshot and the wire metadata has no room for it. So ALREADY_EXISTS must
+    // stay ahead of reconstruction even when an ErrorInfo is present, or the refetch is skipped and
+    // the caller gets a bare code instead of the snapshot.
+    fake.startError =
+        statusWithReason(
+            Status.Code.ALREADY_EXISTS,
+            SagaErrorCode.SAGA_ALREADY_EXISTS.code(),
+            Map.of("saga_id", "my-id"));
+    fake.getResponse = snapshot("my-id", SagaStatus.COMPLETED);
+
+    // Act + Assert
+    assertThatThrownBy(() -> client.start("my-id", "transfer", Map.of()))
+        .isInstanceOfSatisfying(
+            SagaAlreadyExistsException.class,
+            e -> assertThat(e.getExisting().getStatus()).isEqualTo(SagaStatus.COMPLETED));
+  }
+
+  @Test
+  void start_invalidArgumentWithoutErrorInfo_throwsSagaIllegalArgument() {
     fake.startError = Status.INVALID_ARGUMENT.withDescription("bad input").asRuntimeException();
     assertThatThrownBy(() -> client.start("transfer", Map.of()))
-        .isInstanceOf(IllegalArgumentException.class)
+        .isInstanceOf(SagaIllegalArgumentException.class)
         .hasMessageContaining("bad input");
+  }
+
+  @Test
+  void start_invalidArgumentWithControlCharacters_flattensThemInTheMessage() {
+    // Arrange — the description is the one server-controlled text embedded in an exception
+    // message, and an intermediary fully controls it; a newline would fabricate client log lines.
+    fake.startError =
+        Status.INVALID_ARGUMENT.withDescription("line1\nline2\tend").asRuntimeException();
+
+    // Act + Assert — control characters become spaces; the raw text stays on the cause.
+    assertThatThrownBy(() -> client.start("transfer", Map.of()))
+        .isInstanceOf(SagaIllegalArgumentException.class)
+        .hasMessageContaining("line1 line2 end")
+        .hasCauseInstanceOf(StatusRuntimeException.class);
+  }
+
+  @Test
+  void start_invalidArgumentWithOversizedDescription_capsTheMessage() {
+    // Arrange
+    fake.startError = Status.INVALID_ARGUMENT.withDescription("x".repeat(300)).asRuntimeException();
+
+    // Act + Assert — capped with an ellipsis; the full text stays on the cause.
+    assertThatThrownBy(() -> client.start("transfer", Map.of()))
+        .isInstanceOf(SagaIllegalArgumentException.class)
+        .hasMessageContaining("...")
+        .satisfies(e -> assertThat(e.getMessage()).doesNotContain("x".repeat(250)));
   }
 
   // UNAVAILABLE/DEADLINE_EXCEEDED are retryable on the synchronous start path, so the mapping is
@@ -281,10 +612,65 @@ class GrpcSagaOrchestratorClientTest {
   }
 
   @Test
-  void start_internal_throwsSagaRuntimeException() {
+  void start_internalWithoutErrorInfo_throwsInternalError() {
+    // Arrange — an older daemon's security interceptor reports an unexpected server fault as a
+    // bare INTERNAL with no ErrorInfo.
     fake.startError = Status.INTERNAL.withDescription("boom").asRuntimeException();
+
+    // Act + Assert — a server fault to escalate, not the version skew the catch-all would report.
     assertThatThrownBy(() -> client.start("transfer", Map.of()))
-        .isExactlyInstanceOf(SagaRuntimeException.class);
+        .isExactlyInstanceOf(SagaRuntimeException.class)
+        .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.INTERNAL_ERROR);
+  }
+
+  @Test
+  void getStateSnapshot_unknownWithoutErrorInfo_throwsInternalError() {
+    // Arrange — bare UNKNOWN is what the gRPC server runtime emits when a failure escapes the
+    // daemon's handlers entirely (an Error, or a fault in interceptor code).
+    fake.getError = Status.UNKNOWN.withDescription("app error").asRuntimeException();
+
+    // Act + Assert — a server fault to escalate, not the version skew the catch-all would report.
+    assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
+        .isExactlyInstanceOf(SagaRuntimeException.class)
+        .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.INTERNAL_ERROR);
+  }
+
+  @Test
+  void getStateSnapshot_resourceExhaustedWithoutErrorInfo_throwsUnmappedServerStatus() {
+    // Arrange — every shipped server attaches an ErrorInfo to a rate-limit refusal, so a bare
+    // RESOURCE_EXHAUSTED most likely means the gRPC runtime rejected an oversized message.
+    fake.getError = Status.RESOURCE_EXHAUSTED.withDescription("too large").asRuntimeException();
+
+    // Act + Assert — not rate-limit backoff advice (retrying an oversized message never fits) and
+    // not the version-skew catch-all (no code was sent; upgrading changes nothing).
+    assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
+        .isExactlyInstanceOf(SagaRuntimeException.class)
+        .isInstanceOfSatisfying(
+            SagaRuntimeException.class,
+            e -> {
+              assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.UNMAPPED_SERVER_STATUS);
+              assertThat(e.getMetadata()).containsEntry("server_value", "RESOURCE_EXHAUSTED");
+            });
+  }
+
+  @Test
+  void getStateSnapshot_unknownCodeUnderUnmappedStatus_throwsUnrecognizedWithTheCode() {
+    // Arrange — an unresolvable non-retryable code riding a status with no transport arm. The
+    // default split must report genuine version skew (the body was there, this client is too old)
+    // and carry the unresolved code, not the bare-status story.
+    fake.getError = statusWithReason(Status.Code.FAILED_PRECONDITION, "DB-SAGA-10999", Map.of());
+
+    // Act + Assert
+    assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
+        .isExactlyInstanceOf(SagaRuntimeException.class)
+        .isInstanceOfSatisfying(
+            SagaRuntimeException.class,
+            e -> {
+              assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.UNRECOGNIZED_SERVER_ERROR);
+              assertThat(e.getMetadata()).containsEntry("server_value", "DB-SAGA-10999");
+            });
   }
 
   @Test
@@ -418,9 +804,12 @@ class GrpcSagaOrchestratorClientTest {
     fake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
     fake.awaitError = Status.UNAVAILABLE.withDescription("still down").asRuntimeException();
 
-    // Act + Assert
+    // Act + Assert — SAGA_AWAIT_TIMEOUT, not REQUEST_TIMEOUT: the start succeeded and the saga
+    // keeps running; only the wait budget expired, so the caller should poll by ID.
     assertThatThrownBy(() -> deadlineClient.start("transfer", Map.of()))
-        .isInstanceOf(SagaTimeoutException.class);
+        .isInstanceOf(SagaTimeoutException.class)
+        .extracting(e -> ((SagaTimeoutException) e).getErrorCode())
+        .isEqualTo(SagaErrorCode.SAGA_AWAIT_TIMEOUT);
   }
 
   @Test
@@ -490,6 +879,28 @@ class GrpcSagaOrchestratorClientTest {
         .isInstanceOf(NullPointerException.class);
   }
 
+  /**
+   * Builds a {@link StatusRuntimeException} carrying an {@link ErrorInfo} detail, as the daemon's
+   * {@code GrpcErrorMapper} does, so the client's reason-based reconstruction is exercised end to
+   * end.
+   */
+  private static StatusRuntimeException statusWithReason(
+      Status.Code code, String reason, Map<String, String> metadata) {
+    // The saga domain is what the client's ErrorInfo filter matches on; without it the detail is
+    // treated as an intermediary's and ignored.
+    ErrorInfo info =
+        ErrorInfo.newBuilder()
+            .setReason(reason)
+            .setDomain(SagaErrorCode.WIRE_DOMAIN)
+            .putAllMetadata(metadata)
+            .build();
+    return StatusProto.toStatusRuntimeException(
+        com.google.rpc.Status.newBuilder()
+            .setCode(code.value())
+            .addDetails(Any.pack(info))
+            .build());
+  }
+
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
@@ -505,7 +916,50 @@ class GrpcSagaOrchestratorClientTest {
         .build();
   }
 
+  @Test
+  void build_withTrustCaCertificateOnPlaintextChannel_throwsIllegalStateException() {
+    // A trust setting says the caller expects encryption; silently ignoring it on a plaintext
+    // channel would be worse than refusing.
+    assertThatThrownBy(
+            () ->
+                GrpcSagaOrchestratorClient.newBuilder()
+                    .target("localhost:12051")
+                    .trustCaCertificate(Paths.get("/etc/tls/ca.crt"))
+                    .build())
+        .isInstanceOf(IllegalStateException.class);
+  }
+
+  @Test
+  void build_withMissingTrustCaFile_throwsNamingThePath(@TempDir Path dir) {
+    // Eager failure at build(), naming the file — a lazy failure would surface at the first RPC
+    // as an opaque UNAVAILABLE deep inside application code.
+    Path missing = dir.resolve("missing-ca.crt");
+
+    assertThatThrownBy(
+            () ->
+                GrpcSagaOrchestratorClient.newBuilder()
+                    .target("localhost:12051")
+                    .useTransportSecurity()
+                    .trustCaCertificate(missing)
+                    .build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("missing-ca.crt");
+  }
+
+  @Test
+  void build_withOverrideAuthorityOnPlaintextChannel_buildsChannel() throws Exception {
+    // overrideAuthority is legitimate without TLS (gRPC routes on the authority too), so unlike
+    // the trust setting it must not force encryption. No connection is attempted until an RPC, so
+    // building and closing needs no server.
+    GrpcSagaOrchestratorClient.newBuilder()
+        .target("localhost:12051")
+        .overrideAuthority("saga.example.com")
+        .build()
+        .close();
+  }
+
   private static final class FakeSagaService extends SagaServiceGrpc.SagaServiceImplBase {
+
     @Nullable StartSagaRequest lastStart;
     @Nullable AwaitSagaRequest lastAwait;
     @Nullable StatusRuntimeException startError;

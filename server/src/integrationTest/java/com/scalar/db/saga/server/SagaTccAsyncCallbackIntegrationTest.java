@@ -104,6 +104,10 @@ class SagaTccAsyncCallbackIntegrationTest extends ServerIntegrationTestSupport {
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, String.valueOf(daemonPort));
     props.setProperty(SagaServerConfig.CALLBACK_BASE_URL_KEY, "http://localhost:" + daemonPort);
     props.setProperty(SagaServerConfig.CALLBACK_SECRET_KEY, SECRET);
+    // See the note in SagaAsyncCallbackIntegrationTest: a parked saga runs the synchronous start's
+    // wait to its bound, so the default 60s is a minute per test spent proving a status. See
+    // todos/105.
+    props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "2000");
   }
 
   @Test

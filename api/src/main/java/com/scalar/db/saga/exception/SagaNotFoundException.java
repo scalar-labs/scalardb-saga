@@ -8,7 +8,9 @@ public class SagaNotFoundException extends SagaRuntimeException {
   private final String sagaId;
 
   public SagaNotFoundException(String sagaId) {
-    super("Saga not found: " + Objects.requireNonNull(sagaId, "sagaId must not be null"));
+    super(
+        SagaErrorCode.SAGA_NOT_FOUND,
+        ErrorMetadata.of("saga_id", Objects.requireNonNull(sagaId, "sagaId must not be null")));
     this.sagaId = sagaId;
   }
 

@@ -1,6 +1,9 @@
 plugins {
     id("scalardb-saga.java-conventions")
     id("scalardb-saga.license-report-conventions")
+    // Core Gradle plugin (not external, so it does not need to route through build-logic): hosts
+    // the TLS test-certificate generator both the unit and integration suites consume.
+    `java-test-fixtures`
     application
 }
 
@@ -25,6 +28,13 @@ application {
         // picks up in-flight sagas on the next start, whereas a livelocked process holds saga leases
         // without making progress.
         "-XX:+ExitOnOutOfMemoryError",
+        // Two dependencies load a native library through JNI: sqlite-jdbc, and Netty's epoll
+        // transport. JDK 24 made System.load a restricted method, so without this the JVM prints a
+        // warning naming whichever of them reaches it first, and a future release will block the
+        // call outright. Netty would then fall back to NIO and SQLite would fail to load at all.
+        // ALL-UNNAMED is the only granularity available, because the distribution ships a flat
+        // classpath rather than named modules.
+        "--enable-native-access=ALL-UNNAMED",
     )
 }
 
@@ -73,19 +83,33 @@ dependencies {
 
     testImplementation(platform(libs.grpc.bom))
     testImplementation(libs.grpc.inprocess)
-    // The bridge test captures what actually reaches Logback, which needs its appender types at
-    // compile time — the main source set only needs Logback at runtime.
+    // The bridge and TLS tests capture what actually reaches Logback, which needs its appender
+    // types at compile time — the main source set only needs Logback at runtime.
     testImplementation(libs.logback.classic)
 
     "integrationTestImplementation"(project(":core"))
     "integrationTestImplementation"(project(":client"))
+    // The TLS test-certificate generator. It shells out to the JDK's own keytool, deliberately
+    // adding no crypto dependency: BouncyCastle on this classpath would silently widen Netty's
+    // PEM parsing (it accepts PKCS#1 only when BC is present), and these suites exist to exercise
+    // the production parse path.
+    "integrationTestImplementation"(testFixtures(project(":server")))
     "integrationTestImplementation"(platform(libs.grpc.bom))
     "integrationTestImplementation"(libs.grpc.netty)
     "integrationTestImplementation"(libs.mockito.core)
     "integrationTestImplementation"(libs.sqlite.jdbc)
     "integrationTestImplementation"(platform(libs.jackson.bom))
     "integrationTestImplementation"(libs.jackson.databind)
-    "integrationTestRuntimeOnly"(libs.logback.classic)
+    // Not runtimeOnly: the TLS integration test asserts the handshake-noise log policy by
+    // capturing what reaches Logback, which needs its appender types at compile time.
+    "integrationTestImplementation"(libs.logback.classic)
+    // For @SuppressFBWarnings on the TLS suite's deliberately-plaintext probe socket.
+    "integrationTestCompileOnly"(libs.spotbugs.annotations)
+    // Same, for the test-certificate generator's deliberate keytool/throwaway-password usage.
+    "testFixturesCompileOnly"(libs.spotbugs.annotations)
+    // Api, not implementation: LogCapture's surface exposes Logback's appender/event types to the
+    // consuming suites.
+    "testFixturesApi"(libs.logback.classic)
 }
 
 // ---------------------------------------------------------------------------

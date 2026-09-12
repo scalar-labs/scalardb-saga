@@ -58,6 +58,9 @@ message GetSagaDetailRequest {
 message SagaDetail {
   SagaSnapshot saga = 1;
   repeated TimelineEvent timeline = 2;
+  // True when the timeline holds only the newest events because the saga's history exceeded the
+  // server's configured bound; the full history remains in the store.
+  bool truncated = 3;
 }
 
 // One event in a saga's timeline. Carries metadata plus the failure error or intervention reason

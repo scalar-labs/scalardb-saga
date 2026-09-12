@@ -59,7 +59,7 @@ class SagaDefinitionRegistryTest {
   void register_storeWriteFails_definitionNotInMemory() {
     // Arrange
     SagaDefinition def = definition("transfer", "1.0");
-    doThrow(SagaPersistenceException.retryable("store error", new RuntimeException("db down")))
+    doThrow(SagaPersistenceException.storeUnavailable(new RuntimeException("db down")))
         .when(store)
         .registerDefinition(any());
     when(store.getDefinition("transfer", "1.0")).thenReturn(Optional.empty());

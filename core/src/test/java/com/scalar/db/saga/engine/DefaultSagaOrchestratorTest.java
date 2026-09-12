@@ -3,27 +3,39 @@ package com.scalar.db.saga.engine;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.scalar.db.saga.api.SagaCallback;
 import com.scalar.db.saga.api.SagaDefinitionId;
 import com.scalar.db.saga.api.SagaDetail;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.definition.SagaDefinition;
+import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaDefinitionException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaDefinitionNotServedException;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
+import com.scalar.db.saga.exception.SagaOverloadedException;
 import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaStateAndEvents;
@@ -33,11 +45,18 @@ import com.scalar.db.saga.store.StepEvent;
 import java.net.URL;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
@@ -46,6 +65,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.LoggerFactory;
 
 @ExtendWith(MockitoExtension.class)
 class DefaultSagaOrchestratorTest {
@@ -64,7 +84,14 @@ class DefaultSagaOrchestratorTest {
   void setUp() {
     orchestrator =
         new DefaultSagaOrchestrator(
-            engine, store, definitionRegistry, recoveryManager, retentionManager, 30_000);
+            engine,
+            store,
+            definitionRegistry,
+            recoveryManager,
+            retentionManager,
+            30_000,
+            Integer.MAX_VALUE,
+            0);
   }
 
   @AfterEach
@@ -113,7 +140,9 @@ class DefaultSagaOrchestratorTest {
     void register_unresolvableStep_throwsSagaDefinitionException() {
       // Arrange
       SagaDefinition def = definition("transfer");
-      org.mockito.Mockito.doThrow(new SagaDefinitionException("Step class not found"))
+      org.mockito.Mockito.doThrow(
+              SagaDefinitionException.stepClassInvalid(
+                  "com.example.Foo", "not found on classpath", new ClassNotFoundException()))
           .when(engine)
           .getOrBuildPlan(def);
 
@@ -201,6 +230,150 @@ class DefaultSagaOrchestratorTest {
       assertThatThrownBy(() -> orchestrator.start("unknown", Map.of()))
           .isInstanceOf(SagaDefinitionNotFoundException.class);
       verify(definitionRegistry).resolve("unknown");
+    }
+
+    @Test
+    void start_withServedSetExcludingTheName_throwsDefinitionNotServed() {
+      // The store is append-only, so a definition stays registered after the configuration that
+      // introduced it is gone. The served set is what says a saga is no longer startable here.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      orchestrator.serve(Set.of("other-saga"));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.start("transfer", Map.of()))
+          .isInstanceOf(SagaDefinitionNotServedException.class);
+      verify(engine, never()).execute(any(), any(), any());
+    }
+
+    @Test
+    void start_withServedSetIncludingTheName_starts() {
+      // The other half of the gate: publishing a served set must not block what it contains.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.execute(def, null, Map.of())).thenReturn("saga-1");
+      orchestrator.serve(Set.of("transfer"));
+
+      // Act
+      String sagaId = orchestrator.start("transfer", Map.of());
+
+      // Assert
+      assertThat(sagaId).isEqualTo("saga-1");
+    }
+
+    @Test
+    void start_unknownDefinitionWithServedSetExcludingIt_throwsDefinitionNotFound() {
+      // A name nobody ever registered is a different problem with a different fix, so it must stay
+      // a not-found rather than being reported as something this daemon declines to serve.
+      // Arrange
+      when(definitionRegistry.resolve("unknown")).thenReturn(null);
+      orchestrator.serve(Set.of("transfer"));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.start("unknown", Map.of()))
+          .isInstanceOf(SagaDefinitionNotFoundException.class);
+    }
+
+    @Test
+    void start_pinnedToAVersionOfANameNotServed_throwsDefinitionNotServed() {
+      // Being served is a property of the NAME, so pinning a version is refused on the same basis
+      // rather than being a way around it.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer", "1.0")).thenReturn(def);
+      orchestrator.serve(Set.of("other-saga"));
+
+      // Act & Assert
+      assertThatThrownBy(
+              () -> orchestrator.start(new SagaDefinitionId("transfer", "1.0"), Map.of()))
+          .isInstanceOf(SagaDefinitionNotServedException.class);
+      verify(engine, never()).execute(any(), any(), any());
+    }
+
+    @Test
+    void latestDefinition_registeredName_returnsWhatANameOnlyStartWouldRun() {
+      // The daemon asks this to find out whether its definition files still describe what serves.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+
+      // Act & Assert
+      assertThat(orchestrator.latestDefinition("transfer")).isSameAs(def);
+    }
+
+    @Test
+    void latestDefinition_unregisteredName_returnsNull() {
+      // Arrange
+      when(definitionRegistry.resolve("unknown")).thenReturn(null);
+
+      // Act & Assert
+      assertThat(orchestrator.latestDefinition("unknown")).isNull();
+    }
+
+    @Test
+    @SuppressWarnings("NullAway") // deliberately passing null: the guard is what is under test
+    void latestDefinition_nullSagaNameGiven_throwsNullPointer() {
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.latestDefinition(null))
+          .isInstanceOf(NullPointerException.class);
+    }
+
+    @Test
+    void isDefinitionRegistered_storedVersion_returnsTrue() {
+      // This is what separates a rollback from an ordinary upgrade: both name a version that is
+      // not the latest, and only a rollback names one the store already has.
+      // Arrange
+      when(definitionRegistry.resolve("transfer", "1.0")).thenReturn(definition("transfer"));
+
+      // Act & Assert
+      assertThat(orchestrator.isDefinitionRegistered("transfer", "1.0")).isTrue();
+    }
+
+    @Test
+    void isDefinitionRegistered_versionNeverStored_returnsFalse() {
+      // Arrange
+      when(definitionRegistry.resolve("transfer", "9.9")).thenReturn(null);
+
+      // Act & Assert
+      assertThat(orchestrator.isDefinitionRegistered("transfer", "9.9")).isFalse();
+    }
+
+    @Test
+    @SuppressWarnings("NullAway") // deliberately passing null: the guard is what is under test
+    void isDefinitionRegistered_nullVersionGiven_throwsNullPointer() {
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.isDefinitionRegistered("transfer", null))
+          .isInstanceOf(NullPointerException.class);
+    }
+
+    @Test
+    void start_clientSuppliedIdAlreadyExists_propagatesSagaAlreadyExists() {
+      // Arrange — the store raises this on the create; assert the orchestrator passes it through
+      // untouched, since SagaOrchestrator declares it on the client-supplied-id overloads.
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.execute(eq(def), eq("dup"), any()))
+          .thenThrow(new SagaAlreadyExistsException("dup", snapshot("dup", SagaStatus.RUNNING)));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.start("dup", "transfer", Map.of()))
+          .isInstanceOf(SagaAlreadyExistsException.class);
+    }
+
+    @Test
+    void start_malformedClientSuppliedId_propagatesSagaIllegalArgument() {
+      // Arrange — validateSagaId rejects it in the store (covered there end to end); this asserts
+      // the orchestrator does not wrap or swallow it, as the interface declaration promises.
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.execute(eq(def), eq("bad id!"), any()))
+          .thenThrow(new SagaIllegalArgumentException("Invalid saga ID format"));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.start("bad id!", "transfer", Map.of()))
+          .isInstanceOf(SagaIllegalArgumentException.class);
     }
 
     @Test
@@ -325,6 +498,164 @@ class DefaultSagaOrchestratorTest {
     }
 
     @Test
+    void startAsync_executionReturnsCleanlyButSagaStillRunning_logsAnInvariantViolation()
+        throws Exception {
+      // Arrange — executeSaga returns normally yet leaves the saga RUNNING. Nothing in the engine's
+      // environment explains that, so it is a bug in the engine and must not be logged as if a
+      // saga merely failed.
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot runningSaga = snapshot("saga-1", SagaStatus.RUNNING);
+      SagaCallback callback = mock(SagaCallback.class);
+
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(runningSaga);
+      // Execution's own verdict, not a store read: that is what the arm now branches on.
+      when(engine.executeSaga(eq(def), any(), any())).thenReturn(runningSaga);
+
+      ListAppender<ILoggingEvent> logs = attachLogCapture();
+      try {
+        // Act
+        orchestrator.startAsync("transfer", Map.of(), callback);
+
+        // Assert — ERROR, and no callback method is invoked: there is no outcome to report.
+        await(() -> !logs.list.isEmpty());
+        assertThat(logs.list).anySatisfy(e -> assertThat(e.getLevel()).isEqualTo(Level.ERROR));
+        verify(callback, never()).onParked(any());
+        verify(callback, never()).onCompleted(any());
+      } finally {
+        orchestratorLogger().detachAppender(logs);
+      }
+    }
+
+    @Test
+    void startAsync_sagaResumedBeforeTheCallbackIsDispatched_stillReportsThePark()
+        throws Exception {
+      // Arrange — the interleaving that used to corrupt the decision. Execution parks the saga
+      // (WAITING), and before the callback is dispatched a participant callback resumes it, so the
+      // store already says RUNNING. On this replica or another: the resume is not serialised with
+      // this thread at all.
+      //
+      // Reading the store here would see RUNNING and conclude two wrong things — skip onParked, so
+      // the caller waits out its whole bound, and log an engine invariant violation telling the
+      // operator to report a bug. Branching on execution's own verdict cannot go stale that way.
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot runningSaga = snapshot("saga-1", SagaStatus.RUNNING);
+      SagaStateSnapshot parkedSaga = snapshot("saga-1", SagaStatus.WAITING);
+      SagaCallback callback = mock(SagaCallback.class);
+
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(runningSaga);
+      when(engine.executeSaga(eq(def), any(), any())).thenReturn(parkedSaga);
+      // The resume has already landed by the time anyone could read. Lenient deliberately: this
+      // stub going unused is the point, and it is asserted explicitly below.
+      lenient().when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(runningSaga));
+
+      ListAppender<ILoggingEvent> logs = attachLogCapture();
+      try {
+        // Act
+        orchestrator.startAsync("transfer", Map.of(), callback);
+
+        // Assert — the park is reported, and nothing accuses the engine of a defect.
+        verify(callback, timeout(5000)).onParked(parkedSaga);
+        assertThat(logs.list).noneSatisfy(e -> assertThat(e.getLevel()).isEqualTo(Level.ERROR));
+        // The decision never consulted the store, so no resume — here or on another replica —
+        // could have changed it. That is the fix, stated as an assertion.
+        verify(store, never()).getStateSnapshot("saga-1");
+      } finally {
+        orchestratorLogger().detachAppender(logs);
+      }
+    }
+
+    @Test
+    void startAsync_shutdownLeavesSagaRunning_doesNotReportAnInvariantViolation() throws Exception {
+      // Arrange — the shutdown hand-off: under WAIT_CURRENT_STEP the engine finishes the running
+      // step, marks the saga for recovery, and returns *normally* with it still RUNNING. That is
+      // indistinguishable from an engine defect without asking the engine, so before this was
+      // handled every rolling restart told the operator to report a bug per in-flight saga.
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot runningSaga = snapshot("saga-1", SagaStatus.RUNNING);
+      SagaCallback callback = mock(SagaCallback.class);
+
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(runningSaga);
+      when(engine.isShuttingDown()).thenReturn(true);
+      when(engine.executeSaga(eq(def), any(), any())).thenReturn(runningSaga);
+
+      ListAppender<ILoggingEvent> logs = attachLogCapture();
+      try {
+        // Act
+        orchestrator.startAsync("transfer", Map.of(), callback);
+
+        // Assert — nothing above DEBUG, and certainly no "report it" ERROR.
+        await(() -> !logs.list.isEmpty());
+        assertThat(logs.list)
+            .allSatisfy(e -> assertThat(e.getLevel()).isEqualTo(Level.DEBUG))
+            .anySatisfy(e -> assertThat(e.getFormattedMessage()).contains("shutdown"));
+      } finally {
+        orchestratorLogger().detachAppender(logs);
+      }
+    }
+
+    @Test
+    void startAsync_executionThrowsAndLeavesSagaRunning_logsTheAbortNotAnInvariantViolation()
+        throws Exception {
+      // Arrange — the same end status, reached by a failed execution. The cause is already logged
+      // by submitAsync, so this must read as an abort rather than as an engine bug.
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot runningSaga = snapshot("saga-1", SagaStatus.RUNNING);
+      SagaCallback callback = mock(SagaCallback.class);
+
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(runningSaga);
+      doThrow(new IllegalStateException("store blew up"))
+          .when(engine)
+          .executeSaga(eq(def), eq(runningSaga), any());
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(runningSaga));
+
+      ListAppender<ILoggingEvent> logs = attachLogCapture();
+      try {
+        // Act
+        orchestrator.startAsync("transfer", Map.of(), callback);
+
+        // Assert — the dispatch itself reports WARN, not ERROR. (submitAsync separately logs the
+        // Throwable at ERROR, so the assertion targets the abort message specifically.)
+        await(() -> logs.list.stream().anyMatch(e -> e.getFormattedMessage().contains("reclaim")));
+        assertThat(logs.list)
+            .filteredOn(e -> e.getFormattedMessage().contains("reclaim"))
+            .allSatisfy(e -> assertThat(e.getLevel()).isEqualTo(Level.WARN));
+        verify(callback, never()).onParked(any());
+      } finally {
+        orchestratorLogger().detachAppender(logs);
+      }
+    }
+
+    @Test
+    void startAsync_withCallbackAndSagaParks_dispatchesOnParked() throws Exception {
+      // Arrange — execution returns with the saga WAITING, which is what parking on an async step
+      // looks like. Before onParked existed this only logged, so a caller waiting on the callback
+      // had nothing to wake on and waited out its whole bound.
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot runningSaga = snapshot("saga-1", SagaStatus.RUNNING);
+      SagaStateSnapshot parkedSaga = snapshot("saga-1", SagaStatus.WAITING);
+      SagaCallback callback = mock(SagaCallback.class);
+
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(runningSaga);
+      // The verdict path, not the abort fallback: a resume landing in the store afterwards must
+      // not be able to change what this execution reports.
+      when(engine.executeSaga(eq(def), any(), any())).thenReturn(parkedSaga);
+
+      // Act
+      orchestrator.startAsync("transfer", Map.of(), callback);
+
+      // Assert
+      verify(callback, timeout(5000)).onParked(parkedSaga);
+      verify(callback, never()).onCompleted(any());
+      verify(callback, never()).onCompensated(any());
+      verify(callback, never()).onEscalated(any());
+    }
+
+    @Test
     void startAsync_executionFails_stillDispatchesCallback() throws Exception {
       // Arrange
       SagaDefinition def = definition("transfer");
@@ -345,6 +676,84 @@ class DefaultSagaOrchestratorTest {
       // Assert — callback still dispatched despite engine failure
       verify(definitionRegistry).resolve("transfer");
       verify(callback, timeout(5000)).onCompensated(compensatedSaga);
+    }
+
+    @Test
+    void startAsync_settlementListenerThrows_stillDispatchesCallback() throws Exception {
+      // Arrange — a front end's listener is third-party code from the engine's point of view, and a
+      // throwing one must not cost the caller its callback: that caller would otherwise wait out
+      // its whole bound for an answer the engine already had. isWatching is asked before anything
+      // else, so it is the one that can swallow the dispatch entirely.
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot runningSaga = snapshot("saga-1", SagaStatus.RUNNING);
+      SagaStateSnapshot completedSaga = snapshot("saga-1", SagaStatus.COMPLETED);
+      SagaCallback callback = mock(SagaCallback.class);
+      SettlementListener listener = mock(SettlementListener.class);
+      when(listener.isWatching("saga-1")).thenThrow(new RuntimeException("listener failure"));
+
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(runningSaga);
+      when(engine.executeSaga(eq(def), any(), any())).thenReturn(completedSaga);
+
+      try (DefaultSagaOrchestrator watched =
+          new DefaultSagaOrchestrator(
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              Integer.MAX_VALUE,
+              0,
+              Executors.newVirtualThreadPerTaskExecutor(),
+              listener)) {
+        // Act
+        watched.startAsync("transfer", Map.of(), callback);
+
+        // Assert
+        verify(callback, timeout(5000)).onCompleted(completedSaga);
+        verify(listener, never()).onSagaSettled(any());
+      }
+    }
+
+    @Test
+    void startAsync_settlementListenerFailsOnNotification_stillDispatchesCallback()
+        throws Exception {
+      // Arrange — the mirror of the test above, and the half its comment calls "vice versa". There
+      // the listener throws from isWatching; here it throws while being notified, which is after
+      // the engine has the answer and before the callback gets it. Swallowing the callback would
+      // leave an embedded caller waiting on a latch for a saga that finished.
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot runningSaga = snapshot("saga-1", SagaStatus.RUNNING);
+      SagaStateSnapshot completedSaga = snapshot("saga-1", SagaStatus.COMPLETED);
+      SagaCallback callback = mock(SagaCallback.class);
+      SettlementListener listener = mock(SettlementListener.class);
+      when(listener.isWatching("saga-1")).thenReturn(true);
+      doThrow(new RuntimeException("listener failure")).when(listener).onSagaSettled(any());
+
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(runningSaga);
+      when(engine.executeSaga(eq(def), any(), any())).thenReturn(completedSaga);
+
+      try (DefaultSagaOrchestrator watched =
+          new DefaultSagaOrchestrator(
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              Integer.MAX_VALUE,
+              0,
+              Executors.newVirtualThreadPerTaskExecutor(),
+              listener)) {
+        // Act
+        watched.startAsync("transfer", Map.of(), callback);
+
+        // Assert — both were attempted, and the one that threw cost the other nothing.
+        verify(listener, timeout(5000)).onSagaSettled(completedSaga);
+        verify(callback, timeout(5000)).onCompleted(completedSaga);
+      }
     }
 
     @Test
@@ -377,6 +786,91 @@ class DefaultSagaOrchestratorTest {
       assertThatThrownBy(() -> orchestrator.startAsync("unknown", Map.of()))
           .isInstanceOf(SagaDefinitionNotFoundException.class);
       verify(definitionRegistry).resolve("unknown");
+    }
+
+    @Test
+    void startAsync_driveThrowsError_swallowedAndCallbackStillDispatched() {
+      // Arrange — a mocked executor so we can capture the drive Runnable and run it on the test
+      // thread. The detached drive throws an Error; only a catch on Throwable (not Exception)
+      // contains it, so running the captured Runnable must not throw, and the finally block must
+      // still dispatch the callback.
+      ExecutorService mockExecutor = mock(ExecutorService.class);
+      DefaultSagaOrchestrator orchestratorWithMockExecutor =
+          new DefaultSagaOrchestrator(
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              Integer.MAX_VALUE,
+              0,
+              mockExecutor);
+
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
+      SagaStateSnapshot completedSaga = snapshot("saga-1", SagaStatus.COMPLETED);
+      SagaCallback callback = mock(SagaCallback.class);
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(saga);
+      doThrow(new Error("drive failed off-thread"))
+          .when(engine)
+          .executeSaga(eq(def), eq(saga), any());
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(completedSaga));
+
+      // Act — returns immediately; the drive Runnable is captured, not run.
+      String sagaId = orchestratorWithMockExecutor.startAsync("transfer", Map.of(), callback);
+
+      // Assert — running the captured drive swallows the Error (proving the catch is on
+      // Throwable, not Exception) and still dispatches the callback.
+      assertThat(sagaId).isEqualTo("saga-1");
+      ArgumentCaptor<Runnable> driveCaptor = ArgumentCaptor.forClass(Runnable.class);
+      verify(mockExecutor).execute(driveCaptor.capture());
+      assertThatCode(() -> driveCaptor.getValue().run()).doesNotThrowAnyException();
+      verify(engine).executeSaga(eq(def), eq(saga), any());
+      verify(callback).onCompleted(completedSaga);
+
+      orchestratorWithMockExecutor.close();
+    }
+
+    @Test
+    void startAsync_callbackDispatchThrowsError_swallowed() {
+      // Arrange — the drive succeeds but the user callback throws an Error from the finally
+      // block's dispatch. Only a catch on Throwable contains it, so running the captured drive
+      // Runnable must not throw.
+      ExecutorService mockExecutor = mock(ExecutorService.class);
+      DefaultSagaOrchestrator orchestratorWithMockExecutor =
+          new DefaultSagaOrchestrator(
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              Integer.MAX_VALUE,
+              0,
+              mockExecutor);
+
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
+      SagaStateSnapshot completedSaga = snapshot("saga-1", SagaStatus.COMPLETED);
+      SagaCallback callback = mock(SagaCallback.class);
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(saga);
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(completedSaga));
+      doThrow(new Error("callback failed")).when(callback).onCompleted(completedSaga);
+
+      // Act
+      String sagaId = orchestratorWithMockExecutor.startAsync("transfer", Map.of(), callback);
+
+      // Assert — the callback's Error is logged, not propagated.
+      assertThat(sagaId).isEqualTo("saga-1");
+      ArgumentCaptor<Runnable> driveCaptor = ArgumentCaptor.forClass(Runnable.class);
+      verify(mockExecutor).execute(driveCaptor.capture());
+      assertThatCode(() -> driveCaptor.getValue().run()).doesNotThrowAnyException();
+      verify(callback).onCompleted(completedSaga);
+
+      orchestratorWithMockExecutor.close();
     }
   }
 
@@ -543,10 +1037,11 @@ class DefaultSagaOrchestratorTest {
 
     @Test
     void startAsync_executorRejected_logsWarningAndDoesNotThrow() throws InterruptedException {
-      // Arrange — simulate race between close() and submit()
+      // Arrange — simulate race between close() and execute()
       ExecutorService mockExecutor = mock(ExecutorService.class);
-      when(mockExecutor.submit(any(Runnable.class)))
-          .thenThrow(new java.util.concurrent.RejectedExecutionException("shutting down"));
+      doThrow(new java.util.concurrent.RejectedExecutionException("shutting down"))
+          .when(mockExecutor)
+          .execute(any(Runnable.class));
       when(mockExecutor.awaitTermination(anyLong(), any())).thenReturn(true);
       DefaultSagaOrchestrator orchestratorWithMockExecutor =
           new DefaultSagaOrchestrator(
@@ -556,6 +1051,8 @@ class DefaultSagaOrchestratorTest {
               recoveryManager,
               retentionManager,
               30_000,
+              Integer.MAX_VALUE,
+              0,
               mockExecutor);
 
       SagaDefinition def = definition("transfer");
@@ -566,8 +1063,9 @@ class DefaultSagaOrchestratorTest {
       // Act — should not throw; saga is already persisted, recovery will handle it
       String sagaId = orchestratorWithMockExecutor.startAsync("transfer", Map.of());
 
-      // Assert
+      // Assert — the ID is returned and the forward drive never ran.
       assertThat(sagaId).isEqualTo("saga-1");
+      verify(engine, never()).executeSaga(any(), any(), any());
       orchestratorWithMockExecutor.close();
     }
   }
@@ -606,8 +1104,8 @@ class DefaultSagaOrchestratorTest {
     void getSagaDetail_existingSaga_returnsStateAndTimeline() {
       // Arrange — the application read of its own saga's detail, backed by the store's atomic read
       SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.COMPENSATED);
-      when(store.getStateWithEvents("saga-1"))
-          .thenReturn(Optional.of(new SagaStateAndEvents(saga, List.of())));
+      when(store.getStateWithEvents("saga-1", Integer.MAX_VALUE))
+          .thenReturn(Optional.of(new SagaStateAndEvents(saga, List.of(), false)));
 
       // Act
       SagaDetail detail = orchestrator.getSagaDetail("saga-1");
@@ -615,12 +1113,38 @@ class DefaultSagaOrchestratorTest {
       // Assert — the projection itself is covered by SagaDetailReaderTest; here just the wiring
       assertThat(detail.getSnapshot()).isSameAs(saga);
       assertThat(detail.getTimeline()).isEmpty();
+      assertThat(detail.isTruncated()).isFalse();
+    }
+
+    @Test
+    void getSagaDetail_withMaxTimelineEvents_passesBoundToStore() {
+      // Arrange — a bounded orchestrator (the daemon path) forwards its bound to the store read
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.ESCALATED);
+      when(store.getStateWithEvents("saga-1", 42))
+          .thenReturn(Optional.of(new SagaStateAndEvents(saga, List.of(), true)));
+      try (DefaultSagaOrchestrator bounded =
+          new DefaultSagaOrchestrator(
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              42,
+              0)) {
+
+        // Act
+        SagaDetail detail = bounded.getSagaDetail("saga-1");
+
+        // Assert
+        assertThat(detail.isTruncated()).isTrue();
+      }
     }
 
     @Test
     void getSagaDetail_unknownSaga_throwsSagaNotFound() {
       // Arrange
-      when(store.getStateWithEvents("unknown")).thenReturn(Optional.empty());
+      when(store.getStateWithEvents("unknown", Integer.MAX_VALUE)).thenReturn(Optional.empty());
 
       // Act & Assert
       assertThatThrownBy(() -> orchestrator.getSagaDetail("unknown"))
@@ -668,6 +1192,213 @@ class DefaultSagaOrchestratorTest {
       assertThat(captor.getValue().getStepName()).isEqualTo("s1");
       assertThat(result).isSameAs(running);
       verify(engine, timeout(2_000)).resumeFrom(def, context, 2);
+    }
+
+    @Test
+    void completeStepAsync_watchedSagaSettles_notifiesTheSettlementListener() {
+      // Arrange — the same parked saga, resumed by a drive that carries no SagaCallback. The
+      // callback from the original start died at the park, so the listener is the only path by
+      // which a caller still waiting can learn the saga finished.
+      SettlementListener listener = mock(SettlementListener.class);
+      when(listener.isWatching("saga-1")).thenReturn(true);
+      SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
+      SagaDefinition def = definition("test-saga");
+      SagaStateSnapshot running = snapshot("saga-1", SagaStatus.RUNNING);
+      SagaStateSnapshot completed = snapshot("saga-1", SagaStatus.COMPLETED);
+      List<SagaEvent> events =
+          List.of(
+              StatusEvent.started(null),
+              StepEvent.completed(0, "s0", null),
+              StepEvent.pending(1, "s1"));
+      ExecutionContext context = new ExecutionContext("saga-1", Map.of(), running);
+
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(waiting));
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(store.getEvents("saga-1")).thenReturn(events);
+      when(store.resumeParkedStep(eq(waiting), eq(events.size()), any(StepEvent.class)))
+          .thenReturn(running);
+      when(engine.replayEvents(eq(running), any())).thenReturn(context);
+      // The forward drive completes the saga, which is what the context carries afterwards.
+      doAnswer(
+              invocation -> {
+                context.setCurrentState(completed);
+                return null;
+              })
+          .when(engine)
+          .resumeFrom(def, context, 2);
+
+      try (DefaultSagaOrchestrator watched =
+          new DefaultSagaOrchestrator(
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              Integer.MAX_VALUE,
+              0,
+              Executors.newVirtualThreadPerTaskExecutor(),
+              listener)) {
+        // Act
+        watched.completeStepAsync("saga-1", "s1", Map.of());
+
+        // Assert
+        verify(listener, timeout(2_000)).onSagaSettled(completed);
+      }
+    }
+
+    @Test
+    void completeStepAsync_driveDiesWithNoWaiter_doesNotReadTheStoreForAnAnswerNobodyWants() {
+      // Arrange — a resumed drive carries no SagaCallback, so when it dies before reaching a
+      // verdict there is nothing to report it with except a fresh store read. isWatching exists to
+      // keep that read off this path: with nobody waiting the answer would be discarded, and this
+      // is the one place the method earns its keep. The only read here should be the WAITING check
+      // completeStepAsync makes before resuming.
+      SettlementListener listener = mock(SettlementListener.class);
+      when(listener.isWatching("saga-1")).thenReturn(false);
+      SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
+      SagaDefinition def = definition("test-saga");
+      SagaStateSnapshot running = snapshot("saga-1", SagaStatus.RUNNING);
+      List<SagaEvent> events =
+          List.of(
+              StatusEvent.started(null),
+              StepEvent.completed(0, "s0", null),
+              StepEvent.pending(1, "s1"));
+      ExecutionContext context = new ExecutionContext("saga-1", Map.of(), running);
+
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(waiting));
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(store.getEvents("saga-1")).thenReturn(events);
+      when(store.resumeParkedStep(eq(waiting), eq(events.size()), any(StepEvent.class)))
+          .thenReturn(running);
+      when(engine.replayEvents(eq(running), any())).thenReturn(context);
+      doThrow(new RuntimeException("drive died")).when(engine).resumeFrom(def, context, 2);
+
+      try (DefaultSagaOrchestrator unwatched =
+          new DefaultSagaOrchestrator(
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              Integer.MAX_VALUE,
+              0,
+              Executors.newVirtualThreadPerTaskExecutor(),
+              listener)) {
+        // Act
+        unwatched.completeStepAsync("saga-1", "s1", Map.of());
+
+        // Assert — the drive ran and died, and nothing was read to describe a death nobody awaits.
+        verify(engine, timeout(2_000)).resumeFrom(def, context, 2);
+        verify(listener, timeout(2_000)).isWatching("saga-1");
+        verify(store, times(1)).getStateSnapshot("saga-1");
+        verify(listener, never()).onSagaSettled(any());
+      }
+    }
+
+    @Test
+    void completeStepAsync_driveDiesWhileWatched_readsTheStoreAndNotifiesFromIt() {
+      // Arrange — the mirror. With a waiter present the same death is worth a read: the drive has
+      // no verdict to offer, but the store may hold a terminal state it reached before failing, and
+      // that caller is owed it. The second read is the fallback; the first is the WAITING check.
+      SettlementListener listener = mock(SettlementListener.class);
+      when(listener.isWatching("saga-1")).thenReturn(true);
+      SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
+      SagaDefinition def = definition("test-saga");
+      SagaStateSnapshot running = snapshot("saga-1", SagaStatus.RUNNING);
+      SagaStateSnapshot completed = snapshot("saga-1", SagaStatus.COMPLETED);
+      List<SagaEvent> events =
+          List.of(
+              StatusEvent.started(null),
+              StepEvent.completed(0, "s0", null),
+              StepEvent.pending(1, "s1"));
+      ExecutionContext context = new ExecutionContext("saga-1", Map.of(), running);
+
+      // The saga is parked when completeStepAsync checks, and terminal by the time the fallback
+      // read runs — the drive committed the completion and then threw.
+      when(store.getStateSnapshot("saga-1"))
+          .thenReturn(Optional.of(waiting), Optional.of(completed));
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(store.getEvents("saga-1")).thenReturn(events);
+      when(store.resumeParkedStep(eq(waiting), eq(events.size()), any(StepEvent.class)))
+          .thenReturn(running);
+      when(engine.replayEvents(eq(running), any())).thenReturn(context);
+      doThrow(new RuntimeException("drive died after committing"))
+          .when(engine)
+          .resumeFrom(def, context, 2);
+
+      try (DefaultSagaOrchestrator watched =
+          new DefaultSagaOrchestrator(
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              Integer.MAX_VALUE,
+              0,
+              Executors.newVirtualThreadPerTaskExecutor(),
+              listener)) {
+        // Act
+        watched.completeStepAsync("saga-1", "s1", Map.of());
+
+        // Assert — the waiter learns the outcome the dead drive never reported.
+        verify(listener, timeout(2_000)).onSagaSettled(completed);
+        verify(store, timeout(2_000).times(2)).getStateSnapshot("saga-1");
+      }
+    }
+
+    @Test
+    void completeStepAsync_sagaParksAgain_doesNotNotifyTheSettlementListener() {
+      // Arrange — a saga with a second asynchronous step parks again instead of settling. The
+      // waiter has nothing to act on, so it must keep waiting rather than be woken with a
+      // non-terminal state.
+      SettlementListener listener = mock(SettlementListener.class);
+      when(listener.isWatching("saga-1")).thenReturn(true);
+      SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
+      SagaDefinition def = definition("test-saga");
+      SagaStateSnapshot running = snapshot("saga-1", SagaStatus.RUNNING);
+      List<SagaEvent> events =
+          List.of(
+              StatusEvent.started(null),
+              StepEvent.completed(0, "s0", null),
+              StepEvent.pending(1, "s1"));
+      ExecutionContext context = new ExecutionContext("saga-1", Map.of(), running);
+
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(waiting));
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(store.getEvents("saga-1")).thenReturn(events);
+      when(store.resumeParkedStep(eq(waiting), eq(events.size()), any(StepEvent.class)))
+          .thenReturn(running);
+      when(engine.replayEvents(eq(running), any())).thenReturn(context);
+      doAnswer(
+              invocation -> {
+                context.setCurrentState(snapshot("saga-1", SagaStatus.WAITING));
+                return null;
+              })
+          .when(engine)
+          .resumeFrom(def, context, 2);
+
+      try (DefaultSagaOrchestrator watched =
+          new DefaultSagaOrchestrator(
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              Integer.MAX_VALUE,
+              0,
+              Executors.newVirtualThreadPerTaskExecutor(),
+              listener)) {
+        // Act
+        watched.completeStepAsync("saga-1", "s1", Map.of());
+
+        // Assert
+        verify(engine, timeout(2_000)).resumeFrom(def, context, 2);
+        verify(listener, never()).onSagaSettled(any());
+      }
     }
 
     @Test
@@ -728,6 +1459,8 @@ class DefaultSagaOrchestratorTest {
               recoveryManager,
               retentionManager,
               30_000,
+              Integer.MAX_VALUE,
+              0,
               mockExecutor);
 
       SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
@@ -769,6 +1502,8 @@ class DefaultSagaOrchestratorTest {
               recoveryManager,
               retentionManager,
               30_000,
+              Integer.MAX_VALUE,
+              0,
               mockExecutor);
 
       SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
@@ -877,6 +1612,8 @@ class DefaultSagaOrchestratorTest {
               recoveryManager,
               retentionManager,
               30_000,
+              Integer.MAX_VALUE,
+              0,
               mockExecutor);
 
       // Act
@@ -889,6 +1626,334 @@ class DefaultSagaOrchestratorTest {
       verify(engine).shutdown();
       verify(mockExecutor).awaitTermination(anyLong(), eq(TimeUnit.NANOSECONDS));
       verify(store).close();
+    }
+  }
+
+  // Captures the orchestrator's log output so a test can assert the level, not just the text.
+  // Callers must detach in a finally: orchestratorLogger().detachAppender(appender).
+  private static ListAppender<ILoggingEvent> attachLogCapture() {
+    ListAppender<ILoggingEvent> appender = new ListAppender<>();
+    appender.start();
+    orchestratorLogger().addAppender(appender);
+    return appender;
+  }
+
+  private static Logger orchestratorLogger() {
+    return (Logger) LoggerFactory.getLogger(DefaultSagaOrchestrator.class);
+  }
+
+  /** Polls until the async dispatch has landed, rather than sleeping a fixed interval. */
+  private static void await(BooleanSupplier condition) throws InterruptedException {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+    while (!condition.getAsBoolean() && System.nanoTime() < deadline) {
+      Thread.sleep(10);
+    }
+  }
+
+  /**
+   * The admission cap. What has to hold: the cap is enforced, a refusal costs nothing durable,
+   * validation still answers first, and a permit comes back exactly once however the drive ends — a
+   * permit leaked shrinks capacity permanently, one returned twice raises it silently.
+   */
+  @Nested
+  class AdmissionCap {
+
+    /** An orchestrator capped at {@code cap}, sharing this test's mocks. */
+    private DefaultSagaOrchestrator capped(int cap) {
+      return new DefaultSagaOrchestrator(
+          engine,
+          store,
+          definitionRegistry,
+          recoveryManager,
+          retentionManager,
+          30_000,
+          Integer.MAX_VALUE,
+          cap);
+    }
+
+    private DefaultSagaOrchestrator capped(int cap, ExecutorService executor) {
+      return new DefaultSagaOrchestrator(
+          engine,
+          store,
+          definitionRegistry,
+          recoveryManager,
+          retentionManager,
+          30_000,
+          Integer.MAX_VALUE,
+          cap,
+          executor);
+    }
+
+    @Test
+    void start_atTheCap_throwsSagaOverloadedException() throws Exception {
+      // Arrange — cap of 1, with the first drive parked inside execute() so it holds its permit.
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      CountDownLatch inFlight = new CountDownLatch(1);
+      CountDownLatch release = new CountDownLatch(1);
+      when(engine.execute(eq(def), isNull(), any()))
+          .thenAnswer(
+              invocation -> {
+                inFlight.countDown();
+                if (!release.await(10, TimeUnit.SECONDS)) {
+                  throw new IllegalStateException("the test never released the drive");
+                }
+                return "saga-1";
+              });
+
+      try (DefaultSagaOrchestrator orchestrator = capped(1);
+          ExecutorService caller = Executors.newSingleThreadExecutor()) {
+        caller.execute(() -> orchestrator.start("transfer", Map.of()));
+        assertThat(inFlight.await(10, TimeUnit.SECONDS)).isTrue();
+
+        // Act & Assert
+        assertThatThrownBy(() -> orchestrator.start("transfer", Map.of()))
+            .isInstanceOf(SagaOverloadedException.class);
+        release.countDown();
+      }
+    }
+
+    @Test
+    void start_afterTheDriveReturns_admitsAgain() {
+      // The permit is per drive, so a finished drive must hand its seat back.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.execute(eq(def), isNull(), any())).thenReturn("saga-1");
+
+      try (DefaultSagaOrchestrator orchestrator = capped(1)) {
+        // Act
+        orchestrator.start("transfer", Map.of());
+
+        // Assert
+        assertThatCode(() -> orchestrator.start("transfer", Map.of())).doesNotThrowAnyException();
+      }
+    }
+
+    @Test
+    void start_driveThrows_stillReturnsThePermit() {
+      // A permit lost to a failing drive shrinks capacity for the life of the process.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.execute(eq(def), isNull(), any())).thenThrow(new IllegalStateException("boom"));
+
+      try (DefaultSagaOrchestrator orchestrator = capped(1)) {
+        assertThatThrownBy(() -> orchestrator.start("transfer", Map.of()))
+            .isInstanceOf(IllegalStateException.class);
+
+        // Assert — the seat is free again, so the next start reaches the engine.
+        assertThatThrownBy(() -> orchestrator.start("transfer", Map.of()))
+            .isInstanceOf(IllegalStateException.class);
+      }
+    }
+
+    @Test
+    void startAsync_atTheCap_persistsNothing() {
+      // The refusal has to land before createSaga: a rejected start that had already written would
+      // burn the caller's ID and make "retry" false advice.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(saga);
+      ExecutorService neverRuns = mock(ExecutorService.class);
+
+      try (DefaultSagaOrchestrator orchestrator = capped(1, neverRuns)) {
+        orchestrator.startAsync("transfer", Map.of());
+
+        // Act & Assert — the captured drive was never run, so the first permit is still held.
+        assertThatThrownBy(() -> orchestrator.startAsync("transfer", Map.of()))
+            .isInstanceOf(SagaOverloadedException.class);
+        verify(engine, times(1)).createSaga(eq(def), isNull(), any());
+      }
+    }
+
+    @Test
+    void startAsync_createSagaThrows_stillReturnsThePermit() {
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any()))
+          .thenThrow(new IllegalStateException("store down"));
+
+      try (DefaultSagaOrchestrator orchestrator = capped(1)) {
+        assertThatThrownBy(() -> orchestrator.startAsync("transfer", Map.of()))
+            .isInstanceOf(IllegalStateException.class);
+
+        // Assert — a second attempt is refused by the store, not by the cap.
+        assertThatThrownBy(() -> orchestrator.startAsync("transfer", Map.of()))
+            .isInstanceOf(IllegalStateException.class);
+      }
+    }
+
+    @Test
+    void startAsync_executorRejects_stillReturnsThePermit() {
+      // The saga is persisted and left to recovery, but this process is no longer driving it, so
+      // it must not go on occupying a seat.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(saga);
+      ExecutorService rejecting = mock(ExecutorService.class);
+      doThrow(new RejectedExecutionException("shutting down")).when(rejecting).execute(any());
+
+      try (DefaultSagaOrchestrator orchestrator = capped(1, rejecting)) {
+        orchestrator.startAsync("transfer", Map.of());
+
+        // Assert
+        assertThatCode(() -> orchestrator.startAsync("transfer", Map.of()))
+            .doesNotThrowAnyException();
+      }
+    }
+
+    @Test
+    void startAsync_driveCompletes_releasesBeforeDispatchingTheCallback() {
+      // Load-bearing order: a client told its saga finished may start the next one from inside the
+      // callback, and must not be refused by a seat this drive has finished with.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
+      SagaStateSnapshot completed = snapshot("saga-1", SagaStatus.COMPLETED);
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(saga);
+      when(engine.executeSaga(eq(def), eq(saga), any())).thenReturn(completed);
+      ExecutorService mockExecutor = mock(ExecutorService.class);
+      AtomicReference<Throwable> startedFromCallback = new AtomicReference<>();
+
+      try (DefaultSagaOrchestrator orchestrator = capped(1, mockExecutor)) {
+        SagaCallback callback = mock(SagaCallback.class);
+        // The next start, issued the moment the caller hears back.
+        doAnswer(
+                invocation -> {
+                  startedFromCallback.set(
+                      catchThrowable(() -> orchestrator.startAsync("transfer", Map.of())));
+                  return null;
+                })
+            .when(callback)
+            .onCompleted(any());
+        orchestrator.startAsync("transfer", Map.of(), callback);
+        ArgumentCaptor<Runnable> drive = ArgumentCaptor.forClass(Runnable.class);
+        verify(mockExecutor).execute(drive.capture());
+
+        // Act
+        drive.getValue().run();
+
+        // Assert
+        assertThat(startedFromCallback.get()).isNull();
+      }
+    }
+
+    @Test
+    void startAsync_callbackThrows_stillReturnsThePermit() {
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
+      SagaStateSnapshot completed = snapshot("saga-1", SagaStatus.COMPLETED);
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(saga);
+      when(engine.executeSaga(eq(def), eq(saga), any())).thenReturn(completed);
+      SagaCallback throwing = mock(SagaCallback.class);
+      doThrow(new Error("callback exploded")).when(throwing).onCompleted(any());
+      ExecutorService mockExecutor = mock(ExecutorService.class);
+
+      try (DefaultSagaOrchestrator orchestrator = capped(1, mockExecutor)) {
+        orchestrator.startAsync("transfer", Map.of(), throwing);
+        ArgumentCaptor<Runnable> drive = ArgumentCaptor.forClass(Runnable.class);
+        verify(mockExecutor).execute(drive.capture());
+        drive.getValue().run();
+
+        // Assert — the seat survived a callback that blew up after it was returned.
+        assertThatCode(() -> orchestrator.startAsync("transfer", Map.of()))
+            .doesNotThrowAnyException();
+      }
+    }
+
+    @Test
+    void start_unknownDefinitionAtTheCap_reportsOverloadBecauseTheNameIsNeverLookedUp() {
+      // Validation answers first: telling a caller to retry a saga that does not exist would send
+      // them into a loop that can never succeed.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      ExecutorService neverRuns = mock(ExecutorService.class);
+      when(engine.createSaga(eq(def), isNull(), any()))
+          .thenReturn(snapshot("saga-1", SagaStatus.RUNNING));
+
+      try (DefaultSagaOrchestrator orchestrator = capped(1, neverRuns)) {
+        orchestrator.startAsync("transfer", Map.of()); // fills the cap
+
+        // Act & Assert
+        assertThatThrownBy(() -> orchestrator.start("unknown", Map.of()))
+            .isInstanceOf(SagaOverloadedException.class);
+        // The store was never asked, which is the point.
+        verify(definitionRegistry, never()).resolve("unknown");
+      }
+    }
+
+    @Test
+    void start_nullInputValueAtTheCap_reportsTheInputErrorNotOverload() {
+      // "Busy, try again" for a request that can never succeed sends the caller round a loop with
+      // no exit. Input is checked before the permit for exactly that reason.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any()))
+          .thenReturn(snapshot("saga-1", SagaStatus.RUNNING));
+      ExecutorService neverRuns = mock(ExecutorService.class);
+      Map<String, Object> nullValued = new HashMap<>();
+      nullValued.put("amount", null);
+
+      try (DefaultSagaOrchestrator orchestrator = capped(1, neverRuns)) {
+        orchestrator.startAsync("transfer", Map.of()); // fills the cap
+
+        // Act & Assert
+        assertThatThrownBy(() -> orchestrator.start("transfer", nullValued))
+            .isInstanceOf(IllegalArgumentException.class)
+            .isNotInstanceOf(SagaOverloadedException.class);
+      }
+    }
+
+    @Test
+    void start_unusableSagaIdAtTheCap_reportsOverloadBecauseTheIdIsNeverChecked() {
+      // The ID grammar belongs to the store, and reaching for it early meant a method on the store
+      // interface outliving its one caller. So a full cap refuses before the ID is examined, and
+      // the caller learns what is wrong with it once capacity returns — the same trade as an
+      // unknown saga name.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any()))
+          .thenReturn(snapshot("saga-1", SagaStatus.RUNNING));
+      ExecutorService neverRuns = mock(ExecutorService.class);
+
+      try (DefaultSagaOrchestrator orchestrator = capped(1, neverRuns)) {
+        orchestrator.startAsync("transfer", Map.of()); // fills the cap
+
+        // Act & Assert
+        assertThatThrownBy(() -> orchestrator.start("bad id!", "transfer", Map.of()))
+            .isInstanceOf(SagaOverloadedException.class);
+      }
+    }
+
+    @Test
+    void start_withNoCapConfigured_neverRefuses() {
+      // The default: no controller at all, so the seams hold a null and skip the semaphore.
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any()))
+          .thenReturn(snapshot("saga-1", SagaStatus.RUNNING));
+      ExecutorService neverRuns = mock(ExecutorService.class);
+
+      try (DefaultSagaOrchestrator orchestrator = capped(0, neverRuns)) {
+        // Act & Assert — far past any plausible cap, with every drive still outstanding.
+        for (int i = 0; i < 50; i++) {
+          orchestrator.startAsync("transfer", Map.of());
+        }
+        verify(engine, times(50)).createSaga(eq(def), isNull(), any());
+      }
     }
   }
 }

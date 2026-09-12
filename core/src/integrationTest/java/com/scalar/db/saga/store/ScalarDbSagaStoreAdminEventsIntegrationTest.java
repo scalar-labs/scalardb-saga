@@ -1,6 +1,7 @@
 package com.scalar.db.saga.store;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
@@ -136,18 +137,67 @@ class ScalarDbSagaStoreAdminEventsIntegrationTest {
     store.recordStatusEvent(running, 1, StatusEvent.escalated("stuck"), running.getOwnerId());
 
     // Act
-    Optional<SagaStateAndEvents> result = store.getStateWithEvents("saga-detail");
+    Optional<SagaStateAndEvents> result =
+        store.getStateWithEvents("saga-detail", Integer.MAX_VALUE);
 
     // Assert — the snapshot's status is paired with the full, ordered event stream in one read
     assertThat(result).isPresent();
     assertThat(result.get().snapshot().getStatus()).isEqualTo(SagaStatus.ESCALATED);
+    assertThat(result.get().truncated()).isFalse();
     assertThat(result.get().events())
         .extracting(SagaEvent::getEventType)
         .containsExactly(EventType.SAGA_STARTED, EventType.SAGA_ESCALATED);
   }
 
   @Test
+  void getStateWithEvents_streamLongerThanMax_returnsNewestEventsAscendingAndFlagsTruncated() {
+    // Arrange — four events: STARTED @ 0, ESCALATED @ 1, RECOVERING @ 2, ESCALATED @ 3
+    SagaStateSnapshot s0 = newRunningSaga("saga-truncated");
+    SagaStateSnapshot s1 =
+        store.recordStatusEvent(s0, 1, StatusEvent.escalated("stuck"), s0.getOwnerId());
+    SagaStateSnapshot s2 =
+        store.recordStatusEvent(
+            s1, 2, StatusEvent.recovering(SagaStatus.RUNNING, "bob", "retry"), s1.getOwnerId());
+    store.recordStatusEvent(s2, 3, StatusEvent.escalated("stuck again"), s2.getOwnerId());
+
+    // Act
+    Optional<SagaStateAndEvents> result = store.getStateWithEvents("saga-truncated", 2);
+
+    // Assert — the newest two events, back in ascending order, flagged truncated
+    assertThat(result).isPresent();
+    assertThat(result.get().truncated()).isTrue();
+    assertThat(result.get().events())
+        .extracting(SagaEvent::getEventType)
+        .containsExactly(EventType.SAGA_RECOVERING, EventType.SAGA_ESCALATED);
+    StatusEvent newest = (StatusEvent) result.get().events().get(1);
+    assertThat(newest.getPayload()).isEqualTo("stuck again");
+  }
+
+  @Test
+  void getStateWithEvents_streamExactlyMax_returnsAllNotTruncated() {
+    // Arrange — two events, bound of two: the extra-row probe must not report truncation
+    SagaStateSnapshot running = newRunningSaga("saga-exact");
+    store.recordStatusEvent(running, 1, StatusEvent.escalated("stuck"), running.getOwnerId());
+
+    // Act
+    Optional<SagaStateAndEvents> result = store.getStateWithEvents("saga-exact", 2);
+
+    // Assert
+    assertThat(result).isPresent();
+    assertThat(result.get().truncated()).isFalse();
+    assertThat(result.get().events())
+        .extracting(SagaEvent::getEventType)
+        .containsExactly(EventType.SAGA_STARTED, EventType.SAGA_ESCALATED);
+  }
+
+  @Test
+  void getStateWithEvents_maxEventsNotPositive_throwsIllegalArgument() {
+    assertThatThrownBy(() -> store.getStateWithEvents("saga-any", 0))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void getStateWithEvents_missingSaga_returnsEmpty() {
-    assertThat(store.getStateWithEvents("no-such-saga")).isEmpty();
+    assertThat(store.getStateWithEvents("no-such-saga", Integer.MAX_VALUE)).isEmpty();
   }
 }

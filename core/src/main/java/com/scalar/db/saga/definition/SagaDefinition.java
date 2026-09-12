@@ -66,56 +66,6 @@ public final class SagaDefinition {
     this.pivotIndex = computePivotIndex();
   }
 
-  private SagaDefinition(
-      String name,
-      String version,
-      SagaMode mode,
-      List<StepDefinition> steps,
-      RecoveryStrategy recoveryStrategy,
-      long timeoutMillis,
-      @Nullable RetryPolicy defaultRetryPolicy,
-      int pivotIndex) {
-    this.name = name;
-    this.version = version;
-    this.mode = mode;
-    this.steps = List.copyOf(steps);
-    this.recoveryStrategy = recoveryStrategy;
-    this.timeoutMillis = timeoutMillis;
-    this.defaultRetryPolicy = defaultRetryPolicy;
-    this.pivotIndex = pivotIndex;
-  }
-
-  /**
-   * Returns a copy of this definition with its saga-level timeout replaced. Everything else —
-   * steps, mode, recovery strategy, retry policy, pivot — is unchanged, so no re-validation beyond
-   * the timeout bound is needed. Returns {@code this} when the timeout is unchanged.
-   *
-   * <p>Daemon mode uses this to apply a server-wide default timeout to a loaded definition that
-   * left its timeout unset ({@code 0} = unbounded), so a daemon-hosted saga cannot run without a
-   * deadline.
-   *
-   * @param timeoutMillis the new saga timeout in milliseconds ({@code 0} = no timeout)
-   * @return a copy with the given timeout, or {@code this} if unchanged
-   * @throws IllegalArgumentException if {@code timeoutMillis} is negative
-   */
-  public SagaDefinition withTimeoutMillis(long timeoutMillis) {
-    if (timeoutMillis < 0) {
-      throw new IllegalArgumentException("timeoutMillis must be >= 0, got " + timeoutMillis);
-    }
-    if (timeoutMillis == this.timeoutMillis) {
-      return this;
-    }
-    return new SagaDefinition(
-        name,
-        version,
-        mode,
-        steps,
-        recoveryStrategy,
-        timeoutMillis,
-        defaultRetryPolicy,
-        pivotIndex);
-  }
-
   /**
    * Starts a programmatic definition for {@code name}; pick the mode with {@link
    * ModeSelector#saga()} or {@link ModeSelector#tcc()}, which return a {@link SagaBuilder} / {@link
@@ -162,20 +112,22 @@ public final class SagaDefinition {
 
   private void validate() {
     if (name.contains(":")) {
-      throw new SagaDefinitionException("Saga name must not contain ':': '" + name + "'");
+      throw SagaDefinitionException.definitionInvalid(
+          name, "saga name must not contain ':': '" + name + "'");
     }
     if (version.contains(":")) {
-      throw new SagaDefinitionException("Saga version must not contain ':': '" + version + "'");
+      throw SagaDefinitionException.definitionInvalid(
+          name, "saga version must not contain ':': '" + version + "'");
     }
 
     if (steps.isEmpty()) {
-      throw new SagaDefinitionException(
-          "Saga definition '" + name + "' must have at least one step");
+      throw SagaDefinitionException.definitionInvalid(
+          name, "saga definition must have at least one step");
     }
 
     if (timeoutMillis < 0) {
-      throw new SagaDefinitionException(
-          "Saga definition '" + name + "' timeoutMillis must be >= 0, got " + timeoutMillis);
+      throw SagaDefinitionException.definitionInvalid(
+          name, "saga timeoutMillis must be >= 0, got " + timeoutMillis);
     }
 
     // Single-pass: check name uniqueness, step timeouts, and count pivots
@@ -183,12 +135,13 @@ public final class SagaDefinition {
     int pivotCount = 0;
     for (StepDefinition step : steps) {
       if (!stepNames.add(step.getName())) {
-        throw new SagaDefinitionException(
-            "Duplicate step name '" + step.getName() + "' in saga '" + name + "'");
+        throw SagaDefinitionException.definitionInvalid(
+            name, "duplicate step name '" + step.getName() + "'");
       }
       if (step.getTimeoutMillis() < 0) {
-        throw new SagaDefinitionException(
-            "Step '"
+        throw SagaDefinitionException.definitionInvalid(
+            name,
+            "step '"
                 + step.getName()
                 + "' timeoutMillis must be >= 0, got "
                 + step.getTimeoutMillis());
@@ -214,25 +167,25 @@ public final class SagaDefinition {
     switch (recoveryStrategy) {
       case BACKWARD, FORWARD -> {
         if (pivotCount != 0) {
-          throw new SagaDefinitionException(
-              recoveryStrategy + " strategy must not specify a pivot step");
+          throw SagaDefinitionException.definitionInvalid(
+              name, recoveryStrategy + " strategy must not specify a pivot step");
         }
       }
       case MIXED -> {
         if (pivotCount != 1) {
-          throw new SagaDefinitionException(
-              "MIXED strategy requires exactly one pivot step, found " + pivotCount);
+          throw SagaDefinitionException.definitionInvalid(
+              name, "MIXED strategy requires exactly one pivot step, found " + pivotCount);
         }
         if (pivotIndex == 0 || pivotIndex == steps.size() - 1) {
-          throw new SagaDefinitionException(
+          throw SagaDefinitionException.definitionInvalid(
+              name,
               "MIXED pivot must not be the first or last step; a pivot at the first step is"
-                  + " FORWARD, and a pivot at the last step is BACKWARD. MIXED requires at least"
-                  + " one step before the pivot and one after");
+                  + " FORWARD, and at the last step is BACKWARD");
         }
       }
       case PREDEFINED ->
-          throw new SagaDefinitionException(
-              "PREDEFINED recovery strategy is reserved for TCC mode");
+          throw SagaDefinitionException.definitionInvalid(
+              name, "PREDEFINED recovery strategy is reserved for TCC mode");
     }
   }
 
@@ -268,11 +221,9 @@ public final class SagaDefinition {
     Set<String> offending = new TreeSet<>(undo.referencedContextKeys());
     offending.retainAll(produced);
     if (!offending.isEmpty()) {
-      throw new SagaDefinitionException(
-          "Declarative service step '"
-              + service.getName()
-              + "' "
-              + undoPhase
+      throw SagaDefinitionException.declarativeStepInvalid(
+          service.getName(),
+          undoPhase
               + " must not reference its own "
               + forwardPhase
               + " output "

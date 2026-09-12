@@ -42,14 +42,18 @@ class SecurityProviderFactoryTest {
   }
 
   @Test
-  void create_unknownProviderGiven_throwsException() {
-    // Arrange
+  void create_unknownProviderGiven_throwsWithoutEchoingValue() {
+    // Arrange — the provider name is a resolved value, so it may be a pasted secret's plaintext;
+    // the message must name the key and never echo the value.
     Properties properties = new Properties();
-    properties.setProperty(SagaServerConfig.SECURITY_PROVIDER_KEY, "mystery");
+    properties.setProperty(SagaServerConfig.SECURITY_PROVIDER_KEY, "swordfish-like-a-secret");
 
     // Act / Assert
     assertThatThrownBy(() -> SecurityProviderFactory.create(SagaServerConfig.load(properties)))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.SECURITY_PROVIDER_KEY)
+        .hasMessageNotContaining("swordfish")
+        .hasNoCause();
   }
 
   @Test
@@ -98,6 +102,28 @@ class SecurityProviderFactoryTest {
 
     // Assert
     assertThat(provider.name()).isEqualTo("apikey");
+  }
+
+  @Test
+  void create_secretFileReferencePastedOnRolesKey_throwsWithoutEchoingSecret(@TempDir Path dir)
+      throws Exception {
+    // Arrange — the roles key sits one line from .secret in the template, so a reference pasted
+    // onto it resolves to the secret's plaintext, which must stay out of the startup error.
+    Path keyFile = dir.resolve("svc.key");
+    Files.writeString(keyFile, "s3cr3t-plaintext", StandardCharsets.UTF_8);
+    Properties properties = new Properties();
+    properties.setProperty(SagaServerConfig.SECURITY_PROVIDER_KEY, "apikey");
+    properties.setProperty(
+        "scalar.db.saga.server.security.apikey.key.svc.secret", "${file:UTF-8:" + keyFile + "}");
+    properties.setProperty(
+        "scalar.db.saga.server.security.apikey.key.svc.roles", "${file:UTF-8:" + keyFile + "}");
+
+    // Act / Assert
+    assertThatThrownBy(() -> SecurityProviderFactory.create(SagaServerConfig.load(properties)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("scalar.db.saga.server.security.apikey.key.svc.roles")
+        .hasMessageNotContaining("s3cr3t")
+        .hasNoCause();
   }
 
   @Test

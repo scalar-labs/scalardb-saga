@@ -163,6 +163,7 @@ class StepEventTest {
         .isInstanceOf(IllegalArgumentException.class);
   }
 
+  @SuppressWarnings("NullAway")
   @Test
   void pending_nullStepNameGiven_throwsNullPointerException() {
     // Act & Assert

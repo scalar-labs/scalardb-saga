@@ -57,10 +57,12 @@ final class ProtoMappers {
     }
   }
 
-  /** Maps an api detail (snapshot + redacted timeline) to the wire detail. */
+  /** Maps an api detail (snapshot + redacted timeline + truncation flag) to the wire detail. */
   static com.scalar.db.saga.rpc.SagaDetail toProto(SagaDetail detail) {
     com.scalar.db.saga.rpc.SagaDetail.Builder builder =
-        com.scalar.db.saga.rpc.SagaDetail.newBuilder().setSaga(toProto(detail.getSnapshot()));
+        com.scalar.db.saga.rpc.SagaDetail.newBuilder()
+            .setSaga(toProto(detail.getSnapshot()))
+            .setTruncated(detail.isTruncated());
     for (TimelineEvent event : detail.getTimeline()) {
       builder.addTimeline(toProto(event));
     }

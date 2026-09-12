@@ -23,9 +23,9 @@ sealed interface RecoveryAction permits RecoveryAction.Compensate, RecoveryActio
     };
   }
 
-  /** Drive compensation starting at {@code fromStep} (compensating downward from it). */
-  record Compensate(int fromStep) implements RecoveryAction {}
+  /** Drive compensation starting at {@code fromStepIndex} (compensating downward from it). */
+  record Compensate(int fromStepIndex) implements RecoveryAction {}
 
-  /** Resume forward execution starting at {@code fromStep}. */
-  record Resume(int fromStep) implements RecoveryAction {}
+  /** Resume forward execution starting at {@code fromStepIndex}. */
+  record Resume(int fromStepIndex) implements RecoveryAction {}
 }

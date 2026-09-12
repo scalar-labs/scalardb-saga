@@ -36,6 +36,16 @@
     <Class name="~.*Test(\$.*)?"/>
     <Bug pattern="UNENCRYPTED_SERVER_SOCKET"/>
   </Match>
+  <!-- BoundedWaitTest.collectable asserts that a finished wait leaves nothing attached to the
+       caller's abort future. Reachability is the assertion itself, and it has no other observable:
+       the leak is a node the JDK holds on that future, and CompletableFuture exposes no stack. So
+       the test forces collection and retries — the benchmarking-style case DM_GC's own description
+       exempts. Scoped to the one method, so an accidental System.gc() elsewhere still fails. -->
+  <Match>
+    <Class name="com.scalar.db.saga.server.BoundedWaitTest"/>
+    <Method name="collectable"/>
+    <Bug pattern="DM_GC"/>
+  </Match>
   <!-- ThreadLocalRandom in RetryPolicy.sleepWithBackoff is for retry jitter, not security -->
   <Match>
     <Class name="com.scalar.db.saga.definition.RetryPolicy"/>

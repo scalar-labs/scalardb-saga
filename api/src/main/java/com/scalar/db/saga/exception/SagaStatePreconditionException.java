@@ -1,5 +1,6 @@
 package com.scalar.db.saga.exception;
 
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -10,33 +11,72 @@ import java.util.Objects;
  *
  * <p>Examples: {@code forceComplete} on a saga that is not {@code ESCALATED}; {@code recoverSaga}
  * on an {@code ESCALATED} saga; any mutation on a {@code WAITING} (async-parked) or terminal saga.
- * The daemon maps this to <b>HTTP 422 / gRPC FAILED_PRECONDITION</b>. The machine-readable {@link
- * #getCode() code} lets a client distinguish the reason without parsing the message.
+ * The daemon maps this to <b>HTTP 422 / gRPC FAILED_PRECONDITION</b>.
+ *
+ * <p>The machine-readable {@link #getErrorCode()} distinguishes {@link
+ * SagaErrorCode#SAGA_WRONG_STATE} from {@link SagaErrorCode#SAGA_PARKED} so a client can switch on
+ * the failure without parsing the message. Use the static factories {@link #wrongState} or {@link
+ * #parked} to construct.
  */
 public class SagaStatePreconditionException extends SagaRuntimeException {
 
-  /** Machine-readable reason for the precondition failure. */
-  public enum Code {
-    /** The saga is not in a status this operation accepts. */
-    SAGA_WRONG_STATE,
-    /** The saga is {@code WAITING} on an async callback; it resolves via callback or timeout. */
-    SAGA_PARKED
+  private final String sagaId;
+
+  private SagaStatePreconditionException(SagaErrorCode code, Map<String, String> metadata) {
+    super(code, metadata);
+    this.sagaId =
+        Objects.requireNonNull(metadata.get("saga_id"), "metadata.saga_id must not be null");
   }
 
-  private final String sagaId;
-  private final Code code;
+  /**
+   * The saga is in a status the operation does not accept — carries {@link
+   * SagaErrorCode#SAGA_WRONG_STATE}.
+   *
+   * @param sagaId the saga instance id
+   * @param currentState the saga's current status name (e.g. {@code "RUNNING"})
+   * @param requestedOperation a short operation label (e.g. {@code "force-complete"})
+   */
+  public static SagaStatePreconditionException wrongState(
+      String sagaId, String currentState, String requestedOperation) {
+    return new SagaStatePreconditionException(
+        SagaErrorCode.SAGA_WRONG_STATE,
+        ErrorMetadata.of(
+            "saga_id", Objects.requireNonNull(sagaId, "sagaId must not be null"),
+            "current_state", Objects.requireNonNull(currentState, "currentState must not be null"),
+            "requested_operation",
+                Objects.requireNonNull(requestedOperation, "requestedOperation must not be null")));
+  }
 
-  public SagaStatePreconditionException(String sagaId, Code code, String message) {
-    super(message);
-    this.sagaId = Objects.requireNonNull(sagaId, "sagaId must not be null");
-    this.code = Objects.requireNonNull(code, "code must not be null");
+  /**
+   * The saga is {@code WAITING} on an async callback and resolves via callback or timeout — carries
+   * {@link SagaErrorCode#SAGA_PARKED}.
+   */
+  public static SagaStatePreconditionException parked(String sagaId) {
+    return new SagaStatePreconditionException(
+        SagaErrorCode.SAGA_PARKED,
+        ErrorMetadata.of("saga_id", Objects.requireNonNull(sagaId, "sagaId must not be null")));
+  }
+
+  /**
+   * Reconstructs the exception from a wire-received {@link SagaErrorCode} and metadata, for use by
+   * the client SDK when it decodes an {@code ErrorInfo} from the daemon. The code must be one this
+   * exception represents ({@link SagaErrorCode#SAGA_WRONG_STATE} or {@link
+   * SagaErrorCode#SAGA_PARKED}).
+   *
+   * <p>Package-private: {@link ExceptionRegistry} is the only caller, so a code this type does not
+   * represent is a registry wiring bug rather than caller error, and throws {@link
+   * IllegalStateException}. That is deliberately outside the {@code IllegalArgumentException |
+   * NullPointerException} the registry catches for genuine wire-metadata drift, so a wiring bug
+   * surfaces as itself instead of as {@code UNRECOGNIZED_SERVER_ERROR}.
+   */
+  static SagaStatePreconditionException fromWire(SagaErrorCode code, Map<String, String> metadata) {
+    if (code != SagaErrorCode.SAGA_WRONG_STATE && code != SagaErrorCode.SAGA_PARKED) {
+      throw new IllegalStateException("SagaStatePreconditionException does not carry code " + code);
+    }
+    return new SagaStatePreconditionException(code, metadata);
   }
 
   public String getSagaId() {
     return sagaId;
-  }
-
-  public Code getCode() {
-    return code;
   }
 }

@@ -10,14 +10,17 @@ public class SagaAlreadyExistsException extends SagaRuntimeException {
   private final SagaStateSnapshot existing;
 
   public SagaAlreadyExistsException(String sagaId, SagaStateSnapshot existing) {
-    super("Saga already exists: " + Objects.requireNonNull(sagaId, "sagaId must not be null"));
+    super(
+        SagaErrorCode.SAGA_ALREADY_EXISTS,
+        ErrorMetadata.of("saga_id", Objects.requireNonNull(sagaId, "sagaId must not be null")));
     this.sagaId = sagaId;
     this.existing = Objects.requireNonNull(existing, "existing must not be null");
   }
 
   public SagaAlreadyExistsException(String sagaId, SagaStateSnapshot existing, Throwable cause) {
     super(
-        "Saga already exists: " + Objects.requireNonNull(sagaId, "sagaId must not be null"),
+        SagaErrorCode.SAGA_ALREADY_EXISTS,
+        ErrorMetadata.of("saga_id", Objects.requireNonNull(sagaId, "sagaId must not be null")),
         Objects.requireNonNull(cause, "cause must not be null"));
     this.sagaId = sagaId;
     this.existing = Objects.requireNonNull(existing, "existing must not be null");

@@ -1,5 +1,6 @@
 package com.scalar.db.saga.server.api;
 
+import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.api.TimelineEvent;
 import org.jspecify.annotations.Nullable;
 
@@ -26,12 +27,13 @@ public record TimelineEventResponse(
    * @return the response view
    */
   public static TimelineEventResponse from(TimelineEvent event) {
+    SagaStatus resultingStatus = event.getResultingStatus();
     return new TimelineEventResponse(
         event.getTimestamp().toString(),
         event.getType(),
         event.getStepIndex(),
         event.getStepName(),
-        event.getResultingStatus() == null ? null : event.getResultingStatus().name(),
+        resultingStatus == null ? null : resultingStatus.name(),
         event.getDetail(),
         event.getOperator());
   }

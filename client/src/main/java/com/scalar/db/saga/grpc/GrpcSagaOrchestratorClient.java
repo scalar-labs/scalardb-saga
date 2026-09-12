@@ -7,8 +7,10 @@ import com.scalar.db.saga.api.SagaDefinitionId;
 import com.scalar.db.saga.api.SagaDetail;
 import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
+import com.scalar.db.saga.exception.ErrorMetadata;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaTimeoutException;
@@ -24,6 +26,7 @@ import io.grpc.ManagedChannel;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
@@ -44,6 +47,23 @@ import org.jspecify.annotations.Nullable;
  * UnsupportedOperationException}: a local completion callback over a remote, fire-and-forget server
  * needs a server-streaming {@code WatchSaga} RPC, which is not yet supported. Start asynchronously
  * and poll {@link #getStateSnapshot(String)} for the outcome, or use the embedded orchestrator.
+ *
+ * <p>TLS against a private CA (e.g. a cert-manager-issued server certificate), dialing through a
+ * port-forward:
+ *
+ * <pre>{@code
+ * GrpcSagaOrchestratorClient client =
+ *     GrpcSagaOrchestratorClient.newBuilder()
+ *         .target("127.0.0.1:12051") // the port-forward
+ *         .useTransportSecurity()
+ *         .trustCaCertificate(Paths.get("/etc/saga/ca.crt"))
+ *         .overrideAuthority("saga-server.internal") // the name the certificate carries
+ *         .build();
+ * }</pre>
+ *
+ * <p>On Java 8, TLS needs ALPN: use 8u252 or later. The SDK's default transport (grpc-netty-shaded)
+ * also bundles tcnative, which provides ALPN on older JREs; an embedder who swaps in plain
+ * grpc-netty needs {@code netty-tcnative-boringssl-static} instead.
  */
 @ThreadSafe
 public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
@@ -254,6 +274,10 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
    * ALREADY_EXISTS} on the <i>first</i> attempt is a genuine duplicate (surfaced as {@link
    * SagaAlreadyExistsException}); on a <i>retry</i> it means our earlier attempt landed, so we
    * fetch the snapshot and proceed to the await loop.
+   *
+   * <p>An admission refusal after a retry is reconciled the same way and for the same reason: the
+   * earlier attempt may have created the saga, and that saga may be what is holding the last
+   * permit. Overload is reported only once the store agrees nothing is there.
    */
   private SagaSnapshot firstStart(
       StartSagaRequest request,
@@ -274,12 +298,34 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
           }
           throw mapStartException(e, name, version, sagaId);
         }
-        if (isRetryable(code)) {
+        if (isRetryable(e)) {
           attempted = true;
           throwIfClosed(sagaId);
           guardDeadline(loopDeadlineNanos);
           backoff(retries++);
           continue;
+        }
+        // An overload refusal is normally a definite answer: nothing was persisted, the ID is
+        // free. After an ambiguous attempt it is not. That attempt may well have created this
+        // saga — and a saga this client started may be the very thing holding the last permit, so
+        // the refusal and the success can be the same request seen twice. Reconcile the way the
+        // ALREADY_EXISTS path above does, and report overload only once the store agrees nothing
+        // is there.
+        if (attempted && GrpcClientSupport.isEngineOverloaded(e)) {
+          try {
+            return getSagaSnapshot(sagaId, loopDeadlineNanos);
+          } catch (SagaNotFoundException notFound) {
+            // Nothing landed, so the refusal was the honest answer after all.
+          } catch (RuntimeException reconcileFailure) {
+            // The reconcile itself failed, so it settled nothing. Overload is still the only thing
+            // the server actually told us, and it is what a caller keys backpressure on — losing it
+            // to a timeout on this second call would be worst exactly when it matters, since an
+            // overloaded daemon is when this call is slowest. Keep it and carry the failure along,
+            // as the ALREADY_EXISTS refetch does.
+            RuntimeException overloaded = mapStartException(e, name, version, sagaId);
+            overloaded.addSuppressed(reconcileFailure);
+            throw overloaded;
+          }
         }
         throw mapStartException(e, name, version, sagaId);
       }
@@ -301,8 +347,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
         snapshot = callWithin(loopDeadlineNanos).awaitSaga(request);
         retries = 0;
       } catch (StatusRuntimeException e) {
-        Status.Code code = e.getStatus().getCode();
-        if (isRetryable(code)) {
+        if (isRetryable(e)) {
           throwIfClosed(sagaId);
           guardDeadline(loopDeadlineNanos);
           backoff(retries++);
@@ -333,16 +378,39 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
         || status == SagaStatus.SAGA_STATUS_ESCALATED;
   }
 
-  private static boolean isRetryable(Status.Code code) {
-    return code == Status.Code.UNAVAILABLE
-        || code == Status.Code.CANCELLED
-        || code == Status.Code.DEADLINE_EXCEEDED;
+  /**
+   * Whether the client should absorb {@code e} and try again.
+   *
+   * <p>An admission refusal is excluded deliberately, even though it arrives on a retryable status
+   * and is marked retryable on the wire. That marking is a statement about <b>safety</b> — nothing
+   * was persisted, so repeating the request cannot double-start a saga — not an instruction to
+   * repeat it now. Retrying inside the SDK would spend the caller's whole deadline on a condition
+   * only the caller can weigh: shedding the request, queueing it, trying another region, or telling
+   * its own user, are all better answers than waiting, and none of them are available to code
+   * buried in a transport client. It would also keep pressure on a server that has just said it is
+   * saturated.
+   *
+   * <p>So the refusal is surfaced at once as {@link
+   * com.scalar.db.saga.exception.SagaOverloadedException}, and the caller decides. Every other
+   * retryable failure is still absorbed here, where the request may never have arrived at all.
+   */
+  private static boolean isRetryable(StatusRuntimeException e) {
+    Status.Code code = e.getStatus().getCode();
+    boolean retryableStatus =
+        code == Status.Code.UNAVAILABLE
+            || code == Status.Code.CANCELLED
+            || code == Status.Code.DEADLINE_EXCEEDED;
+    return retryableStatus && !GrpcClientSupport.isEngineOverloaded(e);
   }
 
-  /** Throws {@link SagaTimeoutException} when the overall client deadline (if any) has elapsed. */
+  /**
+   * Throws when the overall client deadline (if any) has elapsed. SAGA_AWAIT_TIMEOUT, not
+   * REQUEST_TIMEOUT: every request so far succeeded and the saga keeps running — only the
+   * wait-for-terminal budget expired, so the caller should poll by ID rather than re-send.
+   */
   private void guardDeadline(long loopDeadlineNanos) {
     if (loopDeadlineNanos != 0L && System.nanoTime() >= loopDeadlineNanos) {
-      throw new SagaTimeoutException("Saga did not reach a terminal state within the deadline");
+      throw SagaTimeoutException.awaitExpired();
     }
   }
 
@@ -382,7 +450,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
       Thread.sleep(half + jitter);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
-      throw new SagaRuntimeException("Interrupted while waiting to retry a saga RPC", e);
+      throw new SagaRuntimeException(SagaErrorCode.REQUEST_ABORTED, ErrorMetadata.of(), e);
     }
   }
 
@@ -462,22 +530,29 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
       @Nullable String version,
       @Nullable String clientSagaId) {
     Status.Code code = e.getStatus().getCode();
-    if (code == Status.Code.NOT_FOUND) {
-      return version == null
-          ? new SagaDefinitionNotFoundException(name)
-          : new SagaDefinitionNotFoundException(name, version);
-    }
+    // ALREADY_EXISTS is handled ahead of reconstruction: SAGA_ALREADY_EXISTS is deliberately not
+    // reconstructible, because SagaAlreadyExistsException needs the existing snapshot and the wire
+    // metadata has no room for it. Only this path can re-fetch it.
     if (code == Status.Code.ALREADY_EXISTS) {
       return alreadyExists(clientSagaId, e);
     }
-    return mapCommon(e);
+    SagaRuntimeException reconstructed = GrpcClientSupport.reconstruct(e);
+    if (reconstructed != null) {
+      return reconstructed;
+    }
+    if (code == Status.Code.NOT_FOUND) {
+      return version == null
+          ? SagaDefinitionNotFoundException.byName(name)
+          : SagaDefinitionNotFoundException.byNameAndVersion(name, version);
+    }
+    return GrpcClientSupport.mapTransport(e);
   }
 
   private RuntimeException alreadyExists(@Nullable String clientSagaId, StatusRuntimeException e) {
     if (clientSagaId == null) {
-      // Server-generated ids do not collide; an ALREADY_EXISTS without a client id is unexpected.
-      return new SagaRuntimeException(
-          "Unexpected ALREADY_EXISTS for a server-generated saga id", e);
+      // Server-generated ids do not collide; an ALREADY_EXISTS without a client id is a protocol
+      // invariant violation.
+      return new SagaRuntimeException(SagaErrorCode.INTERNAL_ERROR, ErrorMetadata.of(), e);
     }
     SagaStateSnapshot existing;
     try {
@@ -485,12 +560,12 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
       // only on the rare conflict) so the exception faithfully carries the existing state.
       existing = getStateSnapshot(clientSagaId);
     } catch (RuntimeException refetchFailure) {
-      // Cannot build a SagaAlreadyExistsException without the snapshot; surface the conflict as the
-      // primary cause and attach the refetch failure as suppressed for debugging context.
+      // Cannot build a SagaAlreadyExistsException without the snapshot (its schema requires one).
+      // Surface the conflict via the raw SAGA_ALREADY_EXISTS code so callers keying on
+      // getErrorCode() still see it, and attach the refetch failure as suppressed for debugging.
       SagaRuntimeException conflict =
           new SagaRuntimeException(
-              "Saga '" + clientSagaId + "' already exists, but fetching its current state failed",
-              e);
+              SagaErrorCode.SAGA_ALREADY_EXISTS, ErrorMetadata.of("saga_id", clientSagaId), e);
       conflict.addSuppressed(refetchFailure);
       return conflict;
     }
@@ -498,22 +573,21 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
   }
 
   /**
-   * Maps a saga-instance RPC failure ({@code getSaga}/{@code awaitSaga}) to the api exception.
-   * {@code NOT_FOUND} means the saga id is gone — purged, TTL'd, or never existed — vs the start
-   * path, where {@code NOT_FOUND} means the <i>definition</i> is missing (see {@link
-   * #mapStartException}). Everything else routes through {@link #mapCommon}.
+   * Maps a saga-instance RPC failure ({@code getSaga}/{@code awaitSaga}) to the api exception. The
+   * daemon's {@link com.google.rpc.ErrorInfo} wins when present, since it names the exact code.
+   * Without one, {@code NOT_FOUND} means the saga id is gone — purged, TTL'd, or never existed — vs
+   * the start path, where {@code NOT_FOUND} means the <i>definition</i> is missing (see {@link
+   * #mapStartException}); everything else routes through {@code GrpcClientSupport.mapTransport}.
    */
   private static RuntimeException mapSagaCall(StatusRuntimeException e, String sagaId) {
+    SagaRuntimeException reconstructed = GrpcClientSupport.reconstruct(e);
+    if (reconstructed != null) {
+      return reconstructed;
+    }
     if (e.getStatus().getCode() == Status.Code.NOT_FOUND) {
       return new SagaNotFoundException(sagaId);
     }
-    return mapCommon(e);
-  }
-
-  private static RuntimeException mapCommon(StatusRuntimeException e) {
-    // NOT_FOUND is deliberately not handled here — the two context mappers (mapSagaCall,
-    // mapStartException) handle it upstream, so it never reaches this shared catch-all.
-    return GrpcClientSupport.mapCommon(e, "Saga");
+    return GrpcClientSupport.mapTransport(e);
   }
 
   /** Builder for {@link GrpcSagaOrchestratorClient}. */
@@ -521,6 +595,8 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
 
     @Nullable private String target;
     private boolean useTls = false;
+    @Nullable private Path trustCaCertPath;
+    @Nullable private String overrideAuthority;
     private long defaultDeadlineMillis = 0L;
 
     private Builder() {}
@@ -537,13 +613,45 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
     }
 
     /**
-     * Enables TLS. Server-side TLS termination is not yet supported, so today this is
-     * forward-compat (e.g. connecting through a TLS-terminating mesh/proxy). {@link #build()} fails
-     * fast if the JRE lacks ALPN (on Java 8, use 8u252+ or add {@code
-     * netty-tcnative-boringssl-static}).
+     * Enables TLS — against the daemon's native TLS ({@code scalar.db.saga.server.tls.enabled}) or
+     * a TLS-terminating mesh/proxy in front of it. The server certificate is validated against the
+     * JVM's default trust store unless {@link #trustCaCertificate(Path)} narrows it. {@link
+     * #build()} fails fast if neither the JRE nor a loaded tcnative provides ALPN (on Java 8, use
+     * 8u252+; the default grpc-netty-shaded transport bundles tcnative).
      */
     public Builder useTransportSecurity() {
       this.useTls = true;
+      return this;
+    }
+
+    /**
+     * Trusts only the CA certificate (PEM; concatenated certificates allowed) at {@code caCertPath}
+     * for this channel, replacing the JVM's default trust store. For servers whose certificate a
+     * public CA did not issue — a cert-manager or Vault private CA — where default trust rejects
+     * the handshake. Requires TLS: {@link #build()} fails if the channel is left plaintext, rather
+     * than silently ignoring a setting that says the caller expected encryption. The file is read
+     * at {@link #build()}, so a bad path fails there naming the file, not at the first RPC as an
+     * opaque {@code UNAVAILABLE}.
+     *
+     * @param caCertPath path to the PEM CA certificate to trust
+     * @return this builder
+     */
+    public Builder trustCaCertificate(Path caCertPath) {
+      this.trustCaCertPath = Objects.requireNonNull(caCertPath, "caCertPath must not be null");
+      return this;
+    }
+
+    /**
+     * Validates the server certificate against {@code authority} instead of the dialed address —
+     * for dialing by IP or through a port-forward while the certificate names the service's DNS
+     * name. Independent of {@link #trustCaCertificate(Path)}, and legitimate without TLS too (gRPC
+     * also routes on the authority).
+     *
+     * @param authority the name to validate the server certificate against
+     * @return this builder
+     */
+    public Builder overrideAuthority(String authority) {
+      this.overrideAuthority = Objects.requireNonNull(authority, "authority must not be null");
       return this;
     }
 
@@ -560,7 +668,8 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
 
     public GrpcSagaOrchestratorClient build() {
       String resolvedTarget = Objects.requireNonNull(target, "target must be set");
-      ManagedChannel channel = GrpcClientSupport.openChannel(resolvedTarget, useTls);
+      ManagedChannel channel =
+          GrpcClientSupport.openChannel(resolvedTarget, useTls, trustCaCertPath, overrideAuthority);
       return new GrpcSagaOrchestratorClient(
           SagaServiceGrpc.newBlockingStub(channel), channel, defaultDeadlineMillis);
     }

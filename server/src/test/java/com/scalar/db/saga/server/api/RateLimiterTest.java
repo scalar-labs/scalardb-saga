@@ -19,6 +19,36 @@ class RateLimiterTest {
   }
 
   @Test
+  void retryAfterMillis_liveWindow_returnsRemainingMillis() {
+    // Arrange — window opened at t=0, so at t=300 the reset is 700ms away
+    RateLimiter limiter = new RateLimiter(1, 1_000);
+    limiter.tryAcquire("k", 0);
+
+    // Act / Assert
+    assertThat(limiter.retryAfterMillis("k", 300)).isEqualTo(700);
+  }
+
+  @Test
+  void retryAfterMillis_untrackedKey_returnsFullWindow() {
+    // Arrange — never-seen key (or one evicted between refusal and query): the conservative
+    // advisory is one full window
+    RateLimiter limiter = new RateLimiter(1, 1_000);
+
+    // Act / Assert
+    assertThat(limiter.retryAfterMillis("unknown", 300)).isEqualTo(1_000);
+  }
+
+  @Test
+  void retryAfterMillis_expiredWindow_returnsFullWindow() {
+    // Arrange
+    RateLimiter limiter = new RateLimiter(1, 1_000);
+    limiter.tryAcquire("k", 0);
+
+    // Act / Assert — past the reset the entry is stale; same conservative advisory
+    assertThat(limiter.retryAfterMillis("k", 1_500)).isEqualTo(1_000);
+  }
+
+  @Test
   void tryAcquire_overLimit_rejectedWithinWindow() {
     // Arrange
     RateLimiter limiter = new RateLimiter(2, 1_000);

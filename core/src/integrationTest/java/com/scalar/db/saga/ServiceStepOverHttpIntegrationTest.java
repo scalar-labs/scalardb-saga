@@ -9,6 +9,7 @@ import com.scalar.db.saga.definition.RetryPolicy;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.store.ScalarDbSagaStoreFactory;
+import com.scalar.db.saga.transport.HttpServiceConfig;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
@@ -17,6 +18,7 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -33,8 +35,9 @@ import org.junit.jupiter.api.Test;
  * SAGA happy path (a {@code GET} read step with path/query templating, output extraction, and
  * output flowing into a later step's request), correlation-header propagation, engine retry on a
  * retryable {@code 503}, compensation of a completed step when a later step fails non-retryably
- * ({@code 422}), and the TCC lifecycle (reserve→confirm; reserve→cancel when a later reserve
- * fails).
+ * ({@code 422}), the TCC lifecycle (reserve→confirm; reserve→cancel when a later reserve fails),
+ * and configuration hot reload (an already-built plan re-resolves a swapped endpoint through the
+ * orchestrator's registrar).
  */
 class ServiceStepOverHttpIntegrationTest {
 
@@ -341,6 +344,76 @@ class ServiceStepOverHttpIntegrationTest {
       assertThat(notified).hasSize(1);
       assertThat(notified.get(0)).contains("ACK-OK");
     }
+  }
+
+  @Test
+  void start_afterEndpointSwapViaRegistrar_cachedPlanResolvesReplacementEndpoint()
+      throws Exception {
+    // Arrange — the same participant behind two servers: the service "moves" from A to B
+    AtomicInteger hitsA = new AtomicInteger();
+    AtomicInteger hitsB = new AtomicInteger();
+    HttpServer serverA = pingServer(hitsA);
+    HttpServer serverB = pingServer(hitsB);
+    try {
+      SagaDefinition def =
+          SagaDefinition.newBuilder("moving-saga")
+              .saga()
+              .serviceStep("ping", "moving-service")
+              .execution(HttpCall.newBuilder("/ping").build())
+              .compensation(HttpCall.newBuilder("/noop").build())
+              .add()
+              .build();
+
+      try (DefaultSagaOrchestrator orchestrator =
+          DefaultSagaOrchestrator.newBuilder()
+              .storeFactory(ScalarDbSagaStoreFactory.create(props))
+              .httpEndpoint("moving-service", baseUrlOf(serverA))
+              .add()
+              .build()) {
+        // Registration builds and caches the plan against the original endpoint set
+        orchestrator.register(def);
+        String first = orchestrator.start("moving-saga", Map.of());
+        assertThat(orchestrator.getStateSnapshot(first).getStatus())
+            .isEqualTo(SagaStatus.COMPLETED);
+        assertThat(hitsA.get()).isEqualTo(1);
+
+        // Act — hot-swap the service to B through the orchestrator's public registrar seam
+        orchestrator
+            .httpEndpointRegistrar()
+            .swapHttpEndpoints(
+                Map.of(
+                    "moving-service",
+                    new HttpServiceConfig(baseUrlOf(serverB), List.of(), -1, null, Map.of())));
+
+        // Assert — the SAME cached plan late-binds per call: the rerun lands on B, not A,
+        // covering the engine/instantiator wiring behind httpEndpointRegistrar()
+        String second = orchestrator.start("moving-saga", Map.of());
+        assertThat(orchestrator.getStateSnapshot(second).getStatus())
+            .isEqualTo(SagaStatus.COMPLETED);
+        assertThat(hitsA.get()).isEqualTo(1);
+        assertThat(hitsB.get()).isEqualTo(1);
+      }
+    } finally {
+      serverA.stop(0);
+      serverB.stop(0);
+    }
+  }
+
+  private static HttpServer pingServer(AtomicInteger hits) throws IOException {
+    HttpServer s = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+    s.createContext(
+        "/ping",
+        ex -> {
+          hits.incrementAndGet();
+          respond(ex, 200, "{}");
+        });
+    s.createContext("/noop", ex -> respond(ex, 200, "{}"));
+    s.start();
+    return s;
+  }
+
+  private static String baseUrlOf(HttpServer server) {
+    return "http://localhost:" + server.getAddress().getPort();
   }
 
   private static HttpCall tcc(String path, String op) {

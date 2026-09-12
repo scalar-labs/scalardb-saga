@@ -9,6 +9,7 @@ import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
@@ -180,7 +181,7 @@ public class DefaultSagaAdminService implements SagaAdminService {
     String operator = operator();
 
     if (query.getStatus() != null && query.getStatus() != SagaStatus.ESCALATED) {
-      throw new IllegalArgumentException(
+      throw new SagaIllegalArgumentException(
           "resetEscalated only sweeps ESCALATED sagas; conflicting status filter: "
               + query.getStatus());
     }
@@ -436,50 +437,37 @@ public class DefaultSagaAdminService implements SagaAdminService {
     SagaDefinition def =
         definitionRegistry.resolve(snapshot.getSagaName(), snapshot.getDefinitionVersion());
     if (def == null) {
-      throw new SagaDefinitionNotFoundException(
+      throw SagaDefinitionNotFoundException.byNameAndVersion(
           snapshot.getSagaName(), snapshot.getDefinitionVersion());
     }
     return def;
   }
 
+  // The 422 wire body renders these preconditions' current_state and requested_operation. That
+  // disclosure is acceptable only while every thrower sits behind ADMIN-gated routes, as all of
+  // these do; a throw site reachable from a non-admin route would turn the body into a saga-state
+  // oracle for any authenticated caller.
   private static SagaStatePreconditionException parked(String sagaId) {
-    return new SagaStatePreconditionException(
-        sagaId,
-        SagaStatePreconditionException.Code.SAGA_PARKED,
-        "Saga " + sagaId + " is WAITING on an async callback; it resolves via callback or timeout");
+    return SagaStatePreconditionException.parked(sagaId);
   }
 
   private static SagaStatePreconditionException notEscalated(
       String sagaId, SagaStatus status, String action) {
-    return wrongState(
-        sagaId,
-        "Cannot " + action + " saga " + sagaId + " in status " + status + " (expected ESCALATED)");
+    return SagaStatePreconditionException.wrongState(sagaId, status.name(), action);
   }
 
   private static SagaStatePreconditionException notRecoverable(String sagaId, SagaStatus status) {
-    return wrongState(
-        sagaId,
-        "Cannot recover saga "
-            + sagaId
-            + " in status "
-            + status
-            + " (recover accepts RUNNING or COMPENSATING; for ESCALATED use resetEscalated or"
-            + " forceComplete)");
-  }
-
-  private static SagaStatePreconditionException wrongState(String sagaId, String message) {
-    return new SagaStatePreconditionException(
-        sagaId, SagaStatePreconditionException.Code.SAGA_WRONG_STATE, message);
+    return SagaStatePreconditionException.wrongState(sagaId, status.name(), "recover");
   }
 
   private static String validateReason(String reason) {
     Objects.requireNonNull(reason, "reason must not be null");
     String sanitized = sanitizeControlChars(reason).trim();
     if (sanitized.isEmpty()) {
-      throw new IllegalArgumentException("reason must not be blank");
+      throw new SagaIllegalArgumentException("reason must not be blank");
     }
     if (sanitized.length() > MAX_REASON_LENGTH) {
-      throw new IllegalArgumentException(
+      throw new SagaIllegalArgumentException(
           "reason must be at most " + MAX_REASON_LENGTH + " characters, got " + sanitized.length());
     }
     return sanitized;

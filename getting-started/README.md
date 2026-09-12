@@ -234,13 +234,16 @@ You should see the saga's state followed by its timeline, abridged here for read
              {"timestamp":"...","type":"STEP_COMPENSATED","stepIndex":2,"stepName":"ship"},
              {"timestamp":"...","type":"STEP_COMPENSATED","stepIndex":1,"stepName":"reserve"},
              {"timestamp":"...","type":"STEP_COMPENSATED","stepIndex":0,"stepName":"charge"},
-             {"timestamp":"...","type":"SAGA_COMPENSATED","resultingStatus":"COMPENSATED"}]}
+             {"timestamp":"...","type":"SAGA_COMPENSATED","resultingStatus":"COMPENSATED"}],
+ "truncated":false}
 ```
 
 This record is what lets another server pick up a saga whose coordinator died mid-flight and finish
 it. A step interrupted between running and being recorded runs again on recovery, which is why steps
 must be idempotent. The timeline carries metadata and failure details only; raw step payloads are
-never returned.
+never returned. A history longer than the server's bound (default 1,000 events, configurable via
+`scalar.db.saga.server.detail.max_timeline_events`) is cut to the newest events, and
+`"truncated":true` marks the cut.
 
 ### Start a saga without waiting for it to finish
 
@@ -384,7 +387,7 @@ To go further:
   through the `scalardb-saga-java-client-sdk` over gRPC — with the stack up, run
   `../../gradlew run` from that directory (this one needs a JDK).
 - [server/docker/README.md](../server/docker/README.md) — running the server for real: configuration,
-  authentication, health checks, and deployment.
+  authentication, TLS, health checks, and deployment.
 - Embedded mode, listed in the [root README](../README.md), runs the engine as a library inside your
   application, where steps can be Java code rather than service calls.
 

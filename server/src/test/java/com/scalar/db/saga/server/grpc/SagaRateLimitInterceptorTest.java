@@ -8,14 +8,17 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.google.protobuf.Duration;
 import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.rpc.GetSagaRequest;
 import com.scalar.db.saga.rpc.SagaServiceGrpc;
 import com.scalar.db.saga.rpc.SagaServiceGrpc.SagaServiceBlockingStub;
 import com.scalar.db.saga.rpc.SagaSnapshot;
 import com.scalar.db.saga.rpc.StartSagaRequest;
+import com.scalar.db.saga.server.SagaWaiterRegistry;
 import com.scalar.db.saga.server.api.RateLimiter;
 import com.scalar.db.saga.server.security.SagaAuthRequest;
 import com.scalar.db.saga.server.security.SagaAuthenticationException;
@@ -67,7 +70,11 @@ class SagaRateLimitInterceptorTest {
             .directExecutor()
             .addService(
                 ServerInterceptors.interceptForward(
-                    new SagaServiceImpl(orchestrator, 0L, 60_000L),
+                    new SagaServiceImpl(
+                        orchestrator,
+                        cap -> Math.min(60_000L, cap),
+                        new java.util.concurrent.CompletableFuture<>(),
+                        new SagaWaiterRegistry()),
                     new SagaSecurityInterceptor(new WriteProvider()),
                     new SagaRateLimitInterceptor(new RateLimiter(limit, 60_000L))))
             .build()
@@ -93,6 +100,15 @@ class SagaRateLimitInterceptorTest {
     assertThat(start().getSagaId()).isEqualTo("s-1");
     StatusRuntimeException error = catchThrowableOfType(StatusRuntimeException.class, this::start);
     assertThat(error.getStatus().getCode()).isEqualTo(Status.Code.RESOURCE_EXHAUSTED);
+    // The refusal carries the code, so the client SDK classifies it as retryable rate limiting
+    // instead of falling to its unrecognized-error catch-all.
+    assertThat(ErrorInfos.errorInfo(error).getReason())
+        .isEqualTo(SagaErrorCode.RATE_LIMIT_EXCEEDED.code());
+    // And the standard RetryInfo detail carries the advisory wait — positive, at most the
+    // limiter's window (60s here) — so a machine can back off precisely instead of guessing.
+    Duration delay = ErrorInfos.retryInfo(error).getRetryDelay();
+    long delayMillis = delay.getSeconds() * 1000 + delay.getNanos() / 1_000_000;
+    assertThat(delayMillis).isPositive().isLessThanOrEqualTo(60_000L);
   }
 
   @Test

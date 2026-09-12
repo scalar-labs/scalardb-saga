@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.Objects;
 import org.junit.jupiter.api.Test;
 
 class HmacCallbackUrlProviderTest {
@@ -18,7 +19,7 @@ class HmacCallbackUrlProviderTest {
     HmacCallbackUrlProvider provider =
         new HmacCallbackUrlProvider("http://daemon:8080", SECRET, FIXED);
 
-    String url = provider.callbackUrl("saga-1", "debit");
+    String url = Objects.requireNonNull(provider.callbackUrl("saga-1", "debit"));
 
     assertThat(url)
         .startsWith("http://daemon:8080/sagas/saga-1/steps/debit/complete?token=")

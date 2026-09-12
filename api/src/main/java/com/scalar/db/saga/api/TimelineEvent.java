@@ -69,7 +69,9 @@ public final class TimelineEvent {
   /**
    * A human-readable detail: the failure error message (step failures), the escalation reason
    * ({@code SAGA_ESCALATED}), or the operator's reason (interventions); {@code null} if none. Never
-   * a raw step input/output payload.
+   * a raw step input/output payload. A detail longer than 1024 chars (e.g. a step failure message
+   * embedding a downstream response body) is cut and suffixed with {@code "... (truncated)"}; the
+   * full text remains in the store.
    */
   public @Nullable String getDetail() {
     return detail;

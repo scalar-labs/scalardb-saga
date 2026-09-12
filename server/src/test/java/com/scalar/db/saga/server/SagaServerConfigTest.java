@@ -1,10 +1,9 @@
 package com.scalar.db.saga.server;
 
-import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.assertj.core.api.Assertions.entry;
 
+import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.engine.RecoveryConfig;
 import com.scalar.db.saga.engine.RetentionConfig;
 import com.scalar.db.saga.engine.ShutdownMode;
@@ -13,10 +12,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.util.List;
-import java.util.Map;
 import java.util.Properties;
-import java.util.Set;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -196,15 +193,17 @@ class SagaServerConfigTest {
   }
 
   /**
-   * The two keys whose default leaves a protection off, so the general blank-is-unset rule would
-   * turn a templated value that resolved empty into a silently disabled control. Omitting the key
-   * remains the way to accept the default; only the empty spelling is refused.
+   * The keys whose default leaves a protection off, so the general blank-is-unset rule would turn a
+   * templated value that resolved empty into a silently disabled control. Omitting the key remains
+   * the way to accept the default; only the empty spelling is refused.
    */
   @ParameterizedTest
   @ValueSource(
       strings = {
         SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY,
-        SagaServerConfig.CALLBACK_MAX_AGE_SECONDS_KEY
+        SagaServerConfig.CALLBACK_MAX_AGE_SECONDS_KEY,
+        SagaServerConfig.TLS_ENABLED_KEY,
+        SagaServerConfig.MAX_CONCURRENT_SAGA_STARTS_KEY
       })
   void load_blankProtectionDisablingKey_throwsIllegalArgumentException(String key) {
     Properties props = new Properties();
@@ -224,19 +223,294 @@ class SagaServerConfigTest {
         .isEqualTo(SagaServerConfig.DEFAULT_MAX_START_REQUESTS_PER_MINUTE);
     assertThat(config.callbackMaxAgeSeconds())
         .isEqualTo(SagaServerConfig.DEFAULT_CALLBACK_MAX_AGE_SECONDS);
+    assertThat(config.tlsEnabled()).isEqualTo(SagaServerConfig.DEFAULT_TLS_ENABLED);
+    assertThat(config.maxConcurrentSagaStarts())
+        .isEqualTo(DefaultSagaOrchestrator.DEFAULT_MAX_CONCURRENT_SAGA_STARTS);
   }
 
   @Test
-  void load_blankMaxBodyBytes_isTreatedAsUnset() {
+  void load_unsetTls_disabledWithNoPaths() {
+    SagaServerConfig config = SagaServerConfig.load(new Properties());
+
+    assertThat(config.tlsEnabled()).isFalse();
+    assertThat(config.tlsCertChainPath()).isEmpty();
+    assertThat(config.tlsPrivateKeyPath()).isEmpty();
+  }
+
+  @Test
+  void load_tlsEnabledWithBothPaths_parsesTrimmedPaths() {
     Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-    // Deliberately on the other side of the line from the two keys above: unset leaves the engine's
-    // own cap in place, so a blank value still bounds the body rather than removing a protection.
-    props.setProperty(serviceKey("account", ".max_body_bytes"), "");
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "  /etc/tls/tls.crt  ");
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, "/etc/tls/tls.key");
 
     SagaServerConfig config = SagaServerConfig.load(props);
 
-    assertThat(requireNonNull(config.services().get("account")).maxBodyBytes()).isZero();
+    assertThat(config.tlsEnabled()).isTrue();
+    assertThat(config.tlsCertChainPath()).contains(Path.of("/etc/tls/tls.crt"));
+    assertThat(config.tlsPrivateKeyPath()).contains(Path.of("/etc/tls/tls.key"));
+  }
+
+  @Test
+  void load_tlsEnabledWithoutPrivateKeyPath_throwsNamingMissingKey() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "/etc/tls/tls.crt");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.TLS_ENABLED_KEY)
+        .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY);
+  }
+
+  @Test
+  void load_tlsEnabledWithoutCertChainPath_throwsNamingMissingKey() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, "/etc/tls/tls.key");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.TLS_ENABLED_KEY)
+        .hasMessageContaining(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY);
+  }
+
+  @Test
+  void load_tlsEnabledWithoutAnyPath_throwsNamingBothKeys() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY)
+        .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY);
+  }
+
+  @Test
+  void load_tlsEnabledWithBlankPrivateKeyPath_throwsAsMissingPair() {
+    // Blank-is-unset composes with the pairing rule: a blank path reports as the missing half of
+    // the pair, exactly as an absent key does.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "/etc/tls/tls.crt");
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, "   ");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY);
+  }
+
+  @Test
+  void load_tlsPathsWithExplicitFalse_ignoredAndDisabled() {
+    // The deliberate toggle-off move: material stays mounted and configured, the explicit false
+    // switches it off, and the getters hide the ignored paths so nothing downstream can serve
+    // them by accident.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "false");
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "/etc/tls/tls.crt");
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, "/etc/tls/tls.key");
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.tlsEnabled()).isFalse();
+    assertThat(config.tlsCertChainPath()).isEmpty();
+    assertThat(config.tlsPrivateKeyPath()).isEmpty();
+  }
+
+  @Test
+  void load_tlsCertChainPathWithoutEnabledKey_throwsForgottenSwitch() {
+    // Material without the switch is the forgot-the-switch hole: the operator mounted certificates
+    // expecting TLS, and the server would silently serve plaintext.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "/etc/tls/tls.crt");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY)
+        .hasMessageContaining(SagaServerConfig.TLS_ENABLED_KEY);
+  }
+
+  @Test
+  void load_tlsPrivateKeyPathAloneWithoutEnabledKey_throwsForgottenSwitch() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, "/etc/tls/tls.key");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY)
+        .hasMessageContaining(SagaServerConfig.TLS_ENABLED_KEY);
+  }
+
+  @Test
+  void load_blankTlsPathWithoutEnabledKey_isNoOp() {
+    // The other doctrine-composition cell: blank is unset, so a blank path with no tls.enabled is
+    // not the forgotten switch — it is a template variable that resolved empty, and the server
+    // starts on the plaintext default.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "");
+
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    assertThat(config.tlsEnabled()).isFalse();
+  }
+
+  @Test
+  void load_tlsPathWithNulByte_throwsWithoutEchoingValue() {
+    // InvalidPathException's own message embeds the raw input, which for a mis-pasted secret
+    // reference would be the secret's plaintext; the parser must throw its own redacted message.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "s3cr3t\0plaintext");
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, "/etc/tls/tls.key");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY)
+        .hasMessageNotContaining("s3cr3t")
+        .hasNoCause();
+  }
+
+  @Test
+  void load_secretFileReferenceOnNumericKey_throwsWithoutEchoingSecret(@TempDir Path dir)
+      throws IOException {
+    // The shipped template puts secret references and numeric keys a few lines apart, so a
+    // reference pasted onto the wrong key must fail without writing the resolved plaintext to
+    // the log; pod logs are readable far more widely than the secret itself. The message
+    // assertions are the behavior under test here: the key locates the bad line, the value
+    // stays out, and so does the NumberFormatException cause, whose own message embeds it.
+    Path secret = dir.resolve("api.token");
+    Files.writeString(secret, "s3cr3t-plaintext", StandardCharsets.UTF_8);
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "${file:UTF-8:" + secret + "}");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.HTTP_PORT_KEY)
+        .hasMessageNotContaining("s3cr3t-plaintext")
+        .hasNoCause();
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        SagaServerConfig.HTTP_PORT_KEY,
+        SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY,
+        SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY,
+        SagaServerConfig.SHUTDOWN_MODE_KEY,
+        SagaServerConfig.INSECURE_MODE_ENABLED_KEY
+      })
+  void load_unparseableValue_throwsNamingKeyWithoutEchoingValue(String key) {
+    // One key per parser family (port, bounded long, payload bytes, enum, boolean): every parse
+    // error names the key and never echoes the value, which may be a resolved secret.
+    Properties props = new Properties();
+    props.setProperty(key, "swordfish-like-a-secret");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(key)
+        .hasMessageNotContaining("swordfish")
+        .hasNoCause();
+  }
+
+  @Test
+  void load_outOfRangeNumericPort_throwsWithoutEchoingValue() {
+    // A purely numeric secret parses successfully, so the semantic branches must redact too: the
+    // range check used to print the parsed number, which is the resolved value canonicalized.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "48291736");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.HTTP_PORT_KEY)
+        .hasMessageContaining("between 0 and 65535")
+        .hasMessageNotContaining("48291736");
+  }
+
+  @Test
+  void load_negativeNumericBoundedValue_throwsWithoutEchoingValue() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY, "-7231946");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY)
+        .hasMessageContaining("must be >=")
+        .hasMessageNotContaining("7231946");
+  }
+
+  @Test
+  void load_intOverflowNumericValue_throwsWithoutEchoingValue() {
+    // Between int and long range: parses as a long, then fails the int narrowing check.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY, "99999999999");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.MAX_START_REQUESTS_PER_MINUTE_KEY)
+        .hasMessageContaining("must be <=")
+        .hasMessageNotContaining("99999999999");
+  }
+
+  @Test
+  void load_negativeNumericPayloadBytes_throwsWithoutEchoingValue() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY, "-424242");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.STORE_MAX_EVENT_PAYLOAD_BYTES_KEY)
+        .hasMessageContaining("must not be negative")
+        .hasMessageNotContaining("424242");
+  }
+
+  @Test
+  void load_definitionsPathGiven_isParsedTrimmed() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, "  /etc/saga/definitions  ");
+
+    assertThat(SagaServerConfig.load(props).definitionsPath())
+        .contains(Path.of("/etc/saga/definitions"));
+  }
+
+  @Test
+  void load_pathValueWithNulCharacter_throwsWithoutEchoingValue() {
+    // A NUL character makes Path.of throw InvalidPathException, whose message embeds the input —
+    // which is a resolved value — so the parse must remap it to the usual key-plus-redaction shape.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, "s3cr3t\0plaintext");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.DEFINITIONS_PATH_KEY)
+        .hasMessageNotContaining("s3cr3t")
+        .hasNoCause();
+  }
+
+  @Test
+  void load_collidingPorts_throwsNamingKeysWithoutEchoingValue() {
+    // The collision message needs no number: echoing it would confirm that a numeric secret on
+    // one port key equals the other key's port.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "18080");
+    props.setProperty(SagaServerConfig.GRPC_PORT_KEY, "18080");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.HTTP_PORT_KEY)
+        .hasMessageContaining(SagaServerConfig.GRPC_PORT_KEY)
+        .hasMessageNotContaining("18080");
+  }
+
+  @Test
+  void load_minThreadsAboveMaxThreads_throwsNamingKeysWithoutEchoingValue() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HTTP_MIN_THREADS_KEY, "9999999");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.HTTP_MIN_THREADS_KEY)
+        .hasMessageContaining(SagaServerConfig.HTTP_MAX_THREADS_KEY)
+        .hasMessageNotContaining("9999999");
   }
 
   @Test
@@ -345,6 +619,63 @@ class SagaServerConfigTest {
         .isEqualTo(SagaServerConfig.DEFAULT_SYNC_TIMEOUT_MILLIS);
   }
 
+  // The synchronous-wait bound policy. It lives on the config because both keys do, and because
+  // combining them per transport is how REST came to ignore the ceiling entirely (todos/076).
+
+  @Test
+  void syncWaitBoundMillis_noTimeoutSet_returnsCeiling() {
+    // Arrange — the default: the optional tightening key is unset.
+    SagaServerConfig config = SagaServerConfig.load(new Properties());
+
+    // Act
+    long bound = config.syncWaitBoundMillis(Long.MAX_VALUE);
+
+    // Assert — the ceiling still applies. This is the case that used to block forever on REST.
+    assertThat(bound).isEqualTo(SagaServerConfig.DEFAULT_SYNC_MAX_WAIT_MILLIS);
+  }
+
+  @Test
+  void syncWaitBoundMillis_timeoutTighterThanCeiling_returnsTimeout() {
+    // Arrange
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "60000");
+    props.setProperty(SagaServerConfig.SYNC_TIMEOUT_MILLIS_KEY, "5000");
+
+    // Act
+    long bound = SagaServerConfig.load(props).syncWaitBoundMillis(Long.MAX_VALUE);
+
+    // Assert
+    assertThat(bound).isEqualTo(5000L);
+  }
+
+  @Test
+  void syncWaitBoundMillis_timeoutLooserThanCeiling_returnsCeiling() {
+    // Arrange — the timeout may only tighten the ceiling, never raise it.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "10000");
+    props.setProperty(SagaServerConfig.SYNC_TIMEOUT_MILLIS_KEY, "60000");
+
+    // Act
+    long bound = SagaServerConfig.load(props).syncWaitBoundMillis(Long.MAX_VALUE);
+
+    // Assert
+    assertThat(bound).isEqualTo(10000L);
+  }
+
+  @Test
+  void syncWaitBoundMillis_requestedCapTightest_returnsRequestedCap() {
+    // Arrange
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "60000");
+    props.setProperty(SagaServerConfig.SYNC_TIMEOUT_MILLIS_KEY, "30000");
+
+    // Act — a caller-supplied cap, as gRPC's AwaitSaga passes.
+    long bound = SagaServerConfig.load(props).syncWaitBoundMillis(1000L);
+
+    // Assert
+    assertThat(bound).isEqualTo(1000L);
+  }
+
   @Test
   void load_syncTimeoutGiven_parsesValue() {
     Properties props = new Properties();
@@ -436,280 +767,75 @@ class SagaServerConfigTest {
   }
 
   @Test
-  void load_noServiceKeys_returnsEmptyServices() {
-    assertThat(SagaServerConfig.load(new Properties()).services()).isEmpty();
+  void load_noServicesPath_leavesTheDirectoryUnset() {
+    // Service files are read by the reconciler, not here; this class only points at the directory.
+    assertThat(SagaServerConfig.load(new Properties()).reloadConfig().servicesPath()).isNull();
   }
 
   @Test
-  void load_singleServiceBaseUrlGiven_parsesService() {
+  void load_oldServiceKeyGiven_throwsWithMigrationHint() {
+    // The pre-services_path format is the one unknown-key family with a known history, so the
+    // rejection names the migration instead of reading as a typo.
     Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-
-    SagaServerConfig config = SagaServerConfig.load(props);
-
-    assertThat(config.services())
-        .containsExactly(
-            entry(
-                "account",
-                new SagaServerConfig.ServiceConfig(
-                    "http://account-svc:8080", List.of(), 0L, Map.of())));
-  }
-
-  @Test
-  void load_multipleServiceBaseUrlsGiven_parsesAll() {
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-    props.setProperty(serviceKey("ledger", ".base_url"), "http://ledger-svc:9000");
-
-    SagaServerConfig config = SagaServerConfig.load(props);
-
-    assertThat(config.services()).containsOnlyKeys("account", "ledger");
-    assertThat(requireNonNull(config.services().get("ledger")).baseUrl())
-        .isEqualTo("http://ledger-svc:9000");
-  }
-
-  @Test
-  void load_blankServiceBaseUrlGiven_throwsIllegalArgumentException() {
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "   ");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void load_withFullServicePolicy_parsesEveryAttribute() {
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-    props.setProperty(serviceKey("account", ".allowed_hosts"), "account-svc, account-svc.internal");
-    props.setProperty(serviceKey("account", ".max_body_bytes"), "2000000");
-    props.setProperty(serviceKey("account", ".header.Authorization"), "Bearer token");
-    props.setProperty(serviceKey("account", ".header.X-Tenant"), "acme");
-
-    SagaServerConfig.ServiceConfig service =
-        requireNonNull(SagaServerConfig.load(props).services().get("account"));
-
-    assertThat(service.baseUrl()).isEqualTo("http://account-svc:8080");
-    assertThat(service.allowedHosts()).containsExactly("account-svc", "account-svc.internal");
-    assertThat(service.maxBodyBytes()).isEqualTo(2_000_000L);
-    assertThat(service.headers())
-        .containsOnly(entry("Authorization", "Bearer token"), entry("X-Tenant", "acme"));
-  }
-
-  @Test
-  void load_serviceHeaderSecretReference_isResolved(@TempDir Path dir) throws IOException {
-    // The header value is how a daemon authenticates to a downstream service, so it must accept a
-    // secret reference rather than force the credential inline in the properties file.
-    Path secret = dir.resolve("downstream.token");
-    Files.writeString(secret, "Bearer resolved-token", StandardCharsets.UTF_8);
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
     props.setProperty(
-        serviceKey("account", ".header.Authorization"), "${file:UTF-8:" + secret + "}");
+        SagaServerConfig.SERVICE_KEY_PREFIX + "account.base_url", "http://account-svc:8080");
 
-    SagaServerConfig.ServiceConfig service =
-        requireNonNull(SagaServerConfig.load(props).services().get("account"));
-
-    assertThat(service.headers()).containsExactly(entry("Authorization", "Bearer resolved-token"));
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("services_path");
   }
 
   @Test
-  void load_serviceWithoutBaseUrl_throwsIllegalArgumentException() {
-    // A policy without a base URL configures a service no declarative step can call.
+  void load_reloadKeysUnset_defaultsApply() {
+    ReloadConfig reload = SagaServerConfig.load(new Properties()).reloadConfig();
+
+    assertThat(reload.servicesPath()).isNull();
+    assertThat(reload.intervalSeconds())
+        .isEqualTo(SagaServerConfig.DEFAULT_RELOAD_INTERVAL_SECONDS);
+    assertThat(reload.secretsRoot().toString()).isEqualTo(SagaServerConfig.DEFAULT_SECRETS_ROOT);
+    assertThat(reload.allowedHostsCeiling()).isEmpty();
+  }
+
+  @Test
+  void load_reloadKeysGiven_parsesEach(@TempDir Path dir, @TempDir Path secretsRoot) {
     Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".max_body_bytes"), "1000");
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.RELOAD_INTERVAL_SECONDS_KEY, "0");
+    props.setProperty(SagaServerConfig.SECRETS_ROOT_KEY, secretsRoot.toString());
+    props.setProperty(SagaServerConfig.EGRESS_ALLOWED_HOSTS_CEILING_KEY, "a-svc, b-svc");
+
+    ReloadConfig reload = SagaServerConfig.load(props).reloadConfig();
+
+    assertThat(reload.servicesPath()).isEqualTo(dir);
+    assertThat(reload.intervalSeconds()).isZero();
+    assertThat(reload.secretsRoot()).isEqualTo(secretsRoot);
+    assertThat(reload.allowedHostsCeiling()).containsExactly("a-svc", "b-svc");
+  }
+
+  @Test
+  void load_ceilingEntryWithAPort_throwsIllegalArgumentException(@TempDir Path dir) {
+    // A ceiling is compared against entries that are shaped like hosts, so one that cannot be a
+    // host matches nothing and rejects every service in the fleet — with a message naming the
+    // service files rather than the property that is actually wrong. Catch it where it is written.
+    // Arrange
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.EGRESS_ALLOWED_HOSTS_CEILING_KEY, "account-svc:8080");
+
+    // Act & Assert
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.EGRESS_ALLOWED_HOSTS_CEILING_KEY)
+        .hasMessageNotContaining("account-svc:8080");
+  }
+
+  @Test
+  void load_negativeReloadInterval_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.RELOAD_INTERVAL_SECONDS_KEY, "-1");
 
     assertThatThrownBy(() -> SagaServerConfig.load(props))
         .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void load_unknownServiceAttribute_throwsIllegalArgumentException() {
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-    props.setProperty(serviceKey("account", ".timeout_millis"), "1000");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void load_serviceNameContainingDot_throwsIllegalArgumentException() {
-    // The name is split at the first '.', so a dotted name would silently become a different
-    // service with an unknown attribute; it is rejected rather than half-parsed.
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account.v2", ".base_url"), "http://account-svc:8080");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void load_serviceKeyWithoutAttribute_throwsIllegalArgumentException() {
-    Properties props = new Properties();
-    props.setProperty(SagaServerConfig.SERVICE_KEY_PREFIX + "account", "http://account-svc:8080");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void load_serviceHeaderWithoutName_throwsIllegalArgumentException() {
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-    props.setProperty(serviceKey("account", ".header."), "value");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void load_serviceHeaderNamedLikeCorrelationHeader_throwsIllegalArgumentException() {
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-    // The engine stamps this on every outbound request, so a configured value never reaches the
-    // participant. Reject it instead of accepting a key that silently does nothing.
-    props.setProperty(serviceKey("account", ".header.X-Saga-Id"), "spoofed");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void load_serviceHeaderNamedLikeCorrelationHeaderInAnotherCase_throwsIllegalArgumentException() {
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-    // Header names are case-insensitive, so a lower-cased spelling must be rejected too — it would
-    // collide with the engine's header just the same.
-    props.setProperty(serviceKey("account", ".header.x-saga-step"), "spoofed");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void load_serviceHeaderNamedLikeCallbackUrlHeader_throwsIllegalArgumentException() {
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-    // Injected per call for async steps; a configured value would leak to non-async steps as a
-    // callback URL the engine never issued.
-    props.setProperty(serviceKey("account", ".header.X-Saga-Callback-Url"), "http://evil/cb");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @ParameterizedTest
-  @ValueSource(strings = {"Connection", "Content-Length", "Expect", "Host", "Upgrade", "host"})
-  void load_serviceHeaderRestrictedByJdkGiven_throwsIllegalArgumentException(String header) {
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-    // HttpRequest.Builder.header() throws on these, so the engine cannot build the request at all
-    // and every call to the service fails permanently. Accepting the key would defer that to the
-    // first outbound call, long after startup reported healthy. The lower-cased spelling is in the
-    // list because the JDK's own check is case-insensitive.
-    props.setProperty(serviceKey("account", ".header." + header), "value");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void jdkRestrictedHeaders_nullGiven_returnsAllFiveRestrictedNames() {
-    Set<String> restricted = SagaServerConfig.jdkRestrictedHeaders(null);
-
-    assertThat(restricted)
-        .containsExactlyInAnyOrder("Connection", "Content-Length", "Expect", "Host", "Upgrade");
-  }
-
-  @Test
-  void jdkRestrictedHeaders_nameGiven_omitsThatNameCaseInsensitively() {
-    Set<String> restricted = SagaServerConfig.jdkRestrictedHeaders("HOST");
-
-    // The JDK removes from a case-insensitively ordered set, so the spelling in the property does
-    // not have to match the canonical one.
-    assertThat(restricted).doesNotContain("Host", "host");
-    assertThat(restricted).contains("Connection");
-  }
-
-  @Test
-  void jdkRestrictedHeaders_commaSeparatedNamesGiven_omitsAllOfThem() {
-    Set<String> restricted = SagaServerConfig.jdkRestrictedHeaders("host,connection");
-
-    assertThat(restricted).containsExactlyInAnyOrder("Content-Length", "Expect", "Upgrade");
-  }
-
-  @Test
-  void jdkRestrictedHeaders_spaceAfterCommaGiven_keepsTheNameFollowingTheSpace() {
-    Set<String> restricted = SagaServerConfig.jdkRestrictedHeaders("host, connection");
-
-    // Mirrors the JDK, which trims the whole value once and then splits on commas without trimming
-    // the tokens; " connection" therefore matches nothing. Trimming here instead would accept a
-    // config key that the JDK still rejects at send time, which is the failure this check prevents.
-    assertThat(restricted).doesNotContain("Host");
-    assertThat(restricted).contains("Connection");
-  }
-
-  @Test
-  void jdkRestrictedHeaders_unrelatedNameGiven_omitsNothing() {
-    Set<String> restricted = SagaServerConfig.jdkRestrictedHeaders("X-Nonsense");
-
-    assertThat(restricted)
-        .containsExactlyInAnyOrder("Connection", "Content-Length", "Expect", "Host", "Upgrade");
-  }
-
-  @Test
-  void load_serviceHeadersDifferingOnlyInCase_throwsIllegalArgumentException() {
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-    // Header names are case-insensitive, so these two collapse to one header downstream and which
-    // value survives is not deterministic across restarts. Reject the pair instead.
-    props.setProperty(serviceKey("account", ".header.Authorization"), "Bearer aaa");
-    props.setProperty(serviceKey("account", ".header.authorization"), "Bearer bbb");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void load_sameHeaderNameOnDifferentServices_isAccepted() {
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-    props.setProperty(serviceKey("ledger", ".base_url"), "http://ledger-svc:8080");
-    // The duplicate check is per service: two services may each carry their own Authorization.
-    props.setProperty(serviceKey("account", ".header.Authorization"), "Bearer account");
-    props.setProperty(serviceKey("ledger", ".header.authorization"), "Bearer ledger");
-
-    SagaServerConfig config = SagaServerConfig.load(props);
-
-    assertThat(requireNonNull(config.services().get("account")).headers())
-        .containsExactly(entry("Authorization", "Bearer account"));
-    assertThat(requireNonNull(config.services().get("ledger")).headers())
-        .containsExactly(entry("authorization", "Bearer ledger"));
-  }
-
-  @Test
-  void load_serviceAllowedHostsWithEmptyElement_throwsIllegalArgumentException() {
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-    props.setProperty(serviceKey("account", ".allowed_hosts"), "account-svc,,other");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void load_serviceMaxBodyBytesZero_throwsIllegalArgumentException() {
-    Properties props = new Properties();
-    props.setProperty(serviceKey("account", ".base_url"), "http://account-svc:8080");
-    props.setProperty(serviceKey("account", ".max_body_bytes"), "0");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  private static String serviceKey(String name, String attribute) {
-    return SagaServerConfig.SERVICE_KEY_PREFIX + name + attribute;
   }
 
   @Test
@@ -731,59 +857,82 @@ class SagaServerConfigTest {
   }
 
   @Test
+  void ownerId_controlCharactersGiven_throwsWithoutEchoingTheValue() {
+    // The owner id is echoed in log lines; a CRLF in it would forge log entries, so it is
+    // rejected — and the error must not echo the value it rejects.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.OWNER_ID_KEY, "pod-7\nFORGED LOG LINE");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.OWNER_ID_KEY)
+        .satisfies(e -> assertThat(e.getMessage()).doesNotContain("FORGED"));
+  }
+
+  @Test
+  void ownerId_overlongValueGiven_throws() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.OWNER_ID_KEY, "x".repeat(129));
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.OWNER_ID_KEY);
+  }
+
+  @Test
   void recoveryConfig_unset_matchesEngineDefaults() {
     RecoveryConfig config = SagaServerConfig.load(new Properties()).recoveryConfig();
     RecoveryConfig defaults = RecoveryConfig.defaults();
 
-    assertThat(config.recoveryTimeoutMillis()).isEqualTo(defaults.recoveryTimeoutMillis());
-    assertThat(config.recoveryIntervalSeconds()).isEqualTo(defaults.recoveryIntervalSeconds());
+    assertThat(config.stalenessThresholdMillis()).isEqualTo(defaults.stalenessThresholdMillis());
+    assertThat(config.intervalSeconds()).isEqualTo(defaults.intervalSeconds());
     assertThat(config.compensationGracePeriod()).isEqualTo(defaults.compensationGracePeriod());
-    assertThat(config.batchSize()).isEqualTo(defaults.batchSize());
+    assertThat(config.maxRecoveriesPerSweep()).isEqualTo(defaults.maxRecoveriesPerSweep());
     assertThat(config.maxConcurrentRecoveries()).isEqualTo(defaults.maxConcurrentRecoveries());
   }
 
   @Test
   void recoveryConfig_withAllOptions_setsAllFields() {
     Properties props = new Properties();
-    props.setProperty(SagaServerConfig.RECOVERY_TIMEOUT_MILLIS_KEY, "90000");
+    props.setProperty(SagaServerConfig.RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY, "90000");
     props.setProperty(SagaServerConfig.RECOVERY_INTERVAL_SECONDS_KEY, "15");
     props.setProperty(SagaServerConfig.RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY, "1800");
-    props.setProperty(SagaServerConfig.RECOVERY_BATCH_SIZE_KEY, "2000");
+    props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY, "2000");
     props.setProperty(SagaServerConfig.RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY, "25");
 
     RecoveryConfig config = SagaServerConfig.load(props).recoveryConfig();
 
-    assertThat(config.recoveryTimeoutMillis()).isEqualTo(90_000L);
-    assertThat(config.recoveryIntervalSeconds()).isEqualTo(15L);
+    assertThat(config.stalenessThresholdMillis()).isEqualTo(90_000L);
+    assertThat(config.intervalSeconds()).isEqualTo(15L);
     assertThat(config.compensationGracePeriod()).isEqualTo(Duration.ofMinutes(30));
-    assertThat(config.batchSize()).isEqualTo(2000);
+    assertThat(config.maxRecoveriesPerSweep()).isEqualTo(2000);
     assertThat(config.maxConcurrentRecoveries()).isEqualTo(25);
   }
 
   @Test
-  void recoveryConfig_negativeTimeout_throwsIllegalArgumentException() {
+  void recoveryConfig_negativeStalenessThreshold_throwsIllegalArgumentException() {
     Properties props = new Properties();
-    props.setProperty(SagaServerConfig.RECOVERY_TIMEOUT_MILLIS_KEY, "-1");
+    props.setProperty(SagaServerConfig.RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY, "-1");
 
     assertThatThrownBy(() -> SagaServerConfig.load(props))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
-  void recoveryConfig_nonNumericBatchSize_throwsIllegalArgumentException() {
+  void recoveryConfig_nonNumericMaxRecoveriesPerSweep_throwsIllegalArgumentException() {
     Properties props = new Properties();
-    props.setProperty(SagaServerConfig.RECOVERY_BATCH_SIZE_KEY, "many");
+    props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY, "many");
 
     assertThatThrownBy(() -> SagaServerConfig.load(props))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
-  void recoveryConfig_batchSizeAboveIntRange_throwsIllegalArgumentException() {
+  void recoveryConfig_maxRecoveriesPerSweepAboveIntRange_throwsIllegalArgumentException() {
     // Parsed as a long and range-checked: a bare (int) cast would wrap this to a small or negative
-    // batch size instead of rejecting it.
+    // budget instead of rejecting it.
     Properties props = new Properties();
-    props.setProperty(SagaServerConfig.RECOVERY_BATCH_SIZE_KEY, "4294967296");
+    props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY, "4294967296");
 
     assertThatThrownBy(() -> SagaServerConfig.load(props))
         .isInstanceOf(IllegalArgumentException.class);
@@ -795,8 +944,8 @@ class SagaServerConfigTest {
     RetentionConfig defaults = RetentionConfig.defaults();
 
     assertThat(config.retentionPeriod()).isEqualTo(defaults.retentionPeriod());
-    assertThat(config.cleanupIntervalSeconds()).isEqualTo(defaults.cleanupIntervalSeconds());
-    assertThat(config.batchSize()).isEqualTo(defaults.batchSize());
+    assertThat(config.intervalSeconds()).isEqualTo(defaults.intervalSeconds());
+    assertThat(config.maxPurgesPerPass()).isEqualTo(defaults.maxPurgesPerPass());
     assertThat(config.maxConcurrentPurges()).isEqualTo(defaults.maxConcurrentPurges());
   }
 
@@ -804,15 +953,15 @@ class SagaServerConfigTest {
   void retentionConfig_withAllOptions_setsAllFields() {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.RETENTION_PERIOD_SECONDS_KEY, "86400");
-    props.setProperty(SagaServerConfig.RETENTION_CLEANUP_INTERVAL_SECONDS_KEY, "120");
-    props.setProperty(SagaServerConfig.RETENTION_BATCH_SIZE_KEY, "500");
+    props.setProperty(SagaServerConfig.RETENTION_INTERVAL_SECONDS_KEY, "120");
+    props.setProperty(SagaServerConfig.RETENTION_MAX_PURGES_PER_PASS_KEY, "500");
     props.setProperty(SagaServerConfig.RETENTION_MAX_CONCURRENT_PURGES_KEY, "4");
 
     RetentionConfig config = SagaServerConfig.load(props).retentionConfig();
 
     assertThat(config.retentionPeriod()).isEqualTo(Duration.ofDays(1));
-    assertThat(config.cleanupIntervalSeconds()).isEqualTo(120L);
-    assertThat(config.batchSize()).isEqualTo(500);
+    assertThat(config.intervalSeconds()).isEqualTo(120L);
+    assertThat(config.maxPurgesPerPass()).isEqualTo(500);
     assertThat(config.maxConcurrentPurges()).isEqualTo(4);
   }
 
@@ -827,14 +976,14 @@ class SagaServerConfigTest {
   @ParameterizedTest
   @ValueSource(
       strings = {
-        SagaServerConfig.RECOVERY_TIMEOUT_MILLIS_KEY,
+        SagaServerConfig.RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY,
         SagaServerConfig.RECOVERY_INTERVAL_SECONDS_KEY,
         SagaServerConfig.RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY,
-        SagaServerConfig.RECOVERY_BATCH_SIZE_KEY,
+        SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY,
         SagaServerConfig.RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY,
         SagaServerConfig.RETENTION_PERIOD_SECONDS_KEY,
-        SagaServerConfig.RETENTION_CLEANUP_INTERVAL_SECONDS_KEY,
-        SagaServerConfig.RETENTION_BATCH_SIZE_KEY,
+        SagaServerConfig.RETENTION_INTERVAL_SECONDS_KEY,
+        SagaServerConfig.RETENTION_MAX_PURGES_PER_PASS_KEY,
         SagaServerConfig.RETENTION_MAX_CONCURRENT_PURGES_KEY
       })
   void load_zeroRecoveryOrRetentionBound_throwsIllegalArgumentException(String key) {
@@ -855,33 +1004,32 @@ class SagaServerConfigTest {
 
   @Test
   void load_everyRecoveryAndRetentionBoundAtOne_isAccepted() {
-    // The other half of the pin above: rejecting 0 alone would still allow a bound to drift to 2
-    // and
-    // refuse a value the engine takes. 1 is the smallest the engine accepts on all nine, so setting
+    // The other half of the pin above. Rejecting 0 alone would still let a bound drift to 2 and
+    // refuse a value the engine accepts. 1 is the smallest the engine takes on all nine, so setting
     // them together proves no daemon bound sits above it.
     Properties props = new Properties();
-    props.setProperty(SagaServerConfig.RECOVERY_TIMEOUT_MILLIS_KEY, "1");
+    props.setProperty(SagaServerConfig.RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY, "1");
     props.setProperty(SagaServerConfig.RECOVERY_INTERVAL_SECONDS_KEY, "1");
     props.setProperty(SagaServerConfig.RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY, "1");
-    props.setProperty(SagaServerConfig.RECOVERY_BATCH_SIZE_KEY, "1");
+    props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY, "1");
     props.setProperty(SagaServerConfig.RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY, "1");
     props.setProperty(SagaServerConfig.RETENTION_PERIOD_SECONDS_KEY, "1");
-    props.setProperty(SagaServerConfig.RETENTION_CLEANUP_INTERVAL_SECONDS_KEY, "1");
-    props.setProperty(SagaServerConfig.RETENTION_BATCH_SIZE_KEY, "1");
+    props.setProperty(SagaServerConfig.RETENTION_INTERVAL_SECONDS_KEY, "1");
+    props.setProperty(SagaServerConfig.RETENTION_MAX_PURGES_PER_PASS_KEY, "1");
     props.setProperty(SagaServerConfig.RETENTION_MAX_CONCURRENT_PURGES_KEY, "1");
 
     SagaServerConfig config = SagaServerConfig.load(props);
 
     RecoveryConfig recovery = config.recoveryConfig();
-    assertThat(recovery.recoveryTimeoutMillis()).isEqualTo(1L);
-    assertThat(recovery.recoveryIntervalSeconds()).isEqualTo(1L);
+    assertThat(recovery.stalenessThresholdMillis()).isEqualTo(1L);
+    assertThat(recovery.intervalSeconds()).isEqualTo(1L);
     assertThat(recovery.compensationGracePeriod()).isEqualTo(Duration.ofSeconds(1));
-    assertThat(recovery.batchSize()).isEqualTo(1);
+    assertThat(recovery.maxRecoveriesPerSweep()).isEqualTo(1);
     assertThat(recovery.maxConcurrentRecoveries()).isEqualTo(1);
     RetentionConfig retention = config.retentionConfig();
     assertThat(retention.retentionPeriod()).isEqualTo(Duration.ofSeconds(1));
-    assertThat(retention.cleanupIntervalSeconds()).isEqualTo(1L);
-    assertThat(retention.batchSize()).isEqualTo(1);
+    assertThat(retention.intervalSeconds()).isEqualTo(1L);
+    assertThat(retention.maxPurgesPerPass()).isEqualTo(1);
     assertThat(retention.maxConcurrentPurges()).isEqualTo(1);
   }
 
@@ -929,6 +1077,40 @@ class SagaServerConfigTest {
   void shutdownTimeoutMillis_negative_throwsIllegalArgumentException() {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.SHUTDOWN_TIMEOUT_MILLIS_KEY, "-1");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void detailMaxTimelineEvents_unset_usesDefault() {
+    assertThat(SagaServerConfig.load(new Properties()).detailMaxTimelineEvents())
+        .isEqualTo(SagaServerConfig.DEFAULT_DETAIL_MAX_TIMELINE_EVENTS);
+  }
+
+  @Test
+  void detailMaxTimelineEvents_configured_isParsed() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.DETAIL_MAX_TIMELINE_EVENTS_KEY, "250");
+
+    assertThat(SagaServerConfig.load(props).detailMaxTimelineEvents()).isEqualTo(250);
+  }
+
+  @Test
+  void detailMaxTimelineEvents_zero_throwsIllegalArgumentException() {
+    // 0 would make every detail read return an empty timeline; an operator who wants the endpoint
+    // gone should gate it with RBAC instead, so the config rejects the value.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.DETAIL_MAX_TIMELINE_EVENTS_KEY, "0");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void detailMaxTimelineEvents_notANumber_throwsIllegalArgumentException() {
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.DETAIL_MAX_TIMELINE_EVENTS_KEY, "many");
 
     assertThatThrownBy(() -> SagaServerConfig.load(props))
         .isInstanceOf(IllegalArgumentException.class);
@@ -1383,5 +1565,185 @@ class SagaServerConfigTest {
     // flatten.
     assertThat(config.rawProperties().getProperty(SagaServerConfig.SECURITY_PROVIDER_KEY))
         .isEqualTo("${env:UNSET_NO_SUCH_VAR}");
+  }
+
+  /**
+   * Lenient loading, which only {@code --validate-config} uses. The rule it has to keep is that a
+   * secret this machine cannot read is recorded rather than substituted-and-believed, and that a
+   * reference which is wrong everywhere still fails.
+   */
+  @Nested
+  class LenientSecretResolution {
+
+    private Properties propertiesWith(String key, String value) {
+      Properties properties = new Properties();
+      properties.setProperty(key, value);
+      return properties;
+    }
+
+    @Test
+    public void load_unreadableSecretGiven_failsWithoutACollector() {
+      // The daemon's mode: a value it cannot resolve is a value it cannot serve with.
+      Properties properties =
+          propertiesWith(SagaServerConfig.OWNER_ID_KEY, "${file:UTF-8:/nonexistent/owner-id}");
+
+      assertThatThrownBy(() -> SagaServerConfig.load(properties))
+          .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    public void load_unreadableSecretGiven_recordsTheKeyAndCarriesOn() {
+      // Arrange
+      Properties properties =
+          propertiesWith(SagaServerConfig.OWNER_ID_KEY, "${file:UTF-8:/nonexistent/owner-id}");
+      SagaServerConfig.UnresolvedSecrets unresolved = new SagaServerConfig.UnresolvedSecrets();
+
+      // Act
+      SagaServerConfig config = SagaServerConfig.load(properties, unresolved);
+
+      // Assert — the key is named, so a caller knows which settings its verdict does not cover.
+      assertThat(config).isNotNull();
+      assertThat(unresolved.reasonsByKey()).containsOnlyKeys(SagaServerConfig.OWNER_ID_KEY);
+    }
+
+    @Test
+    public void load_malformedSecretReferenceGiven_failsEvenWithACollector() {
+      // No charset segment: wrong wherever it runs, so leniency must not swallow it.
+      Properties properties =
+          propertiesWith(SagaServerConfig.OWNER_ID_KEY, "${file:/nonexistent/owner-id}");
+
+      assertThatThrownBy(
+              () -> SagaServerConfig.load(properties, new SagaServerConfig.UnresolvedSecrets()))
+          .isInstanceOf(PermanentReferenceException.class);
+    }
+
+    @Test
+    public void load_undefinedEnvReferenceGiven_recordsTheKey() {
+      // Arrange — an undefined ${env:...} is left verbatim rather than raised, so nothing else
+      // marks it and the reference text would stand in as though it were the host. Uses a setting
+      // with no value rules, so what is observed is the recording rather than a parse rejection.
+      Properties properties =
+          propertiesWith(SagaServerConfig.HOST_KEY, "${env:NO_SUCH_VARIABLE_FOR_THIS_TEST}");
+      SagaServerConfig.UnresolvedSecrets unresolved = new SagaServerConfig.UnresolvedSecrets();
+
+      // Act
+      SagaServerConfig config = SagaServerConfig.load(properties, unresolved);
+
+      // Assert — named like an unreadable file, so a caller knows its verdict does not cover it.
+      assertThat(config).isNotNull();
+      assertThat(unresolved.reasonsByKey()).containsOnlyKeys(SagaServerConfig.HOST_KEY);
+    }
+
+    @Test
+    public void load_undefinedEnvReferenceGiven_passesThroughWithoutACollector() {
+      // The daemon's mode is unchanged by that recording: nothing is raised and the value stands as
+      // written, which is what the reference-did-not-expand rules downstream detect.
+      Properties properties =
+          propertiesWith(SagaServerConfig.HOST_KEY, "${env:NO_SUCH_VARIABLE_FOR_THIS_TEST}");
+
+      SagaServerConfig config = SagaServerConfig.load(properties);
+
+      assertThat(config.host()).isEqualTo("${env:NO_SUCH_VARIABLE_FOR_THIS_TEST}");
+    }
+
+    @Test
+    public void load_validatedSettingUnreadableEitherWay_reachesTheSameOutcome() {
+      // Arrange — the two ways a secret can be unavailable, on a setting that checks its own shape.
+      // Both must land in the same place, or the report would call one of them a value that failed
+      // its range check and the other a value it could not read.
+      SagaServerConfig.UnresolvedSecrets viaEnv = new SagaServerConfig.UnresolvedSecrets();
+      SagaServerConfig.UnresolvedSecrets viaFile = new SagaServerConfig.UnresolvedSecrets();
+
+      // Act
+      SagaServerConfig fromEnv =
+          SagaServerConfig.load(
+              propertiesWith(SagaServerConfig.HTTP_PORT_KEY, "${env:NO_SUCH_PORT_VARIABLE}"),
+              viaEnv);
+      SagaServerConfig fromFile =
+          SagaServerConfig.load(
+              propertiesWith(SagaServerConfig.HTTP_PORT_KEY, "${file:UTF-8:/nonexistent/port}"),
+              viaFile);
+
+      // Assert — both recorded, both dropped to the default rather than parsed from a stand-in.
+      assertThat(viaEnv.reasonsByKey()).containsOnlyKeys(SagaServerConfig.HTTP_PORT_KEY);
+      assertThat(viaFile.reasonsByKey()).containsOnlyKeys(SagaServerConfig.HTTP_PORT_KEY);
+      assertThat(fromEnv.httpPort()).isEqualTo(SagaServerConfig.DEFAULT_HTTP_PORT);
+      assertThat(fromFile.httpPort()).isEqualTo(SagaServerConfig.DEFAULT_HTTP_PORT);
+    }
+
+    @Test
+    public void load_unprefixedPlaceholderGiven_recordsNothing() {
+      // A ${NAME} with no lookup prefix resolves on no machine, so calling it absent here would
+      // soften something wrong everywhere. It stands as written, exactly as the daemon leaves it.
+      Properties properties = propertiesWith(SagaServerConfig.HOST_KEY, "${NO_PREFIX_HERE}");
+      SagaServerConfig.UnresolvedSecrets unresolved = new SagaServerConfig.UnresolvedSecrets();
+
+      SagaServerConfig config = SagaServerConfig.load(properties, unresolved);
+
+      assertThat(config.host()).isEqualTo("${NO_PREFIX_HERE}");
+      assertThat(unresolved.isEmpty()).isTrue();
+    }
+
+    @Test
+    public void load_readableSecretGiven_recordsNothing(@TempDir Path dir) throws IOException {
+      // Arrange — leniency is invisible where the secret is present.
+      Path token = Files.writeString(dir.resolve("owner"), "replica-7");
+      SagaServerConfig.UnresolvedSecrets unresolved = new SagaServerConfig.UnresolvedSecrets();
+
+      // Act
+      SagaServerConfig config =
+          SagaServerConfig.load(
+              propertiesWith(SagaServerConfig.OWNER_ID_KEY, "${file:UTF-8:" + token + "}"),
+              unresolved);
+
+      // Assert
+      assertThat(config.ownerId()).isEqualTo("replica-7");
+      assertThat(unresolved.isEmpty()).isTrue();
+    }
+  }
+
+  /**
+   * The admission cap key. It is off by default and freezes at first release, so both the default
+   * and the rejection of a value that cannot mean anything are worth pinning.
+   */
+  @Nested
+  class MaxConcurrentSagaStarts {
+
+    @Test
+    public void load_notSet_defaultsToNoCap() {
+      SagaServerConfig config = SagaServerConfig.load(new Properties());
+
+      assertThat(config.maxConcurrentSagaStarts())
+          .isEqualTo(DefaultSagaOrchestrator.DEFAULT_MAX_CONCURRENT_SAGA_STARTS)
+          .isZero();
+    }
+
+    @Test
+    public void load_positiveValueGiven_returnsIt() {
+      Properties props = new Properties();
+      props.setProperty(SagaServerConfig.MAX_CONCURRENT_SAGA_STARTS_KEY, "250");
+
+      assertThat(SagaServerConfig.load(props).maxConcurrentSagaStarts()).isEqualTo(250);
+    }
+
+    @Test
+    public void load_zeroGiven_meansNoCap() {
+      // 0 is the documented way to turn it off, so it must parse rather than being rejected as a
+      // cap nobody could satisfy.
+      Properties props = new Properties();
+      props.setProperty(SagaServerConfig.MAX_CONCURRENT_SAGA_STARTS_KEY, "0");
+
+      assertThat(SagaServerConfig.load(props).maxConcurrentSagaStarts()).isZero();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"-1", "not-a-number"})
+    public void load_invalidValueGiven_throwsIllegalArgumentException(String value) {
+      Properties props = new Properties();
+      props.setProperty(SagaServerConfig.MAX_CONCURRENT_SAGA_STARTS_KEY, value);
+
+      assertThatThrownBy(() -> SagaServerConfig.load(props))
+          .isInstanceOf(IllegalArgumentException.class);
+    }
   }
 }

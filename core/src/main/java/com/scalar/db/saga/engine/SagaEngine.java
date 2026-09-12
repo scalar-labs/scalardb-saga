@@ -19,6 +19,7 @@ import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.StatusEvent;
 import com.scalar.db.saga.store.StepEvent;
+import com.scalar.db.saga.transport.HttpEndpointRegistrar;
 import com.scalar.db.saga.transport.SagaCorrelationContext;
 import java.time.Clock;
 import java.time.Instant;
@@ -26,7 +27,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -72,10 +73,15 @@ public class SagaEngine implements AutoCloseable {
   private final StepInstantiator stepInstantiator;
   private final String ownerId;
   private final ShutdownConfig shutdownConfig;
+  private final long defaultSagaTimeoutMillis;
   private final Clock clock;
   private volatile boolean shuttingDown = false;
   private final Object shutdownLock = new Object();
-  private final Set<String> activeSagas = ConcurrentHashMap.newKeySet();
+  // Saga id -> when this instance's current drive of it began. A map rather than a set because
+  // recovery needs the start time to tell a wedged drive from a merely slow one, and the drive is
+  // the only thing that knows it: registration creates the entry and the drive's finally removes
+  // it, so the value is always this episode's, never a stale earlier one.
+  private final ConcurrentHashMap<String, Instant> activeSagas = new ConcurrentHashMap<>();
   private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
   private final ConcurrentHashMap<String, List<StepWithPolicy>> planCache =
       new ConcurrentHashMap<>();
@@ -85,17 +91,24 @@ public class SagaEngine implements AutoCloseable {
       StepInstantiator stepInstantiator,
       String ownerId,
       ShutdownConfig shutdownConfig,
+      long defaultSagaTimeoutMillis,
       Clock clock) {
     this.store = store;
     this.stepInstantiator = stepInstantiator;
     this.ownerId = ownerId;
     this.shutdownConfig = shutdownConfig;
+    this.defaultSagaTimeoutMillis = defaultSagaTimeoutMillis;
     this.clock = clock;
   }
 
   /** The owner id this engine stamps on transitions it records (used by the admin service). */
   String ownerId() {
     return ownerId;
+  }
+
+  /** The swap seam for configuration hot reload, surfaced on the orchestrator. */
+  HttpEndpointRegistrar httpEndpointRegistrar() {
+    return stepInstantiator.httpEndpointRegistrar();
   }
 
   // ---------------------------------------------------------------------------
@@ -115,29 +128,36 @@ public class SagaEngine implements AutoCloseable {
     if (shuttingDown) {
       throw new IllegalStateException("Engine is shutting down; cannot create new sagas");
     }
+    // Before persisting, so invalid input fails on the caller's thread rather than on the executor.
+    // ExecutionContext validates the same map when execution starts, but by then an asynchronous
+    // caller is already committed to waiting out its bound for a saga that can never run — and a
+    // doomed saga has been written to the store for recovery to find.
+    ExecutionContext.validateInput(input);
     return store.createSaga(sagaId, def.getName(), ownerId, input, def.getVersion());
   }
 
   /**
-   * Executes a saga from an existing snapshot.
+   * Executes a saga from an existing snapshot, and returns the state <em>this execution</em> left
+   * it in: terminal, {@code WAITING} when it parked, or still {@code RUNNING} when it handed off to
+   * recovery on shutdown.
+   *
+   * <p>Returned rather than re-read afterwards, because "what did this execution do?" is a local
+   * question and the store is a shared, moving answer. Between the return and a read, a participant
+   * callback — on this replica or another — can resume the saga, so a reader sees {@code RUNNING}
+   * for a saga that parked perfectly well. A caller deciding what to report cannot tell that apart
+   * from a defect; this cannot go stale.
    *
    * @param def the saga definition
    * @param saga the initial state snapshot (from {@link #createSaga})
    * @param input the saga input data
+   * @return the state this execution left the saga in
    */
-  void executeSaga(SagaDefinition def, SagaStateSnapshot saga, Map<String, Object> input) {
-    String sagaId = saga.getSagaId();
-    if (!registerActive(sagaId)) {
-      store.markForRecovery(sagaId);
-      return;
-    }
-    try {
-      ExecutionContext context = new ExecutionContext(sagaId, input, saga);
-      context.setNextEventSequence(1); // SAGA_STARTED was seq 0
-      executeSteps(def, context, 0);
-    } finally {
-      unregisterActive(sagaId);
-    }
+  SagaStateSnapshot executeSaga(
+      SagaDefinition def, SagaStateSnapshot saga, Map<String, Object> input) {
+    ExecutionContext context = new ExecutionContext(saga.getSagaId(), input, saga);
+    context.setNextEventSequence(1); // SAGA_STARTED was seq 0
+    resumeFrom(def, context, 0);
+    return context.getCurrentState();
   }
 
   /**
@@ -156,14 +176,15 @@ public class SagaEngine implements AutoCloseable {
    *
    * @return the final state snapshot
    */
-  public SagaStateSnapshot resumeFrom(SagaDefinition def, ExecutionContext context, int fromStep) {
+  public SagaStateSnapshot resumeFrom(
+      SagaDefinition def, ExecutionContext context, int fromStepIndex) {
     String sagaId = context.getSagaId();
-    if (!registerActive(sagaId)) {
-      store.markForRecovery(sagaId);
+    if (!registerOrHandOff(sagaId)) {
       return context.getCurrentState();
     }
     try {
-      executeSteps(def, context, fromStep);
+      List<StepWithPolicy> plan = getOrBuildPlan(def);
+      executeSteps(plan, context, fromStepIndex, def.getPivotIndex(), def.getTimeoutMillis());
     } finally {
       unregisterActive(sagaId);
     }
@@ -173,15 +194,14 @@ public class SagaEngine implements AutoCloseable {
   /**
    * Triggers compensation from a specific step (used by recovery for sagas stuck in COMPENSATING).
    */
-  public void compensateFrom(SagaDefinition def, ExecutionContext context, int fromStep) {
+  public void compensateFrom(SagaDefinition def, ExecutionContext context, int fromStepIndex) {
     String sagaId = context.getSagaId();
-    if (!registerActive(sagaId)) {
-      store.markForRecovery(sagaId);
+    if (!registerOrHandOff(sagaId)) {
       return;
     }
     try {
       List<StepWithPolicy> plan = getOrBuildPlan(def);
-      compensate(plan, context, fromStep);
+      compensateSteps(plan, context, fromStepIndex);
     } finally {
       unregisterActive(sagaId);
     }
@@ -206,8 +226,8 @@ public class SagaEngine implements AutoCloseable {
   void recover(RecoveryAction action, SagaDefinition def, ExecutionContext context) {
     switch (action) {
       case RecoveryAction.Compensate compensate ->
-          compensateFrom(def, context, compensate.fromStep());
-      case RecoveryAction.Resume resume -> resumeFrom(def, context, resume.fromStep());
+          compensateFrom(def, context, compensate.fromStepIndex());
+      case RecoveryAction.Resume resume -> resumeFrom(def, context, resume.fromStepIndex());
     }
   }
 
@@ -275,7 +295,7 @@ public class SagaEngine implements AutoCloseable {
     }
 
     // Mark remaining active sagas for immediate recovery pickup
-    for (String sagaId : activeSagas) {
+    for (String sagaId : activeSagas.keySet()) {
       try {
         store.markForRecovery(sagaId);
         logger.info("Marked saga {} for recovery during shutdown", sagaId);
@@ -300,25 +320,32 @@ public class SagaEngine implements AutoCloseable {
   // Private — execution loop
   // ---------------------------------------------------------------------------
 
-  private void executeSteps(SagaDefinition def, ExecutionContext context, int startIndex) {
-    List<StepWithPolicy> plan = getOrBuildPlan(def);
-    int pivotIndex = def.getPivotIndex();
-    executeSagaSteps(plan, pivotIndex, context, startIndex, def.getTimeoutMillis());
-  }
-
-  private void executeSagaSteps(
+  private void executeSteps(
       List<StepWithPolicy> plan,
-      int pivotIndex,
       ExecutionContext context,
-      int startIndex,
+      int fromStepIndex,
+      int pivotIndex,
       long sagaTimeoutMillis) {
 
-    long sagaDeadline = TimeoutPolicy.calculateSagaDeadline(sagaTimeoutMillis, clock.millis());
+    // The engine default fills in only when the definition specifies no timeout, and it does so
+    // here — at deadline computation — so every execution entry (start, recovery resume, parked
+    // resume) enforces it, and a stored definition never has to carry a baked-in copy of it. The
+    // deadline is recomputed from the current default at each drive, so an in-flight saga's
+    // effective timeout follows the configuration current at each resumption.
+    long effectiveTimeoutMillis =
+        sagaTimeoutMillis > 0 ? sagaTimeoutMillis : defaultSagaTimeoutMillis;
+    long sagaDeadline = TimeoutPolicy.calculateSagaDeadline(effectiveTimeoutMillis, clock.millis());
 
-    for (int i = startIndex; i < plan.size(); i++) {
+    for (int i = fromStepIndex; i < plan.size(); i++) {
       // Check graceful shutdown between steps
       if (shouldStopBetweenSteps()) {
         logger.info("Stopping saga {} between steps due to shutdown", context.getSagaId());
+        // Hand it over explicitly. The drive returns cleanly, so its finally unregisters the saga
+        // before shutdown()'s marking loop runs and that loop never sees it — leaving a RUNNING row
+        // with a freshly written step event. Recovery reads a recent event as "recently driven" and
+        // skips the saga for a whole timeout, which is the opposite of what draining is for. The
+        // epoch stamp is the deliberate hand-off the sweeper takes immediately.
+        store.markForRecovery(context.getSagaId());
         return;
       }
 
@@ -326,7 +353,7 @@ public class SagaEngine implements AutoCloseable {
       if (TimeoutPolicy.isSagaTimedOut(sagaDeadline, clock.millis())) {
         logger.info("Saga {} timed out before step {}", context.getSagaId(), i);
         if (i <= pivotIndex) {
-          compensate(plan, context, i - 1);
+          compensateSteps(plan, context, i - 1);
         }
         return;
       }
@@ -362,7 +389,7 @@ public class SagaEngine implements AutoCloseable {
           // body, an in-doubt timeout, any non-HTTP class step). The honest default is to include
           // step i; skip it (compensate from i - 1) only when the failure proved non-delivery.
           int from = e.knownNotCommitted() ? i - 1 : i;
-          compensate(plan, context, from);
+          compensateSteps(plan, context, from);
         }
         return;
       }
@@ -394,7 +421,7 @@ public class SagaEngine implements AutoCloseable {
               new StepExecutionException(
                   "Failed to record completion for step '" + stepName + "'", e, false);
           recordStepFailed(context, i, stepName, recordFailure);
-          compensate(plan, context, i);
+          compensateSteps(plan, context, i);
         }
         return;
       }
@@ -536,7 +563,7 @@ public class SagaEngine implements AutoCloseable {
     RetryPolicy compensationPolicy = RetryPolicy.compensationDefault();
     List<StepWithPolicy> plan = new ArrayList<>();
     for (StepDefinition stepDef : def.getSteps()) {
-      Step step = resolveStep(stepDef, Step.class);
+      Step step = stepInstantiator.instantiate(stepDef, Step.class);
       RetryPolicy policy = resolveRetryPolicy(stepDef, def);
       plan.add(
           new StepWithPolicy(
@@ -556,7 +583,7 @@ public class SagaEngine implements AutoCloseable {
     RetryPolicy compensationPolicy = RetryPolicy.compensationDefault();
 
     for (StepDefinition stepDef : def.getSteps()) {
-      TccStep tccStep = resolveStep(stepDef, TccStep.class);
+      TccStep tccStep = stepInstantiator.instantiate(stepDef, TccStep.class);
       RetryPolicy reservePolicy = resolveRetryPolicy(stepDef, def);
       reserveSteps.add(
           new StepWithPolicy(
@@ -576,10 +603,6 @@ public class SagaEngine implements AutoCloseable {
 
     reserveSteps.addAll(confirmSteps);
     return reserveSteps;
-  }
-
-  private <T> T resolveStep(StepDefinition stepDef, Class<T> expectedType) {
-    return stepInstantiator.instantiate(stepDef, expectedType);
   }
 
   /**
@@ -621,60 +644,59 @@ public class SagaEngine implements AutoCloseable {
   // ---------------------------------------------------------------------------
 
   /**
-   * Compensates steps in reverse order (LIFO) from {@code fromStepIndex} down to 0.
+   * Compensates steps in reverse order (LIFO) from {@code fromStepIndex} down to 0, maintaining the
+   * saga status alongside the loop: transitions to COMPENSATING first (unless already there) and to
+   * COMPENSATED once every step is compensated. If a step's compensation fails after retries are
+   * exhausted, the saga stays COMPENSATING for recovery to retry. The backward mirror of {@link
+   * #executeSteps}, which likewise owns its direction's terminal transition.
+   *
+   * <p>Not an entry point; callers already hold the {@code registerOrHandOff} guard. The guarded
+   * entry is {@link #compensateFrom}.
    *
    * <p>Package-private for testing.
    *
    * @param plan the execution plan
    * @param context the execution context
    * @param fromStepIndex the highest step index to compensate (inclusive)
-   * @throws StepCompensationException if compensation fails after retries exhausted
    */
   void compensateSteps(List<StepWithPolicy> plan, ExecutionContext context, int fromStepIndex) {
-    for (int i = fromStepIndex; i >= 0; i--) {
-      if (context.isStepCompensated(i)) {
-        logger.debug("Skipping already-compensated step at index {}", i);
-        continue;
-      }
-
-      StepWithPolicy stepWithPolicy = plan.get(i);
-      Step step = stepWithPolicy.step();
-      String stepName = step.getName();
-
-      try {
-        long stepDeadline =
-            stepWithPolicy.stepTimeoutMillis() <= 0
-                ? 0
-                : clock.millis() + stepWithPolicy.stepTimeoutMillis();
-        compensateWithRetry(step, context, stepWithPolicy.compensationRetryPolicy(), stepDeadline);
-        recordStepCompensated(context, i, stepName);
-      } catch (StepCompensationException e) {
-        recordStepCompensationFailed(context, i, stepName);
-        throw new StepCompensationException(stepName, i, e);
-      }
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Private — compensation helpers
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Transitions to COMPENSATING (if not already), runs compensation, and transitions to COMPENSATED
-   * on success. On failure, the saga stays COMPENSATING for recovery to retry.
-   */
-  private void compensate(List<StepWithPolicy> plan, ExecutionContext context, int fromStepIndex) {
     if (context.getCurrentState().getStatus() != SagaStatus.COMPENSATING) {
       transition(context, StatusEvent.compensating());
     }
     try {
-      compensateSteps(plan, context, fromStepIndex);
+      for (int i = fromStepIndex; i >= 0; i--) {
+        if (context.isStepCompensated(i)) {
+          logger.debug("Skipping already-compensated step at index {}", i);
+          continue;
+        }
+
+        StepWithPolicy stepWithPolicy = plan.get(i);
+        Step step = stepWithPolicy.step();
+        String stepName = step.getName();
+
+        try {
+          long stepDeadline =
+              stepWithPolicy.stepTimeoutMillis() <= 0
+                  ? 0
+                  : clock.millis() + stepWithPolicy.stepTimeoutMillis();
+          compensateWithRetry(
+              step, context, stepWithPolicy.compensationRetryPolicy(), stepDeadline);
+          recordStepCompensated(context, i, stepName);
+        } catch (StepCompensationException e) {
+          recordStepCompensationFailed(context, i, stepName);
+          throw new StepCompensationException(stepName, i, e);
+        }
+      }
       transition(context, StatusEvent.compensated());
     } catch (StepCompensationException e) {
       // Saga stays COMPENSATING — recovery will retry
       logger.warn("Compensation incomplete for saga {}: {}", context.getSagaId(), e.getMessage());
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // Private — compensation helpers
+  // ---------------------------------------------------------------------------
 
   private void compensateWithRetry(
       Step step, ExecutionContext context, RetryPolicy retryPolicy, long stepDeadline)
@@ -804,16 +826,65 @@ public class SagaEngine implements AutoCloseable {
   }
 
   // ---------------------------------------------------------------------------
+  // Package-private — what recovery may ask about local drives
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Returns whether this instance is currently driving the given saga.
+   *
+   * <p>Advisory and racy by design: the set is read without {@link #shutdownLock}, so the answer
+   * can be stale the moment it is returned. It is never a lock and must not be used to establish
+   * exclusion. Recovery uses it to avoid claiming a saga this instance is demonstrably executing —
+   * a false negative there costs at most one claim of a saga whose row was freshly stamped anyway,
+   * while a false positive is impossible: an id is in the set only between the drive registering
+   * and its {@code finally} removing it.
+   */
+  boolean isLocallyActive(String sagaId) {
+    return activeSagas.containsKey(sagaId);
+  }
+
+  /**
+   * When this instance's current drive of the saga began, or empty if it is not driving it.
+   *
+   * <p>Advisory in the same way as {@link #isLocallyActive}. The instant is this episode's start: a
+   * saga that parks and is later resumed gets a fresh entry, so the value never folds in an earlier
+   * episode or the idle time between them.
+   */
+  Optional<Instant> activeSince(String sagaId) {
+    return Optional.ofNullable(activeSagas.get(sagaId));
+  }
+
+  // ---------------------------------------------------------------------------
   // Private — shutdown coordination
   // ---------------------------------------------------------------------------
 
-  private boolean registerActive(String sagaId) {
+  /**
+   * Registers this instance as the driver of the saga, or hands it to the sweeper when nothing here
+   * will drive it.
+   *
+   * <p>The two refusals are not interchangeable and the difference must be decided under {@link
+   * #shutdownLock}. Shutting down means nobody here will run this saga, so it has to be marked.
+   * Already active means a healthy drive owns it, and marking would stamp the epoch on that drive's
+   * row — rewriting the clustering key it holds and killing it, turning a duplicate dispatch into a
+   * failed saga. Deciding outside the lock would reopen exactly that race: {@code putIfAbsent}
+   * could fail because a live drive owns the saga, shutdown could flip, and the caller would mark
+   * it.
+   *
+   * <p>The store write is deliberately outside the lock; only the decision needs to be inside.
+   *
+   * @return true when the caller should proceed to drive the saga
+   */
+  private boolean registerOrHandOff(String sagaId) {
     synchronized (shutdownLock) {
-      if (shuttingDown) {
-        return false;
+      if (!shuttingDown) {
+        // false: another drive on this instance already owns it and is still running.
+        // millis(), not instant(): every other clock read in this class goes through millis(),
+        // and stored timestamps are millisecond-granular anyway.
+        return activeSagas.putIfAbsent(sagaId, Instant.ofEpochMilli(clock.millis())) == null;
       }
-      return activeSagas.add(sagaId);
     }
+    store.markForRecovery(sagaId);
+    return false;
   }
 
   private void unregisterActive(String sagaId) {
@@ -822,5 +893,15 @@ public class SagaEngine implements AutoCloseable {
 
   private boolean shouldStopBetweenSteps() {
     return shuttingDown && shutdownConfig.mode() == ShutdownMode.WAIT_CURRENT_STEP;
+  }
+
+  /**
+   * Whether {@link #close} has begun. Exposed so a caller inspecting a saga that stopped short of a
+   * terminal state can tell a deliberate shutdown hand-off from a defect: {@link
+   * #shouldStopBetweenSteps} makes execution return <em>normally</em> with the saga still {@code
+   * RUNNING}, which is indistinguishable from an engine bug without this.
+   */
+  boolean isShuttingDown() {
+    return shuttingDown;
   }
 }

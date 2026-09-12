@@ -24,8 +24,8 @@ class RetentionConfigTest {
 
     // Assert
     assertThat(config.retentionPeriod()).isEqualTo(Duration.ofDays(3));
-    assertThat(config.cleanupIntervalSeconds()).isEqualTo(120);
-    assertThat(config.batchSize()).isEqualTo(5000);
+    assertThat(config.intervalSeconds()).isEqualTo(120);
+    assertThat(config.maxPurgesPerPass()).isEqualTo(5000);
     assertThat(config.maxConcurrentPurges()).isEqualTo(20);
     assertThat(config.clock()).isEqualTo(FIXED_CLOCK);
   }
@@ -57,36 +57,36 @@ class RetentionConfigTest {
   }
 
   // =========================================================================
-  // Validation — cleanupIntervalSeconds
+  // Validation — intervalSeconds
   // =========================================================================
 
   @Test
-  void constructor_zeroCleanupIntervalSeconds_throwsException() {
+  void constructor_zeroIntervalSeconds_throwsException() {
     // Act & Assert
     assertThatThrownBy(() -> new RetentionConfig(Duration.ofDays(7), 0, 10_000, 10, FIXED_CLOCK))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
-  void constructor_negativeCleanupIntervalSeconds_throwsException() {
+  void constructor_negativeIntervalSeconds_throwsException() {
     // Act & Assert
     assertThatThrownBy(() -> new RetentionConfig(Duration.ofDays(7), -1, 10_000, 10, FIXED_CLOCK))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   // =========================================================================
-  // Validation — batchSize
+  // Validation — maxPurgesPerPass
   // =========================================================================
 
   @Test
-  void constructor_zeroBatchSize_throwsException() {
+  void constructor_zeroMaxPurgesPerPass_throwsException() {
     // Act & Assert
     assertThatThrownBy(() -> new RetentionConfig(Duration.ofDays(7), 60, 0, 10, FIXED_CLOCK))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
-  void constructor_negativeBatchSize_throwsException() {
+  void constructor_negativeMaxPurgesPerPass_throwsException() {
     // Act & Assert
     assertThatThrownBy(() -> new RetentionConfig(Duration.ofDays(7), 60, -1, 10, FIXED_CLOCK))
         .isInstanceOf(IllegalArgumentException.class);
@@ -133,8 +133,8 @@ class RetentionConfigTest {
 
     // Assert
     assertThat(config.retentionPeriod()).isEqualTo(Duration.ofDays(7));
-    assertThat(config.cleanupIntervalSeconds()).isEqualTo(60);
-    assertThat(config.batchSize()).isEqualTo(10_000);
+    assertThat(config.intervalSeconds()).isEqualTo(60);
+    assertThat(config.maxPurgesPerPass()).isEqualTo(10_000);
     assertThat(config.maxConcurrentPurges()).isEqualTo(10);
   }
 
@@ -145,8 +145,8 @@ class RetentionConfigTest {
 
     // Assert
     assertThat(config.retentionPeriod()).isEqualTo(Duration.ofDays(7));
-    assertThat(config.cleanupIntervalSeconds()).isEqualTo(60);
-    assertThat(config.batchSize()).isEqualTo(10_000);
+    assertThat(config.intervalSeconds()).isEqualTo(60);
+    assertThat(config.maxPurgesPerPass()).isEqualTo(10_000);
     assertThat(config.maxConcurrentPurges()).isEqualTo(10);
     assertThat(config.clock()).isEqualTo(FIXED_CLOCK);
   }

@@ -27,7 +27,9 @@ class SagaAlreadyExistsExceptionTest {
     // Assert
     assertThat(e.getSagaId()).isEqualTo("saga-1");
     assertThat(e.getExisting()).isSameAs(snapshot);
-    assertThat(e.getMessage()).isEqualTo("Saga already exists: saga-1");
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.SAGA_ALREADY_EXISTS);
+    assertThat(e.getMetadata()).containsEntry("saga_id", "saga-1").hasSize(1);
+    assertThat(e.getMessage()).isEqualTo("DB-SAGA-10301: Saga already exists [saga_id=saga-1]");
     assertThat(e.getCause()).isNull();
   }
 
@@ -44,7 +46,9 @@ class SagaAlreadyExistsExceptionTest {
     assertThat(e.getSagaId()).isEqualTo("saga-2");
     assertThat(e.getExisting()).isSameAs(snapshot);
     assertThat(e.getCause()).isSameAs(cause);
-    assertThat(e.getMessage()).isEqualTo("Saga already exists: saga-2");
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.SAGA_ALREADY_EXISTS);
+    assertThat(e.getMetadata()).containsEntry("saga_id", "saga-2").hasSize(1);
+    assertThat(e.getMessage()).isEqualTo("DB-SAGA-10301: Saga already exists [saga_id=saga-2]");
   }
 
   @SuppressWarnings("NullAway")

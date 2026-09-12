@@ -20,7 +20,9 @@ dependencies {
     implementation(libs.jackson.dataformat.yaml)
     implementation(libs.slf4j.api)
 
-    testRuntimeOnly(libs.logback.classic)
+    // testImplementation, not testRuntimeOnly: tests capture log output through logback's
+    // ListAppender, which needs the logback API on the test compile classpath.
+    testImplementation(libs.logback.classic)
     testImplementation(libs.sqlite.jdbc)
 
     "integrationTestRuntimeOnly"(libs.logback.classic)
@@ -28,4 +30,5 @@ dependencies {
     "integrationTestImplementation"(libs.jackson.databind)
     "integrationTestImplementation"(libs.scalardb)
     "integrationTestImplementation"(libs.sqlite.jdbc)
+    "integrationTestCompileOnly"(libs.jspecify)
 }

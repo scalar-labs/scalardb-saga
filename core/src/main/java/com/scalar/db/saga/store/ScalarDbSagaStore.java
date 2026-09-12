@@ -25,17 +25,21 @@ import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaDefinitionException;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import org.jspecify.annotations.Nullable;
@@ -55,7 +59,7 @@ import org.slf4j.LoggerFactory;
  * CRUD as {@link CrudConflictException} or at commit as {@link CommitConflictException}; retry can
  * be disabled per operation (e.g., {@code createSaga} treats a conflict as permanent).
  */
-public class ScalarDbSagaStore implements SagaStore {
+public final class ScalarDbSagaStore implements SagaStore {
 
   private static final Logger logger = LoggerFactory.getLogger(ScalarDbSagaStore.class);
 
@@ -78,12 +82,18 @@ public class ScalarDbSagaStore implements SagaStore {
   /** Format version prefix for the opaque list page token. */
   private static final String PAGE_TOKEN_VERSION = "1";
 
+  // Circuit breaker for the retention sweep in findByStatusOlderThan: this many consecutive
+  // bucket-scan failures are treated as the store being unavailable rather than poison buckets,
+  // and the failure propagates. Mirrors the recovery manager's consecutive-failed-pages guard.
+  private static final int MAX_CONSECUTIVE_FAILED_BUCKETS = 3;
+
   private final DistributedTransactionManager txManager;
   private final ObjectMapper objectMapper;
   private final SagaSchema schema;
   private final ScalarDbSagaStoreConfig config;
   private final SagaDefinitionSerializer definitionSerializer;
   private final Supplier<String> appendIdSupplier;
+  private final Supplier<Instant> nowSupplier;
 
   /**
    * Creates a new store instance.
@@ -98,7 +108,7 @@ public class ScalarDbSagaStore implements SagaStore {
       ObjectMapper objectMapper,
       SagaSchema schema,
       ScalarDbSagaStoreConfig config) {
-    this(txManager, objectMapper, schema, config, () -> UUID.randomUUID().toString());
+    this(txManager, objectMapper, schema, config, () -> UUID.randomUUID().toString(), Instant::now);
   }
 
   /**
@@ -111,12 +121,28 @@ public class ScalarDbSagaStore implements SagaStore {
       SagaSchema schema,
       ScalarDbSagaStoreConfig config,
       Supplier<String> appendIdSupplier) {
+    this(txManager, objectMapper, schema, config, appendIdSupplier, Instant::now);
+  }
+
+  /**
+   * Visible for testing: additionally inject the timestamp source so tests that pin the recovery
+   * manager's clock keep row timestamps (e.g., the {@code claimForRecovery} stamp) on the same
+   * timeline, avoiding phantom re-claims when a pinned clock runs ahead of wall time.
+   */
+  ScalarDbSagaStore(
+      DistributedTransactionManager txManager,
+      ObjectMapper objectMapper,
+      SagaSchema schema,
+      ScalarDbSagaStoreConfig config,
+      Supplier<String> appendIdSupplier,
+      Supplier<Instant> nowSupplier) {
     this.txManager = Objects.requireNonNull(txManager, "txManager must not be null");
     this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper must not be null");
     this.schema = Objects.requireNonNull(schema, "schema must not be null");
     this.config = Objects.requireNonNull(config, "config must not be null");
     this.appendIdSupplier =
         Objects.requireNonNull(appendIdSupplier, "appendIdSupplier must not be null");
+    this.nowSupplier = Objects.requireNonNull(nowSupplier, "nowSupplier must not be null");
     this.definitionSerializer = new SagaDefinitionSerializer(objectMapper);
   }
 
@@ -129,7 +155,7 @@ public class ScalarDbSagaStore implements SagaStore {
     try {
       txManager.close();
     } catch (Exception e) {
-      throw SagaPersistenceException.retryable("Failed to close transaction manager", e);
+      throw SagaPersistenceException.storeUnavailable(e);
     }
   }
 
@@ -161,7 +187,7 @@ public class ScalarDbSagaStore implements SagaStore {
     try {
       return runInTransaction(
           tx -> {
-            Instant now = Instant.now();
+            Instant now = nowSupplier.get();
             tx.insert(buildEventInsert(id, 0, startedEvent, appendId, now));
             SagaStateSnapshot snapshot =
                 new SagaStateSnapshot(
@@ -202,15 +228,10 @@ public class ScalarDbSagaStore implements SagaStore {
             if (definition.equals(existingDef)) {
               return Boolean.TRUE; // idempotent no-op
             }
-            throw new SagaDefinitionException(
-                "Definition '"
-                    + name
-                    + "' version '"
-                    + version
-                    + "' is already registered with different content. Bump the version instead.");
+            throw SagaDefinitionException.versionContentConflict(name, version);
           }
 
-          tx.insert(buildDefinitionInsert(name, version, json));
+          tx.insert(buildDefinitionInsert(name, version, json, monotonicStamp(tx, name)));
           return Boolean.TRUE;
         },
         () -> {
@@ -265,7 +286,7 @@ public class ScalarDbSagaStore implements SagaStore {
     String appendId = appendIdSupplier.get();
     runInTransaction(
         tx -> {
-          tx.insert(buildEventInsert(sagaId, sequence, event, appendId, Instant.now()));
+          tx.insert(buildEventInsert(sagaId, sequence, event, appendId, nowSupplier.get()));
           return Boolean.TRUE;
         },
         () ->
@@ -291,7 +312,7 @@ public class ScalarDbSagaStore implements SagaStore {
 
     return runInTransaction(
         tx -> {
-          Instant now = Instant.now();
+          Instant now = nowSupplier.get();
 
           // Verify the row still exists at the snapshot's CK.
           // Because status and updated_at are part of the clustering key,
@@ -335,7 +356,7 @@ public class ScalarDbSagaStore implements SagaStore {
 
     return runInTransaction(
         tx -> {
-          Instant now = Instant.now();
+          Instant now = nowSupplier.get();
 
           // Optimistic check: the row must still be at the snapshot's (RUNNING) CK.
           int oldStatus = current.getStatus().getStatusCode();
@@ -410,7 +431,7 @@ public class ScalarDbSagaStore implements SagaStore {
 
     return runInTransaction(
         tx -> {
-          Instant now = Instant.now();
+          Instant now = nowSupplier.get();
 
           // Fail-fast pre-check on the WAITING CK; the state-row delete below is the real
           // exclusion.
@@ -501,7 +522,10 @@ public class ScalarDbSagaStore implements SagaStore {
   }
 
   @Override
-  public Optional<SagaStateAndEvents> getStateWithEvents(String sagaId) {
+  public Optional<SagaStateAndEvents> getStateWithEvents(String sagaId, int maxEvents) {
+    if (maxEvents < 1) {
+      throw new IllegalArgumentException("maxEvents must be positive, got " + maxEvents);
+    }
     return runInTransaction(
         tx -> {
           Optional<SagaStateSnapshot> snapshot =
@@ -511,9 +535,26 @@ public class ScalarDbSagaStore implements SagaStore {
           if (snapshot.isEmpty()) {
             return Optional.<SagaStateAndEvents>empty();
           }
-          List<SagaEvent> events =
-              tx.scan(buildEventScan(sagaId)).stream().map(this::toSagaEvent).toList();
-          return Optional.of(new SagaStateAndEvents(snapshot.get(), events));
+          if (maxEvents == Integer.MAX_VALUE) {
+            // Unbounded read; also keeps maxEvents + 1 below from overflowing.
+            List<SagaEvent> events =
+                tx.scan(buildEventScan(sagaId)).stream().map(this::toSagaEvent).toList();
+            return Optional.of(new SagaStateAndEvents(snapshot.get(), events, false));
+          }
+          // Scan newest-first with one extra row so truncation is detected without a second read
+          // or a count; the events table clusters on the single INT key `sequence`, so a reverse
+          // ordered, limited scan is exactly the supported shape.
+          Scan scan =
+              Scan.newBuilder(buildEventScan(sagaId))
+                  .ordering(Scan.Ordering.desc("sequence"))
+                  .limit(maxEvents + 1)
+                  .build();
+          List<SagaEvent> newestFirst = tx.scan(scan).stream().map(this::toSagaEvent).toList();
+          boolean truncated = newestFirst.size() > maxEvents;
+          List<SagaEvent> retained =
+              new ArrayList<>(truncated ? newestFirst.subList(0, maxEvents) : newestFirst);
+          Collections.reverse(retained); // back to ascending (chronological) order
+          return Optional.of(new SagaStateAndEvents(snapshot.get(), retained, truncated));
         },
         null, // read-only — retry the whole transaction on UTSE
         "get saga state with events " + sagaId);
@@ -529,6 +570,53 @@ public class ScalarDbSagaStore implements SagaStore {
         },
         null,
         "get event count for saga " + sagaId);
+  }
+
+  @Override
+  public Optional<NewestEvent> getNewestEvent(String sagaId) {
+    return runInTransaction(
+        tx -> {
+          // The same reverse-ordered, limited shape getStateWithEvents uses, and supported for the
+          // same reason. What is specific here is the projection: recovery wants the type and the
+          // stamp, so the payload never leaves the store.
+          Scan scan =
+              Scan.newBuilder(buildEventScan(sagaId))
+                  .projections("sequence", "event_type", "created_at")
+                  .ordering(Scan.Ordering.desc("sequence"))
+                  .limit(1)
+                  .build();
+          return tx.scan(scan).stream()
+              .findFirst()
+              .map(
+                  r -> {
+                    Instant createdAt = r.getTimestampTZ("created_at");
+                    if (createdAt == null) {
+                      // Unreachable through this store, which stamps created_at on every append.
+                      // Reporting the epoch rather than throwing keeps a damaged row claimable: a
+                      // saga that cannot report progress must not become permanently unclaimable.
+                      logger.warn(
+                          "Newest event of saga {} has no created_at; treating as no progress",
+                          sagaId);
+                      createdAt = Instant.EPOCH;
+                    }
+                    String eventTypeStr =
+                        Objects.requireNonNull(
+                            r.getText("event_type"), "event_type must not be null");
+                    EventType eventType;
+                    try {
+                      eventType = EventType.valueOf(eventTypeStr);
+                    } catch (IllegalArgumentException e) {
+                      // Same conversion the full row mapper does. A raw IllegalArgumentException
+                      // would escape this public method unwrapped, and during a rolling upgrade an
+                      // older replica reading a type only the newer one writes would surface it on
+                      // every pass for that saga.
+                      throw SagaPersistenceException.deserializationFailed(e);
+                    }
+                    return new NewestEvent(eventType, createdAt);
+                  });
+        },
+        null, // read-only — retry the whole transaction on UTSE
+        "get newest event for saga " + sagaId);
   }
 
   // ---------------------------------------------------------------------------
@@ -570,19 +658,22 @@ public class ScalarDbSagaStore implements SagaStore {
    * #scanSlice} streams on just far enough to <b>complete</b> the cohort straddling the boundary,
    * then stops at the next cohort and sets the cursor to the completed cohort's timestamp.
    *
-   * <h4>Trade-off: {@code pageSize} is a target, and the memory bound is cohort size</h4>
+   * <h4>Trade-off: {@code pageSize} is a target, and the memory bound is {@code pageSize} plus
+   * cohort size</h4>
    *
    * Because a page never splits a cohort, {@code pageSize} is a <b>target</b>, not a cap: a full
    * page runs <b>over</b> it to finish the cohort straddling the limit, and a single cohort larger
-   * than {@code pageSize} is returned whole as one over-sized page. So the rows materialized for
-   * one page are bounded by the <b>largest cohort</b> (rows sharing one {@code updated_at} within a
-   * bucket), <b>not</b> by {@code pageSize}. That is the one unbounded quantity in this path:
-   * recovery caps its analogous per-status scan (see {@link
+   * than {@code pageSize} is returned whole as an over-sized page (a mass event spread across
+   * slices yields several such pages, not one). So the rows materialized for one page are bounded
+   * by {@code pageSize} plus the <b>largest cohort</b> (rows sharing one {@code updated_at} within
+   * one {@code (bucket, status)} slice): the page can already hold up to a full target of rows from
+   * earlier slices when the cohort that overflows it is completed. The cohort term is the one
+   * unbounded quantity in this path: recovery caps its analogous per-status scan (see {@link
    * ScalarDbSagaStoreConfig#getRecoveryScanLimit()}), but this listing does not. A pathological
    * cohort — e.g. a mass transition stamping many sagas with the same millisecond {@code
    * updated_at}, divided only across {@code numBuckets} — therefore drives peak memory for the
-   * call. Operators should provision heap and response limits for the largest expected cohort, not
-   * for {@code pageSize}. Listing is best-effort under concurrent mutation.
+   * call. Operators should provision heap and response limits for {@code pageSize} plus the largest
+   * expected cohort. Listing is best-effort under concurrent mutation.
    *
    * <h4>Future option: bound memory by splitting cohorts on {@code saga_id}</h4>
    *
@@ -623,17 +714,15 @@ public class ScalarDbSagaStore implements SagaStore {
     Instant endTs = updatedBefore != null ? updatedBefore : TimestampTZColumn.MAX_VALUE;
 
     // Which status slices to sweep, in a stable ascending order, and where a token resumes.
+    SagaStatus statusFilter = query.getStatus();
     int[] statusCodes =
-        query.getStatus() != null
-            ? new int[] {query.getStatus().getStatusCode()}
-            : ALL_STATUS_CODES;
+        statusFilter != null ? new int[] {statusFilter.getStatusCode()} : ALL_STATUS_CODES;
     // A token is bound to the filters that produced it; reusing it under different filters is
     // rejected rather than silently resuming against the wrong data.
     String filterKey = PageCursor.filterKey(query);
+    String pageToken = query.getPageToken();
     @Nullable PageCursor cursor =
-        query.getPageToken() == null
-            ? null
-            : PageCursor.decode(query.getPageToken(), numBuckets, statusCodes, filterKey);
+        pageToken == null ? null : PageCursor.decode(pageToken, numBuckets, statusCodes, filterKey);
 
     List<SagaStateSnapshot> items = new ArrayList<>();
     int startBucket = cursor != null ? cursor.bucket() : 0;
@@ -747,7 +836,7 @@ public class ScalarDbSagaStore implements SagaStore {
     if (bound != null
         && (bound.isBefore(TimestampTZColumn.MIN_VALUE)
             || bound.isAfter(TimestampTZColumn.MAX_VALUE))) {
-      throw new IllegalArgumentException(
+      throw new SagaIllegalArgumentException(
           field
               + " must be in ["
               + TimestampTZColumn.MIN_VALUE
@@ -764,17 +853,67 @@ public class ScalarDbSagaStore implements SagaStore {
   // ---------------------------------------------------------------------------
 
   @Override
-  public Recoverables findRecoverable(Instant threshold, @Nullable ScanCursor cursor) {
-    int startBucket = 0;
-    if (cursor instanceof BucketCursor(int nextBucket)) {
-      startBucket = nextBucket;
-    }
+  public ScanCursor initialSweepCursor(String ownerId) {
+    return new PermutedBucketCursor(SweepScatter.seed(ownerId), 0);
+  }
 
-    if (startBucket >= schema.getNumBuckets()) {
+  @Override
+  public @Nullable ScanCursor advanceSweepCursor(ScanCursor cursor) {
+    SweepStep step = nextSweepStep(cursor);
+    return step == null ? null : step.nextCursor();
+  }
+
+  /**
+   * Resolves a sweep cursor to the bucket it points at and the cursor for the following bucket, or
+   * {@code null} when the sweep is exhausted. A {@link PermutedBucketCursor} walks the owner's
+   * scattered permutation; a {@code null} or {@link BucketCursor} cursor walks buckets in ascending
+   * order (backward-compatible direct store access).
+   */
+  private @Nullable SweepStep nextSweepStep(@Nullable ScanCursor cursor) {
+    int numBuckets = schema.getNumBuckets();
+    if (cursor instanceof PermutedBucketCursor(int seed, int position)) {
+      if (position >= numBuckets) {
+        return null;
+      }
+      int bucket = SweepScatter.permutation(seed, numBuckets)[position];
+      @Nullable ScanCursor next =
+          position + 1 < numBuckets ? new PermutedBucketCursor(seed, position + 1) : null;
+      return new SweepStep(bucket, next);
+    }
+    int startBucket;
+    if (cursor == null) {
+      startBucket = 0;
+    } else if (cursor instanceof BucketCursor(int nextBucket)) {
+      startBucket = nextBucket;
+    } else {
+      // A foreign cursor type would otherwise silently restart an un-scattered ascending sweep —
+      // the exact lockstep failure the scattered cursors exist to prevent. Fail fast instead.
+      throw new IllegalArgumentException(
+          "Unknown ScanCursor type "
+              + cursor.getClass().getName()
+              + "; cursors are only valid with the store that created them");
+    }
+    if (startBucket >= numBuckets) {
+      return null;
+    }
+    @Nullable ScanCursor next =
+        startBucket + 1 < numBuckets ? new BucketCursor(startBucket + 1) : null;
+    return new SweepStep(startBucket, next);
+  }
+
+  @Override
+  public int recoveryPageSize() {
+    return config.getRecoveryScanLimit() * RECOVERABLE_STATUS_CODES.length;
+  }
+
+  @Override
+  public Recoverables findRecoverable(Instant threshold, @Nullable ScanCursor cursor) {
+    SweepStep step = nextSweepStep(cursor);
+    if (step == null) {
       return new Recoverables(List.of(), null);
     }
 
-    int bucket = startBucket;
+    int bucket = step.bucket();
 
     List<SagaStateSnapshot> result =
         runInTransaction(
@@ -799,10 +938,7 @@ public class ScalarDbSagaStore implements SagaStore {
             null,
             "find recoverable sagas");
 
-    int nextBucket = startBucket + 1;
-    @Nullable ScanCursor nextCursor =
-        nextBucket < schema.getNumBuckets() ? new BucketCursor(nextBucket) : null;
-    return new Recoverables(result, nextCursor);
+    return new Recoverables(result, step.nextCursor());
   }
 
   @Override
@@ -815,7 +951,7 @@ public class ScalarDbSagaStore implements SagaStore {
       SagaStateSnapshot result =
           runInTransaction(
               tx -> {
-                Instant now = Instant.now();
+                Instant now = nowSupplier.get();
 
                 // Verify the row still exists at the snapshot's CK.
                 Optional<Result> current =
@@ -896,15 +1032,12 @@ public class ScalarDbSagaStore implements SagaStore {
 
   @Override
   public OverdueParked findOverdueParkedSagas(Instant threshold, @Nullable ScanCursor cursor) {
-    int startBucket = 0;
-    if (cursor instanceof BucketCursor(int nextBucket)) {
-      startBucket = nextBucket;
-    }
-    if (startBucket >= schema.getNumBuckets()) {
+    SweepStep step = nextSweepStep(cursor);
+    if (step == null) {
       return new OverdueParked(List.of(), null);
     }
 
-    int bucket = startBucket;
+    int bucket = step.bucket();
     List<String> sagaIds =
         runInTransaction(
             tx -> {
@@ -919,10 +1052,7 @@ public class ScalarDbSagaStore implements SagaStore {
             null,
             "find overdue parked sagas");
 
-    int nextBucket = startBucket + 1;
-    @Nullable ScanCursor nextCursor =
-        nextBucket < schema.getNumBuckets() ? new BucketCursor(nextBucket) : null;
-    return new OverdueParked(sagaIds, nextCursor);
+    return new OverdueParked(sagaIds, step.nextCursor());
   }
 
   // ---------------------------------------------------------------------------
@@ -931,10 +1061,29 @@ public class ScalarDbSagaStore implements SagaStore {
 
   @Override
   public List<SagaStateSnapshot> findByStatusOlderThan(
-      SagaStatus status, Instant threshold, int maxResults) {
+      SagaStatus status, Instant threshold, int maxResults, String ownerId, int rotation) {
+    int numBuckets = schema.getNumBuckets();
+    int[] order = SweepScatter.permutation(SweepScatter.seed(ownerId), numBuckets);
     List<SagaStateSnapshot> results = new ArrayList<>();
-    for (int bucket = 0; bucket < schema.getNumBuckets() && results.size() < maxResults; bucket++) {
-      results.addAll(findByStatusInBucket(bucket, status, threshold, maxResults - results.size()));
+    int breakerThreshold = Math.min(MAX_CONSECUTIVE_FAILED_BUCKETS, numBuckets);
+    int consecutiveFailures = 0;
+    for (int i = 0; i < numBuckets && results.size() < maxResults; i++) {
+      int bucket = order[Math.floorMod(i + rotation, numBuckets)];
+      try {
+        results.addAll(
+            findByStatusInBucket(bucket, status, threshold, maxResults - results.size()));
+        consecutiveFailures = 0;
+      } catch (RuntimeException e) {
+        // One bucket's scan failure (e.g., a row that cannot be deserialized) must not abandon
+        // every bucket after it in the sweep order; skip it and let the next pass retry. But
+        // consecutive failures mean the store itself is unavailable, not a poison bucket:
+        // rethrow so the pass ends with one ERROR from the caller instead of sweeping the whole
+        // ring of an outage at WARN level.
+        if (++consecutiveFailures >= breakerThreshold) {
+          throw e;
+        }
+        logger.warn("Scan of bucket {} for status {} failed; skipping it", bucket, status, e);
+      }
     }
     return results;
   }
@@ -961,10 +1110,15 @@ public class ScalarDbSagaStore implements SagaStore {
   }
 
   @Override
-  public void deleteSaga(String sagaId) {
-    runInTransaction(
+  public boolean deleteSaga(String sagaId) {
+    // Written by every attempt of the transaction body and read by the commit verifier, so after
+    // an unknown commit it can tell "our attempt deleted the row" from "the row was already gone
+    // before this call ran" — post-state alone cannot distinguish the two.
+    AtomicBoolean sawStateRow = new AtomicBoolean();
+    return runInTransaction(
         tx -> {
           Optional<Result> stateResult = tx.scan(buildStateIndexScan(sagaId)).stream().findFirst();
+          sawStateRow.set(stateResult.isPresent());
 
           if (stateResult.isPresent()) {
             Result r = stateResult.get();
@@ -991,10 +1145,25 @@ public class ScalarDbSagaStore implements SagaStore {
             tx.delete(buildEventDelete(sagaId, r.getInt("sequence")));
           }
 
-          return Boolean.TRUE;
+          // True only when this call removed the state row; an already-purged saga is a no-op so
+          // budgeting callers can tell real purges from races with other replicas.
+          return stateResult.isPresent();
         },
         () -> {
-          // Verify deletion: state row should be absent
+          if (!sawStateRow.get()) {
+            // The attempt never saw a state row, so whatever the commit's fate, this call deleted
+            // nothing: an already-purged saga must not be reported as a purge, or budgeting
+            // callers would charge work that never happened.
+            return Optional.of(Boolean.FALSE);
+          }
+          // Verify deletion after an unknown commit: the attempt saw the row, so its absence now
+          // means our delete (or an equivalent one) landed; report it as a real purge. If the row
+          // is still present the commit did not land, and the transaction is retried. A deletion
+          // leaves no marker of who performed it, so a racer that also saw the row but lost the
+          // commit may reach here and report true as well, double charging one budget unit. That
+          // takes both rarities in one call: a lost race whose commit outcome is also unknown. A
+          // cleanly failed commit never gets here — it is retried, and the retry sees the row
+          // already gone and reports false.
           Optional<SagaStateSnapshot> state = loadStateSnapshot(sagaId);
           return state.isEmpty() ? Optional.of(Boolean.TRUE) : Optional.empty();
         },
@@ -1143,9 +1312,7 @@ public class ScalarDbSagaStore implements SagaStore {
               sleepForRetry(v);
               continue;
             }
-            throw SagaPersistenceException.retryable(
-                "Failed to " + operationName + ": commit status unknown and verification failed",
-                e);
+            throw SagaPersistenceException.storeUnavailable(e);
           }
         }
         lastException = e;
@@ -1154,7 +1321,10 @@ public class ScalarDbSagaStore implements SagaStore {
         if (!retryOnConflict) {
           logger.debug(
               "Conflict for {} (txId={})", operationName, e.getTransactionId().orElse("unknown"));
-          throw SagaPersistenceException.retryable("Failed to " + operationName, e);
+          // #41 widened this catch from commit conflicts to CRUD conflicts too, hence the broader
+          // log wording. The message it passed to the retired retryable(message, cause) factory is
+          // now supplied by PERSISTENCE_STORE_UNAVAILABLE itself.
+          throw SagaPersistenceException.storeUnavailable(e);
         }
         logger.debug(
             "Conflict for {} (txId={}), retrying",
@@ -1174,7 +1344,7 @@ public class ScalarDbSagaStore implements SagaStore {
         if (e instanceof RuntimeException re) {
           throw re;
         }
-        throw SagaPersistenceException.retryable("Failed to " + operationName, e);
+        throw SagaPersistenceException.storeUnavailable(e);
       }
     }
     logger.warn("All {} attempts exhausted for {}", maxAttempts, operationName, lastException);
@@ -1187,8 +1357,7 @@ public class ScalarDbSagaStore implements SagaStore {
         return verified.get();
       }
     }
-    throw SagaPersistenceException.retryable(
-        "Failed to " + operationName + " after " + maxAttempts + " attempts", cause);
+    throw SagaPersistenceException.storeUnavailable(cause);
   }
 
   /**
@@ -1241,7 +1410,10 @@ public class ScalarDbSagaStore implements SagaStore {
       Thread.sleep(delay);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
-      throw SagaPersistenceException.retryable("Interrupted during retry backoff", e);
+      // OPERATION_ABORTED, not storeUnavailable: the interrupt means this server is abandoning
+      // the operation (typically shutdown), and reporting it as a store outage would emit false
+      // store alarms on every deploy. Still retryable — the retry lands elsewhere.
+      throw SagaPersistenceException.operationAborted(e);
     }
   }
 
@@ -1384,14 +1556,52 @@ public class ScalarDbSagaStore implements SagaStore {
 
   // -- saga_definitions builders --
 
-  private Insert buildDefinitionInsert(String name, String version, String json) {
+  /**
+   * Returns a {@code registered_at} strictly after every version already registered under {@code
+   * name}, so registration order is what the latest-version lookup reads.
+   *
+   * <p>The lookup picks the greatest {@code registered_at}, and the value comes from whichever
+   * replica happens to serve the registration. Wall clocks across replicas disagree — by seconds,
+   * routinely — so a replica running behind could register a NEWER version with an OLDER stamp and
+   * lose the selection race to the version it replaces, leaving the version it was meant to replace
+   * still serving.
+   *
+   * <p>The scan runs inside the caller's transaction, so two replicas registering different
+   * versions of the same saga at once read overlapping rows and the transaction layer has what it
+   * needs to make one of them lose. How far that goes is the store's to decide: whether a scan
+   * carries phantom protection is a property of the transaction implementation, not of this method.
+   * What this method guarantees on its own is the single-writer case — a clock behind the latest
+   * row still stamps after it.
+   */
+  private Instant monotonicStamp(DistributedTransaction tx, String name) throws Exception {
+    // Truncated to what the column stores. TIMESTAMPTZ does not keep sub-millisecond precision, so
+    // comparing the raw clock against a value read back from the store compares two different
+    // things: a clock reading a fraction of a millisecond past the latest row would look strictly
+    // later, then persist as the same millisecond and tie it — leaving the ordering this method
+    // exists to guarantee up to whichever row the latest-version scan happens to see first.
+    Instant now = nowSupplier.get().truncatedTo(ChronoUnit.MILLIS);
+    Instant latest = null;
+    for (Result row : tx.scan(buildDefinitionScan(name))) {
+      Instant registeredAt = row.getTimestampTZ("registered_at");
+      if (registeredAt != null && (latest == null || registeredAt.isAfter(latest))) {
+        latest = registeredAt;
+      }
+    }
+    if (latest == null || now.isAfter(latest)) {
+      return now;
+    }
+    // The smallest step the column can still tell apart.
+    return latest.plusMillis(1);
+  }
+
+  private Insert buildDefinitionInsert(String name, String version, String json, Instant stamp) {
     return Insert.newBuilder()
         .namespace(SagaSchema.NAMESPACE)
         .table(SagaSchema.DEFINITIONS_TABLE)
         .partitionKey(Key.ofText("saga_name", name))
         .clusteringKey(Key.ofText("definition_version", version))
         .textValue("definition_json", json)
-        .timestampTZValue("registered_at", Instant.now())
+        .timestampTZValue("registered_at", stamp)
         .build();
   }
 
@@ -1473,7 +1683,7 @@ public class ScalarDbSagaStore implements SagaStore {
     try {
       eventType = EventType.valueOf(eventTypeStr);
     } catch (IllegalArgumentException e) {
-      throw SagaPersistenceException.nonRetryable("Unknown event type: " + eventTypeStr, e);
+      throw SagaPersistenceException.deserializationFailed(e);
     }
 
     if (stepIndex >= 0) {
@@ -1487,9 +1697,8 @@ public class ScalarDbSagaStore implements SagaStore {
             case STEP_COMPENSATED -> StepEvent.compensated(stepIndex, name);
             case STEP_COMPENSATION_FAILED -> StepEvent.compensationFailed(stepIndex, name, payload);
             default ->
-                throw SagaPersistenceException.nonRetryable(
-                    "Unknown step event type: " + eventType,
-                    new IllegalStateException(eventTypeStr));
+                throw SagaPersistenceException.deserializationFailed(
+                    new IllegalStateException("Unknown step event type: " + eventType));
           };
       return event.withTimestamp(createdAt);
     } else {
@@ -1505,9 +1714,8 @@ public class ScalarDbSagaStore implements SagaStore {
             case SAGA_RECOVERING, SAGA_RESET ->
                 StatusEvent.reconstruct(eventType, AdminAuditPayload.target(payload), payload);
             default ->
-                throw SagaPersistenceException.nonRetryable(
-                    "Unknown saga event type: " + eventType,
-                    new IllegalStateException(eventTypeStr));
+                throw SagaPersistenceException.deserializationFailed(
+                    new IllegalStateException("Unknown saga event type: " + eventType));
           };
       return event.withTimestamp(createdAt);
     }
@@ -1536,7 +1744,7 @@ public class ScalarDbSagaStore implements SagaStore {
 
   private void validateSagaId(String sagaId) {
     if (!SAGA_ID_PATTERN.matcher(sagaId).matches()) {
-      throw new IllegalArgumentException(
+      throw new SagaIllegalArgumentException(
           "Invalid saga ID format (must match [a-zA-Z0-9._-]{1,128})");
     }
   }
@@ -1546,7 +1754,10 @@ public class ScalarDbSagaStore implements SagaStore {
     if (limit > 0 && payload != null) {
       int byteSize = payload.getBytes(StandardCharsets.UTF_8).length;
       if (byteSize > limit) {
-        throw new IllegalArgumentException(
+        // SagaIllegalArgumentException, not the bare stdlib type: the wire mappers replace a bare
+        // IllegalArgumentException with a fixed detail, and the limit is configurable, so the
+        // actual size and bound are exactly what a remote caller cannot guess.
+        throw new SagaIllegalArgumentException(
             "Event payload exceeds limit: " + byteSize + " bytes > " + limit);
       }
     }
@@ -1556,7 +1767,7 @@ public class ScalarDbSagaStore implements SagaStore {
     try {
       return objectMapper.writeValueAsString(obj);
     } catch (JsonProcessingException e) {
-      throw SagaPersistenceException.nonRetryable("Failed to serialize JSON", e);
+      throw SagaPersistenceException.serializationFailed(e);
     }
   }
 
@@ -1584,6 +1795,16 @@ public class ScalarDbSagaStore implements SagaStore {
 
   /** Internal cursor tracking which bucket to scan next. */
   private record BucketCursor(int nextBucket) implements ScanCursor {}
+
+  /**
+   * Cursor for a scattered sweep: {@code position} indexes into the bucket permutation derived from
+   * {@code seed} (see {@link SweepScatter}), so the cursor stays small while the full order is
+   * recomputed cheaply per call.
+   */
+  private record PermutedBucketCursor(int seed, int position) implements ScanCursor {}
+
+  /** One resolved sweep step: the bucket to scan and the cursor for the following bucket. */
+  private record SweepStep(int bucket, @Nullable ScanCursor nextCursor) {}
 
   /**
    * Result of scanning one {@code (bucket, status)} slice: the rows to emit, and — when the slice
@@ -1639,14 +1860,13 @@ public class ScalarDbSagaStore implements SagaStore {
      * contain {@code "|"}.
      */
     static String filterKey(SagaQuery query) {
+      SagaStatus statusFilter = query.getStatus();
+      Instant updatedAfter = query.getUpdatedAfter();
+      Instant updatedBefore = query.getUpdatedBefore();
       String status =
-          query.getStatus() == null
-              ? ANY_STATUS
-              : Integer.toString(query.getStatus().getStatusCode());
-      String after =
-          query.getUpdatedAfter() == null ? NO_BOUND : query.getUpdatedAfter().toString();
-      String before =
-          query.getUpdatedBefore() == null ? NO_BOUND : query.getUpdatedBefore().toString();
+          statusFilter == null ? ANY_STATUS : Integer.toString(statusFilter.getStatusCode());
+      String after = updatedAfter == null ? NO_BOUND : updatedAfter.toString();
+      String before = updatedBefore == null ? NO_BOUND : updatedBefore.toString();
       return String.join(DELIMITER, status, after, before);
     }
 
@@ -1669,22 +1889,22 @@ public class ScalarDbSagaStore implements SagaStore {
       // Reject an oversized token before allocating its decoded bytes (defense in depth; the daemon
       // also bounds request size).
       if (token.length() > MAX_ENCODED_LENGTH) {
-        throw new IllegalArgumentException("Page token too long");
+        throw new SagaIllegalArgumentException("Page token too long");
       }
       String payload;
       try {
         payload = new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8);
       } catch (IllegalArgumentException e) {
-        throw new IllegalArgumentException("Malformed page token", e);
+        throw new SagaIllegalArgumentException("Malformed page token", e);
       }
       // version | status | after | before | bucket | statusCode | updatedAt
       String[] parts = payload.split(Pattern.quote(DELIMITER), 7);
       if (parts.length != 7 || !PAGE_TOKEN_VERSION.equals(parts[0])) {
-        throw new IllegalArgumentException("Unrecognized page token");
+        throw new SagaIllegalArgumentException("Unrecognized page token");
       }
       String filterKey = String.join(DELIMITER, parts[1], parts[2], parts[3]);
       if (!expectedFilterKey.equals(filterKey)) {
-        throw new IllegalArgumentException("Page token does not match the query");
+        throw new SagaIllegalArgumentException("Page token does not match the query");
       }
       int bucket;
       int statusCode;
@@ -1694,16 +1914,16 @@ public class ScalarDbSagaStore implements SagaStore {
         statusCode = Integer.parseInt(parts[5]);
         updatedAt = Instant.parse(parts[6]);
       } catch (RuntimeException e) {
-        throw new IllegalArgumentException("Malformed page token", e);
+        throw new SagaIllegalArgumentException("Malformed page token", e);
       }
       if (bucket < 0 || bucket >= numBuckets) {
-        throw new IllegalArgumentException("Page token bucket out of range");
+        throw new SagaIllegalArgumentException("Page token bucket out of range");
       }
       // Defense in depth: even with a matching filter key the token is unsigned, so guard the
       // resume math against a tampered statusCode outside the swept set (would index out of
       // bounds).
       if (indexOfStatus(allowedStatusCodes, statusCode) < 0) {
-        throw new IllegalArgumentException("Page token does not match the query");
+        throw new SagaIllegalArgumentException("Page token does not match the query");
       }
       return new PageCursor(bucket, statusCode, updatedAt);
     }

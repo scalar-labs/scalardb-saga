@@ -2,6 +2,7 @@ package com.scalar.db.saga.server.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.server.security.SagaAuthRequest;
 import com.scalar.db.saga.server.security.SagaIdentity;
 import com.scalar.db.saga.server.security.SagaOperation;
@@ -78,7 +79,12 @@ class RateLimitHandlerTest {
     assertThat(send("POST", "/sagas").statusCode()).isEqualTo(200);
     HttpResponse<String> third = send("POST", "/sagas");
     assertThat(third.statusCode()).isEqualTo(429);
-    assertThat(third.body()).contains("TOO_MANY_REQUESTS");
+    assertThat(third.body()).contains(SagaErrorCode.RATE_LIMIT_EXCEEDED.code());
+    // The machine-readable wait: whole seconds, rounded up, at most the limiter's window (60s
+    // here). Without it the only backoff guidance is prose.
+    long retryAfterSeconds =
+        Long.parseLong(third.headers().firstValue("Retry-After").orElseThrow());
+    assertThat(retryAfterSeconds).isPositive().isLessThanOrEqualTo(60);
   }
 
   @Test

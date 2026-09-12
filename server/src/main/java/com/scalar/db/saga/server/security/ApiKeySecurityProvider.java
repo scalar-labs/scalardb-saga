@@ -32,6 +32,21 @@ public final class ApiKeySecurityProvider implements SagaSecurityProvider {
   }
 
   /**
+   * Parses and validates the API-key settings without building a provider, for {@code
+   * --validate-config}.
+   *
+   * @param resolved the resolved server properties
+   * @param raw the pre-resolution properties, which is what tells a secret reference from an inline
+   *     value
+   * @param unresolvedKeys the settings whose secret this machine could not read, whose values are
+   *     reference text standing in for a value and so are not judged as values
+   * @throws IllegalArgumentException if the API-key settings are missing or invalid
+   */
+  public static void validate(Properties resolved, Properties raw, Set<String> unresolvedKeys) {
+    ApiKeyConfig.from(resolved, raw, unresolvedKeys);
+  }
+
+  /**
    * Builds a provider from {@code scalar.db.saga.server.security.apikey.*} properties.
    *
    * @param resolved the secret-resolved server properties
@@ -41,7 +56,9 @@ public final class ApiKeySecurityProvider implements SagaSecurityProvider {
    *     ApiKeyConfig})
    */
   public static ApiKeySecurityProvider create(Properties resolved, Properties raw) {
-    ApiKeyConfig config = ApiKeyConfig.from(resolved, raw);
+    // No stand-ins on this path: the daemon resolves every reference or fails, so a value that did
+    // not expand must still be rejected here.
+    ApiKeyConfig config = ApiKeyConfig.from(resolved, raw, Set.of());
     List<Entry> entries = new ArrayList<>();
     for (ApiKeyConfig.Definition definition : config.definitions()) {
       entries.add(

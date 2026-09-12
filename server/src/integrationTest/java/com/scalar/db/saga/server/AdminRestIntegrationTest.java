@@ -3,6 +3,7 @@ package com.scalar.db.saga.server;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.scalar.db.saga.exception.SagaErrorCode;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.net.http.HttpResponse;
@@ -88,16 +89,19 @@ class AdminRestIntegrationTest extends ServerIntegrationTestSupport {
         post("/sagas/" + sagaId + "/reset", "{\"reason\":\"why\"}", auth(ADMIN_KEY));
 
     assertThat(response.statusCode()).isEqualTo(422);
-    assertThat(MAPPER.readTree(response.body()).get("error").asText())
-        .isEqualTo("SAGA_WRONG_STATE");
+    assertThat(MAPPER.readTree(response.body()).get("errorCode").asText())
+        .isEqualTo(SagaErrorCode.SAGA_WRONG_STATE.code());
   }
 
   @Test
   void adminKey_mutationMissingReason_returns400() throws Exception {
-    // The body's required 'reason' is validated at the edge before the saga is looked up.
+    // The body's required 'reason' is validated at the edge before the saga is looked up, and
+    // carries INVALID_ARGUMENT — the code the engine gives the same mistake on other transports.
     HttpResponse<String> response = post("/sagas/any/recover", "{}", auth(ADMIN_KEY));
 
     assertThat(response.statusCode()).isEqualTo(400);
+    assertThat(MAPPER.readTree(response.body()).get("errorCode").asText())
+        .isEqualTo(SagaErrorCode.INVALID_ARGUMENT.code());
   }
 
   @Test

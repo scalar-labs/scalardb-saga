@@ -1,5 +1,6 @@
 package com.scalar.db.saga.server.grpc;
 
+import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.server.api.RateLimiter;
 import com.scalar.db.saga.server.security.SagaIdentity;
 import com.scalar.db.saga.server.security.SagaOperation;
@@ -7,7 +8,6 @@ import io.grpc.Metadata;
 import io.grpc.ServerCall;
 import io.grpc.ServerCallHandler;
 import io.grpc.ServerInterceptor;
-import io.grpc.Status;
 
 /**
  * The gRPC parallel of {@link com.scalar.db.saga.server.api.RateLimitHandler}: rate-limits calls
@@ -19,7 +19,8 @@ import io.grpc.Status;
  * SagaIdentity} on the gRPC {@link io.grpc.Context}). Whether a call is limited comes from its
  * {@link SagaOperation#rateLimited()}, the same policy the REST handler reads, so the two
  * transports cannot drift. An over-limit call is closed with {@code RESOURCE_EXHAUSTED} — the gRPC
- * analogue of HTTP {@code 429}.
+ * analogue of HTTP {@code 429} — carrying {@link SagaErrorCode#RATE_LIMIT_EXCEEDED} via {@link
+ * GrpcErrorMapper#close}, the same code the REST handler puts in its 429 body.
  */
 public final class SagaRateLimitInterceptor implements ServerInterceptor {
 
@@ -42,11 +43,12 @@ public final class SagaRateLimitInterceptor implements ServerInterceptor {
       // no budget to key on, so the call is left to proceed rather than blocked by a rate limit it
       // cannot attribute.
       SagaIdentity identity = SagaSecurityInterceptor.IDENTITY.get();
-      if (identity != null
-          && !limiter.tryAcquire(identity.principal(), System.currentTimeMillis())) {
-        call.close(
-            Status.RESOURCE_EXHAUSTED.withDescription("Saga-start rate limit exceeded"),
-            new Metadata());
+      long now = System.currentTimeMillis();
+      if (identity != null && !limiter.tryAcquire(identity.principal(), now)) {
+        GrpcErrorMapper.close(
+            call,
+            SagaErrorCode.RATE_LIMIT_EXCEEDED,
+            limiter.retryAfterMillis(identity.principal(), now));
         return new ServerCall.Listener<>() {};
       }
     }

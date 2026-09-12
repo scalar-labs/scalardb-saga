@@ -3,10 +3,10 @@ plugins {
 }
 
 // Thin override of java-conventions for the Java 8 SDK surface (api + future client/participant).
-// Keeps the JDK 21 toolchain (so Error Prone / NullAway still run), but compiles the MAIN source
+// Keeps the JDK 25 toolchain (so Error Prone / NullAway still run), but compiles the MAIN source
 // against the Java 8 platform API + language level via --release 8 (backed by ct.sym). This enforces
 // a Java-8-clean published surface: no records, no java.net.http, no Map.of/copyOf, no instanceof
-// patterns, etc. Tests are NOT constrained — they run at the JDK 21 toolchain.
+// patterns, etc. Tests are NOT constrained — they run at the JDK 25 toolchain.
 tasks.named<JavaCompile>("compileJava") {
     options.release = 8
     // Keep all javac lint (notably -Xlint:unchecked and -Xlint:deprecation, which Error Prone /

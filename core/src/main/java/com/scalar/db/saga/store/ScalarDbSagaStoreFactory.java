@@ -33,8 +33,6 @@ import java.util.Properties;
  *       ({@code 0} = no limit, default: {@code 0})
  *   <li>{@code scalar.db.saga.store.transaction_retry_count} — max transaction retry attempts
  *       (default: {@code 3})
- *   <li>{@code scalar.db.saga.store.recovery_scan_limit} — max rows per recovery scan (default:
- *       {@code 100})
  *   <li>{@code scalar.db.saga.store.num_buckets} — number of state-table bucket partitions
  *       (default: {@code 16})
  * </ul>
@@ -91,11 +89,12 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
       admin.createCoordinatorTables(true);
       SagaSchema.createAll(admin);
     } catch (Exception e) {
-      throw SagaPersistenceException.retryable("Failed to create saga schema", e);
+      throw SagaPersistenceException.storeUnavailable(e);
     }
   }
 
   private static ScalarDbSagaStoreConfig parseConfig(Properties properties) {
+    rejectRemovedKeys(properties);
     ScalarDbSagaStoreConfig.Builder builder = ScalarDbSagaStoreConfig.builder();
     String maxPayload = properties.getProperty(PROP_PREFIX + "max_event_payload_bytes");
     if (maxPayload != null) {
@@ -105,15 +104,28 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
     if (retryCount != null) {
       builder.transactionRetryCount(parseIntProperty("transaction_retry_count", retryCount));
     }
-    String scanLimit = properties.getProperty(PROP_PREFIX + "recovery_scan_limit");
-    if (scanLimit != null) {
-      builder.recoveryScanLimit(parseIntProperty("recovery_scan_limit", scanLimit));
-    }
     String numBuckets = properties.getProperty(PROP_PREFIX + "num_buckets");
     if (numBuckets != null) {
       builder.numBuckets(parseIntProperty("num_buckets", numBuckets));
     }
     return builder.build();
+  }
+
+  /**
+   * Fails on a removed key rather than ignoring it. Nothing else validates this namespace, so a
+   * store key that is merely dropped from the parser reads as unset: the deployment starts cleanly
+   * and runs on a default the operator believes they overrode.
+   */
+  private static void rejectRemovedKeys(Properties properties) {
+    String scanLimit = PROP_PREFIX + "recovery_scan_limit";
+    if (properties.getProperty(scanLimit) != null) {
+      throw new IllegalArgumentException(
+          "'"
+              + scanLimit
+              + "' has been removed; it is now an internal page size. Delete the key. To pace"
+              + " recovery, size RecoveryConfig.maxRecoveriesPerSweep instead (daemon key:"
+              + " scalar.db.saga.server.recovery.max_recoveries_per_sweep).");
+    }
   }
 
   private static int parseIntProperty(String key, String value) {

@@ -221,6 +221,42 @@ public interface SagaStore extends AutoCloseable {
   /** Returns the event count for the given saga without materializing all events. */
   int getEventCount(String sagaId);
 
+  /**
+   * The newest event's type and stamp: everything recovery needs to judge whether a saga is being
+   * driven, without reading any payload.
+   *
+   * @param type the event's type
+   * @param createdAt when the event was appended
+   */
+  record NewestEvent(EventType type, Instant createdAt) {}
+
+  /**
+   * Returns the newest event for this saga, or empty when it has none at all. Reads only the type
+   * and the timestamp, never the payload.
+   *
+   * <p>Recovery uses this as a progress probe: a saga whose state row looks stale but whose event
+   * stream is recent was <em>recently driven</em>, so it must not be claimed on state-row age
+   * alone. The type matters because some events say the opposite — a compensation failure is
+   * written by a drive that then gives up, so it marks the end of an attempt rather than progress.
+   *
+   * <p>An empty result means a state row exists with no events behind it, which the store itself
+   * cannot produce — {@link #createSaga} writes the first event in the same transaction as the row
+   * — so the caller should treat it as damage rather than as an absence of progress.
+   *
+   * <p>"Newest" means highest {@code sequence}, not latest wall clock. Events are stamped by
+   * whichever replica appended them, so under cross-replica skew the highest-sequence row can carry
+   * an earlier stamp than the one before it; that is bounded by the same small-skew assumption the
+   * recovery staleness threshold already rests on.
+   *
+   * <p>Runs in its own read-only transaction.
+   *
+   * @param sagaId the saga instance ID
+   * @return the newest event's type and stamp, or empty when the saga has no events
+   * @throws com.scalar.db.saga.exception.SagaPersistenceException if the read fails, or if the
+   *     stored event type is not one this version knows — which a rolling upgrade can produce
+   */
+  Optional<NewestEvent> getNewestEvent(String sagaId);
+
   // ---------------------------------------------------------------------------
   // Queries
   // ---------------------------------------------------------------------------
@@ -229,12 +265,20 @@ public interface SagaStore extends AutoCloseable {
   Optional<SagaStateSnapshot> getStateSnapshot(String sagaId);
 
   /**
-   * Reads a saga's state snapshot and its full event stream in a single transaction, so the two are
-   * a coherent point-in-time view — a concurrent status transition cannot pair a stale snapshot
-   * with a timeline that already contains the newer event. Returns empty if the saga does not
-   * exist.
+   * Reads a saga's state snapshot and its event stream in a single transaction, so the two are a
+   * coherent point-in-time view — a concurrent status transition cannot pair a stale snapshot with
+   * a timeline that already contains the newer event. Returns empty if the saga does not exist.
+   *
+   * <p>At most {@code maxEvents} events are returned, always in ascending sequence order. When the
+   * stream is longer, the <b>newest</b> {@code maxEvents} events are kept (the recent history is
+   * the diagnostically useful slice) and the result is flagged {@link
+   * SagaStateAndEvents#truncated()}; the full history remains in the store. Pass {@link
+   * Integer#MAX_VALUE} for an unbounded read.
+   *
+   * @param sagaId the saga id
+   * @param maxEvents the maximum number of events to return; must be positive
    */
-  Optional<SagaStateAndEvents> getStateWithEvents(String sagaId);
+  Optional<SagaStateAndEvents> getStateWithEvents(String sagaId, int maxEvents);
 
   /**
    * Lists saga state snapshots matching the given query, one page at a time. Used by the Admin
@@ -262,19 +306,66 @@ public interface SagaStore extends AutoCloseable {
   // ---------------------------------------------------------------------------
 
   /**
+   * Creates the initial cursor for one full sweep of the bucket ring in the given owner's scattered
+   * order. Each replica derives its own pseudo-random bucket permutation from its owner ID, so
+   * concurrently sweeping replicas surface different sagas first instead of racing over the same
+   * ones in lockstep. Feed the cursor to {@link #findRecoverable} or {@link
+   * #findOverdueParkedSagas} and follow the returned cursors; the sweep ends after one revolution.
+   * Obtain a fresh cursor for each new revolution — but a cursor from an unfinished revolution may
+   * be carried into a later pass to resume it (the recovery manager's cross-pass resume does
+   * exactly that), so implementations must not tie cursor validity to a single pass.
+   *
+   * <p><b>Store decorators must delegate this method</b> — falling back to a {@code null} cursor
+   * silently reverts the sweep to the un-scattered ascending order.
+   *
+   * @param ownerId the sweeping replica's owner ID
+   * @return a cursor positioned at the start of this owner's sweep order
+   */
+  ScanCursor initialSweepCursor(String ownerId);
+
+  /**
+   * Advances a sweep cursor past the bucket page it points at without scanning it. Sweeping callers
+   * use this to skip a page whose scan keeps failing (e.g., a row that cannot be deserialized), so
+   * one poison page cannot end the sweep and permanently starve the buckets after it. A pure
+   * function of the cursor — no store access.
+   *
+   * @param cursor the cursor whose page should be skipped
+   * @return the cursor for the following page, or {@code null} if the skipped page was the sweep's
+   *     last
+   */
+  @Nullable ScanCursor advanceSweepCursor(ScanCursor cursor);
+
+  /**
    * Finds sagas in {@link SagaStatus#RUNNING} or {@link SagaStatus#COMPENSATING} status whose
    * {@code updated_at} is older than the given threshold. The caller computes the staleness cutoff
    * from its clock, mirroring {@link #findOverdueParkedSagas} and {@link #findByStatusOlderThan}.
    *
    * <p>Each call returns a batch of results. Pass the cursor from the previous result to continue
-   * scanning, or {@code null} to start from the beginning. A {@code null} cursor in the returned
-   * {@link Recoverables} indicates that the scan is complete.
+   * scanning. Start from {@link #initialSweepCursor} to sweep in the owner's scattered order; a
+   * {@code null} cursor starts an un-scattered ascending sweep from bucket 0, kept for
+   * backward-compatible direct store access in tests. A {@code null} cursor in the returned {@link
+   * Recoverables} indicates that the scan is complete.
    *
    * @param threshold the staleness cutoff — only sagas updated before this are returned
-   * @param cursor the cursor from a previous call, or {@code null} to start a new scan
+   * @param cursor the cursor from a previous call, {@link #initialSweepCursor}, or {@code null} to
+   *     start an ascending scan
    * @return recoverable sagas and a cursor for the next batch
    */
   Recoverables findRecoverable(Instant threshold, @Nullable ScanCursor cursor);
+
+  /**
+   * Returns how many rows one {@link #findRecoverable} call can return, or {@code 0} if this store
+   * does not page recovery scans.
+   *
+   * <p>The recovery manager compares its per-sweep budget against this at startup: a budget below
+   * one page truncates the page, and the cut falls on whichever recoverable status the store
+   * returns last. A decorator must delegate this rather than answer for itself.
+   *
+   * @return rows one {@code findRecoverable} call can return, or {@code 0} if not applicable
+   */
+  default int recoveryPageSize() {
+    return 0;
+  }
 
   /**
    * Attempts to claim a saga for recovery by updating its owner. Returns an empty {@link Optional}
@@ -306,11 +397,13 @@ public interface SagaStore extends AutoCloseable {
    * index row and is never returned.
    *
    * <p>Cursor-paged one bucket per call, like {@link #findRecoverable}: pass the previous result's
-   * cursor to continue, or {@code null} to start. A {@code null} {@link OverdueParked#nextCursor()}
-   * in the result means the scan is complete.
+   * cursor to continue, starting from {@link #initialSweepCursor} for the owner's scattered order
+   * (or {@code null} for an ascending scan). A {@code null} {@link OverdueParked#nextCursor()} in
+   * the result means the scan is complete.
    *
    * @param threshold the cutoff time — parked sagas with a deadline at or before this are returned
-   * @param cursor the cursor from a previous call, or {@code null} to start a new scan
+   * @param cursor the cursor from a previous call, {@link #initialSweepCursor}, or {@code null} to
+   *     start an ascending scan
    * @return a batch of overdue parked saga IDs and a cursor for the next batch
    */
   OverdueParked findOverdueParkedSagas(Instant threshold, @Nullable ScanCursor cursor);
@@ -321,7 +414,15 @@ public interface SagaStore extends AutoCloseable {
 
   /**
    * Finds sagas in the given terminal status with {@code updated_at} older than the threshold. Used
-   * by the retention manager to find purgeable COMPLETED/COMPENSATED sagas.
+   * by the retention manager to find purgeable COMPLETED/COMPENSATED sagas. Buckets are visited in
+   * the owner's scattered sweep order (see {@link #initialSweepCursor}) starting {@code rotation}
+   * positions into it, so when {@code maxResults} truncates the result, concurrently purging
+   * replicas surface different sagas first — and successive passes (a caller-incremented rotation)
+   * give every bucket a turn at the front, so a sustained backlog cannot starve the buckets at the
+   * tail of one fixed order. A bucket whose scan fails is skipped for this call rather than
+   * abandoning the buckets after it; the next call retries it. Consecutive scan failures are the
+   * signature of an unavailable store rather than a poison bucket, and propagate instead of being
+   * swept bucket by bucket, so the caller's pass fails loudly once.
    *
    * <p>This method may be removed once the Admin API's {@code listStateSnapshots} query is
    * available.
@@ -329,17 +430,23 @@ public interface SagaStore extends AutoCloseable {
    * @param status the terminal status to scan for
    * @param threshold the cutoff time — only sagas updated before this are returned
    * @param maxResults the maximum number of results to return
-   * @return matching saga snapshots (order is not guaranteed across buckets)
+   * @param ownerId the purging replica's owner ID, selecting its bucket sweep order
+   * @param rotation how many positions into the sweep order to start; callers increment it once per
+   *     cleanup pass (any int is accepted; it is reduced modulo the bucket count)
+   * @return matching saga snapshots (order follows the owner's rotated bucket permutation)
    */
   List<SagaStateSnapshot> findByStatusOlderThan(
-      SagaStatus status, Instant threshold, int maxResults);
+      SagaStatus status, Instant threshold, int maxResults, String ownerId, int rotation);
 
   /**
    * Deletes all events and state for a terminal saga (COMPLETED, COMPENSATED, or ESCALATED).
    *
    * @param sagaId the saga instance ID to delete
+   * @return {@code true} if this call deleted the saga's state row; {@code false} if the saga was
+   *     already purged (e.g., by a concurrently sweeping replica), so callers budgeting work can
+   *     tell real purges from no-ops
    */
-  void deleteSaga(String sagaId);
+  boolean deleteSaga(String sagaId);
 
   // ---------------------------------------------------------------------------
   // Nested types
@@ -388,7 +495,8 @@ public interface SagaStore extends AutoCloseable {
   /**
    * Opaque cursor for paginating a bucket-partitioned scan ({@link #findRecoverable}, {@link
    * #findOverdueParkedSagas}). Implementations define the internal state (e.g., the next bucket
-   * index).
+   * index). Cursors are only valid with the store that created them: passing a foreign cursor type
+   * throws {@link IllegalArgumentException} rather than silently restarting an un-scattered scan.
    */
   interface ScanCursor {}
 }

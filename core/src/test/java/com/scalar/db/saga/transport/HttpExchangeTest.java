@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 
 import com.sun.net.httpserver.HttpExchange;
@@ -25,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import javax.net.ssl.SSLHandshakeException;
@@ -319,6 +321,35 @@ class HttpExchangeTest {
   void exchange_ambiguousIoException_notKnownNotCommitted() {
     // A mid-flight reset / unrecognized I/O failure may have committed → not proven.
     assertThat(knownNotCommittedAfterSendFails(new IOException("connection reset"))).isFalse();
+  }
+
+  @Test
+  void exchange_submissionRejected_knownNotCommitted() {
+    // sendAsync itself throwing means the client refused the request before accepting it: the
+    // request provably never went out.
+    HttpClient client = mock(HttpClient.class);
+    doThrow(new RejectedExecutionException("shut down")).when(client).sendAsync(any(), any());
+    com.scalar.db.saga.transport.HttpExchange ex =
+        new com.scalar.db.saga.transport.HttpExchange(client, OutboundHttpPolicy.allowAll());
+
+    Throwable t =
+        catchThrowable(
+            () ->
+                ex.exchange(
+                    "GET", baseUrl, "/ok", NO_PARAMS, NO_PARAMS, null, null, "saga-1", "s", null));
+
+    assertThat(t).isInstanceOf(HttpCallException.class);
+    assertThat(((HttpCallException) t).isRetryable()).isTrue();
+    assertThat(((HttpCallException) t).knownNotCommitted()).isTrue();
+  }
+
+  @Test
+  void exchange_rejectionSurfacedThroughFuture_notKnownNotCommitted() {
+    // A rejection surfacing through the future is not proof of pre-send: the client accepted the
+    // request, and an executor shut down mid-exchange can reject continuation work (e.g. response
+    // processing) after the request was transmitted → in-doubt, retryable.
+    assertThat(knownNotCommittedAfterSendFails(new RejectedExecutionException("shut down")))
+        .isFalse();
   }
 
   @Test

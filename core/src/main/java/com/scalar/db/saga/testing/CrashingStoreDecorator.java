@@ -1,23 +1,9 @@
 package com.scalar.db.saga.testing;
 
-import com.scalar.db.saga.api.SagaPage;
-import com.scalar.db.saga.api.SagaQuery;
-import com.scalar.db.saga.api.SagaStateSnapshot;
-import com.scalar.db.saga.api.SagaStatus;
-import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.store.EventType;
-import com.scalar.db.saga.store.SagaEvent;
-import com.scalar.db.saga.store.SagaStateAndEvents;
 import com.scalar.db.saga.store.SagaStore;
-import com.scalar.db.saga.store.StatusEvent;
 import com.scalar.db.saga.store.StepEvent;
-import java.time.Instant;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Optional;
 import net.jcip.annotations.ThreadSafe;
-import org.jspecify.annotations.Nullable;
 
 /**
  * A {@link SagaStore} decorator that simulates a process crash at a configured step boundary.
@@ -36,9 +22,8 @@ import org.jspecify.annotations.Nullable;
  * }</pre>
  */
 @ThreadSafe
-public final class CrashingStoreDecorator implements SagaStore {
+public final class CrashingStoreDecorator extends ForwardingSagaStore {
 
-  private final SagaStore delegate;
   private final int crashAfterStepIndex;
 
   /**
@@ -48,7 +33,7 @@ public final class CrashingStoreDecorator implements SagaStore {
    * @param crashAfterStepIndex the step index whose completion triggers the crash
    */
   public CrashingStoreDecorator(SagaStore delegate, int crashAfterStepIndex) {
-    this.delegate = Objects.requireNonNull(delegate, "delegate must not be null");
+    super(delegate);
     if (crashAfterStepIndex < 0) {
       throw new IllegalArgumentException("crashAfterStepIndex must be >= 0");
     }
@@ -57,137 +42,12 @@ public final class CrashingStoreDecorator implements SagaStore {
 
   @Override
   public void recordStepEvent(String sagaId, int sequence, StepEvent event) {
-    delegate.recordStepEvent(sagaId, sequence, event);
+    delegate().recordStepEvent(sagaId, sequence, event);
 
     if (event.getEventType() == EventType.STEP_COMPLETED
         && event.getStepIndex() == crashAfterStepIndex) {
       throw new SimulatedCrashError(
           "Simulated crash after step " + crashAfterStepIndex + " completed for saga " + sagaId);
     }
-  }
-
-  // --- All remaining methods delegate unchanged ---
-
-  @Override
-  public SagaStateSnapshot createSaga(
-      @Nullable String sagaId,
-      String sagaName,
-      String ownerId,
-      Map<String, Object> input,
-      String definitionVersion) {
-    return delegate.createSaga(sagaId, sagaName, ownerId, input, definitionVersion);
-  }
-
-  @Override
-  public void registerDefinition(SagaDefinition definition) {
-    delegate.registerDefinition(definition);
-  }
-
-  @Override
-  public Optional<SagaDefinition> getDefinition(String sagaName, String definitionVersion) {
-    return delegate.getDefinition(sagaName, definitionVersion);
-  }
-
-  @Override
-  public Optional<SagaDefinition> getDefinition(String sagaName) {
-    return delegate.getDefinition(sagaName);
-  }
-
-  @Override
-  public SagaStateSnapshot recordStatusEvent(
-      SagaStateSnapshot current,
-      int sequence,
-      StatusEvent event,
-      String ownerId,
-      @Nullable Instant stateUpdatedAt) {
-    return delegate.recordStatusEvent(current, sequence, event, ownerId, stateUpdatedAt);
-  }
-
-  @Override
-  public SagaStateSnapshot park(
-      SagaStateSnapshot current,
-      int sequence,
-      StepEvent pendingEvent,
-      @Nullable Instant parkedDeadline) {
-    return delegate.park(current, sequence, pendingEvent, parkedDeadline);
-  }
-
-  @Override
-  public SagaStateSnapshot resumeParkedStep(
-      SagaStateSnapshot current, int sequence, StepEvent completedEvent) {
-    return delegate.resumeParkedStep(current, sequence, completedEvent);
-  }
-
-  @Override
-  public SagaStateSnapshot failParkedStep(
-      SagaStateSnapshot current, int sequence, StepEvent failedEvent, SagaStatus targetStatus) {
-    return delegate.failParkedStep(current, sequence, failedEvent, targetStatus);
-  }
-
-  @Override
-  public SagaStateSnapshot redriveParkedStep(
-      SagaStateSnapshot current, int sequence, StepEvent redriveEvent) {
-    return delegate.redriveParkedStep(current, sequence, redriveEvent);
-  }
-
-  @Override
-  public List<SagaEvent> getEvents(String sagaId) {
-    return delegate.getEvents(sagaId);
-  }
-
-  @Override
-  public int getEventCount(String sagaId) {
-    return delegate.getEventCount(sagaId);
-  }
-
-  @Override
-  public Optional<SagaStateSnapshot> getStateSnapshot(String sagaId) {
-    return delegate.getStateSnapshot(sagaId);
-  }
-
-  @Override
-  public Optional<SagaStateAndEvents> getStateWithEvents(String sagaId) {
-    return delegate.getStateWithEvents(sagaId);
-  }
-
-  @Override
-  public SagaPage<SagaStateSnapshot> listStateSnapshots(SagaQuery query) {
-    return delegate.listStateSnapshots(query);
-  }
-
-  @Override
-  public Recoverables findRecoverable(Instant threshold, @Nullable ScanCursor cursor) {
-    return delegate.findRecoverable(threshold, cursor);
-  }
-
-  @Override
-  public Optional<SagaStateSnapshot> claimForRecovery(SagaStateSnapshot saga, String newOwnerId) {
-    return delegate.claimForRecovery(saga, newOwnerId);
-  }
-
-  @Override
-  public void markForRecovery(String sagaId) {
-    delegate.markForRecovery(sagaId);
-  }
-
-  @Override
-  public OverdueParked findOverdueParkedSagas(Instant threshold, @Nullable ScanCursor cursor) {
-    return delegate.findOverdueParkedSagas(threshold, cursor);
-  }
-
-  @Override
-  public List<SagaStateSnapshot> findByStatusOlderThan(
-      SagaStatus status, Instant threshold, int maxResults) {
-    return delegate.findByStatusOlderThan(status, threshold, maxResults);
-  }
-
-  @Override
-  public void deleteSaga(String sagaId) {
-    delegate.deleteSaga(sagaId);
-  }
-
-  @Override
-  public void close() {
-    delegate.close();
   }
 }
