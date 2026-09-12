@@ -402,6 +402,37 @@ class BoundedWaitTest {
     assertThat(elapsedMillis).isGreaterThanOrEqualTo(900L);
   }
 
+  @Test
+  void awaitWithin_abortAlreadyDoneForAParkedSaga_readsOnceWithoutTheEagerCheck() {
+    // Arrange — shutdown, or a cancelled call, reaching a wait whose saga has already parked. The
+    // read where polling begins is there to save the wait a whole tick; a wait that is over before
+    // it starts has no tick to be saved from, and the read at the end answers anyway. Two
+    // transactions for a departing request is waste on the path a struggling deployment sheds load
+    // through.
+    CompletableFuture<Void> parked = new CompletableFuture<>();
+    parked.complete(null);
+    CompletableFuture<Void> abort = new CompletableFuture<>();
+    abort.complete(null);
+    SagaStateSnapshot waiting = snapshot(SagaStatus.WAITING);
+    AtomicInteger reads = new AtomicInteger();
+
+    // Act
+    SagaStateSnapshot answer =
+        BoundedWait.awaitWithin(
+            new CompletableFuture<>(),
+            abort,
+            parked,
+            30_000L,
+            () -> {
+              reads.incrementAndGet();
+              return waiting;
+            });
+
+    // Assert — the one read that produces the answer, not that one behind an eager check.
+    assertThat(answer).isEqualTo(waiting);
+    assertThat(reads).hasValue(1);
+  }
+
   private static void sleep(long millis) {
     try {
       Thread.sleep(millis);

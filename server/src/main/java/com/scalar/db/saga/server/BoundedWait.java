@@ -117,7 +117,12 @@ public final class BoundedWait {
       // the caller could register. That settle reached nobody, and the first tick is a whole
       // interval away. Read once now rather than waiting that out. Only a start reaches this; a
       // long-poll passes no park signal and has read already.
-      if (polling && pollFrom != null) {
+      //
+      // Not when the caller is already leaving, which the branch that starts polling mid-wait
+      // guards for the same reason: there is no tick left to save it from, and the read at the end
+      // still answers. A second transaction for a departing request is waste on exactly the path a
+      // shutting-down server sheds load through.
+      if (polling && pollFrom != null && !abort.isDone()) {
         SagaStateSnapshot alreadySettled = settledAnswer(settled, read, deadlineNanos);
         if (alreadySettled != null) {
           return alreadySettled;
