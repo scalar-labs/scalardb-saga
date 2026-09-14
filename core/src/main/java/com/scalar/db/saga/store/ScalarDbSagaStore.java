@@ -1757,17 +1757,6 @@ public final class ScalarDbSagaStore implements SagaStore {
         r.getTimestampTZ("updated_at"));
   }
 
-  @Override
-  public Optional<String> getOwnerId(String sagaId) {
-    return runInTransaction(
-        tx ->
-            tx.scan(buildStateIndexScan(sagaId)).stream()
-                .findFirst()
-                .map(r -> r.getText("owner_id")),
-        null,
-        "load owner of saga " + sagaId);
-  }
-
   /**
    * The saga's state row if {@code expectedOwnerId} currently owns it, else empty. Reads the owner
    * from the row because {@link SagaStateSnapshot} does not carry it; one scan serves both the

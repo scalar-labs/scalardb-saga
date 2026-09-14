@@ -1016,7 +1016,9 @@ class ScalarDbSagaStoreTest {
     Instant now = Instant.now();
     SagaStateSnapshot current =
         new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+    Result stateRow = mock(Result.class);
+    when(stateRow.getText("owner_id")).thenReturn("engine-1");
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(stateRow));
 
     // Act
     SagaStateSnapshot result =
@@ -1029,6 +1031,9 @@ class ScalarDbSagaStoreTest {
     verify(tx, times(3)).insert(any(Insert.class));
     verify(tx).delete(any(Delete.class));
     verify(tx).commit();
+    // A park does not change the owner, and the snapshot no longer carries it, so the owner has to
+    // come off the row being replaced. Assert the column: nothing else here would notice a blank.
+    assertThat(stampedOwnerId()).isEqualTo("engine-1");
   }
 
   @Test
@@ -1069,7 +1074,9 @@ class ScalarDbSagaStoreTest {
     Instant now = Instant.now();
     SagaStateSnapshot current =
         new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+    Result stateRow = mock(Result.class);
+    when(stateRow.getText("owner_id")).thenReturn("engine-1");
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(stateRow));
     Result parkedRow = mock(Result.class);
     when(parkedRow.getTimestampTZ("parked_deadline")).thenReturn(now.plusSeconds(600));
     when(tx.scan(any(Scan.class))).thenReturn(List.of(parkedRow));
@@ -1086,6 +1093,9 @@ class ScalarDbSagaStoreTest {
     // state delete + parked-row delete
     verify(tx, times(2)).delete(any(Delete.class));
     verify(tx).commit();
+    // Covers all three transitions out of WAITING: resume, fail and redrive share
+    // transitionParkedStep's body, so one assertion guards the owner on all of them.
+    assertThat(stampedOwnerId()).isEqualTo("engine-1");
   }
 
   @Test
@@ -1775,26 +1785,6 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
-  void getOwnerId_sagaExists_returnsTheOwnerStampedOnTheRow() throws Exception {
-    // The owner is not a component of SagaStateSnapshot, so the store answers it from the column.
-    // Arrange
-    Result row = mockStateResult("saga-1", SagaStatus.RUNNING);
-    when(tx.scan(any(Scan.class))).thenReturn(List.of(row));
-
-    // Act & Assert
-    assertThat(store.getOwnerId("saga-1")).hasValue("engine-1");
-  }
-
-  @Test
-  void getOwnerId_sagaNotFound_returnsEmpty() throws Exception {
-    // Arrange
-    when(tx.scan(any(Scan.class))).thenReturn(List.of());
-
-    // Act & Assert
-    assertThat(store.getOwnerId("missing")).isEmpty();
-  }
-
-  @Test
   void getStateSnapshot_notFound_returnsEmpty() throws Exception {
     // Arrange
     when(tx.scan(any(Scan.class))).thenReturn(List.of());
@@ -2130,6 +2120,9 @@ class ScalarDbSagaStoreTest {
     verify(tx).delete(any(Delete.class));
     verify(tx).insert(any(Insert.class));
     verify(tx).commit();
+    // Re-stamping the scan key to EPOCH must not disturb the owner, which this path also reads off
+    // the row rather than from a parameter.
+    assertThat(stampedOwnerId()).isEqualTo("engine-1");
   }
 
   @Test
