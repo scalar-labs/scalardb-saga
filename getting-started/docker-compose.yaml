@@ -53,9 +53,12 @@ services:
       - ./services/service.py:/service.py:ro
 
   saga-server:
-    # The default names the newest published image. The release workflow asserts that it matches the
-    # version being released, so a stale default fails the release rather than reaching a reader.
-    image: ghcr.io/scalar-labs/scalardb-saga-server:${SAGA_VERSION:-3.19.0-alpha.1}
+    # The default names the version this branch builds, so the sample always runs a server whose
+    # configuration keys match the config file beside it — a server older than this branch rejects a
+    # key it has never heard of and refuses to start. On main that version is a snapshot, which is
+    # not published: build it first (see the README). A release branch names its released version
+    # instead, and the release workflow asserts the two agree before publishing.
+    image: ghcr.io/scalar-labs/scalardb-saga-server:${SAGA_VERSION:-4.0.0-SNAPSHOT}
     ports:
       - "12080:12080" # REST
       - "12051:12051" # gRPC
