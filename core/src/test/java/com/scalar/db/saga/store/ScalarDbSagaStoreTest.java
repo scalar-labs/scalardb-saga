@@ -117,7 +117,7 @@ class ScalarDbSagaStoreTest {
     verify(tx).commit();
     // The owner is not a component of the snapshot; it is stamped on the state row, so that is
     // where stamping it is verified.
-    assertThat(stampedOwnerId()).isEqualTo("engine-1");
+    assertThat(capturedTextColumn(tx, "owner_id")).isEqualTo("engine-1");
   }
 
   @Test
@@ -808,7 +808,7 @@ class ScalarDbSagaStoreTest {
     verify(tx).commit();
     // The re-stamp is the point of this test: engine-2 recorded the transition, so the state row's
     // owner_id becomes engine-2. Asserted on the column, which is where the owner lives.
-    assertThat(stampedOwnerId()).isEqualTo("engine-2");
+    assertThat(capturedTextColumn(tx, "owner_id")).isEqualTo("engine-2");
   }
 
   @Test
@@ -1036,7 +1036,7 @@ class ScalarDbSagaStoreTest {
     verify(tx).commit();
     // A park does not change the owner, and the snapshot no longer carries it, so the owner has to
     // come off the row being replaced. Assert the column: nothing else here would notice a blank.
-    assertThat(stampedOwnerId()).isEqualTo("engine-1");
+    assertThat(capturedTextColumn(tx, "owner_id")).isEqualTo("engine-1");
   }
 
   @Test
@@ -1098,7 +1098,7 @@ class ScalarDbSagaStoreTest {
     verify(tx).commit();
     // Covers all three transitions out of WAITING: resume, fail and redrive share
     // transitionParkedStep's body, so one assertion guards the owner on all of them.
-    assertThat(stampedOwnerId()).isEqualTo("engine-1");
+    assertThat(capturedTextColumn(tx, "owner_id")).isEqualTo("engine-1");
   }
 
   @Test
@@ -2034,7 +2034,7 @@ class ScalarDbSagaStoreTest {
     verify(tx).commit();
     // Taking the claim is precisely a change of owner, so this is the assertion that matters. It
     // reads the state row's column, which is where the owner lives now.
-    assertThat(stampedOwnerId()).isEqualTo("new-owner");
+    assertThat(capturedTextColumn(tx, "owner_id")).isEqualTo("new-owner");
   }
 
   @Test
@@ -2140,7 +2140,7 @@ class ScalarDbSagaStoreTest {
     verify(tx).commit();
     // Re-stamping the scan key to EPOCH must not disturb the owner, which this path also reads off
     // the row rather than from a parameter.
-    assertThat(stampedOwnerId()).isEqualTo("engine-1");
+    assertThat(capturedTextColumn(tx, "owner_id")).isEqualTo("engine-1");
   }
 
   @Test
@@ -3466,18 +3466,19 @@ class ScalarDbSagaStoreTest {
   }
 
   /**
-   * The {@code owner_id} stamped on the state row this call wrote. {@link SagaStateSnapshot} no
-   * longer carries the owner, so stamping it is verified where the owner actually lives: the
-   * column. Picks the first insert that carries the column, since the event insert does not.
+   * The value of {@code column} on the first captured insert that carries it. The state and event
+   * inserts write disjoint columns, so naming the column selects the insert. Used for {@code
+   * owner_id}, which {@link SagaStateSnapshot} no longer carries, and for {@code append_id}.
    */
-  private String stampedOwnerId() throws Exception {
+  private static String capturedTextColumn(DistributedTransaction tx, String column)
+      throws Exception {
     ArgumentCaptor<Insert> captor = ArgumentCaptor.forClass(Insert.class);
     verify(tx, atLeastOnce()).insert(captor.capture());
     return captor.getAllValues().stream()
-        .map(insert -> insert.getColumns().get("owner_id"))
-        .filter(java.util.Objects::nonNull)
+        .map(insert -> insert.getColumns().get(column))
+        .filter(Objects::nonNull)
         .findFirst()
-        .orElseThrow(() -> new AssertionError("no insert carried an owner_id column"))
+        .orElseThrow(() -> new AssertionError("no insert carried a " + column + " column"))
         .getTextValue();
   }
 
@@ -3512,15 +3513,7 @@ class ScalarDbSagaStoreTest {
    */
   private static void assertEventInsertCarriesAppendId(
       DistributedTransaction tx, String expectedAppendId) throws Exception {
-    ArgumentCaptor<Insert> captor = ArgumentCaptor.forClass(Insert.class);
-    verify(tx, atLeastOnce()).insert(captor.capture());
-    Insert eventInsert =
-        captor.getAllValues().stream()
-            .filter(i -> i.getColumns().containsKey("append_id"))
-            .findFirst()
-            .orElseThrow(
-                () -> new AssertionError("no event insert with append_id column was captured"));
-    assertThat(requireAppendId(eventInsert)).isEqualTo(expectedAppendId);
+    assertThat(capturedTextColumn(tx, "append_id")).isEqualTo(expectedAppendId);
   }
 
   /** Reads {@code append_id} from an {@link Insert}, failing loudly if the column is absent. */

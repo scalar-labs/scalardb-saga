@@ -34,7 +34,6 @@ final class ClientProtoMappers {
 
   private ClientProtoMappers() {}
 
-  /** Maps a wire snapshot to an api snapshot. */
   static SagaStateSnapshot fromProto(SagaSnapshot snapshot) {
     return new SagaStateSnapshot(
         snapshot.getSagaId(),

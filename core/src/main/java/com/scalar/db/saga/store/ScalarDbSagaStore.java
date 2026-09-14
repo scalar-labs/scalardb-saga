@@ -380,8 +380,6 @@ public final class ScalarDbSagaStore implements SagaStore {
           if (row.isEmpty()) {
             throw new SagaConcurrentModificationException(sagaId);
           }
-          // The owner is carried by the row, not the snapshot, and this transition does not change
-          // it: preserve whatever the row being replaced held.
           String ownerId = row.get().getText("owner_id");
 
           tx.insert(buildEventInsert(sagaId, sequence, pendingEvent, appendId, now));
@@ -461,8 +459,6 @@ public final class ScalarDbSagaStore implements SagaStore {
           if (row.isEmpty()) {
             throw new SagaConcurrentModificationException(sagaId);
           }
-          // The owner is carried by the row, not the snapshot, and this transition does not change
-          // it: preserve whatever the row being replaced held.
           String ownerId = row.get().getText("owner_id");
 
           tx.insert(buildEventInsert(sagaId, sequence, event, appendId, now));

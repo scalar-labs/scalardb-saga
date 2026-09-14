@@ -23,7 +23,6 @@ final class ProtoMappers {
 
   private ProtoMappers() {}
 
-  /** Maps an api snapshot to the wire snapshot. */
   static com.scalar.db.saga.rpc.SagaSnapshot toProto(SagaStateSnapshot snapshot) {
     return com.scalar.db.saga.rpc.SagaSnapshot.newBuilder()
         .setSagaId(snapshot.getSagaId())
