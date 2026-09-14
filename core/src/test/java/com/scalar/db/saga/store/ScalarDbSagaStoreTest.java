@@ -2038,6 +2038,57 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
+  void claimForRecovery_unknownStatusAndRowNowOwnedByUs_returnsTheClaimedSnapshot()
+      throws Exception {
+    // The claim's commit is in doubt, so loadStateClaimedBy decides it by reading owner_id off the
+    // row. Ours means the claim landed and the caller may drive the saga.
+    // Arrange
+    ScalarDbSagaStore singleAttemptStore = singleAttemptStore();
+    Instant now = Instant.now();
+    SagaStateSnapshot saga =
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
+    Result precheckRow = stateRowWithOwner();
+    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    Result claimedRow = mockStateResult("saga-1", SagaStatus.RUNNING);
+    when(claimedRow.getText("owner_id")).thenReturn("new-owner");
+    when(verifyTx.scan(any(Scan.class))).thenReturn(List.of(claimedRow));
+
+    // Act
+    Optional<SagaStateSnapshot> claimed = singleAttemptStore.claimForRecovery(saga, "new-owner");
+
+    // Assert
+    assertThat(claimed).isPresent();
+  }
+
+  @Test
+  void claimForRecovery_unknownStatusAndRowOwnedByAnotherReplica_doesNotConfirmTheClaim()
+      throws Exception {
+    // The same in-doubt commit, but the row carries another replica's owner: our claim did not
+    // land, and the verifier must not hand back a row we do not own. Reporting the unresolved
+    // commit is right; silently confirming it would let two replicas drive one saga.
+    // Arrange
+    ScalarDbSagaStore singleAttemptStore = singleAttemptStore();
+    Instant now = Instant.now();
+    SagaStateSnapshot saga =
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
+    Result precheckRow = stateRowWithOwner();
+    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    Result foreignRow = mockStateResult("saga-1", SagaStatus.RUNNING);
+    when(foreignRow.getText("owner_id")).thenReturn("another-replica");
+    when(verifyTx.scan(any(Scan.class))).thenReturn(List.of(foreignRow));
+
+    // Act & Assert
+    assertThatThrownBy(() -> singleAttemptStore.claimForRecovery(saga, "new-owner"))
+        .isInstanceOf(SagaPersistenceException.class);
+  }
+
+  @Test
   void claimForRecovery_rowNotFound_returnsEmpty() throws Exception {
     // Arrange
     Instant now = Instant.now();
