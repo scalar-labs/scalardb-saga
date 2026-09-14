@@ -21,6 +21,14 @@ import org.jspecify.annotations.Nullable;
  * {@code api} type. Server-internal bookkeeping therefore stops here rather than riding it: an
  * implementation keeps such a field in its own rows and never surfaces it on the snapshot. {@code
  * owner_id} is the worked example. See {@link SagaStateSnapshot} for the rule.
+ *
+ * <p><b>When {@code owner_id} changes.</b> Only three operations re-stamp it: {@link #createSaga},
+ * {@link #recordStatusEvent} and {@link #claimForRecovery}, each from an {@code ownerId} the caller
+ * supplies. The transitions out of {@code WAITING} preserve whatever the row already held, because
+ * they take no claim; a parked-step callback or timeout can therefore be applied by a replica other
+ * than the one {@code owner_id} names, and the column keeps naming the earlier driver until the
+ * next status event. So {@code owner_id} records who last claimed or last recorded a status event,
+ * not necessarily who is executing right now.
  */
 public interface SagaStore extends AutoCloseable {
 
@@ -106,8 +114,9 @@ public interface SagaStore extends AutoCloseable {
    *
    * <p>The new status is derived from {@link StatusEvent#getTargetStatus()}. The transitioned row
    * is stamped with {@code ownerId} as the replica now processing this saga (an observability
-   * field), so the driver reflected in {@code owner_id} stays current across engine, recovery, and
-   * admin transitions.
+   * field), so a status event recorded by the engine, by recovery or by an admin operation moves
+   * the column to whoever recorded it. This is one of the three operations that re-stamp it; see
+   * the interface javadoc for the ones that preserve it instead.
    *
    * <p>{@code stateUpdatedAt} sets the transitioned row's {@code updated_at}. That column is also
    * the recovery sweeper's scan key (it scans oldest-first), so passing {@link Instant#EPOCH} hands

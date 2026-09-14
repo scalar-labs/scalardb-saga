@@ -1468,6 +1468,13 @@ public final class ScalarDbSagaStore implements SagaStore {
    * off the row they are replacing.
    */
   private Insert buildStateInsert(int bucket, SagaStateSnapshot snapshot, String ownerId) {
+    // Restores the fail-fast that the snapshot's constructor used to provide while it carried the
+    // owner. Without it a null reaches ScalarDB, which accepts it and commits a NULL column, and
+    // "present but unowned" then reads the same as "missing" everywhere downstream. NullAway
+    // cannot catch it: Result.getText sits outside the annotated packages, so it is treated as
+    // non-null. Every write path funnels through here, including the three that read the owner off
+    // the row.
+    Objects.requireNonNull(ownerId, "ownerId must not be null");
     return Insert.newBuilder()
         .namespace(SagaSchema.NAMESPACE)
         .table(SagaSchema.STATE_TABLE)
