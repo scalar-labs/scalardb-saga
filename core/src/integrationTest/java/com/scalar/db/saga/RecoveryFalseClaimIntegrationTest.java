@@ -256,9 +256,13 @@ class RecoveryFalseClaimIntegrationTest {
       // Act — a full recovery pass from the other replica
       replicaB.recover();
 
-      // Assert — B left it alone; the row still belongs to A
-      assertThat(storeB.getStateSnapshot(sagaId.get()).orElseThrow().getOwnerId())
-          .isEqualTo(OWNER_ID);
+      // Assert — B left it alone. A claim rewrites the state row's clustering key with a fresh
+      // updated_at, so an unchanged updated_at proves no claim landed. That is stronger than
+      // checking owner_id, which would also hold if something rewrote the row and put A's id back.
+      // Load-bearing assumption: claimForRecovery stamps a new updated_at. If that ever changes,
+      // this assertion silently stops testing anything.
+      assertThat(storeB.getStateSnapshot(sagaId.get()).orElseThrow().getUpdatedAt())
+          .isEqualTo(stateUpdatedAt);
       assertThat(driveFailure.get()).isNull();
 
       // Act — release A and let it finish

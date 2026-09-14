@@ -270,6 +270,6 @@ class BoundedWaitTest {
 
   private static SagaStateSnapshot snapshot(SagaStatus status) {
     Instant now = Instant.parse("2026-09-08T00:00:00Z");
-    return new SagaStateSnapshot("saga-1", "transfer", status, "owner", "v1", now, now);
+    return new SagaStateSnapshot("saga-1", "transfer", status, "v1", now, now);
   }
 }

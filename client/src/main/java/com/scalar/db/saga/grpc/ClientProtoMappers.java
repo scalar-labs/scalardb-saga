@@ -34,17 +34,11 @@ final class ClientProtoMappers {
 
   private ClientProtoMappers() {}
 
-  /**
-   * Maps a wire snapshot to an api snapshot. {@code ownerId} is set to the empty string: it is a
-   * server-internal recovery-coordination field that the remote API deliberately does not surface
-   * (parity with the REST DTO), so a remote snapshot never carries a real owner.
-   */
   static SagaStateSnapshot fromProto(SagaSnapshot snapshot) {
     return new SagaStateSnapshot(
         snapshot.getSagaId(),
         snapshot.getName(),
         fromProtoStatus(snapshot.getStatus()),
-        "",
         snapshot.getDefinitionVersion(),
         toInstant(snapshot.getCreatedAt()),
         toInstant(snapshot.getUpdatedAt()));
