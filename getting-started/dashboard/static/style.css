@@ -1,0 +1,415 @@
+:root {
+  color-scheme: dark;
+  --bg: #0e1015;
+  --panel: #151922;
+  --raise: #1b2029;
+  --line: #262d3a;
+  --text: #e7eaf0;
+  --muted: #8a93a5;
+  --running: #4f8ef7;
+  --waiting: #7d8798;
+  --completed: #2fbf66;
+  --compensating: #f0a12e;
+  --compensated: #a78bfa;
+  --escalated: #ef5350;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--text);
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.hidden { display: none !important; }
+.empty { color: var(--muted); font-style: italic; }
+
+.banner {
+  background: var(--escalated);
+  color: #fff;
+  text-align: center;
+  padding: 6px;
+  font-weight: 600;
+}
+
+/* --- header / launch controls ------------------------------------------------ */
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 10px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+
+.title h1 { font-size: 18px; margin: 0; display: inline; }
+.title .subtitle { color: var(--muted); margin-left: 8px; }
+
+#launch-form {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+#launch-form label { color: var(--muted); display: inline-flex; align-items: center; gap: 4px; }
+#launch-form input,
+#launch-form select {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 6px;
+  font: inherit;
+  background: var(--bg);
+  color: var(--text);
+}
+#dyn-inputs { display: inline-flex; align-items: center; gap: 12px; }
+#launch-form .pace input[type="range"] { width: 110px; padding: 0; border: none; background: none; }
+#pace-value { min-width: 62px; color: var(--text); }
+
+#launch-form button {
+  border: none;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font: inherit;
+  font-weight: 600;
+  color: #fff;
+  background: #1f8a4d;
+  cursor: pointer;
+}
+#launch-form button:hover { filter: brightness(1.15); }
+#launch-form button:disabled { opacity: 0.5; cursor: default; filter: none; }
+
+/* --- layout ------------------------------------------------------------------ */
+
+main { display: flex; flex: 1; min-height: 0; }
+
+#saga-list-pane {
+  width: 300px;
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+  overflow-y: auto;
+  padding: 10px;
+  flex-shrink: 0;
+}
+
+#detail-pane { flex: 1; min-width: 0; overflow-y: auto; padding: 16px 28px 32px; }
+
+#definition-pane {
+  position: relative;
+  width: 430px;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+  overflow: auto;
+  padding: 10px 14px;
+  flex-shrink: 0;
+}
+
+/* Vertical drag handles between the panes. */
+.v-resize {
+  width: 8px;
+  margin: 0 -4px;
+  cursor: ew-resize;
+  flex-shrink: 0;
+  z-index: 1;
+}
+.v-resize:hover { background: rgba(79, 142, 247, 0.25); }
+
+#detail-pane > .empty { text-align: center; margin-top: 48px; }
+
+#feed-pane {
+  position: relative;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  height: 220px;
+  display: flex;
+  flex-direction: column;
+  padding: 6px 16px;
+  flex-shrink: 0;
+}
+
+/* The pane's top border doubles as a resize handle. */
+#feed-resize {
+  position: absolute;
+  top: -4px;
+  left: 0;
+  right: 0;
+  height: 9px;
+  cursor: ns-resize;
+}
+#feed-resize:hover { background: rgba(79, 142, 247, 0.25); }
+
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 4px 0 8px; }
+h3 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  text-align: center;
+  margin: 44px 0 22px;
+}
+
+/* The detail view: the saga's identity on top, then the orchestrator's durable state timeline,
+   then the step pipeline (each service over its own database). Centered in a capped column so a
+   wide window doesn't pin the content to the left edge. */
+#detail { max-width: 1000px; margin: 0 auto; }
+
+#detail-head { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 28px; }
+#detail-name { font-size: 17px; font-weight: 700; }
+#detail-id { color: var(--muted); font-size: 12px; }
+
+/* --- saga list --------------------------------------------------------------- */
+
+#saga-list { list-style: none; margin: 0; padding: 0; }
+#saga-list li {
+  padding: 7px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+#saga-list li:hover { background: rgba(255, 255, 255, 0.04); }
+#saga-list li.selected { background: rgba(79, 142, 247, 0.14); }
+/* Rows are left-anchored: the badge hugs the saga name and the id/time pair sit together, so
+   resizing the pane never shifts them. */
+.saga-row { display: flex; align-items: center; gap: 8px; }
+.saga-row .badge { flex-shrink: 0; }
+.saga-row-sub { margin-top: 2px; }
+.saga-name {
+  font-weight: 600;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.saga-id { color: var(--muted); font-size: 12px; }
+.saga-time { color: var(--muted); font-size: 12px; }
+
+/* --- badges ------------------------------------------------------------------ */
+
+.badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+  background: rgba(138, 147, 165, 0.18);
+  color: var(--muted);
+}
+.st-RUNNING { background: rgba(79, 142, 247, 0.18); color: #7fb0ff; }
+.st-WAITING { background: rgba(125, 135, 152, 0.2); color: #a6aebd; }
+.st-COMPLETED { background: rgba(47, 191, 102, 0.16); color: #4fd587; }
+.st-COMPENSATING { background: rgba(240, 161, 46, 0.16); color: #f5b859; }
+.st-COMPENSATED { background: rgba(167, 139, 250, 0.18); color: #c3aefc; }
+.st-ESCALATED { background: rgba(239, 83, 80, 0.16); color: #f58c8a; }
+.ev-saga { background: rgba(79, 142, 247, 0.18); color: #7fb0ff; }
+.ev-step { background: rgba(138, 147, 165, 0.18); color: #a6aebd; }
+.ev-bad { background: rgba(239, 83, 80, 0.16); color: #f58c8a; }
+
+/* --- step pipeline ----------------------------------------------------------- */
+
+.pipe-row { display: flex; align-items: flex-start; justify-content: center; gap: 14px; flex-wrap: wrap; }
+/* The arrow sits level with the step boxes' vertical middle, above the database cylinders. */
+.pipe-arrow { color: var(--muted); font-size: 32px; margin-top: 40px; }
+.pipe-note { color: var(--compensating); font-size: 13px; text-align: center; margin-top: 12px; }
+
+.step-stack { display: flex; flex-direction: column; align-items: center; }
+
+/* The cylinder mirrors its step's lifecycle: pulsing while being written to or compensated,
+   tinted green once the side effect is committed, purple once it has been undone, red when the
+   step (or its compensation) failed — a failed step's database state is exactly the uncertainty
+   the engine compensates for. */
+.db { width: 106px; height: 92px; margin-top: 8px; }
+.db line { stroke: var(--line); stroke-width: 2; }
+.db path, .db ellipse { fill: var(--raise); stroke: var(--line); stroke-width: 2; }
+
+.step-stack.executing .db line { stroke: var(--running); }
+.step-stack.executing .db path, .step-stack.executing .db ellipse { stroke: var(--running); fill: rgba(79, 142, 247, 0.12); }
+.step-stack.executing .db { animation: db-glow-blue 1.2s ease-in-out infinite; }
+.step-stack.completed .db line { stroke: var(--completed); }
+.step-stack.completed .db path, .step-stack.completed .db ellipse { stroke: var(--completed); fill: rgba(47, 191, 102, 0.14); }
+.step-stack.failed .db line { stroke: var(--escalated); }
+.step-stack.failed .db path, .step-stack.failed .db ellipse { stroke: var(--escalated); fill: rgba(239, 83, 80, 0.1); }
+.step-stack.compensating .db line { stroke: var(--compensating); }
+.step-stack.compensating .db path, .step-stack.compensating .db ellipse { stroke: var(--compensating); fill: rgba(240, 161, 46, 0.12); }
+.step-stack.compensating .db { animation: db-glow-amber 1.2s ease-in-out infinite; }
+.step-stack.compensated .db line { stroke: var(--compensated); }
+.step-stack.compensated .db path, .step-stack.compensated .db ellipse { stroke: var(--compensated); fill: rgba(167, 139, 250, 0.14); }
+.step-stack.compensation-failed .db line { stroke: var(--escalated); }
+.step-stack.compensation-failed .db path, .step-stack.compensation-failed .db ellipse { stroke: var(--escalated); fill: rgba(239, 83, 80, 0.1); }
+
+.step-log {
+  margin-top: 12px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.sl-row { display: flex; gap: 8px; align-items: baseline; white-space: nowrap; }
+.sl-row.in-flight { opacity: 0.6; }
+.sl-path { max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
+.sl-exec { color: #7fb0ff; }
+.sl-comp { color: #f5b859; }
+
+@keyframes db-glow-blue {
+  0%, 100% { filter: none; }
+  50% { filter: drop-shadow(0 0 7px rgba(79, 142, 247, 0.8)); }
+}
+@keyframes db-glow-amber {
+  0%, 100% { filter: none; }
+  50% { filter: drop-shadow(0 0 7px rgba(240, 161, 46, 0.8)); }
+}
+
+.step {
+  border: 2px solid var(--line);
+  border-radius: 12px;
+  padding: 18px 32px;
+  min-width: 195px;
+  text-align: center;
+  background: var(--panel);
+  cursor: pointer;
+}
+.step:hover { filter: brightness(1.18); }
+.step-name { font-weight: 700; font-size: 20px; }
+.step-service { color: var(--muted); font-size: 15px; }
+.step-state { font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 6px; color: var(--muted); }
+
+.step.executing { border-color: var(--running); animation: pulse-blue 1.2s ease-in-out infinite; }
+.step.executing .step-state { color: var(--running); }
+.step.completed { border-color: var(--completed); }
+.step.completed .step-state { color: var(--completed); }
+.step.failed { border-color: var(--escalated); background: rgba(239, 83, 80, 0.08); }
+.step.failed .step-state { color: var(--escalated); }
+.step.compensating { border-color: var(--compensating); animation: pulse-amber 1.2s ease-in-out infinite; }
+.step.compensating .step-state { color: var(--compensating); }
+.step.compensated { border-color: var(--compensated); }
+.step.compensated .step-state { color: var(--compensated); }
+.step.compensation-failed { border-color: var(--escalated); background: rgba(239, 83, 80, 0.08); }
+.step.compensation-failed .step-state { color: var(--escalated); }
+
+/* TCC-only states; every other TCC state reuses a SAGA family via app.js's TCC_FAMILY map. */
+.step.reserved { border-color: var(--running); }
+.step.reserved .step-state { color: var(--running); }
+.step-stack.reserved .db line { stroke: var(--running); }
+.step-stack.reserved .db path, .step-stack.reserved .db ellipse { stroke: var(--running); fill: rgba(79, 142, 247, 0.12); }
+.step.confirming { border-color: var(--completed); animation: pulse-green 1.2s ease-in-out infinite; }
+.step.confirming .step-state { color: var(--completed); }
+.step-stack.confirming .db line { stroke: var(--completed); }
+.step-stack.confirming .db path, .step-stack.confirming .db ellipse { stroke: var(--completed); fill: rgba(47, 191, 102, 0.14); }
+.step-stack.confirming .db { animation: db-glow-green 1.2s ease-in-out infinite; }
+
+@keyframes pulse-green {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(47, 191, 102, 0.4); }
+  50% { box-shadow: 0 0 0 8px rgba(47, 191, 102, 0); }
+}
+@keyframes db-glow-green {
+  0%, 100% { filter: none; }
+  50% { filter: drop-shadow(0 0 7px rgba(47, 191, 102, 0.8)); }
+}
+
+@keyframes pulse-blue {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(79, 142, 247, 0.4); }
+  50% { box-shadow: 0 0 0 8px rgba(79, 142, 247, 0); }
+}
+@keyframes pulse-amber {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(240, 161, 46, 0.4); }
+  50% { box-shadow: 0 0 0 8px rgba(240, 161, 46, 0); }
+}
+
+/* --- timeline ---------------------------------------------------------------- */
+
+#timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 300px;
+  overflow-y: auto;
+  border-left: 2px solid var(--line);
+  font-size: 16px;
+}
+#timeline li { display: flex; align-items: baseline; gap: 9px; padding: 5px 0 5px 15px; flex-wrap: wrap; }
+#timeline .badge { font-size: 13px; }
+.tl-time { color: var(--muted); font-size: 14px; font-variant-numeric: tabular-nums; }
+.tl-step { font-weight: 600; }
+.tl-operator { color: var(--muted); font-size: 14px; }
+.tl-detail {
+  color: var(--muted);
+  font-size: 14px;
+  max-width: 480px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- saga definition --------------------------------------------------------- */
+
+#definition {
+  margin: 0;
+  padding: 4px 2px 14px;
+  font: 12.5px/1.55 ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--muted);
+  white-space: pre;
+}
+#definition.empty { font-family: inherit; white-space: normal; }
+.def-step.active {
+  background: rgba(250, 224, 110, 0.13);
+  outline: 1px solid rgba(250, 224, 110, 0.38);
+  border-radius: 4px;
+}
+.j-key { color: #79b8ff; }
+.j-str { color: #85d996; }
+.j-num { color: #f0a12e; }
+.j-lit { color: #c3aefc; }
+.j-flow { color: #f5b859; font-weight: 700; }
+
+/* --- participant call feed --------------------------------------------------- */
+
+.feed-head { display: flex; align-items: center; justify-content: space-between; }
+.feed-filter { color: var(--muted); font-size: 12px; }
+
+#feed { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; }
+#feed li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 0;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 13px;
+  white-space: nowrap;
+}
+#feed li.in-flight { opacity: 0.6; }
+.feed-service { font-weight: 700; }
+.feed-call { color: var(--text); }
+.feed-dir { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; padding: 1px 6px; border-radius: 8px; }
+.feed-dir.execution, .feed-dir.reserve { background: rgba(79, 142, 247, 0.18); color: #7fb0ff; }
+.feed-dir.confirm { background: rgba(47, 191, 102, 0.16); color: #4fd587; }
+.feed-dir.compensation, .feed-dir.cancel { background: rgba(240, 161, 46, 0.16); color: #f5b859; }
+.feed-attempt { color: var(--compensating); font-weight: 700; }
+.feed-status.s2xx { color: var(--completed); font-weight: 700; }
+.feed-status.s4xx { color: var(--escalated); font-weight: 700; }
+.feed-status.s5xx { color: var(--compensating); font-weight: 700; }
+.feed-duration { color: var(--muted); }
+.feed-pending { color: var(--muted); }
+.feed-body { color: var(--muted); overflow: hidden; text-overflow: ellipsis; max-width: 480px; }
+
+/* --- toast ------------------------------------------------------------------- */
+
+.toast {
+  position: fixed;
+  bottom: 220px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--raise);
+  color: var(--text);
+  border: 1px solid var(--line);
+  padding: 8px 16px;
+  border-radius: 8px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
