@@ -43,14 +43,15 @@ Start the database, the participant services, and the saga server by running the
 docker compose up -d --wait
 ```
 
-`--wait` holds the command until the saga server and the dashboard report healthy, so the requests
-below cannot race their startup. That starts six containers:
+`--wait` holds the command until the saga server answers `/health`, so the requests below cannot
+race their startup. That starts seven containers:
 
 | Container | Purpose |
 | --- | --- |
 | `postgres` | The database where the saga server keeps saga state |
 | `payment`, `inventory`, `shipping` | The three services a saga calls |
 | `saga-server` | ScalarDB Saga, serving REST on `12080` and gRPC on `12051` |
+| `saga-server-ready` | Polls the saga server's `/health` so `--wait` knows when it is serving |
 | `dashboard` | A live web view of the sagas, on [http://localhost:12090](http://localhost:12090) |
 
 The saga server creates its tables in the database on first start, so there is no schema to load, and

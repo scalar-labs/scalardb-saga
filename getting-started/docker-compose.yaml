@@ -61,14 +61,8 @@ services:
       - "12051:12051" # gRPC
     volumes:
       - ./conf:/scalardb-saga/conf:ro
-    # Lets `docker compose up -d --wait` hold until the server is actually serving. Without it,
-    # `up -d` returns as soon as the container starts and the first request loses a race with
-    # schema creation and definition loading.
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:12080/health"]
-      interval: 2s
-      timeout: 3s
-      retries: 15
+    # No healthcheck: this image ships a JRE and nothing else, so there is no HTTP client in it to
+    # probe /health with. saga-server-ready below is that probe, from a container that has curl.
     depends_on:
       postgres:
         condition: service_healthy
@@ -79,11 +73,27 @@ services:
       shipping:
         condition: service_started
 
+  # The stack's readiness gate, and the reason it is a container of its own: a Compose healthcheck
+  # only ever runs inside the container it belongs to, and nothing inside the saga server's image can
+  # call its own /health. This holds `docker compose up -d --wait` until the server is really
+  # serving; without it `up -d` returns as soon as the containers start and the first request loses a
+  # race with schema creation and definition loading. It idles for the rest of the run.
+  saga-server-ready:
+    image: curlimages/curl
+    command: ["sleep", "infinity"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://saga-server:12080/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    depends_on:
+      saga-server:
+        condition: service_started
+
   # The live dashboard: a web page on http://localhost:12090 that shows sagas executing in
   # realtime. It only reads the saga server's REST API (and relays it to the browser), so the
   # walkthrough works exactly the same without it. Like the participants, nothing is built — the
-  # stock Python image runs the mounted script. The healthcheck is a Python one-liner because the
-  # image ships no curl.
+  # stock Python image runs the mounted script.
   dashboard:
     image: python:3.13-slim
     command: ["python", "/dashboard/server.py"]
@@ -97,11 +107,14 @@ services:
     volumes:
       - ./dashboard:/dashboard:ro
       - ./conf/definitions:/definitions:ro
+    # Unhealthy whenever the saga server is unreachable: a dashboard that reported healthy while it
+    # could not read the API it exists to display would be lying. The stack's startup gate is
+    # saga-server-ready above, not this. A Python one-liner because this image ships no curl either.
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:12090/health', timeout=2)"]
       interval: 2s
       timeout: 3s
       retries: 15
     depends_on:
-      saga-server:
+      saga-server-ready:
         condition: service_healthy

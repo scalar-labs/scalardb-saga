@@ -364,7 +364,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
-            self.send_json(200, {"status": "ok"})
+            self.serve_health()
         elif self.path == "/events":
             self.serve_events()
         else:
@@ -379,6 +379,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(404, {"error": "unknown path"})
 
     # --- routes ---------------------------------------------------------------
+
+    def serve_health(self):
+        """Healthy only once the saga server answers, which is what gates `up -d --wait`."""
+        try:
+            server_get("/health")
+        except Exception:
+            self.send_json(503, {"status": "unavailable", "sagaServer": SAGA_SERVER_URL})
+            return
+        self.send_json(200, {"status": "ok"})
 
     def serve_static(self):
         name = self.path.split("?", 1)[0]
