@@ -405,7 +405,8 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
 
   /**
    * Throws when the overall client deadline (if any) has elapsed. SAGA_AWAIT_TIMEOUT, not
-   * REQUEST_TIMEOUT: nothing failed outright, so the caller should poll by ID rather than re-send.
+   * REQUEST_TIMEOUT: no one request failed, the caller's whole budget ran out. The answer is to
+   * poll the id; anything sent again has to reuse it.
    *
    * <p>Both loops end here, on different footing. From {@code awaitLoop} the start succeeded and
    * the saga is known to be running; only the wait-for-terminal budget expired. From {@code
@@ -683,6 +684,12 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
      * saga is running and will settle on its own, but the budget can also expire while the first
      * request is still being retried, and then the poll is what says whether anything was
      * persisted.
+     *
+     * <p>One narrow path misses that exception. When a retried start is answered {@code
+     * ALREADY_EXISTS} the client fetches the saga on what is left of the budget, and a budget that
+     * runs out on that fetch surfaces as {@link SagaErrorCode#REQUEST_TIMEOUT} with no ID, though
+     * the earlier attempt did land. Supplying the saga ID instead of letting the client mint one
+     * keeps a handle in every case.
      *
      * @param defaultDeadlineMillis the bound in milliseconds, or {@code 0} for no bound
      * @return this builder

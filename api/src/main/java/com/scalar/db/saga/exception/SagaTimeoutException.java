@@ -11,9 +11,9 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@link SagaErrorCode#REQUEST_TIMEOUT} — the request itself did not complete (a gRPC {@code
  *       DEADLINE_EXCEEDED}); retry it or raise the deadline. Construct via {@link
  *       #requestTimedOut(Throwable)}.
- *   <li>{@link SagaErrorCode#SAGA_AWAIT_TIMEOUT} — every request succeeded and the saga keeps
- *       running; only the caller's wait-for-terminal budget expired. Poll the saga by ID rather
- *       than re-sending anything. Construct via {@link #awaitExpired(String)}.
+ *   <li>{@link SagaErrorCode#SAGA_AWAIT_TIMEOUT} — the caller's wait-for-terminal budget expired
+ *       before the saga settled. Poll the saga by ID to learn where it stands; a re-send has to
+ *       reuse that ID. Construct via {@link #awaitExpired(String)}.
  * </ul>
  *
  * <p>Only the await flavour carries a saga ID, and it always does: a blocking {@code start} that
@@ -52,8 +52,8 @@ public class SagaTimeoutException extends SagaRuntimeException {
   }
 
   /**
-   * The saga did not reach a terminal state within the client-side wait bound. Nothing failed, so
-   * the caller should poll {@code sagaId} rather than re-send the request.
+   * The saga did not reach a terminal state within the client-side wait bound. The caller polls
+   * {@code sagaId} to learn where it stands, and reuses that ID for any re-send.
    *
    * @param sagaId the ID the saga was started under: the handle to poll it by, and the key that
    *     resolves whether an ambiguous start landed
