@@ -93,15 +93,22 @@ class SagaSettlementNotificationIntegrationTest extends ServerIntegrationTestSup
   @Test
   void syncStart_parkedSagaResumesOnThisReplica_isPushedTheOutcomeRatherThanPollingForIt()
       throws Exception {
-    // Arrange — fire the participant's callback as soon as the saga is actually parked, so the
-    // resume lands while the synchronous start is still waiting. Waiting for WAITING rather than
-    // sleeping a fixed time: the callback is rejected outright if the saga has not parked yet, so
-    // a sleep would be both a race and a slower test.
+    // Arrange — fire the participant's callback once the saga is parked, so the resume lands while
+    // the synchronous start is still waiting. Waiting for WAITING rather than sleeping a fixed
+    // time: the callback is rejected outright if the saga has not parked yet, so a sleep would be
+    // both a race and a slower test.
+    //
+    // Then wait a little longer, which is what keeps this test honest. The wait reads the store
+    // once where polling begins, and that read answers a saga that settled before the caller could
+    // register. Resuming the instant WAITING appears would race that read, and a pass would no
+    // longer say which of the two answered. Settling only after it has run and found the saga
+    // still parked leaves the push as the one mechanism that can answer inside the ceiling below.
     CompletableFuture<Void> callbackFired =
         CompletableFuture.runAsync(
             () -> {
               String callbackUrl = awaitCallbackUrl();
               awaitParked(sagaIdOf(callbackUrl));
+              pauseForTheReadWherePollingBegins();
               postAbsoluteUnchecked(callbackUrl, "{\"paymentId\":\"P-1\"}");
             });
 
@@ -113,7 +120,8 @@ class SagaSettlementNotificationIntegrationTest extends ServerIntegrationTestSup
     callbackFired.join();
 
     // Assert — the outcome, and soon enough that only the registry can explain it. Unwired, this
-    // same request answers COMPLETED at the first poll tick instead, about ten seconds in.
+    // same request answers COMPLETED at the first poll tick instead, about ten seconds in: the
+    // read where polling begins has already been taken by then and found the saga parked.
     assertThat(start.statusCode()).isEqualTo(200);
     assertThat(status(start)).isEqualTo("COMPLETED");
     assertThat(elapsedMillis).isLessThan(PUSH_CEILING_MILLIS);
@@ -165,6 +173,20 @@ class SagaSettlementNotificationIntegrationTest extends ServerIntegrationTestSup
       }
     } catch (IOException e) {
       throw new UncheckedIOException(e);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new IllegalStateException(e);
+    }
+  }
+
+  /**
+   * Long enough that the bounded wait has taken its read where polling begins, and short enough to
+   * stay far inside the push ceiling. The read happens as soon as the saga parks, so this only has
+   * to outlast one point read on an idle daemon.
+   */
+  private static void pauseForTheReadWherePollingBegins() {
+    try {
+      Thread.sleep(500L);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       throw new IllegalStateException(e);
