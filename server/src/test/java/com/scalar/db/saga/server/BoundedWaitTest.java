@@ -469,6 +469,66 @@ class BoundedWaitTest {
     assertThat(reads).hasValue(1);
   }
 
+  @Test
+  void awaitWithin_slowReadWherePollingBeginsOutlivesTheBound_answersWithoutReadingAgain() {
+    // Arrange — a parked saga still waiting on its participant, against a store slow enough that
+    // the read where polling begins outlives the bound. Following it with the read at the end would
+    // ask the same store the same question in the same breath: two transactions for one answer, on
+    // exactly the store this read exists to spare. The poll tick has the same rule.
+    CompletableFuture<Void> parked = new CompletableFuture<>();
+    parked.complete(null);
+    SagaStateSnapshot waiting = snapshot(SagaStatus.WAITING);
+    AtomicInteger reads = new AtomicInteger();
+
+    // Act — a bound that this one read outlasts on its own.
+    SagaStateSnapshot answer =
+        BoundedWait.awaitWithin(
+            new CompletableFuture<>(),
+            new CompletableFuture<>(),
+            parked,
+            300L,
+            () -> {
+              reads.incrementAndGet();
+              sleep(400L);
+              return waiting;
+            });
+
+    // Assert — the state that slow read returned, and nothing asked twice to get it.
+    assertThat(answer).isEqualTo(waiting);
+    assertThat(reads).hasValue(1);
+  }
+
+  @Test
+  void
+      awaitWithin_sagaSettlesLocallyDuringTheReadWherePollingBegins_answersWithTheSettledSnapshot() {
+    // Arrange — the race the poll tick already guards, at the other read. A parked saga, a store
+    // slow enough that the read where polling begins outlives the bound, and a drive on this
+    // process that settles the saga while that read is in flight: the store's answer is stale the
+    // moment it arrives, and the terminal snapshot is already in memory.
+    CompletableFuture<Void> parked = new CompletableFuture<>();
+    parked.complete(null);
+    CompletableFuture<SagaStateSnapshot> settled = new CompletableFuture<>();
+    SagaStateSnapshot waiting = snapshot(SagaStatus.WAITING);
+    SagaStateSnapshot completed = snapshot(SagaStatus.COMPLETED);
+
+    // Act
+    SagaStateSnapshot answer =
+        BoundedWait.awaitWithin(
+            settled,
+            new CompletableFuture<>(),
+            parked,
+            300L,
+            () -> {
+              // The registry completes the waiter mid-read, which is what the read cannot see.
+              settled.complete(completed);
+              sleep(400L);
+              return waiting;
+            });
+
+    // Assert — the outcome the caller waited for, not the stale read that raced it.
+    assertThat(answer).isEqualTo(completed);
+  }
+
   private static void sleep(long millis) {
     try {
       Thread.sleep(millis);
