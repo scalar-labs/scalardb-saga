@@ -209,9 +209,10 @@ class SagaResourceStartTest {
   void postSagas_parkedSagaSettlesElsewhere_isSeenByAPollTickBeforeTheBound() throws Exception {
     // Arrange — the saga parks and is then resumed on *another* replica, so nothing on this process
     // notifies the waiter: neither the start callback (dead at the park) nor the registry (the
-    // resumed drive ran elsewhere). The poll tick is the only thing that can answer before the
-    // bound. A 6s bound derives the 1s floor, so a tick lands well inside it; without the tick this
-    // would answer at 6s from the read at bound expiry.
+    // resumed drive ran elsewhere). The resume lands after the read where polling begins, which
+    // finds the saga still parked, so the poll tick is the only thing left that can answer before
+    // the bound. A 6s bound derives the 1s floor, so a tick lands well inside it; without the tick
+    // this would answer at 6s from the read at bound expiry.
     app.stop();
     startServer(6_000L);
     when(orchestrator.startAsync(eq(SAGA_NAME), anyMap(), any(SagaCallback.class)))
@@ -220,7 +221,8 @@ class SagaResourceStartTest {
               invocation.getArgument(2, SagaCallback.class).onParked(snapshot(SagaStatus.WAITING));
               return SAGA_ID;
             });
-    when(orchestrator.getStateSnapshot(SAGA_ID)).thenReturn(snapshot(SagaStatus.COMPLETED));
+    when(orchestrator.getStateSnapshot(SAGA_ID))
+        .thenReturn(snapshot(SagaStatus.WAITING), snapshot(SagaStatus.COMPLETED));
 
     // Act
     long startNanos = System.nanoTime();
