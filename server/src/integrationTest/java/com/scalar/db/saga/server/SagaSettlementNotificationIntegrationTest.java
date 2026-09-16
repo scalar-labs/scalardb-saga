@@ -53,6 +53,15 @@ class SagaSettlementNotificationIntegrationTest extends ServerIntegrationTestSup
   /** Half the fallback's first tick, so neither a slow push nor an early tick can be mistaken. */
   private static final long PUSH_CEILING_MILLIS = 5_000L;
 
+  /**
+   * How long to wait for the saga to park before giving up. Generous against the milliseconds it
+   * normally takes, because a read that lands on a contended store waits out the lock timeout
+   * before answering, and one of those should cost an attempt rather than the test. It stays well
+   * inside the bound the start itself is waiting on, so this task cannot outlive the request it
+   * exists to serve.
+   */
+  private static final long PARK_WAIT_SECONDS = 30L;
+
   private final AtomicReference<String> capturedCallbackUrl = new AtomicReference<>();
   private final HttpClient http = HttpClient.newHttpClient();
 
@@ -131,19 +140,33 @@ class SagaSettlementNotificationIntegrationTest extends ServerIntegrationTestSup
     throw new IllegalStateException("participant was never called for the async step");
   }
 
-  /** Blocks until the saga has actually parked, which is when a callback can be accepted. */
+  /**
+   * Blocks until the saga has actually parked, which is when a callback can be accepted.
+   *
+   * <p>Bounded by the clock rather than by a number of attempts. Each read can itself wait out the
+   * store's lock timeout, so counting attempts bounds nothing: retrying a contended read 600 times
+   * would keep this task alive for hours, and the caller joins it without a timeout of its own. The
+   * saga parks in milliseconds when nothing is contended, so this only has to outlast a store that
+   * is briefly busy.
+   */
   private void awaitParked(String sagaId) {
+    long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(PARK_WAIT_SECONDS);
     Exception lastFailure = null;
-    for (int attempt = 0; attempt < 600; attempt++) {
+    while (System.nanoTime() - deadlineNanos < 0) {
       try {
         if ("WAITING".equals(status(get("/sagas/" + sagaId)))) {
           return;
         }
         lastFailure = null;
+      } catch (InterruptedException e) {
+        // Not a failed read: the wait itself is over, whatever the saga is doing. Swallowing it
+        // would drop the interrupt and leave the caller joining a task with no reason left to run.
+        Thread.currentThread().interrupt();
+        throw new IllegalStateException("interrupted waiting for saga " + sagaId + " to park", e);
       } catch (Exception e) {
         // A read can fail while the store is contended, and one that does says nothing about
-        // whether the saga will park. Spend an attempt on it rather than the whole test; there are
-        // 600, and the last failure is carried out below if none of them succeed.
+        // whether the saga will park. Spend an attempt on it rather than the whole test; the last
+        // failure is carried out below if the saga never parks.
         lastFailure = e;
       }
       pause();
