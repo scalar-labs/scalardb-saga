@@ -96,7 +96,7 @@ class HeadMethodTest {
 
   private HttpResponse<String> send(String method, String path) throws Exception {
     return http.send(
-        HttpRequest.newBuilder(URI.create("http://localhost:" + app.port() + path))
+        HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + app.port() + path))
             .method(method, HttpRequest.BodyPublishers.noBody())
             .build(),
         BodyHandlers.ofString());

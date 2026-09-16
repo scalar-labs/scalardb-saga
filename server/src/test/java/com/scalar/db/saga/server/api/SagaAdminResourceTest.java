@@ -301,7 +301,7 @@ class SagaAdminResourceTest {
             ? HttpRequest.BodyPublishers.noBody()
             : HttpRequest.BodyPublishers.ofString(body);
     HttpRequest.Builder builder =
-        HttpRequest.newBuilder(URI.create("http://localhost:" + app.port() + path))
+        HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + app.port() + path))
             .method(method, publisher);
     if (body != null) {
       builder.header("Content-Type", "application/json");

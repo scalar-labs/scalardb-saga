@@ -136,7 +136,7 @@ class HttpVirtualThreadTest {
   }
 
   private static URI uri(Javalin app, String path) {
-    return URI.create("http://localhost:" + app.port() + path);
+    return URI.create("http://127.0.0.1:" + app.port() + path);
   }
 
   private static void send(Javalin app, String path) throws Exception {

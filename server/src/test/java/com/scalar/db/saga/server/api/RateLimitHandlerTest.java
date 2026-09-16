@@ -116,7 +116,7 @@ class RateLimitHandlerTest {
   private HttpResponse<String> send(String method, String path) throws Exception {
     int port = Objects.requireNonNull(app, "app not started").port();
     HttpRequest request =
-        HttpRequest.newBuilder(URI.create("http://localhost:" + port + path))
+        HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
             .method(method, HttpRequest.BodyPublishers.noBody())
             .build();
     return http.send(request, BodyHandlers.ofString());

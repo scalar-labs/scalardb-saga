@@ -221,7 +221,7 @@ class CallbackResourceTest {
   private HttpResponse<String> post(String query, String body) throws Exception {
     URI uri =
         URI.create(
-            "http://localhost:"
+            "http://127.0.0.1:"
                 + app.port()
                 + "/sagas/"
                 + SAGA_ID

@@ -440,7 +440,7 @@ class SagaResourceStartTest {
 
   private HttpResponse<String> send(String method, String path, String body) throws Exception {
     HttpRequest request =
-        HttpRequest.newBuilder(URI.create("http://localhost:" + app.port() + path))
+        HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + app.port() + path))
             .header("X-Test-Role", "write")
             .header("Content-Type", "application/json")
             .method(method, HttpRequest.BodyPublishers.ofString(body))

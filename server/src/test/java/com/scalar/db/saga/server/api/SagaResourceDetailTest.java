@@ -123,7 +123,7 @@ class SagaResourceDetailTest {
   private HttpResponse<String> send(String method, String path, @Nullable String role)
       throws Exception {
     HttpRequest.Builder builder =
-        HttpRequest.newBuilder(URI.create("http://localhost:" + app.port() + path))
+        HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + app.port() + path))
             .method(method, HttpRequest.BodyPublishers.noBody());
     if (role != null) {
       builder.header("X-Test-Role", role);
