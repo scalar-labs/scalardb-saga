@@ -62,10 +62,10 @@ import org.slf4j.LoggerFactory;
  * internalDetail}, principal, required role, or a cause chain with internal specifics). Everything
  * else — where the wire body already tells the whole story — is not logged: the client already saw
  * the error and a duplicate server-side log adds nothing. Severity: 5xx → {@code ERROR} (operator
- * must investigate); authorization denials → {@code INFO} (security audit); the replaced bare
- * {@code IllegalArgumentException} → {@code WARN} (a server fault the wire reports as the caller's
- * mistake, so the log is the only record of it; must print at the production default); everything
- * else that logs → {@code DEBUG} (usually high-volume probing traffic).
+ * must investigate), except the admission cap's 503, which is a refusal rather than a failure and
+ * logs at {@code DEBUG}; authorization denials → {@code INFO} (security audit); everything else
+ * that logs → {@code DEBUG} (usually high-volume probing traffic). A bare {@code
+ * IllegalArgumentException} has no handler and so takes the 5xx rule through the catch-all.
  */
 public final class ErrorMapper {
 
@@ -124,24 +124,15 @@ public final class ErrorMapper {
                 e));
     app.exception(SagaInvalidRequestException.class, (e, ctx) -> respond(ctx, 400, e));
     app.exception(SagaIllegalArgumentException.class, (e, ctx) -> respond(ctx, 400, e));
-    // Every request-reachable caller-input rejection carries a typed exception (this one or
-    // SagaInvalidRequestException) and is handled above, so what still lands here is a server
-    // fault: ScalarDB's operation checkers on a dropped table or a stale schema,
-    // ErrorMetadataSchema's fail-fast on a malformed metadata map, and the engine's internal
-    // contract checks. The 400 is wrong for all three; the branch stays only so that a
-    // caller-input site the audit missed keeps its status rather than flipping to a 500, and the
-    // WARN below is the evidence that decides when it can go.
-    app.exception(
-        IllegalArgumentException.class,
-        (e, ctx) -> {
-          // The wording and cause are replaced on the wire, so log them. A server fault reported
-          // to the caller as their own bad request would otherwise leave no evidence anywhere,
-          // which is how a total store outage stays invisible. WARN prints at the production
-          // logging default.
-          logger.warn(
-              "Replacing a bare IllegalArgumentException on {} {}", ctx.method(), ctx.path(), e);
-          respond(ctx, 400, new SagaIllegalArgumentException("invalid request parameter"));
-        });
+    // There is deliberately no handler for a bare IllegalArgumentException. Every caller-input
+    // rejection carries a typed exception (the two above), so a stdlib one arriving here is a
+    // server fault: ScalarDB's operation checkers on a dropped table or a stale schema,
+    // ErrorMetadataSchema's fail-fast on a malformed metadata map, an engine internal-contract
+    // check. Registering it would answer all three with the caller's own 400, which is how a
+    // total store outage came to be reported to every client as its own bad request. Unhandled,
+    // it resolves to the Exception catch-all below: 500, INTERNAL_ERROR, and an ERROR log
+    // carrying the throwable. The bare-IllegalArgumentException row in ErrorMapperTest's
+    // allArms() fails the build if a handler is registered here again.
 
     // ── Auth (401 / 403) ─────────────────────────────────────────────────
     app.exception(
