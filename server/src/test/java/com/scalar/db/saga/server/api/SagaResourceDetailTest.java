@@ -58,7 +58,9 @@ class SagaResourceDetailTest {
         0L,
         new java.util.concurrent.CompletableFuture<>(),
         new SagaWaiterRegistry());
-    app.start(0);
+    // Loopback, not the wildcard: a wildcard bind can share a port with another suite's
+    // loopback server, which then takes the connection and answers this test's requests.
+    app.start("127.0.0.1", 0);
   }
 
   @AfterEach

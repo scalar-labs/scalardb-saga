@@ -53,7 +53,9 @@ class HttpVirtualThreadTest {
     ExecutorService virtualThreads = Executors.newVirtualThreadPerTaskExecutor();
     Javalin app = SagaServer.createHttpServer(config(8), null, virtualThreads);
     app.get("/probe", ctx -> virtual.set(Thread.currentThread().isVirtual()));
-    app.start(0);
+    // Loopback, not the wildcard: a wildcard bind can share a port with another suite's
+    // loopback server, which then takes the connection and answers this test's requests.
+    app.start("127.0.0.1", 0);
 
     // Act
     try {
@@ -96,7 +98,9 @@ class HttpVirtualThreadTest {
           }
           concurrent.decrementAndGet();
         });
-    app.start(0);
+    // Loopback, not the wildcard: a wildcard bind can share a port with another suite's
+    // loopback server, which then takes the connection and answers this test's requests.
+    app.start("127.0.0.1", 0);
 
     // Act — fire them all, let them pile up inside the handler, then release.
     try {
