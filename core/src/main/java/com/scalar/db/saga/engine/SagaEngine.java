@@ -12,6 +12,7 @@ import com.scalar.db.saga.definition.SagaDefinition.SagaMode;
 import com.scalar.db.saga.definition.SagaDefinition.ServiceStep;
 import com.scalar.db.saga.definition.SagaDefinition.ServiceStep.Phase;
 import com.scalar.db.saga.definition.SagaDefinition.StepDefinition;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.StepCompensationException;
 import com.scalar.db.saga.exception.StepExecutionException;
 import com.scalar.db.saga.exception.StepTimeoutException;
@@ -132,7 +133,15 @@ public class SagaEngine implements AutoCloseable {
     // ExecutionContext validates the same map when execution starts, but by then an asynchronous
     // caller is already committed to waiting out its bound for a saga that can never run — and a
     // doomed saga has been written to the store for recovery to find.
-    ExecutionContext.validateInput(input);
+    try {
+      ExecutionContext.validateInput(input);
+    } catch (IllegalArgumentException e) {
+      // This is the one place the input map is known to be the caller's, so it is the one place
+      // that can attribute the rejection to them. ExecutionContext authors the wording and it names
+      // the offending type, so echoing it tells the caller which value the context cannot hold.
+      throw new SagaIllegalArgumentException(
+          e.getMessage() == null ? e.toString() : e.getMessage(), e);
+    }
     return store.createSaga(sagaId, def.getName(), ownerId, input, def.getVersion());
   }
 

@@ -150,6 +150,17 @@ public class ExecutionContext implements SagaContext {
    * <em>before</em> persisting a saga: this used to run only here, on the execution thread, which
    * left a caller of the asynchronous start path waiting out its whole wait bound for input that
    * was invalid on arrival.
+   *
+   * <p>Rejects with a stdlib {@link IllegalArgumentException}, which the two entry points that know
+   * the map came from a caller convert to a typed one: {@code SagaEngine.createSaga} for a saga's
+   * input, {@code DefaultSagaOrchestrator.resumeParked} for a callback's output.
+   *
+   * <p>The conversion is deliberately theirs rather than this method's, because {@link
+   * #validateType} is shared with {@link #put} and {@link #merge}. Those run over input read back
+   * from the store during a replay and over a participant's reply, where a rejection is a corrupt
+   * row or a malformed downstream response — a server fault, not anyone's bad request. Note the
+   * constructor above is not that path: {@code SagaEngine.replayEvents} passes it an empty map and
+   * feeds the stored input through {@code put}.
    */
   static void validateInput(Map<String, Object> input) {
     input.values().forEach(ExecutionContext::validateType);
@@ -157,8 +168,8 @@ public class ExecutionContext implements SagaContext {
 
   private static void validateType(@Nullable Object value) {
     if (value == null) {
-      // Reachable from a JSON null in a request body. An IllegalArgumentException maps to a 400;
-      // dereferencing it below would surface a client mistake as a 500.
+      // Reachable from a JSON null in a request body, which the engine converts to a 400 at the
+      // start boundary; dereferencing it below would surface a client mistake as a 500.
       throw new IllegalArgumentException("SagaContext does not allow null values");
     }
     if (ALLOWED_TYPES.contains(value.getClass())) {

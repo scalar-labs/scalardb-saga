@@ -25,6 +25,7 @@ import com.scalar.db.saga.api.StepResult;
 import com.scalar.db.saga.api.TccStep;
 import com.scalar.db.saga.definition.RetryPolicy;
 import com.scalar.db.saga.definition.SagaDefinition;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.StepCompensationException;
 import com.scalar.db.saga.exception.StepExecutionException;
 import com.scalar.db.saga.store.EventType;
@@ -197,9 +198,9 @@ class SagaEngineTest {
       Map<String, Object> input = new HashMap<>();
       input.put("k", null);
 
-      // Act & Assert — IllegalArgumentException so the wire layers render it 400, not 500.
+      // Act & Assert: INVALID_ARGUMENT so the wire layers render it 400, not 500.
       assertThatThrownBy(() -> engine.createSaga(def, "saga-1", input))
-          .isInstanceOf(IllegalArgumentException.class);
+          .isInstanceOf(SagaIllegalArgumentException.class);
       verify(store, never()).createSaga(any(), any(), any(), any(), any());
     }
 

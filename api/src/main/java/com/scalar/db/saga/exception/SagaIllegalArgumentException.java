@@ -13,6 +13,13 @@ import java.util.Objects;
  * mode. Contrast {@link SagaInvalidRequestException}, which is the wire <i>message</i> failing
  * validation and therefore remote-only.
  *
+ * <p>One exception to that symmetry. Where the rejecting validation lives on an api-module builder
+ * an embedded caller drives directly — {@code SagaQuery.Builder}'s page size and {@code updatedAt}
+ * window, {@code SagaDefinitionId}'s name and version — the builder keeps the idiomatic stdlib
+ * {@link IllegalArgumentException}, and only the daemon converts, at the edge where the value is
+ * known to have arrived over the wire. An embedded caller therefore sees a stdlib rejection from
+ * those builders and this exception from everything else.
+ *
  * <p>It deliberately extends {@link SagaRuntimeException} rather than {@link
  * IllegalArgumentException}, so that {@code catch (SagaRuntimeException)} covers every saga failure
  * including this one and {@link #getErrorCode()} is always reachable. The trade-off is that {@code

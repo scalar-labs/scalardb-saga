@@ -167,28 +167,29 @@ public final class SagaAdminResource {
   }
 
   private static SagaQuery parseQuery(Context ctx) {
-    SagaQuery.Builder builder = SagaQuery.newBuilder();
-    String status = ctx.queryParam("status");
-    if (status != null) {
-      builder.status(parseStatus(status));
-    }
-    String updatedAfter = ctx.queryParam("updatedAfter");
-    if (updatedAfter != null) {
-      builder.updatedAfter(RequestParsing.parseInstant(updatedAfter, "updatedAfter"));
-    }
-    String updatedBefore = ctx.queryParam("updatedBefore");
-    if (updatedBefore != null) {
-      builder.updatedBefore(RequestParsing.parseInstant(updatedBefore, "updatedBefore"));
-    }
-    String pageSize = ctx.queryParam("pageSize");
-    if (pageSize != null) {
-      builder.pageSize(parsePageSize(pageSize)); // out-of-range -> IllegalArgumentException -> 400
-    }
-    String pageToken = ctx.queryParam("pageToken");
-    if (pageToken != null) {
-      builder.pageToken(pageToken);
-    }
-    return builder.build(); // an empty updatedAt window -> IllegalArgumentException -> 400
+    return RequestParsing.buildQuery(
+        params -> {
+          String status = ctx.queryParam("status");
+          if (status != null) {
+            params.status(parseStatus(status));
+          }
+          String updatedAfter = ctx.queryParam("updatedAfter");
+          if (updatedAfter != null) {
+            params.updatedAfter(RequestParsing.parseInstant(updatedAfter, "updatedAfter"));
+          }
+          String updatedBefore = ctx.queryParam("updatedBefore");
+          if (updatedBefore != null) {
+            params.updatedBefore(RequestParsing.parseInstant(updatedBefore, "updatedBefore"));
+          }
+          String pageSize = ctx.queryParam("pageSize");
+          if (pageSize != null) {
+            params.pageSize(parsePageSize(pageSize));
+          }
+          String pageToken = ctx.queryParam("pageToken");
+          if (pageToken != null) {
+            params.pageToken(pageToken);
+          }
+        });
   }
 
   private static SagaStatus parseStatus(String value) {

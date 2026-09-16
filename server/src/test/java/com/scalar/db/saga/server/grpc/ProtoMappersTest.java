@@ -9,6 +9,7 @@ import com.scalar.db.saga.api.ResetResult;
 import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.rpc.ListSagasRequest;
 import com.scalar.db.saga.rpc.ResetEscalatedBulkRequest;
 import java.time.Instant;
@@ -47,8 +48,7 @@ class ProtoMappersTest {
   @Test
   void toProtoSkipReason_everyApiReason_mapsByNameToANonUnspecifiedWireReason() {
     // Every api skip reason must have a wire counterpart named SKIP_REASON_<name>; an unmapped one
-    // now throws IllegalStateException (mapped to INTERNAL), failing loudly rather than
-    // mislabelled.
+    // throws from valueOf and the mappers report INTERNAL, failing loudly rather than mislabelled.
     for (ResetResult.SkipReason reason : ResetResult.SkipReason.values()) {
       com.scalar.db.saga.rpc.SkipReason wire = ProtoMappers.toProtoSkipReason(reason);
       assertThat(wire.name()).isEqualTo("SKIP_REASON_" + reason.name());
@@ -107,21 +107,20 @@ class ProtoMappersTest {
   }
 
   @Test
-  void toSagaQuery_listSagasWithOutOfRangeTimestampGiven_throwsIllegalArgument() {
-    // A seconds value past Instant's range is bad client input; it must surface as
-    // IllegalArgumentException (mapped to INVALID_ARGUMENT) rather than a DateTimeException that
-    // would fall through to INTERNAL.
+  void toSagaQuery_listSagasWithOutOfRangeTimestampGiven_throwsSagaIllegalArgument() {
+    // A seconds value past Instant's range is bad client input; it must carry INVALID_ARGUMENT
+    // rather than a DateTimeException that would fall through to INTERNAL.
     ListSagasRequest request =
         ListSagasRequest.newBuilder()
             .setUpdatedAfter(Timestamp.newBuilder().setSeconds(Long.MAX_VALUE).build())
             .build();
 
     assertThatThrownBy(() -> ProtoMappers.toSagaQuery(request))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class);
   }
 
   @Test
-  void toSagaQuery_bulkResetWithOutOfRangeTimestampGiven_throwsIllegalArgument() {
+  void toSagaQuery_bulkResetWithOutOfRangeTimestampGiven_throwsSagaIllegalArgument() {
     // Same guard on the bulk-reset overload, which shares the timestamp conversion.
     ResetEscalatedBulkRequest request =
         ResetEscalatedBulkRequest.newBuilder()
@@ -129,7 +128,7 @@ class ProtoMappersTest {
             .build();
 
     assertThatThrownBy(() -> ProtoMappers.toSagaQuery(request))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class);
   }
 
   @Test
@@ -148,19 +147,19 @@ class ProtoMappersTest {
   }
 
   @Test
-  void fromProtoStatus_unspecifiedGiven_throwsIllegalArgument() {
+  void fromProtoStatus_unspecifiedGiven_throwsSagaIllegalArgument() {
     assertThatThrownBy(
             () ->
                 ProtoMappers.fromProtoStatus(
                     com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_UNSPECIFIED))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class);
   }
 
   @Test
-  void fromProtoStatus_unrecognizedGiven_throwsIllegalArgument() {
+  void fromProtoStatus_unrecognizedGiven_throwsSagaIllegalArgument() {
     assertThatThrownBy(
             () -> ProtoMappers.fromProtoStatus(com.scalar.db.saga.rpc.SagaStatus.UNRECOGNIZED))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaIllegalArgumentException.class);
   }
 
   @Test
