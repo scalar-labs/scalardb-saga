@@ -402,8 +402,10 @@ class SagaServiceImplTest {
               invocation.getArgument(2, SagaCallback.class).onParked(parked);
               return "gen-p";
             });
+    // Parked in the store until the bound expires, so the read where polling begins finds it
+    // still running and the wait continues rather than answering from it.
     when(orchestrator.getStateSnapshot("gen-p"))
-        .thenReturn(snapshot("gen-p", SagaStatus.COMPLETED));
+        .thenReturn(snapshot("gen-p", SagaStatus.WAITING), snapshot("gen-p", SagaStatus.COMPLETED));
 
     // Act
     long startNanos = System.nanoTime();
@@ -417,7 +419,8 @@ class SagaServiceImplTest {
     // Both of these fail if the park releases the wait: it would answer immediately, from the
     // parked snapshot, without ever reading the store.
     assertThat(elapsedMillis).isGreaterThanOrEqualTo(250L);
-    verify(orchestrator).getStateSnapshot("gen-p");
+    // Twice: once where polling begins, which found it still parked, and once at bound expiry.
+    verify(orchestrator, times(2)).getStateSnapshot("gen-p");
   }
 
   @Test
@@ -482,7 +485,11 @@ class SagaServiceImplTest {
               invocation.getArgument(2, SagaCallback.class).onParked(parked);
               return "gen-slow";
             });
+    // Fast where polling begins, slow at the tick. The read that has to outlive the bound is the
+    // tick's; making the first one slow instead would spend the whole bound before any tick ran,
+    // and the rule below would never be reached.
     when(orchestrator.getStateSnapshot("gen-slow"))
+        .thenReturn(parked)
         .thenAnswer(
             invocation -> {
               Thread.sleep(1_500L);
@@ -492,10 +499,14 @@ class SagaServiceImplTest {
     // Act
     SagaSnapshot response = stub(2_000).startSaga(startByName("transfer", false));
 
-    // Assert — the tick's own answer, and only the one read that produced it.
+    // Assert — the tick's own answer, and no read after it. Two reads: the one where polling
+    // begins, which returns at once and leaves the wait running, then the tick's, which starts at
+    // 1s and returns half a second past the 2s bound. That second one is the rule under test —
+    // having outlived the deadline it answers from itself, so the bound-expiry read never runs. A
+    // third read here would mean the rule was gone.
     assertThat(response.getStatus())
         .isEqualTo(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_WAITING);
-    verify(orchestrator, times(1)).getStateSnapshot("gen-slow");
+    verify(orchestrator, times(2)).getStateSnapshot("gen-slow");
   }
 
   @Test
@@ -523,9 +534,10 @@ class SagaServiceImplTest {
   void startSaga_parkedSagaSettlesElsewhere_isSeenByAPollTickBeforeTheBound() {
     // Arrange — the saga parks and is then resumed on *another* replica, so nothing on this process
     // notifies the waiter: neither the start callback (dead at the park) nor the registry (the
-    // resumed drive ran elsewhere). The poll tick is the only thing that can answer before the
-    // bound. A 6s bound derives the 1s floor, so a tick lands well inside it; without the tick this
-    // would answer at 6s from the read at bound expiry.
+    // resumed drive ran elsewhere). The resume lands after the read where polling begins, which
+    // finds the saga still parked, so the poll tick is the only thing left that can answer before
+    // the bound. A 6s bound derives the 1s floor, so a tick lands well inside it; without the tick
+    // this would answer at 6s from the read at bound expiry.
     SagaStateSnapshot parked = snapshot("gen-e", SagaStatus.WAITING);
     when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
         .thenAnswer(
@@ -534,7 +546,7 @@ class SagaServiceImplTest {
               return "gen-e";
             });
     when(orchestrator.getStateSnapshot("gen-e"))
-        .thenReturn(snapshot("gen-e", SagaStatus.COMPLETED));
+        .thenReturn(parked, snapshot("gen-e", SagaStatus.COMPLETED));
 
     // Act
     long startNanos = System.nanoTime();
