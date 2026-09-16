@@ -133,17 +133,22 @@ class SagaSettlementNotificationIntegrationTest extends ServerIntegrationTestSup
 
   /** Blocks until the saga has actually parked, which is when a callback can be accepted. */
   private void awaitParked(String sagaId) {
+    Exception lastFailure = null;
     for (int attempt = 0; attempt < 600; attempt++) {
       try {
         if ("WAITING".equals(status(get("/sagas/" + sagaId)))) {
           return;
         }
+        lastFailure = null;
       } catch (Exception e) {
-        throw new IllegalStateException("failed reading saga " + sagaId, e);
+        // A read can fail while the store is contended, and one that does says nothing about
+        // whether the saga will park. Spend an attempt on it rather than the whole test; there are
+        // 600, and the last failure is carried out below if none of them succeed.
+        lastFailure = e;
       }
       pause();
     }
-    throw new IllegalStateException("saga " + sagaId + " never parked");
+    throw new IllegalStateException("saga " + sagaId + " never parked", lastFailure);
   }
 
   private static String sagaIdOf(String callbackUrl) {

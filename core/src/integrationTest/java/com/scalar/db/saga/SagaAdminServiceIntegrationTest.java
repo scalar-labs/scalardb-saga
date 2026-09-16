@@ -43,7 +43,7 @@ class SagaAdminServiceIntegrationTest {
     props.setProperty("scalar.db.storage", "jdbc");
     props.setProperty(
         "scalar.db.contact_points",
-        "jdbc:sqlite:" + dbPath.toAbsolutePath() + "?busy_timeout=10000");
+        "jdbc:sqlite:" + dbPath.toAbsolutePath() + "?busy_timeout=10000&journal_mode=WAL");
     props.setProperty("scalar.db.saga.store.num_buckets", "1");
     // Share one store instance between direct seeding and the orchestrator's admin service.
     store = ScalarDbSagaStoreFactory.create(props).createStore();
