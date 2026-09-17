@@ -14,13 +14,22 @@ public interface SagaCallback {
   void onCompensated(SagaStateSnapshot saga);
 
   /**
-   * Called when the saga is escalated (stuck beyond grace period, needs manual intervention).
+   * Called when the saga is escalated ({@link SagaStatus#ESCALATED}): stuck beyond its grace period
+   * and needing manual intervention.
    *
-   * <p>Note: Currently, escalation only occurs during recovery, which runs asynchronously on a
-   * separate thread without access to the original callback. This method is provided for future
-   * use. To detect escalations, poll {@link SagaOrchestrator#getStateSnapshot}.
+   * <p><b>This does not fire in the normal course.</b> A drive's own verdict is never {@code
+   * ESCALATED}; escalation is set only by recovery, which runs on its own schedule, possibly on
+   * another replica, with no access to the callback the start supplied. Reaching here at all takes
+   * a drive that fails before producing a verdict, so that the outcome must be read back from the
+   * store, plus recovery escalating the same saga in the window before that read. That path is
+   * real, but it is not something to design against: to observe escalation, poll {@link
+   * SagaOrchestrator#getStateSnapshot}.
+   *
+   * <p>Defaults to doing nothing, so no implementation has to write a method that all but never
+   * runs. It stays on the interface rather than being removed so that the narrow path above still
+   * reaches the caller that asked to hear about it.
    */
-  void onEscalated(SagaStateSnapshot saga);
+  default void onEscalated(SagaStateSnapshot saga) {}
 
   /**
    * Called when the saga stops without reaching a terminal state: it parked on an asynchronous step
