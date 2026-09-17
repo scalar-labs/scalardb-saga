@@ -1,5 +1,6 @@
 package com.scalar.db.saga.server;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -87,7 +88,7 @@ abstract class ServerIntegrationTestSupport {
     props.setProperty("scalar.db.storage", "jdbc");
     props.setProperty(
         "scalar.db.contact_points",
-        "jdbc:sqlite:" + tempDbPath.toAbsolutePath() + "?busy_timeout=10000");
+        "jdbc:sqlite:" + tempDbPath.toAbsolutePath() + "?busy_timeout=10000&journal_mode=WAL");
     props.setProperty("scalar.db.saga.store.num_buckets", "1");
     props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
@@ -302,9 +303,24 @@ abstract class ServerIntegrationTestSupport {
     throw new AssertionError("expected the participant to be called on " + path);
   }
 
-  /** The {@code status} field of a saga REST response body. */
+  /**
+   * The {@code status} field of a saga REST response body.
+   *
+   * <p>Fails with the response when the body is not a snapshot. An error body carries a code and a
+   * message but no {@code status}, so reading one here used to be a bare {@link
+   * NullPointerException} that said nothing about what actually came back, and a caller polling for
+   * a status could not tell a contended read from a saga that never arrived.
+   */
   protected final String status(HttpResponse<String> response) throws IOException {
-    return MAPPER.readTree(response.body()).get("status").asText();
+    JsonNode status = MAPPER.readTree(response.body()).get("status");
+    if (status == null) {
+      throw new IllegalStateException(
+          "expected a saga snapshot, got HTTP "
+              + response.statusCode()
+              + " with body: "
+              + response.body());
+    }
+    return status.asText();
   }
 
   protected final HttpResponse<String> post(String path, String body) throws Exception {
