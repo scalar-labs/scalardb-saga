@@ -199,17 +199,13 @@ class ProtoMapperRoundTripIntegrationTest {
   }
 
   /**
-   * A snapshot with every wire-carried field set. {@code ownerId} is the empty string on purpose:
-   * it is deliberately not put on the wire (a server-internal recovery field), so the client fills
-   * {@code ""} and a round trip of a non-empty owner would not be equal — the empty value is what
-   * actually round-trips.
+   * A snapshot with every wire-carried field set, so the round trip has to preserve all of them.
    */
   private static SagaStateSnapshot snapshot(SagaStatus status) {
     return new SagaStateSnapshot(
         "s-1",
         "order-saga",
         status,
-        "",
         "v3",
         Instant.ofEpochSecond(1_700_000_000L, 1),
         Instant.ofEpochSecond(1_700_000_050L, 2));

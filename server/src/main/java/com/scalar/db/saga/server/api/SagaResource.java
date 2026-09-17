@@ -20,10 +20,17 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code POST /sagas} — start a saga with a server-generated ID (synchronous by default;
  *       {@code ?async=true} returns {@code 202} immediately)
  *   <li>{@code PUT /sagas/{id}} — start a saga with a client-supplied ID (idempotent; {@code 409}
- *       with the standard error body on conflict — deliberately without the existing snapshot,
- *       which would let an ID-guessing caller read another caller's saga state)
+ *       with the standard error body on conflict, deliberately without the existing snapshot)
  *   <li>{@code GET /sagas/{id}} — fetch a saga's current state
  * </ul>
+ *
+ * <p><b>Why the conflict body omits the snapshot.</b> Defence in depth, not the control that
+ * prevents disclosure. Under today's RBAC it cannot be: starting a saga needs {@code WRITE}, {@code
+ * WRITE} implies {@code READ}, and reading one needs only {@code READ}, so a caller able to provoke
+ * the {@code 409} can simply {@code GET} the saga. {@code READ} is by-id and unscoped because the
+ * model carries no tenant identity. Keep the omission; it is the right shape for a future tenant
+ * model and costs nothing. Do not read it as the thing standing between an ID-guessing caller and
+ * another caller's state.
  *
  * <p><b>Synchronous outcome contract.</b> A {@code 200} from a synchronous start means the saga
  * <em>executed to a terminal state</em> — it does <b>not</b> imply business success. Callers must

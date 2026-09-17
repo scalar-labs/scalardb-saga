@@ -1346,6 +1346,14 @@ class SagaIntegrationTest {
           DefaultSagaOrchestrator orchestrator =
               replica(failingStore, steps, "replica-fail", budgetOfOne)) {
         failingStore.failEventReads.set(true);
+        // A claim rewrites the state row's clustering key with a fresh updated_at, so capturing it
+        // per saga lets the assertion below count claims from durable state. Load-bearing
+        // assumption: claimForRecovery stamps a new updated_at, and nothing else in this pass
+        // rewrites an unclaimed saga's row.
+        List<Instant> updatedAtBefore = new ArrayList<>();
+        for (String id : sagaIds) {
+          updatedAtBefore.add(baseStore.getStateSnapshot(id).orElseThrow().getUpdatedAt());
+        }
 
         // Act — one pass with budget 1
         orchestrator.recover();
@@ -1353,10 +1361,14 @@ class SagaIntegrationTest {
         // Assert — the committed-but-failed claim spent the budget: exactly one saga was claimed,
         // not a full-revolution claim spree that would hide all three from other replicas
         failingStore.failEventReads.set(false);
-        long claimed =
-            sagaIds.stream()
-                .filter(id -> "replica-fail".equals(orchestrator.getStateSnapshot(id).getOwnerId()))
-                .count();
+        long claimed = 0;
+        for (int i = 0; i < sagaIds.size(); i++) {
+          Instant updatedAtAfter =
+              baseStore.getStateSnapshot(sagaIds.get(i)).orElseThrow().getUpdatedAt();
+          if (!updatedAtAfter.equals(updatedAtBefore.get(i))) {
+            claimed++;
+          }
+        }
         assertThat(claimed).isEqualTo(1);
         assertThat(completedCount(orchestrator, sagaIds)).isZero();
       }

@@ -156,7 +156,7 @@ class ScalarDbSagaStoreListIntegrationTest {
   private void complete(String sagaId) {
     SagaStateSnapshot current = store.getStateSnapshot(sagaId).orElseThrow();
     store.recordStatusEvent(
-        current, store.getEventCount(sagaId), StatusEvent.completed(), current.getOwnerId());
+        current, store.getEventCount(sagaId), StatusEvent.completed(), "engine-1");
   }
 
   private List<String> collected(SagaStatus status, int pageSize) {

@@ -102,7 +102,7 @@ class DefaultSagaAdminServiceTest {
   }
 
   private static SagaStateSnapshot snapshot(SagaStatus status) {
-    return new SagaStateSnapshot(SAGA_ID, SAGA_NAME, status, "owner", DEF_VERSION, TS, TS);
+    return new SagaStateSnapshot(SAGA_ID, SAGA_NAME, status, DEF_VERSION, TS, TS);
   }
 
   private ArgumentCaptor<StatusEvent> stubDrive(SagaStateSnapshot before, List<SagaEvent> events) {
@@ -386,9 +386,9 @@ class DefaultSagaAdminServiceTest {
   void resetEscalated_bulkMixedOutcomes_countsResetAndSkipped() {
     // Arrange — one resettable saga + one with an unresolvable definition
     SagaStateSnapshot ok =
-        new SagaStateSnapshot("ok", SAGA_NAME, SagaStatus.ESCALATED, "o", DEF_VERSION, TS, TS);
+        new SagaStateSnapshot("ok", SAGA_NAME, SagaStatus.ESCALATED, DEF_VERSION, TS, TS);
     SagaStateSnapshot noDef =
-        new SagaStateSnapshot("nodef", "gone", SagaStatus.ESCALATED, "o", "v9", TS, TS);
+        new SagaStateSnapshot("nodef", "gone", SagaStatus.ESCALATED, "v9", TS, TS);
     when(store.listStateSnapshots(any()))
         .thenReturn(new SagaPage<>(List.of(ok, noDef), "next-token"));
     List<SagaEvent> events =
@@ -418,7 +418,7 @@ class DefaultSagaAdminServiceTest {
   void resetEscalated_bulkLostCasRace_countsAsSkipped() {
     // Arrange — the row changed under us; the co-committed transition throws the CAS-lost exception
     SagaStateSnapshot racing =
-        new SagaStateSnapshot("race", SAGA_NAME, SagaStatus.ESCALATED, "o", DEF_VERSION, TS, TS);
+        new SagaStateSnapshot("race", SAGA_NAME, SagaStatus.ESCALATED, DEF_VERSION, TS, TS);
     when(store.listStateSnapshots(any())).thenReturn(new SagaPage<>(List.of(racing), null));
     List<SagaEvent> events =
         List.of(StatusEvent.started(null), StepEvent.completed(0, "debit", null));
@@ -444,9 +444,9 @@ class DefaultSagaAdminServiceTest {
     // Arrange — "bad" cannot be read back at all; "ok" is healthy and ordered after it. A reset
     // saga leaves the ESCALATED scan, so aborting on "bad" would strand "ok" on every re-run too.
     SagaStateSnapshot bad =
-        new SagaStateSnapshot("bad", SAGA_NAME, SagaStatus.ESCALATED, "o", DEF_VERSION, TS, TS);
+        new SagaStateSnapshot("bad", SAGA_NAME, SagaStatus.ESCALATED, DEF_VERSION, TS, TS);
     SagaStateSnapshot ok =
-        new SagaStateSnapshot("ok", SAGA_NAME, SagaStatus.ESCALATED, "o", DEF_VERSION, TS, TS);
+        new SagaStateSnapshot("ok", SAGA_NAME, SagaStatus.ESCALATED, DEF_VERSION, TS, TS);
     when(store.listStateSnapshots(any())).thenReturn(new SagaPage<>(List.of(bad, ok), null));
     when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(backwardDef());
     when(store.getEvents("bad"))
@@ -476,7 +476,7 @@ class DefaultSagaAdminServiceTest {
     // Arrange — the saga's stored definition cannot be decoded, so resolve throws non-retryably.
     // That is not a store outage: the sweep must skip this one saga, not abort on the whole page.
     SagaStateSnapshot bad =
-        new SagaStateSnapshot("bad", SAGA_NAME, SagaStatus.ESCALATED, "o", DEF_VERSION, TS, TS);
+        new SagaStateSnapshot("bad", SAGA_NAME, SagaStatus.ESCALATED, DEF_VERSION, TS, TS);
     when(store.listStateSnapshots(any())).thenReturn(new SagaPage<>(List.of(bad), null));
     when(registry.resolve(SAGA_NAME, DEF_VERSION))
         .thenThrow(
@@ -499,7 +499,7 @@ class DefaultSagaAdminServiceTest {
     // Arrange — the store is failing, not this saga. Every remaining row would fail the same way,
     // so the sweep must surface it instead of reporting a page of misleading skips.
     SagaStateSnapshot down =
-        new SagaStateSnapshot("down", SAGA_NAME, SagaStatus.ESCALATED, "o", DEF_VERSION, TS, TS);
+        new SagaStateSnapshot("down", SAGA_NAME, SagaStatus.ESCALATED, DEF_VERSION, TS, TS);
     when(store.listStateSnapshots(any())).thenReturn(new SagaPage<>(List.of(down), null));
     when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(backwardDef());
     when(store.getEvents("down"))
