@@ -568,7 +568,7 @@ function renderPipeline(entry) {
   if (tcc && states.some((s) => s.startsWith("cancel"))) {
     pipeline.append(el("div", "pipe-note", "← the reservations are cancelled right-to-left; nothing was confirmed"));
   } else if (states.some((s) => s.startsWith("compensat"))) {
-    pipeline.append(el("div", "pipe-note", "← compensation runs right-to-left, starting at the failed step"));
+    pipeline.append(el("div", "pipe-note", "← compensation runs right-to-left"));
   }
 }
 
