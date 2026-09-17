@@ -237,6 +237,6 @@ class CallbackResourceTest {
 
   private static SagaStateSnapshot snapshot(SagaStatus status) {
     Instant now = Instant.parse("2026-01-01T00:00:00Z");
-    return new SagaStateSnapshot(SAGA_ID, "order-saga", status, "engine-1", "v1", now, now);
+    return new SagaStateSnapshot(SAGA_ID, "order-saga", status, "v1", now, now);
   }
 }

@@ -374,8 +374,7 @@ class SagaResourceStartTest {
     // Arrange — startAsync validates the id and persists before dispatching, so a duplicate throws
     // on the request thread. The exception carries the existing saga; the response must not.
     SagaStateSnapshot victim =
-        new SagaStateSnapshot(
-            SAGA_ID, "someone-elses-saga", SagaStatus.RUNNING, "victim", "v1", TS, TS);
+        new SagaStateSnapshot(SAGA_ID, "someone-elses-saga", SagaStatus.RUNNING, "v1", TS, TS);
     doThrow(new SagaAlreadyExistsException(SAGA_ID, victim))
         .when(orchestrator)
         .startAsync(eq(SAGA_ID), eq(SAGA_NAME), anyMap(), any(SagaCallback.class));
@@ -425,7 +424,7 @@ class SagaResourceStartTest {
   }
 
   private SagaStateSnapshot snapshot(SagaStatus status) {
-    return new SagaStateSnapshot(SAGA_ID, SAGA_NAME, status, "owner", "v1", TS, TS);
+    return new SagaStateSnapshot(SAGA_ID, SAGA_NAME, status, "v1", TS, TS);
   }
 
   private HttpResponse<String> post(String path, String body) throws Exception {

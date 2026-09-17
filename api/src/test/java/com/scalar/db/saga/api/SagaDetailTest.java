@@ -13,7 +13,7 @@ class SagaDetailTest {
   private static final Instant TS = Instant.parse("2026-07-13T10:00:00Z");
 
   private static SagaStateSnapshot snapshot() {
-    return new SagaStateSnapshot("saga-1", "order", SagaStatus.ESCALATED, "owner", "v1", TS, TS);
+    return new SagaStateSnapshot("saga-1", "order", SagaStatus.ESCALATED, "v1", TS, TS);
   }
 
   private static TimelineEvent event() {

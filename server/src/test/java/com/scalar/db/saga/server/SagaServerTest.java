@@ -465,7 +465,7 @@ class SagaServerTest {
     lenient().when(orchestrator.httpEndpointRegistrar()).thenReturn(services -> {});
     SagaStateSnapshot completed =
         new SagaStateSnapshot(
-            "s1", "saga", SagaStatus.COMPLETED, "owner", "v1", Instant.EPOCH, Instant.EPOCH);
+            "s1", "saga", SagaStatus.COMPLETED, "v1", Instant.EPOCH, Instant.EPOCH);
     // Completes only after a delay, so answering before the callback proves the wait was skipped.
     when(orchestrator.startAsync(eq("saga"), anyMap(), any(SagaCallback.class)))
         .thenAnswer(

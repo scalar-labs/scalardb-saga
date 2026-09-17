@@ -72,7 +72,7 @@ class SagaResourceDetailTest {
   void detail_readRoleGiven_returns200WithTimeline() throws Exception {
     // Arrange
     SagaStateSnapshot snapshot =
-        new SagaStateSnapshot(SAGA_ID, "order-saga", SagaStatus.COMPENSATED, "owner", "v1", TS, TS);
+        new SagaStateSnapshot(SAGA_ID, "order-saga", SagaStatus.COMPENSATED, "v1", TS, TS);
     TimelineEvent event =
         new TimelineEvent(TS, "STEP_FAILED", 1, "credit", null, "downstream broke", null);
     when(orchestrator.getSagaDetail(SAGA_ID)).thenReturn(new SagaDetail(snapshot, List.of(event)));
@@ -91,7 +91,7 @@ class SagaResourceDetailTest {
   void detail_truncatedTimeline_surfacesFlagInResponse() throws Exception {
     // Arrange — the orchestrator cut the timeline to its configured bound
     SagaStateSnapshot snapshot =
-        new SagaStateSnapshot(SAGA_ID, "order-saga", SagaStatus.ESCALATED, "owner", "v1", TS, TS);
+        new SagaStateSnapshot(SAGA_ID, "order-saga", SagaStatus.ESCALATED, "v1", TS, TS);
     TimelineEvent event =
         new TimelineEvent(TS, "SAGA_ESCALATED", null, null, SagaStatus.ESCALATED, "stuck", null);
     when(orchestrator.getSagaDetail(SAGA_ID))

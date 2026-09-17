@@ -113,7 +113,7 @@ class DefaultSagaOrchestratorTest {
   }
 
   private static SagaStateSnapshot snapshot(String sagaId, SagaStatus status) {
-    return new SagaStateSnapshot(sagaId, "test-saga", status, "owner-1", "1.0", NOW, NOW);
+    return new SagaStateSnapshot(sagaId, "test-saga", status, "1.0", NOW, NOW);
   }
 
   // =========================================================================
