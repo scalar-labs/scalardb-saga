@@ -71,7 +71,9 @@ class SagaResourceStartTest {
     SagaSecurityHandler.register(app, new RoleHeaderProvider());
     ErrorMapper.register(app);
     SagaResource.register(app, orchestrator, syncWaitBoundMillis, shutdownSignal, waiterRegistry);
-    app.start(0);
+    // Loopback, not the wildcard: a wildcard bind can share a port with another suite's
+    // loopback server, which then takes the connection and answers this test's requests.
+    app.start("127.0.0.1", 0);
   }
 
   @BeforeEach
@@ -450,7 +452,7 @@ class SagaResourceStartTest {
 
   private HttpResponse<String> send(String method, String path, String body) throws Exception {
     HttpRequest request =
-        HttpRequest.newBuilder(URI.create("http://localhost:" + app.port() + path))
+        HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + app.port() + path))
             .header("X-Test-Role", "write")
             .header("Content-Type", "application/json")
             .method(method, HttpRequest.BodyPublishers.ofString(body))

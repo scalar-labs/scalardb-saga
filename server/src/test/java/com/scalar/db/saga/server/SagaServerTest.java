@@ -638,14 +638,14 @@ class SagaServerTest {
   private static HttpResponse<String> getSaga(int port) throws Exception {
     return HttpClient.newHttpClient()
         .send(
-            HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/sagas/s1")).build(),
+            HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/sagas/s1")).build(),
             HttpResponse.BodyHandlers.ofString());
   }
 
   private static HttpResponse<String> postComplete(int port) throws Exception {
     URI uri =
         URI.create(
-            "http://localhost:" + port + "/sagas/s1/steps/step1/complete?token=deadbeef&iat=1");
+            "http://127.0.0.1:" + port + "/sagas/s1/steps/step1/complete?token=deadbeef&iat=1");
     return HttpClient.newHttpClient()
         .send(
             HttpRequest.newBuilder(uri)
@@ -684,7 +684,7 @@ class SagaServerTest {
     try (SagaServer server =
         new SagaServer(SagaServerConfig.load(props), mockOrchestrator()).start()) {
       ManagedChannel channel =
-          ManagedChannelBuilder.forAddress("localhost", server.grpcPort()).usePlaintext().build();
+          ManagedChannelBuilder.forAddress("127.0.0.1", server.grpcPort()).usePlaintext().build();
       try {
         // The standard grpc.health.v1.Health service is registered and reports the overall server
         // SERVING — what a K8s-native gRPC probe checks.

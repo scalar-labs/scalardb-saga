@@ -121,7 +121,9 @@ class ErrorMapperTest {
           ctx.body(); // triggers Javalin's request-size cap
           ctx.status(200);
         });
-    app.start(0);
+    // Loopback, not the wildcard: a wildcard bind can share a port with another suite's
+    // loopback server, which then takes the connection and answers this test's requests.
+    app.start("127.0.0.1", 0);
   }
 
   @AfterEach
@@ -147,7 +149,7 @@ class ErrorMapperTest {
     // errorCode.
     HttpResponse<String> response =
         http.send(
-            HttpRequest.newBuilder(URI.create("http://localhost:" + app.port() + "/read-body"))
+            HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + app.port() + "/read-body"))
                 .POST(java.net.http.HttpRequest.BodyPublishers.ofString("x".repeat(1_200_000)))
                 .build(),
             BodyHandlers.ofString());
@@ -536,7 +538,7 @@ class ErrorMapperTest {
 
   private HttpResponse<String> get(String path) throws Exception {
     return http.send(
-        HttpRequest.newBuilder(URI.create("http://localhost:" + app.port() + path)).GET().build(),
+        HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + app.port() + path)).GET().build(),
         BodyHandlers.ofString());
   }
 }

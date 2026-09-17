@@ -52,7 +52,9 @@ class SagaSecurityHandlerTest {
     app.get("/exempt", ctx -> ctx.result("open"), SagaOperation.HEALTH);
     // A route registered with no operation — the "someone forgot to tag it" case.
     app.get("/untagged", ctx -> ctx.result("should never be served"));
-    app.start(0);
+    // Loopback, not the wildcard: a wildcard bind can share a port with another suite's
+    // loopback server, which then takes the connection and answers this test's requests.
+    app.start("127.0.0.1", 0);
   }
 
   @AfterEach
@@ -146,7 +148,7 @@ class SagaSecurityHandlerTest {
   private HttpResponse<String> send(String method, String path, @Nullable String role)
       throws Exception {
     HttpRequest.Builder builder =
-        HttpRequest.newBuilder(URI.create("http://localhost:" + app.port() + path))
+        HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + app.port() + path))
             .method(method, HttpRequest.BodyPublishers.noBody());
     if (role != null) {
       builder.header("X-Test-Role", role);

@@ -45,7 +45,9 @@ class RateLimitHandlerTest {
     RateLimitHandler.register(app, new RateLimiter(limit, 60_000L));
     ErrorMapper.register(app);
     registerRoutes(app);
-    return app.start(0);
+    // Loopback, not the wildcard: a wildcard bind can share a port with another suite's
+    // loopback server, which then takes the connection and answers this test's requests.
+    return app.start("127.0.0.1", 0);
   }
 
   /** Registers the limiter with no upstream authenticator, so no identity is ever resolved. */
@@ -54,7 +56,9 @@ class RateLimitHandlerTest {
     RateLimitHandler.register(app, new RateLimiter(limit, 60_000L));
     ErrorMapper.register(app);
     registerRoutes(app);
-    return app.start(0);
+    // Loopback, not the wildcard: a wildcard bind can share a port with another suite's
+    // loopback server, which then takes the connection and answers this test's requests.
+    return app.start("127.0.0.1", 0);
   }
 
   private static void registerRoutes(Javalin app) {
@@ -112,7 +116,7 @@ class RateLimitHandlerTest {
   private HttpResponse<String> send(String method, String path) throws Exception {
     int port = Objects.requireNonNull(app, "app not started").port();
     HttpRequest request =
-        HttpRequest.newBuilder(URI.create("http://localhost:" + port + path))
+        HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
             .method(method, HttpRequest.BodyPublishers.noBody())
             .build();
     return http.send(request, BodyHandlers.ofString());

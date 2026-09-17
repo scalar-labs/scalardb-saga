@@ -52,7 +52,9 @@ class HeadMethodTest {
     // A route registered with no operation, to prove the HEAD branch did not weaken the fail-closed
     // rejection of an untagged route on its normal (GET) path.
     app.get("/untagged", ctx -> ctx.result("should never be served"));
-    app.start(0);
+    // Loopback, not the wildcard: a wildcard bind can share a port with another suite's
+    // loopback server, which then takes the connection and answers this test's requests.
+    app.start("127.0.0.1", 0);
   }
 
   @AfterEach
@@ -94,7 +96,7 @@ class HeadMethodTest {
 
   private HttpResponse<String> send(String method, String path) throws Exception {
     return http.send(
-        HttpRequest.newBuilder(URI.create("http://localhost:" + app.port() + path))
+        HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + app.port() + path))
             .method(method, HttpRequest.BodyPublishers.noBody())
             .build(),
         BodyHandlers.ofString());

@@ -58,7 +58,9 @@ class SagaResourceDetailTest {
         0L,
         new java.util.concurrent.CompletableFuture<>(),
         new SagaWaiterRegistry());
-    app.start(0);
+    // Loopback, not the wildcard: a wildcard bind can share a port with another suite's
+    // loopback server, which then takes the connection and answers this test's requests.
+    app.start("127.0.0.1", 0);
   }
 
   @AfterEach
@@ -121,7 +123,7 @@ class SagaResourceDetailTest {
   private HttpResponse<String> send(String method, String path, @Nullable String role)
       throws Exception {
     HttpRequest.Builder builder =
-        HttpRequest.newBuilder(URI.create("http://localhost:" + app.port() + path))
+        HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + app.port() + path))
             .method(method, HttpRequest.BodyPublishers.noBody());
     if (role != null) {
       builder.header("X-Test-Role", role);

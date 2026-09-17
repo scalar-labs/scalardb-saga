@@ -54,7 +54,9 @@ class CallbackResourceTest {
     Javalin a = Javalin.create();
     ErrorMapper.register(a);
     CallbackResource.register(a, orchestrator, SECRET, maxAgeSeconds, clock);
-    a.start(0);
+    // Loopback, not the wildcard: a wildcard bind can share a port with another suite's
+    // loopback server, which then takes the connection and answers this test's requests.
+    a.start("127.0.0.1", 0);
     return a;
   }
 
@@ -231,7 +233,7 @@ class CallbackResourceTest {
   private HttpResponse<String> post(String query, String body) throws Exception {
     URI uri =
         URI.create(
-            "http://localhost:"
+            "http://127.0.0.1:"
                 + app.port()
                 + "/sagas/"
                 + SAGA_ID
