@@ -149,7 +149,9 @@ async function launch() {
       renderLaunchInputs();
       renderAll();
     } else {
-      toast(`Launch failed (${response.status}): ${body && body.error ? body.error : "see server logs"}`);
+      // The saga server's rejections carry `message`; the dashboard's own carry `error`.
+      const reason = (body && (body.message || body.error)) || "see server logs";
+      toast(`Launch failed (${response.status}): ${reason}`);
     }
   } catch (e) {
     toast("Launch failed: dashboard unreachable");
