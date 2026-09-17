@@ -41,13 +41,17 @@ import org.jspecify.annotations.Nullable;
  * sees it: the plan is built before any step runs, so the exception escapes the drive before it has
  * a verdict. No callback fires, nothing ends the wait, and the request runs out its whole bound to
  * answer {@code 202} with a {@code RUNNING} body, indistinguishable from a healthy long saga. Only
- * the server log says otherwise, as an {@code ERROR} carrying the exception. Recovery escalates the
- * saga later, once it has been stuck past the compensation grace period; from then on it needs
- * manual admin resolution and retention cleanup skips it, so a misconfigured definition accumulates
- * retention-exempt rows at request rate. This is the same rule gRPC has always followed, and it is
- * the contract {@link com.scalar.db.saga.api.SagaOrchestrator} states for its {@code startAsync}
- * overloads; until 2026-08 the default REST path used the synchronous {@code start} overloads,
- * which did surface that failure as a 4xx.
+ * the server log says otherwise, as an {@code ERROR} carrying the exception. Recovery does not
+ * resolve it either: it re-drives the saga from step 0, which proceeds normally on a replica that
+ * can resolve the steps and throws again on one that cannot, leaving the saga {@code RUNNING} for a
+ * later pass. Nothing escalates it, because the grace-period gate keys off an unresolved {@code
+ * STEP_FAILED} and a plan that never builds writes none. So it stays outside retention, which
+ * purges only terminal statuses, and outside the admin verbs, which act on {@code ESCALATED} sagas;
+ * a misconfigured definition accumulates rows nothing will clean up, at request rate. This is the
+ * same rule gRPC has always followed, and it is the contract {@link
+ * com.scalar.db.saga.api.SagaOrchestrator} states for its {@code startAsync} overloads; until
+ * 2026-08 the default REST path used the synchronous {@code start} overloads, which did surface
+ * that failure as a 4xx.
  *
  * <p><b>No run-to-completion in a single request.</b> The wait bound is unconditional, so a saga
  * that outlives it answers {@code 202} and the client polls {@code GET /sagas/{id}}. There is no
