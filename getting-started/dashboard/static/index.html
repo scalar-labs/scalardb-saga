@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ScalarDB Saga — Live Dashboard</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="banner" class="banner hidden"></div>
+
+<header>
+  <div class="title">
+    <h1>ScalarDB Saga</h1>
+    <span class="subtitle">live dashboard</span>
+  </div>
+  <form id="launch-form" onsubmit="return false;">
+    <label>definition
+      <select id="in-definition"></select>
+    </label>
+    <span id="dyn-inputs"></span>
+    <label class="pace">pace <input id="in-pace" type="range" min="0" max="2000" step="250" value="1500">
+      <span id="pace-value">1500&thinsp;ms</span></label>
+    <button id="btn-launch">Start saga</button>
+  </form>
+</header>
+
+<main>
+  <aside id="saga-list-pane">
+    <h2>Sagas</h2>
+    <ul id="saga-list"></ul>
+    <p id="saga-empty" class="empty">No sagas yet — place an order above, or run the curl walkthrough.</p>
+  </aside>
+  <div class="v-resize" id="saga-list-resize" title="drag to resize"></div>
+
+  <section id="detail-pane">
+    <p id="detail-empty" class="empty">Select a saga to inspect it.</p>
+    <div id="detail" class="hidden">
+      <div id="detail-head">
+        <span id="detail-name"></span>
+        <span id="detail-status" class="badge"></span>
+        <code id="detail-id"></code>
+      </div>
+
+      <h3>Steps</h3>
+      <div id="pipeline"></div>
+      <h3>Orchestrator state timeline</h3>
+      <ol id="timeline"></ol>
+    </div>
+  </section>
+
+  <div class="v-resize" id="definition-resize" title="drag to resize"></div>
+  <aside id="definition-pane">
+    <h2>Saga definition</h2>
+    <pre id="definition"></pre>
+  </aside>
+</main>
+
+<section id="feed-pane">
+  <div id="feed-resize" title="drag to resize"></div>
+  <div class="feed-head">
+    <h2>Participant calls</h2>
+    <label class="feed-filter"><input type="checkbox" id="feed-mine" checked> selected saga only</label>
+  </div>
+  <ul id="feed"></ul>
+  <p id="feed-empty" class="empty">No calls yet.</p>
+</section>
+
+<div id="toast" class="toast hidden"></div>
+
+<!-- The database each participant owns, drawn under its step. Each service keeping its own local
+     database is the architectural reason a saga coordinates the flow: no single transaction can
+     span them. -->
+<template id="db-template">
+  <svg class="db" viewBox="0 0 48 42" role="img">
+    <title>Each service keeps its own local database; no single transaction can span them, which is why a saga coordinates the flow.</title>
+    <line x1="24" y1="0" x2="24" y2="8"></line>
+    <path d="M8 15 v15 a16 6 0 0 0 32 0 v-15"></path>
+    <ellipse cx="24" cy="15" rx="16" ry="6"></ellipse>
+  </svg>
+</template>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
