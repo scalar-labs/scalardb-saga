@@ -86,11 +86,12 @@ class HttpVirtualThreadTest {
     // Arrange — a deliberately tiny pool, and far more requests than it has threads. Each request
     // blocks inside the handler, which is what a synchronous saga start does while it waits.
     //
-    // How many of those requests can be accepted at once is the pool plus its job queue, and on a
-    // cold JVM the excess is refused rather than delayed: with the queue left at its default of
-    // twice the pool, a burst of 20 against 4 threads lost exactly 10 connections here, which is
-    // what failed this test on CI. QUEUE_CAPACITY is what keeps the burst inside that capacity; the
-    // pool stays small, because the pool size is the thing being asserted about.
+    // How many of those requests can be accepted at once is the pool, less the two threads Jetty's
+    // acceptor and selector hold and never give back, plus its job queue. On a cold JVM the excess
+    // is refused rather than delayed: with the queue left at its default of twice the pool, that
+    // capacity is 4 - 2 + 8 = 10, and a burst of 20 against 4 threads lost exactly 10 connections
+    // here, which is what failed this test on CI. QUEUE_CAPACITY is what keeps the burst inside
+    // that capacity; the pool stays small, because the pool size is the thing being asserted about.
     int maxThreads = 4;
     int requests = 20;
     CountDownLatch release = new CountDownLatch(1);
