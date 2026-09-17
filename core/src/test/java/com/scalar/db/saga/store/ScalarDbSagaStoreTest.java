@@ -178,15 +178,18 @@ class ScalarDbSagaStoreTest {
     // belongs to another saga", so the honest answer is the duplicate, not a retryable conflict.
     // Arrange
     ScalarDbSagaStore singleAttemptStore = singleAttemptStore();
-    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
-    DistributedTransaction lookupTx = mock(DistributedTransaction.class);
-    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx).thenReturn(lookupTx);
+    // One transaction serves every post-commit read, the way a real store does. Splitting the
+    // verify and the reconciliation lookup across two mocks would leave the verifier's read
+    // unstubbed, and an empty read-back passes this assertion through the not-landed arm whichever
+    // verifier runs; a state-row verifier reading this same foreign row is what has to fail here.
+    DistributedTransaction readTx = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(readTx);
     doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
     Result foreignEvent = mock(Result.class);
     when(foreignEvent.getText("append_id")).thenReturn(OTHER_APPEND_ID);
-    when(verifyTx.get(any(Get.class))).thenReturn(Optional.of(foreignEvent));
     Result foreignState = mockStateResult("saga-1", SagaStatus.RUNNING);
-    when(lookupTx.scan(any(Scan.class))).thenReturn(List.of(foreignState));
+    when(readTx.get(any(Get.class))).thenReturn(Optional.of(foreignEvent));
+    when(readTx.scan(any(Scan.class))).thenReturn(List.of(foreignState));
 
     // Act & Assert — the duplicate, not SagaConcurrentModificationException: retrying an id that
     // another saga permanently owns can never succeed, so "typically transient" would misdirect.
