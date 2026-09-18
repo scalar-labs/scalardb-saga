@@ -155,8 +155,9 @@ class SagaSettlementNotificationIntegrationTest extends ServerIntegrationTestSup
   }
 
   private static String sagaIdOf(String callbackUrl) {
+    // -1 keeps trailing empty segments; split's default of dropping them is a trap, not a feature.
     String path = URI.create(callbackUrl).getPath();
-    return path.split("/")[2];
+    return path.split("/", -1)[2];
   }
 
   private void postAbsoluteUnchecked(String url, String body) {

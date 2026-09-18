@@ -11,6 +11,7 @@ import com.scalar.db.saga.grpc.GrpcSagaOrchestratorClient;
 import com.sun.net.httpserver.HttpServer;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.Socket;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -143,7 +144,7 @@ class SagaServerTlsIntegrationTest extends ServerIntegrationTestSupport {
   void bareTcpConnectAndClose_onTlsGrpcPort_serverKeepsServingQuietly() throws Exception {
     try (LogCapture logs = LogCapture.ofRoot()) {
       // Arrange — the LB health check / smoke probe shape: connect, send nothing, close.
-      try (Socket probe = new Socket("127.0.0.1", grpcPort())) {
+      try (Socket probe = new Socket(InetAddress.getLoopbackAddress(), grpcPort())) {
         assertThat(probe.isConnected()).isTrue();
       }
 

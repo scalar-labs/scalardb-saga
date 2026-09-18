@@ -13,6 +13,7 @@ import java.net.http.HttpRequest.BodyPublishers;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.nio.file.Path;
+import java.util.Objects;
 import java.util.Properties;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
@@ -120,9 +121,9 @@ class SagaTccAsyncCallbackIntegrationTest extends ServerIntegrationTestSupport {
 
     // The callback URL is keyed on the phase-qualified reserve name, matching the parked marker —
     // a bare "s1" here would fail to resolve to the parked "s1.reserve" step.
-    String callbackUrl = reserveCallbackUrl.get();
+    String callbackUrl =
+        Objects.requireNonNull(reserveCallbackUrl.get(), "the participant was never called");
     assertThat(callbackUrl)
-        .isNotNull()
         .contains("/sagas/" + sagaId + "/steps/s1.reserve/complete?token=")
         .contains("&iat=");
 
@@ -146,9 +147,9 @@ class SagaTccAsyncCallbackIntegrationTest extends ServerIntegrationTestSupport {
     assertThat(hits("/reserve-sync")).isEqualTo(1);
 
     // The callback URL is keyed on the phase-qualified confirm name, matching the parked marker.
-    String callbackUrl = confirmCallbackUrl.get();
+    String callbackUrl =
+        Objects.requireNonNull(confirmCallbackUrl.get(), "the participant was never called");
     assertThat(callbackUrl)
-        .isNotNull()
         .contains("/sagas/" + sagaId + "/steps/s1.confirm/complete?token=")
         .contains("&iat=");
 
