@@ -42,7 +42,7 @@ class ScalarDbSagaStoreListIntegrationTest {
     props.setProperty("scalar.db.storage", "jdbc");
     props.setProperty(
         "scalar.db.contact_points",
-        "jdbc:sqlite:" + dbPath.toAbsolutePath() + "?busy_timeout=10000");
+        "jdbc:sqlite:" + dbPath.toAbsolutePath() + "?busy_timeout=10000&journal_mode=WAL");
     // Multiple buckets so pagination must sweep across bucket boundaries.
     props.setProperty("scalar.db.saga.store.num_buckets", "4");
     factory = ScalarDbSagaStoreFactory.create(props); // creates the schema
@@ -156,7 +156,7 @@ class ScalarDbSagaStoreListIntegrationTest {
   private void complete(String sagaId) {
     SagaStateSnapshot current = store.getStateSnapshot(sagaId).orElseThrow();
     store.recordStatusEvent(
-        current, store.getEventCount(sagaId), StatusEvent.completed(), current.getOwnerId());
+        current, store.getEventCount(sagaId), StatusEvent.completed(), "engine-1");
   }
 
   private List<String> collected(SagaStatus status, int pageSize) {

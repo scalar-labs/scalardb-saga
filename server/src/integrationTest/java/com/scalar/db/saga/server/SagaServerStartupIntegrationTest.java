@@ -118,7 +118,7 @@ class SagaServerStartupIntegrationTest {
     props.setProperty("scalar.db.storage", "jdbc");
     props.setProperty(
         "scalar.db.contact_points",
-        "jdbc:sqlite:" + tempDbPath.toAbsolutePath() + "?busy_timeout=10000");
+        "jdbc:sqlite:" + tempDbPath.toAbsolutePath() + "?busy_timeout=10000&journal_mode=WAL");
     props.setProperty("scalar.db.saga.store.num_buckets", "1");
     props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");

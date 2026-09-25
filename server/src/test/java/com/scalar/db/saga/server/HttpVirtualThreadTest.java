@@ -37,11 +37,23 @@ class HttpVirtualThreadTest {
   private static final long HANDLER_RELEASE_TIMEOUT_SECONDS = 30L;
   private static final long PEAK_WAIT_SECONDS = 10L;
 
+  /**
+   * Room for the whole burst below to be accepted. Jetty's accept path runs through the pool's
+   * bounded job queue, so a connection arriving when the threads are busy and the queue is full is
+   * rejected: the socket is closed after the handshake with no response, which reaches the client
+   * as "HTTP/1.1 header parser received no bytes". The queue defaults to twice {@code
+   * http.max_threads}, which ties accept capacity to a pool size this test deliberately keeps tiny,
+   * so it is pinned here instead.
+   */
+  private static final int QUEUE_CAPACITY = 64;
+
   private static SagaServerConfig config(int maxThreads) {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.HTTP_MAX_THREADS_KEY, Integer.toString(maxThreads));
     props.setProperty(SagaServerConfig.HTTP_MIN_THREADS_KEY, "2");
+    props.setProperty(
+        SagaServerConfig.HTTP_MAX_QUEUED_REQUESTS_KEY, Integer.toString(QUEUE_CAPACITY));
     return SagaServerConfig.load(props);
   }
 
@@ -75,6 +87,13 @@ class HttpVirtualThreadTest {
       throws Exception {
     // Arrange — a deliberately tiny pool, and far more requests than it has threads. Each request
     // blocks inside the handler, which is what a synchronous saga start does while it waits.
+    //
+    // How many of those requests can be accepted at once is the pool, less the two threads Jetty's
+    // acceptor and selector hold and never give back, plus its job queue. On a cold JVM the excess
+    // is refused rather than delayed: with the queue left at its default of twice the pool, that
+    // capacity is 4 - 2 + 8 = 10, and a burst of 20 against 4 threads lost exactly 10 connections
+    // here, which is what failed this test on CI. QUEUE_CAPACITY is what keeps the burst inside
+    // that capacity; the pool stays small, because the pool size is the thing being asserted about.
     int maxThreads = 4;
     int requests = 20;
     CountDownLatch release = new CountDownLatch(1);

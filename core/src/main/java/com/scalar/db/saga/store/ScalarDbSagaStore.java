@@ -180,8 +180,9 @@ public final class ScalarDbSagaStore implements SagaStore {
     StatusEvent startedEvent = StatusEvent.started(payload);
     String id = sagaId; // effectively final for lambda
     int bucket = schema.bucketOf(id);
-    // Minted for schema uniformity — every saga_events row has an append_id — even though
-    // createSaga's verifier is state-row based, not append-id based.
+    // Identifies this call's own seq-0 event, so a post-UnknownTransactionStatus verify can tell
+    // our insert apart from a saga that already owns this id. A state-row read cannot: a row is
+    // present either way, so it would confirm the commit and hand back the other caller's saga.
     String appendId = appendIdSupplier.get();
 
     try {
@@ -191,25 +192,39 @@ public final class ScalarDbSagaStore implements SagaStore {
             tx.insert(buildEventInsert(id, 0, startedEvent, appendId, now));
             SagaStateSnapshot snapshot =
                 new SagaStateSnapshot(
-                    id, sagaName, SagaStatus.RUNNING, ownerId, definitionVersion, now, now);
-            tx.insert(buildStateInsert(bucket, snapshot));
+                    id, sagaName, SagaStatus.RUNNING, definitionVersion, now, now);
+            tx.insert(buildStateInsert(bucket, snapshot, ownerId));
             return snapshot;
           },
-          () -> loadStateSnapshot(id),
+          verifyOwnAppendCommitted(id, 0, appendId),
           "create saga " + id,
           false);
+    } catch (SagaConcurrentModificationException e) {
+      // A foreign append_id at sequence 0 means this saga id already belongs to someone else.
+      // Above sequence 0 a foreign id is a transient racer and the conflict code is the right
+      // answer; at sequence 0 it is a permanent duplicate, and telling the caller to retry an id
+      // that can never be free would be wrong. Report it as the duplicate it is.
+      throw existingSagaOr(id, e);
     } catch (SagaPersistenceException e) {
-      Optional<SagaStateSnapshot> existing = Optional.empty();
-      try {
-        existing = getStateSnapshot(id);
-      } catch (Exception lookupEx) {
-        e.addSuppressed(lookupEx);
-      }
-      if (existing.isPresent()) {
-        throw new SagaAlreadyExistsException(id, existing.get(), e);
-      }
-      throw e;
+      throw existingSagaOr(id, e);
     }
+  }
+
+  /**
+   * Reconciles a create that failed: when a saga already occupies {@code id}, that is the honest
+   * answer rather than the failure which exposed it. Returns the exception to throw, so the {@code
+   * throw} stays visible at the catch site.
+   */
+  private RuntimeException existingSagaOr(String id, RuntimeException failure) {
+    Optional<SagaStateSnapshot> existing = Optional.empty();
+    try {
+      existing = getStateSnapshot(id);
+    } catch (Exception lookupEx) {
+      failure.addSuppressed(lookupEx);
+    }
+    return existing.isPresent()
+        ? new SagaAlreadyExistsException(id, existing.get(), failure)
+        : failure;
   }
 
   @Override
@@ -331,11 +346,11 @@ public final class ScalarDbSagaStore implements SagaStore {
           // recovery-scan key, so a caller passes EPOCH to hand the saga to the sweeper immediately
           // (null = the transition time).
           Instant rowUpdatedAt = stateUpdatedAt != null ? stateUpdatedAt : now;
-          SagaStateSnapshot updated = current.withTransition(newStatus, ownerId, rowUpdatedAt);
-          tx.insert(buildStateInsert(bucket, updated));
+          SagaStateSnapshot updated = current.withTransition(newStatus, rowUpdatedAt);
+          tx.insert(buildStateInsert(bucket, updated, ownerId));
           return updated;
         },
-        verifyTransitionCommitted(sagaId, sequence, appendId),
+        verifyOwnAppendCommitted(sagaId, sequence, appendId),
         "record transition for saga " + sagaId,
         sagaId);
   }
@@ -360,14 +375,17 @@ public final class ScalarDbSagaStore implements SagaStore {
 
           // Optimistic check: the row must still be at the snapshot's (RUNNING) CK.
           int oldStatus = current.getStatus().getStatusCode();
-          if (tx.get(buildStateGet(bucket, oldStatus, current.getUpdatedAt(), sagaId)).isEmpty()) {
+          Optional<Result> row =
+              tx.get(buildStateGet(bucket, oldStatus, current.getUpdatedAt(), sagaId));
+          if (row.isEmpty()) {
             throw new SagaConcurrentModificationException(sagaId);
           }
+          String ownerId = row.get().getText("owner_id");
 
           tx.insert(buildEventInsert(sagaId, sequence, pendingEvent, appendId, now));
           tx.delete(buildStateDelete(bucket, oldStatus, current.getUpdatedAt(), sagaId));
           SagaStateSnapshot updated = current.withTransition(SagaStatus.WAITING, now);
-          tx.insert(buildStateInsert(bucket, updated));
+          tx.insert(buildStateInsert(bucket, updated, ownerId));
           // A bounded park records its deadline for the recovery sweeper; an unbounded park
           // (null deadline) writes no row and is never timed out.
           if (parkedDeadline != null) {
@@ -375,7 +393,7 @@ public final class ScalarDbSagaStore implements SagaStore {
           }
           return updated;
         },
-        verifyTransitionCommitted(sagaId, sequence, appendId),
+        verifyOwnAppendCommitted(sagaId, sequence, appendId),
         "park saga " + sagaId,
         sagaId);
   }
@@ -436,21 +454,24 @@ public final class ScalarDbSagaStore implements SagaStore {
           // Fail-fast pre-check on the WAITING CK; the state-row delete below is the real
           // exclusion.
           int oldStatus = current.getStatus().getStatusCode();
-          if (tx.get(buildStateGet(bucket, oldStatus, current.getUpdatedAt(), sagaId)).isEmpty()) {
+          Optional<Result> row =
+              tx.get(buildStateGet(bucket, oldStatus, current.getUpdatedAt(), sagaId));
+          if (row.isEmpty()) {
             throw new SagaConcurrentModificationException(sagaId);
           }
+          String ownerId = row.get().getText("owner_id");
 
           tx.insert(buildEventInsert(sagaId, sequence, event, appendId, now));
           tx.delete(buildStateDelete(bucket, oldStatus, current.getUpdatedAt(), sagaId));
           SagaStateSnapshot updated = current.withTransition(targetStatus, now);
-          tx.insert(buildStateInsert(bucket, updated));
+          tx.insert(buildStateInsert(bucket, updated, ownerId));
 
           for (Result parked : tx.scan(buildParkedIndexScan(sagaId))) {
             tx.delete(buildParkedDelete(bucket, parked.getTimestampTZ("parked_deadline"), sagaId));
           }
           return updated;
         },
-        verifyTransitionCommitted(sagaId, sequence, appendId),
+        verifyOwnAppendCommitted(sagaId, sequence, appendId),
         op + " for saga " + sagaId,
         sagaId);
   }
@@ -496,13 +517,17 @@ public final class ScalarDbSagaStore implements SagaStore {
   }
 
   /**
-   * Verifier for a state transition (park, resume, timeout, {@code recordStatusEvent}): treats the
+   * Verifier for any write that appends one event and leaves a state row: the transitions (park,
+   * resume, timeout, {@code recordStatusEvent}) and {@code createSaga}'s seq-0 insert. Treats the
    * tx as committed when the event at {@code sequence} was written by us (see {@link
    * #verifyOwnEventCommitted}). On a match it returns the resulting state snapshot; when the event
    * is absent it returns empty so the caller retries; when another writer won the sequence, {@link
    * #verifyOwnEventCommitted} throws {@link SagaConcurrentModificationException} directly.
+   *
+   * <p>{@code createSaga} translates that conflict into {@link SagaAlreadyExistsException}, because
+   * at sequence 0 a foreign {@code append_id} means the id is taken rather than contended.
    */
-  private CommitVerifier<SagaStateSnapshot> verifyTransitionCommitted(
+  private CommitVerifier<SagaStateSnapshot> verifyOwnAppendCommitted(
       String sagaId, int sequence, String appendId) {
     return () ->
         verifyOwnEventCommitted(sagaId, sequence, appendId)
@@ -967,20 +992,13 @@ public final class ScalarDbSagaStore implements SagaStore {
                         sagaId,
                         saga.getSagaName(),
                         saga.getStatus(),
-                        newOwnerId,
                         saga.getDefinitionVersion(),
                         saga.getCreatedAt(),
                         now);
-                tx.insert(buildStateInsert(bucket, claimed));
+                tx.insert(buildStateInsert(bucket, claimed, newOwnerId));
                 return claimed;
               },
-              () -> {
-                Optional<SagaStateSnapshot> state = loadStateSnapshot(sagaId);
-                if (state.isPresent() && newOwnerId.equals(state.get().getOwnerId())) {
-                  return state;
-                }
-                return Optional.empty();
-              },
+              () -> loadStateClaimedBy(sagaId, newOwnerId),
               "claim saga " + sagaId + " for recovery");
       return Optional.of(result);
     } catch (SagaConcurrentModificationException e) {
@@ -1011,11 +1029,10 @@ public final class ScalarDbSagaStore implements SagaStore {
                     sagaId,
                     current.getSagaName(),
                     current.getStatus(),
-                    current.getOwnerId(),
                     current.getDefinitionVersion(),
                     current.getCreatedAt(),
                     Instant.EPOCH);
-            tx.insert(buildStateInsert(bucket, marked));
+            tx.insert(buildStateInsert(bucket, marked, r.getText("owner_id")));
             return Boolean.TRUE;
           },
           null, // best-effort — no verifier
@@ -1219,7 +1236,7 @@ public final class ScalarDbSagaStore implements SagaStore {
    * <p>The classification is only as sound as the verifier passed in, which is what actually
    * performs the check: it must identify our own write by its {@code append_id} and throw {@link
    * SagaConcurrentModificationException} when a foreign one holds the sequence. Pass {@link
-   * #verifyTransitionCommitted}, or a lambda over {@link #verifyOwnEventCommitted} as {@code
+   * #verifyOwnAppendCommitted}, or a lambda over {@link #verifyOwnEventCommitted} as {@code
    * recordStepEvent} does. A verifier that cannot tell writers apart will either claim collisions
    * it has not proven or never report one. See {@link #verifyAfterExhaustedConflict}.
    */
@@ -1441,7 +1458,19 @@ public final class ScalarDbSagaStore implements SagaStore {
         .build();
   }
 
-  private Insert buildStateInsert(int bucket, SagaStateSnapshot snapshot) {
+  /**
+   * The owner is passed separately because it is server-internal and deliberately absent from
+   * {@link SagaStateSnapshot} (see that class). Callers either hold it as a parameter or read it
+   * off the row they are replacing.
+   */
+  private Insert buildStateInsert(int bucket, SagaStateSnapshot snapshot, String ownerId) {
+    // Restores the fail-fast that the snapshot's constructor used to provide while it carried the
+    // owner. Without it a null reaches ScalarDB, which accepts it and commits a NULL column, and
+    // "present but unowned" then reads the same as "missing" everywhere downstream. NullAway
+    // cannot catch it: Result.getText sits outside the annotated packages, so it is treated as
+    // non-null. Every write path funnels through here, including the three that read the owner off
+    // the row.
+    Objects.requireNonNull(ownerId, "ownerId must not be null");
     return Insert.newBuilder()
         .namespace(SagaSchema.NAMESPACE)
         .table(SagaSchema.STATE_TABLE)
@@ -1452,7 +1481,7 @@ public final class ScalarDbSagaStore implements SagaStore {
                 snapshot.getUpdatedAt(),
                 snapshot.getSagaId()))
         .textValue("saga_name", snapshot.getSagaName())
-        .textValue("owner_id", snapshot.getOwnerId())
+        .textValue("owner_id", ownerId)
         .textValue("definition_version", snapshot.getDefinitionVersion())
         .timestampTZValue("created_at", snapshot.getCreatedAt())
         .build();
@@ -1726,10 +1755,25 @@ public final class ScalarDbSagaStore implements SagaStore {
         r.getText("saga_id"),
         r.getText("saga_name"),
         SagaStatus.fromStatusCode(r.getInt("status")),
-        r.getText("owner_id"),
         r.getText("definition_version"),
         r.getTimestampTZ("created_at"),
         r.getTimestampTZ("updated_at"));
+  }
+
+  /**
+   * The saga's state row if {@code expectedOwnerId} currently owns it, else empty. Reads the owner
+   * from the row because {@link SagaStateSnapshot} does not carry it; one scan serves both the
+   * ownership test and the snapshot it returns.
+   */
+  private Optional<SagaStateSnapshot> loadStateClaimedBy(String sagaId, String expectedOwnerId) {
+    return runInTransaction(
+        tx ->
+            tx.scan(buildStateIndexScan(sagaId)).stream()
+                .findFirst()
+                .filter(r -> expectedOwnerId.equals(r.getText("owner_id")))
+                .map(this::toSagaStateSnapshot),
+        null,
+        "verify claim of saga " + sagaId);
   }
 
   private Optional<SagaStateSnapshot> loadStateSnapshot(String sagaId) {
