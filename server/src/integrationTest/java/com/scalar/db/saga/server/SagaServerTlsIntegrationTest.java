@@ -144,7 +144,9 @@ class SagaServerTlsIntegrationTest extends ServerIntegrationTestSupport {
   void bareTcpConnectAndClose_onTlsGrpcPort_serverKeepsServingQuietly() throws Exception {
     try (LogCapture logs = LogCapture.ofRoot()) {
       // Arrange — the LB health check / smoke probe shape: connect, send nothing, close.
-      try (Socket probe = new Socket(InetAddress.getLoopbackAddress(), grpcPort())) {
+      // The fixture binds 127.0.0.1, so parse that literal: getLoopbackAddress() is ::1 when the
+      // JVM prefers IPv6, and nothing listens there.
+      try (Socket probe = new Socket(InetAddress.ofLiteral("127.0.0.1"), grpcPort())) {
         assertThat(probe.isConnected()).isTrue();
       }
 
