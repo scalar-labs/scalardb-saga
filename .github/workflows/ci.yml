@@ -72,8 +72,11 @@ jobs:
       - name: Check
         run: ./gradlew check
 
+      # Every Java source set, not just main + test: `check` compiles the integration tests too, but
+      # with the build cache on, and a cached compile task replays no javac output. Error Prone and
+      # NullAway ran over them for months with nobody able to see what they printed.
       - name: Check compiler warnings
-        run: ./gradlew clean compileTestJava --no-build-cache
+        run: ./gradlew clean compileTestJava compileTestFixturesJava compileIntegrationTestJava --no-build-cache
 
       # Keep the failing run's reports and result XML so a flake that doesn't reproduce is still
       # diagnosable. The warnings step's `clean` wipes build/, so a failure there has nothing to

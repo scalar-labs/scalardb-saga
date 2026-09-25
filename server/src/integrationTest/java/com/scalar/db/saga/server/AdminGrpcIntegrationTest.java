@@ -33,10 +33,11 @@ class AdminGrpcIntegrationTest extends ServerIntegrationTestSupport {
   private static final String SAGA_NAME = "saga";
   private static final String DEFINITION =
       withService(
-          "{ \"name\": \"saga\", \"mode\": \"SAGA\", \"steps\": [\n"
-              + "  { \"name\": \"s1\", \"service\": \"$svc\",\n"
-              + "    \"execution\":    { \"method\": \"POST\", \"path\": \"/debit\" },\n"
-              + "    \"compensation\": { \"method\": \"POST\", \"path\": \"/reverse\" } } ] }");
+          """
+        { "name": "saga", "mode": "SAGA", "steps": [
+          { "name": "s1", "service": "$svc",
+            "execution":    { "method": "POST", "path": "/debit" },
+            "compensation": { "method": "POST", "path": "/reverse" } } ] }""");
 
   private final List<GrpcSagaAdminClient> clients = new ArrayList<>();
 

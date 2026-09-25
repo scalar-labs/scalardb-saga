@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -224,7 +225,8 @@ class RecoveryFalseClaimIntegrationTest {
     drive.start();
     assertThat(stepStarted.await(30, TimeUnit.SECONDS)).isTrue();
     sagaId.set(runningSagaId.get());
-    assertThat(sagaId.get()).isNotNull();
+    String runningId =
+        Objects.requireNonNull(sagaId.get(), "the step ran without recording its saga id");
 
     // Replica B: its own store on the same database, its own owner id and clock.
     SagaStore storeB = ScalarDbSagaStoreFactory.create(storeProps()).createStore();
@@ -242,16 +244,16 @@ class RecoveryFalseClaimIntegrationTest {
 
       // Put B's threshold exactly at the newest event, so the saga's creation-time row is stale to
       // B while its event stream is not. Reading the stamp back also exercises the real scan.
-      Instant newestEvent = storeB.getNewestEvent(sagaId.get()).orElseThrow().createdAt();
+      Instant newestEvent = storeB.getNewestEvent(runningId).orElseThrow().createdAt();
       clockB.set(newestEvent.plusMillis(RECOVERY_TIMEOUT_MILLIS));
 
       // The saga really is a candidate at that threshold — the probe is what spares it, not the
       // scan failing to reach it. Without this the test could pass for the wrong reason.
-      Instant stateUpdatedAt = storeB.getStateSnapshot(sagaId.get()).orElseThrow().getUpdatedAt();
+      Instant stateUpdatedAt = storeB.getStateSnapshot(runningId).orElseThrow().getUpdatedAt();
       assertThat(storeB.findRecoverable(newestEvent, storeB.initialSweepCursor(OWNER_ID_B)).sagas())
           .as("newestEvent=%s stateUpdatedAt=%s", newestEvent, stateUpdatedAt)
           .extracting(SagaStateSnapshot::getSagaId)
-          .contains(sagaId.get());
+          .contains(runningId);
 
       // Act — a full recovery pass from the other replica
       replicaB.recover();
@@ -261,7 +263,7 @@ class RecoveryFalseClaimIntegrationTest {
       // checking owner_id, which would also hold if something rewrote the row and put A's id back.
       // Load-bearing assumption: claimForRecovery stamps a new updated_at. If that ever changes,
       // this assertion silently stops testing anything.
-      assertThat(storeB.getStateSnapshot(sagaId.get()).orElseThrow().getUpdatedAt())
+      assertThat(storeB.getStateSnapshot(runningId).orElseThrow().getUpdatedAt())
           .isEqualTo(stateUpdatedAt);
       assertThat(driveFailure.get()).isNull();
 
@@ -271,7 +273,7 @@ class RecoveryFalseClaimIntegrationTest {
 
       // Assert — A completed normally, each step once, with no redrive from B
       assertThat(driveFailure.get()).isNull();
-      assertThat(orchestrator.getStateSnapshot(sagaId.get()).getStatus())
+      assertThat(orchestrator.getStateSnapshot(runningId).getStatus())
           .isEqualTo(SagaStatus.COMPLETED);
       assertThat(executions).containsExactly("first", "slow", "after");
     } finally {
@@ -316,7 +318,9 @@ class RecoveryFalseClaimIntegrationTest {
     // above would have claimed the live saga and killed this drive at its next transition.
     assertThat(drive.isAlive()).isFalse();
     assertThat(driveFailure.get()).isNull();
-    SagaStateSnapshot result = orchestrator.getStateSnapshot(sagaId.get());
+    SagaStateSnapshot result =
+        orchestrator.getStateSnapshot(
+            Objects.requireNonNull(sagaId.get(), "the drive never returned a saga id"));
     assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPLETED);
     assertThat(executions).containsExactly("first", "slow", "after");
   }
