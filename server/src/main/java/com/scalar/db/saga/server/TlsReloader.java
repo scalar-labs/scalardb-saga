@@ -36,10 +36,11 @@ import org.slf4j.LoggerFactory;
  * rotation recovers, and WARN when the serving certificate is expired, not yet valid, or into the
  * last quarter of its validity with no replacement — the sign that an issuer's renewal has not
  * landed, measured against the certificate's own lifetime so a one-day and a one-year certificate
- * alert at the same point past their due renewal. The alertable condition is the conjunction:
- * rejections while expiry approaches. Validity dates are the one certificate detail echoed, being
- * public handshake material; PEM content and configured path values never are (see {@link
- * TlsMaterial}).
+ * alert at the same point past their due renewal. Validity is watched on every pass, rejected or
+ * not, so the warning never depends on a rotation having been attempted; for an operator, the
+ * condition worth paging on is the conjunction, rejections while expiry approaches. Validity dates
+ * are the one certificate detail echoed, being public handshake material; PEM content and
+ * configured path values never are (see {@link TlsMaterial}).
  *
  * <p>The pass state belongs to the reload scheduler's single thread; {@link #run} is {@code
  * synchronized} as a belt, so the synchronous test seam cannot interleave with a scheduled pass.

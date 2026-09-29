@@ -12,6 +12,7 @@ import java.security.cert.X509Certificate;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.List;
 import javax.net.ssl.X509ExtendedKeyManager;
@@ -345,22 +346,27 @@ class TlsReloaderTest {
   }
 
   @Test
-  void run_lastQuarterOfValidity_warnsOnceNotEveryPass() {
-    // Arrange — a fifth of the lifetime left: past the point any issuer would have renewed
+  void run_certificateAgesIntoItsLastQuarter_warnsOnceFromThePassNotEveryPass() {
+    // Arrange — built with half the certificate's life left, so the constructor has nothing to
+    // say; what is under test is the pass noticing the certificate ageing past the threshold
     X509Certificate leaf = boot.certificate();
     Instant notBefore = leaf.getNotBefore().toInstant();
     Instant notAfter = leaf.getNotAfter().toInstant();
-    Clock lateInLife =
-        Clock.fixed(
-            notAfter.minus(Duration.between(notBefore, notAfter).dividedBy(5)), ZoneOffset.UTC);
+    Duration lifetime = Duration.between(notBefore, notAfter);
+    SteppingClock clock = new SteppingClock(notAfter.minus(lifetime.dividedBy(2)));
 
     try (LogCapture logs = LogCapture.of(TlsReloader.class)) {
-      // Act
-      TlsReloader reloader = reloader(lateInLife);
+      TlsReloader reloader = reloader(clock);
+      reloader.run();
+      assertThat(logs.events()).isEmpty();
+
+      // Act — time passes to a fifth of the lifetime left, past any issuer's renewal point, then
+      // two passes
+      clock.advance(lifetime.dividedBy(2).minus(lifetime.dividedBy(5)));
       reloader.run();
       reloader.run();
 
-      // Assert
+      // Assert — one WARN, from the first pass past the threshold
       assertThat(atLevel(logs, Level.WARN))
           .singleElement()
           .satisfies(
@@ -368,6 +374,34 @@ class TlsReloaderTest {
                 assertThat(event.getFormattedMessage()).contains("last quarter");
                 assertThat(event.getFormattedMessage()).contains(notAfter.toString());
               });
+    }
+  }
+
+  /** A clock a test can step, for a certificate that has to age between two passes. */
+  private static final class SteppingClock extends Clock {
+    private Instant instant;
+
+    SteppingClock(Instant start) {
+      this.instant = start;
+    }
+
+    void advance(Duration amount) {
+      instant = instant.plus(amount);
+    }
+
+    @Override
+    public ZoneId getZone() {
+      return ZoneOffset.UTC;
+    }
+
+    @Override
+    public Clock withZone(ZoneId zone) {
+      return this;
+    }
+
+    @Override
+    public Instant instant() {
+      return instant;
     }
   }
 }

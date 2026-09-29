@@ -209,12 +209,12 @@ snapshot of a read that straddles the kubelet's symlink flip — changes nothing
 material keeps serving, the rejection is logged once at WARN, and the next pass retries. The daemon
 also warns, once, when the serving certificate enters the last quarter of its validity with no
 replacement, and again when it expires; that warning next to a rejection WARN is the alert to act
-on. Two Kubernetes traps defeat rotation silently, reload or restart alike, and both are spelled out
-under [Configuration reload](#configuration-reload): mount the Secret as a whole volume, never with
-`subPath` (updates never reach a `subPath` mount), and keep the certificate and key in **one**
-Secret (split across two, a rotation arrives as the new key beside the old certificate; the daemon
-rejects that pair and retries until both have updated, but a restart in that window fails boot on
-the mismatch).
+on. Two Kubernetes traps, both spelled out under [Configuration reload](#configuration-reload):
+mount the Secret as a whole volume, never with `subPath` (a `subPath` mount never receives updates
+while the pod runs, so only a restart ever sees the new files, which is exactly what reload is meant
+to spare you), and keep the certificate and key in **one** Secret (split across two, a rotation
+arrives as the new key beside the old certificate; reload rejects that pair and retries until both
+have updated, but a restart in that window fails boot on the mismatch).
 
 Two operational notes:
 
@@ -282,8 +282,7 @@ the configured ports test-bound; the report lists both.
 ## Configuration reload
 
 With `reload.interval_seconds` > 0 (default 30), the daemon re-reads `services_path` and
-`definitions_path` (and, with TLS on, the certificate and key — see [TLS](#tls)) on that interval,
-validates the **complete** candidate set, and only then
+`definitions_path` on that interval, validates the **complete** candidate set, and only then
 applies it — services first, then definition registrations. A set that fails **validation** changes
 nothing at all: the previously applied configuration keeps serving, the rejection is logged once at
 WARN (repeats at DEBUG until it changes), and the next pass retries. A failure while **applying**
@@ -291,7 +290,10 @@ WARN (repeats at DEBUG until it changes), and the next pass retries. A failure w
 definitions registered before the failure; those are named in an `INFO` apply line of their own,
 and the next pass retries only what is left. The applied INFO line carries the changed names and a
 SHA-256 over the raw file bytes — grep it across replicas to tell a lagging replica from a
-rejecting one. Secret **values** never appear in any log line.
+rejecting one. Secret **values** never appear in any log line. With TLS on, the certificate and key
+are re-read on the same interval as a **separate** pass with its own validation (see [TLS](#tls)):
+a rejected certificate never holds back a configuration change, and a rejected configuration never
+holds back a rotation.
 
 Operational notes, learned from how Kubernetes actually delivers files:
 
