@@ -12,8 +12,8 @@ import org.jspecify.annotations.Nullable;
  *
  * <p>{@code servicesPath} feeds boot-time service loading and every reload pass; {@code
  * secretsRoot}/{@code allowedHostsCeiling} bound what a service file may reference and authorize;
- * {@code intervalSeconds} paces {@code SagaConfigReloadManager}'s passes, and {@code 0} disables
- * reload entirely (startup-only loading).
+ * {@code intervalSeconds} paces {@code SagaConfigReloadManager}'s passes — the TLS certificate pass
+ * included, when TLS is on — and {@code 0} disables reload entirely (startup-only loading).
  *
  * @param servicesPath directory of per-service {@code <name>.properties} files, or {@code null}
  *     when no services are configured

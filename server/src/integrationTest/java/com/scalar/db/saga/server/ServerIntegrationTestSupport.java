@@ -137,7 +137,7 @@ abstract class ServerIntegrationTestSupport {
    * Hook for a subclass to add or override server properties before the server starts (no-op by
    * default).
    */
-  protected void configureProperties(Properties props) {}
+  protected void configureProperties(Properties props) throws IOException {}
 
   /**
    * Adjusts the service files written to {@code services_path} before the server starts. The map
@@ -192,6 +192,13 @@ abstract class ServerIntegrationTestSupport {
    */
   protected final boolean reloadNow() {
     return server.reloadNow();
+  }
+
+  /**
+   * Runs one TLS certificate reload pass synchronously, for the same reason as {@link #reloadNow}.
+   */
+  protected final void reloadTlsNow() {
+    server.reloadTlsNow();
   }
 
   // --- optional apikey security wiring (shared by the admin integration tests) ----------------
