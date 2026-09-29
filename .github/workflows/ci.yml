@@ -175,6 +175,8 @@ jobs:
         run: |
           docker run --rm \
             --volume "$PWD/.github/smoke:/smoke:ro" \
+            --volume "$PWD/.github/smoke/definitions:/scalardb-saga/conf/definitions:ro" \
+            --volume "$PWD/.github/smoke/services:/scalardb-saga/conf/services:ro" \
             scalardb-saga-server:ci --validate-config --config /smoke/server.properties
 
       # The fixture above acknowledges insecure mode, so it cannot exercise the guard that refuses
@@ -190,6 +192,8 @@ jobs:
           code=0
           docker run --rm \
             --volume "/tmp/smoke-unacknowledged:/smoke:ro" \
+            --volume "/tmp/smoke-unacknowledged/definitions:/scalardb-saga/conf/definitions:ro" \
+            --volume "/tmp/smoke-unacknowledged/services:/scalardb-saga/conf/services:ro" \
             scalardb-saga-server:ci --validate-config --config /smoke/server.properties || code=$?
           # 1 is the only code meaning the configuration was read and rejected. Accepting any
           # non-zero would let a run that never read the file at all — a broken mount exits 3 —
@@ -206,6 +210,8 @@ jobs:
           docker run --detach --name saga \
             --publish 12080:12080 --publish 12051:12051 \
             --volume "$PWD/.github/smoke:/smoke:ro" \
+            --volume "$PWD/.github/smoke/definitions:/scalardb-saga/conf/definitions:ro" \
+            --volume "$PWD/.github/smoke/services:/scalardb-saga/conf/services:ro" \
             scalardb-saga-server:ci --config /smoke/server.properties
 
       - name: Wait for the REST health endpoint
@@ -349,6 +355,8 @@ jobs:
           docker run --detach --name saga-tls \
             --publish 12080:12080 --publish 12051:12051 \
             --volume "$PWD/smoke-tls:/smoke:ro" \
+            --volume "$PWD/smoke-tls/definitions:/scalardb-saga/conf/definitions:ro" \
+            --volume "$PWD/smoke-tls/services:/scalardb-saga/conf/services:ro" \
             scalardb-saga-server:ci --config /smoke/server.properties
 
       - name: Wait for the HTTPS health endpoint
@@ -469,6 +477,8 @@ jobs:
           docker run --detach --name saga-arm64 --platform linux/arm64 \
             --publish 12080:12080 \
             --volume "$PWD/.github/smoke:/smoke:ro" \
+            --volume "$PWD/.github/smoke/definitions:/scalardb-saga/conf/definitions:ro" \
+            --volume "$PWD/.github/smoke/services:/scalardb-saga/conf/services:ro" \
             scalardb-saga-server:ci-arm64 --config /smoke/server.properties
 
       # A far longer budget than the native job: every instruction the JVM executes is translated, and
