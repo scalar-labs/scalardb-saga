@@ -104,7 +104,8 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
    * here is idempotent, so a rerun once the winner has finished short-circuits cleanly. Only that
    * family of failures is expected, but nothing distinguishes it reliably from the storage's
    * wrapped errors, so every failure is retried; the bound keeps a store that is really down from
-   * hanging the boot, and every attempt logs its cause so an outage stays visible.
+   * hanging the boot. Each retried attempt logs its cause at WARN, and the last failure is the
+   * cause of the thrown exception, so an outage stays visible either way.
    *
    * <p>Package-private, taking the admin as a supplier, so a test can drive it with a mocked admin
    * and no pause: ScalarDB's {@code TransactionFactory} is final and needs a live database.
