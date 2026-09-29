@@ -154,12 +154,15 @@ tasks.register<Exec>("dockerBuild") {
     // terminal. Gradle injects the caller's environment into the build, so resolving the name here
     // against the caller's PATH gives the process launcher an absolute path to run. Done in doFirst
     // so PATH is read only when this task runs, and stays out of every other build's configuration
-    // inputs. The fallback keeps Gradle's own error when Docker is not installed at all.
+    // inputs. A candidate has to be a regular file as well as executable, since a directory with
+    // the search bit set also reports as executable and a directory named `docker` on an earlier
+    // PATH entry would otherwise shadow the real binary; that is the lookup rule a shell applies.
+    // The fallback keeps Gradle's own error when Docker is not installed at all.
     doFirst {
         executable = providers.environmentVariable("PATH").map { path ->
             path.split(File.pathSeparator)
                 .flatMap { dir -> listOf("docker", "docker.exe").map { File(dir, it) } }
-                .firstOrNull(File::canExecute)
+                .firstOrNull { it.isFile && it.canExecute() }
                 ?.absolutePath
                 ?: "docker"
         }.get()
