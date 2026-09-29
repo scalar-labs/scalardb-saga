@@ -65,6 +65,10 @@ dependencies {
     runtimeOnly(variantOf(libs.netty.transport.native.epoll) { classifier("linux-aarch_64") })
     implementation(libs.grpc.stub)
     implementation(libs.grpc.netty)
+    // AdvancedTlsX509KeyManager, the one key manager both transports serve TLS from. grpc-util is
+    // already on the runtime classpath through grpc-core; naming it here puts it on the compile
+    // classpath.
+    implementation(libs.grpc.util)
     implementation(libs.grpc.services)
     implementation(libs.grpc.protobuf)
     implementation(libs.protobuf.java)

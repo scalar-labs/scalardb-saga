@@ -2,7 +2,6 @@ package com.scalar.db.saga.server;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AccessDeniedException;
 import java.nio.file.Files;
@@ -10,10 +9,8 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.security.GeneralSecurityException;
 import java.security.KeyFactory;
-import java.security.KeyStore;
 import java.security.PrivateKey;
 import java.security.Signature;
-import java.security.cert.CertificateEncodingException;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
@@ -30,22 +27,13 @@ import org.slf4j.LoggerFactory;
 
 /**
  * The server's TLS key material: the PEM certificate chain and private key named by {@code
- * tls.cert_chain_path} and {@code tls.private_key_path}, loaded and validated once at startup,
- * before either transport binds. Both transports consume this one component — Jetty through {@link
- * #keyStore}, gRPC through the validated material re-encoded as PEM ({@link #certChainPemStream}
- * and {@link #privateKeyPemStream}) — so both serve exactly the bytes validated here and cannot
- * diverge from each other or from what was vetted, no matter what happens to the files after
- * validation. Its acceptance set is deliberately a strict subset of what either stack parses
- * (unencrypted PKCS#8, RSA or EC), which keeps behavior independent of the classpath: BouncyCastle
- * appearing transitively would widen Netty's parser, but never what already passed here.
- *
- * <p>A future certificate reload starts here but does not end here: re-running {@link #load}
- * re-validates the same paths, but neither listener would notice a swapped result on its own —
- * Jetty serves from an {@code SslContextFactory} built once in {@code SagaServer.tlsConnector}
- * (reload must retain that factory and call its {@code reload(...)}), and gRPC pins the SslContext
- * built from this material at server-build time (reload needs a delegating key manager, e.g. grpc's
- * {@code AdvancedTlsX509KeyManager}, or a server rebuild). Until that wiring exists, certificate
- * rotation is a restart.
+ * tls.cert_chain_path} and {@code tls.private_key_path}, loaded and validated at startup, before
+ * either transport binds. The validated chain and key are published to one key manager that both
+ * transports serve from, so both present exactly the bytes validated here and cannot diverge from
+ * each other or from what was vetted, no matter what happens to the files afterwards. Its
+ * acceptance set is deliberately a strict subset of what either stack parses (unencrypted PKCS#8,
+ * RSA or EC), which keeps behavior independent of the classpath: BouncyCastle appearing
+ * transitively would widen Netty's parser, but never what already passed here.
  *
  * <p>Every failure here is a startup error an operator must act on, so each failure class gets its
  * own message naming the config key — and never the configured value, not even the path. A path
@@ -80,16 +68,10 @@ final class TlsMaterial {
   // the redaction rule forbids echoing path values anywhere, so not even diagnostics want them.
   private final List<X509Certificate> certChain;
   private final PrivateKey privateKey;
-  // The validated material re-encoded as PEM, computed once: what the gRPC builder consumes, so
-  // Netty never re-reads the files (see certChainPemStream).
-  private final byte[] certChainPem;
-  private final byte[] privateKeyPem;
 
   private TlsMaterial(List<X509Certificate> certChain, PrivateKey privateKey) {
     this.certChain = certChain;
     this.privateKey = privateKey;
-    this.certChainPem = pemEncode("CERTIFICATE", certificateDers(certChain));
-    this.privateKeyPem = pemEncode("PRIVATE KEY", List.of(privateKey.getEncoded()));
   }
 
   /**
@@ -118,70 +100,6 @@ final class TlsMaterial {
 
   PrivateKey privateKey() {
     return privateKey;
-  }
-
-  /**
-   * The validated chain re-encoded as PEM, as a fresh stream — what the gRPC builder consumes.
-   * Handing over re-encoded bytes rather than the file paths is what guarantees gRPC serves exactly
-   * the validated material: the files can change between validation and server build (a rotation
-   * landing mid-boot), and Netty would otherwise read them a second time.
-   */
-  InputStream certChainPemStream() {
-    return new ByteArrayInputStream(certChainPem);
-  }
-
-  /** The validated key re-encoded as unencrypted PKCS#8 PEM, as a fresh stream. */
-  InputStream privateKeyPemStream() {
-    return new ByteArrayInputStream(privateKeyPem);
-  }
-
-  /**
-   * Builds an in-memory PKCS12 keystore holding the key and chain under one entry, protected by
-   * {@code password} — for Jetty, whose {@code SslContextFactory} initializes its key manager with
-   * the keystore password, so the caller must hand it the same throwaway password it passes here.
-   * Nothing is written to disk.
-   */
-  KeyStore keyStore(char[] password) {
-    try {
-      KeyStore keyStore = KeyStore.getInstance("PKCS12");
-      keyStore.load(null, null);
-      keyStore.setKeyEntry(
-          "scalardb-saga-tls", privateKey, password, certChain.toArray(new X509Certificate[0]));
-      return keyStore;
-    } catch (IOException | GeneralSecurityException e) {
-      // Assembling an in-memory PKCS12 from already-validated material does not fail for
-      // config-attributable reasons; if it does, something is wrong with the runtime itself.
-      throw new IllegalStateException("Failed to assemble the in-memory TLS keystore", e);
-    }
-  }
-
-  private static List<byte[]> certificateDers(List<X509Certificate> chain) {
-    List<byte[]> ders = new ArrayList<>();
-    for (X509Certificate certificate : chain) {
-      try {
-        ders.add(certificate.getEncoded());
-      } catch (CertificateEncodingException e) {
-        // Re-encoding an already-parsed certificate does not fail for config-attributable
-        // reasons; if it does, something is wrong with the runtime itself.
-        throw new IllegalStateException("Failed to re-encode the validated certificate chain", e);
-      }
-    }
-    return ders;
-  }
-
-  private static byte[] pemEncode(String label, List<byte[]> ders) {
-    StringBuilder pem = new StringBuilder();
-    Base64.Encoder encoder = Base64.getMimeEncoder(64, "\n".getBytes(StandardCharsets.US_ASCII));
-    for (byte[] der : ders) {
-      pem.append("-----BEGIN ")
-          .append(label)
-          .append("-----\n")
-          .append(encoder.encodeToString(der))
-          .append("\n-----END ")
-          .append(label)
-          .append("-----\n");
-    }
-    return pem.toString().getBytes(StandardCharsets.US_ASCII);
   }
 
   /**

@@ -6,20 +6,14 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import ch.qos.logback.classic.Level;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.KeyPairGenerator;
-import java.security.KeyStore;
-import java.security.cert.Certificate;
-import java.security.cert.CertificateFactory;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.ZoneOffset;
-import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.BeforeAll;
@@ -372,50 +366,6 @@ class TlsMaterialTest {
 
       assertThat(logs.events()).isEmpty();
     }
-  }
-
-  @Test
-  void certChainPemStream_reparsedByCertificateFactory_yieldsTheValidatedChain() throws Exception {
-    TlsMaterial material =
-        TlsMaterial.load(rsa.certChainPath(), rsa.privateKeyPath(), Clock.systemUTC());
-
-    List<Certificate> reparsed =
-        new ArrayList<>(
-            CertificateFactory.getInstance("X.509")
-                .generateCertificates(material.certChainPemStream()));
-
-    assertThat(reparsed).containsExactly(rsa.certificate());
-  }
-
-  @Test
-  void privateKeyPemStream_carriesTheValidatedKeyAsUnencryptedPkcs8() throws Exception {
-    TlsMaterial material =
-        TlsMaterial.load(rsa.certChainPath(), rsa.privateKeyPath(), Clock.systemUTC());
-
-    String pem =
-        new String(material.privateKeyPemStream().readAllBytes(), StandardCharsets.US_ASCII);
-
-    // Exactly the validated key's PKCS#8 encoding, under the PKCS#8 label — what makes the gRPC
-    // transport serve vetted bytes rather than whatever the files hold at server-build time.
-    assertThat(pem).startsWith("-----BEGIN PRIVATE KEY-----");
-    String body =
-        pem.replace("-----BEGIN PRIVATE KEY-----", "")
-            .replace("-----END PRIVATE KEY-----", "")
-            .replaceAll("\\s", "");
-    assertThat(Base64.getDecoder().decode(body)).isEqualTo(material.privateKey().getEncoded());
-  }
-
-  @Test
-  void keyStore_passwordGiven_holdsKeyAndChainUnderOneEntry() throws Exception {
-    TlsMaterial material =
-        TlsMaterial.load(rsa.certChainPath(), rsa.privateKeyPath(), Clock.systemUTC());
-    char[] password = "throwaway".toCharArray();
-
-    KeyStore keyStore = material.keyStore(password);
-
-    assertThat(keyStore.getKey("scalardb-saga-tls", password)).isEqualTo(material.privateKey());
-    assertThat(keyStore.getCertificateChain("scalardb-saga-tls"))
-        .containsExactly(rsa.certificate());
   }
 
   @Test
