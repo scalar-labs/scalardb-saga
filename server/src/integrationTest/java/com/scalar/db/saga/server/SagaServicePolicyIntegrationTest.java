@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.net.http.HttpResponse;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Properties;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
@@ -78,7 +79,8 @@ class SagaServicePolicyIntegrationTest extends ServerIntegrationTestSupport {
 
   @Override
   protected void configureServices(Map<String, Properties> services) {
-    Properties account = services.get(SERVICE);
+    Properties account =
+        Objects.requireNonNull(services.get(SERVICE), "the fixture did not register " + SERVICE);
     account.setProperty("header.Authorization", TOKEN);
     account.setProperty("header.X-Tenant", "acme");
     account.setProperty("allowed_hosts", "localhost");

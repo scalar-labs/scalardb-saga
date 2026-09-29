@@ -13,6 +13,7 @@ import java.net.http.HttpRequest.BodyPublishers;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.nio.file.Path;
+import java.util.Objects;
 import java.util.Properties;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
@@ -83,9 +84,9 @@ class SagaAsyncCallbackIntegrationTest extends ServerIntegrationTestSupport {
     assertThat(status(start)).isEqualTo("WAITING");
 
     // The daemon minted a signed callback URL and handed it to the participant.
-    String callbackUrl = capturedCallbackUrl.get();
+    String callbackUrl =
+        Objects.requireNonNull(capturedCallbackUrl.get(), "the participant was never called");
     assertThat(callbackUrl)
-        .isNotNull()
         .contains("/sagas/" + sagaId + "/steps/charge/complete?token=")
         .contains("&iat=");
 
@@ -105,7 +106,9 @@ class SagaAsyncCallbackIntegrationTest extends ServerIntegrationTestSupport {
     assertThat(status(start)).isEqualTo("WAITING");
 
     // Mutate iat (part of the signed data) so the recomputed HMAC no longer matches the token.
-    String tampered = capturedCallbackUrl.get().replace("&iat=", "&iat=9");
+    String tampered =
+        Objects.requireNonNull(capturedCallbackUrl.get(), "the participant was never called")
+            .replace("&iat=", "&iat=9");
     HttpResponse<String> callback = postAbsolute(tampered, "{}");
 
     assertThat(callback.statusCode()).isEqualTo(401);
