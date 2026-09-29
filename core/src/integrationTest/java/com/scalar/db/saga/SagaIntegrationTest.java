@@ -16,6 +16,7 @@ import com.scalar.db.saga.engine.RecoveryConfig;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.StepCompensationException;
 import com.scalar.db.saga.exception.StepExecutionException;
+import com.scalar.db.saga.integration.IntegrationTestStore;
 import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaSchema;
@@ -70,10 +71,7 @@ class SagaIntegrationTest {
     tempDbPath = Files.createTempFile("saga-test-", ".db");
 
     props = new Properties();
-    props.setProperty("scalar.db.storage", "jdbc");
-    props.setProperty(
-        "scalar.db.contact_points",
-        "jdbc:sqlite:" + tempDbPath.toAbsolutePath() + "?busy_timeout=10000&journal_mode=WAL");
+    IntegrationTestStore.configure(props, tempDbPath);
     props.setProperty("scalar.db.saga.store.num_buckets", "1");
   }
 

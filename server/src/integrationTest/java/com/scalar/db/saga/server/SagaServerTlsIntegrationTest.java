@@ -9,6 +9,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.exception.SagaUnavailableException;
 import com.scalar.db.saga.grpc.GrpcSagaOrchestratorClient;
+import com.scalar.db.saga.integration.IntegrationTestStore;
 import com.sun.net.httpserver.HttpServer;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.IOException;
@@ -200,8 +201,7 @@ class SagaServerTlsIntegrationTest extends ServerIntegrationTestSupport {
     Files.createDirectories(definitions);
     writeDefinition(definitions, "saga", DEFINITION);
     Properties props = new Properties();
-    props.setProperty("scalar.db.storage", "jdbc");
-    props.setProperty("scalar.db.contact_points", "jdbc:sqlite:" + db.toAbsolutePath());
+    IntegrationTestStore.configure(props, db);
     props.setProperty("scalar.db.saga.store.num_buckets", "1");
     props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
