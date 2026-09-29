@@ -200,8 +200,21 @@ the common issuers emit by default:
 - **Vault PKI** emits traditional encoding unless the request passes `private_key_format=pkcs8`
 - anything else converts with `openssl pkcs8 -topk8 -nocrypt`
 
-Certificate **rotation currently requires a restart** — the files are read once at startup. Hot
-reload is planned alongside the configuration hot-reload feature.
+**Rotation needs no restart.** The two files are re-read on every configuration reload pass
+(`reload.interval_seconds`, default 30; `0` turns reload off, certificate rotation included), so a
+rotated certificate reaches new connections on both transports within one interval of the kubelet
+delivering it. Connections established before the rotation keep the certificate they negotiated. A
+rotation that fails validation — a mismatched or corrupt pair, an empty or missing file, the torn
+snapshot of a read that straddles the kubelet's symlink flip — changes nothing: the previous
+material keeps serving, the rejection is logged once at WARN, and the next pass retries. The daemon
+also warns, once, when the serving certificate enters the last quarter of its validity with no
+replacement, and again when it expires; that warning next to a rejection WARN is the alert to act
+on. Two Kubernetes traps defeat rotation silently, reload or restart alike, and both are spelled out
+under [Configuration reload](#configuration-reload): mount the Secret as a whole volume, never with
+`subPath` (updates never reach a `subPath` mount), and keep the certificate and key in **one**
+Secret (split across two, a rotation arrives as the new key beside the old certificate; the daemon
+rejects that pair and retries until both have updated, but a restart in that window fails boot on
+the mismatch).
 
 Two operational notes:
 
@@ -269,7 +282,8 @@ the configured ports test-bound; the report lists both.
 ## Configuration reload
 
 With `reload.interval_seconds` > 0 (default 30), the daemon re-reads `services_path` and
-`definitions_path` on that interval, validates the **complete** candidate set, and only then
+`definitions_path` (and, with TLS on, the certificate and key — see [TLS](#tls)) on that interval,
+validates the **complete** candidate set, and only then
 applies it — services first, then definition registrations. A set that fails **validation** changes
 nothing at all: the previously applied configuration keeps serving, the rejection is logged once at
 WARN (repeats at DEBUG until it changes), and the next pass retries. A failure while **applying**
