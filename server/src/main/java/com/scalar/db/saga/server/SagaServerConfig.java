@@ -4,6 +4,8 @@ import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.engine.RecoveryConfig;
 import com.scalar.db.saga.engine.RetentionConfig;
 import com.scalar.db.saga.engine.ShutdownMode;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.time.Clock;
@@ -46,7 +48,10 @@ import org.jspecify.annotations.Nullable;
  *       retention sweep scatter (bucket order and schedule offset), so a stable value gives stable
  *       sweep phases across restarts. Must match {@code [a-zA-Z0-9._-]{1,128}} — it is stamped on
  *       claimed rows and echoed in log lines
- *   <li>{@code definitions_path} — path to a JSON/YAML saga definition file or directory
+ *   <li>{@code definitions_path} — path to a JSON/YAML saga definition file or directory. Unset, it
+ *       is the image's mount point {@value #DEFAULT_DEFINITIONS_PATH} when that directory exists,
+ *       so a Deployment that mounts there declares the path once; outside the image the key is set
+ *       explicitly
  *   <li>{@code default_saga_timeout_millis} — a default saga timeout enforced at execution for
  *       definitions that set none ({@code 0} = unbounded); {@code 0} (default) disables it. A
  *       definition's own timeout always wins. Applied at every execution entry (start, recovery
@@ -258,7 +263,8 @@ import org.jspecify.annotations.Nullable;
  * <p>The directory-level keys:
  *
  * <ul>
- *   <li>{@code services_path} — the directory of service files; unset = no services
+ *   <li>{@code services_path} — the directory of service files. Unset, it is the image's mount
+ *       point {@value #DEFAULT_SERVICES_PATH} when that directory exists, and otherwise no services
  *   <li>{@code reload.interval_seconds} — seconds between configuration reload passes (default
  *       {@value #DEFAULT_RELOAD_INTERVAL_SECONDS}): service files and definitions are re-read and
  *       validated as a complete set, so changes land without a restart. Validation is all or
@@ -449,6 +455,11 @@ public final class SagaServerConfig {
 
   static final long DEFAULT_RELOAD_INTERVAL_SECONDS = 30L;
   static final String DEFAULT_SECRETS_ROOT = "/run/secrets";
+  // The image's conventional configuration mount (see server/docker), where the two path keys look
+  // when unset. Container paths: outside the image both keys are set explicitly.
+  static final String DEFAULT_CONF_DIR = "/scalardb-saga/conf";
+  static final String DEFAULT_DEFINITIONS_PATH = DEFAULT_CONF_DIR + "/definitions";
+  static final String DEFAULT_SERVICES_PATH = DEFAULT_CONF_DIR + "/services";
 
   static final String STORE_MAX_EVENT_PAYLOAD_BYTES_KEY = PREFIX + "store.max_event_payload_bytes";
 
@@ -728,6 +739,8 @@ public final class SagaServerConfig {
   private final Properties properties;
   private final Properties rawProperties;
   private final @Nullable Path definitionsPath;
+  // Whether definitions_path was left unset, so the path above is the default directory or absent.
+  private final boolean definitionsPathDefaulted;
   private final ReloadConfig reloadConfig;
 
   /**
@@ -736,8 +749,10 @@ public final class SagaServerConfig {
    *
    * @param resolved the secret-resolved properties
    * @param raw the pre-resolution properties (see {@link #rawProperties()})
+   * @param confDir the directory whose {@code definitions} and {@code services} subdirectories the
+   *     two path keys default to when unset
    */
-  private SagaServerConfig(Properties resolved, Properties raw) {
+  private SagaServerConfig(Properties resolved, Properties raw, Path confDir) {
     rejectUnknownKeys(resolved);
     this.host = parseHost(resolved.getProperty(HOST_KEY));
     this.ownerId = parseOwnerId(resolved.getProperty(OWNER_ID_KEY));
@@ -867,9 +882,14 @@ public final class SagaServerConfig {
             MAX_START_REQUESTS_PER_MINUTE_KEY,
             DEFAULT_MAX_START_REQUESTS_PER_MINUTE,
             0);
-    this.definitionsPath =
+    Path definitionsPath =
         parseOptionalPath(resolved.getProperty(DEFINITIONS_PATH_KEY), DEFINITIONS_PATH_KEY);
-    this.reloadConfig = parseReloadConfig(resolved);
+    this.definitionsPathDefaulted = definitionsPath == null;
+    this.definitionsPath =
+        definitionsPath != null
+            ? definitionsPath
+            : existingDirectory(confDir.resolve("definitions"));
+    this.reloadConfig = parseReloadConfig(resolved, confDir);
     this.properties = applyStoreDefaults(copyOf(resolved));
     this.grpcMaxInboundMessageBytes = parseGrpcMaxInboundMessageBytes(this.properties);
     this.rawProperties = copyOf(raw);
@@ -1029,12 +1049,28 @@ public final class SagaServerConfig {
    * @param unresolved collector for unreadable secret references, or {@code null} to fail on one
    * @return the parsed configuration
    */
+  @SuppressFBWarnings(
+      value = "DMI_HARDCODED_ABSOLUTE_FILENAME",
+      justification =
+          "The image's conventional mount point is a deliberate container-absolute default, like"
+              + " DEFAULT_SECRETS_ROOT; tests stage the directories elsewhere through the overload"
+              + " that takes the directory")
   static SagaServerConfig load(Properties properties, @Nullable UnresolvedSecrets unresolved) {
+    return load(properties, unresolved, Path.of(DEFAULT_CONF_DIR));
+  }
+
+  /**
+   * Visible for testing: {@code confDir} stands in for the image's {@value #DEFAULT_CONF_DIR}, the
+   * directory the two path keys default into, so a test can stage the default directories in a
+   * temporary location instead of on the machine's root file system.
+   */
+  static SagaServerConfig load(
+      Properties properties, @Nullable UnresolvedSecrets unresolved, Path confDir) {
     Objects.requireNonNull(properties, "properties must not be null");
     // Keep the pre-resolution properties so a provider can tell a secret reference from an inline
     // value (both look identical after resolution) — e.g. the API-key provider requires references.
     try {
-      return new SagaServerConfig(resolveSecrets(properties, unresolved), properties);
+      return new SagaServerConfig(resolveSecrets(properties, unresolved), properties, confDir);
     } catch (RuntimeException e) {
       if (unresolved == null || unresolved.isEmpty()) {
         throw e;
@@ -1055,7 +1091,8 @@ public final class SagaServerConfig {
           });
       // Anything unreadable was just removed, so nothing new can be recorded; a fresh collector
       // keeps the caller's list to what the first pass found.
-      return new SagaServerConfig(resolveSecrets(readable, new UnresolvedSecrets()), properties);
+      return new SagaServerConfig(
+          resolveSecrets(readable, new UnresolvedSecrets()), properties, confDir);
     }
   }
 
@@ -1282,14 +1319,16 @@ public final class SagaServerConfig {
    * live, how often they are re-read, where their secret references may resolve, and the optional
    * egress ceiling. The files themselves are read by the reconciler, not here.
    */
-  private static ReloadConfig parseReloadConfig(Properties resolved) {
+  private static ReloadConfig parseReloadConfig(Properties resolved, Path confDir) {
+    Path servicesPath =
+        parseOptionalPath(resolved.getProperty(SERVICES_PATH_KEY), SERVICES_PATH_KEY);
     String secretsRoot = resolved.getProperty(SECRETS_ROOT_KEY);
     String ceiling =
         requireNonBlankIfSet(
             EGRESS_ALLOWED_HOSTS_CEILING_KEY,
             resolved.getProperty(EGRESS_ALLOWED_HOSTS_CEILING_KEY));
     return new ReloadConfig(
-        parseOptionalPath(resolved.getProperty(SERVICES_PATH_KEY), SERVICES_PATH_KEY),
+        servicesPath != null ? servicesPath : existingDirectory(confDir.resolve("services")),
         parseBoundedLong(
             resolved.getProperty(RELOAD_INTERVAL_SECONDS_KEY),
             RELOAD_INTERVAL_SECONDS_KEY,
@@ -1579,9 +1618,32 @@ public final class SagaServerConfig {
     return copyOf(rawProperties);
   }
 
-  /** Returns the optional path to declarative saga definitions loaded at startup. */
+  /**
+   * Returns the path to the declarative saga definitions: the configured file or directory, or the
+   * default directory {@value #DEFAULT_DEFINITIONS_PATH} when the key is unset and that directory
+   * exists. Empty when the key is unset and nothing is mounted at the default.
+   */
   public Optional<Path> definitionsPath() {
     return Optional.ofNullable(definitionsPath);
+  }
+
+  /**
+   * Whether {@code definitions_path} was left unset, so {@link #definitionsPath()} is the default
+   * directory or empty; what lets the no-definitions refusal name the directory it looked in.
+   */
+  boolean definitionsPathDefaulted() {
+    return definitionsPathDefaulted;
+  }
+
+  /**
+   * A default directory, or {@code null} when it does not exist. An absent default means "nothing
+   * configured": the image ships no definitions or services of its own, so the directory exists
+   * only where an operator mounted one. An absent <em>explicit</em> path stays the hard error the
+   * reconciler raises, because an operator who named a path meant it. Probed once, here, so the
+   * directory the daemon reads is pinned for the process lifetime like every configured path.
+   */
+  private static @Nullable Path existingDirectory(Path candidate) {
+    return Files.isDirectory(candidate) ? candidate : null;
   }
 
   /**

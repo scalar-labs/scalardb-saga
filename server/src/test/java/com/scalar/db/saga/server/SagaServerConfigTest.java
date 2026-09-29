@@ -464,6 +464,47 @@ class SagaServerConfigTest {
   }
 
   @Test
+  void load_definitionsPathUnsetAndDefaultDirectoryPresent_usesTheDefault(@TempDir Path conf)
+      throws IOException {
+    // Arrange — the image's conventional mount, stood in by a temp directory: what a Deployment
+    // that mounts at the documented path and omits the key gets
+    Path definitions = Files.createDirectory(conf.resolve("definitions"));
+
+    // Act
+    SagaServerConfig config = SagaServerConfig.load(new Properties(), null, conf);
+
+    // Assert
+    assertThat(config.definitionsPath()).contains(definitions);
+    assertThat(config.definitionsPathDefaulted()).isTrue();
+  }
+
+  @Test
+  void load_definitionsPathUnsetAndDefaultDirectoryAbsent_isEmpty(@TempDir Path conf) {
+    // Nothing mounted at the default is "nothing configured", not a bad path: the boot guard then
+    // names the directory it looked in, whereas an explicit path that is absent stays an error.
+    SagaServerConfig config = SagaServerConfig.load(new Properties(), null, conf);
+
+    assertThat(config.definitionsPath()).isEmpty();
+    assertThat(config.definitionsPathDefaulted()).isTrue();
+  }
+
+  @Test
+  void load_definitionsPathGivenAndDefaultDirectoryPresent_explicitValueWins(@TempDir Path conf)
+      throws IOException {
+    // Arrange
+    Files.createDirectory(conf.resolve("definitions"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, "/etc/saga/definitions");
+
+    // Act
+    SagaServerConfig config = SagaServerConfig.load(props, null, conf);
+
+    // Assert
+    assertThat(config.definitionsPath()).contains(Path.of("/etc/saga/definitions"));
+    assertThat(config.definitionsPathDefaulted()).isFalse();
+  }
+
+  @Test
   void load_definitionsPathGiven_isParsedTrimmed() {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, "  /etc/saga/definitions  ");
@@ -767,9 +808,35 @@ class SagaServerConfigTest {
   }
 
   @Test
-  void load_noServicesPath_leavesTheDirectoryUnset() {
-    // Service files are read by the reconciler, not here; this class only points at the directory.
-    assertThat(SagaServerConfig.load(new Properties()).reloadConfig().servicesPath()).isNull();
+  void load_noServicesPathAndDefaultDirectoryAbsent_leavesTheDirectoryUnset(@TempDir Path conf) {
+    // Service files are read by the reconciler, not here; this class only points at the directory,
+    // and with nothing mounted at the default there is none to point at.
+    assertThat(SagaServerConfig.load(new Properties(), null, conf).reloadConfig().servicesPath())
+        .isNull();
+  }
+
+  @Test
+  void load_noServicesPathAndDefaultDirectoryPresent_usesTheDefault(@TempDir Path conf)
+      throws IOException {
+    // Arrange — the image's conventional mount, stood in by a temp directory
+    Path services = Files.createDirectory(conf.resolve("services"));
+
+    // Act & Assert
+    assertThat(SagaServerConfig.load(new Properties(), null, conf).reloadConfig().servicesPath())
+        .isEqualTo(services);
+  }
+
+  @Test
+  void load_servicesPathGivenAndDefaultDirectoryPresent_explicitValueWins(@TempDir Path conf)
+      throws IOException {
+    // Arrange
+    Files.createDirectory(conf.resolve("services"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, "/etc/saga/services");
+
+    // Act & Assert
+    assertThat(SagaServerConfig.load(props, null, conf).reloadConfig().servicesPath())
+        .isEqualTo(Path.of("/etc/saga/services"));
   }
 
   @Test

@@ -231,7 +231,7 @@ public final class SagaServer implements AutoCloseable {
       // a healthy but useless process. Reload cannot lift this later: the empty-transition guard
       // rejects a wind-down to zero, so a useful daemon always starts with at least one.
       if (configReconciler.appliedDefinitionCount() == 0) {
-        throw new IllegalStateException(noDefinitionsMessage());
+        throw new IllegalStateException(noDefinitionsMessage(config));
       }
       logger.info("Registered {} saga definition(s)", configReconciler.appliedDefinitionCount());
       manager =
@@ -576,10 +576,10 @@ public final class SagaServer implements AutoCloseable {
    * The refusal message for starting unauthenticated on a network-reachable interface, or {@code
    * null} when the binding is acceptable.
    *
-   * <p>Shared with {@code --validate-config}, like {@link #noDefinitionsMessage()}: the rule reads
-   * three configuration values and nothing else, so an offline check can reach the same verdict,
-   * and a configuration this refuses must not be one the validator calls acceptable. Stated once so
-   * the two cannot come to disagree. The settings it reads are named by {@link
+   * <p>Shared with {@code --validate-config}, like {@link #noDefinitionsMessage(SagaServerConfig)}:
+   * the rule reads three configuration values and nothing else, so an offline check can reach the
+   * same verdict, and a configuration this refuses must not be one the validator calls acceptable.
+   * Stated once so the two cannot come to disagree. The settings it reads are named by {@link
    * #insecureBindingKeys()}, so a caller holding values it could not resolve can tell whether this
    * verdict would rest on one.
    */
@@ -959,12 +959,23 @@ public final class SagaServer implements AutoCloseable {
    * The boot guard's message, shared with {@code --validate-config} so the offline check and the
    * guard it mirrors cannot come to say different things. The rule is the server's, not the reload
    * pass's — the pass rejects only a wind-down to zero, which a first pass is not — so it is stated
-   * here and quoted there.
+   * here and quoted there. It names the place that was searched: the default directory when the key
+   * is unset (a constant, safe to echo), or the key itself when the operator named a path (a
+   * configured value, never echoed, like every other).
    */
-  static String noDefinitionsMessage() {
-    return "No saga definitions registered. Set '"
+  static String noDefinitionsMessage(SagaServerConfig config) {
+    if (config.definitionsPathDefaulted()) {
+      return "No saga definitions registered: '"
+          + SagaServerConfig.DEFINITIONS_PATH_KEY
+          + "' is not set, and the default directory "
+          + SagaServerConfig.DEFAULT_DEFINITIONS_PATH
+          + " is absent or holds no definition file (.json, .yaml or .yml). Mount the definitions"
+          + " there, or set the key to a file or directory holding at least one.";
+    }
+    return "No saga definitions registered: the file or directory named by '"
         + SagaServerConfig.DEFINITIONS_PATH_KEY
-        + "' to a file or directory containing at least one saga definition.";
+        + "' holds no saga definition (.json, .yaml or .yml). Add one there, or point the key at a"
+        + " file or directory holding at least one.";
   }
 
   /**

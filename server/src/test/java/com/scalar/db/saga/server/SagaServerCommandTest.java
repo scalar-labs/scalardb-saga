@@ -540,7 +540,9 @@ class SagaServerCommandTest {
 
       // Assert
       assertThat(exitCode).isEqualTo(1);
-      assertThat(out.toString()).contains(SagaServer.noDefinitionsMessage());
+      assertThat(out.toString())
+          .contains("No saga definitions registered")
+          .contains(SagaServerConfig.DEFINITIONS_PATH_KEY);
     }
 
     @Test

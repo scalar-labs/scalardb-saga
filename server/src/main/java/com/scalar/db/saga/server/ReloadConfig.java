@@ -16,7 +16,8 @@ import org.jspecify.annotations.Nullable;
  * reload entirely (startup-only loading).
  *
  * @param servicesPath directory of per-service {@code <name>.properties} files, or {@code null}
- *     when no services are configured
+ *     when {@code services_path} is unset and nothing is mounted at its default directory (no
+ *     services)
  * @param intervalSeconds seconds between reload passes; {@code 0} disables reload (startup-only
  *     loading)
  * @param secretsRoot directory that {@code ${file:...}} references in service files must resolve

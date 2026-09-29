@@ -246,7 +246,7 @@ public class SagaServerCommand implements Callable<Integer> {
     // rather than in the pass — so a validator that did not mirror it would pass a configuration
     // that cannot boot, which is the one thing this command exists to prevent.
     if (problems.isEmpty() && result.definitionCount() == 0) {
-      problems.add(SagaServer.noDefinitionsMessage());
+      problems.add(SagaServer.noDefinitionsMessage(config));
     }
     List<String> warnings = unresolvedWarnings(unresolved);
     // The other guard that refuses a boot on configuration alone. Reported alongside the rest
