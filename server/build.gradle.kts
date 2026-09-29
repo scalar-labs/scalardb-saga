@@ -146,7 +146,24 @@ tasks.register<Exec>("dockerBuild") {
 
     dependsOn(dockerContext)
     workingDir = layout.buildDirectory.dir("docker").get().asFile
-    executable = "docker"
+
+    // A bare executable name is resolved against the Gradle daemon's PATH, which is whatever the
+    // shell that first started the daemon had, not the PATH of the shell running this build. Docker
+    // Desktop installs its CLI outside the system directories, so a daemon started from a shell
+    // without that directory fails to start the process while `docker` works in the caller's
+    // terminal. Gradle injects the caller's environment into the build, so resolving the name here
+    // against the caller's PATH gives the process launcher an absolute path to run. Done in doFirst
+    // so PATH is read only when this task runs, and stays out of every other build's configuration
+    // inputs. The fallback keeps Gradle's own error when Docker is not installed at all.
+    doFirst {
+        executable = providers.environmentVariable("PATH").map { path ->
+            path.split(File.pathSeparator)
+                .flatMap { dir -> listOf("docker", "docker.exe").map { File(dir, it) } }
+                .firstOrNull(File::canExecute)
+                ?.absolutePath
+                ?: "docker"
+        }.get()
+    }
 
     // The argument provider below is a script lambda, which captures the build script object and so
     // cannot be serialized into the configuration cache. Computing the arguments eagerly instead
