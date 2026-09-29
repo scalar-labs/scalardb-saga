@@ -1,10 +1,14 @@
 package com.scalar.db.saga.store;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.scalar.db.api.DistributedTransactionAdmin;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.service.TransactionFactory;
 import java.util.Objects;
 import java.util.Properties;
+import java.util.function.Supplier;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Factory that creates a {@link ScalarDbSagaStore} backed by ScalarDB.
@@ -39,7 +43,14 @@ import java.util.Properties;
  */
 public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
 
+  private static final Logger logger = LoggerFactory.getLogger(ScalarDbSagaStoreFactory.class);
+
   private static final String PROP_PREFIX = "scalar.db.saga.store.";
+
+  /** How many times {@link #createSchema} runs before giving up; see there for why it retries. */
+  static final int SCHEMA_CREATE_ATTEMPTS = 5;
+
+  private static final long SCHEMA_CREATE_RETRY_MILLIS = 3_000;
 
   private final TransactionFactory transactionFactory;
   private final ScalarDbSagaStoreConfig config;
@@ -71,7 +82,7 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
     ScalarDbSagaStoreConfig config = parseConfig(properties);
 
     TransactionFactory transactionFactory = TransactionFactory.create(properties);
-    createSchema(transactionFactory);
+    createSchema(transactionFactory::getTransactionAdmin, SCHEMA_CREATE_RETRY_MILLIS);
     // Defense in depth against polymorphic-deserialization gadgets (off by default in Jackson 2.x).
     ObjectMapper objectMapper = new ObjectMapper().deactivateDefaultTyping();
     return new ScalarDbSagaStoreFactory(transactionFactory, config, objectMapper);
@@ -84,12 +95,49 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
         transactionFactory.getTransactionManager(), objectMapper, schema, config);
   }
 
-  private static void createSchema(TransactionFactory transactionFactory) {
-    try (var admin = transactionFactory.getTransactionAdmin()) {
-      admin.createCoordinatorTables(true);
-      SagaSchema.createAll(admin);
-    } catch (Exception e) {
-      throw SagaPersistenceException.storeUnavailable(e);
+  /**
+   * Creates the coordinator and saga schema, retrying when a sibling replica gets there first.
+   *
+   * <p>ScalarDB's {@code ifNotExists} admin calls check and then create as two separate steps, so
+   * replicas booting together can both pass the check, and the slower one fails with "already
+   * exists" from ScalarDB, or with the storage's own duplicate-DDL error one level down. Every step
+   * here is idempotent, so a rerun once the winner has finished short-circuits cleanly. Only that
+   * family of failures is expected, but nothing distinguishes it reliably from the storage's
+   * wrapped errors, so every failure is retried; the bound keeps a store that is really down from
+   * hanging the boot, and every attempt logs its cause so an outage stays visible.
+   *
+   * <p>Package-private, taking the admin as a supplier, so a test can drive it with a mocked admin
+   * and no pause: ScalarDB's {@code TransactionFactory} is final and needs a live database.
+   *
+   * @param admins produces a fresh admin per attempt; each is closed after use
+   * @param retryMillis the pause between attempts
+   * @throws SagaPersistenceException if every attempt fails, or the pause is interrupted
+   */
+  static void createSchema(Supplier<DistributedTransactionAdmin> admins, long retryMillis) {
+    for (int attempt = 1; ; attempt++) {
+      Exception failure;
+      try (DistributedTransactionAdmin admin = admins.get()) {
+        admin.createCoordinatorTables(true);
+        SagaSchema.createAll(admin);
+        return;
+      } catch (Exception e) {
+        failure = e;
+      }
+      if (attempt >= SCHEMA_CREATE_ATTEMPTS) {
+        throw SagaPersistenceException.storeUnavailable(failure);
+      }
+      logger.warn(
+          "Creating the saga schema failed (attempt {} of {}); retrying in {} ms",
+          attempt,
+          SCHEMA_CREATE_ATTEMPTS,
+          retryMillis,
+          failure);
+      try {
+        Thread.sleep(retryMillis);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw SagaPersistenceException.operationAborted(e);
+      }
     }
   }
 
