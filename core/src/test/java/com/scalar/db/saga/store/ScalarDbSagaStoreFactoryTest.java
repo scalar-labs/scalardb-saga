@@ -8,12 +8,17 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 import com.scalar.db.api.DistributedTransactionAdmin;
+import com.scalar.db.saga.definition.RetryPolicy;
 import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import java.util.Properties;
 import org.junit.jupiter.api.Test;
 
 class ScalarDbSagaStoreFactoryTest {
+
+  /** A 1 ms interval halves to zero, so every pause is a zero-length sleep. */
+  private static final RetryPolicy NO_PAUSE =
+      RetryPolicy.newBuilder().maxAttempts(3).initialIntervalMillis(1).maxIntervalMillis(1).build();
 
   /**
    * Nothing else validates the {@code scalar.db.saga.store.} namespace, so a removed key that is
@@ -49,7 +54,7 @@ class ScalarDbSagaStoreFactoryTest {
         .createCoordinatorTables(true);
 
     // Act
-    ScalarDbSagaStoreFactory.createSchema(() -> admin, 0);
+    ScalarDbSagaStoreFactory.createSchema(() -> admin, NO_PAUSE);
 
     // Assert
     verify(admin, times(2)).createCoordinatorTables(true);
@@ -65,13 +70,12 @@ class ScalarDbSagaStoreFactoryTest {
     doThrow(cause).when(admin).createCoordinatorTables(true);
 
     // Act & Assert
-    assertThatThrownBy(() -> ScalarDbSagaStoreFactory.createSchema(() -> admin, 0))
+    assertThatThrownBy(() -> ScalarDbSagaStoreFactory.createSchema(() -> admin, NO_PAUSE))
         .isInstanceOf(SagaPersistenceException.class)
         .hasCause(cause)
         .extracting(e -> ((SagaPersistenceException) e).getErrorCode())
         .isEqualTo(SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE);
-    verify(admin, times(ScalarDbSagaStoreFactory.SCHEMA_CREATE_ATTEMPTS))
-        .createCoordinatorTables(true);
+    verify(admin, times(NO_PAUSE.getMaxAttempts())).createCoordinatorTables(true);
   }
 
   /** A shutdown during the pause must not be swallowed into another attempt. */
@@ -83,11 +87,13 @@ class ScalarDbSagaStoreFactoryTest {
     doThrow(new IllegalArgumentException("DB-CORE-10050: The namespace already exists"))
         .when(admin)
         .createCoordinatorTables(true);
+    RetryPolicy longPause =
+        RetryPolicy.newBuilder().initialIntervalMillis(60_000).maxIntervalMillis(60_000).build();
     Thread.currentThread().interrupt();
 
     try {
       // Act & Assert
-      assertThatThrownBy(() -> ScalarDbSagaStoreFactory.createSchema(() -> admin, 60_000))
+      assertThatThrownBy(() -> ScalarDbSagaStoreFactory.createSchema(() -> admin, longPause))
           .isInstanceOf(SagaPersistenceException.class)
           .hasCauseInstanceOf(InterruptedException.class)
           .extracting(e -> ((SagaPersistenceException) e).getErrorCode())

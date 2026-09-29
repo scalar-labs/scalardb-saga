@@ -2,6 +2,7 @@ package com.scalar.db.saga.store;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.scalar.db.api.DistributedTransactionAdmin;
+import com.scalar.db.saga.definition.RetryPolicy;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.service.TransactionFactory;
 import java.util.Objects;
@@ -47,10 +48,17 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
 
   private static final String PROP_PREFIX = "scalar.db.saga.store.";
 
-  /** How many times {@link #createSchema} runs before giving up; see there for why it retries. */
-  static final int SCHEMA_CREATE_ATTEMPTS = 5;
-
-  private static final long SCHEMA_CREATE_RETRY_MILLIS = 3_000;
+  /**
+   * Boot-time schema creation: ten attempts, pausing from about half a second and doubling to a
+   * 15-second ceiling, roughly a minute of pauses in all. See {@link #createSchema} for why.
+   */
+  static final RetryPolicy SCHEMA_CREATE_RETRY =
+      RetryPolicy.newBuilder()
+          .maxAttempts(10)
+          .initialIntervalMillis(500)
+          .backoffMultiplier(2.0)
+          .maxIntervalMillis(15_000)
+          .build();
 
   private final TransactionFactory transactionFactory;
   private final ScalarDbSagaStoreConfig config;
@@ -82,7 +90,7 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
     ScalarDbSagaStoreConfig config = parseConfig(properties);
 
     TransactionFactory transactionFactory = TransactionFactory.create(properties);
-    createSchema(transactionFactory::getTransactionAdmin, SCHEMA_CREATE_RETRY_MILLIS);
+    createSchema(transactionFactory::getTransactionAdmin, SCHEMA_CREATE_RETRY);
     // Defense in depth against polymorphic-deserialization gadgets (off by default in Jackson 2.x).
     ObjectMapper objectMapper = new ObjectMapper().deactivateDefaultTyping();
     return new ScalarDbSagaStoreFactory(transactionFactory, config, objectMapper);
@@ -104,17 +112,26 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
    * here is idempotent, so a rerun once the winner has finished short-circuits cleanly. Only that
    * family of failures is expected, but nothing distinguishes it reliably from the storage's
    * wrapped errors, so every failure is retried; the bound keeps a store that is really down from
-   * hanging the boot. Each retried attempt logs its cause at WARN, and the last failure is the
-   * cause of the thrown exception, so an outage stays visible either way.
+   * hanging the boot. A retried attempt is the expected outcome of every multi-replica first boot,
+   * so it logs its cause at INFO with the stack at DEBUG; the last failure is the cause of the
+   * thrown exception, which the daemon reports at ERROR, so an outage stays visible either way.
    *
-   * <p>Package-private, taking the admin as a supplier, so a test can drive it with a mocked admin
-   * and no pause: ScalarDB's {@code TransactionFactory} is final and needs a live database.
+   * <p>The pauses back off with jitter so replicas that failed together do not retry together:
+   * losers that wake in the same instant race each other on the tables the winner has not reached
+   * yet, and one that grabs a table fails the winner's pass as well. {@link #SCHEMA_CREATE_RETRY}
+   * is sized for backends whose table creation blocks until the table is ready, DynamoDB above all,
+   * where a six-table pass keeps the winner busy for the better part of a minute.
+   *
+   * <p>Package-private, taking the admin as a supplier and the policy as a parameter, so a test can
+   * drive it with a mocked admin and no pause: ScalarDB's {@code TransactionFactory} is final and
+   * needs a live database.
    *
    * @param admins produces a fresh admin per attempt; each is closed after use
-   * @param retryMillis the pause between attempts
-   * @throws SagaPersistenceException if every attempt fails, or the pause is interrupted
+   * @param retry how many attempts to make, and how long to pause between them
+   * @throws SagaPersistenceException if every attempt fails, or a pause is interrupted
    */
-  static void createSchema(Supplier<DistributedTransactionAdmin> admins, long retryMillis) {
+  static void createSchema(Supplier<DistributedTransactionAdmin> admins, RetryPolicy retry) {
+    long interval = retry.getInitialIntervalMillis();
     for (int attempt = 1; ; attempt++) {
       Exception failure;
       try (DistributedTransactionAdmin admin = admins.get()) {
@@ -124,17 +141,18 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
       } catch (Exception e) {
         failure = e;
       }
-      if (attempt >= SCHEMA_CREATE_ATTEMPTS) {
+      if (attempt >= retry.getMaxAttempts()) {
         throw SagaPersistenceException.storeUnavailable(failure);
       }
-      logger.warn(
-          "Creating the saga schema failed (attempt {} of {}); retrying in {} ms",
+      logger.info(
+          "Creating the saga schema failed (attempt {} of {}); retrying within {} ms: {}",
           attempt,
-          SCHEMA_CREATE_ATTEMPTS,
-          retryMillis,
-          failure);
+          retry.getMaxAttempts(),
+          interval,
+          failure.toString());
+      logger.debug("Schema creation failure detail", failure);
       try {
-        Thread.sleep(retryMillis);
+        interval = retry.sleepWithBackoff(interval);
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
         throw SagaPersistenceException.operationAborted(e);
