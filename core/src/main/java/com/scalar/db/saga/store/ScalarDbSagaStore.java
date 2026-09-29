@@ -33,7 +33,6 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -278,17 +277,58 @@ public final class ScalarDbSagaStore implements SagaStore {
         "get definition " + sagaName + " " + definitionVersion);
   }
 
+  /**
+   * {@inheritDoc}
+   *
+   * <p>"Latest" is the version with the greatest {@code registered_at}; see {@link
+   * #newestRegistration} for how a tie resolves and why that is accepted.
+   */
   @Override
   public Optional<SagaDefinition> getDefinition(String sagaName) {
     return runInTransaction(
-        tx -> {
-          List<Result> results = tx.scan(buildDefinitionScan(sagaName));
-          return results.stream()
-              .max(Comparator.comparing(r -> r.getTimestampTZ("registered_at")))
-              .map(r -> definitionSerializer.deserialize(r.getText("definition_json")));
-        },
+        tx ->
+            newestRegistration(tx.scan(buildDefinitionScan(sagaName)))
+                .map(r -> definitionSerializer.deserialize(r.getText("definition_json"))),
         null, // read-only
         "get latest definition " + sagaName);
+  }
+
+  /**
+   * The row with the greatest {@code registered_at}, which is what "latest version" means for this
+   * store. The one place that ranks definition rows, so the lookup and the stamp that feeds it
+   * cannot disagree.
+   *
+   * <p>Equal stamps can only come from two replicas registering different versions of the same saga
+   * in the same millisecond: a single replica always stamps strictly after every row it can see
+   * ({@link #monotonicStamp}). On a tie the first row in clustering-key order wins, which is the
+   * lexicographically smallest version string. That is accepted rather than broken by a secondary
+   * key: versions are free-form text, so no order on them means anything, and the version that
+   * loses the tie stays registered and startable by version.
+   *
+   * <p>A row with no stamp is corrupt, not old: this store has written {@code registered_at} on
+   * every insert since the table existed. Such a row fails the read as a deserialization failure
+   * rather than being ranked somewhere arbitrary, and it fails whether or not it is the only row.
+   */
+  private static Optional<Result> newestRegistration(List<Result> rows) {
+    Result newest = null;
+    Instant newestAt = null;
+    for (Result row : rows) {
+      Instant at = registeredAt(row);
+      if (newestAt == null || at.isAfter(newestAt)) {
+        newest = row;
+        newestAt = at;
+      }
+    }
+    return Optional.ofNullable(newest);
+  }
+
+  private static Instant registeredAt(Result row) {
+    Instant registeredAt = row.getTimestampTZ("registered_at");
+    if (registeredAt == null) {
+      throw SagaPersistenceException.deserializationFailed(
+          new IllegalStateException("saga_definitions row has no registered_at"));
+    }
+    return registeredAt;
   }
 
   // ---------------------------------------------------------------------------
@@ -1609,13 +1649,10 @@ public final class ScalarDbSagaStore implements SagaStore {
     // later, then persist as the same millisecond and tie it — leaving the ordering this method
     // exists to guarantee up to whichever row the latest-version scan happens to see first.
     Instant now = nowSupplier.get().truncatedTo(ChronoUnit.MILLIS);
-    Instant latest = null;
-    for (Result row : tx.scan(buildDefinitionScan(name))) {
-      Instant registeredAt = row.getTimestampTZ("registered_at");
-      if (registeredAt != null && (latest == null || registeredAt.isAfter(latest))) {
-        latest = registeredAt;
-      }
-    }
+    Instant latest =
+        newestRegistration(tx.scan(buildDefinitionScan(name)))
+            .map(ScalarDbSagaStore::registeredAt)
+            .orElse(null);
     if (latest == null || now.isAfter(latest)) {
       return now;
     }
