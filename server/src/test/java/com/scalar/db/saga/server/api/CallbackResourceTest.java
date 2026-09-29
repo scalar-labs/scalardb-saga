@@ -51,9 +51,12 @@ class CallbackResourceTest {
   }
 
   private Javalin startApp(long maxAgeSeconds, Clock clock) {
-    Javalin a = Javalin.create();
-    ErrorMapper.register(a);
-    CallbackResource.register(a, orchestrator, SECRET, maxAgeSeconds, clock);
+    Javalin a =
+        Javalin.create(
+            cfg -> {
+              ErrorMapper.register(cfg.routes);
+              CallbackResource.register(cfg.routes, orchestrator, SECRET, maxAgeSeconds, clock);
+            });
     // Loopback, not the wildcard: a wildcard bind can share a port with another suite's
     // loopback server, which then takes the connection and answers this test's requests.
     a.start("127.0.0.1", 0);

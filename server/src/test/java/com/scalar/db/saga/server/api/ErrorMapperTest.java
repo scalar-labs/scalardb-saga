@@ -68,59 +68,64 @@ class ErrorMapperTest {
 
   @BeforeEach
   void setUp() {
-    app = Javalin.create();
-    ErrorMapper.register(app);
-    app.get(
-        "/bad-request",
-        ctx -> {
-          throw new BadRequestResponse();
-        });
-    app.get(
-        "/boom",
-        ctx -> {
-          throw new RuntimeException("internal detail");
-        });
-    app.get(
-        "/auth-unavailable",
-        ctx -> {
-          throw new SagaAuthUnavailableException("jwks unreachable", new RuntimeException());
-        });
-    app.get(
-        "/persist-transient",
-        ctx -> {
-          throw SagaPersistenceException.storeUnavailable(
-              new RuntimeException("db down on secret_table"));
-        });
-    app.get(
-        "/persist-permanent",
-        ctx -> {
-          throw SagaPersistenceException.serializationFailed(
-              new RuntimeException("bad json for secret_table"));
-        });
-    app.get(
-        "/not-found-typed",
-        ctx -> {
-          throw new SagaNotFoundException("s-404");
-        });
-    app.get(
-        "/throw-dispatch",
-        ctx -> {
-          throw toThrow;
-        });
-    app.get(
-        "/bad-metadata",
-        ctx -> {
-          // Constructing it is the failure: SagaRuntimeException validates the metadata against
-          // its code's schema in the constructor, so this throws IllegalArgumentException before
-          // any SagaRuntimeException exists to be thrown.
-          throw new SagaRuntimeException(SagaErrorCode.SAGA_NOT_FOUND, Map.of("wrong_key", "x"));
-        });
-    app.post(
-        "/read-body",
-        ctx -> {
-          ctx.body(); // triggers Javalin's request-size cap
-          ctx.status(200);
-        });
+    app =
+        Javalin.create(
+            cfg -> {
+              ErrorMapper.register(cfg.routes);
+              cfg.routes.get(
+                  "/bad-request",
+                  ctx -> {
+                    throw new BadRequestResponse();
+                  });
+              cfg.routes.get(
+                  "/boom",
+                  ctx -> {
+                    throw new RuntimeException("internal detail");
+                  });
+              cfg.routes.get(
+                  "/auth-unavailable",
+                  ctx -> {
+                    throw new SagaAuthUnavailableException(
+                        "jwks unreachable", new RuntimeException());
+                  });
+              cfg.routes.get(
+                  "/persist-transient",
+                  ctx -> {
+                    throw SagaPersistenceException.storeUnavailable(
+                        new RuntimeException("db down on secret_table"));
+                  });
+              cfg.routes.get(
+                  "/persist-permanent",
+                  ctx -> {
+                    throw SagaPersistenceException.serializationFailed(
+                        new RuntimeException("bad json for secret_table"));
+                  });
+              cfg.routes.get(
+                  "/not-found-typed",
+                  ctx -> {
+                    throw new SagaNotFoundException("s-404");
+                  });
+              cfg.routes.get(
+                  "/throw-dispatch",
+                  ctx -> {
+                    throw toThrow;
+                  });
+              cfg.routes.get(
+                  "/bad-metadata",
+                  ctx -> {
+                    // Constructing it is the failure: SagaRuntimeException validates the metadata
+                    // against its code's schema in the constructor, so this throws
+                    // IllegalArgumentException before any SagaRuntimeException exists to be thrown.
+                    throw new SagaRuntimeException(
+                        SagaErrorCode.SAGA_NOT_FOUND, Map.of("wrong_key", "x"));
+                  });
+              cfg.routes.post(
+                  "/read-body",
+                  ctx -> {
+                    ctx.body(); // triggers Javalin's request-size cap
+                    ctx.status(200);
+                  });
+            });
     // Loopback, not the wildcard: a wildcard bind can share a port with another suite's
     // loopback server, which then takes the connection and answers this test's requests.
     app.start("127.0.0.1", 0);

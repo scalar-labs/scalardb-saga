@@ -1,10 +1,10 @@
 package com.scalar.db.saga.server.security;
 
-import io.javalin.Javalin;
 import io.javalin.http.Context;
 import io.javalin.http.HandlerType;
 import io.javalin.http.Header;
 import io.javalin.http.HttpStatus;
+import io.javalin.router.JavalinDefaultRoutingApi;
 import java.util.Objects;
 
 /**
@@ -72,20 +72,20 @@ public final class SagaSecurityHandler {
   }
 
   /**
-   * Registers the RBAC handler on the given app.
+   * Registers the RBAC handler on the given routing configuration.
    *
-   * @param app the Javalin app
+   * @param routes the routing configuration the server is created with
    * @param provider the security provider that authenticates requests
    */
-  public static void register(Javalin app, SagaSecurityProvider provider) {
-    Objects.requireNonNull(app, "app must not be null");
+  public static void register(JavalinDefaultRoutingApi routes, SagaSecurityProvider provider) {
+    Objects.requireNonNull(routes, "routes must not be null");
     Objects.requireNonNull(provider, "provider must not be null");
     SagaSecurityHandler handler = new SagaSecurityHandler(provider);
-    app.beforeMatched(handler::handle);
+    routes.beforeMatched(handler::handle);
   }
 
   private void handle(Context ctx) {
-    if (ctx.method() == HandlerType.HEAD && ctx.routeRoles().isEmpty()) {
+    if (HandlerType.HEAD.equals(ctx.method()) && ctx.routeRoles().isEmpty()) {
       // HEAD to a GET-only route: Javalin routes it here with the empty resource-handler role set.
       // The route exists (beforeMatched runs for HEAD only when a GET handler is registered at the
       // path), we just do not serve HEAD on it — answer 405 rather than letting fromRouteRoles

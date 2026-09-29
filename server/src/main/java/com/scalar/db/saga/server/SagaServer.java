@@ -25,6 +25,7 @@ import io.grpc.ServerServiceDefinition;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.protobuf.services.HealthStatusManager;
 import io.javalin.Javalin;
+import io.javalin.router.JavalinDefaultRoutingApi;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
@@ -40,6 +41,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 import org.eclipse.jetty.http.HttpVersion;
 import org.eclipse.jetty.server.HttpConfiguration;
 import org.eclipse.jetty.server.HttpConnectionFactory;
@@ -173,13 +175,8 @@ public final class SagaServer implements AutoCloseable {
     // an executor it was handed, and close() must be able to wait for handler bodies.
     ExecutorService httpVirtualThreads =
         config.httpEnabled() ? Executors.newVirtualThreadPerTaskExecutor() : null;
-    Javalin httpServer =
-        httpVirtualThreads == null
-            ? null
-            : createHttpServer(config, tlsMaterial, httpVirtualThreads);
     ExecutorService grpcExecutor =
         config.grpcEnabled() ? Executors.newVirtualThreadPerTaskExecutor() : null;
-    this.httpServer = httpServer;
     this.httpVirtualThreads = httpVirtualThreads;
     this.grpcExecutor = grpcExecutor;
     this.rateLimiter =
@@ -239,9 +236,12 @@ public final class SagaServer implements AutoCloseable {
               ? new SagaConfigReloadManager(configReconciler, config.reloadConfig())
               : null;
       this.reloadManager = manager;
-      if (httpServer != null) {
-        registerRoutes(httpServer);
-      }
+      // Built here rather than with the executors above: Javalin takes its routes at creation, and
+      // the routes need the security provider, the limiter and the orchestrator wired first.
+      this.httpServer =
+          httpVirtualThreads == null
+              ? null
+              : createHttpServer(config, tlsMaterial, httpVirtualThreads, this::registerRoutes);
       if (grpcExecutor != null) {
         HealthStatusManager health = new HealthStatusManager();
         this.grpcHealth = health;
@@ -428,16 +428,23 @@ public final class SagaServer implements AutoCloseable {
    * <p>Second, because handlers now block on virtual threads, store I/O on the request path can pin
    * a carrier with a natively-blocking driver; see {@code todos/070} (Java 25) and {@code
    * todos/071} (the store bulkhead).
+   *
+   * <p>{@code routes} registers the routes and handlers. Javalin takes them while the server is
+   * created rather than on the built server, so the caller has to have everything the routes depend
+   * on in hand before calling this.
    */
   // Package-private for testing that handlers really land on virtual threads, without booting a
   // server; the same reason grpcDrainMillis() is. A silent revert to platform threads would leave
   // the daemon healthy and this fix inert, so it is worth a direct assertion.
   static Javalin createHttpServer(
-      SagaServerConfig config, @Nullable TlsMaterial tls, ExecutorService virtualThreads) {
+      SagaServerConfig config,
+      @Nullable TlsMaterial tls,
+      ExecutorService virtualThreads,
+      Consumer<JavalinDefaultRoutingApi> routes) {
     int queueCap = config.httpMaxQueuedRequests();
-    // A fixed-capacity queue (initial == growBy == max == cap): it never grows past the cap, so the
-    // backlog is memory-bounded and the pool rejects further work once threads and queue are full.
-    BlockingArrayQueue<Runnable> jobQueue = new BlockingArrayQueue<>(queueCap, queueCap, queueCap);
+    // A fixed-capacity queue: it never grows past the cap, so the backlog is memory-bounded and
+    // the pool rejects further work once threads and queue are full.
+    BlockingArrayQueue<Runnable> jobQueue = new BlockingArrayQueue<>(queueCap);
     return Javalin.create(
         cfg -> {
           QueuedThreadPool threadPool =
@@ -456,6 +463,7 @@ public final class SagaServer implements AutoCloseable {
             cfg.jetty.addConnector(
                 (server, httpConfig) -> tlsConnector(server, httpConfig, config, tls));
           }
+          routes.accept(cfg.routes);
         });
   }
 
@@ -495,12 +503,12 @@ public final class SagaServer implements AutoCloseable {
     return connector;
   }
 
-  private void registerRoutes(Javalin httpServer) {
+  private void registerRoutes(JavalinDefaultRoutingApi routes) {
     // The RBAC handler authenticates every matched route according to the SagaOperation the route
     // declares; the two routes that carry no caller credential (the liveness probe, and the
     // async-callback route with its own per-step HMAC) are tagged with an auth-exempt operation
     // rather than listed here, so a route's policy travels with its registration.
-    SagaSecurityHandler.register(httpServer, securityProvider);
+    SagaSecurityHandler.register(routes, securityProvider);
     // Rate limiting runs after auth (it keys off the resolved principal) and only when enabled.
     // Both
     // are beforeMatched handlers, and this registration order is what puts the limiter after the
@@ -509,17 +517,17 @@ public final class SagaServer implements AutoCloseable {
     // is
     // per caller, not per port.
     if (rateLimiter != null) {
-      RateLimitHandler.register(httpServer, rateLimiter);
+      RateLimitHandler.register(routes, rateLimiter);
     }
-    HealthResource.register(httpServer);
-    ErrorMapper.register(httpServer);
+    HealthResource.register(routes);
+    ErrorMapper.register(routes);
     SagaResource.register(
-        httpServer,
+        routes,
         orchestrator,
         config.syncWaitBoundMillis(Long.MAX_VALUE),
         shutdownSignal,
         waiterRegistry);
-    SagaAdminResource.register(httpServer, orchestrator, adminDriveDeadlineMillis());
+    SagaAdminResource.register(routes, orchestrator, adminDriveDeadlineMillis());
     // The async-callback route exists only when a callback secret is configured; without it there
     // is nothing to authenticate callbacks against, so async completion is not enabled.
     config
@@ -527,7 +535,7 @@ public final class SagaServer implements AutoCloseable {
         .ifPresent(
             secret ->
                 CallbackResource.register(
-                    httpServer,
+                    routes,
                     orchestrator,
                     secret,
                     config.callbackMaxAgeSeconds(),
