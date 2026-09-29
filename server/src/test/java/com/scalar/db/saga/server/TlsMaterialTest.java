@@ -141,6 +141,24 @@ class TlsMaterialTest {
   }
 
   @Test
+  void load_certFileWithUnterminatedBlock_throwsMidWriteHint() throws IOException {
+    // Arrange — what a plain copy looks like when read mid-write: the leaf complete, the
+    // intermediate cut off. The leaf alone would validate against the key, so this is the one
+    // torn shape the key-match check cannot catch.
+    Path torn = dir.resolve("torn.crt");
+    Files.writeString(
+        torn, Files.readString(rsa.certChainPath()) + "-----BEGIN CERTIFICATE-----\nMIIDATCC\n");
+
+    // Act & Assert
+    assertThatThrownBy(() -> TlsMaterial.load(torn, rsa.privateKeyPath()))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY)
+        .hasMessageContaining("not terminated")
+        .hasMessageNotContaining("-----")
+        .hasNoCause();
+  }
+
+  @Test
   void load_certFileWithoutCertificateBlock_throws() throws IOException {
     Path notPem = dir.resolve("not-pem.crt");
     Files.writeString(notPem, "hello, this is not a certificate\n");

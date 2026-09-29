@@ -41,9 +41,9 @@ import org.slf4j.LoggerFactory;
  * public handshake material; PEM content and configured path values never are (see {@link
  * TlsMaterial}).
  *
- * <p>Not thread-safe, by design: after construction the pass state belongs to the reload
- * scheduler's single thread (or to a test driving the pass directly, in sequence). The key manager
- * publishes through a volatile write and is safe to hand to the transports.
+ * <p>The pass state belongs to the reload scheduler's single thread; {@link #run} is {@code
+ * synchronized} as a belt, so the synchronous test seam cannot interleave with a scheduled pass.
+ * The key manager publishes through a volatile write and is safe to hand to the transports.
  */
 final class TlsReloader {
 
@@ -76,7 +76,7 @@ final class TlsReloader {
   }
 
   /** One pass: re-read and re-validate, publish on change, keep serving on rejection. */
-  void run() {
+  synchronized void run() {
     TlsMaterial candidate;
     try {
       candidate = TlsMaterial.load(certChainPath, privateKeyPath);

@@ -116,9 +116,9 @@ final class SagaConfigReloadManager {
     } finally {
       if (!scheduler.isTerminated()) {
         logger.warn(
-            "A config reload pass was still running at the shutdown deadline and is being"
-                + " interrupted. A registration in flight may fail against the closing store; it"
-                + " is re-applied on the next start.");
+            "A reload pass was still running at the shutdown deadline and is being interrupted. A"
+                + " definition registration in flight may fail against the closing store; it is"
+                + " re-applied on the next start. A certificate pass in flight loses nothing.");
       }
       scheduler.shutdownNow();
     }

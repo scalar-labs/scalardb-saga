@@ -42,8 +42,8 @@ import java.util.regex.Pattern;
  * log. The operator resolves key to path in their own configuration file. Key material makes the
  * usual redaction rule absolute: the parse exceptions embed raw input, so none are propagated as
  * causes. Certificate <em>metadata</em> (validity dates) is the deliberate exception — the
- * certificate is public material presented to every client on handshake, so the expiry warning may
- * name its dates.
+ * certificate is public material presented to every client on handshake, so {@link TlsReloader}'s
+ * validity warnings may name its dates.
  */
 final class TlsMaterial {
 
@@ -51,6 +51,7 @@ final class TlsMaterial {
   // subject= and issuer= comment lines) cannot trip the underlying parsers.
   private static final Pattern CERT_BLOCK =
       Pattern.compile("-----BEGIN CERTIFICATE-----([A-Za-z0-9+/=\\s]*)-----END CERTIFICATE-----");
+  private static final Pattern CERT_BEGIN = Pattern.compile("-----BEGIN CERTIFICATE-----");
   private static final Pattern KEY_BLOCK =
       Pattern.compile(
           "-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----([A-Za-z0-9+/=\\s]*)-----END \\1-----");
@@ -168,6 +169,16 @@ final class TlsMaterial {
             SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY,
             "whose CERTIFICATE block does not parse as an X.509 certificate.");
       }
+    }
+    // A BEGIN the loop skipped is a block with no END: the shape a non-atomic writer leaves when
+    // the file is read mid-write, with the leaf complete and an intermediate cut short. Publishing
+    // what did parse would serve a chain missing its intermediates until the next pass; rejecting
+    // it costs one interval instead. A kubelet symlink flip never produces this; a plain copy can.
+    if (CERT_BEGIN.matcher(pem).results().count() != chain.size()) {
+      throw badFile(
+          SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY,
+          "containing a CERTIFICATE block that is not terminated. If a rotation is in progress the"
+              + " next reload pass picks up the complete file; otherwise the file is truncated.");
     }
     if (chain.isEmpty()) {
       if (KEY_BLOCK.matcher(pem).find()) {

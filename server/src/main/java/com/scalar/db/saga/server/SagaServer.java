@@ -454,7 +454,7 @@ public final class SagaServer implements AutoCloseable {
   // the daemon healthy and this fix inert, so it is worth a direct assertion.
   static Javalin createHttpServer(
       SagaServerConfig config,
-      @Nullable KeyManager tls,
+      @Nullable KeyManager keyManager,
       ExecutorService virtualThreads,
       Consumer<JavalinDefaultRoutingApi> routes) {
     int queueCap = config.httpMaxQueuedRequests();
@@ -473,11 +473,11 @@ public final class SagaServer implements AutoCloseable {
           // handler body ends up on a virtual thread while the pool keeps its bounded queue.
           threadPool.setVirtualThreadsExecutor(virtualThreads);
           cfg.jetty.threadPool = threadPool;
-          if (tls != null) {
+          if (keyManager != null) {
             // Registering any connector suppresses Javalin's default plaintext one (it is created
             // only when the connector list is empty), so TLS-on cannot leak a plaintext listener.
             cfg.jetty.addConnector(
-                (server, httpConfig) -> tlsConnector(server, httpConfig, config, tls));
+                (server, httpConfig) -> tlsConnector(server, httpConfig, config, keyManager));
           }
           routes.accept(cfg.routes);
         });
@@ -498,9 +498,9 @@ public final class SagaServer implements AutoCloseable {
       org.eclipse.jetty.server.Server server,
       HttpConfiguration baseConfig,
       SagaServerConfig config,
-      KeyManager tls) {
+      KeyManager keyManager) {
     SslContextFactory.Server sslContextFactory = new SslContextFactory.Server();
-    sslContextFactory.setSslContext(sslContextOver(tls));
+    sslContextFactory.setSslContext(sslContextOver(keyManager));
     // Copy before mutating: Javalin hands the same HttpConfiguration instance to every connector
     // callback and would back a default connector with it too.
     HttpConfiguration httpsConfig = new HttpConfiguration(baseConfig);
