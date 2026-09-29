@@ -7,10 +7,12 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.io.Reader;
 import java.io.StringWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Properties;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
@@ -535,14 +537,20 @@ class SagaServerCommandTest {
       writeService("account", "base_url=http://account:8080\n");
       StringWriter out = new StringWriter();
 
-      // Act
-      int exitCode = validate(out, writeConfig());
+      Path config = writeConfig();
 
-      // Assert
+      // Act
+      int exitCode = validate(out, config);
+
+      // Assert — the exact message the boot guard raises for this same configuration, so the two
+      // cannot drift apart in wording
+      Properties properties = new Properties();
+      try (Reader reader = Files.newBufferedReader(config)) {
+        properties.load(reader);
+      }
       assertThat(exitCode).isEqualTo(1);
       assertThat(out.toString())
-          .contains("No saga definitions registered")
-          .contains(SagaServerConfig.DEFINITIONS_PATH_KEY);
+          .contains(SagaServer.noDefinitionsMessage(SagaServerConfig.load(properties)));
     }
 
     @Test

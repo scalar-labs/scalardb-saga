@@ -34,9 +34,10 @@ keys of each provider.
 Mounted there, the two directories need no keys: `definitions_path` and `services_path` default to
 `/scalardb-saga/conf/definitions` and `/scalardb-saga/conf/services` whenever those directories
 exist, so a Deployment declares each mount once instead of repeating the path in a ConfigMap. Set a
-key only to read from somewhere else, or outside this image, where those directories do not exist
-and both keys are required. A path you set must exist; an absent default simply means nothing is
-mounted, and for definitions the boot refusal then names the directory it looked in.
+key only to read from somewhere else, or outside this image, where those directories do not exist:
+there, set `definitions_path`, and `services_path` if you use services. A path you set must exist;
+an absent default simply means nothing is mounted, and for definitions the boot refusal then names
+the directory it looked in.
 
 Daemon mode is **declarative-only**: a definition naming a code step (`stepClass`) is rejected at
 startup, because an operator cannot add classes to this image. Use a declarative service step, or embed
@@ -57,11 +58,9 @@ service files the same references work, but `${file:...}` must resolve inside `s
 the secrets mounted for that purpose. Keys under plain `scalar.db.*` are resolved by ScalarDB, which
 supports `${env:...}` but **not** `${file:...}`.
 
-The same references keep a Deployment from restating its own mount paths. Any deployment-coupled
-value — a TLS path, the callback base URL, a directory mounted somewhere unconventional — can be
-written as `${env:NAME}` in `server.properties` and set next to the mount in the Deployment, so the
-two cannot drift. On image versions without the path defaults above, that is also the way to stop
-`definitions_path` and `services_path` from being written twice.
+The same `${env:NAME}` reference is how a Deployment avoids restating its own mount paths for any
+deployment-coupled value, a TLS path or the callback base URL, say: set the variable next to the
+mount in the Deployment, and the two cannot drift.
 
 | Variable | Effect |
 | --- | --- |

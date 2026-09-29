@@ -853,8 +853,8 @@ class SagaServerConfigTest {
   }
 
   @Test
-  void load_reloadKeysUnset_defaultsApply() {
-    ReloadConfig reload = SagaServerConfig.load(new Properties()).reloadConfig();
+  void load_reloadKeysUnset_defaultsApply(@TempDir Path conf) {
+    ReloadConfig reload = SagaServerConfig.load(new Properties(), null, conf).reloadConfig();
 
     assertThat(reload.servicesPath()).isNull();
     assertThat(reload.intervalSeconds())
