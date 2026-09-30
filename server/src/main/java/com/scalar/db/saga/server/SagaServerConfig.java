@@ -149,11 +149,13 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code shutdown.mode} — {@code WAIT_CURRENT_STEP} (default) finishes the running step and
  *       stops between steps, leaving the saga for recovery; {@code WAIT_ALL_SAGAS} waits for
  *       in-flight sagas to reach a terminal state
- *   <li>{@code shutdown.timeout_millis} — ceiling (ms) on that drain (default {@value
- *       #DEFAULT_SHUTDOWN_TIMEOUT_MILLIS}). It is the second of the two shutdown windows the daemon
- *       spends in sequence; budget a container's termination grace period for their sum. {@code 0}
- *       drains nothing: in-flight work is cancelled at once and left for the recovery scan, which
- *       trades shutdown latency for reclaim latency on the next boot
+ *   <li>{@code shutdown.timeout_millis} — the budget (ms) for the whole drain (default {@value
+ *       #DEFAULT_SHUTDOWN_TIMEOUT_MILLIS}): one deadline, computed once, that the reload stop, both
+ *       transport drains and the saga drain spend in turn. The first three share at most half of it
+ *       and never more than 15s, with the transports draining side by side; the saga drain gets the
+ *       rest. Size a container's termination grace period above this value. {@code 0} drains
+ *       nothing: in-flight requests are dropped, in-flight work is cancelled at once and left for
+ *       the recovery scan, which trades shutdown latency for reclaim latency on the next boot
  * </ul>
  *
  * <h2>Saga detail reads ({@code detail.*})</h2>
