@@ -42,7 +42,10 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Properties;
+import java.util.concurrent.BrokenBarrierException;
+import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -752,22 +755,23 @@ class SagaServerTest {
   }
 
   @Test
-  void drainConcurrently_bothDrainsBlock_elapsedIsTheLongerNotTheSum() {
-    // Arrange — two drains of 400ms each: sequenced they would cost 800ms
-    AtomicBoolean blockingRan = new AtomicBoolean();
-    AtomicBoolean inlineRan = new AtomicBoolean();
-    Runnable blocking = () -> sleepMillis(400, blockingRan);
-    Runnable inline = () -> sleepMillis(400, inlineRan);
+  void drainConcurrently_bothDrainsBlock_theyRunAtTheSameTime() {
+    // Arrange — each drain waits at a barrier the other must also reach: sequenced, the first
+    // would wait alone until its timeout and never pass, so passing proves they overlapped without
+    // a wall-clock threshold a busy CI runner could miss
+    CyclicBarrier bothEntered = new CyclicBarrier(2);
+    AtomicBoolean blockingPassed = new AtomicBoolean();
+    AtomicBoolean inlinePassed = new AtomicBoolean();
+    Runnable blocking = () -> awaitBarrier(bothEntered, blockingPassed);
+    Runnable inline = () -> awaitBarrier(bothEntered, inlinePassed);
 
     // Act
-    long startNanos = System.nanoTime();
-    SagaServer.drainConcurrently(blocking, inline, startNanos + TimeUnit.SECONDS.toNanos(5));
-    long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+    SagaServer.drainConcurrently(
+        blocking, inline, System.nanoTime() + TimeUnit.SECONDS.toNanos(10));
 
-    // Assert — both ran, and together they cost about one of them, not two
-    assertThat(blockingRan).isTrue();
-    assertThat(inlineRan).isTrue();
-    assertThat(elapsedMillis).isBetween(400L, 700L);
+    // Assert
+    assertThat(blockingPassed).isTrue();
+    assertThat(inlinePassed).isTrue();
   }
 
   @Test
@@ -785,6 +789,17 @@ class SagaServerTest {
     // Assert — the caller is released at the deadline and the straggler is left to itself
     assertThat(elapsedMillis).isBetween(300L, 2_000L);
     assertThat(blockingRan).isFalse();
+  }
+
+  private static void awaitBarrier(CyclicBarrier barrier, AtomicBoolean passed) {
+    try {
+      barrier.await(5, TimeUnit.SECONDS);
+      passed.set(true);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    } catch (BrokenBarrierException | TimeoutException e) {
+      // Left unset: the other drain never arrived, so the two did not overlap.
+    }
   }
 
   private static void sleepMillis(long millis, AtomicBoolean done) {

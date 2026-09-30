@@ -360,9 +360,9 @@ Operational notes, learned from how Kubernetes actually delivers files:
 The JVM is PID 1 and receives `SIGTERM` directly, which triggers a drain rather than dropping
 in-flight work.
 
-**The whole drain is bounded by `shutdown.timeout_millis`**, 30s by default, plus a small constant
-for the final steps that run outside it. `close()` computes one deadline when it starts, and every
-phase spends what is left of it rather than starting a clock of its own:
+**The whole drain is bounded by `shutdown.timeout_millis`**, 30s by default, plus a tail for the
+final steps that run outside it. `close()` computes one deadline when it starts, and every phase
+spends what is left of it rather than starting a clock of its own:
 
 - **First, at once:** every synchronous start that is waiting on its saga is woken and answered
   `202`, because a terminating server cannot advance the saga anyway. This is what makes a typical
@@ -380,13 +380,16 @@ phase spends what is left of it rather than starting a clock of its own:
   needs a budget sized to your longest saga, doubled, since up to half of it may go to the front
   slice.
 - **After the deadline, always:** each saga still active is marked for recovery, one store write
-  each, and the store is closed. That is the small constant.
+  each, and the store is closed. That is the tail: normally milliseconds, but it is one sequential
+  write per saga that was still mid-step at the deadline, so it grows with that count and with
+  store latency rather than staying constant.
 
-Worst case at defaults is therefore the 30s budget plus that constant; the typical case is about a
-second. Size `terminationGracePeriodSeconds` above the budget, with a few seconds to spare for
-SIGTERM delivery and JVM exit: with Kubernetes' own 30s default grace period, set the budget to
-about 20s, or raise the grace period to 60s and keep the default. A `preStop` delay for
-load-balancer deregistration comes out of the same grace period.
+Worst case at defaults is therefore the 30s budget plus that tail; the typical case is about a
+second. Size `terminationGracePeriodSeconds` above the budget with headroom for the tail, SIGTERM
+delivery and JVM exit: a few seconds is enough unless many sagas run at once against a slow store,
+in which case allow for one write per in-flight saga. With Kubernetes' own 30s default grace
+period, set the budget to about 20s, or raise the grace period to 60s and keep the default. A
+`preStop` delay for load-balancer deregistration comes out of the same grace period.
 
 `shutdown.timeout_millis=0` drains nothing at all: in-flight requests are dropped rather than
 answered, and in-flight work is cancelled and left for the recovery scan. That trades shutdown

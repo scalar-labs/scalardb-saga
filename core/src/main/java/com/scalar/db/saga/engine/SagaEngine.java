@@ -290,23 +290,27 @@ public class SagaEngine implements AutoCloseable {
   }
 
   /**
-   * Initiates graceful shutdown: waits up to {@code waitMillis}, on this engine's clock, for active
-   * sagas to finish per the shutdown mode, then marks whatever is still active for recovery. The
-   * caller hands in what is left of a budget it owns, so a server can bound its whole shutdown by
-   * one deadline instead of this engine starting a clock of its own. The wait is the optional part
-   * of the drain; the mark is the necessary one, and it runs even when {@code waitMillis} is zero
-   * or already spent: it is one store write per saga, the store is still open here, and skipping it
-   * would cost each saga a full staleness threshold before recovery noticed it.
+   * Initiates graceful shutdown: waits up to {@code waitMillis} for active sagas to finish per the
+   * shutdown mode, then marks whatever is still active for recovery. The caller hands in what is
+   * left of a budget it owns, so a server can bound its whole shutdown by one deadline instead of
+   * this engine starting a clock of its own. The wait is measured with monotonic time, not the
+   * injected clock: that clock stamps saga events and may be stepped by an operator or NTP, and a
+   * step must neither stretch the drain past the caller's deadline nor cut it short. The wait is
+   * the optional part of the drain; the mark is the necessary one, and it runs even when {@code
+   * waitMillis} is zero or already spent: it is one store write per saga, the store is still open
+   * here, and skipping it would cost each saga a full staleness threshold before recovery noticed
+   * it.
    */
   void shutdown(long waitMillis) {
     synchronized (shutdownLock) {
       shuttingDown = true;
     }
 
-    long deadline = clock.millis() + Math.max(0L, waitMillis);
+    long deadlineNanos =
+        System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(Math.max(0L, waitMillis));
 
     while (!activeSagas.isEmpty()) {
-      long remaining = deadline - clock.millis();
+      long remaining = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
       if (remaining <= 0) {
         break;
       }
