@@ -80,8 +80,12 @@ import org.slf4j.bridge.SLF4JBridgeHandler;
 public final class SagaServer implements AutoCloseable {
 
   private static final Logger logger = LoggerFactory.getLogger(SagaServer.class);
-  private static final long DRAIN_MIN_SECONDS = 30L;
-  private static final long DRAIN_SLACK_MILLIS = 5_000L;
+  // The most of the shutdown budget the front phase (reload stop and both transport drains) may
+  // take before the saga drain gets the rest: half of it, and never more than this. After the
+  // wake-all at the top of close() a transport drain costs one store read and one response write
+  // per in-flight request, so 15s reads as "the store is stuck", not as a normal cost; the saga
+  // drain is the phase whose work cannot be redone cheaply, so it holds the reserve.
+  private static final long FRONT_PHASE_MAX_MILLIS = 15_000L;
   private static final long THREAD_POOL_IDLE_TIMEOUT_MILLIS = 60_000L;
   private static final long RATE_LIMIT_WINDOW_MILLIS = 60_000L;
 
@@ -92,9 +96,8 @@ public final class SagaServer implements AutoCloseable {
    * milliseconds unless the store is slow — whereas the drain that follows needs the rest. A pass
    * still running when this elapses is interrupted, which the manager logs.
    */
-  private static final long RELOAD_DRAIN_MILLIS = 5_000L;
-
   private final SagaServerConfig config;
+
   private final DefaultSagaOrchestrator orchestrator;
   // Shared by the engine, which notifies it, and both transports, whose waiters register on it.
   private final SagaWaiterRegistry waiterRegistry;
@@ -430,7 +433,7 @@ public final class SagaServer implements AutoCloseable {
    * todos/071} (the store bulkhead).
    */
   // Package-private for testing that handlers really land on virtual threads, without booting a
-  // server; the same reason grpcDrainMillis() is. A silent revert to platform threads would leave
+  // server; the same reason frontPhaseMillis() is. A silent revert to platform threads would leave
   // the daemon healthy and this fix inert, so it is worth a direct assertion.
   static Javalin createHttpServer(
       SagaServerConfig config, @Nullable TlsMaterial tls, ExecutorService virtualThreads) {
@@ -538,8 +541,8 @@ public final class SagaServer implements AutoCloseable {
    * The bound on a single-saga admin inline drive: the shared synchronous-wait bound, with no
    * caller-supplied cap. Past the bound the durable transition is already recorded and the response
    * carries the saga's current state, so the bound only caps how long the request waits, never
-   * correctness. Deriving it from {@code sync.max_wait_millis} keeps the drive inside the shutdown
-   * drain window {@link #grpcDrainMillis()} derives from the same value.
+   * correctness. Deriving it from {@code sync.max_wait_millis} keeps it on the one wait bound every
+   * transport shares, and shutdown wakes it like any other bounded waiter.
    */
   private long adminDriveDeadlineMillis() {
     return config.syncWaitBoundMillis(Long.MAX_VALUE);
@@ -776,15 +779,15 @@ public final class SagaServer implements AutoCloseable {
     if (!closed.compareAndSet(false, true)) {
       return;
     }
-    // The shutdown budget, computed once: the reload stop and the saga drain take what is left of
-    // it rather than each starting a clock of its own, so an operator can size a termination grace
-    // period from shutdown.timeout_millis alone.
-    long deadlineNanos =
-        System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(config.shutdownTimeoutMillis());
-    // One deadline for the whole HTTP drain, shared by Jetty's stop and the executor backstop
-    // below. Giving the backstop a fresh full window would double-count it in an operator's grace
-    // period, and it is only ever reached after Jetty has already spent that window.
-    long httpDrainDeadlineNanos = System.nanoTime();
+    // The shutdown budget, computed once: every phase below takes what is left of it rather than
+    // starting a clock of its own, so an operator can size a termination grace period from
+    // shutdown.timeout_millis alone. The reload stop and the transport drains share a front slice
+    // of it (frontPhaseMillis); the saga drain gets whatever they leave, and at least the rest.
+    long startNanos = System.nanoTime();
+    long deadlineNanos = startNanos + TimeUnit.MILLISECONDS.toNanos(config.shutdownTimeoutMillis());
+    long frontDeadlineNanos =
+        startNanos
+            + TimeUnit.MILLISECONDS.toNanos(frontPhaseMillis(config.shutdownTimeoutMillis()));
     // Wake every bounded synchronous start before anything else: each one would otherwise hold its
     // request until its wait bound elapsed, and a terminating server cannot advance those sagas
     // anyway. This is what keeps the drains below short enough to fit a grace period.
@@ -794,10 +797,7 @@ public final class SagaServer implements AutoCloseable {
     // stopping it here keeps a registration from racing the store's close. That second part is
     // best effort; stop() waits only until the deadline below, and warns if a pass outlives it.
     if (reloadManager != null) {
-      reloadManager.stop(
-          Math.min(
-              deadlineNanos,
-              System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(RELOAD_DRAIN_MILLIS)));
+      reloadManager.stop(frontDeadlineNanos);
     }
     // Then stop accepting new requests on the enabled transports, drain in-flight calls, and drain
     // sagas. Order matters: every handler body must finish before orchestrator.close() closes the
@@ -815,13 +815,11 @@ public final class SagaServer implements AutoCloseable {
         // Javalin stops the server itself when start() fails to bind — so a stop timeout baked in
         // at construction replaces a port-in-use error with that, exactly when the operator needs
         // the real one.
-        httpDrainDeadlineNanos =
-            System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(httpDrainMillis());
         org.eclipse.jetty.server.Server jetty = httpServer.jettyServer().server();
         if (jetty.isRunning()) {
-          jetty.setStopTimeout(httpDrainMillis());
+          jetty.setStopTimeout(remainingMillis(frontDeadlineNanos));
         }
-        // Blocks until in-flight requests have been answered; see httpDrainMillis().
+        // Blocks until in-flight requests have been answered, or the front slice is spent.
         httpServer.stop();
       } catch (Exception e) {
         // Catch broadly, and deliberately. Two failures land here and neither may abort the drains
@@ -832,14 +830,16 @@ public final class SagaServer implements AutoCloseable {
         logger.warn("HTTP drain did not complete cleanly", e);
       }
     }
-    shutdownGrpc();
+    shutdownGrpc(frontDeadlineNanos);
     // Neither Jetty nor gRPC stops an executor it was handed, so shut both down ourselves.
     // shutdownGrpc() has already drained in-flight calls, so no gRPC tasks remain and a plain
     // shutdown() suffices. For HTTP, awaitTermination is the backstop for a drain that overran:
     // Jetty abandons those handler bodies without interrupting them, and they must not still be
-    // running when the store closes.
+    // running when the store closes. It shares the front slice rather than taking a window of its
+    // own: giving it a fresh one would double-count it in an operator's grace period, and it is
+    // only ever reached after Jetty has already spent that slice.
     if (httpVirtualThreads != null) {
-      shutdownHttpVirtualThreads(httpVirtualThreads, httpDrainDeadlineNanos);
+      shutdownHttpVirtualThreads(httpVirtualThreads, frontDeadlineNanos);
     }
     if (grpcExecutor != null) {
       grpcExecutor.shutdown();
@@ -865,11 +865,10 @@ public final class SagaServer implements AutoCloseable {
   private void shutdownHttpVirtualThreads(
       ExecutorService httpVirtualThreads, long drainDeadlineNanos) {
     httpVirtualThreads.shutdown();
-    // Only what is left of the HTTP window, not a second full one: Jetty's stop has already had it.
-    long remainingMillis =
-        Math.max(0L, TimeUnit.NANOSECONDS.toMillis(drainDeadlineNanos - System.nanoTime()));
+    // Only what is left of the front slice, not a second one: Jetty's stop has already had it.
     try {
-      if (!httpVirtualThreads.awaitTermination(remainingMillis, TimeUnit.MILLISECONDS)) {
+      if (!httpVirtualThreads.awaitTermination(
+          remainingMillis(drainDeadlineNanos), TimeUnit.MILLISECONDS)) {
         logger.warn("HTTP handlers still running after the drain window; closing the store anyway");
       }
     } catch (InterruptedException e) {
@@ -897,11 +896,11 @@ public final class SagaServer implements AutoCloseable {
 
   /**
    * Gracefully shuts the gRPC server: mark it {@code NOT_SERVING} for any in-flight health probe,
-   * stop accepting calls, drain in-flight ones up to {@link #grpcDrainMillis()}, then force-cancel
-   * any stragglers. A no-op if gRPC is disabled or the server never started (a built-but-unbound
-   * server holds no resources).
+   * stop accepting calls, drain in-flight ones until the deadline, then force-cancel any
+   * stragglers. A no-op if gRPC is disabled or the server never started (a built-but-unbound server
+   * holds no resources).
    */
-  private void shutdownGrpc() {
+  private void shutdownGrpc(long deadlineNanos) {
     Server server = grpcServer;
     if (server == null || !grpcStarted) {
       return;
@@ -911,7 +910,7 @@ public final class SagaServer implements AutoCloseable {
     }
     server.shutdown();
     try {
-      if (!server.awaitTermination(grpcDrainMillis(), TimeUnit.MILLISECONDS)) {
+      if (!server.awaitTermination(remainingMillis(deadlineNanos), TimeUnit.MILLISECONDS)) {
         server.shutdownNow();
       }
     } catch (InterruptedException e) {
@@ -921,43 +920,23 @@ public final class SagaServer implements AutoCloseable {
   }
 
   /**
-   * The graceful gRPC drain window (ms). Derived from {@code sync.max_wait_millis} so an in-flight
-   * bounded-sync {@code StartSaga}/{@code AwaitSaga} call can reach its own wait ceiling before we
-   * force-cancel it: a fixed 30s drain would cut a legitimate 60s (default) wait in half, and the
-   * gap would widen further whenever an operator raises {@code sync.max_wait_millis}. Kept at a
-   * {@value #DRAIN_MIN_SECONDS}s floor for small ceilings, and padded with {@value
-   * #DRAIN_SLACK_MILLIS}ms of slack so the call unwinds before the deadline rather than at it.
+   * The front phase's slice (ms) of the shutdown budget: half of it, capped at {@value
+   * #FRONT_PHASE_MAX_MILLIS}ms. The reload stop and both transport drains share it, and the saga
+   * drain is guaranteed the rest. The transports need no window of their own sized to {@code
+   * sync.max_wait_millis}: the first thing {@code close()} does is wake every bounded synchronous
+   * waiter, so at shutdown no request waits on that bound any more, and what remains per request is
+   * one store read and one response write. The half keeps the reserve meaningful at a small budget;
+   * the cap keeps a large budget, sized for long sagas under {@code WAIT_ALL_SAGAS}, from handing
+   * the transports time they cannot use.
    *
-   * <p>Package-private for testing the derivation without binding a port or shutting down a server.
+   * <p>Package-private for testing the split without binding a port or shutting down a server.
    */
-  long grpcDrainMillis() {
-    return drainMillis(config);
+  static long frontPhaseMillis(long shutdownTimeoutMillis) {
+    return Math.min(shutdownTimeoutMillis / 2, FRONT_PHASE_MAX_MILLIS);
   }
 
-  /**
-   * The graceful HTTP drain window (ms) — the same derivation, for the same reason: a REST handler
-   * blocked in a bounded synchronous start waits up to {@code sync.max_wait_millis}, so a shorter
-   * window would cut a legitimate request short. Jetty applies it as the server's stop timeout, and
-   * past it {@code stop()} abandons whatever is still running.
-   *
-   * <p>One derivation serves both transports deliberately.
-   *
-   * <p>Package-private for testing the derivation without binding a port.
-   */
-  long httpDrainMillis() {
-    return drainMillis(config);
-  }
-
-  /**
-   * The graceful drain window (ms) for either transport: the {@code sync.max_wait_millis} ceiling a
-   * request may legitimately wait, padded with {@value #DRAIN_SLACK_MILLIS}ms of slack so the call
-   * unwinds before the deadline rather than at it, and floored at {@value #DRAIN_MIN_SECONDS}s for
-   * small ceilings. Static because {@link #createHttpServer} needs it before an instance exists.
-   */
-  static long drainMillis(SagaServerConfig config) {
-    return Math.max(
-        TimeUnit.SECONDS.toMillis(DRAIN_MIN_SECONDS),
-        config.syncMaxWaitMillis() + DRAIN_SLACK_MILLIS);
+  private static long remainingMillis(long deadlineNanos) {
+    return Math.max(0L, TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime()));
   }
 
   /**

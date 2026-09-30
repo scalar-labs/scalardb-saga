@@ -725,39 +725,29 @@ class SagaServerTest {
     }
   }
 
-  private SagaServer serverWithSyncMaxWait(Path dir, long syncMaxWaitMillis) throws Exception {
-    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
-    Properties props = new Properties();
-    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
-    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
-    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, svcServices(dir).toString());
-    props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, Long.toString(syncMaxWaitMillis));
-    return new SagaServer(SagaServerConfig.load(props), mockOrchestrator());
+  @Test
+  void frontPhaseMillis_smallBudget_isHalfOfIt() {
+    // At a 20s budget the transports may take 10s, so the saga drain keeps at least 10s.
+    assertThat(SagaServer.frontPhaseMillis(20_000L)).isEqualTo(10_000L);
   }
 
   @Test
-  void grpcDrainMillis_syncMaxWaitBelowFloor_returnsFloor(@TempDir Path dir) throws Exception {
-    // A small ceiling still drains for at least the 30s floor.
-    SagaServer server = serverWithSyncMaxWait(dir, 1_000L);
-
-    assertThat(server.grpcDrainMillis()).isEqualTo(30_000L);
+  void frontPhaseMillis_defaultBudget_isTheCap() {
+    // Half of the 30s default is the 15s cap exactly.
+    assertThat(SagaServer.frontPhaseMillis(30_000L)).isEqualTo(15_000L);
   }
 
   @Test
-  void grpcDrainMillis_syncMaxWaitAboveFloor_returnsCeilingPlusSlack(@TempDir Path dir)
-      throws Exception {
-    // A ceiling that (with slack) exceeds the floor widens the drain window past 30s, so a
-    // legitimate bounded-sync call reaches its own wait ceiling before force-cancellation.
-    SagaServer server = serverWithSyncMaxWait(dir, 60_000L);
-
-    assertThat(server.grpcDrainMillis()).isEqualTo(65_000L);
+  void frontPhaseMillis_largeBudget_staysAtTheCap() {
+    // A budget sized for long sagas under WAIT_ALL_SAGAS does not hand the transports time they
+    // cannot use: past the wake-all a drain costs one store read per request.
+    assertThat(SagaServer.frontPhaseMillis(600_000L)).isEqualTo(15_000L);
   }
 
   @Test
-  void grpcDrainMillis_raisedSyncMaxWait_widensWindow(@TempDir Path dir) throws Exception {
-    SagaServer server = serverWithSyncMaxWait(dir, 120_000L);
-
-    assertThat(server.grpcDrainMillis()).isEqualTo(125_000L);
+  void frontPhaseMillis_zeroBudget_isZero() {
+    // shutdown.timeout_millis=0 drains nothing, the transports included.
+    assertThat(SagaServer.frontPhaseMillis(0L)).isZero();
   }
 
   /**
