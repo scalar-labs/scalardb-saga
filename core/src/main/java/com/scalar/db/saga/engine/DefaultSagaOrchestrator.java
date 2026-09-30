@@ -973,15 +973,17 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * Closes against a deadline the caller owns. The background managers, the engine's saga drain and
    * the async executor each take what remains of it rather than starting a clock of their own, so a
    * server can bound its whole shutdown by one budget; the no-arg {@link #close()} spends the
-   * configured shutdown timeout, which is what an embedded caller expects. Past the deadline the
+   * configured shutdown timeout, which is what an embedded caller expects. The engine is told it is
+   * shutting down before the managers stop, so a recovery drive running through it stops at its
+   * next step boundary instead of spending the budget the saga drain is owed. Past the deadline the
    * engine still marks every saga it could not finish for recovery, and the store is closed last,
    * so a spent budget costs reclaim latency rather than integrity.
    *
-   * @param deadlineNanos the absolute {@link System#nanoTime()} deadline for the drain
+   * @param deadline the absolute {@link System#nanoTime()} deadline for the drain
    */
-  public void close(long deadlineNanos) {
+  public void close(long deadline) {
     closed = true;
-    long deadline = deadlineNanos;
+    engine.beginShutdown();
 
     retentionManager.stop(deadline);
     recoveryManager.stop(deadline);

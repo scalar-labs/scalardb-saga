@@ -66,7 +66,7 @@ import org.slf4j.bridge.SLF4JBridgeHandler;
  * and — unless {@code reload.interval_seconds} is {@code 0} — begins re-running that pass
  * periodically, so service and definition changes apply without a restart. {@link #close()} stops
  * accepting requests, stops the reload pass, and then drains in-flight sagas via {@link
- * DefaultSagaOrchestrator#close()}.
+ * DefaultSagaOrchestrator#close(long)}.
  *
  * <p>Each transport is independently toggleable ({@link SagaServerConfig#httpEnabled()} / {@link
  * SagaServerConfig#grpcEnabled()}, both on by default); the config layer guarantees at least one is
@@ -81,24 +81,18 @@ import org.slf4j.bridge.SLF4JBridgeHandler;
 public final class SagaServer implements AutoCloseable {
 
   private static final Logger logger = LoggerFactory.getLogger(SagaServer.class);
-  // The most of the shutdown budget the front phase (reload stop and both transport drains) may
-  // take before the saga drain gets the rest: half of it, and never more than this. After the
-  // wake-all at the top of close() a transport drain costs one store read and one response write
-  // per in-flight request, so 15s reads as "the store is stuck", not as a normal cost; the saga
-  // drain is the phase whose work cannot be redone cheaply, so it holds the reserve.
+  // The cap on the front phase of shutdown; see frontPhaseMillis.
   private static final long FRONT_PHASE_MAX_MILLIS = 15_000L;
   private static final long THREAD_POOL_IDLE_TIMEOUT_MILLIS = 60_000L;
   private static final long RATE_LIMIT_WINDOW_MILLIS = 60_000L;
 
-  /**
-   * The slice of the shutdown budget the in-flight reload pass may take before the saga drain
-   * starts. Deliberately a small fixed window rather than the configured budget: the two waits are
-   * sequential, an operator sizes the container's grace period from one number, and a pass is
-   * milliseconds unless the store is slow — whereas the drain that follows needs the rest. A pass
-   * still running when this elapses is interrupted, which the manager logs.
-   */
-  private final SagaServerConfig config;
+  // The most of the front phase the reload stop may take. It runs before the transports drain, in
+  // the same slice, so without this a pass stuck on a slow store would leave them nothing: Jetty
+  // would skip its graceful phase and gRPC would cancel in-flight calls at once. A pass still
+  // running when it elapses is interrupted, which the manager logs.
+  private static final long RELOAD_STOP_MAX_MILLIS = 5_000L;
 
+  private final SagaServerConfig config;
   private final DefaultSagaOrchestrator orchestrator;
   // Shared by the engine, which notifies it, and both transports, whose waiters register on it.
   private final SagaWaiterRegistry waiterRegistry;
@@ -543,7 +537,8 @@ public final class SagaServer implements AutoCloseable {
    * caller-supplied cap. Past the bound the durable transition is already recorded and the response
    * carries the saga's current state, so the bound only caps how long the request waits, never
    * correctness. Deriving it from {@code sync.max_wait_millis} keeps it on the one wait bound every
-   * transport shares, and shutdown wakes it like any other bounded waiter.
+   * transport shares. Unlike a synchronous start, shutdown does not wake it: a drive in flight at
+   * shutdown holds its request until the front slice ends, and the engine's drain then settles it.
    */
   private long adminDriveDeadlineMillis() {
     return config.syncWaitBoundMillis(Long.MAX_VALUE);
@@ -796,9 +791,12 @@ public final class SagaServer implements AutoCloseable {
     // Reload stops first, before anything else winds down: a pass that ran during the drain could
     // swap the endpoint set out from under sagas that are still finishing their current step, and
     // stopping it here keeps a registration from racing the store's close. That second part is
-    // best effort; stop() waits only until the deadline below, and warns if a pass outlives it.
+    // best effort; stop() waits only until its cap, and warns if a pass outlives it.
     if (reloadManager != null) {
-      reloadManager.stop(frontDeadlineNanos);
+      reloadManager.stop(
+          Math.min(
+              frontDeadlineNanos,
+              startNanos + TimeUnit.MILLISECONDS.toNanos(RELOAD_STOP_MAX_MILLIS)));
     }
     // Then stop accepting new requests on the enabled transports and drain in-flight calls, both
     // transports at once: nothing orders them, and a Jetty stop that ran long would otherwise leave
@@ -808,13 +806,12 @@ public final class SagaServer implements AutoCloseable {
         () -> stopHttp(frontDeadlineNanos),
         () -> shutdownGrpc(frontDeadlineNanos),
         frontDeadlineNanos);
-    // Neither Jetty nor gRPC stops an executor it was handed, so shut both down ourselves.
-    // shutdownGrpc() has already drained in-flight calls, so no gRPC tasks remain and a plain
-    // shutdown() suffices. For HTTP, awaitTermination is the backstop for a drain that overran:
-    // Jetty abandons those handler bodies without interrupting them, and they must not still be
-    // running when the store closes. It shares the front slice rather than taking a window of its
-    // own: giving it a fresh one would double-count it in an operator's grace period, and it is
-    // only ever reached after Jetty has already spent that slice.
+    // Neither Jetty nor gRPC stops an executor it was handed, so shut both down ourselves. A gRPC
+    // call cancelled by shutdownNow() leaves its handler body running, like an HTTP straggler, and
+    // a plain shutdown() does not interrupt it; the executor is shut down only so it takes no more
+    // work. For HTTP, awaitTermination is the backstop for a drain that overran: Jetty abandons
+    // those handler bodies without interrupting them, and they must not still be running when the
+    // store closes.
     if (httpVirtualThreads != null) {
       shutdownHttpVirtualThreads(httpVirtualThreads, frontDeadlineNanos);
     }
@@ -863,29 +860,32 @@ public final class SagaServer implements AutoCloseable {
 
   /**
    * Runs {@code blockingStop} on a throwaway virtual thread while {@code inlineDrain} runs on the
-   * caller's thread, then waits for that thread until the deadline. What it has not finished by
-   * then is left to it: Jetty's stop past its own timeout is already abandoning stragglers, and the
-   * caller's next step is the executor backstop that bounds those. The thread is deliberately not
+   * caller's thread, then waits for that thread until the deadline, even if {@code inlineDrain}
+   * throws. Whatever it has not finished by then is left to it. The thread is deliberately not
    * drawn from {@code httpVirtualThreads}, which is itself being shut down on this path.
    *
-   * <p>Package-private so a test can prove the two overlap rather than sum, with stubs that sleep.
+   * <p>Package-private so a test can prove the two overlap rather than sum.
    */
   static void drainConcurrently(Runnable blockingStop, Runnable inlineDrain, long deadlineNanos) {
     Thread stopper = Thread.ofVirtual().name("saga-http-drain").start(blockingStop);
-    inlineDrain.run();
     try {
-      // The Duration overload returns at once for a spent deadline; join(0) would wait forever.
-      stopper.join(Duration.ofNanos(Math.max(0L, deadlineNanos - System.nanoTime())));
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
+      inlineDrain.run();
+    } finally {
+      try {
+        // The Duration overload returns at once for a spent deadline; join(0) would wait forever.
+        stopper.join(Duration.ofNanos(Math.max(0L, deadlineNanos - System.nanoTime())));
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
     }
   }
 
   /**
    * Shuts down the executor that ran the HTTP handler bodies and waits for any that outlived the
-   * Jetty drain, so none is still touching the store when {@link DefaultSagaOrchestrator#close()}
-   * closes it. Bounded by the same drain window, and only ever reached with stragglers after that
-   * window already overran, so it logs rather than blocking shutdown further.
+   * Jetty drain, so none is still touching the store when {@link
+   * DefaultSagaOrchestrator#close(long)} closes it. Bounded by the same drain window, and only ever
+   * reached with stragglers after that window already overran, so it logs rather than blocking
+   * shutdown further.
    *
    * <p>A straggler past that point is <b>deliberately abandoned</b>, unlike {@link #shutdownGrpc},
    * which escalates to {@code shutdownNow()}. It is left running and the store closes underneath

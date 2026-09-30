@@ -153,11 +153,11 @@ import org.jspecify.annotations.Nullable;
  *       #DEFAULT_SHUTDOWN_TIMEOUT_MILLIS}): one deadline, computed once, that the reload stop, both
  *       transport drains and the saga drain spend in turn. The first three share at most half of it
  *       and never more than 15s, with the transports draining side by side; the saga drain gets the
- *       rest. Past the deadline each saga still active is marked for recovery, one store write
- *       each, and the store closes: size a container's termination grace period above this value
- *       with headroom for that tail. {@code 0} drains nothing: in-flight requests are dropped,
- *       in-flight work is cancelled at once and left for the recovery scan, which trades shutdown
- *       latency for reclaim latency on the next boot
+ *       rest. Past the deadline each saga still active is marked for recovery, one store write each
+ *       run in parallel, and the store closes: size a container's termination grace period above
+ *       this value with headroom for that tail. {@code 0} skips every wait but not the marking:
+ *       in-flight requests are dropped, and in-flight work is cancelled at once, marked, and left
+ *       for the recovery scan, which trades shutdown latency for reclaim latency
  * </ul>
  *
  * <h2>Saga detail reads ({@code detail.*})</h2>
@@ -1550,12 +1550,13 @@ public final class SagaServerConfig {
   /**
    * Returns the budget (ms) for the whole shutdown drain (default {@value
    * #DEFAULT_SHUTDOWN_TIMEOUT_MILLIS}): one deadline that the reload stop, both transport drains
-   * and the saga-engine drain spend in turn. The first three share at most half of it and never
-   * more than 15s; the engine drain gets the rest, so it is guaranteed at least half. Past the
-   * deadline, whatever has not drained is marked for recovery and reclaimed by the recovery scan
-   * after the next start. Raise it together with a container's termination grace period when {@link
-   * #shutdownMode()} is {@link ShutdownMode#WAIT_ALL_SAGAS}, which waits for whole sagas rather
-   * than a single step and so needs a budget sized to the longest saga, doubled.
+   * and the saga drain spend in turn. The first three share at most half of it and never more than
+   * 15s; the saga drain, which also stops the recovery and retention schedulers, gets the rest, so
+   * it is guaranteed at least half. Past the deadline, whatever has not drained is marked for
+   * recovery and reclaimed by the recovery scan after the next start. Raise it together with a
+   * container's termination grace period when {@link #shutdownMode()} is {@link
+   * ShutdownMode#WAIT_ALL_SAGAS}, which waits for whole sagas rather than a single step and so
+   * needs a budget of the longest saga plus 15s, or twice the longest saga if that is shorter.
    */
   public long shutdownTimeoutMillis() {
     return shutdownTimeoutMillis;

@@ -12,6 +12,7 @@ import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.ArgumentMatchers.longThat;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -66,6 +67,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.slf4j.LoggerFactory;
@@ -1772,6 +1774,36 @@ class DefaultSagaOrchestratorTest {
       verify(recoveryManager).stop(deadlineNanos);
       verify(engine).shutdown(longThat(wait -> wait > 9_000L && wait <= 10_000L));
       verify(store).close();
+    }
+
+    @Test
+    void close_deadlineGiven_tellsTheEngineBeforeStoppingTheManagers() throws InterruptedException {
+      // Arrange — a recovery drive runs through the engine and stops between steps only once the
+      // engine knows it is shutting down, so the engine must be told before the manager stop
+      // waits for that drive
+      ExecutorService mockExecutor = mock(ExecutorService.class);
+      when(mockExecutor.awaitTermination(anyLong(), any())).thenReturn(true);
+      DefaultSagaOrchestrator orchestratorWithMockExecutor =
+          new DefaultSagaOrchestrator(
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              Integer.MAX_VALUE,
+              0,
+              mockExecutor);
+
+      // Act
+      orchestratorWithMockExecutor.close(System.nanoTime() + TimeUnit.SECONDS.toNanos(10));
+
+      // Assert
+      InOrder order = inOrder(engine, retentionManager, recoveryManager);
+      order.verify(engine).beginShutdown();
+      order.verify(retentionManager).stop(anyLong());
+      order.verify(recoveryManager).stop(anyLong());
+      order.verify(engine).shutdown(anyLong());
     }
 
     @Test

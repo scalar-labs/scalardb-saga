@@ -368,32 +368,33 @@ spends what is left of it rather than starting a clock of its own:
   `202`, because a terminating server cannot advance the saga anyway. This is what makes a typical
   shutdown cost about a second.
 - **Front slice, at most half the budget and never more than 15s:** the reload stop (only if a
-  configuration pass is mid-flight) and both transport drains, which run at the same time rather
-  than one after the other. In-flight requests are answered before the listeners close; new
+  configuration pass is mid-flight, and at most 5s of the slice) and both transport drains, which
+  run at the same time rather than one after the other. In-flight requests are answered before the
+  listeners close; new
   connections are refused as soon as the drain begins, so a load balancer still needs its own
   pre-stop delay or readiness flip. Past the wake-all a request costs one store read and one
   response write, so the slice is a ceiling reached only when the store is stuck, never a cost.
-- **Saga drain, everything the front slice left, and at least the other half:** the recovery and
-  retention schedulers stop, then the engine drains per `shutdown.mode`. Under the default
-  `WAIT_CURRENT_STEP` it finishes each running step and leaves the saga for recovery, so this is
-  rarely spent in full; `WAIT_ALL_SAGAS` waits for in-flight sagas to reach a terminal state and
-  needs a budget sized to your longest saga, doubled, since up to half of it may go to the front
-  slice.
+- **Saga drain, everything the front slice left, and at least the other half:** the engine stops
+  starting steps, the recovery and retention schedulers stop, then the engine drains per
+  `shutdown.mode`. Under the default `WAIT_CURRENT_STEP` it finishes each running step and leaves
+  the saga for recovery, so this is rarely spent in full; `WAIT_ALL_SAGAS` waits for in-flight
+  sagas to reach a terminal state and needs a budget of your longest saga plus 15s (or twice the
+  longest saga, if that is shorter), since the front slice may take that much first.
 - **After the deadline, always:** each saga still active is marked for recovery, one store write
-  each, and the store is closed. That is the tail: normally milliseconds, but it is one sequential
-  write per saga that was still mid-step at the deadline, so it grows with that count and with
-  store latency rather than staying constant.
+  each, all in parallel, then outbound HTTP clients get up to 2s to finish and the store is
+  closed. That is the tail. It grows with the number of sagas still active and with store latency,
+  bounded by the store's connection pool.
 
-Worst case at defaults is therefore the 30s budget plus that tail; the typical case is about a
-second. Size `terminationGracePeriodSeconds` above the budget with headroom for the tail, SIGTERM
-delivery and JVM exit: a few seconds is enough unless many sagas run at once against a slow store,
-in which case allow for one write per in-flight saga. With Kubernetes' own 30s default grace
-period, set the budget to about 20s, or raise the grace period to 60s and keep the default. A
-`preStop` delay for load-balancer deregistration comes out of the same grace period.
+Worst case at defaults is therefore the 30s budget plus that tail. Size
+`terminationGracePeriodSeconds` above the budget with headroom for the tail, SIGTERM delivery and
+JVM exit: a few seconds is enough unless many sagas run at once against a slow store. With
+Kubernetes' own 30s default grace period, set the budget to about 20s, or raise the grace period to
+60s and keep the default. A `preStop` delay for load-balancer deregistration comes out of the same
+grace period.
 
-`shutdown.timeout_millis=0` drains nothing at all: in-flight requests are dropped rather than
-answered, and in-flight work is cancelled and left for the recovery scan. That trades shutdown
-latency for reclaim latency on the next boot, and is a valid choice for a fast-restart deployment.
+`shutdown.timeout_millis=0` skips every wait but not the tail: in-flight requests are dropped rather
+than answered, and every in-flight saga is cancelled, marked and left for the recovery scan. That
+is a valid choice for a fast-restart deployment.
 
 Being cut short costs latency, not integrity: whatever was interrupted is reclaimed by the recovery
 scan on the next boot.

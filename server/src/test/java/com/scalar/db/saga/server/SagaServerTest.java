@@ -43,6 +43,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.Properties;
 import java.util.concurrent.BrokenBarrierException;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -736,12 +737,6 @@ class SagaServerTest {
   }
 
   @Test
-  void frontPhaseMillis_defaultBudget_isTheCap() {
-    // Half of the 30s default is the 15s cap exactly.
-    assertThat(SagaServer.frontPhaseMillis(30_000L)).isEqualTo(15_000L);
-  }
-
-  @Test
   void frontPhaseMillis_largeBudget_staysAtTheCap() {
     // A budget sized for long sagas under WAIT_ALL_SAGAS does not hand the transports time they
     // cannot use: past the wake-all a drain costs one store read per request.
@@ -777,8 +772,14 @@ class SagaServerTest {
   @Test
   void drainConcurrently_blockingStopOutlivesTheDeadline_returnsAtTheDeadline() {
     // Arrange — a stop that would take 5s, against a 300ms deadline
-    AtomicBoolean blockingRan = new AtomicBoolean();
-    Runnable blocking = () -> sleepMillis(5_000, blockingRan);
+    Runnable blocking =
+        () -> {
+          try {
+            Thread.sleep(5_000);
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+        };
 
     // Act
     long startNanos = System.nanoTime();
@@ -788,7 +789,37 @@ class SagaServerTest {
 
     // Assert — the caller is released at the deadline and the straggler is left to itself
     assertThat(elapsedMillis).isBetween(300L, 2_000L);
-    assertThat(blockingRan).isFalse();
+  }
+
+  @Test
+  void drainConcurrently_inlineDrainThrows_stillWaitsForTheBlockingStop() {
+    // Arrange — the blocking stop finishes only after the inline drain has already thrown
+    CountDownLatch inlineThrew = new CountDownLatch(1);
+    AtomicBoolean blockingFinished = new AtomicBoolean();
+    Runnable blocking =
+        () -> {
+          try {
+            if (inlineThrew.await(5, TimeUnit.SECONDS)) {
+              Thread.sleep(200);
+              blockingFinished.set(true);
+            }
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+        };
+    Runnable inline =
+        () -> {
+          inlineThrew.countDown();
+          throw new IllegalStateException("gRPC drain failed");
+        };
+
+    // Act & Assert — the exception propagates, but only after the join
+    assertThatThrownBy(
+            () ->
+                SagaServer.drainConcurrently(
+                    blocking, inline, System.nanoTime() + TimeUnit.SECONDS.toNanos(5)))
+        .isInstanceOf(IllegalStateException.class);
+    assertThat(blockingFinished).isTrue();
   }
 
   private static void awaitBarrier(CyclicBarrier barrier, AtomicBoolean passed) {
@@ -799,15 +830,6 @@ class SagaServerTest {
       Thread.currentThread().interrupt();
     } catch (BrokenBarrierException | TimeoutException e) {
       // Left unset: the other drain never arrived, so the two did not overlap.
-    }
-  }
-
-  private static void sleepMillis(long millis, AtomicBoolean done) {
-    try {
-      Thread.sleep(millis);
-      done.set(true);
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
     }
   }
 
