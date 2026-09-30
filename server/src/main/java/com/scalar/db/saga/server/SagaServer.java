@@ -776,6 +776,11 @@ public final class SagaServer implements AutoCloseable {
     if (!closed.compareAndSet(false, true)) {
       return;
     }
+    // The shutdown budget, computed once: the reload stop and the saga drain take what is left of
+    // it rather than each starting a clock of its own, so an operator can size a termination grace
+    // period from shutdown.timeout_millis alone.
+    long deadlineNanos =
+        System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(config.shutdownTimeoutMillis());
     // One deadline for the whole HTTP drain, shared by Jetty's stop and the executor backstop
     // below. Giving the backstop a fresh full window would double-count it in an operator's grace
     // period, and it is only ever reached after Jetty has already spent that window.
@@ -790,9 +795,9 @@ public final class SagaServer implements AutoCloseable {
     // best effort; stop() waits only until the deadline below, and warns if a pass outlives it.
     if (reloadManager != null) {
       reloadManager.stop(
-          System.nanoTime()
-              + TimeUnit.MILLISECONDS.toNanos(
-                  Math.min(RELOAD_DRAIN_MILLIS, config.shutdownTimeoutMillis())));
+          Math.min(
+              deadlineNanos,
+              System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(RELOAD_DRAIN_MILLIS)));
     }
     // Then stop accepting new requests on the enabled transports, drain in-flight calls, and drain
     // sagas. Order matters: every handler body must finish before orchestrator.close() closes the
@@ -840,7 +845,7 @@ public final class SagaServer implements AutoCloseable {
       grpcExecutor.shutdown();
     }
     closeSecurityProvider(securityProvider);
-    orchestrator.close();
+    orchestrator.close(deadlineNanos);
     logger.info("SagaServer stopped");
   }
 

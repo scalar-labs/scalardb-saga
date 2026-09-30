@@ -1,6 +1,7 @@
 package com.scalar.db.saga.server;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -94,7 +95,7 @@ class HttpDrainTest {
               return null;
             })
         .when(orchestrator)
-        .close();
+        .close(anyLong());
 
     SagaServer server = new SagaServer(SagaServerConfig.load(props), orchestrator).start();
 

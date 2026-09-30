@@ -9,6 +9,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.ArgumentMatchers.longThat;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
@@ -1734,12 +1735,69 @@ class DefaultSagaOrchestratorTest {
       // Act
       orchestratorWithMockExecutor.close();
 
-      // Assert
+      // Assert — the no-arg close spends the configured shutdown timeout, as an embedded caller
+      // expects: the engine is handed (almost) all of it
       verify(retentionManager).stop(anyLong());
       verify(recoveryManager).stop(anyLong());
       verify(mockExecutor).shutdown();
-      verify(engine).shutdown();
+      verify(engine).shutdown(longThat(wait -> wait > 29_000L && wait <= 30_000L));
       verify(mockExecutor).awaitTermination(anyLong(), eq(TimeUnit.NANOSECONDS));
+      verify(store).close();
+    }
+
+    @Test
+    void close_deadlineGiven_handsTheManagersThatDeadlineAndTheEngineWhatIsLeftOfIt()
+        throws InterruptedException {
+      // Arrange — a deadline the caller owns, well short of the configured 30s timeout
+      ExecutorService mockExecutor = mock(ExecutorService.class);
+      when(mockExecutor.awaitTermination(anyLong(), any())).thenReturn(true);
+      DefaultSagaOrchestrator orchestratorWithMockExecutor =
+          new DefaultSagaOrchestrator(
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              Integer.MAX_VALUE,
+              0,
+              mockExecutor);
+      long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+
+      // Act
+      orchestratorWithMockExecutor.close(deadlineNanos);
+
+      // Assert — one deadline, not a fresh clock per phase
+      verify(retentionManager).stop(deadlineNanos);
+      verify(recoveryManager).stop(deadlineNanos);
+      verify(engine).shutdown(longThat(wait -> wait > 9_000L && wait <= 10_000L));
+      verify(store).close();
+    }
+
+    @Test
+    void close_deadlineAlreadyPassed_stillShutsDownTheEngineAndClosesTheStore()
+        throws InterruptedException {
+      // Arrange — a spent budget: the engine gets a zero wait (it still marks sagas for recovery)
+      // and the store still closes, so nothing is skipped that costs integrity
+      ExecutorService mockExecutor = mock(ExecutorService.class);
+      DefaultSagaOrchestrator orchestratorWithMockExecutor =
+          new DefaultSagaOrchestrator(
+              engine,
+              store,
+              definitionRegistry,
+              recoveryManager,
+              retentionManager,
+              30_000,
+              Integer.MAX_VALUE,
+              0,
+              mockExecutor);
+
+      // Act
+      orchestratorWithMockExecutor.close(System.nanoTime() - 1);
+
+      // Assert
+      verify(engine).shutdown(0L);
+      verify(mockExecutor).shutdownNow();
       verify(store).close();
     }
   }

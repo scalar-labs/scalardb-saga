@@ -282,13 +282,28 @@ public class SagaEngine implements AutoCloseable {
     return context;
   }
 
-  /** Initiates graceful shutdown. */
+  /**
+   * Initiates graceful shutdown, waiting up to the configured shutdown timeout for active sagas.
+   */
   void shutdown() {
+    shutdown(shutdownConfig.timeoutMillis());
+  }
+
+  /**
+   * Initiates graceful shutdown: waits up to {@code waitMillis}, on this engine's clock, for active
+   * sagas to finish per the shutdown mode, then marks whatever is still active for recovery. The
+   * caller hands in what is left of a budget it owns, so a server can bound its whole shutdown by
+   * one deadline instead of this engine starting a clock of its own. The wait is the optional part
+   * of the drain; the mark is the necessary one, and it runs even when {@code waitMillis} is zero
+   * or already spent: it is one store write per saga, the store is still open here, and skipping it
+   * would cost each saga a full staleness threshold before recovery noticed it.
+   */
+  void shutdown(long waitMillis) {
     synchronized (shutdownLock) {
       shuttingDown = true;
     }
 
-    long deadline = clock.millis() + shutdownConfig.timeoutMillis();
+    long deadline = clock.millis() + Math.max(0L, waitMillis);
 
     while (!activeSagas.isEmpty()) {
       long remaining = deadline - clock.millis();

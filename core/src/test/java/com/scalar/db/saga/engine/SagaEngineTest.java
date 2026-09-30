@@ -1354,6 +1354,48 @@ class SagaEngineTest {
       verify(store).markForRecovery("saga-1");
       sagaThread.join(5000);
     }
+
+    @Test
+    void shutdown_zeroWaitGiven_marksActiveSagasForRecoveryWithoutWaiting() throws Exception {
+      // Arrange — a step that outlasts any wait, on an engine whose own timeout is generous: the
+      // budget the caller hands in must win, and a spent budget must still mark the saga
+      CountDownLatch stepStarted = new CountDownLatch(1);
+      Step step1 = mock(Step.class);
+      when(step1.getName()).thenReturn("s1");
+      when(step1.execute(any(SagaContext.class)))
+          .thenAnswer(
+              invocation -> {
+                stepStarted.countDown();
+                Thread.sleep(500);
+                return StepResult.empty();
+              });
+      registerStep("s1", step1);
+      SagaDefinition def = sagaDefinitionWithRetry("s1");
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
+      engine.close();
+      engine =
+          new SagaEngine(
+              store,
+              new StepInstantiator(stepResolver, HttpEndpointManager.create(Map.of())),
+              OWNER_ID,
+              new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_ALL_SAGAS, 5_000),
+              0,
+              Clock.systemUTC());
+      Thread sagaThread = new Thread(() -> engine.executeSaga(def, saga, Map.of()));
+      sagaThread.start();
+      stepStarted.await();
+
+      // Act
+      long startNanos = System.nanoTime();
+      engine.shutdown(0L);
+      long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+
+      // Assert — no wait was spent, and the saga was marked while the store was still open
+      assertThat(elapsedMillis).isLessThan(2_000L);
+      verify(store).markForRecovery("saga-1");
+      sagaThread.join(5000);
+    }
   }
 
   // =========================================================================

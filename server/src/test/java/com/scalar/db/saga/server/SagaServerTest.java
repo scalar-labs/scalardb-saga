@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_SELF;
@@ -355,7 +356,7 @@ class SagaServerTest {
       assertThatThrownBy(server::start).isInstanceOf(RuntimeException.class);
 
       verify(orchestrator).startBackgroundTasks();
-      verify(orchestrator).close();
+      verify(orchestrator).close(anyLong());
     } finally {
       portHolder.stop();
     }
@@ -397,7 +398,33 @@ class SagaServerTest {
     server.close();
     server.close();
 
-    verify(orchestrator, times(1)).close();
+    verify(orchestrator, times(1)).close(anyLong());
+  }
+
+  @Test
+  void close_always_handsTheOrchestratorTheOneShutdownBudget(@TempDir Path dir) throws Exception {
+    // Arrange — the budget is computed once at the top of close(); every phase before the saga
+    // drain spends from it, so the orchestrator's deadline is that same instant, not a fresh clock
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, svcServices(dir).toString());
+    props.setProperty(SagaServerConfig.SHUTDOWN_TIMEOUT_MILLIS_KEY, "20000");
+    DefaultSagaOrchestrator orchestrator = mockOrchestrator();
+    SagaServer server = new SagaServer(SagaServerConfig.load(props), orchestrator);
+    ArgumentCaptor<Long> deadline = ArgumentCaptor.forClass(Long.class);
+
+    // Act
+    long startNanos = System.nanoTime();
+    server.close();
+    long endNanos = System.nanoTime();
+
+    // Assert — the deadline is 20s after the start of close(), within the time close() took
+    verify(orchestrator).close(deadline.capture());
+    assertThat(deadline.getValue())
+        .isBetween(
+            startNanos + TimeUnit.SECONDS.toNanos(20), endNanos + TimeUnit.SECONDS.toNanos(20));
   }
 
   @Test
