@@ -43,6 +43,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.Properties;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -748,6 +749,51 @@ class SagaServerTest {
   void frontPhaseMillis_zeroBudget_isZero() {
     // shutdown.timeout_millis=0 drains nothing, the transports included.
     assertThat(SagaServer.frontPhaseMillis(0L)).isZero();
+  }
+
+  @Test
+  void drainConcurrently_bothDrainsBlock_elapsedIsTheLongerNotTheSum() {
+    // Arrange — two drains of 400ms each: sequenced they would cost 800ms
+    AtomicBoolean blockingRan = new AtomicBoolean();
+    AtomicBoolean inlineRan = new AtomicBoolean();
+    Runnable blocking = () -> sleepMillis(400, blockingRan);
+    Runnable inline = () -> sleepMillis(400, inlineRan);
+
+    // Act
+    long startNanos = System.nanoTime();
+    SagaServer.drainConcurrently(blocking, inline, startNanos + TimeUnit.SECONDS.toNanos(5));
+    long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+
+    // Assert — both ran, and together they cost about one of them, not two
+    assertThat(blockingRan).isTrue();
+    assertThat(inlineRan).isTrue();
+    assertThat(elapsedMillis).isBetween(400L, 700L);
+  }
+
+  @Test
+  void drainConcurrently_blockingStopOutlivesTheDeadline_returnsAtTheDeadline() {
+    // Arrange — a stop that would take 5s, against a 300ms deadline
+    AtomicBoolean blockingRan = new AtomicBoolean();
+    Runnable blocking = () -> sleepMillis(5_000, blockingRan);
+
+    // Act
+    long startNanos = System.nanoTime();
+    SagaServer.drainConcurrently(
+        blocking, () -> {}, startNanos + TimeUnit.MILLISECONDS.toNanos(300));
+    long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+
+    // Assert — the caller is released at the deadline and the straggler is left to itself
+    assertThat(elapsedMillis).isBetween(300L, 2_000L);
+    assertThat(blockingRan).isFalse();
+  }
+
+  private static void sleepMillis(long millis, AtomicBoolean done) {
+    try {
+      Thread.sleep(millis);
+      done.set(true);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    }
   }
 
   /**

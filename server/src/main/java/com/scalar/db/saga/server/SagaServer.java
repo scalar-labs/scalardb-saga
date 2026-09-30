@@ -30,6 +30,7 @@ import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.time.Clock;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -799,38 +800,14 @@ public final class SagaServer implements AutoCloseable {
     if (reloadManager != null) {
       reloadManager.stop(frontDeadlineNanos);
     }
-    // Then stop accepting new requests on the enabled transports, drain in-flight calls, and drain
-    // sagas. Order matters: every handler body must finish before orchestrator.close() closes the
-    // store underneath it.
-    if (httpServer != null) {
-      try {
-        // Jetty runs Graceful.shutdown() from Server.doStop() only when stopTimeout is positive.
-        // Without it, stop() goes straight to stopping the connectors and an in-flight request's
-        // socket dies under it — the caller sees a closed channel rather than its response. The
-        // connector's own Graceful (its endpoint set must empty) tracks those requests, so this
-        // works whether or not the handler body is on a virtual thread.
-        //
-        // Set here rather than at construction, and only for a server that actually started:
-        // gracefully stopping a Jetty that never bound raises a checked ExecutionException, and
-        // Javalin stops the server itself when start() fails to bind — so a stop timeout baked in
-        // at construction replaces a port-in-use error with that, exactly when the operator needs
-        // the real one.
-        org.eclipse.jetty.server.Server jetty = httpServer.jettyServer().server();
-        if (jetty.isRunning()) {
-          jetty.setStopTimeout(remainingMillis(frontDeadlineNanos));
-        }
-        // Blocks until in-flight requests have been answered, or the front slice is spent.
-        httpServer.stop();
-      } catch (Exception e) {
-        // Catch broadly, and deliberately. Two failures land here and neither may abort the drains
-        // below: a drain that overruns its window (Jetty ends FAILED, but the connectors are
-        // stopped and the port released), and stopping a server that never bound — start() calls
-        // close() on a bind failure, and gracefully stopping a never-started Jetty raises a checked
-        // ExecutionException that would otherwise replace the bind error the caller needs to see.
-        logger.warn("HTTP drain did not complete cleanly", e);
-      }
-    }
-    shutdownGrpc(frontDeadlineNanos);
+    // Then stop accepting new requests on the enabled transports and drain in-flight calls, both
+    // transports at once: nothing orders them, and a Jetty stop that ran long would otherwise leave
+    // gRPC none of the slice. Both finish, or are abandoned, before orchestrator.close() closes the
+    // store underneath their handler bodies; that ordering is the one that matters.
+    drainConcurrently(
+        () -> stopHttp(frontDeadlineNanos),
+        () -> shutdownGrpc(frontDeadlineNanos),
+        frontDeadlineNanos);
     // Neither Jetty nor gRPC stops an executor it was handed, so shut both down ourselves.
     // shutdownGrpc() has already drained in-flight calls, so no gRPC tasks remain and a plain
     // shutdown() suffices. For HTTP, awaitTermination is the backstop for a drain that overran:
@@ -847,6 +824,61 @@ public final class SagaServer implements AutoCloseable {
     closeSecurityProvider(securityProvider);
     orchestrator.close(deadlineNanos);
     logger.info("SagaServer stopped");
+  }
+
+  /**
+   * Stops the HTTP server, answering in-flight requests until the deadline; a no-op with HTTP off.
+   */
+  private void stopHttp(long deadlineNanos) {
+    if (httpServer == null) {
+      return;
+    }
+    try {
+      // Jetty runs Graceful.shutdown() from Server.doStop() only when stopTimeout is positive.
+      // Without it, stop() goes straight to stopping the connectors and an in-flight request's
+      // socket dies under it — the caller sees a closed channel rather than its response. The
+      // connector's own Graceful (its endpoint set must empty) tracks those requests, so this
+      // works whether or not the handler body is on a virtual thread.
+      //
+      // Set here rather than at construction, and only for a server that actually started:
+      // gracefully stopping a Jetty that never bound raises a checked ExecutionException, and
+      // Javalin stops the server itself when start() fails to bind — so a stop timeout baked in
+      // at construction replaces a port-in-use error with that, exactly when the operator needs
+      // the real one.
+      org.eclipse.jetty.server.Server jetty = httpServer.jettyServer().server();
+      if (jetty.isRunning()) {
+        jetty.setStopTimeout(remainingMillis(deadlineNanos));
+      }
+      // Blocks until in-flight requests have been answered, or the deadline is spent.
+      httpServer.stop();
+    } catch (Exception e) {
+      // Catch broadly, and deliberately. Two failures land here and neither may abort the drains
+      // that follow: a drain that overruns its window (Jetty ends FAILED, but the connectors are
+      // stopped and the port released), and stopping a server that never bound — start() calls
+      // close() on a bind failure, and gracefully stopping a never-started Jetty raises a checked
+      // ExecutionException that would otherwise replace the bind error the caller needs to see.
+      logger.warn("HTTP drain did not complete cleanly", e);
+    }
+  }
+
+  /**
+   * Runs {@code blockingStop} on a throwaway virtual thread while {@code inlineDrain} runs on the
+   * caller's thread, then waits for that thread until the deadline. What it has not finished by
+   * then is left to it: Jetty's stop past its own timeout is already abandoning stragglers, and the
+   * caller's next step is the executor backstop that bounds those. The thread is deliberately not
+   * drawn from {@code httpVirtualThreads}, which is itself being shut down on this path.
+   *
+   * <p>Package-private so a test can prove the two overlap rather than sum, with stubs that sleep.
+   */
+  static void drainConcurrently(Runnable blockingStop, Runnable inlineDrain, long deadlineNanos) {
+    Thread stopper = Thread.ofVirtual().name("saga-http-drain").start(blockingStop);
+    inlineDrain.run();
+    try {
+      // The Duration overload returns at once for a spent deadline; join(0) would wait forever.
+      stopper.join(Duration.ofNanos(Math.max(0L, deadlineNanos - System.nanoTime())));
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    }
   }
 
   /**
