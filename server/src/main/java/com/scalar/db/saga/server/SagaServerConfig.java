@@ -121,13 +121,16 @@ import org.jspecify.annotations.Nullable;
  *       those legacy encodings unless asked for PKCS#8
  * </ul>
  *
- * <p>The keys take paths, never certificate or key contents, so the material stays re-readable for
- * a future reload. The files are read and validated at startup, before either port binds, and every
- * failure names the offending key — never the configured value, which like any value here could be
- * a mis-pasted secret (see {@code TlsMaterial}). Protocols default to TLS 1.3 and 1.2 with no keys
- * to tune, and ciphers to each stack's hardened defaults (Jetty's standard exclusions over the JDK
- * list; gRPC's HTTP-2-approved suites); the rare compliance need is served by JVM flags (e.g.
- * {@code jdk.tls.server.protocols}).
+ * <p>The keys take paths, never certificate or key contents, so the material stays re-readable: the
+ * files are read and validated at startup, before either port binds, and again on every
+ * configuration reload pass ({@code reload.interval_seconds}), so a rotated certificate reaches new
+ * connections on both transports without a restart; established connections keep the certificate
+ * they negotiated. A rotation that fails validation is rejected and logged, and the previous
+ * material keeps serving. Every failure names the offending key — never the configured value, which
+ * like any value here could be a mis-pasted secret (see {@code TlsMaterial}). Protocols default to
+ * TLS 1.3 and 1.2 with no keys to tune, and ciphers to each stack's hardened defaults (Jetty's
+ * standard exclusions over the JDK list; gRPC's HTTP-2-approved suites); the rare compliance need
+ * is served by JVM flags (e.g. {@code jdk.tls.server.protocols}).
  *
  * <h2>Synchronous starts ({@code sync.*})</h2>
  *
@@ -264,7 +267,8 @@ import org.jspecify.annotations.Nullable;
  *       validated as a complete set, so changes land without a restart. Validation is all or
  *       nothing; applying is not — services swap before definitions register, one definition at a
  *       time, so a failure part way through leaves what committed live and retries the rest next
- *       pass. {@code 0} disables reload (startup-only loading)
+ *       pass. With TLS on, the certificate and key are re-read on the same schedule (see the TLS
+ *       section). {@code 0} disables reload (startup-only loading), certificate rotation included
  *   <li>{@code secrets_root} — the directory {@code ${file:...}} references in service files must
  *       resolve inside, after symlink resolution (default {@value #DEFAULT_SECRETS_ROOT}). Service
  *       files are a live trust boundary under reload, so their file references are confined to the

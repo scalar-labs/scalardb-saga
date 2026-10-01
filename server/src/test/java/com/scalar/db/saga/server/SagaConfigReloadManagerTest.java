@@ -17,11 +17,13 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -83,7 +85,7 @@ class SagaConfigReloadManagerTest {
     // Arrange
     ReloadConfig config = reloadConfig(30);
     SagaConfigReloadManager manager =
-        new SagaConfigReloadManager(reconciler(config), config, scheduler);
+        new SagaConfigReloadManager(reconciler(config), config, null, scheduler);
 
     // Act
     manager.start();
@@ -105,7 +107,8 @@ class SagaConfigReloadManagerTest {
             + "\"compensation\":{\"method\":\"POST\",\"path\":\"/y\"}}]}");
     ReloadConfig config = reloadConfig(30);
     ConfigReconciler reconciler = reconciler(config);
-    SagaConfigReloadManager manager = new SagaConfigReloadManager(reconciler, config, scheduler);
+    SagaConfigReloadManager manager =
+        new SagaConfigReloadManager(reconciler, config, null, scheduler);
     manager.start();
     ArgumentCaptor<Runnable> task = ArgumentCaptor.forClass(Runnable.class);
     verify(scheduler)
@@ -137,7 +140,88 @@ class SagaConfigReloadManagerTest {
             },
             acceptingStore(),
             names -> {});
-    SagaConfigReloadManager manager = new SagaConfigReloadManager(reconciler, config, scheduler);
+    SagaConfigReloadManager manager =
+        new SagaConfigReloadManager(reconciler, config, null, scheduler);
+    manager.start();
+    ArgumentCaptor<Runnable> task = ArgumentCaptor.forClass(Runnable.class);
+    verify(scheduler)
+        .scheduleWithFixedDelay(task.capture(), anyLong(), anyLong(), any(TimeUnit.class));
+
+    // Act & Assert
+    assertThatCode(() -> task.getValue().run()).doesNotThrowAnyException();
+  }
+
+  @Test
+  void start_withTlsPass_scheduledTaskRunsTheConfigPassThenTheTlsPass() throws IOException {
+    // Arrange — a service file makes the config pass reach its registrar, which records its turn
+    Files.writeString(servicesDir.resolve("svc.properties"), "base_url=http://svc:1\n");
+    List<String> order = new ArrayList<>();
+    ReloadConfig config = reloadConfig(30);
+    ConfigReconciler reconciler =
+        new ConfigReconciler(
+            config,
+            definitionsDir,
+            false,
+            new ServiceSecretResolver(config.secretsRoot()),
+            services -> order.add("config"),
+            acceptingStore(),
+            names -> {});
+    SagaConfigReloadManager manager =
+        new SagaConfigReloadManager(reconciler, config, () -> order.add("tls"), scheduler);
+    manager.start();
+    ArgumentCaptor<Runnable> task = ArgumentCaptor.forClass(Runnable.class);
+    verify(scheduler)
+        .scheduleWithFixedDelay(task.capture(), anyLong(), anyLong(), any(TimeUnit.class));
+
+    // Act
+    task.getValue().run();
+
+    // Assert — one task, both passes, configuration first
+    assertThat(order).containsExactly("config", "tls");
+  }
+
+  @Test
+  void start_configPassThrowsError_tlsPassStillRunsAndTheTaskContainsIt() throws IOException {
+    // Arrange — the passes are guarded separately: a blown-up config pass must cost neither the
+    // certificate its check nor the scheduler its task
+    Files.writeString(servicesDir.resolve("svc.properties"), "base_url=http://svc:1\n");
+    AtomicBoolean tlsRan = new AtomicBoolean();
+    ReloadConfig config = reloadConfig(30);
+    ConfigReconciler reconciler =
+        new ConfigReconciler(
+            config,
+            definitionsDir,
+            false,
+            new ServiceSecretResolver(config.secretsRoot()),
+            services -> {
+              throw new Error("registrar blew up");
+            },
+            acceptingStore(),
+            names -> {});
+    SagaConfigReloadManager manager =
+        new SagaConfigReloadManager(reconciler, config, () -> tlsRan.set(true), scheduler);
+    manager.start();
+    ArgumentCaptor<Runnable> task = ArgumentCaptor.forClass(Runnable.class);
+    verify(scheduler)
+        .scheduleWithFixedDelay(task.capture(), anyLong(), anyLong(), any(TimeUnit.class));
+
+    // Act & Assert
+    assertThatCode(() -> task.getValue().run()).doesNotThrowAnyException();
+    assertThat(tlsRan).isTrue();
+  }
+
+  @Test
+  void start_tlsPassThrowsError_scheduledTaskContainsIt() {
+    // Arrange
+    ReloadConfig config = reloadConfig(30);
+    SagaConfigReloadManager manager =
+        new SagaConfigReloadManager(
+            reconciler(config),
+            config,
+            () -> {
+              throw new Error("tls pass blew up");
+            },
+            scheduler);
     manager.start();
     ArgumentCaptor<Runnable> task = ArgumentCaptor.forClass(Runnable.class);
     verify(scheduler)
@@ -154,7 +238,7 @@ class SagaConfigReloadManagerTest {
     when(scheduler.awaitTermination(anyLong(), any())).thenReturn(true);
     when(scheduler.isTerminated()).thenReturn(true);
     SagaConfigReloadManager manager =
-        new SagaConfigReloadManager(reconciler(config), config, scheduler);
+        new SagaConfigReloadManager(reconciler(config), config, null, scheduler);
 
     // Act
     manager.stop(System.nanoTime() + TimeUnit.SECONDS.toNanos(5));
@@ -173,7 +257,7 @@ class SagaConfigReloadManagerTest {
     when(scheduler.awaitTermination(anyLong(), any())).thenReturn(false);
     when(scheduler.isTerminated()).thenReturn(false);
     SagaConfigReloadManager manager =
-        new SagaConfigReloadManager(reconciler(config), config, scheduler);
+        new SagaConfigReloadManager(reconciler(config), config, null, scheduler);
 
     // Act & Assert
     try (LogCapture logs = LogCapture.of(SagaConfigReloadManager.class)) {
@@ -196,7 +280,7 @@ class SagaConfigReloadManagerTest {
     ReloadConfig config = reloadConfig(30);
     when(scheduler.isTerminated()).thenReturn(true);
     SagaConfigReloadManager manager =
-        new SagaConfigReloadManager(reconciler(config), config, scheduler);
+        new SagaConfigReloadManager(reconciler(config), config, null, scheduler);
 
     // Act & Assert
     assertThatCode(() -> manager.stop(System.nanoTime())).doesNotThrowAnyException();
