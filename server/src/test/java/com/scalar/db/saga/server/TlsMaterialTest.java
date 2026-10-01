@@ -143,8 +143,9 @@ class TlsMaterialTest {
   @Test
   void load_certFileWithUnterminatedBlock_throwsMidWriteHint() throws IOException {
     // Arrange — what a plain copy looks like when read mid-write: the leaf complete, the
-    // intermediate cut off. The leaf alone would validate against the key, so this is the one
-    // torn shape the key-match check cannot catch.
+    // intermediate cut off. The leaf alone would validate against the key, so this is one torn
+    // shape the key-match check cannot catch. Not the only one: a cut at or just past the leaf's
+    // END line looks like a genuine leaf-only file and still passes.
     Path torn = dir.resolve("torn.crt");
     Files.writeString(
         torn, Files.readString(rsa.certChainPath()) + "-----BEGIN CERTIFICATE-----\nMIIDATCC\n");

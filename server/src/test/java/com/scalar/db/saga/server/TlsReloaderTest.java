@@ -377,6 +377,38 @@ class TlsReloaderTest {
     }
   }
 
+  @Test
+  void run_certificateAgesIntoItsLastQuarterWhileRejected_warnsFromTheRejectedPass()
+      throws IOException {
+    // Arrange — the rotation is stuck on a key from another issuance, so every pass is rejected
+    // and only the rejection path is left to notice the serving certificate ageing
+    X509Certificate leaf = boot.certificate();
+    Instant notBefore = leaf.getNotBefore().toInstant();
+    Instant notAfter = leaf.getNotAfter().toInstant();
+    Duration lifetime = Duration.between(notBefore, notAfter);
+    SteppingClock clock = new SteppingClock(notAfter.minus(lifetime.dividedBy(2)));
+    TlsReloader reloader = reloader(clock);
+    Files.copy(rotated.privateKeyPath(), liveKey, REPLACE_EXISTING);
+
+    try (LogCapture logs = LogCapture.of(TlsReloader.class)) {
+      reloader.run();
+      assertThat(atLevel(logs, Level.WARN))
+          .singleElement()
+          .satisfies(event -> assertThat(event.getFormattedMessage()).contains("rejected"));
+
+      // Act — time passes to a fifth of the lifetime left, then a pass that is rejected again
+      clock.advance(lifetime.dividedBy(2).minus(lifetime.dividedBy(5)));
+      reloader.run();
+
+      // Assert — the repeat rejection stays quiet; the ageing certificate does not
+      assertThat(atLevel(logs, Level.WARN))
+          .hasSize(2)
+          .last()
+          .satisfies(event -> assertThat(event.getFormattedMessage()).contains("last quarter"));
+    }
+    assertThat(served(reloader)).isEqualTo(boot.certificate());
+  }
+
   /** A clock a test can step, for a certificate that has to age between two passes. */
   private static final class SteppingClock extends Clock {
     private Instant instant;
