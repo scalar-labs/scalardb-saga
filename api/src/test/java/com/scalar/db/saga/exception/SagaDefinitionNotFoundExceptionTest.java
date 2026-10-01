@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.scalar.db.saga.api.SagaDefinitionId;
+import java.util.Collections;
 import org.junit.jupiter.api.Test;
 
 class SagaDefinitionNotFoundExceptionTest {
@@ -73,6 +74,58 @@ class SagaDefinitionNotFoundExceptionTest {
     // Arrange & Act & Assert
     assertThatThrownBy(() -> SagaDefinitionNotFoundException.byNameAndVersion("order-saga", null))
         .isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void fromWire_nameOnlyCodeAndSagaNameGiven_reconstructsByName() {
+    // Act
+    SagaDefinitionNotFoundException e =
+        SagaDefinitionNotFoundException.fromWire(
+            SagaErrorCode.SAGA_DEFINITION_NOT_FOUND,
+            Collections.singletonMap("saga_name", "order-saga"));
+
+    // Assert
+    assertThat(e.getSagaName()).isEqualTo("order-saga");
+    assertThat(e.getVersion()).isNull();
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.SAGA_DEFINITION_NOT_FOUND);
+  }
+
+  @Test
+  void fromWire_versionedCodeAndBothKeysGiven_reconstructsByNameAndVersion() {
+    // Act
+    SagaDefinitionNotFoundException e =
+        SagaDefinitionNotFoundException.fromWire(
+            SagaErrorCode.SAGA_DEFINITION_VERSION_NOT_FOUND,
+            ErrorMetadata.of("saga_name", "order-saga", "version", "2.0"));
+
+    // Assert
+    assertThat(e.getSagaName()).isEqualTo("order-saga");
+    assertThat(e.getVersion()).isEqualTo("2.0");
+    assertThat(e.getErrorCode()).isEqualTo(SagaErrorCode.SAGA_DEFINITION_VERSION_NOT_FOUND);
+  }
+
+  @Test
+  void fromWire_versionedCodeMissingVersionGiven_throwsNullPointerException() {
+    // Arrange & Act & Assert — the registry catches this and degrades rather than producing a
+    // versioned exception with no version
+    assertThatThrownBy(
+            () ->
+                SagaDefinitionNotFoundException.fromWire(
+                    SagaErrorCode.SAGA_DEFINITION_VERSION_NOT_FOUND,
+                    Collections.singletonMap("saga_name", "order-saga")))
+        .isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void fromWire_unrelatedCodeGiven_throwsIllegalStateException() {
+    // Arrange & Act & Assert — only ExceptionRegistry calls fromWire, so an unrelated code is a
+    // registry wiring bug; IllegalStateException sits outside what the registry catches for
+    // wire-metadata drift, so the bug propagates instead of degrading
+    assertThatThrownBy(
+            () ->
+                SagaDefinitionNotFoundException.fromWire(
+                    SagaErrorCode.SAGA_NOT_FOUND, Collections.singletonMap("saga_name", "x")))
+        .isInstanceOf(IllegalStateException.class);
   }
 
   @Test
