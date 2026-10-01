@@ -79,13 +79,11 @@ dependencies {
     implementation(platform(libs.jackson.bom))
     implementation(libs.jackson.databind)
 
-    runtimeOnly(libs.logback.classic)
+    // Not runtimeOnly: BoundedQueueWarningFilter extends Logback's TurboFilter.
+    implementation(libs.logback.classic)
 
     testImplementation(platform(libs.grpc.bom))
     testImplementation(libs.grpc.inprocess)
-    // The bridge and TLS tests capture what actually reaches Logback, which needs its appender
-    // types at compile time — the main source set only needs Logback at runtime.
-    testImplementation(libs.logback.classic)
 
     "integrationTestImplementation"(project(":core"))
     "integrationTestImplementation"(project(":client"))
