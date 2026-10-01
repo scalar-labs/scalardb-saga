@@ -299,11 +299,13 @@ public final class ScalarDbSagaStore implements SagaStore {
    * cannot disagree.
    *
    * <p>Equal stamps can only come from two replicas registering different versions of the same saga
-   * in the same millisecond: a single replica always stamps strictly after every row it can see
-   * ({@link #monotonicStamp}). On a tie the first row in clustering-key order wins, which is the
-   * lexicographically smallest version string. That is accepted rather than broken by a secondary
-   * key: versions are free-form text, so no order on them means anything, and the version that
-   * loses the tie stays registered and startable by version.
+   * concurrently: a single replica always stamps strictly after every row it can see ({@link
+   * #monotonicStamp}). Two replicas tie when their clocks read the same millisecond, or when both
+   * clocks are behind the newest row, since both then clamp to one millisecond past it. On a tie
+   * the first row in clustering-key order wins, which is the lexicographically smallest version
+   * string. That is accepted rather than broken by a secondary key: versions are free-form text, so
+   * no order on them means anything, and the version that loses the tie stays registered and
+   * startable by version.
    *
    * <p>A row with no stamp is corrupt, not old: this store has written {@code registered_at} on
    * every insert since the table existed. Such a row fails the read as a deserialization failure
