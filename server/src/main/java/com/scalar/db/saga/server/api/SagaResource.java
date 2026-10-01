@@ -7,8 +7,8 @@ import com.scalar.db.saga.exception.SagaInvalidRequestException;
 import com.scalar.db.saga.server.BoundedWait;
 import com.scalar.db.saga.server.SagaWaiterRegistry;
 import com.scalar.db.saga.server.security.SagaOperation;
-import io.javalin.Javalin;
 import io.javalin.http.Context;
+import io.javalin.router.JavalinDefaultRoutingApi;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import org.jspecify.annotations.Nullable;
@@ -93,9 +93,9 @@ public final class SagaResource {
   private SagaResource() {}
 
   /**
-   * Registers the saga lifecycle routes on the given app.
+   * Registers the saga lifecycle routes on the given routing configuration.
    *
-   * @param app the Javalin app
+   * @param routes the routing configuration the server is created with
    * @param orchestrator the saga orchestrator the endpoints delegate to
    * @param syncWaitBoundMillis how long a synchronous start may wait before answering {@code 202},
    *     already resolved from the {@code sync.*} keys. Always finite, so no start can block
@@ -106,12 +106,12 @@ public final class SagaResource {
    *     process wakes it; shared with the engine and the gRPC transport
    */
   public static void register(
-      Javalin app,
+      JavalinDefaultRoutingApi routes,
       SagaOrchestrator orchestrator,
       long syncWaitBoundMillis,
       CompletableFuture<Void> shutdownSignal,
       SagaWaiterRegistry waiterRegistry) {
-    app.post(
+    routes.post(
         "/sagas",
         ctx -> {
           StartSagaRequest request = parseRequest(ctx);
@@ -138,7 +138,7 @@ public final class SagaResource {
         },
         SagaOperation.START_SAGA);
 
-    app.put(
+    routes.put(
         "/sagas/{id}",
         ctx -> {
           String sagaId = ctx.pathParam("id");
@@ -165,7 +165,7 @@ public final class SagaResource {
         },
         SagaOperation.START_SAGA);
 
-    app.get(
+    routes.get(
         "/sagas/{id}",
         ctx -> respond(ctx, 200, orchestrator.getStateSnapshot(ctx.pathParam("id"))),
         SagaOperation.GET_SAGA);
@@ -173,7 +173,7 @@ public final class SagaResource {
     // A saga's detail (state + timeline). An application read of its own saga — self-service
     // diagnosis of a failure — so it lives here with the other application reads, not on the admin
     // surface; the timeline redacts raw step payloads.
-    app.get(
+    routes.get(
         "/sagas/{id}/detail",
         ctx ->
             ctx.status(200)

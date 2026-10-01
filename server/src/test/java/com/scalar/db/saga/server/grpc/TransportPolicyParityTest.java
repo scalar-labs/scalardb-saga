@@ -17,6 +17,7 @@ import com.scalar.db.saga.server.security.SagaRole;
 import io.grpc.MethodDescriptor;
 import io.javalin.Javalin;
 import io.javalin.router.Endpoint;
+import io.javalin.security.Roles;
 import io.javalin.security.RouteRole;
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
@@ -162,24 +163,30 @@ class TransportPolicyParityTest {
   @Test
   void restRoutes_allCarryTheExpectedOperation() {
     // Arrange — register the real routes, exactly as SagaServer does
-    Javalin app = Javalin.create();
     DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
-    HealthResource.register(app);
-    SagaResource.register(
-        app,
-        mock(SagaOrchestrator.class),
-        0L,
-        new java.util.concurrent.CompletableFuture<>(),
-        new SagaWaiterRegistry());
-    SagaAdminResource.register(app, orchestrator, 0L);
-    CallbackResource.register(app, orchestrator, "test-secret", 0L, Clock.systemUTC());
+    Javalin app =
+        Javalin.create(
+            cfg -> {
+              HealthResource.register(cfg.routes);
+              SagaResource.register(
+                  cfg.routes,
+                  mock(SagaOrchestrator.class),
+                  0L,
+                  new java.util.concurrent.CompletableFuture<>(),
+                  new SagaWaiterRegistry());
+              SagaAdminResource.register(cfg.routes, orchestrator, 0L);
+              CallbackResource.register(
+                  cfg.routes, orchestrator, "test-secret", 0L, Clock.systemUTC());
+            });
 
     // Act — enumerate what was actually registered, skipping the before/after handlers
     Map<String, SagaOperation> registered = new HashMap<>();
     Set<String> untagged = new LinkedHashSet<>();
     for (Endpoint endpoint : registeredHttpEndpoints(app)) {
-      String route = endpoint.getMethod() + " " + endpoint.getPath();
-      SagaOperation operation = operationOf(endpoint.getRoles());
+      String route = endpoint.method + " " + endpoint.path;
+      // No roles entry at all reads as untagged, the same as an empty one: both fail closed below.
+      Roles roles = endpoint.metadata(Roles.class);
+      SagaOperation operation = roles == null ? null : operationOf(roles.getRoles());
       if (operation == null) {
         untagged.add(route);
       } else {
@@ -198,19 +205,18 @@ class TransportPolicyParityTest {
 
   /**
    * The app's registered HTTP-verb endpoints, excluding the before/after filter handlers. Reads the
-   * router straight off the config rather than through {@code javalinServlet()}, whose concrete
-   * type depends on which server backs the app.
+   * router straight off the app's state rather than through {@code javalinServlet()}, whose
+   * concrete type depends on which server backs the app.
    */
   private static Iterable<Endpoint> registeredHttpEndpoints(Javalin app) {
     Set<Endpoint> endpoints = new LinkedHashSet<>();
-    app.unsafeConfig()
-        .pvt
+    app.unsafe
         .internalRouter
         .allHttpHandlers()
         .forEach(
             parsed -> {
-              Endpoint endpoint = parsed.getEndpoint();
-              if (endpoint.getMethod().isHttpMethod()) {
+              Endpoint endpoint = parsed.endpoint;
+              if (endpoint.method.isHttpMethod()) {
                 endpoints.add(endpoint);
               }
             });

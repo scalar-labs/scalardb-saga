@@ -65,6 +65,10 @@ dependencies {
     runtimeOnly(variantOf(libs.netty.transport.native.epoll) { classifier("linux-aarch_64") })
     implementation(libs.grpc.stub)
     implementation(libs.grpc.netty)
+    // AdvancedTlsX509KeyManager, the one key manager both transports serve TLS from. grpc-util is
+    // already on the runtime classpath through grpc-core; naming it here puts it on the compile
+    // classpath.
+    implementation(libs.grpc.util)
     implementation(libs.grpc.services)
     implementation(libs.grpc.protobuf)
     implementation(libs.protobuf.java)
@@ -79,13 +83,11 @@ dependencies {
     implementation(platform(libs.jackson.bom))
     implementation(libs.jackson.databind)
 
-    runtimeOnly(libs.logback.classic)
+    // Not runtimeOnly: BoundedQueueWarningFilter extends Logback's TurboFilter.
+    implementation(libs.logback.classic)
 
     testImplementation(platform(libs.grpc.bom))
     testImplementation(libs.grpc.inprocess)
-    // The bridge and TLS tests capture what actually reaches Logback, which needs its appender
-    // types at compile time — the main source set only needs Logback at runtime.
-    testImplementation(libs.logback.classic)
 
     "integrationTestImplementation"(project(":core"))
     "integrationTestImplementation"(project(":client"))

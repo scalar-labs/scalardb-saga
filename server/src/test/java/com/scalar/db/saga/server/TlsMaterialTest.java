@@ -4,22 +4,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
-import ch.qos.logback.classic.Level;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.KeyPairGenerator;
-import java.security.KeyStore;
-import java.security.cert.Certificate;
-import java.security.cert.CertificateFactory;
-import java.time.Clock;
-import java.time.Duration;
-import java.time.ZoneOffset;
-import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.BeforeAll;
@@ -48,8 +38,7 @@ class TlsMaterialTest {
   @Test
   void load_validRsaPemGiven_parsesChainAndKey() {
     // Act
-    TlsMaterial material =
-        TlsMaterial.load(rsa.certChainPath(), rsa.privateKeyPath(), Clock.systemUTC());
+    TlsMaterial material = TlsMaterial.load(rsa.certChainPath(), rsa.privateKeyPath());
 
     // Assert
     assertThat(material.certChain()).containsExactly(rsa.certificate());
@@ -58,8 +47,7 @@ class TlsMaterialTest {
 
   @Test
   void load_validEcPemGiven_parsesKey() {
-    TlsMaterial material =
-        TlsMaterial.load(ec.certChainPath(), ec.privateKeyPath(), Clock.systemUTC());
+    TlsMaterial material = TlsMaterial.load(ec.certChainPath(), ec.privateKeyPath());
 
     assertThat(material.certChain()).containsExactly(ec.certificate());
     assertThat(material.privateKey().getAlgorithm()).isEqualTo("EC");
@@ -74,7 +62,7 @@ class TlsMaterialTest {
         chain, Files.readString(rsa.certChainPath()) + Files.readString(otherRsa.certChainPath()));
 
     // Act
-    TlsMaterial material = TlsMaterial.load(chain, rsa.privateKeyPath(), Clock.systemUTC());
+    TlsMaterial material = TlsMaterial.load(chain, rsa.privateKeyPath());
 
     // Assert
     assertThat(material.certChain()).containsExactly(rsa.certificate(), otherRsa.certificate());
@@ -89,7 +77,7 @@ class TlsMaterialTest {
         chain,
         "subject=CN=localhost\nissuer=CN=localhost\n" + Files.readString(rsa.certChainPath()));
 
-    TlsMaterial material = TlsMaterial.load(chain, rsa.privateKeyPath(), Clock.systemUTC());
+    TlsMaterial material = TlsMaterial.load(chain, rsa.privateKeyPath());
 
     assertThat(material.certChain()).containsExactly(rsa.certificate());
   }
@@ -100,7 +88,7 @@ class TlsMaterialTest {
     // reference on a path key resolves to the referenced content), so no message may echo it.
     Path missing = dir.resolve("nope.crt");
 
-    assertThatThrownBy(() -> TlsMaterial.load(missing, rsa.privateKeyPath(), Clock.systemUTC()))
+    assertThatThrownBy(() -> TlsMaterial.load(missing, rsa.privateKeyPath()))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY)
         .hasMessageContaining("does not exist")
@@ -112,7 +100,7 @@ class TlsMaterialTest {
   void load_keyFileMissing_throwsNamingKeyButNotPathValue() {
     Path missing = dir.resolve("nope.key");
 
-    assertThatThrownBy(() -> TlsMaterial.load(rsa.certChainPath(), missing, Clock.systemUTC()))
+    assertThatThrownBy(() -> TlsMaterial.load(rsa.certChainPath(), missing))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY)
         .hasMessageContaining("does not exist")
@@ -132,7 +120,7 @@ class TlsMaterialTest {
     Files.copy(rsa.privateKeyPath(), unreadable);
     Files.setPosixFilePermissions(unreadable, PosixFilePermissions.fromString("---------"));
 
-    assertThatThrownBy(() -> TlsMaterial.load(rsa.certChainPath(), unreadable, Clock.systemUTC()))
+    assertThatThrownBy(() -> TlsMaterial.load(rsa.certChainPath(), unreadable))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY)
         .hasMessageContaining("not readable")
@@ -145,10 +133,29 @@ class TlsMaterialTest {
     Path der = dir.resolve("cert.der");
     Files.write(der, rsa.certificate().getEncoded());
 
-    assertThatThrownBy(() -> TlsMaterial.load(der, rsa.privateKeyPath(), Clock.systemUTC()))
+    assertThatThrownBy(() -> TlsMaterial.load(der, rsa.privateKeyPath()))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY)
         .hasMessageContaining("DER")
+        .hasNoCause();
+  }
+
+  @Test
+  void load_certFileWithUnterminatedBlock_throwsMidWriteHint() throws IOException {
+    // Arrange — what a plain copy looks like when read mid-write: the leaf complete, the
+    // intermediate cut off. The leaf alone would validate against the key, so this is one torn
+    // shape the key-match check cannot catch. Not the only one: a cut at or just past the leaf's
+    // END line looks like a genuine leaf-only file and still passes.
+    Path torn = dir.resolve("torn.crt");
+    Files.writeString(
+        torn, Files.readString(rsa.certChainPath()) + "-----BEGIN CERTIFICATE-----\nMIIDATCC\n");
+
+    // Act & Assert
+    assertThatThrownBy(() -> TlsMaterial.load(torn, rsa.privateKeyPath()))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY)
+        .hasMessageContaining("not terminated")
+        .hasMessageNotContaining("-----")
         .hasNoCause();
   }
 
@@ -157,7 +164,7 @@ class TlsMaterialTest {
     Path notPem = dir.resolve("not-pem.crt");
     Files.writeString(notPem, "hello, this is not a certificate\n");
 
-    assertThatThrownBy(() -> TlsMaterial.load(notPem, rsa.privateKeyPath(), Clock.systemUTC()))
+    assertThatThrownBy(() -> TlsMaterial.load(notPem, rsa.privateKeyPath()))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY)
         .hasMessageContaining("no CERTIFICATE block")
@@ -166,8 +173,7 @@ class TlsMaterialTest {
 
   @Test
   void load_keyMaterialInCertPath_throwsSwappedPathsHint() {
-    assertThatThrownBy(
-            () -> TlsMaterial.load(rsa.privateKeyPath(), rsa.privateKeyPath(), Clock.systemUTC()))
+    assertThatThrownBy(() -> TlsMaterial.load(rsa.privateKeyPath(), rsa.privateKeyPath()))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY)
         .hasMessageContaining("swapped")
@@ -176,8 +182,7 @@ class TlsMaterialTest {
 
   @Test
   void load_certificateInKeyPath_throwsSwappedPathsHint() {
-    assertThatThrownBy(
-            () -> TlsMaterial.load(rsa.certChainPath(), rsa.certChainPath(), Clock.systemUTC()))
+    assertThatThrownBy(() -> TlsMaterial.load(rsa.certChainPath(), rsa.certChainPath()))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY)
         .hasMessageContaining("swapped")
@@ -190,7 +195,7 @@ class TlsMaterialTest {
     Path corrupt = dir.resolve("corrupt.crt");
     Files.writeString(corrupt, "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n");
 
-    assertThatThrownBy(() -> TlsMaterial.load(corrupt, rsa.privateKeyPath(), Clock.systemUTC()))
+    assertThatThrownBy(() -> TlsMaterial.load(corrupt, rsa.privateKeyPath()))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY)
         .hasMessageContaining("does not parse")
@@ -206,7 +211,7 @@ class TlsMaterialTest {
     Files.writeString(
         pkcs1, "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n");
 
-    assertThatThrownBy(() -> TlsMaterial.load(rsa.certChainPath(), pkcs1, Clock.systemUTC()))
+    assertThatThrownBy(() -> TlsMaterial.load(rsa.certChainPath(), pkcs1))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY)
         .hasMessageContaining("PKCS#1")
@@ -220,7 +225,7 @@ class TlsMaterialTest {
     Path sec1 = dir.resolve("sec1.key");
     Files.writeString(sec1, "-----BEGIN EC PRIVATE KEY-----\nAAAA\n-----END EC PRIVATE KEY-----\n");
 
-    assertThatThrownBy(() -> TlsMaterial.load(rsa.certChainPath(), sec1, Clock.systemUTC()))
+    assertThatThrownBy(() -> TlsMaterial.load(rsa.certChainPath(), sec1))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY)
         .hasMessageContaining("SEC1")
@@ -235,7 +240,7 @@ class TlsMaterialTest {
         encrypted,
         "-----BEGIN ENCRYPTED PRIVATE KEY-----\nAAAA\n-----END ENCRYPTED PRIVATE KEY-----\n");
 
-    assertThatThrownBy(() -> TlsMaterial.load(rsa.certChainPath(), encrypted, Clock.systemUTC()))
+    assertThatThrownBy(() -> TlsMaterial.load(rsa.certChainPath(), encrypted))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY)
         .hasMessageContaining("encrypted")
@@ -253,7 +258,7 @@ class TlsMaterialTest {
         ed25519,
         TlsTestCerts.pem("PRIVATE KEY", generator.generateKeyPair().getPrivate().getEncoded()));
 
-    assertThatThrownBy(() -> TlsMaterial.load(rsa.certChainPath(), ed25519, Clock.systemUTC()))
+    assertThatThrownBy(() -> TlsMaterial.load(rsa.certChainPath(), ed25519))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY)
         .hasMessageContaining("neither RSA nor EC")
@@ -268,7 +273,7 @@ class TlsMaterialTest {
     Path corrupt = dir.resolve("corrupt-pkcs8.key");
     Files.writeString(corrupt, "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n");
 
-    assertThatThrownBy(() -> TlsMaterial.load(rsa.certChainPath(), corrupt, Clock.systemUTC()))
+    assertThatThrownBy(() -> TlsMaterial.load(rsa.certChainPath(), corrupt))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY)
         .hasMessageContaining("corrupt")
@@ -293,7 +298,7 @@ class TlsMaterialTest {
         -----END RSA PRIVATE KEY-----
         """);
 
-    assertThatThrownBy(() -> TlsMaterial.load(rsa.certChainPath(), encrypted, Clock.systemUTC()))
+    assertThatThrownBy(() -> TlsMaterial.load(rsa.certChainPath(), encrypted))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY)
         .hasMessageContaining("encrypted legacy")
@@ -305,9 +310,7 @@ class TlsMaterialTest {
   void load_keyFromDifferentIssuanceGiven_throwsMismatchNamingBothPaths() {
     // Same algorithm, wrong pair — the renewed-cert-with-stale-key case, which neither Jetty nor
     // Netty catches at startup.
-    assertThatThrownBy(
-            () ->
-                TlsMaterial.load(rsa.certChainPath(), otherRsa.privateKeyPath(), Clock.systemUTC()))
+    assertThatThrownBy(() -> TlsMaterial.load(rsa.certChainPath(), otherRsa.privateKeyPath()))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY)
         .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY)
@@ -317,105 +320,37 @@ class TlsMaterialTest {
 
   @Test
   void load_ecKeyWithRsaCertGiven_throwsMismatch() {
-    assertThatThrownBy(
-            () -> TlsMaterial.load(rsa.certChainPath(), ec.privateKeyPath(), Clock.systemUTC()))
+    assertThatThrownBy(() -> TlsMaterial.load(rsa.certChainPath(), ec.privateKeyPath()))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("does not match")
         .hasNoCause();
   }
 
   @Test
-  void load_expiredCert_warnsWithDateOnly() {
-    // Arrange: a clock past notAfter makes the (10-year) test certificate expired. The server
-    // still starts — rotation may land a fresh file — but the warning must say so, dates only.
-    Clock afterExpiry =
-        Clock.fixed(
-            rsa.certificate().getNotAfter().toInstant().plus(Duration.ofDays(1)), ZoneOffset.UTC);
+  void sameMaterialAs_reformattedCopyOfTheSameFiles_true() throws IOException {
+    // Arrange — the same material through a differently formatted file: prose around the block,
+    // as openssl writes it. Bytes differ; the DER, and so the material, does not.
+    Path annotated = dir.resolve("annotated.crt");
+    Files.writeString(annotated, "subject=CN=localhost\n" + Files.readString(rsa.certChainPath()));
+    TlsMaterial original = TlsMaterial.load(rsa.certChainPath(), rsa.privateKeyPath());
 
-    try (LogCapture logs = LogCapture.of(TlsMaterial.class)) {
-      // Act
-      TlsMaterial.load(rsa.certChainPath(), rsa.privateKeyPath(), afterExpiry);
+    // Act
+    TlsMaterial reloaded = TlsMaterial.load(annotated, rsa.privateKeyPath());
 
-      // Assert
-      assertThat(logs.events())
-          .anySatisfy(
-              event -> {
-                assertThat(event.getLevel()).isEqualTo(Level.WARN);
-                assertThat(event.getFormattedMessage()).contains("expired");
-                assertThat(event.getFormattedMessage()).doesNotContain("BEGIN");
-              });
-    }
+    // Assert
+    assertThat(reloaded.sameMaterialAs(original)).isTrue();
   }
 
   @Test
-  void load_notYetValidCert_warnsWithDateOnly() {
-    Clock beforeValidity =
-        Clock.fixed(
-            rsa.certificate().getNotBefore().toInstant().minus(Duration.ofDays(1)), ZoneOffset.UTC);
+  void sameMaterialAs_differentIssuance_false() {
+    // Arrange
+    TlsMaterial original = TlsMaterial.load(rsa.certChainPath(), rsa.privateKeyPath());
 
-    try (LogCapture logs = LogCapture.of(TlsMaterial.class)) {
-      TlsMaterial.load(rsa.certChainPath(), rsa.privateKeyPath(), beforeValidity);
+    // Act
+    TlsMaterial other = TlsMaterial.load(otherRsa.certChainPath(), otherRsa.privateKeyPath());
 
-      assertThat(logs.events())
-          .anySatisfy(
-              event -> {
-                assertThat(event.getLevel()).isEqualTo(Level.WARN);
-                assertThat(event.getFormattedMessage()).contains("not valid until");
-              });
-    }
-  }
-
-  @Test
-  void load_certWithinValidity_logsNoWarning() {
-    try (LogCapture logs = LogCapture.of(TlsMaterial.class)) {
-      TlsMaterial.load(rsa.certChainPath(), rsa.privateKeyPath(), Clock.systemUTC());
-
-      assertThat(logs.events()).isEmpty();
-    }
-  }
-
-  @Test
-  void certChainPemStream_reparsedByCertificateFactory_yieldsTheValidatedChain() throws Exception {
-    TlsMaterial material =
-        TlsMaterial.load(rsa.certChainPath(), rsa.privateKeyPath(), Clock.systemUTC());
-
-    List<Certificate> reparsed =
-        new ArrayList<>(
-            CertificateFactory.getInstance("X.509")
-                .generateCertificates(material.certChainPemStream()));
-
-    assertThat(reparsed).containsExactly(rsa.certificate());
-  }
-
-  @Test
-  void privateKeyPemStream_carriesTheValidatedKeyAsUnencryptedPkcs8() throws Exception {
-    TlsMaterial material =
-        TlsMaterial.load(rsa.certChainPath(), rsa.privateKeyPath(), Clock.systemUTC());
-
-    String pem =
-        new String(material.privateKeyPemStream().readAllBytes(), StandardCharsets.US_ASCII);
-
-    // Exactly the validated key's PKCS#8 encoding, under the PKCS#8 label — what makes the gRPC
-    // transport serve vetted bytes rather than whatever the files hold at server-build time.
-    assertThat(pem).startsWith("-----BEGIN PRIVATE KEY-----");
-    String body =
-        pem.replace("-----BEGIN PRIVATE KEY-----", "")
-            .replace("-----END PRIVATE KEY-----", "")
-            .replaceAll("\\s", "");
-    assertThat(Base64.getDecoder().decode(body)).isEqualTo(material.privateKey().getEncoded());
-  }
-
-  @Test
-  void keyStore_passwordGiven_holdsKeyAndChainUnderOneEntry() throws Exception {
-    TlsMaterial material =
-        TlsMaterial.load(rsa.certChainPath(), rsa.privateKeyPath(), Clock.systemUTC());
-    char[] password = "throwaway".toCharArray();
-
-    KeyStore keyStore = material.keyStore(password);
-
-    assertThat(keyStore.getKey("scalardb-saga-tls", password)).isEqualTo(material.privateKey());
-    assertThat(keyStore.getCertificateChain("scalardb-saga-tls"))
-        .containsExactly(rsa.certificate());
+    // Assert
+    assertThat(other.sameMaterialAs(original)).isFalse();
   }
 
   @Test
@@ -428,13 +363,11 @@ class TlsMaterialTest {
         pkcs1, "-----BEGIN RSA PRIVATE KEY-----\nMIIEow==\n-----END RSA PRIVATE KEY-----\n");
     List<ThrowingCallable> cases =
         List.of(
-            () -> TlsMaterial.load(dir.resolve("no.crt"), rsa.privateKeyPath(), Clock.systemUTC()),
-            () -> TlsMaterial.load(rsa.privateKeyPath(), rsa.privateKeyPath(), Clock.systemUTC()),
-            () -> TlsMaterial.load(rsa.certChainPath(), rsa.certChainPath(), Clock.systemUTC()),
-            () -> TlsMaterial.load(rsa.certChainPath(), pkcs1, Clock.systemUTC()),
-            () ->
-                TlsMaterial.load(
-                    rsa.certChainPath(), otherRsa.privateKeyPath(), Clock.systemUTC()));
+            () -> TlsMaterial.load(dir.resolve("no.crt"), rsa.privateKeyPath()),
+            () -> TlsMaterial.load(rsa.privateKeyPath(), rsa.privateKeyPath()),
+            () -> TlsMaterial.load(rsa.certChainPath(), rsa.certChainPath()),
+            () -> TlsMaterial.load(rsa.certChainPath(), pkcs1),
+            () -> TlsMaterial.load(rsa.certChainPath(), otherRsa.privateKeyPath()));
 
     for (ThrowingCallable failing : cases) {
       // Messages may name PEM labels as static guidance ("a block labeled BEGIN PRIVATE KEY");

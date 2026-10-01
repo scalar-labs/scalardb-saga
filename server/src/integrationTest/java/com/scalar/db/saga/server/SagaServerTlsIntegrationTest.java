@@ -1,5 +1,6 @@
 package com.scalar.db.saga.server;
 
+import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -21,6 +22,7 @@ import java.net.http.HttpResponse.BodyHandlers;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyStore;
+import java.security.cert.X509Certificate;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -33,10 +35,11 @@ import org.junit.jupiter.api.io.TempDir;
 
 /**
  * End-to-end TLS coverage: a real {@link SagaServer} serving TLS on <b>both</b> transports from one
- * certificate, driven by clients that verify it — the only place Jetty's in-memory-keystore path
- * and Netty's PEM path are proven to serve identical material. Also pins the runtime policy around
- * hostile-but-routine connections: plaintext clients and bare TCP probes (load balancers, the smoke
- * test) must neither disturb the server nor push anything above INFO into the logs.
+ * certificate, driven by clients that verify it — the only place Jetty's and Netty's consumption of
+ * the shared key manager are proven to serve identical material, at boot and across a rotation.
+ * Also pins the runtime policy around hostile-but-routine connections: plaintext clients, bare TCP
+ * probes (load balancers, the smoke test) and clients still trusting a rotated-out certificate must
+ * neither disturb the server nor push anything above INFO into the logs.
  *
  * <p>The BouncyCastle-free classpath here is deliberate: Netty widens its PEM parsing when BC is
  * present, and this suite exists to exercise the production parse path (see {@link TlsTestCerts}).
@@ -54,10 +57,16 @@ class SagaServerTlsIntegrationTest extends ServerIntegrationTestSupport {
 
   @TempDir static Path tlsDir;
   private static TlsTestCerts.PemPair tls;
+  private static TlsTestCerts.PemPair rotated;
+
+  // The files the server reads: a per-test copy of the boot pair, so a rotation test can overwrite
+  // them without the next test booting on a rotated certificate.
+  @TempDir Path liveDir;
 
   @BeforeAll
   static void generateTlsMaterial() {
     tls = TlsTestCerts.generateRsa(tlsDir, "server");
+    rotated = TlsTestCerts.generateRsa(tlsDir, "rotated");
   }
 
   @Override
@@ -71,11 +80,21 @@ class SagaServerTlsIntegrationTest extends ServerIntegrationTestSupport {
     writeDefinition(definitionsDir, "saga", DEFINITION);
   }
 
+  private Path liveCert() {
+    return liveDir.resolve("tls.crt");
+  }
+
+  private Path liveKey() {
+    return liveDir.resolve("tls.key");
+  }
+
   @Override
-  protected void configureProperties(Properties props) {
+  protected void configureProperties(Properties props) throws IOException {
+    Files.copy(tls.certChainPath(), liveCert());
+    Files.copy(tls.privateKeyPath(), liveKey());
     props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
-    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, tls.certChainPath().toString());
-    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, tls.privateKeyPath().toString());
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, liveCert().toString());
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, liveKey().toString());
   }
 
   @Test
@@ -203,16 +222,119 @@ class SagaServerTlsIntegrationTest extends ServerIntegrationTestSupport {
         .hasNoCause();
   }
 
+  @Test
+  void
+      reloadTlsNow_rotatedPairWritten_newConnectionsOnBothTransportsGetItAndAnEstablishedOneKeepsServing()
+          throws Exception {
+    try (LogCapture logs = LogCapture.ofRoot()) {
+      // Arrange — a gRPC connection established under the boot certificate, with a saga behind it
+      GrpcSagaOrchestratorClient established = grpcClient(tls.certChainPath());
+      try {
+        String sagaId = established.start("saga", Map.of());
+
+        // Act — a rotation as the kubelet delivers one: both files replaced, then a pass
+        Files.copy(rotated.certChainPath(), liveCert(), REPLACE_EXISTING);
+        Files.copy(rotated.privateKeyPath(), liveKey(), REPLACE_EXISTING);
+        reloadTlsNow();
+
+        // Assert (HTTPS) — a new client trusting only the rotated certificate is served, and one
+        // trusting only the boot certificate is refused: the proof the swap happened, not merely
+        // that both are accepted.
+        String health = "https://localhost:" + httpPort() + "/health";
+        assertThat(httpsGet(health, rotated.certificate()).statusCode()).isEqualTo(200);
+        assertThatThrownBy(() -> httpsGet(health, tls.certificate()))
+            .isInstanceOf(IOException.class);
+
+        // Assert (gRPC) — the same, over the SDK
+        GrpcSagaOrchestratorClient fresh = grpcClient(rotated.certChainPath());
+        try {
+          assertThat(fresh.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.COMPLETED);
+        } finally {
+          fresh.close();
+        }
+        GrpcSagaOrchestratorClient stale = grpcClient(tls.certChainPath());
+        try {
+          assertThatThrownBy(() -> stale.getStateSnapshot(sagaId))
+              .isInstanceOf(SagaUnavailableException.class);
+        } finally {
+          stale.close();
+        }
+
+        // Assert (established) — the pre-rotation connection is untouched: a key manager is
+        // consulted only at handshake
+        assertThat(established.getStateSnapshot(sagaId).getStatus())
+            .isEqualTo(SagaStatus.COMPLETED);
+      } finally {
+        established.close();
+      }
+
+      // Assert (policy) — the stale clients' refused handshakes are routine during a rotation and
+      // stay below WARN, like every other hostile-but-routine connection here
+      assertThat(transportNoiseAtWarnOrAbove(logs.events())).isEmpty();
+    }
+  }
+
+  @Test
+  void reloadTlsNow_mismatchedPairWritten_keepsServingTheBootCertificateAndWarnsOnce()
+      throws Exception {
+    try (LogCapture logs = LogCapture.of(TlsReloader.class)) {
+      // Arrange — the torn rotation a kubelet symlink flip yields between the two reads: a new
+      // key beside the old certificate
+      Files.copy(rotated.privateKeyPath(), liveKey(), REPLACE_EXISTING);
+
+      // Act — two passes: the same rejection must not be warned twice
+      reloadTlsNow();
+      reloadTlsNow();
+
+      // Assert — both transports still serve the boot certificate, and the server is healthy
+      assertThat(httpsGet("https://localhost:" + httpPort() + "/health").statusCode())
+          .isEqualTo(200);
+      GrpcSagaOrchestratorClient client = grpcClient(tls.certChainPath());
+      try {
+        String sagaId = client.start("saga", Map.of());
+        assertThat(client.getStateSnapshot(sagaId).getStatus()).isEqualTo(SagaStatus.COMPLETED);
+      } finally {
+        client.close();
+      }
+
+      // Assert — one WARN naming the rejection and the key, nothing from inside the files
+      assertThat(logs.events().stream().filter(event -> event.getLevel() == Level.WARN))
+          .singleElement()
+          .satisfies(
+              event -> {
+                assertThat(event.getFormattedMessage()).contains("rejected");
+                assertThat(event.getFormattedMessage())
+                    .contains(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY);
+                assertThat(event.getFormattedMessage()).doesNotContain("-----");
+              });
+    }
+  }
+
   private HttpResponse<String> httpsGet(String url) throws Exception {
-    return httpsClient()
+    return httpsGet(url, tls.certificate());
+  }
+
+  private static HttpResponse<String> httpsGet(String url, X509Certificate trusted)
+      throws Exception {
+    return httpsClient(trusted)
         .send(HttpRequest.newBuilder(URI.create(url)).GET().build(), BodyHandlers.ofString());
   }
 
-  /** An HTTPS client trusting exactly the generated test CA (the server's own certificate). */
-  private static HttpClient httpsClient() throws Exception {
+  /** A gRPC SDK client trusting exactly {@code trustedCertChain}, dialing by IP. */
+  private GrpcSagaOrchestratorClient grpcClient(Path trustedCertChain) {
+    return GrpcSagaOrchestratorClient.newBuilder()
+        .target("127.0.0.1:" + grpcPort())
+        .useTransportSecurity()
+        .trustCaCertificate(trustedCertChain)
+        .overrideAuthority("localhost")
+        .build();
+  }
+
+  /** An HTTPS client trusting exactly {@code trusted} (a server's own self-signed certificate). */
+  private static HttpClient httpsClient(X509Certificate trusted) throws Exception {
     KeyStore trust = KeyStore.getInstance(KeyStore.getDefaultType());
     trust.load(null, null);
-    trust.setCertificateEntry("test-ca", tls.certificate());
+    trust.setCertificateEntry("test-ca", trusted);
     TrustManagerFactory trustManagers =
         TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
     trustManagers.init(trust);

@@ -68,10 +68,13 @@ class SagaAdminResourceTest {
     when(orchestrator.adminService()).thenReturn(adminService);
     when(orchestrator.adminService(any(OperatorContext.class), anyLong())).thenReturn(adminService);
 
-    app = Javalin.create();
-    SagaSecurityHandler.register(app, new RoleHeaderProvider());
-    ErrorMapper.register(app);
-    SagaAdminResource.register(app, orchestrator, 1_000L);
+    app =
+        Javalin.create(
+            cfg -> {
+              SagaSecurityHandler.register(cfg.routes, new RoleHeaderProvider());
+              ErrorMapper.register(cfg.routes);
+              SagaAdminResource.register(cfg.routes, orchestrator, 1_000L);
+            });
     // Loopback, not the wildcard: a wildcard bind can share a port with another suite's
     // loopback server, which then takes the connection and answers this test's requests.
     app.start("127.0.0.1", 0);

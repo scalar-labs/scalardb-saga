@@ -31,14 +31,12 @@ import io.grpc.health.v1.HealthGrpc;
 import io.grpc.netty.NettyServerBuilder;
 import io.javalin.Javalin;
 import java.io.IOException;
-import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Clock;
 import java.time.Instant;
 import java.util.Properties;
 import java.util.concurrent.TimeUnit;
@@ -821,7 +819,7 @@ class SagaServerTest {
     NettyServerBuilder builder = mock(NettyServerBuilder.class, RETURNS_SELF);
 
     // Act
-    SagaServer.applyGrpcTransportSettings(builder, config, null);
+    SagaServer.applyGrpcTransportSettings(builder, config);
 
     // Assert
     verify(builder).maxInboundMessageSize(2_097_152);
@@ -839,7 +837,7 @@ class SagaServerTest {
     NettyServerBuilder builder = mock(NettyServerBuilder.class, RETURNS_SELF);
 
     // Act
-    SagaServer.applyGrpcTransportSettings(builder, SagaServerConfig.load(props), null);
+    SagaServer.applyGrpcTransportSettings(builder, SagaServerConfig.load(props));
 
     // Assert
     verify(builder).maxInboundMessageSize(524_288);
@@ -853,41 +851,12 @@ class SagaServerTest {
     NettyServerBuilder builder = mock(NettyServerBuilder.class, RETURNS_SELF);
 
     // Act
-    SagaServer.applyGrpcTransportSettings(builder, SagaServerConfig.load(new Properties()), null);
+    SagaServer.applyGrpcTransportSettings(builder, SagaServerConfig.load(new Properties()));
 
     // Assert
     verify(builder).maxInboundMessageSize(SagaServerConfig.DEFAULT_MAX_EVENT_PAYLOAD_BYTES);
     verify(builder)
         .maxInboundMetadataSize(SagaServerConfig.DEFAULT_GRPC_MAX_INBOUND_METADATA_BYTES);
-  }
-
-  @Test
-  void applyGrpcTransportSettings_withTlsMaterial_enablesTransportSecurityFromValidatedBytes() {
-    // Arrange — real material: the builder must receive the validated bytes re-encoded as PEM,
-    // never the file paths, so nothing re-reads the files after validation (a rotation landing
-    // mid-boot would otherwise hand gRPC material the validator never saw).
-    TlsMaterial material =
-        TlsMaterial.load(tls.certChainPath(), tls.privateKeyPath(), Clock.systemUTC());
-    NettyServerBuilder builder = mock(NettyServerBuilder.class, RETURNS_SELF);
-
-    // Act
-    SagaServer.applyGrpcTransportSettings(
-        builder, SagaServerConfig.load(new Properties()), material);
-
-    // Assert
-    verify(builder).useTransportSecurity(any(InputStream.class), any(InputStream.class));
-  }
-
-  @Test
-  void applyGrpcTransportSettings_withoutTlsMaterial_leavesTransportPlaintext() {
-    // Arrange
-    NettyServerBuilder builder = mock(NettyServerBuilder.class, RETURNS_SELF);
-
-    // Act
-    SagaServer.applyGrpcTransportSettings(builder, SagaServerConfig.load(new Properties()), null);
-
-    // Assert
-    verify(builder, never()).useTransportSecurity(any(InputStream.class), any(InputStream.class));
   }
 
   @Test

@@ -34,24 +34,27 @@ class SagaSecurityHandlerTest {
 
   @BeforeEach
   void setUp() {
-    app = Javalin.create();
-    SagaSecurityHandler.register(app, new RoleHeaderProvider());
-    ErrorMapper.register(app);
-    // A read-gated route that echoes the resolved principal, so a test can assert the identity was
-    // stored on the request.
-    app.get(
-        "/read",
-        ctx -> {
-          SagaIdentity identity = ctx.attribute(SagaSecurityHandler.IDENTITY_ATTRIBUTE);
-          ctx.result("read:" + (identity == null ? "none" : identity.principal()));
-        },
-        SagaOperation.GET_SAGA);
-    // A write-gated route.
-    app.post("/write", ctx -> ctx.result("written"), SagaOperation.START_SAGA);
-    // An auth-exempt route reachable with no credential.
-    app.get("/exempt", ctx -> ctx.result("open"), SagaOperation.HEALTH);
-    // A route registered with no operation — the "someone forgot to tag it" case.
-    app.get("/untagged", ctx -> ctx.result("should never be served"));
+    app =
+        Javalin.create(
+            cfg -> {
+              SagaSecurityHandler.register(cfg.routes, new RoleHeaderProvider());
+              ErrorMapper.register(cfg.routes);
+              // A read-gated route that echoes the resolved principal, so a test can assert the
+              // identity was stored on the request.
+              cfg.routes.get(
+                  "/read",
+                  ctx -> {
+                    SagaIdentity identity = ctx.attribute(SagaSecurityHandler.IDENTITY_ATTRIBUTE);
+                    ctx.result("read:" + (identity == null ? "none" : identity.principal()));
+                  },
+                  SagaOperation.GET_SAGA);
+              // A write-gated route.
+              cfg.routes.post("/write", ctx -> ctx.result("written"), SagaOperation.START_SAGA);
+              // An auth-exempt route reachable with no credential.
+              cfg.routes.get("/exempt", ctx -> ctx.result("open"), SagaOperation.HEALTH);
+              // A route registered with no operation — the "someone forgot to tag it" case.
+              cfg.routes.get("/untagged", ctx -> ctx.result("should never be served"));
+            });
     // Loopback, not the wildcard: a wildcard bind can share a port with another suite's
     // loopback server, which then takes the connection and answers this test's requests.
     app.start("127.0.0.1", 0);

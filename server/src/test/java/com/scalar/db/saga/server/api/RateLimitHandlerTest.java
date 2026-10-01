@@ -10,6 +10,7 @@ import com.scalar.db.saga.server.security.SagaRole;
 import com.scalar.db.saga.server.security.SagaSecurityHandler;
 import com.scalar.db.saga.server.security.SagaSecurityProvider;
 import io.javalin.Javalin;
+import io.javalin.router.JavalinDefaultRoutingApi;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -40,11 +41,14 @@ class RateLimitHandlerTest {
 
   /** Registers the real security handler and the limiter, in the order {@code SagaServer} uses. */
   private Javalin startAuthenticated(int limit, SagaIdentity identity) {
-    app = Javalin.create();
-    SagaSecurityHandler.register(app, new FixedIdentityProvider(identity));
-    RateLimitHandler.register(app, new RateLimiter(limit, 60_000L));
-    ErrorMapper.register(app);
-    registerRoutes(app);
+    app =
+        Javalin.create(
+            cfg -> {
+              SagaSecurityHandler.register(cfg.routes, new FixedIdentityProvider(identity));
+              RateLimitHandler.register(cfg.routes, new RateLimiter(limit, 60_000L));
+              ErrorMapper.register(cfg.routes);
+              registerRoutes(cfg.routes);
+            });
     // Loopback, not the wildcard: a wildcard bind can share a port with another suite's
     // loopback server, which then takes the connection and answers this test's requests.
     return app.start("127.0.0.1", 0);
@@ -52,18 +56,21 @@ class RateLimitHandlerTest {
 
   /** Registers the limiter with no upstream authenticator, so no identity is ever resolved. */
   private Javalin startWithoutAuth(int limit) {
-    app = Javalin.create();
-    RateLimitHandler.register(app, new RateLimiter(limit, 60_000L));
-    ErrorMapper.register(app);
-    registerRoutes(app);
+    app =
+        Javalin.create(
+            cfg -> {
+              RateLimitHandler.register(cfg.routes, new RateLimiter(limit, 60_000L));
+              ErrorMapper.register(cfg.routes);
+              registerRoutes(cfg.routes);
+            });
     // Loopback, not the wildcard: a wildcard bind can share a port with another suite's
     // loopback server, which then takes the connection and answers this test's requests.
     return app.start("127.0.0.1", 0);
   }
 
-  private static void registerRoutes(Javalin app) {
-    app.post("/sagas", ctx -> ctx.result("created"), SagaOperation.START_SAGA);
-    app.get("/sagas/x", ctx -> ctx.result("read"), SagaOperation.GET_SAGA);
+  private static void registerRoutes(JavalinDefaultRoutingApi routes) {
+    routes.post("/sagas", ctx -> ctx.result("created"), SagaOperation.START_SAGA);
+    routes.get("/sagas/x", ctx -> ctx.result("read"), SagaOperation.GET_SAGA);
   }
 
   @AfterEach
