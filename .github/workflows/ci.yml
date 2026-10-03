@@ -321,28 +321,24 @@ jobs:
 
       # --- TLS boot ---------------------------------------------------------------------------
       # The plaintext boot above proves the packaged image serves; this second boot proves the same
-      # image serves TLS on both transports when the tls.* keys are set. The material is generated
-      # here, never committed (committed keys expire and trip secret scanners), and the
-      # configuration is the shared fixture plus only the tls.* delta, so the two boots cannot
-      # drift apart. JDK SSL means nothing here is architecture-specific, so the arm64 job stays
-      # plaintext-only.
+      # image serves TLS on both transports when a certificate pair is mounted at the image's
+      # conventional path. The material is generated here, never committed (committed keys expire
+      # and trip secret scanners), and the configuration is the shared fixture unchanged: not one
+      # tls.* key, so the boot also proves that mounted material alone turns TLS on, which is what
+      # a Deployment that mounts the Secret and writes nothing else relies on. JDK SSL means nothing
+      # here is architecture-specific, so the arm64 job stays plaintext-only.
       - name: Prepare the TLS boot fixture
         run: |
           set -euo pipefail
-          mkdir -p smoke-tls
+          mkdir -p smoke-tls/tls/server
           cp -R .github/smoke/. smoke-tls/
           openssl req -x509 -newkey rsa:2048 -noenc -days 2 \
-            -keyout smoke-tls/tls.key -out smoke-tls/tls.crt \
+            -keyout smoke-tls/tls/server/tls.key -out smoke-tls/tls/server/tls.crt \
             -subj "/CN=localhost" \
             -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
           # Readable by the container's uid 201; a throwaway CI key on a read-only mount, so a
           # permissive mode costs nothing.
-          chmod 0644 smoke-tls/tls.key smoke-tls/tls.crt
-          {
-            echo "scalar.db.saga.server.tls.enabled=true"
-            echo "scalar.db.saga.server.tls.cert_chain_path=/scalardb-saga/conf/tls.crt"
-            echo "scalar.db.saga.server.tls.private_key_path=/scalardb-saga/conf/tls.key"
-          } >> smoke-tls/server.properties
+          chmod 0644 smoke-tls/tls/server/tls.key smoke-tls/tls/server/tls.crt
 
       - name: Start the TLS container
         run: |
@@ -359,7 +355,7 @@ jobs:
             # above: a refused connection or unfinished handshake (inevitable while the container
             # boots) must read as a falsy poll, not a `set -e` exit. As a bare assignment, curl's
             # nonzero exit would kill the step on the first poll.
-            if [ "$(curl -s --cacert smoke-tls/tls.crt -o /dev/null -w '%{http_code}' https://127.0.0.1:12080/health)" = "200" ]; then
+            if [ "$(curl -s --cacert smoke-tls/tls/server/tls.crt -o /dev/null -w '%{http_code}' https://127.0.0.1:12080/health)" = "200" ]; then
               echo "GET /health returned 200 over TLS"
               exit 0
             fi
@@ -386,7 +382,7 @@ jobs:
             | sha256sum -c -
           chmod +x grpc-health-probe
           ./grpc-health-probe -addr 127.0.0.1:12051 \
-            -tls -tls-ca-cert smoke-tls/tls.crt -tls-server-name localhost
+            -tls -tls-ca-cert smoke-tls/tls/server/tls.crt -tls-server-name localhost
 
       # The positive TLS confirmation the server logs at boot, plus the same DEBUG-flood guard as
       # the plaintext boot — which under TLS also covers the handshake-noise policy.

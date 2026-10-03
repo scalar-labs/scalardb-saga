@@ -215,26 +215,130 @@ class SagaServerConfigTest {
   }
 
   @Test
-  void load_protectionDisablingKeysAbsent_stillDefaultToDisabled() {
+  void load_protectionDisablingKeysAbsent_stillDefaultToDisabled(@TempDir Path conf) {
     // The other half of the rule above: rejecting blank must not turn these into required keys.
-    SagaServerConfig config = SagaServerConfig.load(new Properties());
+    // The conf directory stands in for the image's mount so TLS has no material to infer from.
+    SagaServerConfig config = SagaServerConfig.load(new Properties(), null, conf);
 
     assertThat(config.maxStartRequestsPerMinute())
         .isEqualTo(SagaServerConfig.DEFAULT_MAX_START_REQUESTS_PER_MINUTE);
     assertThat(config.callbackMaxAgeSeconds())
         .isEqualTo(SagaServerConfig.DEFAULT_CALLBACK_MAX_AGE_SECONDS);
-    assertThat(config.tlsEnabled()).isEqualTo(SagaServerConfig.DEFAULT_TLS_ENABLED);
+    assertThat(config.tlsEnabled()).isFalse();
     assertThat(config.maxConcurrentSagaStarts())
         .isEqualTo(DefaultSagaOrchestrator.DEFAULT_MAX_CONCURRENT_SAGA_STARTS);
   }
 
-  @Test
-  void load_unsetTls_disabledWithNoPaths() {
-    SagaServerConfig config = SagaServerConfig.load(new Properties());
+  /**
+   * Stages the image's conventional TLS pair, or half of it, under the stand-in conf directory. The
+   * contents are never read here: the config only probes for the files.
+   */
+  private static Path stageTlsMaterial(Path conf, boolean certificate, boolean key)
+      throws IOException {
+    Path dir = Files.createDirectories(conf.resolve(SagaServerConfig.TLS_SERVER_DIR));
+    if (certificate) {
+      Files.writeString(dir.resolve(SagaServerConfig.TLS_CERT_CHAIN_FILE), "certificate");
+    }
+    if (key) {
+      Files.writeString(dir.resolve(SagaServerConfig.TLS_PRIVATE_KEY_FILE), "key");
+    }
+    return dir;
+  }
 
+  @Test
+  void load_tlsUnsetAndNothingMounted_isPlaintext(@TempDir Path conf) {
+    // Arrange — no tls.* key and nothing under the stand-in conf directory
+
+    // Act
+    SagaServerConfig config = SagaServerConfig.load(new Properties(), null, conf);
+
+    // Assert
     assertThat(config.tlsEnabled()).isFalse();
     assertThat(config.tlsCertChainPath()).isEmpty();
     assertThat(config.tlsPrivateKeyPath()).isEmpty();
+  }
+
+  @Test
+  void load_tlsUnsetAndDefaultPairMounted_servesTlsFromTheDefaults(@TempDir Path conf)
+      throws IOException {
+    // Arrange — a Secret mounted at the conventional path, and no tls.* key at all: what a chart
+    // that mounts the material when its own TLS value is on gets to rely on
+    Path dir = stageTlsMaterial(conf, true, true);
+
+    // Act
+    SagaServerConfig config = SagaServerConfig.load(new Properties(), null, conf);
+
+    // Assert
+    assertThat(config.tlsEnabled()).isTrue();
+    assertThat(config.tlsCertChainPath()).contains(dir.resolve("tls.crt"));
+    assertThat(config.tlsPrivateKeyPath()).contains(dir.resolve("tls.key"));
+  }
+
+  @Test
+  void load_tlsUnsetAndOnlyDefaultCertificateMounted_throwsNamingTheMissingHalf(@TempDir Path conf)
+      throws IOException {
+    // Arrange — a torn mount: the certificate arrived, the key did not. Present material turns TLS
+    // on, so the half pair is refused rather than quietly served as plaintext.
+    stageTlsMaterial(conf, true, false);
+
+    // Act & Assert
+    assertThatThrownBy(() -> SagaServerConfig.load(new Properties(), null, conf))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.DEFAULT_TLS_CERT_CHAIN_PATH)
+        .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY)
+        .hasMessageContaining(SagaServerConfig.DEFAULT_TLS_PRIVATE_KEY_PATH);
+  }
+
+  @Test
+  void load_tlsEnabledAndDefaultPairMounted_servesTlsFromTheDefaults(@TempDir Path conf)
+      throws IOException {
+    // Arrange
+    Path dir = stageTlsMaterial(conf, true, true);
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+
+    // Act
+    SagaServerConfig config = SagaServerConfig.load(props, null, conf);
+
+    // Assert
+    assertThat(config.tlsEnabled()).isTrue();
+    assertThat(config.tlsCertChainPath()).contains(dir.resolve("tls.crt"));
+    assertThat(config.tlsPrivateKeyPath()).contains(dir.resolve("tls.key"));
+  }
+
+  @Test
+  void load_tlsFalseAndDefaultPairMounted_ignoresTheDefaults(@TempDir Path conf)
+      throws IOException {
+    // Arrange — the toggle-off move works for mounted material exactly as for configured paths
+    stageTlsMaterial(conf, true, true);
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "false");
+
+    // Act
+    SagaServerConfig config = SagaServerConfig.load(props, null, conf);
+
+    // Assert
+    assertThat(config.tlsEnabled()).isFalse();
+    assertThat(config.tlsCertChainPath()).isEmpty();
+    assertThat(config.tlsPrivateKeyPath()).isEmpty();
+  }
+
+  @Test
+  void load_tlsPathsGivenAndDefaultPairMounted_explicitValuesWin(@TempDir Path conf)
+      throws IOException {
+    // Arrange
+    stageTlsMaterial(conf, true, true);
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "/etc/tls/tls.crt");
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, "/etc/tls/tls.key");
+
+    // Act
+    SagaServerConfig config = SagaServerConfig.load(props, null, conf);
+
+    // Assert
+    assertThat(config.tlsEnabled()).isTrue();
+    assertThat(config.tlsCertChainPath()).contains(Path.of("/etc/tls/tls.crt"));
+    assertThat(config.tlsPrivateKeyPath()).contains(Path.of("/etc/tls/tls.key"));
   }
 
   @Test
@@ -252,42 +356,49 @@ class SagaServerConfigTest {
   }
 
   @Test
-  void load_tlsEnabledWithoutPrivateKeyPath_throwsNamingMissingKey() {
+  void load_tlsEnabledWithoutPrivateKeyPath_throwsNamingMissingKeyAndItsDefault(
+      @TempDir Path conf) {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
     props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "/etc/tls/tls.crt");
 
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
+    assertThatThrownBy(() -> SagaServerConfig.load(props, null, conf))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining(SagaServerConfig.TLS_ENABLED_KEY)
-        .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY);
+        .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY)
+        .hasMessageContaining(SagaServerConfig.DEFAULT_TLS_PRIVATE_KEY_PATH)
+        .hasMessageNotContaining("/etc/tls");
   }
 
   @Test
-  void load_tlsEnabledWithoutCertChainPath_throwsNamingMissingKey() {
+  void load_tlsEnabledWithoutCertChainPath_throwsNamingMissingKeyAndItsDefault(@TempDir Path conf) {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
     props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, "/etc/tls/tls.key");
 
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
+    assertThatThrownBy(() -> SagaServerConfig.load(props, null, conf))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining(SagaServerConfig.TLS_ENABLED_KEY)
-        .hasMessageContaining(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY);
+        .hasMessageContaining(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY)
+        .hasMessageContaining(SagaServerConfig.DEFAULT_TLS_CERT_CHAIN_PATH)
+        .hasMessageNotContaining("/etc/tls");
   }
 
   @Test
-  void load_tlsEnabledWithoutAnyPath_throwsNamingBothKeys() {
+  void load_tlsEnabledAndNothingMounted_throwsNamingBothKeysAndTheDefaultLocation(
+      @TempDir Path conf) {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
 
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
+    assertThatThrownBy(() -> SagaServerConfig.load(props, null, conf))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY)
-        .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY);
+        .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY)
+        .hasMessageContaining(SagaServerConfig.DEFAULT_TLS_SERVER_DIR);
   }
 
   @Test
-  void load_tlsEnabledWithBlankPrivateKeyPath_throwsAsMissingPair() {
+  void load_tlsEnabledWithBlankPrivateKeyPath_throwsAsMissingPair(@TempDir Path conf) {
     // Blank-is-unset composes with the pairing rule: a blank path reports as the missing half of
     // the pair, exactly as an absent key does.
     Properties props = new Properties();
@@ -295,7 +406,7 @@ class SagaServerConfigTest {
     props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "/etc/tls/tls.crt");
     props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, "   ");
 
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
+    assertThatThrownBy(() -> SagaServerConfig.load(props, null, conf))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY);
   }
@@ -318,40 +429,116 @@ class SagaServerConfigTest {
   }
 
   @Test
-  void load_tlsCertChainPathWithoutEnabledKey_throwsForgottenSwitch() {
-    // Material without the switch is the forgot-the-switch hole: the operator mounted certificates
-    // expecting TLS, and the server would silently serve plaintext.
+  void load_bothTlsPathsWithoutEnabledKey_servesTls() {
+    // Configured material is intent enough: the switch is for forcing TLS on or off, not for
+    // confirming what the paths already say, so a Deployment states TLS in one place.
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "/etc/tls/tls.crt");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY)
-        .hasMessageContaining(SagaServerConfig.TLS_ENABLED_KEY);
-  }
-
-  @Test
-  void load_tlsPrivateKeyPathAloneWithoutEnabledKey_throwsForgottenSwitch() {
-    Properties props = new Properties();
     props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, "/etc/tls/tls.key");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY)
-        .hasMessageContaining(SagaServerConfig.TLS_ENABLED_KEY);
-  }
-
-  @Test
-  void load_blankTlsPathWithoutEnabledKey_isNoOp() {
-    // The other doctrine-composition cell: blank is unset, so a blank path with no tls.enabled is
-    // not the forgotten switch — it is a template variable that resolved empty, and the server
-    // starts on the plaintext default.
-    Properties props = new Properties();
-    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "");
 
     SagaServerConfig config = SagaServerConfig.load(props);
 
+    assertThat(config.tlsEnabled()).isTrue();
+    assertThat(config.tlsCertChainPath()).contains(Path.of("/etc/tls/tls.crt"));
+    assertThat(config.tlsPrivateKeyPath()).contains(Path.of("/etc/tls/tls.key"));
+  }
+
+  @Test
+  void load_tlsCertChainPathAloneWithoutEnabledKey_throwsNamingTheMissingHalf(@TempDir Path conf) {
+    // One configured half turns TLS on and then fails the pairing check, so a half-configured
+    // deployment is refused rather than quietly served as plaintext. The refusal says which half
+    // turned TLS on, since no switch was written to cite.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "/etc/tls/tls.crt");
+
+    assertThatThrownBy(() -> SagaServerConfig.load(props, null, conf))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("'" + SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY + "' is set")
+        .hasMessageContaining(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY)
+        .hasMessageContaining(SagaServerConfig.DEFAULT_TLS_PRIVATE_KEY_PATH)
+        .hasMessageNotContaining("/etc/tls");
+  }
+
+  @Test
+  void load_blankTlsPathWithoutEnabledKey_isPlaintext(@TempDir Path conf) {
+    // Blank is unset: a template variable that resolved empty configures nothing, so with nothing
+    // mounted either the server starts on the plaintext default.
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "");
+
+    SagaServerConfig config = SagaServerConfig.load(props, null, conf);
+
     assertThat(config.tlsEnabled()).isFalse();
+  }
+
+  @Test
+  void tlsSummary_tlsUnsetAndNothingMounted_saysOffAndWhereItLooked(@TempDir Path conf) {
+    // Arrange
+    SagaServerConfig config = SagaServerConfig.load(new Properties(), null, conf);
+
+    // Act
+    String summary = config.tlsSummary();
+
+    // Assert
+    assertThat(summary)
+        .startsWith("TLS off")
+        .contains(SagaServerConfig.TLS_ENABLED_KEY)
+        .contains(SagaServerConfig.DEFAULT_TLS_SERVER_DIR);
+  }
+
+  @Test
+  void tlsSummary_tlsUnsetAndDefaultPairMounted_saysOnAndInferred(@TempDir Path conf)
+      throws IOException {
+    // Arrange
+    stageTlsMaterial(conf, true, true);
+    SagaServerConfig config = SagaServerConfig.load(new Properties(), null, conf);
+
+    // Act
+    String summary = config.tlsSummary();
+
+    // Assert
+    assertThat(summary)
+        .startsWith("TLS on")
+        .contains("inferred")
+        .contains(SagaServerConfig.DEFAULT_TLS_CERT_CHAIN_PATH)
+        .contains(SagaServerConfig.DEFAULT_TLS_PRIVATE_KEY_PATH);
+  }
+
+  @Test
+  void tlsSummary_tlsFalseWithPathsGiven_saysTheMaterialIsUnused() {
+    // Arrange
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "false");
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "/etc/tls/tls.crt");
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, "/etc/tls/tls.key");
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    // Act
+    String summary = config.tlsSummary();
+
+    // Assert
+    assertThat(summary).startsWith("TLS off").contains("unused").doesNotContain("/etc/tls");
+  }
+
+  @Test
+  void tlsSummary_tlsEnabledWithPathsGiven_namesTheKeysNotTheValues() {
+    // Arrange — the summary is printed by the validator, so it is bound by the redaction rule like
+    // every other line: a path value may be a mis-pasted secret
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.TLS_ENABLED_KEY, "true");
+    props.setProperty(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY, "/etc/tls/tls.crt");
+    props.setProperty(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY, "/etc/tls/tls.key");
+    SagaServerConfig config = SagaServerConfig.load(props);
+
+    // Act
+    String summary = config.tlsSummary();
+
+    // Assert
+    assertThat(summary)
+        .startsWith("TLS on")
+        .contains(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY)
+        .contains(SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY)
+        .doesNotContain("/etc/tls");
   }
 
   @Test
@@ -480,10 +667,14 @@ class SagaServerConfigTest {
 
   @Test
   void load_definitionsPathUnsetAndDefaultDirectoryAbsent_isEmpty(@TempDir Path conf) {
-    // Nothing mounted at the default is "nothing configured", not a bad path: the boot guard then
-    // names the directory it looked in, whereas an explicit path that is absent stays an error.
+    // Arrange — nothing mounted at the default is "nothing configured", not a bad path: the boot
+    // guard then names the directory it looked in, whereas an explicit path that is absent stays
+    // an error. The empty temp directory is the whole arrangement.
+
+    // Act
     SagaServerConfig config = SagaServerConfig.load(new Properties(), null, conf);
 
+    // Assert
     assertThat(config.definitionsPath()).isEmpty();
     assertThat(config.definitionsPathDefaulted()).isTrue();
   }
@@ -809,10 +1000,15 @@ class SagaServerConfigTest {
 
   @Test
   void load_noServicesPathAndDefaultDirectoryAbsent_leavesTheDirectoryUnset(@TempDir Path conf) {
-    // Service files are read by the reconciler, not here; this class only points at the directory,
-    // and with nothing mounted at the default there is none to point at.
-    assertThat(SagaServerConfig.load(new Properties(), null, conf).reloadConfig().servicesPath())
-        .isNull();
+    // Arrange — service files are read by the reconciler, not here; this class only points at the
+    // directory, and with nothing mounted at the default there is none to point at. The empty temp
+    // directory is the whole arrangement.
+
+    // Act
+    ReloadConfig reload = SagaServerConfig.load(new Properties(), null, conf).reloadConfig();
+
+    // Assert
+    assertThat(reload.servicesPath()).isNull();
   }
 
   @Test
@@ -821,9 +1017,11 @@ class SagaServerConfigTest {
     // Arrange — the image's conventional mount, stood in by a temp directory
     Path services = Files.createDirectory(conf.resolve("services"));
 
-    // Act & Assert
-    assertThat(SagaServerConfig.load(new Properties(), null, conf).reloadConfig().servicesPath())
-        .isEqualTo(services);
+    // Act
+    ReloadConfig reload = SagaServerConfig.load(new Properties(), null, conf).reloadConfig();
+
+    // Assert
+    assertThat(reload.servicesPath()).isEqualTo(services);
   }
 
   @Test
@@ -834,9 +1032,11 @@ class SagaServerConfigTest {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, "/etc/saga/services");
 
-    // Act & Assert
-    assertThat(SagaServerConfig.load(props, null, conf).reloadConfig().servicesPath())
-        .isEqualTo(Path.of("/etc/saga/services"));
+    // Act
+    ReloadConfig reload = SagaServerConfig.load(props, null, conf).reloadConfig();
+
+    // Assert
+    assertThat(reload.servicesPath()).isEqualTo(Path.of("/etc/saga/services"));
   }
 
   @Test

@@ -221,6 +221,7 @@ public class SagaServerCommand implements Callable<Integer> {
           unresolvedWarnings(unresolved),
           0,
           0,
+          null,
           "The server settings are read in order and reading stopped here, so there may be more"
               + " problems after this one.");
     }
@@ -282,7 +283,14 @@ public class SagaServerCommand implements Callable<Integer> {
     }
     warnings.addAll(result.warnings());
     return report(
-        out, path, problems, warnings, result.serviceCount(), result.definitionCount(), null);
+        out,
+        path,
+        problems,
+        warnings,
+        result.serviceCount(),
+        result.definitionCount(),
+        config.tlsSummary(),
+        null);
   }
 
   /**
@@ -307,7 +315,9 @@ public class SagaServerCommand implements Callable<Integer> {
   /**
    * Prints the report and returns the exit code. Problems first, because that is what the reader
    * came for; the enumeration of what could not be checked comes last, where it qualifies the
-   * verdict above it.
+   * verdict above it. The TLS line ({@code null} when the settings never loaded) states the one
+   * decision the file does not spell out: with {@code tls.enabled} unset, whether the daemon will
+   * serve TLS is read off the mounted material.
    */
   private static int report(
       PrintWriter out,
@@ -316,9 +326,14 @@ public class SagaServerCommand implements Callable<Integer> {
       List<String> warnings,
       int serviceCount,
       int definitionCount,
+      @Nullable String tlsSummary,
       @Nullable String truncationNote) {
     out.println("Validating " + path);
     out.println();
+    if (tlsSummary != null) {
+      out.println(tlsSummary);
+      out.println();
+    }
     if (problems.isEmpty()) {
       out.println(
           "Checked "

@@ -362,6 +362,48 @@ class SagaServerCommandTest {
     }
 
     @Test
+    void execute_tlsPathsGivenWithoutTheSwitch_reportsTlsOnAsInferred() throws IOException {
+      // Arrange — the one TLS decision the file does not spell out, so the report states it. The
+      // files are not opened here (the pair is validated at startup), so any path will do, and it
+      // must not be echoed: a path value may be a mis-pasted secret.
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("order-saga", "account");
+      StringWriter out = new StringWriter();
+
+      // Act
+      int exitCode =
+          validate(
+              out,
+              writeConfig(
+                  "scalar.db.saga.server.tls.cert_chain_path=/etc/tls/tls.crt",
+                  "scalar.db.saga.server.tls.private_key_path=/etc/tls/tls.key"));
+
+      // Assert
+      assertThat(exitCode).isZero();
+      assertThat(out.toString())
+          .contains("TLS on")
+          .contains("inferred")
+          .contains(SagaServerConfig.TLS_ENABLED_KEY)
+          .doesNotContain("/etc/tls");
+    }
+
+    @Test
+    void execute_tlsDisabledExplicitly_reportsTlsOff() throws IOException {
+      // Arrange
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("order-saga", "account");
+      StringWriter out = new StringWriter();
+
+      // Act
+      int exitCode = validate(out, writeConfig("scalar.db.saga.server.tls.enabled=false"));
+
+      // Assert
+      assertThat(exitCode).isZero();
+      assertThat(out.toString())
+          .contains("TLS off: '" + SagaServerConfig.TLS_ENABLED_KEY + "=false'");
+    }
+
+    @Test
     void execute_definitionNamingAnAbsentService_exitsOneAndNamesIt() throws IOException {
       // Arrange
       writeService("account", "base_url=http://account:8080\n");
