@@ -7,10 +7,12 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.io.Reader;
 import java.io.StringWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Properties;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
@@ -360,6 +362,48 @@ class SagaServerCommandTest {
     }
 
     @Test
+    void execute_tlsPathsGivenWithoutTheSwitch_reportsTlsOnAsInferred() throws IOException {
+      // Arrange — the one TLS decision the file does not spell out, so the report states it. The
+      // files are not opened here (the pair is validated at startup), so any path will do, and it
+      // must not be echoed: a path value may be a mis-pasted secret.
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("order-saga", "account");
+      StringWriter out = new StringWriter();
+
+      // Act
+      int exitCode =
+          validate(
+              out,
+              writeConfig(
+                  "scalar.db.saga.server.tls.cert_chain_path=/etc/tls/tls.crt",
+                  "scalar.db.saga.server.tls.private_key_path=/etc/tls/tls.key"));
+
+      // Assert
+      assertThat(exitCode).isZero();
+      assertThat(out.toString())
+          .contains("TLS on")
+          .contains("inferred")
+          .contains(SagaServerConfig.TLS_ENABLED_KEY)
+          .doesNotContain("/etc/tls");
+    }
+
+    @Test
+    void execute_tlsDisabledExplicitly_reportsTlsOff() throws IOException {
+      // Arrange
+      writeService("account", "base_url=http://account:8080\n");
+      writeDefinition("order-saga", "account");
+      StringWriter out = new StringWriter();
+
+      // Act
+      int exitCode = validate(out, writeConfig("scalar.db.saga.server.tls.enabled=false"));
+
+      // Assert
+      assertThat(exitCode).isZero();
+      assertThat(out.toString())
+          .contains("TLS off: '" + SagaServerConfig.TLS_ENABLED_KEY + "=false'");
+    }
+
+    @Test
     void execute_definitionNamingAnAbsentService_exitsOneAndNamesIt() throws IOException {
       // Arrange
       writeService("account", "base_url=http://account:8080\n");
@@ -535,12 +579,20 @@ class SagaServerCommandTest {
       writeService("account", "base_url=http://account:8080\n");
       StringWriter out = new StringWriter();
 
-      // Act
-      int exitCode = validate(out, writeConfig());
+      Path config = writeConfig();
 
-      // Assert
+      // Act
+      int exitCode = validate(out, config);
+
+      // Assert — the exact message the boot guard raises for this same configuration, so the two
+      // cannot drift apart in wording
+      Properties properties = new Properties();
+      try (Reader reader = Files.newBufferedReader(config)) {
+        properties.load(reader);
+      }
       assertThat(exitCode).isEqualTo(1);
-      assertThat(out.toString()).contains(SagaServer.noDefinitionsMessage());
+      assertThat(out.toString())
+          .contains(SagaServer.noDefinitionsMessage(SagaServerConfig.load(properties)));
     }
 
     @Test

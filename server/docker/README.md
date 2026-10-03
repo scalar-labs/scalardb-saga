@@ -26,10 +26,18 @@ docker run --rm \
   ghcr.io/scalar-labs/scalardb-saga-server:<version>
 ```
 
-Mount over `/scalardb-saga/conf` with your own `server.properties`, `definitions/`, and — when you
-configure downstream services — `services/`. Start from the template in this directory — every key is
-documented there and on `SagaServerConfig`, or on `JwtConfig` and `ApiKeyConfig` for the security
-keys of each provider.
+Mount over `/scalardb-saga/conf` with your own `server.properties`, `definitions/`, `services/` when
+you configure downstream services, and `tls/server/` when the daemon itself terminates TLS (see
+[TLS](#tls)). Start from the template in this directory — every key is documented there and on
+`SagaServerConfig`, or on `JwtConfig` and `ApiKeyConfig` for the security keys of each provider.
+
+Mounted there, the two directories need no keys: `definitions_path` and `services_path` default to
+`/scalardb-saga/conf/definitions` and `/scalardb-saga/conf/services` whenever those directories
+exist, so a Deployment declares each mount once instead of repeating the path in a ConfigMap. The
+TLS certificate pair follows the same rule under `tls/server/`. Set a key only to read from somewhere
+else, or outside this image, where those directories do not exist: there, set `definitions_path`,
+and `services_path` if you use services. A path you set must exist; an absent default simply means
+nothing is mounted, and for definitions the boot refusal then names the directory it looked in.
 
 Daemon mode is **declarative-only**: a definition naming a code step (`stepClass`) is rejected at
 startup, because an operator cannot add classes to this image. Use a declarative service step, or embed
@@ -49,6 +57,10 @@ service files the same references work, but `${file:...}` must resolve inside `s
 (default `/run/secrets`) — service files are reloadable input, so what they may read is confined to
 the secrets mounted for that purpose. Keys under plain `scalar.db.*` are resolved by ScalarDB, which
 supports `${env:...}` but **not** `${file:...}`.
+
+The same `${env:NAME}` reference is how a Deployment avoids restating its own mount paths for any
+deployment-coupled value, the callback base URL, say: set the variable next to the mount in the
+Deployment, and the two cannot drift.
 
 | Variable | Effect |
 | --- | --- |
@@ -151,8 +163,9 @@ start under `noop` on a non-loopback interface.
   volumes:
     - { name: tmp, emptyDir: {} }
   ```
-- Serves **plaintext** on both ports by default. Terminating TLS at an ingress or a service mesh
-  remains the recommended setup; where no such layer exists, enable native TLS (below).
+- Serves **plaintext** on both ports unless a certificate pair is mounted or configured. Terminating
+  TLS at an ingress or a service mesh remains the recommended setup; where no such layer exists,
+  serve TLS natively (below).
 - The default `noop` security provider authenticates nothing, and the daemon refuses to start under it
   on a non-loopback interface unless `insecure_mode.enabled=true` is set. Configure the `jwt` or
   `apikey` provider instead of setting that flag. TLS does not relax this guard: encrypting the
@@ -161,37 +174,46 @@ start under `noop` on a non-loopback interface.
 ## TLS
 
 Native TLS covers **both** transports from one certificate, all-or-nothing (the two listeners share
-`host`, so one certificate's SANs cover both). Three keys, documented in the template and on
-`SagaServerConfig`:
-
-```properties
-scalar.db.saga.server.tls.enabled=true
-scalar.db.saga.server.tls.cert_chain_path=/scalardb-saga/tls/tls.crt
-scalar.db.saga.server.tls.private_key_path=/scalardb-saga/tls/tls.key
-```
-
-Both files are PEM; the paths are read and validated at startup, before either port binds, and every
-misconfiguration (missing file, unreadable file, malformed PEM, key/cert mismatch, wrong key format)
-fails boot with an error naming the key (the configured value is never echoed — like any value, it
-could be a mis-pasted secret). Protocols default to TLS 1.3 and 1.2 with nothing to
-tune; cipher policy is each stack's hardened default — Jetty applies its standard exclusions over
-the JDK list, gRPC restricts to the HTTP/2-approved suites — rather than a knob. The rare
-compliance need is served through `JAVA_OPTS` (e.g. `-Djdk.tls.server.protocols=TLSv1.3`). There is no mTLS, and no plaintext→HTTPS redirect listener:
-with TLS on, nothing serves plaintext.
-
-Mounting the material in Kubernetes — the mounted files must be readable by uid `201`, so set an
-explicit permissive `defaultMode` (a root-owned `0600` Secret is invisible to the daemon and fails
-boot with a permissions hint):
+`host`, so one certificate's SANs cover both). Mount the PEM certificate chain and its private key as
+`tls.crt` and `tls.key` under `/scalardb-saga/conf/tls/server/` and the daemon serves TLS with no key
+in `server.properties`: those are the file names a Kubernetes TLS Secret publishes, so the Secret
+mounts as-is. The mounted files must be readable by uid `201`, so set an explicit permissive
+`defaultMode` (a root-owned `0600` Secret is invisible to the daemon and fails boot with a
+permissions hint). The mount sits inside the configuration mount, which Kubernetes allows:
 
 ```yaml
 volumeMounts:
-  - { name: tls, mountPath: /scalardb-saga/tls, readOnly: true }
+  - { name: tls, mountPath: /scalardb-saga/conf/tls/server, readOnly: true }
 volumes:
   - name: tls
     secret:
       secretName: saga-server-tls
       defaultMode: 0444
 ```
+
+Three keys, documented in the template and on `SagaServerConfig`, cover the rest: two paths, for
+material mounted somewhere else, and the switch.
+
+```properties
+scalar.db.saga.server.tls.cert_chain_path=/etc/saga/tls/tls.crt
+scalar.db.saga.server.tls.private_key_path=/etc/saga/tls/tls.key
+```
+
+`tls.enabled` is unset by default, and then the material decides: TLS is on when a certificate or
+key is configured or mounted and off otherwise, so certificates can never sit mounted while the
+server silently serves plaintext (a half pair fails boot rather than falling back). `true` makes a
+missing pair a boot failure instead of a plaintext server; `false` leaves mounted material unused,
+which is how to turn TLS off without unmounting it. `--validate-config` prints which way the
+decision went.
+
+Both files are PEM; they are read and validated at startup, before either port binds, and every
+misconfiguration (missing file, unreadable file, malformed PEM, key/cert mismatch, wrong key format)
+fails boot with an error naming the key or the default path (a configured value is never echoed —
+like any value, it could be a mis-pasted secret). Protocols default to TLS 1.3 and 1.2 with nothing
+to tune; cipher policy is each stack's hardened default — Jetty applies its standard exclusions over
+the JDK list, gRPC restricts to the HTTP/2-approved suites — rather than a knob. The rare
+compliance need is served through `JAVA_OPTS` (e.g. `-Djdk.tls.server.protocols=TLSv1.3`). There is no mTLS, and no plaintext→HTTPS redirect listener:
+with TLS on, nothing serves plaintext.
 
 The private key must be **unencrypted PKCS#8** (`BEGIN PRIVATE KEY`), RSA or EC. That is *not* what
 the common issuers emit by default:
