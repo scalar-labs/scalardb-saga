@@ -9,6 +9,7 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -42,7 +43,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
@@ -1351,6 +1354,133 @@ class SagaEngineTest {
       engine.shutdown();
 
       // Assert — saga still active when timeout expired, so marked for recovery
+      verify(store).markForRecovery("saga-1");
+      sagaThread.join(5000);
+    }
+
+    @Test
+    void shutdown_severalSagasStillActive_marksThemAllConcurrently() throws Exception {
+      // Arrange — three sagas blocked mid-step, and a store whose mark returns only once all three
+      // marks are in flight at the same time: marked one after another, the first would wait
+      // alone until the barrier timed out, so every mark passing proves they ran concurrently
+      int sagaCount = 3;
+      CountDownLatch stepsStarted = new CountDownLatch(sagaCount);
+      Step step1 = mock(Step.class);
+      when(step1.getName()).thenReturn("s1");
+      when(step1.execute(any(SagaContext.class)))
+          .thenAnswer(
+              invocation -> {
+                stepsStarted.countDown();
+                Thread.sleep(2_000);
+                return StepResult.empty();
+              });
+      registerStep("s1", step1);
+      SagaDefinition def = sagaDefinitionWithRetry("s1");
+      when(store.recordStatusEvent(any(), anyInt(), any(), any()))
+          .thenAnswer(invocation -> invocation.getArgument(0));
+      CyclicBarrier allMarking = new CyclicBarrier(sagaCount);
+      AtomicInteger marksPassed = new AtomicInteger();
+      doAnswer(
+              invocation -> {
+                allMarking.await(5, TimeUnit.SECONDS);
+                marksPassed.incrementAndGet();
+                return null;
+              })
+          .when(store)
+          .markForRecovery(anyString());
+      List<Thread> sagaThreads = new ArrayList<>();
+      for (int i = 1; i <= sagaCount; i++) {
+        SagaStateSnapshot saga = runningSnapshot("saga-" + i);
+        Thread thread = new Thread(() -> engine.executeSaga(def, saga, Map.of()));
+        thread.start();
+        sagaThreads.add(thread);
+      }
+      stepsStarted.await();
+
+      // Act
+      engine.shutdown(0L);
+
+      // Assert
+      assertThat(marksPassed.get()).isEqualTo(sagaCount);
+      for (Thread thread : sagaThreads) {
+        thread.join(5_000);
+      }
+    }
+
+    @Test
+    void beginShutdown_sagaBetweenSteps_stopsBeforeTheNextStep() throws Exception {
+      // Arrange — the flag alone, with no wait: a saga whose first step is running when it is set
+      // must not start its second step, which is what lets a caller stop background managers
+      // after it without their drives spending the budget
+      CountDownLatch firstStepStarted = new CountDownLatch(1);
+      CountDownLatch release = new CountDownLatch(1);
+      Step step1 = mock(Step.class);
+      when(step1.getName()).thenReturn("s1");
+      when(step1.execute(any(SagaContext.class)))
+          .thenAnswer(
+              invocation -> {
+                firstStepStarted.countDown();
+                assertThat(release.await(5, TimeUnit.SECONDS)).isTrue();
+                return StepResult.empty();
+              });
+      Step step2 = mock(Step.class);
+      when(step2.getName()).thenReturn("s2");
+      registerStep("s1", step1);
+      registerStep("s2", step2);
+      SagaDefinition def = sagaDefinitionWithRetry("s1", "s2");
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
+      Thread sagaThread = new Thread(() -> engine.executeSaga(def, saga, Map.of()));
+      sagaThread.start();
+      firstStepStarted.await();
+
+      // Act
+      engine.beginShutdown();
+      release.countDown();
+      sagaThread.join(5_000);
+
+      // Assert
+      verify(step2, never()).execute(any(SagaContext.class));
+    }
+
+    @Test
+    void shutdown_zeroWaitGiven_marksActiveSagasForRecoveryWithoutWaiting() throws Exception {
+      // Arrange — a step that outlasts any wait, on an engine whose own timeout is generous: the
+      // budget the caller hands in must win, and a spent budget must still mark the saga
+      CountDownLatch stepStarted = new CountDownLatch(1);
+      Step step1 = mock(Step.class);
+      when(step1.getName()).thenReturn("s1");
+      when(step1.execute(any(SagaContext.class)))
+          .thenAnswer(
+              invocation -> {
+                stepStarted.countDown();
+                Thread.sleep(500);
+                return StepResult.empty();
+              });
+      registerStep("s1", step1);
+      SagaDefinition def = sagaDefinitionWithRetry("s1");
+      SagaStateSnapshot saga = runningSnapshot("saga-1");
+      when(store.recordStatusEvent(any(), anyInt(), any(), any())).thenReturn(saga);
+      engine.close();
+      engine =
+          new SagaEngine(
+              store,
+              new StepInstantiator(stepResolver, HttpEndpointManager.create(Map.of())),
+              OWNER_ID,
+              new SagaEngine.ShutdownConfig(ShutdownMode.WAIT_ALL_SAGAS, 5_000),
+              0,
+              Clock.systemUTC());
+      Thread sagaThread = new Thread(() -> engine.executeSaga(def, saga, Map.of()));
+      sagaThread.start();
+      stepStarted.await();
+
+      // Act
+      long startNanos = System.nanoTime();
+      engine.shutdown(0L);
+      long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+
+      // Assert — no wait was spent, and the saga was marked while the store was still open
+      assertThat(elapsedMillis).isLessThan(2_000L);
       verify(store).markForRecovery("saga-1");
       sagaThread.join(5000);
     }

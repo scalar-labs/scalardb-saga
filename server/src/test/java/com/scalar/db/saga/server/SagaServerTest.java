@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_SELF;
@@ -39,7 +40,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.Properties;
+import java.util.concurrent.BrokenBarrierException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -353,7 +359,7 @@ class SagaServerTest {
       assertThatThrownBy(server::start).isInstanceOf(RuntimeException.class);
 
       verify(orchestrator).startBackgroundTasks();
-      verify(orchestrator).close();
+      verify(orchestrator).close(anyLong());
     } finally {
       portHolder.stop();
     }
@@ -395,7 +401,33 @@ class SagaServerTest {
     server.close();
     server.close();
 
-    verify(orchestrator, times(1)).close();
+    verify(orchestrator, times(1)).close(anyLong());
+  }
+
+  @Test
+  void close_always_handsTheOrchestratorTheOneShutdownBudget(@TempDir Path dir) throws Exception {
+    // Arrange — the budget is computed once at the top of close(); every phase before the saga
+    // drain spends from it, so the orchestrator's deadline is that same instant, not a fresh clock
+    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
+    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
+    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, svcServices(dir).toString());
+    props.setProperty(SagaServerConfig.SHUTDOWN_TIMEOUT_MILLIS_KEY, "20000");
+    DefaultSagaOrchestrator orchestrator = mockOrchestrator();
+    SagaServer server = new SagaServer(SagaServerConfig.load(props), orchestrator);
+    ArgumentCaptor<Long> deadline = ArgumentCaptor.forClass(Long.class);
+
+    // Act
+    long startNanos = System.nanoTime();
+    server.close();
+    long endNanos = System.nanoTime();
+
+    // Assert — the deadline is 20s after the start of close(), within the time close() took
+    verify(orchestrator).close(deadline.capture());
+    assertThat(deadline.getValue())
+        .isBetween(
+            startNanos + TimeUnit.SECONDS.toNanos(20), endNanos + TimeUnit.SECONDS.toNanos(20));
   }
 
   @Test
@@ -696,39 +728,107 @@ class SagaServerTest {
     }
   }
 
-  private SagaServer serverWithSyncMaxWait(Path dir, long syncMaxWaitMillis) throws Exception {
-    Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
-    Properties props = new Properties();
-    props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
-    props.setProperty(SagaServerConfig.DEFINITIONS_PATH_KEY, dir.toString());
-    props.setProperty(SagaServerConfig.SERVICES_PATH_KEY, svcServices(dir).toString());
-    props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, Long.toString(syncMaxWaitMillis));
-    return new SagaServer(SagaServerConfig.load(props), mockOrchestrator());
+  @Test
+  void frontPhaseMillis_smallBudget_isHalfOfIt() {
+    // Act & Assert — at a 20s budget the transports may take 10s and the saga drain keeps 10s
+    assertThat(SagaServer.frontPhaseMillis(20_000L)).isEqualTo(10_000L);
   }
 
   @Test
-  void grpcDrainMillis_syncMaxWaitBelowFloor_returnsFloor(@TempDir Path dir) throws Exception {
-    // A small ceiling still drains for at least the 30s floor.
-    SagaServer server = serverWithSyncMaxWait(dir, 1_000L);
-
-    assertThat(server.grpcDrainMillis()).isEqualTo(30_000L);
+  void frontPhaseMillis_largeBudget_staysAtTheCap() {
+    // Act & Assert — a budget sized for long sagas under WAIT_ALL_SAGAS does not hand the
+    // transports time they cannot use
+    assertThat(SagaServer.frontPhaseMillis(600_000L)).isEqualTo(15_000L);
   }
 
   @Test
-  void grpcDrainMillis_syncMaxWaitAboveFloor_returnsCeilingPlusSlack(@TempDir Path dir)
-      throws Exception {
-    // A ceiling that (with slack) exceeds the floor widens the drain window past 30s, so a
-    // legitimate bounded-sync call reaches its own wait ceiling before force-cancellation.
-    SagaServer server = serverWithSyncMaxWait(dir, 60_000L);
-
-    assertThat(server.grpcDrainMillis()).isEqualTo(65_000L);
+  void frontPhaseMillis_zeroBudget_isZero() {
+    // Act & Assert — shutdown.timeout_millis=0 drains nothing, the transports included
+    assertThat(SagaServer.frontPhaseMillis(0L)).isZero();
   }
 
   @Test
-  void grpcDrainMillis_raisedSyncMaxWait_widensWindow(@TempDir Path dir) throws Exception {
-    SagaServer server = serverWithSyncMaxWait(dir, 120_000L);
+  void drainConcurrently_bothDrainsBlock_theyRunAtTheSameTime() {
+    // Arrange — each drain waits at a barrier the other must also reach: sequenced, the first
+    // would wait alone until its timeout and never pass, so passing proves they overlapped without
+    // a wall-clock threshold a busy CI runner could miss
+    CyclicBarrier bothEntered = new CyclicBarrier(2);
+    AtomicBoolean blockingPassed = new AtomicBoolean();
+    AtomicBoolean inlinePassed = new AtomicBoolean();
+    Runnable blocking = () -> awaitBarrier(bothEntered, blockingPassed);
+    Runnable inline = () -> awaitBarrier(bothEntered, inlinePassed);
 
-    assertThat(server.grpcDrainMillis()).isEqualTo(125_000L);
+    // Act
+    SagaServer.drainConcurrently(
+        blocking, inline, System.nanoTime() + TimeUnit.SECONDS.toNanos(10));
+
+    // Assert
+    assertThat(blockingPassed).isTrue();
+    assertThat(inlinePassed).isTrue();
+  }
+
+  @Test
+  void drainConcurrently_blockingStopOutlivesTheDeadline_returnsAtTheDeadline() {
+    // Arrange — a stop that would take 5s, against a 300ms deadline
+    Runnable blocking =
+        () -> {
+          try {
+            Thread.sleep(5_000);
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+        };
+
+    // Act
+    long startNanos = System.nanoTime();
+    SagaServer.drainConcurrently(
+        blocking, () -> {}, startNanos + TimeUnit.MILLISECONDS.toNanos(300));
+    long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+
+    // Assert — the caller is released at the deadline and the straggler is left to itself
+    assertThat(elapsedMillis).isBetween(300L, 2_000L);
+  }
+
+  @Test
+  void drainConcurrently_inlineDrainThrows_stillWaitsForTheBlockingStop() {
+    // Arrange — the blocking stop finishes only after the inline drain has already thrown
+    CountDownLatch inlineThrew = new CountDownLatch(1);
+    AtomicBoolean blockingFinished = new AtomicBoolean();
+    Runnable blocking =
+        () -> {
+          try {
+            if (inlineThrew.await(5, TimeUnit.SECONDS)) {
+              Thread.sleep(200);
+              blockingFinished.set(true);
+            }
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+        };
+    Runnable inline =
+        () -> {
+          inlineThrew.countDown();
+          throw new IllegalStateException("gRPC drain failed");
+        };
+
+    // Act & Assert — the exception propagates, but only after the join
+    assertThatThrownBy(
+            () ->
+                SagaServer.drainConcurrently(
+                    blocking, inline, System.nanoTime() + TimeUnit.SECONDS.toNanos(5)))
+        .isInstanceOf(IllegalStateException.class);
+    assertThat(blockingFinished).isTrue();
+  }
+
+  private static void awaitBarrier(CyclicBarrier barrier, AtomicBoolean passed) {
+    try {
+      barrier.await(5, TimeUnit.SECONDS);
+      passed.set(true);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    } catch (BrokenBarrierException | TimeoutException e) {
+      // Left unset: the other drain never arrived, so the two did not overlap.
+    }
   }
 
   /**
