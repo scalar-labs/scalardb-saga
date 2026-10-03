@@ -373,7 +373,9 @@ spends what is left of it rather than starting a clock of its own:
   listeners close; new
   connections are refused as soon as the drain begins, so a load balancer still needs its own
   pre-stop delay or readiness flip. Past the wake-all a request costs one store read and one
-  response write, so the slice is a ceiling reached only when the store is stuck, never a cost.
+  response write, so the slice is a ceiling reached only when the store is stuck. The one
+  exception is an admin recover or reset of a single saga, which shutdown does not wake: one in
+  flight holds its request until its saga settles or the slice ends.
 - **Saga drain, everything the front slice left, and at least the other half:** the engine stops
   starting steps, the recovery and retention schedulers stop, then the engine drains per
   `shutdown.mode`. Under the default `WAIT_CURRENT_STEP` it finishes each running step and leaves

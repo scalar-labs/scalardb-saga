@@ -732,20 +732,20 @@ class SagaServerTest {
 
   @Test
   void frontPhaseMillis_smallBudget_isHalfOfIt() {
-    // At a 20s budget the transports may take 10s, so the saga drain keeps at least 10s.
+    // Act & Assert — at a 20s budget the transports may take 10s and the saga drain keeps 10s
     assertThat(SagaServer.frontPhaseMillis(20_000L)).isEqualTo(10_000L);
   }
 
   @Test
   void frontPhaseMillis_largeBudget_staysAtTheCap() {
-    // A budget sized for long sagas under WAIT_ALL_SAGAS does not hand the transports time they
-    // cannot use: past the wake-all a drain costs one store read per request.
+    // Act & Assert — a budget sized for long sagas under WAIT_ALL_SAGAS does not hand the
+    // transports time they cannot use
     assertThat(SagaServer.frontPhaseMillis(600_000L)).isEqualTo(15_000L);
   }
 
   @Test
   void frontPhaseMillis_zeroBudget_isZero() {
-    // shutdown.timeout_millis=0 drains nothing, the transports included.
+    // Act & Assert — shutdown.timeout_millis=0 drains nothing, the transports included
     assertThat(SagaServer.frontPhaseMillis(0L)).isZero();
   }
 

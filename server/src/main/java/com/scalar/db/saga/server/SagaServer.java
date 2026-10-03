@@ -956,10 +956,12 @@ public final class SagaServer implements AutoCloseable {
    * #FRONT_PHASE_MAX_MILLIS}ms. The reload stop and both transport drains share it, and the saga
    * drain is guaranteed the rest. The transports need no window of their own sized to {@code
    * sync.max_wait_millis}: the first thing {@code close()} does is wake every bounded synchronous
-   * waiter, so at shutdown no request waits on that bound any more, and what remains per request is
-   * one store read and one response write. The half keeps the reserve meaningful at a small budget;
-   * the cap keeps a large budget, sized for long sagas under {@code WAIT_ALL_SAGAS}, from handing
-   * the transports time they cannot use.
+   * waiter, so at shutdown no start waits on that bound any more, and what remains per request is
+   * one store read and one response write. An admin inline drive is the exception, as {@code
+   * adminDriveDeadlineMillis()} says: shutdown does not wake it, and one in flight holds its
+   * request until its saga settles or the slice ends. The half keeps the reserve meaningful at a
+   * small budget; the cap keeps a large budget, sized for long sagas under {@code WAIT_ALL_SAGAS},
+   * from handing the transports time they cannot use.
    *
    * <p>Package-private for testing the split without binding a port or shutting down a server.
    */
