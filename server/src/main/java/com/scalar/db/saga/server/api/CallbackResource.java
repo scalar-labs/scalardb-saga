@@ -5,8 +5,8 @@ import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.SagaConcurrentModificationException;
 import com.scalar.db.saga.exception.SagaInvalidRequestException;
 import com.scalar.db.saga.server.security.SagaOperation;
-import io.javalin.Javalin;
 import io.javalin.http.Context;
+import io.javalin.router.JavalinDefaultRoutingApi;
 import java.time.Clock;
 import java.util.Map;
 import java.util.regex.Pattern;
@@ -46,9 +46,9 @@ public final class CallbackResource {
   private CallbackResource() {}
 
   /**
-   * Registers the callback route on the given app.
+   * Registers the callback route on the given routing configuration.
    *
-   * @param app the Javalin app
+   * @param routes the routing configuration the server is created with
    * @param orchestrator the orchestrator whose {@link DefaultSagaOrchestrator#completeStepAsync}
    *     resumes the parked saga
    * @param callbackSecret the HMAC secret the callback token is verified against
@@ -57,12 +57,12 @@ public final class CallbackResource {
    * @param clock the clock used to age the token's {@code iat} against {@code maxAgeSeconds}
    */
   public static void register(
-      Javalin app,
+      JavalinDefaultRoutingApi routes,
       DefaultSagaOrchestrator orchestrator,
       String callbackSecret,
       long maxAgeSeconds,
       Clock clock) {
-    app.post(
+    routes.post(
         PATH,
         ctx -> {
           String sagaId = ctx.pathParam("id");

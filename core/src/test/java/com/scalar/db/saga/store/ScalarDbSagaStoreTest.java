@@ -46,6 +46,7 @@ import com.scalar.db.saga.store.SagaStore.OverdueParked;
 import com.scalar.db.saga.store.SagaStore.Recoverables;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
@@ -286,8 +287,19 @@ class ScalarDbSagaStoreTest {
   // ---------------------------------------------------------------------------
 
   @Test
-  void registerDefinition_firstRegistration_insertsDefinition() throws Exception {
-    // Arrange
+  void registerDefinition_firstRegistration_insertsDefinitionStampedWithTheClock()
+      throws Exception {
+    // Arrange — nothing registered under the name yet, and a clock with sub-millisecond digits so
+    // the assertion also shows the stamp is truncated to what the column stores
+    Instant now = Instant.parse("2026-08-26T12:00:00.123456789Z");
+    ScalarDbSagaStore clockedStore =
+        new ScalarDbSagaStore(
+            txManager,
+            objectMapper,
+            schema,
+            ScalarDbSagaStoreConfig.builder().build(),
+            () -> OWN_APPEND_ID,
+            () -> now);
     SagaDefinition def =
         SagaDefinition.newBuilder("order-saga")
             .saga()
@@ -298,11 +310,17 @@ class ScalarDbSagaStoreTest {
     when(tx.get(any(Get.class))).thenReturn(Optional.empty());
 
     // Act
-    store.registerDefinition(def);
+    clockedStore.registerDefinition(def);
 
-    // Assert
+    // Assert — with no earlier row the stamp is the clock itself, at millisecond precision
     verify(tx).get(any(Get.class));
-    verify(tx).insert(any(Insert.class));
+    ArgumentCaptor<Insert> captor = ArgumentCaptor.forClass(Insert.class);
+    verify(tx).insert(captor.capture());
+    Instant stamped =
+        Objects.requireNonNull(
+                captor.getValue().getColumns().get("registered_at"), "registered_at column missing")
+            .getTimestampTZValue();
+    assertThat(stamped).isEqualTo(now.truncatedTo(ChronoUnit.MILLIS));
     verify(tx).commit();
   }
 
@@ -426,6 +444,30 @@ class ScalarDbSagaStoreTest {
             Objects.requireNonNull(captor.getValue().getColumns().get("registered_at"))
                 .getTimestampTZValue())
         .isEqualTo(now);
+  }
+
+  @Test
+  void registerDefinition_existingRowWithoutRegisteredAt_throwsSagaPersistenceException()
+      throws Exception {
+    // Arrange — a stored row with no stamp is corrupt (every insert writes one), so the stamp for
+    // the new version cannot be placed after it
+    SagaDefinition def =
+        SagaDefinition.newBuilder("order-saga")
+            .saga()
+            .version("v2")
+            .step("debit", "com.example.DebitStep")
+            .add()
+            .build();
+    Result corruptRow = mock(Result.class);
+    when(corruptRow.getTimestampTZ("registered_at")).thenReturn(null);
+    when(tx.get(any(Get.class))).thenReturn(Optional.empty());
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(corruptRow));
+
+    // Act & Assert — fails as corrupt data, and nothing is written next to it
+    assertThatThrownBy(() -> store.registerDefinition(def))
+        .isInstanceOf(SagaPersistenceException.class)
+        .satisfies(e -> assertThat(((SagaPersistenceException) e).isRetryable()).isFalse());
+    verify(tx, never()).insert(any(Insert.class));
   }
 
   @Test
@@ -613,6 +655,49 @@ class ScalarDbSagaStoreTest {
     assertThat(found).isPresent();
     assertThat(found.get().getVersion()).isEqualTo("v2");
     assertThat(found.get().getSteps()).hasSize(2);
+  }
+
+  @Test
+  void getDefinition_equalStamps_returnsTheFirstRowInScanOrder() throws Exception {
+    // Arrange — two versions with the same stamp, which only two replicas registering in the same
+    // millisecond can produce. The rows arrive in clustering-key order, so the first one is the
+    // lexicographically smaller version; that is the documented, accepted outcome, pinned here so
+    // it cannot change silently.
+    SagaDefinition defV10 =
+        SagaDefinition.newBuilder("order-saga")
+            .saga()
+            .version("10.0")
+            .step("debit", "com.example.DebitStep")
+            .add()
+            .build();
+    Instant sameStamp = Instant.parse("2026-01-01T00:00:00Z");
+    Result rowV10 = mock(Result.class);
+    when(rowV10.getText("definition_json")).thenReturn(definitionSerializer.serialize(defV10));
+    when(rowV10.getTimestampTZ("registered_at")).thenReturn(sameStamp);
+    Result rowV3 = mock(Result.class);
+    when(rowV3.getTimestampTZ("registered_at")).thenReturn(sameStamp);
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(rowV10, rowV3));
+
+    // Act
+    Optional<SagaDefinition> found = store.getDefinition("order-saga");
+
+    // Assert
+    assertThat(found).isPresent();
+    assertThat(found.get().getVersion()).isEqualTo("10.0");
+  }
+
+  @Test
+  void getDefinition_rowWithoutRegisteredAt_throwsSagaPersistenceException() throws Exception {
+    // Arrange — a single row with no stamp. Being the only row does not excuse it: the lookup
+    // validates every row it ranks rather than skipping the comparison it would not need.
+    Result corruptRow = mock(Result.class);
+    when(corruptRow.getTimestampTZ("registered_at")).thenReturn(null);
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(corruptRow));
+
+    // Act & Assert
+    assertThatThrownBy(() -> store.getDefinition("order-saga"))
+        .isInstanceOf(SagaPersistenceException.class)
+        .satisfies(e -> assertThat(((SagaPersistenceException) e).isRetryable()).isFalse());
   }
 
   @Test

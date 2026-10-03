@@ -17,10 +17,10 @@ import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import com.scalar.db.saga.server.security.SagaAuthUnavailableException;
 import com.scalar.db.saga.server.security.SagaAuthenticationException;
 import com.scalar.db.saga.server.security.SagaAuthorizationException;
-import io.javalin.Javalin;
 import io.javalin.http.Context;
 import io.javalin.http.HttpResponseException;
 import io.javalin.http.NotFoundResponse;
+import io.javalin.router.JavalinDefaultRoutingApi;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.slf4j.Logger;
@@ -47,9 +47,9 @@ import org.slf4j.LoggerFactory;
  * drift.
  *
  * <p><b>Per-type explicit registration.</b> Every wire-facing exception has its own {@code
- * app.exception} handler; this file reads as a complete per-type dispatch table. The generic {@link
- * SagaRuntimeException} handler catches any future subclass that lacks a dedicated entry so the
- * fallback route is safe.
+ * routes.exception} handler; this file reads as a complete per-type dispatch table. The generic
+ * {@link SagaRuntimeException} handler catches any future subclass that lacks a dedicated entry so
+ * the fallback route is safe.
  *
  * <p><b>Route-level 404.</b> A request no route matches surfaces as Javalin's internal {@link
  * NotFoundResponse}, which Javalin's own handler would render with a default body — the one REST
@@ -88,32 +88,32 @@ public final class ErrorMapper {
   private ErrorMapper() {}
 
   /**
-   * Registers exception handlers on the given app.
+   * Registers exception handlers on the given routing configuration.
    *
-   * @param app the Javalin app
+   * @param routes the routing configuration the server is created with
    */
-  public static void register(Javalin app) {
+  public static void register(JavalinDefaultRoutingApi routes) {
     // ── Not found (404) ──────────────────────────────────────────────────
-    app.exception(SagaNotFoundException.class, (e, ctx) -> respond(ctx, 404, e));
-    app.exception(SagaDefinitionNotFoundException.class, (e, ctx) -> respond(ctx, 404, e));
+    routes.exception(SagaNotFoundException.class, (e, ctx) -> respond(ctx, 404, e));
+    routes.exception(SagaDefinitionNotFoundException.class, (e, ctx) -> respond(ctx, 404, e));
 
     // ── Conflict (409) ───────────────────────────────────────────────────
-    app.exception(SagaAlreadyExistsException.class, (e, ctx) -> respond(ctx, 409, e));
-    app.exception(SagaConcurrentModificationException.class, (e, ctx) -> respond(ctx, 409, e));
+    routes.exception(SagaAlreadyExistsException.class, (e, ctx) -> respond(ctx, 409, e));
+    routes.exception(SagaConcurrentModificationException.class, (e, ctx) -> respond(ctx, 409, e));
 
     // ── Precondition failed (422) ────────────────────────────────────────
-    app.exception(SagaStatePreconditionException.class, (e, ctx) -> respond(ctx, 422, e));
+    routes.exception(SagaStatePreconditionException.class, (e, ctx) -> respond(ctx, 422, e));
     // A saga this daemon does not serve is a stable precondition failure, not a transient race:
     // retrying the same start against this replica never succeeds, which is what separates 422
     // from the 409 the conflict codes carry.
-    app.exception(SagaDefinitionNotServedException.class, (e, ctx) -> respond(ctx, 422, e));
+    routes.exception(SagaDefinitionNotServedException.class, (e, ctx) -> respond(ctx, 422, e));
 
     // ── Bad request (400) ────────────────────────────────────────────────
     // SAGA_DEFINITION_VERSION_CONTENT_CONFLICT is the one definition code that is not a bad
     // request: it is numbered in the conflict (103xx) sub-range, and the sub-range is a wire
     // contract, so the status must say 409 where the code says conflict. The other six definition
     // codes are genuinely bad requests.
-    app.exception(
+    routes.exception(
         SagaDefinitionException.class,
         (e, ctx) ->
             respond(
@@ -122,8 +122,8 @@ public final class ErrorMapper {
                     ? 409
                     : 400,
                 e));
-    app.exception(SagaInvalidRequestException.class, (e, ctx) -> respond(ctx, 400, e));
-    app.exception(SagaIllegalArgumentException.class, (e, ctx) -> respond(ctx, 400, e));
+    routes.exception(SagaInvalidRequestException.class, (e, ctx) -> respond(ctx, 400, e));
+    routes.exception(SagaIllegalArgumentException.class, (e, ctx) -> respond(ctx, 400, e));
     // There is deliberately no handler for a bare IllegalArgumentException. Every caller-input
     // rejection carries a typed exception (the two above), so a stdlib one arriving here is a
     // server fault: ScalarDB's operation checkers on a dropped table or a stale schema,
@@ -135,7 +135,7 @@ public final class ErrorMapper {
     // allArms() fails the build if a handler is registered here again.
 
     // ── Auth (401 / 403) ─────────────────────────────────────────────────
-    app.exception(
+    routes.exception(
         CallbackAuthException.class,
         (e, ctx) -> {
           // DEBUG: probing traffic can make this frequent; log the internal reason for triage.
@@ -143,7 +143,7 @@ public final class ErrorMapper {
               "{} on {} {}: {}", e.getMessage(), ctx.method(), ctx.path(), e.getInternalDetail());
           respond(ctx, 401, e);
         });
-    app.exception(
+    routes.exception(
         SagaAuthenticationException.class,
         (e, ctx) -> {
           // DEBUG: probing traffic can make this frequent.
@@ -151,7 +151,7 @@ public final class ErrorMapper {
               "{} on {} {}: {}", e.getMessage(), ctx.method(), ctx.path(), e.getInternalDetail());
           respond(ctx, 401, e);
         });
-    app.exception(
+    routes.exception(
         SagaAuthorizationException.class,
         (e, ctx) -> {
           // INFO: audit trail with principal + required role.
@@ -166,7 +166,7 @@ public final class ErrorMapper {
         });
 
     // ── Rate limit (429) ─────────────────────────────────────────────────
-    app.exception(
+    routes.exception(
         RateLimitExceededException.class,
         (e, ctx) -> {
           logger.debug(
@@ -183,7 +183,7 @@ public final class ErrorMapper {
     // line and one stack per refused request; that is a log-flood amplifier any caller can reach.
     // And a refusal is not a failure: the engine is doing what it was configured to do, so DEBUG is
     // the honest level, and the controller summarizes the storm once a minute.
-    app.exception(
+    routes.exception(
         SagaOverloadedException.class,
         (e, ctx) -> {
           logger.debug("{} on {} {}", e.getMessage(), ctx.method(), ctx.path());
@@ -193,7 +193,7 @@ public final class ErrorMapper {
 
     // ── Server errors (500 / 503) ────────────────────────────────────────
     // Identity-provider transient outage; log ERROR with the specific upstream failure.
-    app.exception(
+    routes.exception(
         SagaAuthUnavailableException.class,
         (e, ctx) -> {
           logger.error(
@@ -206,7 +206,7 @@ public final class ErrorMapper {
           respond(ctx, 503, e);
         });
     // Transient store failure → 503 (retryable); permanent → 500 (do not retry).
-    app.exception(
+    routes.exception(
         SagaPersistenceException.class,
         (e, ctx) -> {
           int status = e.isRetryable() ? 503 : 500;
@@ -216,7 +216,7 @@ public final class ErrorMapper {
 
     // ── Fallbacks ────────────────────────────────────────────────────────
     // Any SagaRuntimeException subclass that isn't listed above — sane default via category.
-    app.exception(
+    routes.exception(
         SagaRuntimeException.class,
         (e, ctx) -> {
           int status = statusForCategory(e.getErrorCode().category());
@@ -226,7 +226,7 @@ public final class ErrorMapper {
           respond(ctx, status, e);
         });
     // Non-Saga catch-all: log and surface the enum's generic INTERNAL_ERROR.
-    app.exception(
+    routes.exception(
         Exception.class,
         (e, ctx) -> {
           logger.error("Unhandled error on {} {}", ctx.method(), ctx.path(), e);
@@ -241,7 +241,7 @@ public final class ErrorMapper {
     // not-found-family code. Handler-produced 404s (saga or definition not found) carry their own
     // typed exceptions and never reach this entry. Registering the exact type outranks Javalin's
     // built-in HttpResponseException handler, which resolves by nearest class.
-    app.exception(
+    routes.exception(
         NotFoundResponse.class,
         (e, ctx) ->
             ctx.status(404)
@@ -258,7 +258,7 @@ public final class ErrorMapper {
     // composition keeps the framework's status and adds ours: INVALID_REQUEST for the 4xx
     // request-shape statuses, INTERNAL_ERROR for 5xx. NotFoundResponse stays on its dedicated
     // ENDPOINT_NOT_FOUND handler above; Javalin resolves the nearest registered type.
-    app.exception(
+    routes.exception(
         HttpResponseException.class,
         (e, ctx) -> {
           int status = e.getStatus();

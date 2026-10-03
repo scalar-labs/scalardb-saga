@@ -63,8 +63,12 @@ class HttpVirtualThreadTest {
     // Arrange
     AtomicBoolean virtual = new AtomicBoolean();
     ExecutorService virtualThreads = Executors.newVirtualThreadPerTaskExecutor();
-    Javalin app = SagaServer.createHttpServer(config(8), null, virtualThreads);
-    app.get("/probe", ctx -> virtual.set(Thread.currentThread().isVirtual()));
+    Javalin app =
+        SagaServer.createHttpServer(
+            config(8),
+            null,
+            virtualThreads,
+            routes -> routes.get("/probe", ctx -> virtual.set(Thread.currentThread().isVirtual())));
     // Loopback, not the wildcard: a wildcard bind can share a port with another suite's
     // loopback server, which then takes the connection and answers this test's requests.
     app.start("127.0.0.1", 0);
@@ -104,19 +108,25 @@ class HttpVirtualThreadTest {
     AtomicBoolean releasedCleanly = new AtomicBoolean(true);
 
     ExecutorService virtualThreads = Executors.newVirtualThreadPerTaskExecutor();
-    Javalin app = SagaServer.createHttpServer(config(maxThreads), null, virtualThreads);
-    app.get(
-        "/block",
-        ctx -> {
-          peak.accumulateAndGet(concurrent.incrementAndGet(), Math::max);
-          // Comfortably longer than awaitPeak's own budget below: these two waits race, and if a
-          // handler gives up first the peak collapses and the test fails for a reason unrelated to
-          // what it asserts. @Timeout is the real backstop, so this only has to lose that race.
-          if (!release.await(HANDLER_RELEASE_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-            releasedCleanly.set(false);
-          }
-          concurrent.decrementAndGet();
-        });
+    Javalin app =
+        SagaServer.createHttpServer(
+            config(maxThreads),
+            null,
+            virtualThreads,
+            routes ->
+                routes.get(
+                    "/block",
+                    ctx -> {
+                      peak.accumulateAndGet(concurrent.incrementAndGet(), Math::max);
+                      // Comfortably longer than awaitPeak's own budget below: these two waits
+                      // race, and if a handler gives up first the peak collapses and the test
+                      // fails for a reason unrelated to what it asserts. @Timeout is the real
+                      // backstop, so this only has to lose that race.
+                      if (!release.await(HANDLER_RELEASE_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                        releasedCleanly.set(false);
+                      }
+                      concurrent.decrementAndGet();
+                    }));
     // Loopback, not the wildcard: a wildcard bind can share a port with another suite's
     // loopback server, which then takes the connection and answers this test's requests.
     app.start("127.0.0.1", 0);

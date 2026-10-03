@@ -67,10 +67,14 @@ class SagaResourceStartTest {
     shutdownSignal = new CompletableFuture<>();
     orchestrator = mock(SagaOrchestrator.class);
     waiterRegistry = new SagaWaiterRegistry();
-    app = Javalin.create();
-    SagaSecurityHandler.register(app, new RoleHeaderProvider());
-    ErrorMapper.register(app);
-    SagaResource.register(app, orchestrator, syncWaitBoundMillis, shutdownSignal, waiterRegistry);
+    app =
+        Javalin.create(
+            cfg -> {
+              SagaSecurityHandler.register(cfg.routes, new RoleHeaderProvider());
+              ErrorMapper.register(cfg.routes);
+              SagaResource.register(
+                  cfg.routes, orchestrator, syncWaitBoundMillis, shutdownSignal, waiterRegistry);
+            });
     // Loopback, not the wildcard: a wildcard bind can share a port with another suite's
     // loopback server, which then takes the connection and answers this test's requests.
     app.start("127.0.0.1", 0);

@@ -65,6 +65,10 @@ dependencies {
     runtimeOnly(variantOf(libs.netty.transport.native.epoll) { classifier("linux-aarch_64") })
     implementation(libs.grpc.stub)
     implementation(libs.grpc.netty)
+    // AdvancedTlsX509KeyManager, the one key manager both transports serve TLS from. grpc-util is
+    // already on the runtime classpath through grpc-core; naming it here puts it on the compile
+    // classpath.
+    implementation(libs.grpc.util)
     implementation(libs.grpc.services)
     implementation(libs.grpc.protobuf)
     implementation(libs.protobuf.java)
@@ -79,13 +83,11 @@ dependencies {
     implementation(platform(libs.jackson.bom))
     implementation(libs.jackson.databind)
 
-    runtimeOnly(libs.logback.classic)
+    // Not runtimeOnly: BoundedQueueWarningFilter extends Logback's TurboFilter.
+    implementation(libs.logback.classic)
 
     testImplementation(platform(libs.grpc.bom))
     testImplementation(libs.grpc.inprocess)
-    // The bridge and TLS tests capture what actually reaches Logback, which needs its appender
-    // types at compile time — the main source set only needs Logback at runtime.
-    testImplementation(libs.logback.classic)
 
     "integrationTestImplementation"(project(":core"))
     "integrationTestImplementation"(project(":client"))
@@ -146,7 +148,27 @@ tasks.register<Exec>("dockerBuild") {
 
     dependsOn(dockerContext)
     workingDir = layout.buildDirectory.dir("docker").get().asFile
-    executable = "docker"
+
+    // A bare executable name is resolved against the Gradle daemon's PATH, which is whatever the
+    // shell that first started the daemon had, not the PATH of the shell running this build. Docker
+    // Desktop installs its CLI outside the system directories, so a daemon started from a shell
+    // without that directory fails to start the process while `docker` works in the caller's
+    // terminal. Gradle injects the caller's environment into the build, so resolving the name here
+    // against the caller's PATH gives the process launcher an absolute path to run. Done in doFirst
+    // so PATH is read only when this task runs, and stays out of every other build's configuration
+    // inputs. A candidate has to be a regular file as well as executable, since a directory with
+    // the search bit set also reports as executable and a directory named `docker` on an earlier
+    // PATH entry would otherwise shadow the real binary; that is the lookup rule a shell applies.
+    // The fallback keeps Gradle's own error when Docker is not installed at all.
+    doFirst {
+        executable = providers.environmentVariable("PATH").map { path ->
+            path.split(File.pathSeparator)
+                .flatMap { dir -> listOf("docker", "docker.exe").map { File(dir, it) } }
+                .firstOrNull { it.isFile && it.canExecute() }
+                ?.absolutePath
+                ?: "docker"
+        }.get()
+    }
 
     // The argument provider below is a script lambda, which captures the build script object and so
     // cannot be serialized into the configuration cache. Computing the arguments eagerly instead

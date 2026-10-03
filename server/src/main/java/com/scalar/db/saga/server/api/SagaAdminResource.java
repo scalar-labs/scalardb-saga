@@ -10,8 +10,8 @@ import com.scalar.db.saga.exception.SagaInvalidRequestException;
 import com.scalar.db.saga.server.security.SagaIdentity;
 import com.scalar.db.saga.server.security.SagaOperation;
 import com.scalar.db.saga.server.security.SagaSecurityHandler;
-import io.javalin.Javalin;
 import io.javalin.http.Context;
+import io.javalin.router.JavalinDefaultRoutingApi;
 
 /**
  * Registers the Admin API REST endpoints — the operational control plane over the daemon's saga
@@ -53,28 +53,30 @@ public final class SagaAdminResource {
   private SagaAdminResource() {}
 
   /**
-   * Registers the admin routes on the given app.
+   * Registers the admin routes on the given routing configuration.
    *
-   * @param app the Javalin app
+   * @param routes the routing configuration the server is created with
    * @param orchestrator the orchestrator whose admin control plane the endpoints drive
    * @param driveDeadlineMillis the bound on a single-saga inline drive ({@code 0} = unbounded)
    */
   public static void register(
-      Javalin app, DefaultSagaOrchestrator orchestrator, long driveDeadlineMillis) {
-    app.get("/sagas", ctx -> list(ctx, orchestrator), SagaOperation.LIST_SAGAS);
-    app.post(
+      JavalinDefaultRoutingApi routes,
+      DefaultSagaOrchestrator orchestrator,
+      long driveDeadlineMillis) {
+    routes.get("/sagas", ctx -> list(ctx, orchestrator), SagaOperation.LIST_SAGAS);
+    routes.post(
         "/sagas/{id}/recover",
         ctx -> recover(ctx, orchestrator, driveDeadlineMillis),
         SagaOperation.RECOVER_SAGA);
-    app.post(
+    routes.post(
         "/sagas/{id}/force-complete",
         ctx -> forceComplete(ctx, orchestrator, driveDeadlineMillis),
         SagaOperation.FORCE_COMPLETE);
-    app.post(
+    routes.post(
         "/sagas/{id}/reset",
         ctx -> reset(ctx, orchestrator, driveDeadlineMillis),
         SagaOperation.RESET_ESCALATED);
-    app.post(
+    routes.post(
         "/admin/reset-escalated",
         ctx -> bulkReset(ctx, orchestrator, driveDeadlineMillis),
         SagaOperation.RESET_ESCALATED);

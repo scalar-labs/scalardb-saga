@@ -2,7 +2,6 @@ package com.scalar.db.saga.server;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AccessDeniedException;
 import java.nio.file.Files;
@@ -10,62 +9,49 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.security.GeneralSecurityException;
 import java.security.KeyFactory;
-import java.security.KeyStore;
+import java.security.MessageDigest;
 import java.security.PrivateKey;
 import java.security.Signature;
-import java.security.cert.CertificateEncodingException;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.security.spec.PKCS8EncodedKeySpec;
-import java.time.Clock;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * The server's TLS key material: the PEM certificate chain and private key named by {@code
- * tls.cert_chain_path} and {@code tls.private_key_path}, loaded and validated once at startup,
- * before either transport binds. Both transports consume this one component — Jetty through {@link
- * #keyStore}, gRPC through the validated material re-encoded as PEM ({@link #certChainPemStream}
- * and {@link #privateKeyPemStream}) — so both serve exactly the bytes validated here and cannot
- * diverge from each other or from what was vetted, no matter what happens to the files after
- * validation. Its acceptance set is deliberately a strict subset of what either stack parses
- * (unencrypted PKCS#8, RSA or EC), which keeps behavior independent of the classpath: BouncyCastle
- * appearing transitively would widen Netty's parser, but never what already passed here.
+ * tls.cert_chain_path} and {@code tls.private_key_path}, loaded and validated at startup, before
+ * either transport binds, and again on every reload pass (see {@link TlsReloader}). The validated
+ * chain and key are published to one key manager that both transports serve from, so both present
+ * exactly the bytes validated here and cannot diverge from each other or from what was vetted, no
+ * matter what happens to the files afterwards. Its acceptance set is deliberately a strict subset
+ * of what either stack parses (unencrypted PKCS#8, RSA or EC), which keeps behavior independent of
+ * the classpath: BouncyCastle appearing transitively would widen Netty's parser, but never what
+ * already passed here.
  *
- * <p>A future certificate reload starts here but does not end here: re-running {@link #load}
- * re-validates the same paths, but neither listener would notice a swapped result on its own —
- * Jetty serves from an {@code SslContextFactory} built once in {@code SagaServer.tlsConnector}
- * (reload must retain that factory and call its {@code reload(...)}), and gRPC pins the SslContext
- * built from this material at server-build time (reload needs a delegating key manager, e.g. grpc's
- * {@code AdvancedTlsX509KeyManager}, or a server rebuild). Until that wiring exists, certificate
- * rotation is a restart.
- *
- * <p>Every failure here is a startup error an operator must act on, so each failure class gets its
- * own message naming the config key — and never the configured value, not even the path. A path
- * <em>value</em> is not provably a path: any {@code scalar.db.saga.*} value may arrive through a
- * secret reference or an inline paste, so a {@code ${file:...}} reference mis-placed on a path key
- * delivers the referenced secret (potentially this very private key) as the "path", and echoing it
- * would write the secret to the log. The operator resolves key to path in their own configuration
- * file. Key material makes the usual redaction rule absolute: the parse exceptions embed raw input,
- * so none are propagated as causes. Certificate <em>metadata</em> (validity dates) is the
- * deliberate exception — the certificate is public material presented to every client on handshake,
- * so the expiry warning may name its dates.
+ * <p>Every failure here is a configuration error an operator must act on — fatal at startup, a
+ * logged rejection on reload — so each failure class gets its own message naming the config key,
+ * and never the configured value, not even the path. A path <em>value</em> is not provably a path:
+ * any {@code scalar.db.saga.*} value may arrive through a secret reference or an inline paste, so a
+ * {@code ${file:...}} reference mis-placed on a path key delivers the referenced secret
+ * (potentially this very private key) as the "path", and echoing it would write the secret to the
+ * log. The operator resolves key to path in their own configuration file. Key material makes the
+ * usual redaction rule absolute: the parse exceptions embed raw input, so none are propagated as
+ * causes. Certificate <em>metadata</em> (validity dates) is the deliberate exception — the
+ * certificate is public material presented to every client on handshake, so {@link TlsReloader}'s
+ * validity warnings may name its dates.
  */
 final class TlsMaterial {
-
-  private static final Logger logger = LoggerFactory.getLogger(TlsMaterial.class);
 
   // PEM block extraction rather than whole-file parsing, so prose between blocks (openssl's
   // subject= and issuer= comment lines) cannot trip the underlying parsers.
   private static final Pattern CERT_BLOCK =
       Pattern.compile("-----BEGIN CERTIFICATE-----([A-Za-z0-9+/=\\s]*)-----END CERTIFICATE-----");
+  private static final Pattern CERT_BEGIN = Pattern.compile("-----BEGIN CERTIFICATE-----");
   private static final Pattern KEY_BLOCK =
       Pattern.compile(
           "-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----([A-Za-z0-9+/=\\s]*)-----END \\1-----");
@@ -76,38 +62,31 @@ final class TlsMaterial {
   private static final String SEC1_LABEL = "EC PRIVATE KEY";
 
   // Deliberately no path fields: this object is the validated material, not its provenance. The
-  // authoritative path holder is SagaServerConfig, which is what a future reload re-reads — and
+  // authoritative path holder is SagaServerConfig, which is what the reload pass re-reads — and
   // the redaction rule forbids echoing path values anywhere, so not even diagnostics want them.
   private final List<X509Certificate> certChain;
   private final PrivateKey privateKey;
-  // The validated material re-encoded as PEM, computed once: what the gRPC builder consumes, so
-  // Netty never re-reads the files (see certChainPemStream).
-  private final byte[] certChainPem;
-  private final byte[] privateKeyPem;
 
   private TlsMaterial(List<X509Certificate> certChain, PrivateKey privateKey) {
     this.certChain = certChain;
     this.privateKey = privateKey;
-    this.certChainPem = pemEncode("CERTIFICATE", certificateDers(certChain));
-    this.privateKeyPem = pemEncode("PRIVATE KEY", List.of(privateKey.getEncoded()));
   }
 
   /**
    * Loads and validates the material: both files readable, the chain parses with at least one
    * certificate, the key parses as unencrypted PKCS#8 RSA or EC, and the key is the one the leaf
-   * certificate was issued for. Warns (dates only) when the leaf is outside its validity window,
-   * judged against {@code clock} so tests can pin time.
+   * certificate was issued for. Validity dates are not checked here: the leaf's window is the
+   * reload pass's concern, watched continuously rather than judged once.
    *
    * @throws IllegalArgumentException naming the config key — never file content or the configured
    *     value — on any failure
    */
-  static TlsMaterial load(Path certChainPath, Path privateKeyPath, Clock clock) {
+  static TlsMaterial load(Path certChainPath, Path privateKeyPath) {
     String certPem = readPemText(certChainPath, SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY);
     String keyPem = readPemText(privateKeyPath, SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY);
     List<X509Certificate> chain = parseCertChain(certPem);
     PrivateKey key = parsePrivateKey(keyPem);
     requireKeyMatchesLeaf(key, chain.get(0));
-    warnIfOutsideValidity(chain.get(0), clock);
     return new TlsMaterial(List.copyOf(chain), key);
   }
 
@@ -120,68 +99,19 @@ final class TlsMaterial {
     return privateKey;
   }
 
-  /**
-   * The validated chain re-encoded as PEM, as a fresh stream — what the gRPC builder consumes.
-   * Handing over re-encoded bytes rather than the file paths is what guarantees gRPC serves exactly
-   * the validated material: the files can change between validation and server build (a rotation
-   * landing mid-boot), and Netty would otherwise read them a second time.
-   */
-  InputStream certChainPemStream() {
-    return new ByteArrayInputStream(certChainPem);
-  }
-
-  /** The validated key re-encoded as unencrypted PKCS#8 PEM, as a fresh stream. */
-  InputStream privateKeyPemStream() {
-    return new ByteArrayInputStream(privateKeyPem);
+  /** The leaf certificate: first in the chain, the one the key was issued for. */
+  X509Certificate leaf() {
+    return certChain.get(0);
   }
 
   /**
-   * Builds an in-memory PKCS12 keystore holding the key and chain under one entry, protected by
-   * {@code password} — for Jetty, whose {@code SslContextFactory} initializes its key manager with
-   * the keystore password, so the caller must hand it the same throwaway password it passes here.
-   * Nothing is written to disk.
+   * Whether {@code other} carries the same chain and key, compared by DER encoding — what the
+   * reload pass asks to tell a re-read of unchanged files, or a reformatted copy of them, from a
+   * rotation.
    */
-  KeyStore keyStore(char[] password) {
-    try {
-      KeyStore keyStore = KeyStore.getInstance("PKCS12");
-      keyStore.load(null, null);
-      keyStore.setKeyEntry(
-          "scalardb-saga-tls", privateKey, password, certChain.toArray(new X509Certificate[0]));
-      return keyStore;
-    } catch (IOException | GeneralSecurityException e) {
-      // Assembling an in-memory PKCS12 from already-validated material does not fail for
-      // config-attributable reasons; if it does, something is wrong with the runtime itself.
-      throw new IllegalStateException("Failed to assemble the in-memory TLS keystore", e);
-    }
-  }
-
-  private static List<byte[]> certificateDers(List<X509Certificate> chain) {
-    List<byte[]> ders = new ArrayList<>();
-    for (X509Certificate certificate : chain) {
-      try {
-        ders.add(certificate.getEncoded());
-      } catch (CertificateEncodingException e) {
-        // Re-encoding an already-parsed certificate does not fail for config-attributable
-        // reasons; if it does, something is wrong with the runtime itself.
-        throw new IllegalStateException("Failed to re-encode the validated certificate chain", e);
-      }
-    }
-    return ders;
-  }
-
-  private static byte[] pemEncode(String label, List<byte[]> ders) {
-    StringBuilder pem = new StringBuilder();
-    Base64.Encoder encoder = Base64.getMimeEncoder(64, "\n".getBytes(StandardCharsets.US_ASCII));
-    for (byte[] der : ders) {
-      pem.append("-----BEGIN ")
-          .append(label)
-          .append("-----\n")
-          .append(encoder.encodeToString(der))
-          .append("\n-----END ")
-          .append(label)
-          .append("-----\n");
-    }
-    return pem.toString().getBytes(StandardCharsets.US_ASCII);
+  boolean sameMaterialAs(TlsMaterial other) {
+    return certChain.equals(other.certChain)
+        && MessageDigest.isEqual(privateKey.getEncoded(), other.privateKey.getEncoded());
   }
 
   /**
@@ -239,6 +169,16 @@ final class TlsMaterial {
             SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY,
             "whose CERTIFICATE block does not parse as an X.509 certificate.");
       }
+    }
+    // A BEGIN the loop skipped is a block with no END: the shape a non-atomic writer leaves when
+    // the file is read mid-write, with the leaf complete and an intermediate cut short. Publishing
+    // what did parse would serve a chain missing its intermediates until the next pass; rejecting
+    // it costs one interval instead. A kubelet symlink flip never produces this; a plain copy can.
+    if (CERT_BEGIN.matcher(pem).results().count() != chain.size()) {
+      throw badFile(
+          SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY,
+          "containing a CERTIFICATE block that is not terminated. If a rotation is in progress the"
+              + " next reload pass picks up the complete file; otherwise the file is truncated.");
     }
     if (chain.isEmpty()) {
       if (KEY_BLOCK.matcher(pem).find()) {
@@ -370,32 +310,6 @@ final class TlsMaterial {
               + "'. The key must be the one the leaf certificate was issued for; the usual cause"
               + " is a renewed certificate mounted alongside a stale key, or the two keys naming"
               + " material from different issuances.");
-    }
-  }
-
-  /**
-   * Warns when the leaf certificate is outside its validity window. The server still starts —
-   * cert-manager-style rotation can land a fresh file before real traffic arrives, and refusing to
-   * boot would turn a monitoring problem into an outage — but every client will reject the
-   * handshake until the material is replaced, so say so at startup. Dates only: validity is public
-   * handshake material, but nothing else from the certificate is echoed.
-   */
-  private static void warnIfOutsideValidity(X509Certificate leaf, Clock clock) {
-    Instant now = clock.instant();
-    Instant notBefore = leaf.getNotBefore().toInstant();
-    Instant notAfter = leaf.getNotAfter().toInstant();
-    if (now.isBefore(notBefore)) {
-      logger.warn(
-          "The TLS certificate named by '{}' is not valid until {}; clients will reject the"
-              + " handshake until then.",
-          SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY,
-          notBefore);
-    } else if (now.isAfter(notAfter)) {
-      logger.warn(
-          "The TLS certificate named by '{}' expired at {}; clients will reject the handshake"
-              + " until it is replaced.",
-          SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY,
-          notAfter);
     }
   }
 }

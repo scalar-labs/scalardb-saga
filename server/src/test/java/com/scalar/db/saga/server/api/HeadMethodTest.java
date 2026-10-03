@@ -39,19 +39,22 @@ class HeadMethodTest {
 
   @BeforeEach
   void setUp() {
-    app = Javalin.create();
-    SagaSecurityHandler.register(app, new FullAccessProvider());
-    ErrorMapper.register(app);
-    HealthResource.register(app);
-    SagaResource.register(
-        app,
-        mock(SagaOrchestrator.class),
-        0L,
-        new java.util.concurrent.CompletableFuture<>(),
-        new SagaWaiterRegistry());
-    // A route registered with no operation, to prove the HEAD branch did not weaken the fail-closed
-    // rejection of an untagged route on its normal (GET) path.
-    app.get("/untagged", ctx -> ctx.result("should never be served"));
+    app =
+        Javalin.create(
+            cfg -> {
+              SagaSecurityHandler.register(cfg.routes, new FullAccessProvider());
+              ErrorMapper.register(cfg.routes);
+              HealthResource.register(cfg.routes);
+              SagaResource.register(
+                  cfg.routes,
+                  mock(SagaOrchestrator.class),
+                  0L,
+                  new java.util.concurrent.CompletableFuture<>(),
+                  new SagaWaiterRegistry());
+              // A route registered with no operation, to prove the HEAD branch did not weaken the
+              // fail-closed rejection of an untagged route on its normal (GET) path.
+              cfg.routes.get("/untagged", ctx -> ctx.result("should never be served"));
+            });
     // Loopback, not the wildcard: a wildcard bind can share a port with another suite's
     // loopback server, which then takes the connection and answers this test's requests.
     app.start("127.0.0.1", 0);

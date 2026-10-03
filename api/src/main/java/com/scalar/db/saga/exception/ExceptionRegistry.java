@@ -73,15 +73,17 @@ public final class ExceptionRegistry {
     m.put(SagaErrorCode.PERMISSION_DENIED, meta -> new SagaPermissionDeniedException());
 
     // ── USER_ERROR — Not-found (102xx) ────────────────────────────────
-    m.put(SagaErrorCode.SAGA_NOT_FOUND, meta -> new SagaNotFoundException(meta.get("saga_id")));
+    m.put(SagaErrorCode.SAGA_NOT_FOUND, SagaNotFoundException::fromWire);
     m.put(
         SagaErrorCode.SAGA_DEFINITION_NOT_FOUND,
-        meta -> SagaDefinitionNotFoundException.byName(meta.get("saga_name")));
+        meta ->
+            SagaDefinitionNotFoundException.fromWire(
+                SagaErrorCode.SAGA_DEFINITION_NOT_FOUND, meta));
     m.put(
         SagaErrorCode.SAGA_DEFINITION_VERSION_NOT_FOUND,
         meta ->
-            SagaDefinitionNotFoundException.byNameAndVersion(
-                meta.get("saga_name"), meta.get("version")));
+            SagaDefinitionNotFoundException.fromWire(
+                SagaErrorCode.SAGA_DEFINITION_VERSION_NOT_FOUND, meta));
     // REST-only (the unmatched-route 404); no dedicated exception type, so it round-trips raw.
     m.put(SagaErrorCode.ENDPOINT_NOT_FOUND, meta -> raw(SagaErrorCode.ENDPOINT_NOT_FOUND, meta));
 
@@ -107,8 +109,7 @@ public final class ExceptionRegistry {
 
     // ── RETRYABLE_SERVER_ERROR (2xxxx) ────────────────────────────────
     m.put(
-        SagaErrorCode.SAGA_CONCURRENT_MODIFICATION,
-        meta -> new SagaConcurrentModificationException(meta.get("saga_id")));
+        SagaErrorCode.SAGA_CONCURRENT_MODIFICATION, SagaConcurrentModificationException::fromWire);
     // Reconstructs as SagaPersistenceException, not SagaUnavailableException: the latter hardcodes
     // SERVICE_UNAVAILABLE, so substituting it silently rewrote the code (and the rendered message)
     // from DB-SAGA-20002 to DB-SAGA-20003 and dropped isRetryable(). A remote caller keying on
@@ -184,11 +185,11 @@ public final class ExceptionRegistry {
   @SuppressFBWarnings(
       value = "DCN_NULLPOINTER_EXCEPTION",
       justification =
-          "Catching NPE is intentional: some typed exception ctors call Objects.requireNonNull on"
-              + " metadata values (e.g. SagaNotFoundException(saga_id)), so a missing wire key"
-              + " surfaces as NPE rather than the IllegalArgumentException that ErrorMetadataSchema.validate"
-              + " throws. Both indicate the same protocol-drift condition and degrade the same"
-              + " way.")
+          "Catching NPE is intentional: the fromWire factories call Objects.requireNonNull on the"
+              + " metadata values they read (e.g. SagaNotFoundException.fromWire on saga_id), so a"
+              + " missing wire key surfaces as NPE rather than the IllegalArgumentException that"
+              + " ErrorMetadataSchema.validate throws. Both indicate the same protocol-drift"
+              + " condition and degrade the same way.")
   public static Optional<SagaRuntimeException> tryReconstruct(
       String wireCode, Map<String, String> metadata) {
     SagaErrorCode code = SagaErrorCode.fromCode(wireCode).orElse(null);

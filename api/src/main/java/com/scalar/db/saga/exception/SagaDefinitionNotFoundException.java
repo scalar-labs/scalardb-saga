@@ -1,6 +1,7 @@
 package com.scalar.db.saga.exception;
 
 import com.scalar.db.saga.api.SagaDefinitionId;
+import java.util.Map;
 import java.util.Objects;
 import org.jspecify.annotations.Nullable;
 
@@ -30,6 +31,31 @@ public class SagaDefinitionNotFoundException extends SagaRuntimeException {
   /** As {@link #byNameAndVersion(String, String)}, from a {@link SagaDefinitionId}. */
   public static SagaDefinitionNotFoundException byId(SagaDefinitionId id) {
     return new SagaDefinitionNotFoundException(id.name(), id.version());
+  }
+
+  /**
+   * Reconstructs the exception from a wire-received metadata map, under the code the wire named.
+   *
+   * <p>Package-private: {@link ExceptionRegistry} is the only caller, so a code this type does not
+   * represent is a registry wiring bug rather than caller error, and throws {@link
+   * IllegalStateException}. That is deliberately outside the {@code IllegalArgumentException |
+   * NullPointerException} the registry catches for genuine wire-metadata drift, so a wiring bug
+   * surfaces as itself instead of as {@code UNRECOGNIZED_SERVER_ERROR}.
+   */
+  static SagaDefinitionNotFoundException fromWire(
+      SagaErrorCode code, Map<String, String> metadata) {
+    switch (code) {
+      case SAGA_DEFINITION_NOT_FOUND:
+        return byName(
+            Objects.requireNonNull(metadata.get("saga_name"), "sagaName must not be null"));
+      case SAGA_DEFINITION_VERSION_NOT_FOUND:
+        return byNameAndVersion(
+            Objects.requireNonNull(metadata.get("saga_name"), "sagaName must not be null"),
+            Objects.requireNonNull(metadata.get("version"), "version must not be null"));
+      default:
+        throw new IllegalStateException(
+            "SagaDefinitionNotFoundException does not carry code " + code);
+    }
   }
 
   private SagaDefinitionNotFoundException(String sagaName) {

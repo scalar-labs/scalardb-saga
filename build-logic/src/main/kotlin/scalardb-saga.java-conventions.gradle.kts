@@ -50,6 +50,14 @@ tasks.withType<AbstractArchiveTask>().configureEach {
 // makes both stamps reappear.
 tasks.withType<Javadoc>().configureEach {
     (options as StandardJavadocDocletOptions).isNoTimestamp = true
+    // javadoc stops printing after its default of 100 warnings, so a module past that cap shows a
+    // flat "100 warnings" no matter what changes and a new warning is not merely unread but never
+    // printed. Raise the cap far above any real count so the log states the whole number.
+    //
+    // Every hand-written module keeps doclint's full default, "missing" group included: the javadoc
+    // is read by the developers who change this code as much as by users. Generated sources are the
+    // one exception, and the module that has them says so in its own build file.
+    (options as StandardJavadocDocletOptions).addStringOption("Xmaxwarns", "10000")
 }
 
 // ---------------------------------------------------------------------------

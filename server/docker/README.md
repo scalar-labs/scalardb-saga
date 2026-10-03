@@ -222,8 +222,21 @@ the common issuers emit by default:
 - **Vault PKI** emits traditional encoding unless the request passes `private_key_format=pkcs8`
 - anything else converts with `openssl pkcs8 -topk8 -nocrypt`
 
-Certificate **rotation currently requires a restart** — the files are read once at startup. Hot
-reload is planned alongside the configuration hot-reload feature.
+**Rotation needs no restart.** The two files are re-read on every configuration reload pass
+(`reload.interval_seconds`, default 30; `0` turns reload off, certificate rotation included), so a
+rotated certificate reaches new connections on both transports within one interval of the kubelet
+delivering it. Connections established before the rotation keep the certificate they negotiated. A
+rotation that fails validation — a mismatched or corrupt pair, an empty or missing file, the torn
+snapshot of a read that straddles the kubelet's symlink flip — changes nothing: the previous
+material keeps serving, the rejection is logged once at WARN, and the next pass retries. The daemon
+also warns, once, when the serving certificate enters the last quarter of its validity with no
+replacement, and again when it expires; that warning next to a rejection WARN is the alert to act
+on. Two Kubernetes traps, both spelled out under [Configuration reload](#configuration-reload):
+mount the Secret as a whole volume, never with `subPath` (a `subPath` mount never receives updates
+while the pod runs, so only a restart ever sees the new files, which is exactly what reload is meant
+to spare you), and keep the certificate and key in **one** Secret (split across two, a rotation
+arrives as the new key beside the old certificate; reload rejects that pair and retries until both
+have updated, but a restart in that window fails boot on the mismatch).
 
 Two operational notes:
 
@@ -299,7 +312,10 @@ WARN (repeats at DEBUG until it changes), and the next pass retries. A failure w
 definitions registered before the failure; those are named in an `INFO` apply line of their own,
 and the next pass retries only what is left. The applied INFO line carries the changed names and a
 SHA-256 over the raw file bytes — grep it across replicas to tell a lagging replica from a
-rejecting one. Secret **values** never appear in any log line.
+rejecting one. Secret **values** never appear in any log line. With TLS on, the certificate and key
+are re-read on the same interval as a **separate** pass with its own validation (see [TLS](#tls)):
+a rejected certificate never holds back a configuration change, and a rejected configuration never
+holds back a rotation.
 
 Operational notes, learned from how Kubernetes actually delivers files:
 

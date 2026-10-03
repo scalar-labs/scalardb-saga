@@ -36,3 +36,12 @@ spotless {
 tasks.withType<JavaCompile>().configureEach {
     options.errorprone.excludedPaths = ".*/build/generated/.*"
 }
+
+// Javadoc: the stubs are generated, so doclint's "missing" group (no comment, no @param, no @return)
+// is off, as Spotless and Error Prone already are for them; the javadoc jar still ships so consumers
+// of the wire contract get class pages. Every other doclint warning fails the build, since nothing
+// here needs writing to reach zero.
+tasks.withType<Javadoc>().configureEach {
+    (options as StandardJavadocDocletOptions).addBooleanOption("Xdoclint:all,-missing", true)
+    (options as StandardJavadocDocletOptions).addBooleanOption("Werror", true)
+}
