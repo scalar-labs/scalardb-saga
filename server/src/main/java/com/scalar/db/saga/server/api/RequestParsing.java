@@ -52,26 +52,58 @@ public final class RequestParsing {
     private @Nullable Integer pageSize;
     private @Nullable String pageToken;
 
+    private QueryParams() {}
+
+    /**
+     * Stores the status filter.
+     *
+     * @param status the status to list
+     * @return this collector
+     */
     public QueryParams status(SagaStatus status) {
       this.status = status;
       return this;
     }
 
+    /**
+     * Stores the inclusive {@code updatedAt} lower bound.
+     *
+     * @param updatedAfter the earliest {@code updatedAt} to include
+     * @return this collector
+     */
     public QueryParams updatedAfter(Instant updatedAfter) {
       this.updatedAfter = updatedAfter;
       return this;
     }
 
+    /**
+     * Stores the inclusive {@code updatedAt} upper bound.
+     *
+     * @param updatedBefore the latest {@code updatedAt} to include
+     * @return this collector
+     */
     public QueryParams updatedBefore(Instant updatedBefore) {
       this.updatedBefore = updatedBefore;
       return this;
     }
 
+    /**
+     * Stores the requested page size, unvalidated; the builder checks it.
+     *
+     * @param pageSize the requested results per page
+     * @return this collector
+     */
     public QueryParams pageSize(int pageSize) {
       this.pageSize = pageSize;
       return this;
     }
 
+    /**
+     * Stores the opaque continuation token.
+     *
+     * @param pageToken the token from the previous page
+     * @return this collector
+     */
     public QueryParams pageToken(String pageToken) {
       this.pageToken = pageToken;
       return this;

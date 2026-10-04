@@ -58,6 +58,9 @@ tasks.withType<Javadoc>().configureEach {
     // is read by the developers who change this code as much as by users. Generated sources are the
     // one exception, and the module that has them says so in its own build file.
     (options as StandardJavadocDocletOptions).addStringOption("Xmaxwarns", "10000")
+    // Every module is documented to zero doclint warnings and stays there: any javadoc warning
+    // fails the build, so a gap shows up on the pull request that opens it.
+    (options as StandardJavadocDocletOptions).addBooleanOption("Werror", true)
 }
 
 // ---------------------------------------------------------------------------

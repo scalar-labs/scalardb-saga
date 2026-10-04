@@ -42,6 +42,8 @@ public final class AdminServiceImpl extends AdminServiceGrpc.AdminServiceImplBas
   private final long adminDriveDeadlineMillis;
 
   /**
+   * Creates the service over the daemon's orchestrator.
+   *
    * @param orchestrator the orchestrator whose admin control plane the RPCs drive
    * @param adminDriveDeadlineMillis the daemon's standing bound on a single-saga inline drive
    *     (positive); tightened per call by the remaining gRPC deadline

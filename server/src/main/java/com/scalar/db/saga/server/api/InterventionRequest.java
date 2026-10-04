@@ -8,6 +8,9 @@ import org.jspecify.annotations.Nullable;
  * {@code reset}): the operator's {@code reason}, recorded on the audit trail. The operator identity
  * itself is never in the body — it is taken from the authenticated request, so a caller cannot
  * forge who acted.
+ *
+ * @param reason why the operator intervened, recorded on the audit trail; required, checked by
+ *     {@link #requireReason()}
  */
 public record InterventionRequest(@Nullable String reason) {
 

@@ -26,6 +26,11 @@ public final class SagaRateLimitInterceptor implements ServerInterceptor {
 
   private final RateLimiter limiter;
 
+  /**
+   * Creates the interceptor over the daemon's limiter.
+   *
+   * @param limiter the per-principal limiter, shared with the REST handler
+   */
   public SagaRateLimitInterceptor(RateLimiter limiter) {
     this.limiter = limiter;
   }

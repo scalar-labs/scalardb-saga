@@ -33,6 +33,11 @@ public record ReloadConfig(
     List<String> allowedHostsCeiling,
     Clock clock) {
 
+  /**
+   * Rejects a negative interval and copies {@code allowedHostsCeiling} into an unmodifiable list.
+   *
+   * @throws IllegalArgumentException if {@code intervalSeconds} is negative
+   */
   public ReloadConfig {
     // No requireNonNull here: this record is internal to the unpublished server module, where
     // @NullMarked + NullAway carry the null contract (unlike core's RecoveryConfig/RetentionConfig,

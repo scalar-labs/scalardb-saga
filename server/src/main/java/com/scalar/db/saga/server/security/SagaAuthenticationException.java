@@ -20,13 +20,26 @@ public final class SagaAuthenticationException extends SagaRuntimeException {
 
   private static final long serialVersionUID = 1L;
 
+  /** The operator-facing reason, logged server-side and never sent on the wire. */
   private final String internalDetail;
 
+  /**
+   * Creates the exception a provider throws when it rejects a credential on its own evidence, such
+   * as a missing header or an expired token.
+   *
+   * @param internalDetail why the credential was rejected, for the server log only
+   */
   public SagaAuthenticationException(String internalDetail) {
     super(SagaErrorCode.UNAUTHENTICATED, ErrorMetadata.of());
     this.internalDetail = Objects.requireNonNull(internalDetail, "internalDetail must not be null");
   }
 
+  /**
+   * Creates the exception a provider throws when a verification library rejected the credential.
+   *
+   * @param internalDetail why the credential was rejected, for the server log only
+   * @param cause the library's rejection
+   */
   public SagaAuthenticationException(String internalDetail, Throwable cause) {
     super(
         SagaErrorCode.UNAUTHENTICATED,
@@ -35,7 +48,11 @@ public final class SagaAuthenticationException extends SagaRuntimeException {
     this.internalDetail = Objects.requireNonNull(internalDetail, "internalDetail must not be null");
   }
 
-  /** The server-side-only reason (never sent on the wire); used by the daemon's log statement. */
+  /**
+   * The server-side-only reason (never sent on the wire); used by the daemon's log statement.
+   *
+   * @return the operator-facing reason
+   */
   public String getInternalDetail() {
     return internalDetail;
   }

@@ -43,6 +43,13 @@ public final class RateLimiter {
   // hit, so a second scan within the same window would remove almost nothing.
   private final AtomicLong lastPrunedMillis = new AtomicLong(0L);
 
+  /**
+   * Creates a limiter allowing {@code limit} hits per key in each {@code windowMillis} window.
+   *
+   * @param limit the hits allowed per key per window
+   * @param windowMillis the window length in milliseconds
+   * @throws IllegalArgumentException if either is not positive
+   */
   public RateLimiter(int limit, long windowMillis) {
     this(limit, windowMillis, MAX_TRACKED_KEYS);
   }
@@ -89,6 +96,10 @@ public final class RateLimiter {
    * should back off before retrying. In {@code [1, windowMillis]} for a live tracked window; {@code
    * windowMillis} when the key is untracked or expired (a refusal races with pruning or eviction
    * only rarely, and one full window is the conservative answer).
+   *
+   * @param key the bucket key the refusal was for
+   * @param nowMillis the current time in epoch millis
+   * @return the wait in milliseconds, in {@code [1, windowMillis]}
    */
   public long retryAfterMillis(String key, long nowMillis) {
     Window window = windows.get(key);
