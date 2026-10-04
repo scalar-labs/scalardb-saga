@@ -16,6 +16,12 @@ import java.util.Objects;
  */
 public class SagaInvalidRequestException extends SagaRuntimeException {
 
+  /**
+   * The request message failed validation at the daemon edge. Carries {@link
+   * SagaErrorCode#INVALID_REQUEST} with {@code detail} in its metadata.
+   *
+   * @param detail which part of the request was rejected, and why
+   */
   public SagaInvalidRequestException(String detail) {
     super(
         SagaErrorCode.INVALID_REQUEST,
