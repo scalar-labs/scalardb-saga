@@ -16,7 +16,6 @@ import com.scalar.db.exception.transaction.CrudConflictException;
 import com.scalar.db.exception.transaction.TransactionException;
 import com.scalar.db.exception.transaction.UnknownTransactionStatusException;
 import com.scalar.db.io.Key;
-import com.scalar.db.io.TimestampTZColumn;
 import com.scalar.db.saga.api.SagaPage;
 import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
@@ -77,6 +76,12 @@ public final class ScalarDbSagaStore implements SagaStore {
           .mapToInt(SagaStatus::getStatusCode)
           .sorted()
           .toArray();
+
+  /** The earliest instant the epoch-millisecond {@code updated_at} key can hold. */
+  static final Instant MIN_KEY_INSTANT = Instant.ofEpochMilli(Long.MIN_VALUE);
+
+  /** The latest instant the epoch-millisecond {@code updated_at} key can hold. */
+  static final Instant MAX_KEY_INSTANT = Instant.ofEpochMilli(Long.MAX_VALUE);
 
   /** Format version prefix for the opaque list page token. */
   private static final String PAGE_TOKEN_VERSION = "1";
@@ -774,13 +779,11 @@ public final class ScalarDbSagaStore implements SagaStore {
   public SagaPage<SagaStateSnapshot> listStateSnapshots(SagaQuery query) {
     int numBuckets = schema.getNumBuckets();
     int pageSize = query.getPageSize();
-    @Nullable Instant updatedAfter =
-        requireInTimestampTzRange(query.getUpdatedAfter(), "updatedAfter");
-    @Nullable Instant updatedBefore =
-        requireInTimestampTzRange(query.getUpdatedBefore(), "updatedBefore");
-    // Open-ended upper bound: scan to the max instant TIMESTAMPTZ can store. That sentinel keeps
-    // the end key at the same clustering-key width as the start key.
-    Instant endTs = updatedBefore != null ? updatedBefore : TimestampTZColumn.MAX_VALUE;
+    @Nullable Instant updatedAfter = requireInKeyRange(query.getUpdatedAfter(), "updatedAfter");
+    @Nullable Instant updatedBefore = requireInKeyRange(query.getUpdatedBefore(), "updatedBefore");
+    // Open-ended upper bound: scan to the latest instant the key can hold, so every stored row is
+    // in range. That sentinel keeps the end key at the same clustering-key width as the start key.
+    Instant endTs = updatedBefore != null ? updatedBefore : MAX_KEY_INSTANT;
 
     // Which status slices to sweep, in a stable ascending order, and where a token resumes.
     SagaStatus statusFilter = query.getStatus();
@@ -892,27 +895,17 @@ public final class ScalarDbSagaStore implements SagaStore {
   }
 
   /**
-   * Rejects an {@code updated_at} bound outside the range this store's TIMESTAMPTZ column can hold,
-   * with a clear message, rather than letting it surface as a lower-level exception when the scan
-   * key is built. Sub-millisecond precision needs no handling here: the scan routes the bound
-   * through {@link TimestampTZColumn#of}, which truncates it to match the millisecond-granular
-   * stored values.
+   * Rejects an {@code updated_at} bound outside the range the epoch-millisecond key can hold, with
+   * a clear message, rather than letting it surface as an {@code ArithmeticException} from {@link
+   * Instant#toEpochMilli} when the scan key is built. Sub-millisecond precision needs no handling
+   * here: {@code toEpochMilli} drops it, the same way the stored values were written.
    *
    * @return {@code bound} unchanged (including {@code null}, which means no bound)
    */
-  private static @Nullable Instant requireInTimestampTzRange(
-      @Nullable Instant bound, String field) {
-    if (bound != null
-        && (bound.isBefore(TimestampTZColumn.MIN_VALUE)
-            || bound.isAfter(TimestampTZColumn.MAX_VALUE))) {
+  private static @Nullable Instant requireInKeyRange(@Nullable Instant bound, String field) {
+    if (bound != null && (bound.isBefore(MIN_KEY_INSTANT) || bound.isAfter(MAX_KEY_INSTANT))) {
       throw new SagaIllegalArgumentException(
-          field
-              + " must be in ["
-              + TimestampTZColumn.MIN_VALUE
-              + ", "
-              + TimestampTZColumn.MAX_VALUE
-              + "]: "
-              + bound);
+          field + " must be in [" + MIN_KEY_INSTANT + ", " + MAX_KEY_INSTANT + "]: " + bound);
     }
     return bound;
   }

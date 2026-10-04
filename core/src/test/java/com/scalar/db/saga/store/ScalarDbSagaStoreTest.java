@@ -29,7 +29,6 @@ import com.scalar.db.exception.transaction.CrudException;
 import com.scalar.db.exception.transaction.TransactionException;
 import com.scalar.db.exception.transaction.UnknownTransactionStatusException;
 import com.scalar.db.io.Key;
-import com.scalar.db.io.TimestampTZColumn;
 import com.scalar.db.saga.api.SagaPage;
 import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
@@ -3157,10 +3156,12 @@ class ScalarDbSagaStoreTest {
   // ---------------------------------------------------------------------------
 
   @Test
-  void listStateSnapshots_updatedAfterAboveTimestampTzMaxGiven_throwsException() {
+  void listStateSnapshots_updatedAfterAboveKeyMaxGiven_throwsException() {
     // Arrange
     SagaQuery query =
-        SagaQuery.newBuilder().updatedAfter(TimestampTZColumn.MAX_VALUE.plusMillis(1)).build();
+        SagaQuery.newBuilder()
+            .updatedAfter(ScalarDbSagaStore.MAX_KEY_INSTANT.plusMillis(1))
+            .build();
 
     // Act & Assert
     assertThatThrownBy(() -> store.listStateSnapshots(query))
@@ -3168,10 +3169,12 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
-  void listStateSnapshots_updatedBeforeBelowTimestampTzMinGiven_throwsException() {
+  void listStateSnapshots_updatedBeforeBelowKeyMinGiven_throwsException() {
     // Arrange
     SagaQuery query =
-        SagaQuery.newBuilder().updatedBefore(TimestampTZColumn.MIN_VALUE.minusMillis(1)).build();
+        SagaQuery.newBuilder()
+            .updatedBefore(ScalarDbSagaStore.MIN_KEY_INSTANT.minusMillis(1))
+            .build();
 
     // Act & Assert
     assertThatThrownBy(() -> store.listStateSnapshots(query))
@@ -3179,16 +3182,16 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
-  void listStateSnapshots_updatedBoundsAtTimestampTzExtremesGiven_accepted() throws Exception {
-    // Arrange — the inclusive endpoints of the TIMESTAMPTZ domain are valid and start a real scan
+  void listStateSnapshots_updatedBoundsAtKeyExtremesGiven_accepted() throws Exception {
+    // Arrange — the inclusive endpoints of the key domain are valid and start a real scan
     stubScanner();
 
     // Act
     SagaPage<SagaStateSnapshot> page =
         store.listStateSnapshots(
             SagaQuery.newBuilder()
-                .updatedAfter(TimestampTZColumn.MIN_VALUE)
-                .updatedBefore(TimestampTZColumn.MAX_VALUE)
+                .updatedAfter(ScalarDbSagaStore.MIN_KEY_INSTANT)
+                .updatedBefore(ScalarDbSagaStore.MAX_KEY_INSTANT)
                 .build());
 
     // Assert
