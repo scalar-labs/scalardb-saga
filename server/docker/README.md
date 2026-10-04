@@ -163,9 +163,8 @@ start under `noop` on a non-loopback interface.
   volumes:
     - { name: tmp, emptyDir: {} }
   ```
-- Serves **plaintext** on both ports unless a certificate pair is mounted or configured. Terminating
-  TLS at an ingress or a service mesh remains the recommended setup; where no such layer exists,
-  serve TLS natively (below).
+- Serves **plaintext** on both ports by default. Terminating TLS at an ingress or a service mesh
+  remains the recommended setup; where no such layer exists, enable native TLS (below).
 - The default `noop` security provider authenticates nothing, and the daemon refuses to start under it
   on a non-loopback interface unless `insecure_mode.enabled=true` is set. Configure the `jwt` or
   `apikey` provider instead of setting that flag. TLS does not relax this guard: encrypting the
@@ -175,11 +174,16 @@ start under `noop` on a non-loopback interface.
 
 Native TLS covers **both** transports from one certificate, all-or-nothing (the two listeners share
 `host`, so one certificate's SANs cover both). Mount the PEM certificate chain and its private key as
-`tls.crt` and `tls.key` under `/scalardb-saga/conf/tls/server/` and the daemon serves TLS with no key
-in `server.properties`: those are the file names a Kubernetes TLS Secret publishes, so the Secret
-mounts as-is. The mounted files must be readable by uid `201`, so set an explicit permissive
-`defaultMode` (a root-owned `0600` Secret is invisible to the daemon and fails boot with a
-permissions hint). The mount sits inside the configuration mount, which Kubernetes allows:
+`tls.crt` and `tls.key` under `/scalardb-saga/conf/tls/server/` and set one key:
+
+```properties
+scalar.db.saga.server.tls.enabled=true
+```
+
+Those are the file names a Kubernetes TLS Secret publishes, so the Secret mounts as-is. The mounted
+files must be readable by uid `201`, so set an explicit permissive `defaultMode` (a root-owned `0600`
+Secret is invisible to the daemon and fails boot with a permissions hint). The mount sits inside the
+configuration mount, which Kubernetes allows:
 
 ```yaml
 volumeMounts:
@@ -191,20 +195,15 @@ volumes:
       defaultMode: 0444
 ```
 
-Three keys, documented in the template and on `SagaServerConfig`, cover the rest: two paths, for
-material mounted somewhere else, and the switch.
+A chart that has a TLS value of its own can append that one line to the properties it renders, so
+TLS is still stated once. Two more keys, `tls.cert_chain_path` and `tls.private_key_path`, point at
+material mounted somewhere else; all three are documented in the template and on `SagaServerConfig`.
 
-```properties
-scalar.db.saga.server.tls.cert_chain_path=/etc/saga/tls/tls.crt
-scalar.db.saga.server.tls.private_key_path=/etc/saga/tls/tls.key
-```
-
-`tls.enabled` is unset by default, and then the material decides: TLS is on when a certificate or
-key is configured or mounted and off otherwise, so certificates can never sit mounted while the
-server silently serves plaintext (a half pair fails boot rather than falling back). `true` makes a
-missing pair a boot failure instead of a plaintext server; `false` leaves mounted material unused,
-which is how to turn TLS off without unmounting it. `--validate-config` prints which way the
-decision went.
+The switch is deliberately explicit. Material without it, configured or mounted, fails boot, so
+certificates can never sit mounted while the server silently serves plaintext. `tls.enabled=true`
+with the pair missing fails boot naming the missing half and the default path it looked at.
+`tls.enabled=false` leaves mounted material unused, which is how to turn TLS off without unmounting
+it. `--validate-config` reports the resulting TLS state and where the pair comes from.
 
 Both files are PEM; they are read and validated at startup, before either port binds, and every
 misconfiguration (missing file, unreadable file, malformed PEM, key/cert mismatch, wrong key format)

@@ -108,19 +108,18 @@ import org.jspecify.annotations.Nullable;
  * <h2>TLS ({@code tls.*})</h2>
  *
  * <p>Native TLS for <b>both</b> transports, all-or-nothing: one certificate covers the HTTP and
- * gRPC listeners, which share {@code host}. Plaintext unless certificate material is configured or
- * mounted — terminating TLS at a mesh, ingress, or load balancer remains the recommended
- * deployment; serve TLS here where no such layer exists.
+ * gRPC listeners, which share {@code host}. Off by default — terminating TLS at a mesh, ingress, or
+ * load balancer remains the recommended deployment; enable this where no such layer exists.
  *
  * <ul>
- *   <li>{@code tls.enabled} — unset by default, which lets the material decide: TLS is on when a
- *       certificate chain or private key is configured by the paths below or mounted at their
- *       default locations, and off otherwise, so a Secret mounted at the conventional path needs no
- *       key and mounted certificates can never sit unused while the server silently serves
- *       plaintext. {@code true} requires the material and fails startup without it; {@code false}
- *       ignores it, which is how an operator toggles TLS off without unmounting the material.
- *       Ignored values must still be well-formed: shape checks run regardless of the toggle, as for
- *       every key here, so the file stays valid for the day the toggle flips back
+ *   <li>{@code tls.enabled} — serve TLS on both enabled transports (off when unset). Requires the
+ *       pair below, configured by its keys or mounted at their default locations. Material without
+ *       this key, whether configured or mounted, is rejected, so certificates cannot sit unused
+ *       behind a forgotten switch while the server silently serves plaintext; {@code
+ *       tls.enabled=false} with material present is legal and ignores it, which is how an operator
+ *       toggles TLS off without unmounting the material. Ignored values must still be well-formed:
+ *       shape checks run regardless of the toggle, as for every key here, so the file stays valid
+ *       for the day the toggle flips back
  *   <li>{@code tls.cert_chain_path} — path to the PEM certificate chain, leaf first; defaults to
  *       {@value #DEFAULT_TLS_CERT_CHAIN_PATH} when that file exists
  *   <li>{@code tls.private_key_path} — path to the matching PEM private key: unencrypted PKCS#8
@@ -733,8 +732,9 @@ public final class SagaServerConfig {
   private final int grpcMaxInboundMetadataBytes;
   private final int grpcMaxInboundMessageBytes;
   private final boolean tlsEnabled;
-  // Whether tls.enabled appeared in the properties at all: unset means the material decided, which
-  // the pairing check's wording and the validation report both say.
+  // Whether tls.enabled appeared in the properties at all. Consumed by validateCombinations, which
+  // treats material-with-absent-switch as a forgotten 'true' but material-with-explicit-false as a
+  // deliberate toggle-off, and by the validation report.
   private final boolean tlsEnabledKeySet;
   private final @Nullable Path tlsCertChainPath;
   private final @Nullable Path tlsPrivateKeyPath;
@@ -817,15 +817,14 @@ public final class SagaServerConfig {
             GRPC_MAX_INBOUND_METADATA_BYTES_KEY,
             DEFAULT_GRPC_MAX_INBOUND_METADATA_BYTES,
             1);
-    // tls.enabled rejects blank: unset is a state of its own (the material decides), and blank
-    // must not pass for it. The paths follow the ordinary blank-is-unset rule, and an unset path
-    // falls back to the file at the image's conventional mount when one exists, so a Secret mounted
-    // there needs no key. With the switch unset, any material, configured or mounted, turns TLS on:
-    // certificates present while the server serves plaintext is the silent failure to rule out, so
-    // a half pair fails the pairing check in validateCombinations instead of quietly going without.
+    // tls.enabled rejects blank: unset leaves the protection off, and blank must not pass for it.
+    // The paths follow the usual blank-is-unset rule, and an unset path falls back to the file at
+    // the image's conventional mount when one exists, so a Secret mounted there needs only the
+    // switch. The pairing checks in validateCombinations see a blank path exactly as an absent one.
     String tlsEnabledValue =
         requireNonBlankIfSet(TLS_ENABLED_KEY, resolved.getProperty(TLS_ENABLED_KEY));
     this.tlsEnabledKeySet = tlsEnabledValue != null;
+    this.tlsEnabled = parseBoolean(tlsEnabledValue, TLS_ENABLED_KEY, false);
     Path tlsCertChainPath =
         parseOptionalPath(resolved.getProperty(TLS_CERT_CHAIN_PATH_KEY), TLS_CERT_CHAIN_PATH_KEY);
     Path tlsPrivateKeyPath =
@@ -841,10 +840,6 @@ public final class SagaServerConfig {
         tlsPrivateKeyPath != null
             ? tlsPrivateKeyPath
             : existingFile(tlsServerDir.resolve(TLS_PRIVATE_KEY_FILE));
-    this.tlsEnabled =
-        tlsEnabledValue != null
-            ? parseBoolean(tlsEnabledValue, TLS_ENABLED_KEY, false)
-            : this.tlsCertChainPath != null || this.tlsPrivateKeyPath != null;
     this.syncTimeoutMillis =
         parseBoundedLong(
             resolved.getProperty(SYNC_TIMEOUT_MILLIS_KEY),
@@ -981,25 +976,8 @@ public final class SagaServerConfig {
     // otherwise surface only as handshake failures after the ports are already serving. A missing
     // half is one whose key is unset and whose conventional file is absent, so the message names
     // both places it looked: the default paths are constants, safe to echo, where the configured
-    // values never are. With the switch unset, the present half is what turned TLS on, and the
-    // message says so rather than citing a key the operator never wrote.
+    // values never are.
     if (tlsEnabled && (tlsCertChainPath == null || tlsPrivateKeyPath == null)) {
-      String reason;
-      if (tlsEnabledKeySet) {
-        reason = "'" + TLS_ENABLED_KEY + "' is true but ";
-      } else if (tlsCertChainPath != null) {
-        reason =
-            tlsPresence(
-                    TLS_CERT_CHAIN_PATH_KEY, DEFAULT_TLS_CERT_CHAIN_PATH, tlsCertChainPathDefaulted)
-                + ", which turns TLS on, but ";
-      } else {
-        reason =
-            tlsPresence(
-                    TLS_PRIVATE_KEY_PATH_KEY,
-                    DEFAULT_TLS_PRIVATE_KEY_PATH,
-                    tlsPrivateKeyPathDefaulted)
-                + ", which turns TLS on, but ";
-      }
       String missing;
       if (tlsCertChainPath == null && tlsPrivateKeyPath == null) {
         missing =
@@ -1018,7 +996,9 @@ public final class SagaServerConfig {
         missing = tlsAbsence(TLS_PRIVATE_KEY_PATH_KEY, DEFAULT_TLS_PRIVATE_KEY_PATH);
       }
       throw new IllegalArgumentException(
-          reason
+          "'"
+              + TLS_ENABLED_KEY
+              + "' is true but "
               + missing
               + ". Serving TLS needs both the certificate chain and its private key: set both paths,"
               + " mount both files under "
@@ -1026,6 +1006,31 @@ public final class SagaServerConfig {
               + ", or set '"
               + TLS_ENABLED_KEY
               + "=false' to serve plaintext.");
+    }
+    // Material without the switch: an operator who mounts or configures certificates but forgets
+    // tls.enabled=true would silently serve plaintext. An explicit false stays legal: that is the
+    // deliberate "toggle TLS off, leave the material mounted" move. The message says how the
+    // material got here, by key or by the conventional file; a mounted file has no key to name.
+    if (!tlsEnabledKeySet && (tlsCertChainPath != null || tlsPrivateKeyPath != null)) {
+      String present =
+          tlsCertChainPath != null
+              ? tlsPresence(
+                  TLS_CERT_CHAIN_PATH_KEY, DEFAULT_TLS_CERT_CHAIN_PATH, tlsCertChainPathDefaulted)
+              : tlsPresence(
+                  TLS_PRIVATE_KEY_PATH_KEY,
+                  DEFAULT_TLS_PRIVATE_KEY_PATH,
+                  tlsPrivateKeyPathDefaulted);
+      throw new IllegalArgumentException(
+          present
+              + " but '"
+              + TLS_ENABLED_KEY
+              + "' is not set. Set '"
+              + TLS_ENABLED_KEY
+              + "=true' to serve TLS with this material, or '"
+              + TLS_ENABLED_KEY
+              + "=false' to keep it unused and serve plaintext. The explicit switch is required so"
+              + " a forgotten 'true' cannot leave the server silently serving plaintext with"
+              + " certificates mounted.");
     }
   }
 
@@ -1522,27 +1527,25 @@ public final class SagaServerConfig {
   }
 
   /**
-   * Whether the daemon serves TLS on both enabled transports: the {@code tls.enabled} key, or when
-   * that is unset, whether certificate material is configured or mounted at the default location.
-   * When {@code true}, {@link #tlsCertChainPath()} and {@link #tlsPrivateKeyPath()} are both
-   * present — the combination is validated at load.
+   * Whether the daemon serves TLS on both enabled transports (the {@code tls.enabled} key; off when
+   * unset). When {@code true}, {@link #tlsCertChainPath()} and {@link #tlsPrivateKeyPath()} are
+   * both present — the combination is validated at load.
    */
   public boolean tlsEnabled() {
     return tlsEnabled;
   }
 
   /**
-   * One line saying whether the daemon will serve TLS and what decided it, for the configuration
-   * validator's report: with {@code tls.enabled} unset the answer is inferred from the material,
-   * which an operator cannot read off the file. Names keys and the constant default paths only,
-   * never a configured value.
+   * One line for the configuration validator's report: whether the daemon will serve TLS and where
+   * the pair comes from, since a pair found at the conventional mount is not written in the file.
+   * Names keys and the constant default paths only, never a configured value.
    */
   String tlsSummary() {
     if (!tlsEnabled) {
       if (!tlsEnabledKeySet) {
         return "TLS off: '"
             + TLS_ENABLED_KEY
-            + "' is not set, and no certificate is configured or mounted under "
+            + "' is not set, and nothing is mounted under "
             + DEFAULT_TLS_SERVER_DIR
             + ".";
       }
@@ -1550,11 +1553,7 @@ public final class SagaServerConfig {
           ? "TLS off: '" + TLS_ENABLED_KEY + "=false' leaves the certificate material unused."
           : "TLS off: '" + TLS_ENABLED_KEY + "=false'.";
     }
-    return "TLS on"
-        + (tlsEnabledKeySet
-            ? ": '" + TLS_ENABLED_KEY + "=true'; "
-            : ", inferred from the material as '" + TLS_ENABLED_KEY + "' is not set: ")
-        + "certificate from "
+    return "TLS on: certificate from "
         + tlsSource(TLS_CERT_CHAIN_PATH_KEY, DEFAULT_TLS_CERT_CHAIN_PATH, tlsCertChainPathDefaulted)
         + ", key from "
         + tlsSource(

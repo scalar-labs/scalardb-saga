@@ -316,9 +316,9 @@ public class SagaServerCommand implements Callable<Integer> {
   /**
    * Prints the report and returns the exit code. Problems first, because that is what the reader
    * came for; the enumeration of what could not be checked comes last, where it qualifies the
-   * verdict above it. The TLS line ({@code null} when the settings never loaded) states the one
-   * decision the file does not spell out: with {@code tls.enabled} unset, whether the daemon will
-   * serve TLS is read off the mounted material.
+   * verdict above it. The TLS line ({@code null} when the settings never loaded) says whether the
+   * daemon will serve TLS and where the pair comes from, since a pair found at the conventional
+   * mount is not written in the file.
    */
   private static int report(
       PrintWriter out,

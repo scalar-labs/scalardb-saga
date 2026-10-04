@@ -322,11 +322,10 @@ jobs:
       # --- TLS boot ---------------------------------------------------------------------------
       # The plaintext boot above proves the packaged image serves; this second boot proves the same
       # image serves TLS on both transports when a certificate pair is mounted at the image's
-      # conventional path. The material is generated here, never committed (committed keys expire
-      # and trip secret scanners), and the configuration is the shared fixture unchanged: not one
-      # tls.* key, so the boot also proves that mounted material alone turns TLS on, which is what
-      # a Deployment that mounts the Secret and writes nothing else relies on. JDK SSL means nothing
-      # here is architecture-specific, so the arm64 job stays plaintext-only.
+      # conventional path and tls.enabled is set. The material is generated here, never committed
+      # (committed keys expire and trip secret scanners), and the configuration is the shared fixture
+      # plus that one line: no path key, so the boot also proves the pair's defaults. JDK SSL means
+      # nothing here is architecture-specific, so the arm64 job stays plaintext-only.
       - name: Prepare the TLS boot fixture
         run: |
           set -euo pipefail
@@ -339,6 +338,7 @@ jobs:
           # Readable by the container's uid 201; a throwaway CI key on a read-only mount, so a
           # permissive mode costs nothing.
           chmod 0644 smoke-tls/tls/server/tls.key smoke-tls/tls/server/tls.crt
+          echo "scalar.db.saga.server.tls.enabled=true" >> smoke-tls/server.properties
 
       - name: Start the TLS container
         run: |
