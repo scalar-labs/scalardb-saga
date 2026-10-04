@@ -509,7 +509,9 @@ public final class ScalarDbSagaStore implements SagaStore {
           tx.insert(buildStateInsert(bucket, updated, ownerId));
 
           for (Result parked : tx.scan(buildParkedIndexScan(sagaId))) {
-            tx.delete(buildParkedDelete(bucket, parked.getTimestampTZ("parked_deadline"), sagaId));
+            tx.delete(
+                buildParkedDelete(
+                    bucket, Instant.ofEpochMilli(parked.getBigInt("parked_deadline")), sagaId));
           }
           return updated;
         },
@@ -863,7 +865,7 @@ public final class ScalarDbSagaStore implements SagaStore {
                   buildStateRangeScan(bucket, statusCode, startTs, startInclusive, endTs))) {
             for (Optional<Result> next = scanner.one(); next.isPresent(); next = scanner.one()) {
               Result r = next.get();
-              Instant ts = r.getTimestampTZ("updated_at");
+              Instant ts = Instant.ofEpochMilli(r.getBigInt("updated_at"));
               if (rows.size() >= limit && !ts.equals(lastTs)) {
                 break; // limit met and a new cohort begins — leave it for the next page
               }
@@ -1190,7 +1192,7 @@ public final class ScalarDbSagaStore implements SagaStore {
                 buildStateDelete(
                     r.getInt("bucket"),
                     r.getInt("status"),
-                    r.getTimestampTZ("updated_at"),
+                    Instant.ofEpochMilli(r.getBigInt("updated_at")),
                     sagaId));
           }
 
@@ -1568,12 +1570,15 @@ public final class ScalarDbSagaStore implements SagaStore {
         .table(SagaSchema.STATE_TABLE)
         .partitionKey(Key.ofInt("bucket", bucket))
         .start(
-            Key.newBuilder().addInt("status", status).addTimestampTZ("updated_at", startTs).build(),
+            Key.newBuilder()
+                .addInt("status", status)
+                .addBigInt("updated_at", startTs.toEpochMilli())
+                .build(),
             startInclusive)
         .end(
             Key.newBuilder()
                 .addInt("status", status)
-                .addTimestampTZ("updated_at", endInclusive)
+                .addBigInt("updated_at", endInclusive.toEpochMilli())
                 .build(),
             true)
         .build();
@@ -1585,8 +1590,8 @@ public final class ScalarDbSagaStore implements SagaStore {
         .namespace(SagaSchema.NAMESPACE)
         .table(SagaSchema.PARKED_TABLE)
         .partitionKey(Key.ofInt("bucket", bucket))
-        .start(Key.newBuilder().addTimestampTZ("parked_deadline", Instant.EPOCH).build(), true)
-        .end(Key.newBuilder().addTimestampTZ("parked_deadline", threshold).build(), true)
+        .start(Key.newBuilder().addBigInt("parked_deadline", 0L).build(), true)
+        .end(Key.newBuilder().addBigInt("parked_deadline", threshold.toEpochMilli()).build(), true)
         .build();
   }
 
@@ -1620,7 +1625,7 @@ public final class ScalarDbSagaStore implements SagaStore {
 
   private static Key parkedClusteringKey(Instant parkedDeadline, String sagaId) {
     return Key.newBuilder()
-        .addTimestampTZ("parked_deadline", parkedDeadline)
+        .addBigInt("parked_deadline", parkedDeadline.toEpochMilli())
         .addText("saga_id", sagaId)
         .build();
   }
@@ -1796,7 +1801,7 @@ public final class ScalarDbSagaStore implements SagaStore {
         SagaStatus.fromStatusCode(r.getInt("status")),
         r.getText("definition_version"),
         r.getTimestampTZ("created_at"),
-        r.getTimestampTZ("updated_at"));
+        Instant.ofEpochMilli(r.getBigInt("updated_at")));
   }
 
   /**
@@ -1857,7 +1862,7 @@ public final class ScalarDbSagaStore implements SagaStore {
   private static Key stateClusteringKey(int status, Instant updatedAt, String sagaId) {
     return Key.newBuilder()
         .addInt("status", status)
-        .addTimestampTZ("updated_at", updatedAt)
+        .addBigInt("updated_at", updatedAt.toEpochMilli())
         .addText("saga_id", sagaId)
         .build();
   }

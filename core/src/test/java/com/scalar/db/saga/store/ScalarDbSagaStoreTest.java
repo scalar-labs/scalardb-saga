@@ -55,6 +55,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -1147,6 +1148,42 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
+  void park_subMillisecondStampsGiven_writesBothKeyColumnsAsEpochMillis() throws Exception {
+    // Arrange — sub-millisecond digits on both stamps, which the BIGINT keys drop
+    Instant now = Instant.parse("2026-08-26T12:00:00.123456789Z");
+    Instant deadline = Instant.parse("2026-08-26T12:10:00.987654321Z");
+    ScalarDbSagaStore clockedStore =
+        new ScalarDbSagaStore(
+            txManager,
+            objectMapper,
+            schema,
+            ScalarDbSagaStoreConfig.builder().build(),
+            () -> OWN_APPEND_ID,
+            () -> now);
+    SagaStateSnapshot current =
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
+    Result precheckRow = stateRowWithOwner();
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
+
+    // Act
+    clockedStore.park(current, 3, StepEvent.pending(1, "charge"), deadline);
+
+    // Assert
+    ArgumentCaptor<Insert> captor = ArgumentCaptor.forClass(Insert.class);
+    verify(tx, times(3)).insert(captor.capture());
+    Map<String, Key> keysByTable =
+        captor.getAllValues().stream()
+            .collect(
+                Collectors.toMap(
+                    insert -> insert.forTable().orElseThrow(),
+                    insert -> insert.getClusteringKey().orElseThrow()));
+    assertThat(Objects.requireNonNull(keysByTable.get(SagaSchema.STATE_TABLE)).getBigIntValue(1))
+        .isEqualTo(Instant.parse("2026-08-26T12:00:00.123Z").toEpochMilli());
+    assertThat(Objects.requireNonNull(keysByTable.get(SagaSchema.PARKED_TABLE)).getBigIntValue(0))
+        .isEqualTo(Instant.parse("2026-08-26T12:10:00.987Z").toEpochMilli());
+  }
+
+  @Test
   void park_rowNotFound_throwsSagaConcurrentModificationException() throws Exception {
     // Arrange
     Instant now = Instant.now();
@@ -1169,7 +1206,7 @@ class ScalarDbSagaStoreTest {
     Result precheckRow = stateRowWithOwner();
     when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
     Result parkedRow = mock(Result.class);
-    when(parkedRow.getTimestampTZ("parked_deadline")).thenReturn(now.plusSeconds(600));
+    when(parkedRow.getBigInt("parked_deadline")).thenReturn(now.plusSeconds(600).toEpochMilli());
     when(tx.scan(any(Scan.class))).thenReturn(List.of(parkedRow));
 
     // Act
@@ -1357,7 +1394,7 @@ class ScalarDbSagaStoreTest {
     Result precheckRow = stateRowWithOwner();
     when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
     Result parkedRow = mock(Result.class);
-    when(parkedRow.getTimestampTZ("parked_deadline")).thenReturn(now.plusSeconds(600));
+    when(parkedRow.getBigInt("parked_deadline")).thenReturn(now.plusSeconds(600).toEpochMilli());
     when(tx.scan(any(Scan.class))).thenReturn(List.of(parkedRow));
 
     // Act
@@ -1471,7 +1508,7 @@ class ScalarDbSagaStoreTest {
     Result precheckRow = stateRowWithOwner();
     when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
     Result parkedRow = mock(Result.class);
-    when(parkedRow.getTimestampTZ("parked_deadline")).thenReturn(now.plusSeconds(600));
+    when(parkedRow.getBigInt("parked_deadline")).thenReturn(now.plusSeconds(600).toEpochMilli());
     when(tx.scan(any(Scan.class))).thenReturn(List.of(parkedRow));
 
     // Act
@@ -3527,22 +3564,23 @@ class ScalarDbSagaStoreTest {
               int bucket = scan.getPartitionKey().getIntValue(0);
               Key start = scan.getStartClusteringKey().orElseThrow();
               int status = start.getIntValue(0);
-              Instant startTs = start.getTimestampTZValue(1);
+              Instant startTs = Instant.ofEpochMilli(start.getBigIntValue(1));
               boolean startInclusive = scan.getStartInclusive();
-              Instant endTs = scan.getEndClusteringKey().orElseThrow().getTimestampTZValue(1);
+              Instant endTs =
+                  Instant.ofEpochMilli(scan.getEndClusteringKey().orElseThrow().getBigIntValue(1));
 
               List<Result> slice = new ArrayList<>();
               for (Result r : master) {
                 if (r.getInt("bucket") != bucket || r.getInt("status") != status) {
                   continue;
                 }
-                Instant ts = r.getTimestampTZ("updated_at");
+                Instant ts = Instant.ofEpochMilli(r.getBigInt("updated_at"));
                 boolean afterStart = startInclusive ? !ts.isBefore(startTs) : ts.isAfter(startTs);
                 if (afterStart && !ts.isAfter(endTs)) {
                   slice.add(r);
                 }
               }
-              slice.sort(Comparator.comparing(r -> r.getTimestampTZ("updated_at")));
+              slice.sort(Comparator.comparingLong(r -> r.getBigInt("updated_at")));
               return scannerOver(slice);
             });
   }
@@ -3685,8 +3723,8 @@ class ScalarDbSagaStoreTest {
         .when(r.getTimestampTZ("created_at"))
         .thenReturn(Instant.parse("2026-01-01T00:00:00Z"));
     lenient()
-        .when(r.getTimestampTZ("updated_at"))
-        .thenReturn(Instant.parse("2026-01-01T00:00:00Z"));
+        .when(r.getBigInt("updated_at"))
+        .thenReturn(Instant.parse("2026-01-01T00:00:00Z").toEpochMilli());
     return r;
   }
 
@@ -3695,7 +3733,7 @@ class ScalarDbSagaStoreTest {
    */
   private Result mockStateResult(String sagaId, SagaStatus status, Instant updatedAt) {
     Result r = mockStateResult(sagaId, status);
-    lenient().when(r.getTimestampTZ("updated_at")).thenReturn(updatedAt);
+    lenient().when(r.getBigInt("updated_at")).thenReturn(updatedAt.toEpochMilli());
     return r;
   }
 
