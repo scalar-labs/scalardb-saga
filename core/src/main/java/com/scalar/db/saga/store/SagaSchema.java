@@ -20,10 +20,19 @@ import com.scalar.db.io.DataType;
  */
 public final class SagaSchema {
 
+  /** The ScalarDB namespace holding every saga table. */
   public static final String NAMESPACE = "saga";
+
+  /** The append-only event log, one partition per saga. */
   public static final String EVENTS_TABLE = "saga_events";
+
+  /** The mutable status and recovery table, one row per saga, bucket-partitioned. */
   public static final String STATE_TABLE = "saga_state";
+
+  /** The deadline index of parked ({@code WAITING}) sagas, bucket-partitioned. */
   public static final String PARKED_TABLE = "saga_parked";
+
+  /** The saga definition registry, keyed by name and version. */
   public static final String DEFINITIONS_TABLE = "saga_definitions";
 
   /** Default number of buckets for partitioning {@code saga_state}. */
@@ -31,6 +40,7 @@ public final class SagaSchema {
 
   private final int numBuckets;
 
+  /** Creates a schema with {@value #DEFAULT_NUM_BUCKETS} buckets. */
   public SagaSchema() {
     this(DEFAULT_NUM_BUCKETS);
   }
@@ -51,6 +61,11 @@ public final class SagaSchema {
     this.numBuckets = numBuckets;
   }
 
+  /**
+   * The number of bucket partitions of {@code saga_state} and {@code saga_parked}.
+   *
+   * @return the bucket count, always positive
+   */
   public int getNumBuckets() {
     return numBuckets;
   }
@@ -72,6 +87,8 @@ public final class SagaSchema {
    *
    * <p>Every state change is a single INSERT. No UPDATEs, no DELETEs. ScalarDB's clustering key
    * ensures efficient ordered scan by saga ID.
+   *
+   * @return the metadata of {@code saga_events}
    */
   public static TableMetadata sagaEventsTable() {
     return TableMetadata.newBuilder()
@@ -102,6 +119,8 @@ public final class SagaSchema {
    * a separate partition, avoiding hot-partition problems that would occur if status alone were the
    * partition key. Clustering key design enables efficient recovery scans: scan each bucket with
    * {@code status=RUNNING} and {@code updated_at <= threshold}, reading only stale active sagas.
+   *
+   * @return the metadata of {@code saga_state}
    */
   public static TableMetadata sagaStateTable() {
     return TableMetadata.newBuilder()
@@ -134,6 +153,8 @@ public final class SagaSchema {
    * the expired ones. A step with no timeout (wait indefinitely) has no row here. Kept out of
    * {@code saga_state} so parking — a minority feature — never touches the recovery/retention
    * clustering key.
+   *
+   * @return the metadata of {@code saga_parked}
    */
   public static TableMetadata sagaParkedTable() {
     return TableMetadata.newBuilder()
@@ -151,6 +172,8 @@ public final class SagaSchema {
    * Saga definition registry.
    *
    * <p>Partition key: {@code saga_name}. Clustering key: {@code definition_version}.
+   *
+   * @return the metadata of {@code saga_definitions}
    */
   public static TableMetadata sagaDefinitionsTable() {
     return TableMetadata.newBuilder()

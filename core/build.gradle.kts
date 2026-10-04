@@ -32,3 +32,10 @@ dependencies {
     "integrationTestImplementation"(libs.sqlite.jdbc)
     "integrationTestCompileOnly"(libs.jspecify)
 }
+
+// Javadoc is documented to zero doclint warnings and stays there: any javadoc warning fails the
+// build. Module-local until the server reaches zero too, when the gate moves into the shared
+// conventions.
+tasks.withType<Javadoc>().configureEach {
+    (options as StandardJavadocDocletOptions).addBooleanOption("Werror", true)
+}

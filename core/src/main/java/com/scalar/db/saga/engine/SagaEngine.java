@@ -184,6 +184,9 @@ public class SagaEngine implements AutoCloseable {
   /**
    * Resumes a saga from a specific step (used by recovery).
    *
+   * @param def the saga's definition, at the version the saga was created with
+   * @param context the execution context rebuilt by {@link #replayEvents}
+   * @param fromStepIndex the index of the first step to execute
    * @return the final state snapshot
    */
   public SagaStateSnapshot resumeFrom(
@@ -203,6 +206,10 @@ public class SagaEngine implements AutoCloseable {
 
   /**
    * Triggers compensation from a specific step (used by recovery for sagas stuck in COMPENSATING).
+   *
+   * @param def the saga's definition, at the version the saga was created with
+   * @param context the execution context rebuilt by {@link #replayEvents}
+   * @param fromStepIndex the index of the first step to compensate, counting backwards from it
    */
   public void compensateFrom(SagaDefinition def, ExecutionContext context, int fromStepIndex) {
     String sagaId = context.getSagaId();
@@ -241,7 +248,14 @@ public class SagaEngine implements AutoCloseable {
     }
   }
 
-  /** Replays events to reconstruct an ExecutionContext for crash recovery. */
+  /**
+   * Replays events to reconstruct an ExecutionContext for crash recovery.
+   *
+   * @param saga the saga's current state snapshot
+   * @param events the saga's events in sequence order
+   * @return a context holding the saga input, every completed step's output, the failed and
+   *     compensated step indices, and the next event sequence
+   */
   public ExecutionContext replayEvents(SagaStateSnapshot saga, List<SagaEvent> events) {
     ExecutionContext context = new ExecutionContext(saga.getSagaId(), Map.of(), saga);
 

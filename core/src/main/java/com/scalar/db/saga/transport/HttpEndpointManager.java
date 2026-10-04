@@ -69,7 +69,12 @@ public final class HttpEndpointManager
     this.callbackUrlProvider = callbackUrlProvider;
   }
 
-  /** Creates a manager with no async-callback provisioning (see the two-argument overload). */
+  /**
+   * Creates a manager with no async-callback provisioning (see the two-argument overload).
+   *
+   * @param endpointConfigs the endpoints to register, service name to configuration
+   * @return a manager serving those endpoints
+   */
   public static HttpEndpointManager create(Map<String, HttpServiceConfig> endpointConfigs) {
     return create(endpointConfigs, null);
   }
@@ -78,6 +83,11 @@ public final class HttpEndpointManager
    * Creates a manager with one {@link HttpEndpoint} per {@code name → config} entry, wiring {@code
    * callbackUrlProvider} (engine-global; {@code null} when async completion is not configured) into
    * each endpoint's declarative transport.
+   *
+   * @param endpointConfigs the endpoints to register, service name to configuration
+   * @param callbackUrlProvider the engine-wide callback URL provider, or {@code null} when async
+   *     completion is not configured
+   * @return a manager serving those endpoints
    */
   public static HttpEndpointManager create(
       Map<String, HttpServiceConfig> endpointConfigs,
@@ -107,7 +117,12 @@ public final class HttpEndpointManager
     return endpoint.transportAdapter();
   }
 
-  /** Whether an endpoint is currently registered under {@code name}. */
+  /**
+   * Whether an endpoint is currently registered under {@code name}.
+   *
+   * @param name the service name
+   * @return {@code true} if an endpoint is registered under it
+   */
   public boolean contains(String name) {
     return endpoints.get(name) != null;
   }
@@ -121,6 +136,9 @@ public final class HttpEndpointManager
    * The {@link SagaHttpClient} for the endpoint currently registered under {@code name}, or {@code
    * null} if none is. The returned client is pinned to that endpoint — a later swap does not rebind
    * it (see {@link HttpEndpointRegistrar}'s embedded-mode contract).
+   *
+   * @param name the service name
+   * @return the client pinned to that endpoint, or {@code null} if none is registered
    */
   public @Nullable SagaHttpClient sagaHttpClient(String name) {
     HttpEndpoint endpoint = endpoints.get(name);
@@ -133,6 +151,8 @@ public final class HttpEndpointManager
    * lookup): reading names and clients separately could straddle a concurrent swap and miss an
    * endpoint that was registered at every instant. Each client is pinned to its endpoint like
    * {@link #sagaHttpClient(String)}.
+   *
+   * @return service name to client, unmodifiable, taken from one snapshot of the current set
    */
   public Map<String, SagaHttpClient> sagaHttpClients() {
     Map<String, HttpEndpoint> snapshot = endpoints;
@@ -146,6 +166,11 @@ public final class HttpEndpointManager
   /**
    * Wraps a declaratively-defined service step's phases as a {@link Step} (SAGA) named {@code
    * stepName}, resolving {@code service} to its endpoint once per phase call.
+   *
+   * @param stepName the step's name within its definition
+   * @param service the service name, resolved on every phase call
+   * @param phases the call to make in each phase
+   * @return the step the engine runs
    */
   public Step toStep(String stepName, String service, Map<Phase, CallSpec> phases) {
     requireCallbackProviderForAsync(stepName, phases);
@@ -155,6 +180,11 @@ public final class HttpEndpointManager
   /**
    * Wraps a declaratively-defined service step's phases as a {@link TccStep} (TCC) named {@code
    * stepName}, resolving {@code service} to its endpoint once per phase call.
+   *
+   * @param stepName the step's name within its definition
+   * @param service the service name, resolved on every phase call
+   * @param phases the call to make in each phase
+   * @return the TCC step the engine runs
    */
   public TccStep toTccStep(String stepName, String service, Map<Phase, CallSpec> phases) {
     requireCallbackProviderForAsync(stepName, phases);

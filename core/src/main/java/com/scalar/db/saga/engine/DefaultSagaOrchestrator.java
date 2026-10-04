@@ -210,7 +210,11 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     this.settlementListener = settlementListener;
   }
 
-  /** Creates a new builder for constructing a {@link DefaultSagaOrchestrator}. */
+  /**
+   * Creates a new builder for constructing a {@link DefaultSagaOrchestrator}.
+   *
+   * @return a builder with every setting at its default
+   */
   public static Builder newBuilder() {
     return new Builder();
   }
@@ -219,6 +223,14 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   // Registration
   // ---------------------------------------------------------------------------
 
+  /**
+   * Registers a saga definition, making it startable by name. Every step is resolved first, so a
+   * definition whose steps cannot be resolved is rejected with a {@link
+   * com.scalar.db.saga.exception.SagaDefinitionException} before anything is stored. The definition
+   * is then persisted, where other replicas and recovery can read it, and cached in memory.
+   *
+   * @param definition the definition to register
+   */
   public void register(SagaDefinition definition) {
     Objects.requireNonNull(definition, "definition must not be null");
     // Eagerly resolve all steps — fail fast on missing resources or unresolvable constructors.
@@ -254,6 +266,10 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * such a caller cannot tell that its files and the fleet disagree. It gets the whole definition
    * rather than the version alone because, on finding them disagreeing, what serves is the only
    * thing left worth validating.
+   *
+   * @param sagaName the saga name
+   * @return the definition a name-only start would run, or {@code null} when nothing is registered
+   *     under that name
    */
   public @Nullable SagaDefinition latestDefinition(String sagaName) {
     Objects.requireNonNull(sagaName, "sagaName must not be null");
@@ -267,6 +283,10 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * version that is not serving: a NEW version, which is an ordinary upgrade about to become the
    * latest, and an OLDER one that is already stored, which is a rollback that will register nothing
    * and leave the newer version running.
+   *
+   * @param sagaName the saga name
+   * @param version the definition version
+   * @return whether that version of the definition is registered
    */
   public boolean isDefinitionRegistered(String sagaName, String version) {
     Objects.requireNonNull(sagaName, "sagaName must not be null");
@@ -274,6 +294,13 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     return definitionRegistry.resolve(sagaName, version) != null;
   }
 
+  /**
+   * Registers the saga definition read from a file, as {@link #register(SagaDefinition)} does for a
+   * parsed one.
+   *
+   * @param definitionFile the path of a JSON ({@code .json}) or YAML ({@code .yaml}, {@code .yml})
+   *     definition file
+   */
   public void register(Path definitionFile) {
     Objects.requireNonNull(definitionFile, "definitionFile must not be null");
     register(SagaDefinitionParser.parseFile(definitionFile));
@@ -288,6 +315,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * <p>The returned registrar shares this orchestrator's lifecycle: a swap applied after {@link
    * #close()} throws {@link IllegalStateException}, so a hot-reload caller racing shutdown must be
    * prepared for it.
+   *
+   * @return the registrar for this orchestrator's HTTP endpoint set
    */
   public HttpEndpointRegistrar httpEndpointRegistrar() {
     return engine.httpEndpointRegistrar();
@@ -709,6 +738,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * attributed to a fixed embedded principal, and single-saga drives run to completion on the
    * calling thread. A server that authenticates its callers and must not block a request thread
    * indefinitely passes its own operator context and drive deadline to that method instead.
+   *
+   * @return the admin service for embedded use
    */
   public SagaAdminService adminService() {
     return adminService(() -> EMBEDDED_OPERATOR, 0L);
@@ -954,6 +985,14 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   // Background Tasks
   // ---------------------------------------------------------------------------
 
+  /**
+   * Starts the periodic recovery and retention passes on this process, scheduled per the {@link
+   * RecoveryConfig} and {@link RetentionConfig} the builder was given. Without this call the
+   * orchestrator runs sagas but neither recovers abandoned ones on its own nor purges finished
+   * ones; {@link #recover()} still runs a single recovery pass on demand.
+   *
+   * @throws IllegalStateException if the orchestrator is closed
+   */
   public void startBackgroundTasks() {
     ensureOpen();
     recoveryManager.start();
@@ -1288,6 +1327,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     /**
      * Registers a named resource for constructor injection during step resolution.
      *
+     * @param <T> the resource's static type
      * @param type the resource type
      * @param instance the resource instance
      * @param name the qualifier name (must match {@code @Named} on constructor parameters)
@@ -1304,6 +1344,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     /**
      * Registers an unnamed resource for constructor injection during step resolution.
      *
+     * @param <T> the resource's static type
      * @param type the resource type
      * @param instance the resource instance
      * @return this builder

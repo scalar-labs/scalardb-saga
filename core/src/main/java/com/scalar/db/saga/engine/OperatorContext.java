@@ -12,6 +12,10 @@ package com.scalar.db.saga.engine;
 @FunctionalInterface
 public interface OperatorContext {
 
-  /** Returns the current operator's identity (non-blank). */
+  /**
+   * Returns the current operator's identity (non-blank).
+   *
+   * @return the identity stamped on the audit record, never blank
+   */
   String currentOperator();
 }

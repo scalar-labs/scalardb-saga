@@ -16,6 +16,8 @@ public interface TransportResolver {
   /**
    * Returns the adapter currently registered under {@code service}.
    *
+   * @param service the logical service name the step was defined with
+   * @return the adapter registered under that name at the time of the call
    * @throws TransportException if no endpoint is currently registered under {@code service} —
    *     retryable and known-not-committed: the miss is proven pre-send, and when it comes from a
    *     replica whose configuration lags a removal or rename, a later resolution succeeds once the

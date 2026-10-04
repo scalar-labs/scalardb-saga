@@ -35,6 +35,13 @@ public final class FakeStep implements Step {
   /** Action that may throw {@link StepExecutionException}. */
   @FunctionalInterface
   public interface ExecuteAction {
+    /**
+     * Runs in place of {@link Step#execute}.
+     *
+     * @param context the saga context the engine passes to the step
+     * @return the step's result
+     * @throws StepExecutionException to make the step fail
+     */
     StepResult execute(SagaContext context) throws StepExecutionException;
   }
 
@@ -50,6 +57,12 @@ public final class FakeStep implements Step {
     this.compensationFailure = builder.compensationFailure;
   }
 
+  /**
+   * Starts building a fake step with the given name.
+   *
+   * @param name the step name, unique within its saga definition
+   * @return a builder whose step succeeds with {@link StepResult#empty()} until configured
+   */
   public static Builder newBuilder(String name) {
     return new Builder(Objects.requireNonNull(name, "name must not be null"));
   }
@@ -73,20 +86,38 @@ public final class FakeStep implements Step {
     }
   }
 
-  /** Returns the saga IDs that invoked {@link #execute}, in order. */
+  /**
+   * Returns the saga IDs that invoked {@link #execute}, in order.
+   *
+   * @return the saga IDs, oldest first; empty if the step never executed
+   */
   public List<String> getExecutions() {
     return List.copyOf(executions);
   }
 
-  /** Returns the saga IDs that invoked {@link #compensate}, in order. */
+  /**
+   * Returns the saga IDs that invoked {@link #compensate}, in order.
+   *
+   * @return the saga IDs, oldest first; empty if the step was never compensated
+   */
   public List<String> getCompensations() {
     return List.copyOf(compensations);
   }
 
+  /**
+   * How many times {@link #execute} has been invoked.
+   *
+   * @return the execution count
+   */
   public int getExecutionCount() {
     return executions.size();
   }
 
+  /**
+   * How many times {@link #compensate} has been invoked.
+   *
+   * @return the compensation count
+   */
   public int getCompensationCount() {
     return compensations.size();
   }
@@ -102,7 +133,12 @@ public final class FakeStep implements Step {
       this.name = name;
     }
 
-    /** Sets the result returned by {@link Step#execute}. Default: {@link StepResult#empty()}. */
+    /**
+     * Sets the result returned by {@link Step#execute}. Default: {@link StepResult#empty()}.
+     *
+     * @param result the result every execution returns
+     * @return this builder
+     */
     public Builder executeReturns(StepResult result) {
       Objects.requireNonNull(result, "result must not be null");
       this.executeAction = ctx -> result;
@@ -112,13 +148,21 @@ public final class FakeStep implements Step {
     /**
      * Sets a dynamic execute action that receives the {@link SagaContext} and returns a result. The
      * action may throw {@link StepExecutionException} to simulate failure.
+     *
+     * @param action the action run on every execution
+     * @return this builder
      */
     public Builder executeAction(ExecuteAction action) {
       this.executeAction = Objects.requireNonNull(action, "action must not be null");
       return this;
     }
 
-    /** Makes {@link Step#execute} throw the given exception. */
+    /**
+     * Makes {@link Step#execute} throw the given exception.
+     *
+     * @param failure the exception every execution throws
+     * @return this builder
+     */
     public Builder executeFails(StepExecutionException failure) {
       Objects.requireNonNull(failure, "failure must not be null");
       this.executeAction =
@@ -128,12 +172,22 @@ public final class FakeStep implements Step {
       return this;
     }
 
-    /** Makes {@link Step#compensate} throw the given exception. */
+    /**
+     * Makes {@link Step#compensate} throw the given exception.
+     *
+     * @param failure the exception every compensation throws
+     * @return this builder
+     */
     public Builder compensateFails(StepCompensationException failure) {
       this.compensationFailure = Objects.requireNonNull(failure, "failure must not be null");
       return this;
     }
 
+    /**
+     * Builds the step.
+     *
+     * @return the configured fake step
+     */
     public FakeStep build() {
       return new FakeStep(this);
     }
