@@ -100,7 +100,7 @@ public final class SagaSchema {
    *
    * <p>{@code updated_at} holds epoch milliseconds in a {@code BIGINT}, not a {@code TIMESTAMPTZ}:
    * Oracle rejects a time-zone timestamp in a primary key, and the integer sorts the same way on
-   * every backend. {@code saga_parked.parked_deadline} is stored the same way for the same reason.
+   * every backend.
    *
    * <p>Bucket-based partitioning distributes recovery scans across database nodes — each bucket is
    * a separate partition, avoiding hot-partition problems that would occur if status alone were the
@@ -138,6 +138,10 @@ public final class SagaSchema {
    * the expired ones. A step with no timeout (wait indefinitely) has no row here. Kept out of
    * {@code saga_state} so parking — a minority feature — never touches the recovery/retention
    * clustering key.
+   *
+   * <p>{@code parked_deadline} holds epoch milliseconds in a {@code BIGINT}, like {@code
+   * saga_state.updated_at} and for the same reason: Oracle rejects a time-zone timestamp in a
+   * primary key.
    */
   public static TableMetadata sagaParkedTable() {
     return TableMetadata.newBuilder()

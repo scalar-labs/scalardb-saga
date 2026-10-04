@@ -3199,6 +3199,38 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
+  void listStateSnapshots_withoutUpdatedBefore_endsEveryScanWithinPortableBigIntRange()
+      throws Exception {
+    // Arrange — Cosmos DB rejects a BIGINT key beyond +/-2^53, a scan's end key included
+    stubScanner();
+
+    // Act
+    store.listStateSnapshots(SagaQuery.newBuilder().build());
+
+    // Assert
+    ArgumentCaptor<Scan> captor = ArgumentCaptor.forClass(Scan.class);
+    verify(tx, atLeastOnce()).getScanner(captor.capture());
+    assertThat(captor.getAllValues())
+        .allSatisfy(
+            scan ->
+                assertThat(scan.getEndClusteringKey().orElseThrow().getBigIntValue(1))
+                    .isBetween(-(1L << 53), 1L << 53));
+  }
+
+  @Test
+  void listStateSnapshots_tokenUpdatedAtBeyondKeyRangeGiven_throwsSagaIllegalArgumentException() {
+    // Arrange — a tampered cursor timestamp would become the next scan's start key
+    String token =
+        encodePageToken(
+            "1", "*|-|-", 0, 0, ScalarDbSagaStore.MAX_KEY_INSTANT.plusMillis(1).toString());
+
+    // Act & Assert
+    assertThatThrownBy(
+            () -> store.listStateSnapshots(SagaQuery.newBuilder().pageToken(token).build()))
+        .isInstanceOf(SagaIllegalArgumentException.class);
+  }
+
+  @Test
   void listStateSnapshots_emptyStore_returnsEmptyPageWithNullToken() throws Exception {
     // Arrange
     stubScanner();

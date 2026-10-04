@@ -77,11 +77,17 @@ public final class ScalarDbSagaStore implements SagaStore {
           .sorted()
           .toArray();
 
-  /** The earliest instant the epoch-millisecond {@code updated_at} key can hold. */
-  static final Instant MIN_KEY_INSTANT = Instant.ofEpochMilli(Long.MIN_VALUE);
+  /**
+   * The earliest instant the epoch-millisecond {@code updated_at} key can hold: -2^53 ms, the low
+   * end of the BIGINT range ScalarDB accepts on every backend. Cosmos DB rejects a key value beyond
+   * it, a scan bound included, so the listing's bounds and open-ended sentinel stay inside it.
+   */
+  static final Instant MIN_KEY_INSTANT = Instant.ofEpochMilli(-(1L << 53));
 
-  /** The latest instant the epoch-millisecond {@code updated_at} key can hold. */
-  static final Instant MAX_KEY_INSTANT = Instant.ofEpochMilli(Long.MAX_VALUE);
+  /**
+   * The latest instant the {@code updated_at} key can hold: 2^53 ms, the high end of that range.
+   */
+  static final Instant MAX_KEY_INSTANT = Instant.ofEpochMilli(1L << 53);
 
   /** Format version prefix for the opaque list page token. */
   private static final String PAGE_TOKEN_VERSION = "1";
@@ -336,6 +342,10 @@ public final class ScalarDbSagaStore implements SagaStore {
           new IllegalStateException("saga_definitions row has no registered_at"));
     }
     return registeredAt;
+  }
+
+  private static Instant updatedAt(Result row) {
+    return Instant.ofEpochMilli(row.getBigInt("updated_at"));
   }
 
   // ---------------------------------------------------------------------------
@@ -868,7 +878,7 @@ public final class ScalarDbSagaStore implements SagaStore {
                   buildStateRangeScan(bucket, statusCode, startTs, startInclusive, endTs))) {
             for (Optional<Result> next = scanner.one(); next.isPresent(); next = scanner.one()) {
               Result r = next.get();
-              Instant ts = Instant.ofEpochMilli(r.getBigInt("updated_at"));
+              Instant ts = updatedAt(r);
               if (rows.size() >= limit && !ts.equals(lastTs)) {
                 break; // limit met and a new cohort begins — leave it for the next page
               }
@@ -895,10 +905,10 @@ public final class ScalarDbSagaStore implements SagaStore {
   }
 
   /**
-   * Rejects an {@code updated_at} bound outside the range the epoch-millisecond key can hold, with
-   * a clear message, rather than letting it surface as an {@code ArithmeticException} from {@link
-   * Instant#toEpochMilli} when the scan key is built. Sub-millisecond precision needs no handling
-   * here: {@code toEpochMilli} drops it, the same way the stored values were written.
+   * Rejects an {@code updated_at} bound outside the range the key can hold ({@link
+   * #MIN_KEY_INSTANT} to {@link #MAX_KEY_INSTANT}), with a clear message, rather than letting it
+   * surface as a lower-level exception when the scan key is built. Sub-millisecond precision needs
+   * no handling here: {@code toEpochMilli} drops it, the same way the stored values were written.
    *
    * @return {@code bound} unchanged (including {@code null}, which means no bound)
    */
@@ -1182,11 +1192,7 @@ public final class ScalarDbSagaStore implements SagaStore {
                   "Cannot delete saga in non-terminal status: " + status);
             }
             tx.delete(
-                buildStateDelete(
-                    r.getInt("bucket"),
-                    r.getInt("status"),
-                    Instant.ofEpochMilli(r.getBigInt("updated_at")),
-                    sagaId));
+                buildStateDelete(r.getInt("bucket"), r.getInt("status"), updatedAt(r), sagaId));
           }
 
           List<Result> eventResults =
@@ -1794,7 +1800,7 @@ public final class ScalarDbSagaStore implements SagaStore {
         SagaStatus.fromStatusCode(r.getInt("status")),
         r.getText("definition_version"),
         r.getTimestampTZ("created_at"),
-        Instant.ofEpochMilli(r.getBigInt("updated_at")));
+        updatedAt(r));
   }
 
   /**
@@ -2006,6 +2012,8 @@ public final class ScalarDbSagaStore implements SagaStore {
       if (indexOfStatus(allowedStatusCodes, statusCode) < 0) {
         throw new SagaIllegalArgumentException("Page token does not match the query");
       }
+      // Held to the same range as the query bounds, since it becomes the next scan's start key.
+      requireInKeyRange(updatedAt, "Page token updatedAt");
       return new PageCursor(bucket, statusCode, updatedAt);
     }
   }
