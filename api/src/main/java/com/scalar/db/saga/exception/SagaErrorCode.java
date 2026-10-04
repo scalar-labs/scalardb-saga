@@ -432,14 +432,18 @@ public enum SagaErrorCode {
       "The step threw a non-retryable failure; a business-rule rejection, or a 4xx from a declarative service step.",
       "Inspect the step's failure detail; the saga compensates and settles."),
 
-  /** A step's compensation action threw; the saga may be parked pending manual intervention. */
+  /**
+   * A step's compensation action threw. The saga stays {@code COMPENSATING} and recovery retries
+   * the compensation; one stuck past the compensation grace period is escalated for manual
+   * intervention.
+   */
   COMPENSATION_FAILED(
       "DB-SAGA-30005",
       Category.NON_RETRYABLE_SERVER_ERROR,
       "Compensation of step failed",
       ErrorMetadataSchema.of("step_name", "step_index"),
       "The step's compensation action threw an exception.",
-      "Investigate the compensation implementation; the saga may be parked pending manual intervention."),
+      "Investigate the compensation implementation; recovery retries the compensation and escalates the saga if it stays stuck past the grace period."),
 
   /**
    * The engine hit an unexpected internal error; the catch-all for a server fault no other code
