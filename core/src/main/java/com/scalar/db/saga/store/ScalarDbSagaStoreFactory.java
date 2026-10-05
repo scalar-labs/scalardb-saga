@@ -2,6 +2,7 @@ package com.scalar.db.saga.store;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.scalar.db.api.DistributedTransactionAdmin;
+import com.scalar.db.config.DatabaseConfig;
 import com.scalar.db.saga.definition.RetryPolicy;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.service.TransactionFactory;
@@ -47,6 +48,7 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
   private static final Logger logger = LoggerFactory.getLogger(ScalarDbSagaStoreFactory.class);
 
   private static final String PROP_PREFIX = "scalar.db.saga.store.";
+  private static final String CONSENSUS_COMMIT = "consensus-commit";
 
   /**
    * Boot-time schema creation: ten attempts, pausing from about half a second and doubling to a
@@ -87,6 +89,7 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
   public static ScalarDbSagaStoreFactory create(Properties properties) {
     Objects.requireNonNull(properties, "properties must not be null");
 
+    validateTransactionManager(properties);
     ScalarDbSagaStoreConfig config = parseConfig(properties);
 
     TransactionFactory transactionFactory = TransactionFactory.create(properties);
@@ -157,6 +160,35 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
         Thread.currentThread().interrupt();
         throw SagaPersistenceException.operationAborted(e);
       }
+    }
+  }
+
+  /**
+   * Fails unless ScalarDB will run Consensus Commit, before anything connects. The store's
+   * correctness is argued against Consensus Commit, not merely tested on it: a status transition
+   * deletes the old state row and inserts the new one, and the claim that a saga has at most one
+   * visible state row holds only because the two commit atomically under its snapshot isolation.
+   * Another manager can boot and run cleanly until that assumption breaks.
+   *
+   * <p>The value is read through ScalarDB's own {@link DatabaseConfig}, so an unset key and a
+   * placeholder resolve exactly as they will for the transaction manager. ScalarDB Cluster's
+   * client-side {@code cluster} manager is rejected too, because nothing has validated the store on
+   * it. The public {@link ScalarDbSagaStore} constructor that takes a ready transaction manager
+   * bypasses this check.
+   */
+  static void validateTransactionManager(Properties properties) {
+    String manager = new DatabaseConfig(properties).getTransactionManager();
+    if (!CONSENSUS_COMMIT.equals(manager)) {
+      throw new IllegalArgumentException(
+          "The saga store requires "
+              + DatabaseConfig.TRANSACTION_MANAGER
+              + "="
+              + CONSENSUS_COMMIT
+              + ", but it is '"
+              + manager
+              + "'. Remove the key or set it to "
+              + CONSENSUS_COMMIT
+              + ".");
     }
   }
 

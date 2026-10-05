@@ -1,6 +1,7 @@
 package com.scalar.db.saga.store;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -38,6 +39,54 @@ class ScalarDbSagaStoreFactoryTest {
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("recovery_scan_limit")
         .hasMessageContaining("has been removed");
+  }
+
+  /**
+   * Checked before anything connects. The message is asserted because an unconfigured {@code
+   * TransactionFactory} throws the same exception type later in {@code create}.
+   */
+  @Test
+  void create_jdbcTransactionManagerGiven_throwsIllegalArgumentException() {
+    // Arrange
+    Properties props = new Properties();
+    props.setProperty("scalar.db.transaction_manager", "jdbc");
+
+    // Act & Assert
+    assertThatThrownBy(() -> ScalarDbSagaStoreFactory.create(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("scalar.db.transaction_manager");
+  }
+
+  @Test
+  void validateTransactionManager_keyUnset_passes() {
+    // Arrange — ScalarDB defaults to Consensus Commit
+    Properties props = new Properties();
+
+    // Act & Assert
+    assertThatCode(() -> ScalarDbSagaStoreFactory.validateTransactionManager(props))
+        .doesNotThrowAnyException();
+  }
+
+  @Test
+  void validateTransactionManager_consensusCommitGiven_passes() {
+    // Arrange
+    Properties props = new Properties();
+    props.setProperty("scalar.db.transaction_manager", "consensus-commit");
+
+    // Act & Assert
+    assertThatCode(() -> ScalarDbSagaStoreFactory.validateTransactionManager(props))
+        .doesNotThrowAnyException();
+  }
+
+  @Test
+  void validateTransactionManager_otherManagerGiven_throwsIllegalArgumentException() {
+    // Arrange
+    Properties props = new Properties();
+    props.setProperty("scalar.db.transaction_manager", "cluster");
+
+    // Act & Assert
+    assertThatThrownBy(() -> ScalarDbSagaStoreFactory.validateTransactionManager(props))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   /**
