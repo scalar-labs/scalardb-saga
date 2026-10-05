@@ -202,7 +202,7 @@ class SagaServerTlsIntegrationTest extends ServerIntegrationTestSupport {
     writeDefinition(definitions, "saga", DEFINITION);
     Properties props = new Properties();
     IntegrationTestStore.configure(props, db);
-    props.setProperty("scalar.db.saga.store.num_buckets", "1");
+    props.setProperty("scalar.db.saga.store.scalardb.num_buckets", "1");
     props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_PORT_KEY, "0");

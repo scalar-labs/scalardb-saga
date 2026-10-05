@@ -9,6 +9,8 @@ import static org.mockito.Mockito.verify;
 import com.scalar.db.api.Admin;
 import com.scalar.db.api.TableMetadata;
 import com.scalar.db.exception.storage.ExecutionException;
+import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -160,36 +162,40 @@ class SagaSchemaTest {
   // --- createAll ---
 
   @Test
-  void createAll_called_createsNamespaceAndAllTables() throws ExecutionException {
+  void createAll_noOptionsGiven_createsNamespaceAndAllTablesWithEmptyOptions()
+      throws ExecutionException {
     // Act
     SagaSchema.createAll(admin);
 
     // Assert
-    verify(admin).createNamespace(SagaSchema.NAMESPACE, true);
-    verify(admin)
-        .createTable(
-            eq(SagaSchema.NAMESPACE),
-            eq(SagaSchema.EVENTS_TABLE),
-            any(TableMetadata.class),
-            eq(true));
-    verify(admin)
-        .createTable(
-            eq(SagaSchema.NAMESPACE),
-            eq(SagaSchema.STATE_TABLE),
-            any(TableMetadata.class),
-            eq(true));
-    verify(admin)
-        .createTable(
-            eq(SagaSchema.NAMESPACE),
-            eq(SagaSchema.PARKED_TABLE),
-            any(TableMetadata.class),
-            eq(true));
-    verify(admin)
-        .createTable(
-            eq(SagaSchema.NAMESPACE),
-            eq(SagaSchema.DEFINITIONS_TABLE),
-            any(TableMetadata.class),
-            eq(true));
+    verifyNamespaceAndAllTablesCreatedWith(Map.of());
+  }
+
+  @Test
+  void createAll_optionsGiven_passesThemToNamespaceAndEveryTable() throws ExecutionException {
+    // Arrange
+    Map<String, String> options = Map.of("replication-factor", "1");
+
+    // Act
+    SagaSchema.createAll(admin, options);
+
+    // Assert
+    verifyNamespaceAndAllTablesCreatedWith(options);
+  }
+
+  private void verifyNamespaceAndAllTablesCreatedWith(Map<String, String> options)
+      throws ExecutionException {
+    verify(admin).createNamespace(SagaSchema.NAMESPACE, true, options);
+    for (String table :
+        List.of(
+            SagaSchema.EVENTS_TABLE,
+            SagaSchema.STATE_TABLE,
+            SagaSchema.PARKED_TABLE,
+            SagaSchema.DEFINITIONS_TABLE)) {
+      verify(admin)
+          .createTable(
+              eq(SagaSchema.NAMESPACE), eq(table), any(TableMetadata.class), eq(true), eq(options));
+    }
   }
 
   // --- Constants ---

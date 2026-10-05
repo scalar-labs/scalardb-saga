@@ -9,9 +9,7 @@ import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Properties;
 
 /**
@@ -23,19 +21,14 @@ import java.util.Properties;
  * IntegrationTestStoreExtension} empties its saga and coordinator tables before each test, and each
  * test still starts from nothing.
  *
- * <p>The file may also carry {@value #CREATE_OPTIONS_PROPERTY}, a comma-separated {@code
- * name:value} list of ScalarDB table creation options such as {@code replication-factor:1} for a
- * single-node Cassandra or {@code no-scaling:true,no-backup:true} for DynamoDB Local. It is removed
- * before the properties reach ScalarDB.
+ * <p>The tables themselves are created by the store factory the tests open, so the file carries the
+ * same store keys a deployment would, such as {@code
+ * scalar.db.saga.store.scalardb.create_options.replication-factor=1} for a single-node Cassandra.
  */
 public final class IntegrationTestStore {
 
   /** System property naming a ScalarDB properties file; unset means a private SQLite file. */
   public static final String PROPERTY = "scalardb.saga.integration_test.properties";
-
-  /** Key inside that file for the creation options; see the class comment. */
-  public static final String CREATE_OPTIONS_PROPERTY =
-      "scalardb.saga.integration_test.create_options";
 
   private static final List<String> SAGA_TABLES =
       List.of(
@@ -61,18 +54,11 @@ public final class IntegrationTestStore {
           "jdbc:sqlite:" + sqliteDb.toAbsolutePath() + "?busy_timeout=10000&journal_mode=WAL");
       return;
     }
-    Properties external = new Properties();
-    try (InputStream in = Files.newInputStream(Paths.get(file))) {
-      external.load(in);
-    } catch (IOException e) {
-      throw new UncheckedIOException("cannot read " + PROPERTY + "=" + file, e);
-    }
-    creationOptions(external);
-    props.putAll(external);
+    props.putAll(load(file));
   }
 
   /**
-   * Creates the external store's saga and coordinator tables if needed and empties them. Does
+   * Empties the external store's saga and coordinator tables, skipping any not created yet. Does
    * nothing when the tests run on SQLite. Called by {@link IntegrationTestStoreExtension} before
    * each test; a test that opens several stores must not see its own rows vanish between them.
    */
@@ -81,63 +67,28 @@ public final class IntegrationTestStore {
     if (file == null) {
       return;
     }
+    try (DistributedTransactionAdmin admin =
+        TransactionFactory.create(load(file)).getTransactionAdmin()) {
+      if (admin.coordinatorTablesExist()) {
+        admin.truncateCoordinatorTables();
+      }
+      for (String table : SAGA_TABLES) {
+        if (admin.tableExists(SagaSchema.NAMESPACE, table)) {
+          admin.truncateTable(SagaSchema.NAMESPACE, table);
+        }
+      }
+    } catch (Exception e) {
+      throw new IllegalStateException("could not reset the external saga store", e);
+    }
+  }
+
+  private static Properties load(String file) {
     Properties external = new Properties();
     try (InputStream in = Files.newInputStream(Paths.get(file))) {
       external.load(in);
     } catch (IOException e) {
       throw new UncheckedIOException("cannot read " + PROPERTY + "=" + file, e);
     }
-    resetTables(external, creationOptions(external));
-  }
-
-  private static Map<String, String> creationOptions(Properties props) {
-    Map<String, String> options = new HashMap<>();
-    Object spec = props.remove(CREATE_OPTIONS_PROPERTY);
-    if (spec != null) {
-      for (String pair : spec.toString().split(",", -1)) {
-        String[] nameAndValue = pair.split(":", 2);
-        if (nameAndValue.length != 2) {
-          throw new IllegalArgumentException(
-              CREATE_OPTIONS_PROPERTY + " entries are name:value, got \"" + pair + "\"");
-        }
-        options.put(nameAndValue[0].trim(), nameAndValue[1].trim());
-      }
-    }
-    return options;
-  }
-
-  /** Creates the saga and coordinator tables if needed, then empties them. */
-  private static void resetTables(Properties props, Map<String, String> options) {
-    try (DistributedTransactionAdmin admin =
-        TransactionFactory.create(props).getTransactionAdmin()) {
-      admin.createCoordinatorTables(true, options);
-      admin.createNamespace(SagaSchema.NAMESPACE, true, options);
-      admin.createTable(
-          SagaSchema.NAMESPACE,
-          SagaSchema.EVENTS_TABLE,
-          SagaSchema.sagaEventsTable(),
-          true,
-          options);
-      admin.createTable(
-          SagaSchema.NAMESPACE, SagaSchema.STATE_TABLE, SagaSchema.sagaStateTable(), true, options);
-      admin.createTable(
-          SagaSchema.NAMESPACE,
-          SagaSchema.PARKED_TABLE,
-          SagaSchema.sagaParkedTable(),
-          true,
-          options);
-      admin.createTable(
-          SagaSchema.NAMESPACE,
-          SagaSchema.DEFINITIONS_TABLE,
-          SagaSchema.sagaDefinitionsTable(),
-          true,
-          options);
-      admin.truncateCoordinatorTables();
-      for (String table : SAGA_TABLES) {
-        admin.truncateTable(SagaSchema.NAMESPACE, table);
-      }
-    } catch (Exception e) {
-      throw new IllegalStateException("could not reset the external saga store", e);
-    }
+    return external;
   }
 }

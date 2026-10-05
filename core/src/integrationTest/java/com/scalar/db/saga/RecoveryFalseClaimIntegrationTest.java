@@ -190,7 +190,7 @@ class RecoveryFalseClaimIntegrationTest {
   private Properties storeProps() {
     Properties props = new Properties();
     IntegrationTestStore.configure(props, dbPath);
-    props.setProperty("scalar.db.saga.store.num_buckets", "1");
+    props.setProperty("scalar.db.saga.store.scalardb.num_buckets", "1");
     return props;
   }
 

@@ -42,7 +42,7 @@ class ScalarDbSagaStoreListIntegrationTest {
     Properties props = new Properties();
     IntegrationTestStore.configure(props, dbPath);
     // Multiple buckets so pagination must sweep across bucket boundaries.
-    props.setProperty("scalar.db.saga.store.num_buckets", "4");
+    props.setProperty("scalar.db.saga.store.scalardb.num_buckets", "4");
     factory = ScalarDbSagaStoreFactory.create(props); // creates the schema
     store = factory.createStore();
   }

@@ -1221,12 +1221,13 @@ class SagaServerConfigTest {
     // Only the daemon's own namespace is checked; ScalarDB and store keys pass through untouched.
     Properties props = new Properties();
     props.setProperty("scalar.db.storage", "jdbc");
-    props.setProperty("scalar.db.saga.store.num_buckets", "4");
+    props.setProperty("scalar.db.saga.store.scalardb.num_buckets", "4");
 
     SagaServerConfig config = SagaServerConfig.load(props);
 
     assertThat(config.properties().getProperty("scalar.db.storage")).isEqualTo("jdbc");
-    assertThat(config.properties().getProperty("scalar.db.saga.store.num_buckets")).isEqualTo("4");
+    assertThat(config.properties().getProperty("scalar.db.saga.store.scalardb.num_buckets"))
+        .isEqualTo("4");
   }
 
   @Test

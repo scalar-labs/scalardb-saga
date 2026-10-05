@@ -72,7 +72,7 @@ class SagaIntegrationTest {
 
     props = new Properties();
     IntegrationTestStore.configure(props, tempDbPath);
-    props.setProperty("scalar.db.saga.store.num_buckets", "1");
+    props.setProperty("scalar.db.saga.store.scalardb.num_buckets", "1");
   }
 
   @AfterEach
@@ -1263,7 +1263,7 @@ class SagaIntegrationTest {
     void recover_twoReplicasDrainBacklog_eachSagaRecoveredExactlyOnce() {
       // Arrange — 8 crashed sagas across 4 buckets; two replicas with budgets of 2 per pass, so
       // neither can drain the backlog alone in one pass.
-      props.setProperty("scalar.db.saga.store.num_buckets", String.valueOf(NUM_BUCKETS));
+      props.setProperty("scalar.db.saga.store.scalardb.num_buckets", String.valueOf(NUM_BUCKETS));
       FakeStep step1 = FakeStep.newBuilder("step1").executeReturns(StepResult.of("a", 1)).build();
       FakeStep step2 = FakeStep.newBuilder("step2").build();
       Map<String, Object> steps = Map.of("step1", step1, "step2", step2);
@@ -1299,7 +1299,7 @@ class SagaIntegrationTest {
     @Test
     void recover_budgetOfOne_drainsOneSagaPerPassAcrossAllBuckets() {
       // Arrange — one crashed saga per bucket, budget of 1 successful recovery per pass
-      props.setProperty("scalar.db.saga.store.num_buckets", String.valueOf(NUM_BUCKETS));
+      props.setProperty("scalar.db.saga.store.scalardb.num_buckets", String.valueOf(NUM_BUCKETS));
       FakeStep step1 = FakeStep.newBuilder("step1").executeReturns(StepResult.of("a", 1)).build();
       FakeStep step2 = FakeStep.newBuilder("step2").build();
       Map<String, Object> steps = Map.of("step1", step1, "step2", step2);
@@ -1327,7 +1327,7 @@ class SagaIntegrationTest {
     void recover_driveFailsAfterClaim_budgetSpentWithoutClaimSpree() {
       // Arrange — three crashed sagas in distinct buckets; the recovering replica's event reads
       // fail, so every claim commits but every drive fails
-      props.setProperty("scalar.db.saga.store.num_buckets", String.valueOf(NUM_BUCKETS));
+      props.setProperty("scalar.db.saga.store.scalardb.num_buckets", String.valueOf(NUM_BUCKETS));
       FakeStep step1 = FakeStep.newBuilder("step1").executeReturns(StepResult.of("a", 1)).build();
       FakeStep step2 = FakeStep.newBuilder("step2").build();
       Map<String, Object> steps = Map.of("step1", step1, "step2", step2);
@@ -1375,7 +1375,7 @@ class SagaIntegrationTest {
     @Test
     void recover_poisonFirstPage_otherBucketsStillSweptSamePass() {
       // Arrange — one crashed saga per bucket; the first scanned page of the pass fails
-      props.setProperty("scalar.db.saga.store.num_buckets", String.valueOf(NUM_BUCKETS));
+      props.setProperty("scalar.db.saga.store.scalardb.num_buckets", String.valueOf(NUM_BUCKETS));
       FakeStep step1 = FakeStep.newBuilder("step1").executeReturns(StepResult.of("a", 1)).build();
       FakeStep step2 = FakeStep.newBuilder("step2").build();
       Map<String, Object> steps = Map.of("step1", step1, "step2", step2);
