@@ -79,9 +79,9 @@ public final class HttpCallResponse {
   }
 
   /**
-   * All response headers, keyed by name as the participant sent it, to the list of values. The
-   * returned map is a plain copy, so lookups on it are case-sensitive; use {@link #header(String)}
-   * or {@link #headers(String)} for a case-insensitive lookup.
+   * All response headers, keyed by header name in the spelling the HTTP client reports, to the list
+   * of values. The returned map is a plain copy, so lookups on it are case-sensitive; use {@link
+   * #header(String)} or {@link #headers(String)} for a case-insensitive lookup.
    *
    * @return every response header with all of its values, unmodifiable
    */

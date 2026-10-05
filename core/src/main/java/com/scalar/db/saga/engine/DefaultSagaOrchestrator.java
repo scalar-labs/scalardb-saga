@@ -989,7 +989,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * Starts the periodic recovery and retention passes on this process, scheduled per the {@link
    * RecoveryConfig} and {@link RetentionConfig} the builder was given. Without this call the
    * orchestrator runs sagas but neither recovers abandoned ones on its own nor purges finished
-   * ones; {@link #recover()} still runs a single recovery pass on demand.
+   * ones; {@link #recover()} still runs a single recovery pass on demand. Call it once: nothing
+   * guards against a second call, which schedules a second set of passes alongside the first.
    *
    * @throws IllegalStateException if the orchestrator is closed
    */

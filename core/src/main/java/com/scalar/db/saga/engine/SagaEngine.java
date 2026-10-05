@@ -252,7 +252,8 @@ public class SagaEngine implements AutoCloseable {
    * Replays events to reconstruct an ExecutionContext for crash recovery.
    *
    * @param saga the saga's current state snapshot
-   * @param events the saga's events in sequence order
+   * @param events the saga's complete event stream from sequence 0, in order; a slice yields a
+   *     context whose next sequence is wrong
    * @return a context holding the saga input, every completed step's output, the failed and
    *     compensated step indices, and the next event sequence
    */

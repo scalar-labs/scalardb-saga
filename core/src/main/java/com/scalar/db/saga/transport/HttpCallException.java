@@ -76,8 +76,9 @@ public final class HttpCallException extends Exception {
   }
 
   /**
-   * Whether the failure is transient and the call may be retried, as derived from the response
-   * status or the {@code X-Saga-Retryable} override.
+   * Whether the failure is transient and the call may be retried, as the HTTP engine classified it:
+   * from the response status or the {@code X-Saga-Retryable} override when a response arrived,
+   * otherwise from the kind of failure, such as a timeout or a request that could not be encoded.
    *
    * @return {@code true} if the call may be retried
    */
@@ -102,7 +103,8 @@ public final class HttpCallException extends Exception {
    * The HTTP response that caused this failure, present only for non-2xx responses. Empty for
    * transport, policy, encode, or decode failures (no response was received or parsed).
    *
-   * @return the failing response, or empty when none was received or parsed
+   * @return the failing non-2xx response, or empty for every other failure, including a body that
+   *     could not be decoded, whose response is not kept
    */
   public Optional<HttpCallResponse> response() {
     return Optional.ofNullable(response);
