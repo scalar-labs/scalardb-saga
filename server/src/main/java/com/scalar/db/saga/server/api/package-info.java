@@ -8,8 +8,9 @@
  * response records ({@link StartSagaRequest}, {@link SagaDetailResponse} and their siblings) are
  * the JSON bodies as the wire sees them, kept apart from the api value types so the REST contract
  * stays fixed while those evolve. {@link ErrorMapper} turns every exception into the one JSON error
- * body, and {@link RateLimitHandler} and {@link RequestParsing} are the edge checks the handlers
- * share with the gRPC transport.
+ * body; {@link RateLimitHandler} charges the same {@link RateLimiter} the gRPC interceptor charges,
+ * so a caller's start budget spans both transports; and {@link RequestParsing} is the edge parsing
+ * both transports share.
  */
 @NullMarked
 package com.scalar.db.saga.server.api;

@@ -161,6 +161,13 @@ tasks.named("check") {
     dependsOn(tasks.named("javadoc"))
 }
 
+// A test-fixtures source set gets a javadoc task of its own, which `check` does not run by default,
+// so a gap there would regress without failing anything. Hold it to the same bar; the task is named
+// rather than resolved because the fixtures plugin may apply after this one.
+plugins.withId("java-test-fixtures") {
+    tasks.named("check") { dependsOn("testFixturesJavadoc") }
+}
+
 dependencies {
     compileOnly(libs.jspecify)
     compileOnly(libs.jcip.annotations)

@@ -11,7 +11,8 @@
  * references, TLS material loading and reload, the security-provider factory, and the registry that
  * wakes a synchronous start when its saga settles.
  *
- * <p>The transports live in the {@code api} (REST), {@code grpc} and {@code security} subpackages.
+ * <p>The REST and gRPC transports live in the {@code api} and {@code grpc} subpackages; {@code
+ * security} holds the authentication SPI and the access policy both share.
  */
 @NullMarked
 package com.scalar.db.saga.server;
