@@ -20,7 +20,7 @@ class SecurityProviderFactoryTest {
     SagaServerConfig config = SagaServerConfig.load(new Properties());
 
     // Act
-    SagaSecurityProvider provider = SecurityProviderFactory.create(config);
+    SagaSecurityProvider provider = SecurityProviderFactory.create(config, null);
 
     // Assert
     assertThat(provider).isInstanceOf(NoopSecurityProvider.class);
@@ -35,7 +35,7 @@ class SecurityProviderFactoryTest {
 
     // Act
     SagaSecurityProvider provider =
-        SecurityProviderFactory.create(SagaServerConfig.load(properties));
+        SecurityProviderFactory.create(SagaServerConfig.load(properties), null);
 
     // Assert — case-insensitive selection
     assertThat(provider).isInstanceOf(NoopSecurityProvider.class);
@@ -49,7 +49,8 @@ class SecurityProviderFactoryTest {
     properties.setProperty(SagaServerConfig.SECURITY_PROVIDER_KEY, "swordfish-like-a-secret");
 
     // Act / Assert
-    assertThatThrownBy(() -> SecurityProviderFactory.create(SagaServerConfig.load(properties)))
+    assertThatThrownBy(
+            () -> SecurityProviderFactory.create(SagaServerConfig.load(properties), null))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining(SagaServerConfig.SECURITY_PROVIDER_KEY)
         .hasMessageNotContaining("swordfish")
@@ -68,7 +69,7 @@ class SecurityProviderFactoryTest {
 
     // Act
     SagaSecurityProvider provider =
-        SecurityProviderFactory.create(SagaServerConfig.load(properties));
+        SecurityProviderFactory.create(SagaServerConfig.load(properties), null);
 
     // Assert
     assertThat(provider.name()).isEqualTo("jwt");
@@ -81,7 +82,8 @@ class SecurityProviderFactoryTest {
     properties.setProperty(SagaServerConfig.SECURITY_PROVIDER_KEY, "jwt");
 
     // Act / Assert
-    assertThatThrownBy(() -> SecurityProviderFactory.create(SagaServerConfig.load(properties)))
+    assertThatThrownBy(
+            () -> SecurityProviderFactory.create(SagaServerConfig.load(properties), null))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
@@ -98,7 +100,7 @@ class SecurityProviderFactoryTest {
 
     // Act
     SagaSecurityProvider provider =
-        SecurityProviderFactory.create(SagaServerConfig.load(properties));
+        SecurityProviderFactory.create(SagaServerConfig.load(properties), null);
 
     // Assert
     assertThat(provider.name()).isEqualTo("apikey");
@@ -119,7 +121,8 @@ class SecurityProviderFactoryTest {
         "scalar.db.saga.server.security.apikey.key.svc.roles", "${file:UTF-8:" + keyFile + "}");
 
     // Act / Assert
-    assertThatThrownBy(() -> SecurityProviderFactory.create(SagaServerConfig.load(properties)))
+    assertThatThrownBy(
+            () -> SecurityProviderFactory.create(SagaServerConfig.load(properties), null))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("scalar.db.saga.server.security.apikey.key.svc.roles")
         .hasMessageNotContaining("s3cr3t")
@@ -136,7 +139,8 @@ class SecurityProviderFactoryTest {
     properties.setProperty("scalar.db.saga.server.security.apikey.key.svc.roles", "saga:read");
 
     // Act / Assert
-    assertThatThrownBy(() -> SecurityProviderFactory.create(SagaServerConfig.load(properties)))
+    assertThatThrownBy(
+            () -> SecurityProviderFactory.create(SagaServerConfig.load(properties), null))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
@@ -147,7 +151,8 @@ class SecurityProviderFactoryTest {
     properties.setProperty(SagaServerConfig.SECURITY_PROVIDER_KEY, "apikey");
 
     // Act / Assert
-    assertThatThrownBy(() -> SecurityProviderFactory.create(SagaServerConfig.load(properties)))
+    assertThatThrownBy(
+            () -> SecurityProviderFactory.create(SagaServerConfig.load(properties), null))
         .isInstanceOf(IllegalArgumentException.class);
   }
 }

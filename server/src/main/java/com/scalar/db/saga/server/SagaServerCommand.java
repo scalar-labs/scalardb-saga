@@ -290,7 +290,7 @@ public class SagaServerCommand implements Callable<Integer> {
         warnings,
         result.serviceCount(),
         result.definitionCount(),
-        config.tlsSummary(),
+        config.tlsSummary() + System.lineSeparator() + config.egressTrustSummary(),
         null);
   }
 
@@ -316,9 +316,9 @@ public class SagaServerCommand implements Callable<Integer> {
   /**
    * Prints the report and returns the exit code. Problems first, because that is what the reader
    * came for; the enumeration of what could not be checked comes last, where it qualifies the
-   * verdict above it. The TLS line ({@code null} when the settings never loaded) says whether the
-   * daemon will serve TLS and where the pair comes from, since a pair found at the conventional
-   * mount is not written in the file.
+   * verdict above it. The TLS lines ({@code null} when the settings never loaded) say whether the
+   * daemon will serve TLS and what it trusts on outbound calls, and where that material comes from,
+   * since material found at the conventional mount is not written in the file.
    */
   private static int report(
       PrintWriter out,

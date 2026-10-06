@@ -2,6 +2,7 @@ package com.scalar.db.saga.server;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.entry;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
@@ -23,6 +24,8 @@ import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.engine.ShutdownMode;
 import com.scalar.db.saga.server.api.HmacCallbackUrlProvider;
+import com.scalar.db.saga.transport.HttpEndpointRegistrar;
+import com.scalar.db.saga.transport.HttpServiceConfig;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.health.v1.HealthCheckRequest;
@@ -38,6 +41,8 @@ import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeAll;
@@ -760,6 +765,46 @@ class SagaServerTest {
     props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY, "251");
     props.setProperty(SagaServerConfig.RETENTION_MAX_PURGES_PER_PASS_KEY, "52");
     return SagaServerConfig.load(props);
+  }
+
+  @Test
+  void withEgressClient_servicesGiven_installsEachThroughTheSharedClientUnchangedOtherwise() {
+    // Arrange
+    HttpEndpointRegistrar registrar = mock(HttpEndpointRegistrar.class);
+    HttpClient client = HttpClient.newHttpClient();
+    HttpServiceConfig payments =
+        new HttpServiceConfig(
+            "https://payments.internal", List.of("payments.internal"), 1024, null, Map.of());
+    HttpServiceConfig stock =
+        new HttpServiceConfig(
+            "https://stock.internal", List.of(), 0, null, Map.of("X-Team", "inventory"));
+
+    // Act
+    SagaServer.withEgressClient(registrar, client)
+        .swapHttpEndpoints(Map.of("payments", payments, "stock", stock));
+
+    // Assert
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Map<String, HttpServiceConfig>> captor = ArgumentCaptor.forClass(Map.class);
+    verify(registrar).swapHttpEndpoints(captor.capture());
+    assertThat(captor.getValue())
+        .containsOnly(
+            entry(
+                "payments",
+                new HttpServiceConfig(
+                    "https://payments.internal",
+                    List.of("payments.internal"),
+                    1024,
+                    client,
+                    Map.of())),
+            entry(
+                "stock",
+                new HttpServiceConfig(
+                    "https://stock.internal",
+                    List.of(),
+                    0,
+                    client,
+                    Map.of("X-Team", "inventory"))));
   }
 
   @Test

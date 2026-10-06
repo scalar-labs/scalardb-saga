@@ -10,6 +10,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.KeyPairGenerator;
+import java.security.cert.X509Certificate;
 import java.util.List;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.BeforeAll;
@@ -177,6 +178,34 @@ class TlsMaterialTest {
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY)
         .hasMessageContaining("swapped")
+        .hasNoCause();
+  }
+
+  @Test
+  void loadCertificates_bundleOfTwoGiven_returnsBothInFileOrder() throws IOException {
+    // Arrange
+    Path bundle = dir.resolve("bundle.crt");
+    Files.writeString(
+        bundle, Files.readString(rsa.certChainPath()) + Files.readString(ec.certChainPath()));
+
+    // Act
+    List<X509Certificate> certificates =
+        TlsMaterial.loadCertificates(bundle, SagaServerConfig.EGRESS_CA_CERT_PATH_KEY);
+
+    // Assert
+    assertThat(certificates).containsExactly(rsa.certificate(), ec.certificate());
+  }
+
+  @Test
+  void loadCertificates_keyMaterialGiven_throwsNamingTheGivenKeyWithoutTheSwapHint() {
+    // Act & Assert — the hint about the two tls.* keys means nothing for a CA bundle
+    assertThatThrownBy(
+            () ->
+                TlsMaterial.loadCertificates(
+                    rsa.privateKeyPath(), SagaServerConfig.EGRESS_CA_CERT_PATH_KEY))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.EGRESS_CA_CERT_PATH_KEY)
+        .hasMessageNotContaining("swapped")
         .hasNoCause();
   }
 

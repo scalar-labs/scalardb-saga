@@ -84,10 +84,26 @@ final class TlsMaterial {
   static TlsMaterial load(Path certChainPath, Path privateKeyPath) {
     String certPem = readPemText(certChainPath, SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY);
     String keyPem = readPemText(privateKeyPath, SagaServerConfig.TLS_PRIVATE_KEY_PATH_KEY);
-    List<X509Certificate> chain = parseCertChain(certPem);
+    List<X509Certificate> chain =
+        parseCertificates(certPem, SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY);
     PrivateKey key = parsePrivateKey(keyPem);
     requireKeyMatchesLeaf(key, chain.get(0));
     return new TlsMaterial(List.copyOf(chain), key);
+  }
+
+  /**
+   * Loads a PEM certificate bundle, such as the CA certificates named by {@code
+   * egress.ca_cert_path}, with the same strictness and the same value-free failures as the server's
+   * own chain: at least one certificate, every block complete and parseable, and no private-key
+   * material.
+   *
+   * @param path the file to read
+   * @param key the config key that names it, the only identifier any failure message carries
+   * @return the certificates in file order; never empty
+   * @throws IllegalArgumentException naming {@code key} on any failure
+   */
+  static List<X509Certificate> loadCertificates(Path path, String key) {
+    return List.copyOf(parseCertificates(readPemText(path, key), key));
   }
 
   /** The parsed chain, leaf first, in file order. Never empty. */
@@ -151,7 +167,8 @@ final class TlsMaterial {
     }
   }
 
-  private static List<X509Certificate> parseCertChain(String pem) {
+  private static List<X509Certificate> parseCertificates(String pem, String key) {
+    boolean serverChain = key.equals(SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY);
     CertificateFactory factory;
     try {
       factory = CertificateFactory.getInstance("X.509");
@@ -161,35 +178,39 @@ final class TlsMaterial {
     List<X509Certificate> chain = new ArrayList<>();
     Matcher matcher = CERT_BLOCK.matcher(pem);
     while (matcher.find()) {
-      byte[] der = decodeBase64(matcher.group(1), SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY);
+      byte[] der = decodeBase64(matcher.group(1), key);
       try {
         chain.add((X509Certificate) factory.generateCertificate(new ByteArrayInputStream(der)));
       } catch (CertificateException e) {
-        throw badFile(
-            SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY,
-            "whose CERTIFICATE block does not parse as an X.509 certificate.");
+        throw badFile(key, "whose CERTIFICATE block does not parse as an X.509 certificate.");
       }
     }
     // A BEGIN the loop skipped is a block with no END: the shape a non-atomic writer leaves when
     // the file is read mid-write, with the leaf complete and an intermediate cut short. Publishing
-    // what did parse would serve a chain missing its intermediates until the next pass; rejecting
-    // it costs one interval instead. A kubelet symlink flip never produces this; a plain copy can.
+    // what did parse would serve a chain missing its intermediates, or trust a bundle missing a CA,
+    // until the next pass; rejecting it costs one interval instead. A kubelet symlink flip never
+    // produces this; a plain copy can.
     if (CERT_BEGIN.matcher(pem).results().count() != chain.size()) {
       throw badFile(
-          SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY,
+          key,
           "containing a CERTIFICATE block that is not terminated. If a rotation is in progress the"
               + " next reload pass picks up the complete file; otherwise the file is truncated.");
     }
     if (chain.isEmpty()) {
       if (KEY_BLOCK.matcher(pem).find()) {
         throw badFile(
-            SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY,
-            "holding private-key material, not a certificate chain. Did the two tls.* path values"
-                + " get swapped?");
+            key,
+            serverChain
+                ? "holding private-key material, not a certificate chain. Did the two tls.* path"
+                    + " values get swapped?"
+                : "holding private-key material, not CA certificates. Only certificates belong"
+                    + " here.");
       }
       throw badFile(
-          SagaServerConfig.TLS_CERT_CHAIN_PATH_KEY,
-          "with no CERTIFICATE block. The file must be a PEM certificate chain, leaf first.");
+          key,
+          serverChain
+              ? "with no CERTIFICATE block. The file must be a PEM certificate chain, leaf first."
+              : "with no CERTIFICATE block. The file must hold one or more PEM CA certificates.");
     }
     return chain;
   }
