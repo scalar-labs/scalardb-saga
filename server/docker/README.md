@@ -247,9 +247,11 @@ Two operational notes:
   (each service file's `base_url`) or JWKS fetches. Those trust the JVM's default CAs plus, when a
   participant or the JWKS host sits behind a private CA, a PEM bundle of CA certificates mounted at
   `/scalardb-saga/conf/tls/egress/ca.crt` or named by `egress.ca_cert_path`. The bundle adds to the
-  JVM's trust rather than replacing it, holds any number of certificates, and needs no switch. It is
+  JVM's trust rather than replacing it, holds any number of certificates, and needs no switch:
+  certificate validation and hostname verification stay on. One bundle covers every service and the
+  JWKS host, so each CA in it can vouch for all of them; mount only CAs you trust that far. It is
   re-read on every reload pass, so a CA rotation (old and new CA in one file, then the old one
-  removed) needs no restart. One bundle covers every service; there is no per-service trust.
+  removed) needs no restart.
 
 Java clients of the SDK enable TLS with `useTransportSecurity()`; against a private CA, add
 `trustCaCertificate(path)` (and `overrideAuthority(name)` when dialing by IP or through a

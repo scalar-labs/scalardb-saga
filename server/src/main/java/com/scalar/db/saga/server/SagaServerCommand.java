@@ -194,7 +194,9 @@ public class SagaServerCommand implements Callable<Integer> {
               + " scalar.db.saga.store.* values are parsed here",
           "whether the configured host and ports can actually be bound",
           "the TLS certificate and key pair, which is validated at startup and on every reload"
-              + " pass");
+              + " pass",
+          "the outbound CA bundle (egress.ca_cert_path), which is validated at startup and on"
+              + " every reload pass");
 
   /**
    * Validates the configuration without starting anything, and prints a report.

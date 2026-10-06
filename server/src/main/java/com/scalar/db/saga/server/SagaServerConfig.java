@@ -289,11 +289,14 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code egress.ca_cert_path} — a PEM bundle of one or more CA certificates trusted on
  *       outbound HTTPS, participant calls and JWKS fetches alike, in addition to the JVM's default
  *       trust store; defaults to {@value #DEFAULT_EGRESS_CA_CERT_PATH} when that file exists. Used
- *       whenever present, with no switch: extra trust cannot weaken a connection, and a missing
- *       bundle fails loudly, as a certificate error on the first call to a private-CA participant.
- *       The bundle is validated at startup and re-read on every configuration reload pass, so a CA
- *       rotation (old and new CA in one file, then the old one removed) needs no restart; a bundle
- *       that fails validation is rejected and the previous trust stays in place
+ *       whenever present, with no switch: unlike a forgotten {@code tls.enabled}, a bundle never
+ *       disables anything, since the default CAs, certificate validation and hostname verification
+ *       all stay on, and a missing bundle fails loudly, as a certificate error on the first call to
+ *       a private-CA participant. Each CA it holds can vouch for every participant and the JWKS
+ *       host, so mount only CAs trusted for all of them. The bundle holds certificates only; one
+ *       carrying a private key is rejected. It is validated at startup and re-read on every reload
+ *       pass, so a CA rotation (old and new CA in one file, then the old one removed) needs no
+ *       restart; a bundle that fails validation is rejected and the previous trust stays in place
  * </ul>
  *
  * <h2>Async callbacks ({@code callback.*})</h2>

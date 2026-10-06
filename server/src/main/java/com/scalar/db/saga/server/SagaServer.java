@@ -122,6 +122,9 @@ public final class SagaServer implements AutoCloseable {
   // long before either port could bind.
   private final @Nullable TlsReloader tlsReloader;
   private final @Nullable EgressTrust egressTrust;
+  // The client every participant endpoint shares when an egress CA bundle is configured. The
+  // endpoints treat a supplied client as the caller's, so this server shuts it down at close.
+  private final @Nullable HttpClient egressClient;
   // Each transport is null when disabled; SagaServerConfig guarantees at least one is enabled.
   private final @Nullable Javalin httpServer;
   private final @Nullable ExecutorService httpVirtualThreads;
@@ -192,6 +195,8 @@ public final class SagaServer implements AutoCloseable {
     }
     this.tlsReloader = tlsReloader;
     this.egressTrust = egressTrust;
+    HttpClient egressClient = egressTrust == null ? null : buildEgressClient(egressTrust);
+    this.egressClient = egressClient;
     // Created here rather than inside createHttpServer so the server owns it: Jetty never stops
     // an executor it was handed, and close() must be able to wait for handler bodies.
     ExecutorService httpVirtualThreads =
@@ -224,10 +229,9 @@ public final class SagaServer implements AutoCloseable {
               config.definitionsPath().orElse(null),
               config.callbackBaseUrl().isPresent() && config.callbackSecret().isPresent(),
               new ServiceSecretResolver(config.reloadConfig().secretsRoot()),
-              egressTrust == null
+              egressClient == null
                   ? orchestrator.httpEndpointRegistrar()
-                  : withEgressClient(
-                      orchestrator.httpEndpointRegistrar(), egressClient(egressTrust)),
+                  : withEgressClient(orchestrator.httpEndpointRegistrar(), egressClient),
               new DefinitionStore() {
                 @Override
                 public void register(SagaDefinition definition) {
@@ -301,6 +305,7 @@ public final class SagaServer implements AutoCloseable {
       }
       closeSecurityProvider(provider);
       orchestrator.close();
+      shutdownEgressClient(egressClient);
       throw e;
     }
   }
@@ -392,12 +397,23 @@ public final class SagaServer implements AutoCloseable {
    * configured, built as {@code HttpEndpoint} builds its own: no redirects, which keeps a service's
    * {@code allowed_hosts} from being bypassed by a 3xx, and a bounded connect phase.
    */
-  private static HttpClient egressClient(EgressTrust egressTrust) {
+  private static HttpClient buildEgressClient(EgressTrust egressTrust) {
     return HttpClient.newBuilder()
         .connectTimeout(EGRESS_CONNECT_TIMEOUT)
         .followRedirects(HttpClient.Redirect.NEVER)
         .sslContext(egressTrust.sslContext())
         .build();
+  }
+
+  /**
+   * Releases the shared outbound client's selector thread and pooled connections. {@code
+   * shutdown()}, never {@code close()}, for the reason {@code HttpEndpointManager} gives: close may
+   * block indefinitely on an abandoned streaming body.
+   */
+  private static void shutdownEgressClient(@Nullable HttpClient egressClient) {
+    if (egressClient != null) {
+      egressClient.shutdown();
+    }
   }
 
   /**
@@ -973,6 +989,8 @@ public final class SagaServer implements AutoCloseable {
     }
     closeSecurityProvider(securityProvider);
     orchestrator.close();
+    // After the orchestrator has drained, so no participant call is still using the client.
+    shutdownEgressClient(egressClient);
     logger.info("SagaServer stopped");
   }
 

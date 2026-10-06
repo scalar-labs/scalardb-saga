@@ -196,6 +196,14 @@ final class TlsMaterial {
           "containing a CERTIFICATE block that is not terminated. If a rotation is in progress the"
               + " next reload pass picks up the complete file; otherwise the file is truncated.");
     }
+    // A trust-only bundle has no use for a key. One beside the certificates is a pasted secret, so
+    // it is refused rather than left on disk unnoticed.
+    if (!serverChain && !chain.isEmpty() && KEY_BLOCK.matcher(pem).find()) {
+      throw badFile(
+          key,
+          "holding private-key material beside its certificates. A CA bundle holds certificates"
+              + " only; remove the key.");
+    }
     if (chain.isEmpty()) {
       if (KEY_BLOCK.matcher(pem).find()) {
         throw badFile(

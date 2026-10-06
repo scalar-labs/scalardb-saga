@@ -210,6 +210,22 @@ class TlsMaterialTest {
   }
 
   @Test
+  void loadCertificates_certificateFollowedByKeyGiven_throwsIllegalArgumentException()
+      throws IOException {
+    // Arrange — a key pasted after a valid certificate: a secret in a trust-only file
+    Path bundle = dir.resolve("bundle-with-key.crt");
+    Files.writeString(
+        bundle, Files.readString(rsa.certChainPath()) + Files.readString(rsa.privateKeyPath()));
+
+    // Act & Assert
+    assertThatThrownBy(
+            () -> TlsMaterial.loadCertificates(bundle, SagaServerConfig.EGRESS_CA_CERT_PATH_KEY))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(SagaServerConfig.EGRESS_CA_CERT_PATH_KEY)
+        .hasNoCause();
+  }
+
+  @Test
   void load_certificateInKeyPath_throwsSwappedPathsHint() {
     assertThatThrownBy(() -> TlsMaterial.load(rsa.certChainPath(), rsa.certChainPath()))
         .isInstanceOf(IllegalArgumentException.class)
