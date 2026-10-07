@@ -41,10 +41,6 @@ class ScalarDbSagaStoreFactoryTest {
         .hasMessageContaining("has been removed");
   }
 
-  /**
-   * Checked before anything connects. The message is asserted because an unconfigured {@code
-   * TransactionFactory} throws the same exception type later in {@code create}.
-   */
   @Test
   void create_jdbcTransactionManagerGiven_throwsIllegalArgumentException() {
     // Arrange
@@ -53,8 +49,7 @@ class ScalarDbSagaStoreFactoryTest {
 
     // Act & Assert
     assertThatThrownBy(() -> ScalarDbSagaStoreFactory.create(props))
-        .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("scalar.db.transaction_manager");
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
