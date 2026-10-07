@@ -2,6 +2,7 @@ package com.scalar.db.saga.server;
 
 import java.io.IOException;
 import java.net.Socket;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
@@ -42,7 +43,8 @@ import org.slf4j.LoggerFactory;
  *
  * <p>Like {@link TlsReloader}, a pass parses and validates the complete bundle before anything is
  * swapped, and a bundle that fails is rejected whole: the previous trust stays in place and the
- * rejection is logged once per change of state, WARN first and DEBUG while it repeats. Failures
+ * rejection is logged once per change of state, WARN first and DEBUG while it repeats. A bundle
+ * that is gone is not a failure but a removal, so its CAs are dropped (see {@link #run}). Failures
  * name the config key, never the configured value or file content (see {@link TlsMaterial}).
  *
  * <p>The pass state belongs to the reload scheduler's single thread; {@link #run} is {@code
@@ -85,28 +87,47 @@ final class EgressTrust {
     return sslContext;
   }
 
-  /** One pass: re-read and re-validate, swap on change, keep the current trust on rejection. */
+  /**
+   * One pass: re-read and re-validate, swap on change, keep the current trust on rejection.
+   *
+   * <p>A bundle that is present but fails validation is rejected and the previous trust stays,
+   * since a half-written or mistyped file is the likely cause and failing every private-CA call
+   * over it would be an outage. A bundle that is gone is different: deleting or unmounting it is
+   * how an operator stops trusting its CAs, so the pass drops them and the JVM's defaults remain.
+   * Keeping them would leave a CA the operator removed trusted until the next restart.
+   */
   synchronized void run() {
     if (swappedAtMillis > 0) {
       invalidateSessionsCreatedBy(swappedAtMillis);
     }
     List<X509Certificate> candidate;
-    try {
-      candidate = load(bundlePath);
-    } catch (IllegalArgumentException e) {
-      reject(Objects.requireNonNull(e.getMessage()));
-      return;
+    if (!Files.exists(bundlePath)) {
+      candidate = List.of();
+    } else {
+      try {
+        candidate = load(bundlePath);
+      } catch (IllegalArgumentException e) {
+        reject(Objects.requireNonNull(e.getMessage()));
+        return;
+      }
     }
     if (!candidate.equals(trusted)) {
       trustManager.delegate = trustManagerFor(jvmDefaults, candidate);
       swappedAtMillis = System.currentTimeMillis();
       invalidateSessionsCreatedBy(swappedAtMillis);
       trusted = candidate;
-      logger.info(
-          "Outbound CA bundle named by '{}' reloaded; new connections trust its {} certificate(s)"
-              + " in addition to the JVM's",
-          SagaServerConfig.EGRESS_CA_CERT_PATH_KEY,
-          candidate.size());
+      if (candidate.isEmpty()) {
+        logger.warn(
+            "Outbound CA bundle named by '{}' is gone; new connections trust only the JVM's"
+                + " default CAs until it returns",
+            SagaServerConfig.EGRESS_CA_CERT_PATH_KEY);
+      } else {
+        logger.info(
+            "Outbound CA bundle named by '{}' reloaded; new connections trust its {}"
+                + " certificate(s) in addition to the JVM's",
+            SagaServerConfig.EGRESS_CA_CERT_PATH_KEY,
+            candidate.size());
+      }
     }
     if (rejectedPasses > 0) {
       logger.info("Outbound CA bundle reload recovered after {} rejected pass(es)", rejectedPasses);

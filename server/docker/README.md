@@ -253,7 +253,8 @@ Two operational notes:
   bundled CA's own name constraints are not enforced: to confine a CA to certain hosts, bundle its
   root and let a name-constrained intermediate carry the limit. While reload is enabled
   (`reload.interval_seconds` above zero) the bundle is re-read on every pass, so a CA rotation (old
-  and new CA in one file, then the old one removed) needs no restart.
+  and new CA in one file, then the old one removed) needs no restart. A bundle that fails
+  validation is rejected and the previous trust stays; deleting the file drops its CAs instead.
 
 Java clients of the SDK enable TLS with `useTransportSecurity()`; against a private CA, add
 `trustCaCertificate(path)` (and `overrideAuthority(name)` when dialing by IP or through a

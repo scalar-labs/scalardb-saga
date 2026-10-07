@@ -298,7 +298,8 @@ import org.jspecify.annotations.Nullable;
  *       carry the limit. The bundle holds certificates only; one carrying a private key is
  *       rejected. It is validated at startup and, while reload is enabled, re-read on every reload
  *       pass, so a CA rotation (old and new CA in one file, then the old one removed) needs no
- *       restart; a bundle that fails validation is rejected and the previous trust stays in place
+ *       restart; a bundle that fails validation is rejected and the previous trust stays in place,
+ *       while a deleted bundle drops its CAs at the next pass
  * </ul>
  *
  * <h2>Async callbacks ({@code callback.*})</h2>

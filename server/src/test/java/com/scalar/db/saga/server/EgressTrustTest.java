@@ -141,6 +141,42 @@ class EgressTrustTest {
   }
 
   @Test
+  void run_bundleDeleted_dropsItsCasAndKeepsTheJvmDefaults() throws Exception {
+    // Arrange — deleting the bundle is how an operator stops trusting its CAs; keeping them until
+    // a restart would leave a CA the operator removed still trusted
+    int port = serve(participantA);
+    Path bundle = bundleOf(participantA);
+    EgressTrust trust = new EgressTrust(bundle);
+    assertThat(get(trust.sslContext(), port)).isEqualTo(200);
+    Files.delete(bundle);
+
+    // Act
+    trust.run();
+
+    // Assert
+    assertThatThrownBy(() -> get(trust.sslContext(), port))
+        .isInstanceOf(SSLHandshakeException.class);
+  }
+
+  @Test
+  void run_bundleRestoredAfterDeletion_trustsItsCasAgain() throws Exception {
+    // Arrange
+    int port = serve(participantA);
+    Path bundle = bundleOf(participantA);
+    EgressTrust trust = new EgressTrust(bundle);
+    Path saved = Files.copy(bundle, dir.resolve("saved.crt"));
+    Files.delete(bundle);
+    trust.run();
+    Files.copy(saved, bundle);
+
+    // Act
+    trust.run();
+
+    // Assert
+    assertThat(get(trust.sslContext(), port)).isEqualTo(200);
+  }
+
+  @Test
   void run_bundleReplacedByPrivateKey_keepsTheTrustLoadedBefore() throws Exception {
     // Arrange
     int port = serve(participantA);
