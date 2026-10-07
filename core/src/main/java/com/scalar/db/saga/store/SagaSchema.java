@@ -5,7 +5,6 @@ import com.scalar.db.api.Scan;
 import com.scalar.db.api.TableMetadata;
 import com.scalar.db.exception.storage.ExecutionException;
 import com.scalar.db.io.DataType;
-import java.util.Collections;
 import java.util.Map;
 
 /**
@@ -163,17 +162,6 @@ public final class SagaSchema {
         .addPartitionKey("saga_name")
         .addClusteringKey("definition_version", Scan.Ordering.Order.ASC)
         .build();
-  }
-
-  /**
-   * Creates all saga tables using the ScalarDB Admin API, with ScalarDB's default creation options.
-   * Idempotent — uses {@code ifNotExists}.
-   *
-   * @param admin the ScalarDB admin interface
-   * @throws ExecutionException if a table creation fails
-   */
-  public static void createAll(Admin admin) throws ExecutionException {
-    createAll(admin, Collections.emptyMap());
   }
 
   /**

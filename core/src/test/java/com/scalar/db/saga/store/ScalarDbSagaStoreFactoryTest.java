@@ -62,42 +62,42 @@ class ScalarDbSagaStoreFactoryTest {
   }
 
   @Test
-  void parseCreateOptions_prefixedKeysGiven_returnsNamesWithTrimmedValues() {
+  void parseCreationOptions_prefixedKeysGiven_returnsNamesWithTrimmedValues() {
     // Arrange
     Properties props = new Properties();
-    props.setProperty("scalar.db.saga.store.scalardb.create_options.no-scaling", " true ");
-    props.setProperty("scalar.db.saga.store.scalardb.create_options.ru", "1000");
+    props.setProperty("scalar.db.saga.store.scalardb.creation_options.no-scaling", " true ");
+    props.setProperty("scalar.db.saga.store.scalardb.creation_options.ru", "1000");
     props.setProperty("scalar.db.saga.store.scalardb.num_buckets", "4");
     props.setProperty("scalar.db.storage", "dynamo");
 
     // Act
-    Map<String, String> options = ScalarDbSagaStoreFactory.parseCreateOptions(props);
+    Map<String, String> options = ScalarDbSagaStoreFactory.parseCreationOptions(props);
 
     // Assert
     assertThat(options).containsExactly(entry("no-scaling", "true"), entry("ru", "1000"));
   }
 
   @Test
-  void parseCreateOptions_noPrefixedKeys_returnsEmptyMap() {
+  void parseCreationOptions_noPrefixedKeys_returnsEmptyMap() {
     // Arrange
     Properties props = new Properties();
     props.setProperty("scalar.db.storage", "cassandra");
 
     // Act
-    Map<String, String> options = ScalarDbSagaStoreFactory.parseCreateOptions(props);
+    Map<String, String> options = ScalarDbSagaStoreFactory.parseCreationOptions(props);
 
     // Assert
     assertThat(options).isEmpty();
   }
 
   @Test
-  void parseCreateOptions_keyWithoutOptionNameGiven_throwsIllegalArgumentException() {
+  void parseCreationOptions_keyWithoutOptionNameGiven_throwsIllegalArgumentException() {
     // Arrange
     Properties props = new Properties();
-    props.setProperty("scalar.db.saga.store.scalardb.create_options.", "1");
+    props.setProperty("scalar.db.saga.store.scalardb.creation_options.", "1");
 
     // Act & Assert
-    assertThatThrownBy(() -> ScalarDbSagaStoreFactory.parseCreateOptions(props))
+    assertThatThrownBy(() -> ScalarDbSagaStoreFactory.parseCreationOptions(props))
         .isInstanceOf(IllegalArgumentException.class);
   }
 

@@ -162,16 +162,6 @@ class SagaSchemaTest {
   // --- createAll ---
 
   @Test
-  void createAll_noOptionsGiven_createsNamespaceAndAllTablesWithEmptyOptions()
-      throws ExecutionException {
-    // Act
-    SagaSchema.createAll(admin);
-
-    // Assert
-    verifyNamespaceAndAllTablesCreatedWith(Map.of());
-  }
-
-  @Test
   void createAll_optionsGiven_passesThemToNamespaceAndEveryTable() throws ExecutionException {
     // Arrange
     Map<String, String> options = Map.of("replication-factor", "1");

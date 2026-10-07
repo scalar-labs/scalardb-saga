@@ -49,13 +49,17 @@ import org.slf4j.LoggerFactory;
  * <ul>
  *   <li>{@code scalar.db.saga.store.scalardb.num_buckets} — number of state-table bucket partitions
  *       (default: {@code 16})
- *   <li>{@code scalar.db.saga.store.scalardb.create_options.<name>} — a ScalarDB creation option
+ *   <li>{@code scalar.db.saga.store.scalardb.creation_options.<name>} — a ScalarDB creation option
  *       passed, with its value, to every namespace, table, and coordinator-table creation call when
- *       the store creates its schema. Names are ScalarDB's own, as the Schema Loader spells them:
- *       {@code replication-strategy} and {@code replication-factor} (Cassandra), {@code
- *       no-scaling}, {@code no-backup} and {@code ru} (DynamoDB), and {@code ru} (Cosmos DB). A
- *       backend ignores the options it does not know, and the options only take effect when a table
- *       is created, not on one that already exists. Unset, ScalarDB's defaults apply.
+ *       the store creates its schema. The names and defaults are ScalarDB's own; see the
+ *       creation-options tables in the <a
+ *       href="https://scalardb.scalar-labs.com/docs/latest/api-guide/#creation-options">ScalarDB
+ *       API guide</a>. A backend ignores the options it does not know, and the options only take
+ *       effect when a table is created, not on one that already exists. Unset, ScalarDB's defaults
+ *       apply; on Cassandra that is {@code SimpleStrategy} with {@code replication-factor} 1, so a
+ *       production cluster sets the factor here before the first start, and a multi-datacenter
+ *       layout, which these options cannot express, has its saga and coordinator keyspaces created
+ *       beforehand.
  * </ul>
  */
 public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
@@ -64,7 +68,7 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
 
   private static final String PROP_PREFIX = "scalar.db.saga.store.";
   private static final String SCALARDB_PREFIX = PROP_PREFIX + "scalardb.";
-  private static final String CREATE_OPTIONS_PREFIX = SCALARDB_PREFIX + "create_options.";
+  private static final String CREATION_OPTIONS_PREFIX = SCALARDB_PREFIX + "creation_options.";
 
   /**
    * Boot-time schema creation: ten attempts, pausing from about half a second and doubling to a
@@ -106,10 +110,10 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
     Objects.requireNonNull(properties, "properties must not be null");
 
     ScalarDbSagaStoreConfig config = parseConfig(properties);
-    Map<String, String> createOptions = parseCreateOptions(properties);
+    Map<String, String> creationOptions = parseCreationOptions(properties);
 
     TransactionFactory transactionFactory = TransactionFactory.create(properties);
-    createSchema(transactionFactory::getTransactionAdmin, SCHEMA_CREATE_RETRY, createOptions);
+    createSchema(transactionFactory::getTransactionAdmin, SCHEMA_CREATE_RETRY, creationOptions);
     // Defense in depth against polymorphic-deserialization gadgets (off by default in Jackson 2.x).
     ObjectMapper objectMapper = new ObjectMapper().deactivateDefaultTyping();
     return new ScalarDbSagaStoreFactory(transactionFactory, config, objectMapper);
@@ -202,21 +206,21 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
   }
 
   /**
-   * Collects the {@code scalar.db.saga.store.scalardb.create_options.<name>} keys into the option
+   * Collects the {@code scalar.db.saga.store.scalardb.creation_options.<name>} keys into the option
    * map ScalarDB's admin takes, the value trimmed and passed through untouched, so an option
    * ScalarDB adds later needs no change here. A key with no name after the prefix is rejected:
    * ScalarDB would silently ignore it.
    */
-  static Map<String, String> parseCreateOptions(Properties properties) {
+  static Map<String, String> parseCreationOptions(Properties properties) {
     Map<String, String> options = new TreeMap<>();
     for (String key : properties.stringPropertyNames()) {
-      if (!key.startsWith(CREATE_OPTIONS_PREFIX)) {
+      if (!key.startsWith(CREATION_OPTIONS_PREFIX)) {
         continue;
       }
-      String name = key.substring(CREATE_OPTIONS_PREFIX.length()).trim();
+      String name = key.substring(CREATION_OPTIONS_PREFIX.length()).trim();
       if (name.isEmpty()) {
         throw new IllegalArgumentException(
-            "'" + key + "' names no option; use " + CREATE_OPTIONS_PREFIX + "<name>=<value>");
+            "'" + key + "' names no option; use " + CREATION_OPTIONS_PREFIX + "<name>=<value>");
       }
       options.put(name, properties.getProperty(key).trim());
     }

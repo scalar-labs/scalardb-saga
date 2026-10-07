@@ -23,7 +23,7 @@ import java.util.Properties;
  *
  * <p>The tables themselves are created by the store factory the tests open, so the file carries the
  * same store keys a deployment would, such as {@code
- * scalar.db.saga.store.scalardb.create_options.replication-factor=1} for a single-node Cassandra.
+ * scalar.db.saga.store.scalardb.creation_options.no-scaling=true} for DynamoDB Local.
  */
 public final class IntegrationTestStore {
 
