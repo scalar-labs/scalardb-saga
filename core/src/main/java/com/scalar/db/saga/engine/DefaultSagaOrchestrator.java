@@ -947,7 +947,17 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
         return waiting.get();
       }
     }
-    SagaStateSnapshot saga = getStateSnapshot(sagaId);
+    SagaStateSnapshot saga;
+    try {
+      saga = getStateSnapshot(sagaId);
+    } catch (SagaNotFoundException e) {
+      if (events.isEmpty()) {
+        throw e;
+      }
+      // The log proves the saga exists. The lookup missed it because its index lags the write, as
+      // on DynamoDB, so the callback is ahead of the row and is retried.
+      throw new SagaStepNotParkedException(sagaId, stepName);
+    }
     if (saga.getStatus() == SagaStatus.WAITING && loggedAsParked) {
       // The keyed read missed although both the log and the lookup say parked: proceed on the
       // lookup's snapshot, as before, rather than refuse a callback that can be applied.
@@ -955,24 +965,36 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     }
     boolean stillAhead =
         saga.getStatus() == SagaStatus.RUNNING || saga.getStatus() == SagaStatus.WAITING;
-    if (stillAhead && !forwardOutcomeRecorded(events, stepName)) {
+    if (stillAhead && !forwardOutcomeStands(events, stepName)) {
       throw new SagaStepNotParkedException(sagaId, stepName);
     }
     throw new IllegalStateException(
         "Cannot complete step for saga " + sagaId + " in status " + saga.getStatus());
   }
 
-  /** Whether the log already records {@code stepName}'s forward outcome, completed or failed. */
-  private static boolean forwardOutcomeRecorded(List<SagaEvent> events, String stepName) {
+  /**
+   * Whether {@code stepName}'s forward outcome is recorded and still stands, judged by the step's
+   * latest event rather than any outcome ever recorded. A later {@code STEP_PENDING} or {@code
+   * STEP_REISSUING} reopens the step, and so does an operator's {@code SAGA_RESET} or {@code
+   * SAGA_RECOVERING} after a failure, since that intervention can drive the failed step again. A
+   * completed step stays completed: an intervention does not re-run it.
+   */
+  private static boolean forwardOutcomeStands(List<SagaEvent> events, String stepName) {
+    EventType outcome = null;
     for (SagaEvent event : events) {
-      if (event instanceof StepEvent step
-          && step.getStepName().equals(stepName)
-          && (step.getEventType() == EventType.STEP_COMPLETED
-              || step.getEventType() == EventType.STEP_FAILED)) {
-        return true;
+      EventType type = event.getEventType();
+      if (event instanceof StepEvent step && step.getStepName().equals(stepName)) {
+        if (type == EventType.STEP_COMPLETED || type == EventType.STEP_FAILED) {
+          outcome = type;
+        } else if (type == EventType.STEP_PENDING || type == EventType.STEP_REISSUING) {
+          outcome = null;
+        }
+      } else if ((type == EventType.SAGA_RESET || type == EventType.SAGA_RECOVERING)
+          && outcome == EventType.STEP_FAILED) {
+        outcome = null;
       }
     }
-    return false;
+    return outcome != null;
   }
 
   /** Phase-1 result of completing a parked step: the resumed saga and where to drive it from. */

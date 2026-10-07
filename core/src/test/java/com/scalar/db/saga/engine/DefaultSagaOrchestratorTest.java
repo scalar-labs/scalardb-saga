@@ -1459,6 +1459,64 @@ class DefaultSagaOrchestratorTest {
     }
 
     @Test
+    void completeStepAsync_lookupMissesASagaTheLogShows_throwsStepNotParkedNotNotFound() {
+      // Arrange — a first step that is async, called back at once: the log already has the start,
+      // but on DynamoDB the lookup by ID can still miss the new row. A 404 would end the callback.
+      when(store.getEvents("saga-1")).thenReturn(List.of(StatusEvent.started(null)));
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.empty());
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.completeStepAsync("saga-1", "s1", Map.of()))
+          .isInstanceOf(SagaStepNotParkedException.class);
+    }
+
+    @Test
+    void completeStepAsync_unknownSaga_throwsSagaNotFound() {
+      // Arrange — no events and no row: the saga does not exist
+      when(store.getEvents("nope")).thenReturn(List.of());
+      when(store.getStateSnapshot("nope")).thenReturn(Optional.empty());
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.completeStepAsync("nope", "s1", Map.of()))
+          .isInstanceOf(SagaNotFoundException.class);
+    }
+
+    @Test
+    void completeStepAsync_failedStepRedrivenAfterAReset_throwsStepNotParked() {
+      // Arrange — the step failed, an operator reset the saga to RUNNING, and the re-driven step's
+      // participant calls back before its new park. The old failure no longer settles the step.
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(saga));
+      when(store.getEvents("saga-1"))
+          .thenReturn(
+              List.of(
+                  StatusEvent.started(null),
+                  StepEvent.failed(1, "s1", null),
+                  StatusEvent.reset(SagaStatus.RUNNING, "ops", "retry")));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.completeStepAsync("saga-1", "s1", Map.of()))
+          .isInstanceOf(SagaStepNotParkedException.class);
+    }
+
+    @Test
+    void completeStepAsync_completedStepAfterAReset_staysADuplicate() {
+      // Arrange — a reset does not re-run a completed step, so its callback is still a duplicate
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(saga));
+      when(store.getEvents("saga-1"))
+          .thenReturn(
+              List.of(
+                  StatusEvent.started(null),
+                  StepEvent.completed(1, "s1", null),
+                  StatusEvent.reset(SagaStatus.RUNNING, "ops", "retry")));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.completeStepAsync("saga-1", "s1", Map.of()))
+          .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
     void completeStepAsync_stepAlreadyCompleted_throwsIllegalStateAsADuplicate() {
       // Arrange — the step's outcome is recorded, so this callback repeats one already applied;
       // the endpoint answers IllegalStateException as an idempotent duplicate
