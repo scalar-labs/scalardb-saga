@@ -4,21 +4,16 @@ import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.sun.net.httpserver.HttpsConfigurator;
 import com.sun.net.httpserver.HttpsServer;
 import java.io.IOException;
-import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.GeneralSecurityException;
-import java.security.KeyStore;
 import java.security.cert.X509Certificate;
 import java.util.List;
-import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLHandshakeException;
 import org.jspecify.annotations.Nullable;
@@ -203,32 +198,9 @@ class EgressTrustTest {
     return bundle;
   }
 
-  /** Starts an HTTPS server on a free loopback port presenting {@code pair}; returns the port. */
-  private int serve(TlsTestCerts.PemPair pair) throws IOException, GeneralSecurityException {
-    TlsMaterial material = TlsMaterial.load(pair.certChainPath(), pair.privateKeyPath());
-    KeyStore keyStore = KeyStore.getInstance("PKCS12");
-    keyStore.load(null, null);
-    char[] password = new char[0];
-    keyStore.setKeyEntry(
-        "server",
-        material.privateKey(),
-        password,
-        material.certChain().toArray(new X509Certificate[0]));
-    KeyManagerFactory keyManagers =
-        KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
-    keyManagers.init(keyStore, password);
-    SSLContext context = SSLContext.getInstance("TLS");
-    context.init(keyManagers.getKeyManagers(), null, null);
-    // The wildcard address, so the IPv6 loopback reaches it as well as 127.0.0.1.
-    server = HttpsServer.create(new InetSocketAddress(0), 0);
-    server.setHttpsConfigurator(new HttpsConfigurator(context));
-    server.createContext(
-        "/",
-        exchange -> {
-          exchange.sendResponseHeaders(200, -1);
-          exchange.close();
-        });
-    server.start();
+  /** Starts an HTTPS server presenting {@code pair} on every local address; returns the port. */
+  private int serve(TlsTestCerts.PemPair pair) {
+    server = TlsTestCerts.startHttpsServer(pair, "/", new byte[0]);
     return server.getAddress().getPort();
   }
 

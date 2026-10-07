@@ -293,8 +293,10 @@ import org.jspecify.annotations.Nullable;
  *       disables anything, since the default CAs, certificate validation and hostname verification
  *       all stay on, and a missing bundle fails loudly, as a certificate error on the first call to
  *       a private-CA participant. Each CA it holds can vouch for every participant and the JWKS
- *       host, so mount only CAs trusted for all of them. The bundle holds certificates only; one
- *       carrying a private key is rejected. It is validated at startup and re-read on every reload
+ *       host, so mount only CAs trusted for all of them; a bundled CA's own name constraints are
+ *       not enforced, so to confine one, bundle its root and let a name-constrained intermediate
+ *       carry the limit. The bundle holds certificates only; one carrying a private key is
+ *       rejected. It is validated at startup and, while reload is enabled, re-read on every reload
  *       pass, so a CA rotation (old and new CA in one file, then the old one removed) needs no
  *       restart; a bundle that fails validation is rejected and the previous trust stays in place
  * </ul>

@@ -34,9 +34,11 @@ import org.slf4j.LoggerFactory;
  * certificates it issued, and a restart-only design would force every replica to restart inside
  * that window. A swap also invalidates the context's cached client sessions: a resumed handshake
  * never consults the trust manager, so without that a removed CA would keep vouching for hosts
- * already reached until their sessions expired. Connections already open keep the trust they were
- * verified under. The delegate is the JDK's own trust manager over a key store of both certificate
- * sets, so chain validation and hostname verification are the platform's own.
+ * already reached until their sessions expired. Each later pass repeats that sweep for sessions
+ * created up to the swap, which catches one stored by a handshake already in flight at the swap.
+ * Connections already open keep the trust they were verified under. The delegate is the JDK's own
+ * trust manager over a key store of both certificate sets, so chain validation and hostname
+ * verification are the platform's own.
  *
  * <p>Like {@link TlsReloader}, a pass parses and validates the complete bundle before anything is
  * swapped, and a bundle that fails is rejected whole: the previous trust stays in place and the
@@ -57,6 +59,11 @@ final class EgressTrust {
   private final SSLContext sslContext;
   private List<X509Certificate> trusted;
   private int rejectedPasses;
+  // When the delegate was last swapped, in epoch millis; 0 until the first swap. Every pass drops
+  // cached sessions created up to then, not only the pass that swapped: a handshake already under
+  // way at the swap was verified under the old trust and can store its session after that sweep,
+  // since TLS 1.3 stores it only when the server's session ticket arrives.
+  private long swappedAtMillis;
   private @Nullable String lastRejection;
 
   /**
@@ -80,6 +87,9 @@ final class EgressTrust {
 
   /** One pass: re-read and re-validate, swap on change, keep the current trust on rejection. */
   synchronized void run() {
+    if (swappedAtMillis > 0) {
+      invalidateSessionsCreatedBy(swappedAtMillis);
+    }
     List<X509Certificate> candidate;
     try {
       candidate = load(bundlePath);
@@ -89,7 +99,8 @@ final class EgressTrust {
     }
     if (!candidate.equals(trusted)) {
       trustManager.delegate = trustManagerFor(jvmDefaults, candidate);
-      invalidateCachedSessions();
+      swappedAtMillis = System.currentTimeMillis();
+      invalidateSessionsCreatedBy(swappedAtMillis);
       trusted = candidate;
       logger.info(
           "Outbound CA bundle named by '{}' reloaded; new connections trust its {} certificate(s)"
@@ -104,12 +115,15 @@ final class EgressTrust {
     }
   }
 
-  /** Drops every cached client session, so the next handshake is a full one under the new trust. */
-  private void invalidateCachedSessions() {
+  /**
+   * Drops the cached client sessions created at or before {@code cutoffMillis}, so connecting to
+   * those hosts again takes a full handshake under the current trust.
+   */
+  private void invalidateSessionsCreatedBy(long cutoffMillis) {
     SSLSessionContext sessions = sslContext.getClientSessionContext();
     for (Enumeration<byte[]> ids = sessions.getIds(); ids.hasMoreElements(); ) {
       SSLSession session = sessions.getSession(ids.nextElement());
-      if (session != null) {
+      if (session != null && session.getCreationTime() <= cutoffMillis) {
         session.invalidate();
       }
     }

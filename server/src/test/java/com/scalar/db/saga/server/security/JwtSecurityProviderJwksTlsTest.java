@@ -12,23 +12,14 @@ import com.nimbusds.jose.jwk.gen.RSAKeyGenerator;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
 import com.scalar.db.saga.server.TlsTestCerts;
-import com.sun.net.httpserver.HttpsConfigurator;
 import com.sun.net.httpserver.HttpsServer;
-import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.KeyFactory;
 import java.security.KeyStore;
-import java.security.PrivateKey;
-import java.security.cert.Certificate;
-import java.security.spec.PKCS8EncodedKeySpec;
 import java.time.Instant;
-import java.util.Base64;
 import java.util.Date;
 import java.util.Map;
 import java.util.Properties;
-import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManagerFactory;
@@ -58,30 +49,11 @@ class JwtSecurityProviderJwksTlsTest {
   void startJwksServer() throws Exception {
     signingKey = new RSAKeyGenerator(2048).keyID("tls-key").generate();
     jwksCert = TlsTestCerts.generateRsa(dir, "jwks");
-    KeyStore keyStore = KeyStore.getInstance("PKCS12");
-    keyStore.load(null, null);
-    char[] password = new char[0];
-    keyStore.setKeyEntry(
-        "jwks",
-        privateKey(jwksCert.privateKeyPath()),
-        password,
-        new Certificate[] {jwksCert.certificate()});
-    KeyManagerFactory keyManagers =
-        KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
-    keyManagers.init(keyStore, password);
-    SSLContext context = SSLContext.getInstance("TLS");
-    context.init(keyManagers.getKeyManagers(), null, null);
-    byte[] jwks = new JWKSet(signingKey.toPublicJWK()).toString().getBytes(StandardCharsets.UTF_8);
-    jwksServer = HttpsServer.create(new InetSocketAddress("localhost", 0), 0);
-    jwksServer.setHttpsConfigurator(new HttpsConfigurator(context));
-    jwksServer.createContext(
-        "/jwks.json",
-        exchange -> {
-          exchange.sendResponseHeaders(200, jwks.length);
-          exchange.getResponseBody().write(jwks);
-          exchange.close();
-        });
-    jwksServer.start();
+    jwksServer =
+        TlsTestCerts.startHttpsServer(
+            jwksCert,
+            "/jwks.json",
+            new JWKSet(signingKey.toPublicJWK()).toString().getBytes(StandardCharsets.UTF_8));
     props = new Properties();
     props.setProperty(
         JwtConfig.JWKS_URL_KEY,
@@ -142,15 +114,6 @@ class JwtSecurityProviderJwksTlsTest {
         new SignedJWT(new JWSHeader.Builder(JWSAlgorithm.RS256).keyID("tls-key").build(), claims);
     jwt.sign(new RSASSASigner(signingKey));
     return jwt.serialize();
-  }
-
-  private static PrivateKey privateKey(Path pem) throws Exception {
-    String body =
-        Files.readString(pem)
-            .replace("-----BEGIN PRIVATE KEY-----", "")
-            .replace("-----END PRIVATE KEY-----", "");
-    return KeyFactory.getInstance("RSA")
-        .generatePrivate(new PKCS8EncodedKeySpec(Base64.getMimeDecoder().decode(body)));
   }
 
   private static SagaAuthRequest bearer(String token) {

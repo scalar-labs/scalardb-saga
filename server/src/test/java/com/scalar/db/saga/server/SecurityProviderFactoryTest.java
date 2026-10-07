@@ -15,20 +15,14 @@ import com.scalar.db.saga.server.security.NoopSecurityProvider;
 import com.scalar.db.saga.server.security.SagaAuthRequest;
 import com.scalar.db.saga.server.security.SagaIdentity;
 import com.scalar.db.saga.server.security.SagaSecurityProvider;
-import com.sun.net.httpserver.HttpsConfigurator;
 import com.sun.net.httpserver.HttpsServer;
-import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.KeyStore;
-import java.security.cert.X509Certificate;
 import java.time.Instant;
 import java.util.Date;
 import java.util.Map;
 import java.util.Properties;
-import javax.net.ssl.KeyManagerFactory;
-import javax.net.ssl.SSLContext;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -82,34 +76,11 @@ class SecurityProviderFactoryTest {
     }
   }
 
-  private static HttpsServer startJwksHost(TlsTestCerts.PemPair cert, RSAKey signingKey)
-      throws Exception {
-    TlsMaterial material = TlsMaterial.load(cert.certChainPath(), cert.privateKeyPath());
-    KeyStore keyStore = KeyStore.getInstance("PKCS12");
-    keyStore.load(null, null);
-    char[] password = new char[0];
-    keyStore.setKeyEntry(
-        "jwks",
-        material.privateKey(),
-        password,
-        material.certChain().toArray(new X509Certificate[0]));
-    KeyManagerFactory keyManagers =
-        KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
-    keyManagers.init(keyStore, password);
-    SSLContext context = SSLContext.getInstance("TLS");
-    context.init(keyManagers.getKeyManagers(), null, null);
-    byte[] body = new JWKSet(signingKey.toPublicJWK()).toString().getBytes(StandardCharsets.UTF_8);
-    HttpsServer server = HttpsServer.create(new InetSocketAddress("localhost", 0), 0);
-    server.setHttpsConfigurator(new HttpsConfigurator(context));
-    server.createContext(
+  private static HttpsServer startJwksHost(TlsTestCerts.PemPair cert, RSAKey signingKey) {
+    return TlsTestCerts.startHttpsServer(
+        cert,
         "/jwks.json",
-        exchange -> {
-          exchange.sendResponseHeaders(200, body.length);
-          exchange.getResponseBody().write(body);
-          exchange.close();
-        });
-    server.start();
-    return server;
+        new JWKSet(signingKey.toPublicJWK()).toString().getBytes(StandardCharsets.UTF_8));
   }
 
   private static String token(RSAKey signingKey) throws Exception {

@@ -249,9 +249,11 @@ Two operational notes:
   `/scalardb-saga/conf/tls/egress/ca.crt` or named by `egress.ca_cert_path`. The bundle adds to the
   JVM's trust rather than replacing it, holds any number of certificates, and needs no switch:
   certificate validation and hostname verification stay on. One bundle covers every service and the
-  JWKS host, so each CA in it can vouch for all of them; mount only CAs you trust that far. It is
-  re-read on every reload pass, so a CA rotation (old and new CA in one file, then the old one
-  removed) needs no restart.
+  JWKS host, so each CA in it can vouch for all of them; mount only CAs you trust that far. A
+  bundled CA's own name constraints are not enforced: to confine a CA to certain hosts, bundle its
+  root and let a name-constrained intermediate carry the limit. While reload is enabled
+  (`reload.interval_seconds` above zero) the bundle is re-read on every pass, so a CA rotation (old
+  and new CA in one file, then the old one removed) needs no restart.
 
 Java clients of the SDK enable TLS with `useTransportSecurity()`; against a private CA, add
 `trustCaCertificate(path)` (and `overrideAuthority(name)` when dialing by IP or through a

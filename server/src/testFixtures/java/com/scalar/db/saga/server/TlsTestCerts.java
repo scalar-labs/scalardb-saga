@@ -1,8 +1,11 @@
 package com.scalar.db.saga.server;
 
+import com.sun.net.httpserver.HttpsConfigurator;
+import com.sun.net.httpserver.HttpsServer;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -13,6 +16,8 @@ import java.security.cert.X509Certificate;
 import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SSLContext;
 
 /**
  * Generates throwaway TLS material for tests: a self-signed certificate (SAN {@code localhost} and
@@ -46,6 +51,51 @@ public final class TlsTestCerts {
   /** Generates a P-256 EC pair under {@code dir}, file names derived from {@code baseName}. */
   public static PemPair generateEc(Path dir, String baseName) {
     return generate(dir, baseName, "EC", "256");
+  }
+
+  /**
+   * Starts an HTTPS server on a free port of every local address (so both {@code 127.0.0.1} and the
+   * IPv6 loopback reach it) presenting {@code pair}, answering {@code path} with 200 and {@code
+   * body}. The caller stops it. Loads the keystore {@link #generateRsa} and {@link #generateEc}
+   * write beside the PEM files.
+   */
+  @SuppressFBWarnings(
+      value = "HARD_CODE_PASSWORD",
+      justification = "Reads back the test-only keystore this class wrote; see generate()")
+  public static HttpsServer startHttpsServer(PemPair pair, String path, byte[] body) {
+    try {
+      KeyStore keyStore = KeyStore.getInstance("PKCS12");
+      try (InputStream in = Files.newInputStream(keystoreOf(pair))) {
+        keyStore.load(in, PASSWORD.toCharArray());
+      }
+      KeyManagerFactory keyManagers =
+          KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+      keyManagers.init(keyStore, PASSWORD.toCharArray());
+      SSLContext context = SSLContext.getInstance("TLS");
+      context.init(keyManagers.getKeyManagers(), null, null);
+      HttpsServer server = HttpsServer.create(new InetSocketAddress(0), 0);
+      server.setHttpsConfigurator(new HttpsConfigurator(context));
+      byte[] response = body.clone();
+      server.createContext(
+          path,
+          exchange -> {
+            exchange.sendResponseHeaders(200, response.length == 0 ? -1 : response.length);
+            if (response.length > 0) {
+              exchange.getResponseBody().write(response);
+            }
+            exchange.close();
+          });
+      server.start();
+      return server;
+    } catch (IOException | GeneralSecurityException e) {
+      throw new IllegalStateException("Failed to start the test HTTPS server", e);
+    }
+  }
+
+  /** The keystore generate() wrote for {@code pair}: the PEM chain's name with {@code .p12}. */
+  private static Path keystoreOf(PemPair pair) {
+    String chain = pair.certChainPath().toString();
+    return Path.of(chain.substring(0, chain.length() - ".crt".length()) + ".p12");
   }
 
   /** Wraps DER bytes in a PEM block with the given label, 64-column MIME line wrapping. */
