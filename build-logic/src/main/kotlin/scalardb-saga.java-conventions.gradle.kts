@@ -157,6 +157,9 @@ testing {
 val integrationTestStore = providers.systemProperty("scalardb.saga.integration_test.properties")
 tasks.named<Test>("integrationTest") {
     if (integrationTestStore.isPresent) {
+        // Only the path is a task input, not the file's contents or the store behind it, so a rerun
+        // after editing the file would otherwise be UP-TO-DATE, or FROM-CACHE after a clean.
+        doNotTrackState("an external store is not a tracked input")
         systemProperty(
             "scalardb.saga.integration_test.properties",
             rootDir.resolve(integrationTestStore.get()).absolutePath,
