@@ -260,7 +260,7 @@ class SagaServerConfigTest {
   @Test
   void load_egressCaUnsetAndBundleMounted_usesTheMountedBundleWithoutASwitch(@TempDir Path conf)
       throws IOException {
-    // Arrange — extra trust cannot weaken a connection, so a mounted bundle needs no switch
+    // Arrange — a bundle never disables validation or hostname checks, so mounting it is enough
     Path dir = Files.createDirectories(conf.resolve(SagaServerConfig.TLS_EGRESS_DIR));
     Path bundle = Files.writeString(dir.resolve(SagaServerConfig.EGRESS_CA_FILE), "bundle");
 

@@ -43,6 +43,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeAll;
@@ -765,6 +766,39 @@ class SagaServerTest {
     props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY, "251");
     props.setProperty(SagaServerConfig.RETENTION_MAX_PURGES_PER_PASS_KEY, "52");
     return SagaServerConfig.load(props);
+  }
+
+  @Test
+  void certificatePasses_neitherGiven_returnsNull() {
+    // Act & Assert
+    assertThat(SagaServer.certificatePasses(null, null)).isNull();
+  }
+
+  @Test
+  void certificatePasses_bothGiven_runsBoth() {
+    // Arrange
+    TlsReloader tls = mock(TlsReloader.class);
+    EgressTrust egress = mock(EgressTrust.class);
+
+    // Act
+    Objects.requireNonNull(SagaServer.certificatePasses(tls, egress)).run();
+
+    // Assert
+    verify(tls).run();
+    verify(egress).run();
+  }
+
+  @Test
+  void certificatePasses_tlsPassThrows_stillRunsTheEgressPassAndRethrows() {
+    // Arrange — an unexpected failure in one pass must not cost the other its turn
+    TlsReloader tls = mock(TlsReloader.class);
+    doThrow(new IllegalStateException("boom")).when(tls).run();
+    EgressTrust egress = mock(EgressTrust.class);
+    Runnable passes = Objects.requireNonNull(SagaServer.certificatePasses(tls, egress));
+
+    // Act & Assert
+    assertThatThrownBy(passes::run).isInstanceOf(IllegalStateException.class);
+    verify(egress).run();
   }
 
   @Test

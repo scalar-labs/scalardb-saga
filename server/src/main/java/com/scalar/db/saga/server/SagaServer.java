@@ -446,8 +446,10 @@ public final class SagaServer implements AutoCloseable {
    * or {@code null} when there is neither. Each pass logs its own rejections; the {@code finally}
    * keeps an unexpected failure in the first from costing the second its turn, as the manager does
    * for its passes.
+   *
+   * <p>Visible for testing.
    */
-  private static @Nullable Runnable certificatePasses(
+  static @Nullable Runnable certificatePasses(
       @Nullable TlsReloader tlsReloader, @Nullable EgressTrust egressTrust) {
     if (tlsReloader == null && egressTrust == null) {
       return null;

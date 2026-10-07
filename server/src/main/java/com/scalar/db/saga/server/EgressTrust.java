@@ -7,10 +7,13 @@ import java.security.GeneralSecurityException;
 import java.security.KeyStore;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
+import java.util.Enumeration;
 import java.util.List;
 import java.util.Objects;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.SSLSessionContext;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509ExtendedTrustManager;
@@ -26,12 +29,14 @@ import org.slf4j.LoggerFactory;
  * working when a private one is added.
  *
  * <p>Both outbound stacks hold one {@link SSLContext} whose trust manager forwards to a delegate
- * the reload pass swaps, so a rotated bundle reaches every new handshake without a restart. That
+ * the reload pass swaps, so a rotated bundle reaches every new connection without a restart. That
  * matters most during a CA rotation: the new CA has to be trusted before participants move to
  * certificates it issued, and a restart-only design would force every replica to restart inside
- * that window. Connections already established keep the trust they were verified under. The
- * delegate is the JDK's own trust manager, built over a key store of both certificate sets, so
- * chain validation and hostname verification are the platform's, not reimplemented here.
+ * that window. A swap also invalidates the context's cached client sessions: a resumed handshake
+ * never consults the trust manager, so without that a removed CA would keep vouching for hosts
+ * already reached until their sessions expired. Connections already open keep the trust they were
+ * verified under. The delegate is the JDK's own trust manager over a key store of both certificate
+ * sets, so chain validation and hostname verification are the platform's own.
  *
  * <p>Like {@link TlsReloader}, a pass parses and validates the complete bundle before anything is
  * swapped, and a bundle that fails is rejected whole: the previous trust stays in place and the
@@ -84,6 +89,7 @@ final class EgressTrust {
     }
     if (!candidate.equals(trusted)) {
       trustManager.delegate = trustManagerFor(jvmDefaults, candidate);
+      invalidateCachedSessions();
       trusted = candidate;
       logger.info(
           "Outbound CA bundle named by '{}' reloaded; new connections trust its {} certificate(s)"
@@ -95,6 +101,17 @@ final class EgressTrust {
       logger.info("Outbound CA bundle reload recovered after {} rejected pass(es)", rejectedPasses);
       rejectedPasses = 0;
       lastRejection = null;
+    }
+  }
+
+  /** Drops every cached client session, so the next handshake is a full one under the new trust. */
+  private void invalidateCachedSessions() {
+    SSLSessionContext sessions = sslContext.getClientSessionContext();
+    for (Enumeration<byte[]> ids = sessions.getIds(); ids.hasMoreElements(); ) {
+      SSLSession session = sessions.getSession(ids.nextElement());
+      if (session != null) {
+        session.invalidate();
+      }
     }
   }
 

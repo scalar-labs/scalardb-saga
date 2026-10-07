@@ -128,6 +128,24 @@ class EgressTrustTest {
   }
 
   @Test
+  void run_caRemovedFromTheBundle_hostsAlreadyReachedAreRefusedToo() throws Exception {
+    // Arrange — a session to A is cached by the first call. A resumed handshake never consults the
+    // trust manager, so without invalidation the removed CA would keep vouching for A.
+    int port = serve(participantA);
+    Path bundle = bundleOf(participantA);
+    EgressTrust trust = new EgressTrust(bundle);
+    assertThat(get(trust.sslContext(), port)).isEqualTo(200);
+    Files.copy(bundleOf(participantB), bundle, REPLACE_EXISTING);
+
+    // Act
+    trust.run();
+
+    // Assert
+    assertThatThrownBy(() -> get(trust.sslContext(), port))
+        .isInstanceOf(SSLHandshakeException.class);
+  }
+
+  @Test
   void run_bundleReplacedByPrivateKey_keepsTheTrustLoadedBefore() throws Exception {
     // Arrange
     int port = serve(participantA);

@@ -100,22 +100,28 @@ class SagaEgressTrustIntegrationTest extends ServerIntegrationTestSupport {
 
   @Test
   void startSync_bundleWithoutTheParticipantsCa_doesNotComplete() throws Exception {
+    // Arrange — the daemon booted trusting only the unrelated CA (configureProperties)
+
+    // Act
     HttpResponse<String> post = post("/sagas", "{\"sagaName\":\"" + SAGA + "\"}");
 
+    // Assert
     assertThat(status(post)).isNotEqualTo("COMPLETED");
   }
 
   @Test
   void startSync_bundleRotatedToTheParticipantsCaAndReloaded_completes() throws Exception {
-    // Old and new CA in one file, as a rotation stages it.
+    // Arrange — old and new CA in one file, as a rotation stages it, then one reload pass
     Files.writeString(
         Objects.requireNonNull(bundle, "configureProperties did not run"),
         Files.readString(unrelatedCert.certChainPath())
             + Files.readString(participantCert.certChainPath()));
     reloadEgressTrustNow();
 
+    // Act
     HttpResponse<String> post = post("/sagas", "{\"sagaName\":\"" + SAGA + "\"}");
 
+    // Assert
     assertThat(post.statusCode()).isEqualTo(200);
     assertThat(status(post)).isEqualTo("COMPLETED");
   }

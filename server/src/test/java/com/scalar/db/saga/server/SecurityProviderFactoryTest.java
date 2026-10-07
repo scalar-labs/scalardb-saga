@@ -3,12 +3,32 @@ package com.scalar.db.saga.server;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.nimbusds.jose.JWSAlgorithm;
+import com.nimbusds.jose.JWSHeader;
+import com.nimbusds.jose.crypto.RSASSASigner;
+import com.nimbusds.jose.jwk.JWKSet;
+import com.nimbusds.jose.jwk.RSAKey;
+import com.nimbusds.jose.jwk.gen.RSAKeyGenerator;
+import com.nimbusds.jwt.JWTClaimsSet;
+import com.nimbusds.jwt.SignedJWT;
 import com.scalar.db.saga.server.security.NoopSecurityProvider;
+import com.scalar.db.saga.server.security.SagaAuthRequest;
+import com.scalar.db.saga.server.security.SagaIdentity;
 import com.scalar.db.saga.server.security.SagaSecurityProvider;
+import com.sun.net.httpserver.HttpsConfigurator;
+import com.sun.net.httpserver.HttpsServer;
+import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.KeyStore;
+import java.security.cert.X509Certificate;
+import java.time.Instant;
+import java.util.Date;
+import java.util.Map;
 import java.util.Properties;
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SSLContext;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -25,6 +45,86 @@ class SecurityProviderFactoryTest {
     // Assert
     assertThat(provider).isInstanceOf(NoopSecurityProvider.class);
     assertThat(provider.name()).isEqualTo("noop");
+  }
+
+  @Test
+  void create_jwtWithEgressSocketFactoryGiven_fetchesTheJwksThroughIt(@TempDir Path dir)
+      throws Exception {
+    // Arrange — a JWKS host behind a private CA, reachable only through the egress trust's socket
+    // factory; a factory dropped on the way to the retriever leaves the token unverifiable
+    RSAKey signingKey = new RSAKeyGenerator(2048).keyID("k1").generate();
+    TlsTestCerts.PemPair jwksCert = TlsTestCerts.generateRsa(dir, "jwks");
+    HttpsServer jwks = startJwksHost(jwksCert, signingKey);
+    try {
+      Properties properties = new Properties();
+      properties.setProperty(SagaServerConfig.SECURITY_PROVIDER_KEY, "jwt");
+      properties.setProperty(
+          "scalar.db.saga.server.security.jwt.jwks_url",
+          "https://localhost:" + jwks.getAddress().getPort() + "/jwks.json");
+      properties.setProperty("scalar.db.saga.server.security.jwt.issuer", "https://issuer.example");
+      properties.setProperty("scalar.db.saga.server.security.jwt.audience", "saga-daemon");
+      EgressTrust trust = new EgressTrust(jwksCert.certChainPath());
+
+      try (SagaSecurityProvider provider =
+          SecurityProviderFactory.create(
+              SagaServerConfig.load(properties), trust.sslContext().getSocketFactory())) {
+        // Act
+        SagaIdentity identity =
+            provider.authenticate(
+                SagaAuthRequest.fromHeaders(
+                    "GET /sagas/x", null, Map.of("Authorization", "Bearer " + token(signingKey))));
+
+        // Assert
+        assertThat(identity.principal()).isEqualTo("alice");
+      }
+    } finally {
+      jwks.stop(0);
+    }
+  }
+
+  private static HttpsServer startJwksHost(TlsTestCerts.PemPair cert, RSAKey signingKey)
+      throws Exception {
+    TlsMaterial material = TlsMaterial.load(cert.certChainPath(), cert.privateKeyPath());
+    KeyStore keyStore = KeyStore.getInstance("PKCS12");
+    keyStore.load(null, null);
+    char[] password = new char[0];
+    keyStore.setKeyEntry(
+        "jwks",
+        material.privateKey(),
+        password,
+        material.certChain().toArray(new X509Certificate[0]));
+    KeyManagerFactory keyManagers =
+        KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+    keyManagers.init(keyStore, password);
+    SSLContext context = SSLContext.getInstance("TLS");
+    context.init(keyManagers.getKeyManagers(), null, null);
+    byte[] body = new JWKSet(signingKey.toPublicJWK()).toString().getBytes(StandardCharsets.UTF_8);
+    HttpsServer server = HttpsServer.create(new InetSocketAddress("localhost", 0), 0);
+    server.setHttpsConfigurator(new HttpsConfigurator(context));
+    server.createContext(
+        "/jwks.json",
+        exchange -> {
+          exchange.sendResponseHeaders(200, body.length);
+          exchange.getResponseBody().write(body);
+          exchange.close();
+        });
+    server.start();
+    return server;
+  }
+
+  private static String token(RSAKey signingKey) throws Exception {
+    JWTClaimsSet claims =
+        new JWTClaimsSet.Builder()
+            .subject("alice")
+            .issuer("https://issuer.example")
+            .audience("saga-daemon")
+            .expirationTime(Date.from(Instant.now().plusSeconds(300)))
+            .build();
+    SignedJWT jwt =
+        new SignedJWT(
+            new JWSHeader.Builder(JWSAlgorithm.RS256).keyID(signingKey.getKeyID()).build(), claims);
+    jwt.sign(new RSASSASigner(signingKey));
+    return jwt.serialize();
   }
 
   @Test
