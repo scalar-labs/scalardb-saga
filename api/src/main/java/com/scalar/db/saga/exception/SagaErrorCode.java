@@ -271,6 +271,14 @@ public enum SagaErrorCode {
       "The server is already running as many sagas as its admission cap allows, so it refused to start another. Nothing was persisted: the saga does not exist and its ID is still free. Distinct from RATE_LIMIT_EXCEEDED, which is about how often this caller may ask; this is about how much work the server is doing for everyone.",
       "Retry with backoff and jitter, honouring Retry-After when present. Sustained rejection means the cap, the request rate limit, or downstream capacity needs revisiting."),
 
+  SAGA_STEP_NOT_PARKED(
+      "DB-SAGA-20007",
+      Category.RETRYABLE_SERVER_ERROR,
+      "The step has not finished parking yet",
+      ErrorMetadataSchema.of("saga_id", "step_name"),
+      "An async-step callback arrived before the saga recorded that it is waiting on that step. The engine parks a saga only after the participant accepts the call, so a participant that calls back immediately can arrive first. Nothing was recorded; the callback was not applied.",
+      "Retry the callback with backoff, honouring Retry-After when present. Once the park is recorded, the same callback completes the step."),
+
   UNRECOGNIZED_RETRYABLE_SERVER_ERROR(
       "DB-SAGA-29999",
       Category.RETRYABLE_SERVER_ERROR,

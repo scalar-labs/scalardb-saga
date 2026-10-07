@@ -1815,6 +1815,18 @@ public final class ScalarDbSagaStore implements SagaStore {
         "verify claim of saga " + sagaId);
   }
 
+  @Override
+  public Optional<SagaStateSnapshot> getStateSnapshot(
+      String sagaId, SagaStatus status, Instant updatedAt) {
+    int bucket = schema.bucketOf(sagaId);
+    return runInTransaction(
+        tx ->
+            tx.get(buildStateGet(bucket, status.getStatusCode(), updatedAt, sagaId))
+                .map(this::toSagaStateSnapshot),
+        null,
+        "load saga state " + sagaId);
+  }
+
   private Optional<SagaStateSnapshot> loadStateSnapshot(String sagaId) {
     return runInTransaction(
         tx ->

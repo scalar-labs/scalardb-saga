@@ -279,6 +279,16 @@ public interface SagaStore extends AutoCloseable {
   Optional<SagaStateSnapshot> getStateSnapshot(String sagaId);
 
   /**
+   * Reads the saga's state only if it is at exactly {@code status} and {@code updatedAt}, by the
+   * state row's full key rather than a lookup by saga ID. For a caller that already knows both,
+   * from the event log for example: on a backend whose secondary-index reads lag the base table, a
+   * lookup by ID can miss a just-written row, while this read cannot.
+   *
+   * @return the snapshot, or empty when the saga is not at that status and timestamp
+   */
+  Optional<SagaStateSnapshot> getStateSnapshot(String sagaId, SagaStatus status, Instant updatedAt);
+
+  /**
    * Reads a saga's state snapshot and its event stream in a single transaction, so the two are a
    * coherent point-in-time view — a concurrent status transition cannot pair a stale snapshot with
    * a timeline that already contains the newer event. Returns empty if the saga does not exist.

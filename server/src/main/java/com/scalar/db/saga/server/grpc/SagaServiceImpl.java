@@ -5,8 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.protobuf.ByteString;
 import com.scalar.db.saga.api.SagaCallback;
 import com.scalar.db.saga.api.SagaDefinitionId;
-import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
+import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaInvalidRequestException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
@@ -33,9 +33,9 @@ import org.jspecify.annotations.Nullable;
 /**
  * The gRPC rendering of the saga lifecycle API — the wire-protocol parallel of {@link
  * com.scalar.db.saga.server.api.SagaResource} (REST). Holds no per-request state: the injected
- * {@link SagaOrchestrator} (the same instance the REST routes use), the server's shutdown signal,
- * and the {@link com.scalar.db.saga.server.SagaWaiterRegistry} are all shared and process-wide;
- * every latch or reference belonging to one call is local to it.
+ * {@link DefaultSagaOrchestrator} (the same instance the REST routes use), the server's shutdown
+ * signal, and the {@link com.scalar.db.saga.server.SagaWaiterRegistry} are all shared and
+ * process-wide; every latch or reference belonging to one call is local to it.
  *
  * <p><b>Sync vs async.</b> {@code async=true} starts the saga and returns the running snapshot
  * immediately. {@code async=false} blocks until the saga is terminal, bounded by the {@code
@@ -61,7 +61,7 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
   private static final TypeReference<LinkedHashMap<String, Object>> MAP_TYPE =
       new TypeReference<>() {};
 
-  private final SagaOrchestrator orchestrator;
+  private final DefaultSagaOrchestrator orchestrator;
   // The shared synchronous-wait policy, already bound to the server's configuration. A function
   // rather than a value because AwaitSaga supplies a different per-call cap on every request.
   private final LongUnaryOperator syncWaitBound;
@@ -74,7 +74,7 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
   private final ObjectMapper objectMapper = new ObjectMapper();
 
   public SagaServiceImpl(
-      SagaOrchestrator orchestrator,
+      DefaultSagaOrchestrator orchestrator,
       LongUnaryOperator syncWaitBound,
       CompletableFuture<Void> shutdownSignal,
       SagaWaiterRegistry waiterRegistry) {
@@ -135,7 +135,7 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
 
   /**
    * Waits until {@code sagaId} is terminal or {@code boundMillis} elapses, returning the latest
-   * snapshot either way. The first {@link SagaOrchestrator#getStateSnapshot} also validates
+   * snapshot either way. The first {@link DefaultSagaOrchestrator#getStateSnapshot} also validates
    * existence (throws {@link com.scalar.db.saga.exception.SagaNotFoundException} → {@code
    * NOT_FOUND}).
    *
@@ -186,8 +186,7 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
 
   private SagaStateSnapshot startAsyncAndSnapshot(
       StartSagaRequest request, Map<String, Object> input) {
-    String sagaId = dispatchStart(request, input, null);
-    return snapshotAfterStart(sagaId);
+    return start(request, input, null);
   }
 
   private SagaStateSnapshot startBoundedSync(StartSagaRequest request, Map<String, Object> input) {
@@ -198,13 +197,14 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
     CompletableFuture<Void> parked = new CompletableFuture<>();
     // One future, completed by whichever mechanism sees the saga settle first. The callback is
     // handed out before the saga id exists; on a server-generated id there is no id to register
-    // under until dispatchStart returns. The registry covers every drive after the registration
+    // under until the start returns. The registry covers every drive after the registration
     // below, including the resume that follows an asynchronous step and carries none.
     //
     // Neither covers a drive that parks before that registration. Its callback ends at the park
     // and its resume carries none, so a settle in that window reaches no one; the wait reads once
     // where polling begins to catch it.
-    String sagaId = dispatchStart(request, input, outcomeSignal(settled, parked));
+    SagaStateSnapshot created = start(request, input, outcomeSignal(settled, parked));
+    String sagaId = created.getSagaId();
     SagaStateSnapshot answer;
     try (SagaWaiterRegistry.Waiter waiter = waiterRegistry.register(sagaId, settled)) {
       answer =
@@ -213,7 +213,7 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
               abortSignal(),
               parked,
               computeBoundMillis(Long.MAX_VALUE),
-              () -> snapshotAfterStart(sagaId));
+              () -> readAfterStart(created));
     }
     // Never cancel the saga. Shutdown short-circuits the wait rather than letting it run to the
     // bound: the bound is a maximum, not a promise to wait, and a terminating server cannot advance
@@ -223,17 +223,16 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
   }
 
   /**
-   * Reads the snapshot of a saga that was just started. {@code createSaga} persisted it
-   * synchronously, so a {@link SagaNotFoundException} from this read is a server-side invariant
-   * violation (e.g. the saga was purged in the narrow window before the read), not a client error.
-   * Surface it as {@code INTERNAL} via the catch-all rather than {@code NOT_FOUND}, so a start
-   * RPC's {@code NOT_FOUND} unambiguously means the saga <i>definition</i> was not found.
+   * Reads a saga this call just started. The start persisted it synchronously, but on a backend
+   * whose secondary index lags the write, such as DynamoDB, the lookup by ID can briefly miss the
+   * new row. The saga exists either way, so a miss answers with the snapshot the start returned
+   * rather than an error that would tell the client its running saga was never created.
    */
-  private SagaStateSnapshot snapshotAfterStart(String sagaId) {
+  private SagaStateSnapshot readAfterStart(SagaStateSnapshot created) {
     try {
-      return orchestrator.getStateSnapshot(sagaId);
+      return orchestrator.getStateSnapshot(created.getSagaId());
     } catch (SagaNotFoundException e) {
-      throw new IllegalStateException("Saga " + sagaId + " not found immediately after start", e);
+      return created;
     }
   }
 
@@ -252,41 +251,24 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
   }
 
   /**
-   * Routes to the {@link SagaOrchestrator} {@code startAsync} overload matching the request:
-   * name-vs-versioned, server-generated-vs-client-supplied id, with or without the completion
-   * {@code callback}. Returns the saga id (the supplied one, or the generated one).
+   * Starts the saga the request names, by name or exact version, under the client-supplied ID when
+   * there is one, and returns the snapshot of the saga created. The start endpoints answer from
+   * that snapshot rather than reading the saga back by ID (see {@link #readAfterStart}).
    */
-  private String dispatchStart(
+  private SagaStateSnapshot start(
       StartSagaRequest request, Map<String, Object> input, @Nullable SagaCallback callback) {
-    boolean clientSupplied = request.hasSagaId();
+    String version = null;
     if (request.hasVersion()) {
-      SagaDefinitionId id = definitionId(request.getName(), request.getVersion());
-      if (clientSupplied) {
-        String sagaId = request.getSagaId();
-        if (callback == null) {
-          orchestrator.startAsync(sagaId, id, input);
-        } else {
-          orchestrator.startAsync(sagaId, id, input, callback);
-        }
-        return sagaId;
-      }
-      return callback == null
-          ? orchestrator.startAsync(id, input)
-          : orchestrator.startAsync(id, input, callback);
+      // Validated here so a malformed version is the caller's INVALID_ARGUMENT, not a failure
+      // inside the start.
+      version = definitionId(request.getName(), request.getVersion()).version();
     }
-    String name = request.getName();
-    if (clientSupplied) {
-      String sagaId = request.getSagaId();
-      if (callback == null) {
-        orchestrator.startAsync(sagaId, name, input);
-      } else {
-        orchestrator.startAsync(sagaId, name, input, callback);
-      }
-      return sagaId;
-    }
-    return callback == null
-        ? orchestrator.startAsync(name, input)
-        : orchestrator.startAsync(name, input, callback);
+    return orchestrator.startAsyncReturningSnapshot(
+        request.hasSagaId() ? request.getSagaId() : null,
+        request.getName(),
+        version,
+        input,
+        callback);
   }
 
   /**

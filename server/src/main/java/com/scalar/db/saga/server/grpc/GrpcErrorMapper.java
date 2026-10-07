@@ -18,6 +18,7 @@ import com.scalar.db.saga.exception.SagaOverloadedException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
+import com.scalar.db.saga.exception.SagaStepNotParkedException;
 import com.scalar.db.saga.server.api.ErrorMapper;
 import io.grpc.Metadata;
 import io.grpc.ServerCall;
@@ -109,6 +110,17 @@ final class GrpcErrorMapper {
             e.getMetadata(),
             e.getMessage(),
             ErrorMapper.OVERLOAD_RETRY_AFTER_MILLIS);
+      }
+      // Expected, like the overload refusal above, so DEBUG rather than the fallback's ERROR.
+      // Callbacks arrive over REST today; this arm keeps the two transports answering alike.
+      case SagaStepNotParkedException e -> {
+        logger.debug("{} handling gRPC call", e.getMessage());
+        yield status(
+            Status.Code.UNAVAILABLE,
+            e.getErrorCode(),
+            e.getMetadata(),
+            e.getMessage(),
+            ErrorMapper.STEP_NOT_PARKED_RETRY_AFTER_MILLIS);
       }
       case SagaPersistenceException pe -> {
         Status.Code code = pe.isRetryable() ? Status.Code.UNAVAILABLE : Status.Code.INTERNAL;

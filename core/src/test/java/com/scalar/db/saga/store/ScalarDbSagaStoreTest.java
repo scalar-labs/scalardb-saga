@@ -1890,6 +1890,38 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
+  void getStateSnapshot_statusAndUpdatedAtGiven_readsTheRowByItsFullKeyNotTheIndex()
+      throws Exception {
+    // Arrange
+    Instant updatedAt = Instant.parse("2026-01-01T00:00:00Z");
+    Result result = mockStateResult("saga-1", SagaStatus.WAITING, updatedAt);
+    ArgumentCaptor<Get> captor = ArgumentCaptor.forClass(Get.class);
+    when(tx.get(captor.capture())).thenReturn(Optional.of(result));
+
+    // Act
+    Optional<SagaStateSnapshot> snapshot =
+        store.getStateSnapshot("saga-1", SagaStatus.WAITING, updatedAt);
+
+    // Assert — a primary-key Get on (bucket, status, updated_at, saga_id), never an index scan
+    assertThat(snapshot).map(SagaStateSnapshot::getStatus).contains(SagaStatus.WAITING);
+    assertThat(captor.getValue().getClusteringKey()).isPresent();
+    verify(tx, never()).scan(any(Scan.class));
+  }
+
+  @Test
+  void getStateSnapshot_rowNotAtThatStatusAndUpdatedAt_returnsEmpty() throws Exception {
+    // Arrange
+    when(tx.get(any(Get.class))).thenReturn(Optional.empty());
+
+    // Act
+    Optional<SagaStateSnapshot> snapshot =
+        store.getStateSnapshot("saga-1", SagaStatus.WAITING, Instant.EPOCH);
+
+    // Assert
+    assertThat(snapshot).isEmpty();
+  }
+
+  @Test
   void getStateSnapshot_notFound_returnsEmpty() throws Exception {
     // Arrange
     when(tx.scan(any(Scan.class))).thenReturn(List.of());

@@ -1,9 +1,10 @@
 package com.scalar.db.saga.server.api;
 
 import com.scalar.db.saga.api.SagaCallback;
-import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
+import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.SagaInvalidRequestException;
+import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.server.BoundedWait;
 import com.scalar.db.saga.server.SagaWaiterRegistry;
 import com.scalar.db.saga.server.security.SagaOperation;
@@ -107,7 +108,7 @@ public final class SagaResource {
    */
   public static void register(
       JavalinDefaultRoutingApi routes,
-      SagaOrchestrator orchestrator,
+      DefaultSagaOrchestrator orchestrator,
       long syncWaitBoundMillis,
       CompletableFuture<Void> shutdownSignal,
       SagaWaiterRegistry waiterRegistry) {
@@ -117,19 +118,22 @@ public final class SagaResource {
           StartSagaRequest request = parseRequest(ctx);
           Map<String, Object> input = request.inputOrEmpty();
           if (isAsync(ctx.queryParam("async"))) {
-            String sagaId = orchestrator.startAsync(request.requireSagaName(), input);
-            respond(ctx, 202, orchestrator.getStateSnapshot(sagaId));
+            respond(
+                ctx,
+                202,
+                orchestrator.startAsyncReturningSnapshot(
+                    null, request.requireSagaName(), null, input, null));
           } else {
             CompletableFuture<SagaStateSnapshot> settled = new CompletableFuture<>();
             CompletableFuture<Void> parked = new CompletableFuture<>();
-            String sagaId =
-                orchestrator.startAsync(
-                    request.requireSagaName(), input, outcomeSignal(settled, parked));
+            SagaStateSnapshot created =
+                orchestrator.startAsyncReturningSnapshot(
+                    null, request.requireSagaName(), null, input, outcomeSignal(settled, parked));
             respondBoundedSync(
                 ctx,
                 orchestrator,
                 waiterRegistry,
-                sagaId,
+                created,
                 settled,
                 parked,
                 shutdownSignal,
@@ -145,18 +149,22 @@ public final class SagaResource {
           StartSagaRequest request = parseRequest(ctx);
           Map<String, Object> input = request.inputOrEmpty();
           if (isAsync(ctx.queryParam("async"))) {
-            orchestrator.startAsync(sagaId, request.requireSagaName(), input);
-            respond(ctx, 202, orchestrator.getStateSnapshot(sagaId));
+            respond(
+                ctx,
+                202,
+                orchestrator.startAsyncReturningSnapshot(
+                    sagaId, request.requireSagaName(), null, input, null));
           } else {
             CompletableFuture<SagaStateSnapshot> settled = new CompletableFuture<>();
             CompletableFuture<Void> parked = new CompletableFuture<>();
-            orchestrator.startAsync(
-                sagaId, request.requireSagaName(), input, outcomeSignal(settled, parked));
+            SagaStateSnapshot created =
+                orchestrator.startAsyncReturningSnapshot(
+                    sagaId, request.requireSagaName(), null, input, outcomeSignal(settled, parked));
             respondBoundedSync(
                 ctx,
                 orchestrator,
                 waiterRegistry,
-                sagaId,
+                created,
                 settled,
                 parked,
                 shutdownSignal,
@@ -240,9 +248,9 @@ public final class SagaResource {
    */
   private static void respondBoundedSync(
       Context ctx,
-      SagaOrchestrator orchestrator,
+      DefaultSagaOrchestrator orchestrator,
       SagaWaiterRegistry waiterRegistry,
-      String sagaId,
+      SagaStateSnapshot created,
       CompletableFuture<SagaStateSnapshot> settled,
       CompletableFuture<Void> parked,
       CompletableFuture<Void> shutdownSignal,
@@ -256,6 +264,7 @@ public final class SagaResource {
     // Neither covers a drive that parks before that registration. Its callback ends at the park
     // and its resume carries none, so a settle in that window reaches no one; the wait reads once
     // where polling begins to catch it.
+    String sagaId = created.getSagaId();
     try (SagaWaiterRegistry.Waiter waiter = waiterRegistry.register(sagaId, settled)) {
       snapshot =
           BoundedWait.awaitWithin(
@@ -263,9 +272,24 @@ public final class SagaResource {
               shutdownSignal,
               parked,
               timeoutMillis,
-              () -> orchestrator.getStateSnapshot(sagaId));
+              () -> readAfterStart(orchestrator, created));
     }
     respond(ctx, snapshot.getStatus().isTerminal() ? 200 : 202, snapshot);
+  }
+
+  /**
+   * Reads a saga this request just started. The start persisted it synchronously, but on a backend
+   * whose secondary index lags the write, such as DynamoDB, the lookup by ID can briefly miss the
+   * new row. The saga exists either way, so a miss answers with the snapshot the start returned
+   * rather than a 404 that would tell the client its running saga was never created.
+   */
+  private static SagaStateSnapshot readAfterStart(
+      DefaultSagaOrchestrator orchestrator, SagaStateSnapshot created) {
+    try {
+      return orchestrator.getStateSnapshot(created.getSagaId());
+    } catch (SagaNotFoundException e) {
+      return created;
+    }
   }
 
   /** Renders a saga snapshot as the JSON response body with the given HTTP status. */
