@@ -425,6 +425,12 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * <p>The snapshot is the saga as created, {@code RUNNING}; the drive is already under way, so it
    * may have moved on by the time the caller reads it.
    *
+   * <p><b>For the process hosting the engine, not for applications.</b> Like this class's other
+   * methods outside {@link SagaOrchestrator}, such as {@link #completeStepAsync} and {@link
+   * #adminService(OperatorContext, long)}, it serves the server that embeds the engine. An
+   * application should program to {@link SagaOrchestrator}, which the client SDK implements too;
+   * code written against this method runs only embedded.
+   *
    * @param sagaId the caller-supplied saga ID, or {@code null} to generate one
    * @param sagaName the definition name
    * @param version the exact definition version, or {@code null} for the latest
