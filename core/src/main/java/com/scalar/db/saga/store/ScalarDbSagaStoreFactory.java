@@ -178,7 +178,7 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
    */
   static void validateTransactionManager(Properties properties) {
     String manager = new DatabaseConfig(properties).getTransactionManager();
-    if (!CONSENSUS_COMMIT.equals(manager)) {
+    if (!CONSENSUS_COMMIT.equalsIgnoreCase(manager)) {
       throw new IllegalArgumentException(
           "The saga store requires "
               + DatabaseConfig.TRANSACTION_MANAGER

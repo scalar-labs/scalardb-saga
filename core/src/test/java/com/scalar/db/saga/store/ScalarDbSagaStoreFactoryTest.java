@@ -74,6 +74,17 @@ class ScalarDbSagaStoreFactoryTest {
   }
 
   @Test
+  void validateTransactionManager_consensusCommitInOtherCaseGiven_passes() {
+    // Arrange — ScalarDB resolves the name case-insensitively
+    Properties props = new Properties();
+    props.setProperty("scalar.db.transaction_manager", "Consensus-Commit");
+
+    // Act & Assert
+    assertThatCode(() -> ScalarDbSagaStoreFactory.validateTransactionManager(props))
+        .doesNotThrowAnyException();
+  }
+
+  @Test
   void validateTransactionManager_otherManagerGiven_throwsIllegalArgumentException() {
     // Arrange
     Properties props = new Properties();
