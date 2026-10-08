@@ -68,11 +68,22 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
     this.defaultDeadlineMillis = defaultDeadlineMillis;
   }
 
-  /** Creates a client connected to {@code target} over plaintext (the in-cluster default). */
+  /**
+   * Creates a client connected to {@code target} over plaintext (the in-cluster default).
+   *
+   * @param target the saga server's gRPC target, typically {@code host:port}
+   * @return a client owning a channel to that server
+   */
   public static GrpcSagaAdminClient create(String target) {
     return newBuilder().target(target).build();
   }
 
+  /**
+   * Starts building a client, for when plaintext with no credential is not enough: TLS, a
+   * credential, or a default deadline.
+   *
+   * @return a new builder
+   */
   public static Builder newBuilder() {
     return new Builder();
   }
@@ -251,6 +262,12 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
 
     private Builder() {}
 
+    /**
+     * The saga server to connect to, as a gRPC target, typically {@code host:port}. Required.
+     *
+     * @param target the gRPC target
+     * @return this builder
+     */
     public Builder target(String target) {
       this.target = Objects.requireNonNull(target, "target must not be null");
       return this;
@@ -260,6 +277,9 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
      * The credential presented on every call, resolved server-side to the operator identity.
      * Against a daemon with a real provider this is required; {@link
      * #staticHeaderCredentials(String, String)} builds one for the header-based built-in providers.
+     *
+     * @param callCredentials the credential to present on every call
+     * @return this builder
      */
     public Builder callCredentials(CallCredentials callCredentials) {
       this.callCredentials =
@@ -267,7 +287,11 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
       return this;
     }
 
-    /** Plaintext transport (the default; appropriate for an isolated in-cluster network). */
+    /**
+     * Plaintext transport (the default; appropriate for an isolated in-cluster network).
+     *
+     * @return this builder
+     */
     public Builder usePlaintext() {
       this.useTls = false;
       return this;
@@ -279,6 +303,8 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
      * JVM's default trust store unless {@link #trustCaCertificate(Path)} narrows it. {@link
      * #build()} fails fast if neither the JRE nor a loaded tcnative provides ALPN (on Java 8, use
      * 8u252+; the default grpc-netty-shaded transport bundles tcnative).
+     *
+     * @return this builder
      */
     public Builder useTransportSecurity() {
       this.useTls = true;
@@ -316,7 +342,13 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
       return this;
     }
 
-    /** A default per-call deadline (ms) applied to every admin call; {@code 0} disables. */
+    /**
+     * A default per-call deadline (ms) applied to every admin call; {@code 0} disables.
+     *
+     * @param defaultDeadlineMillis the deadline in milliseconds, or {@code 0} for none
+     * @return this builder
+     * @throws IllegalArgumentException if negative
+     */
     public Builder defaultDeadlineMillis(long defaultDeadlineMillis) {
       if (defaultDeadlineMillis < 0L) {
         throw new IllegalArgumentException("defaultDeadlineMillis must not be negative");
@@ -325,6 +357,17 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
       return this;
     }
 
+    /**
+     * Opens the channel and creates the client. A configuration that cannot work fails here rather
+     * than at the first call: a trusted CA on a plaintext channel, TLS without ALPN, or a CA
+     * certificate file that cannot be read.
+     *
+     * @return the client, which owns the channel until {@link GrpcSagaAdminClient#close()}
+     * @throws NullPointerException if {@link #target(String)} was not set
+     * @throws IllegalStateException if {@link #trustCaCertificate(Path)} was set without {@link
+     *     #useTransportSecurity()}, or TLS was requested but ALPN is unavailable
+     * @throws IllegalArgumentException if the CA certificate file cannot be read
+     */
     public GrpcSagaAdminClient build() {
       String resolvedTarget = Objects.requireNonNull(target, "target must be set");
       ManagedChannel channel =

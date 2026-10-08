@@ -22,6 +22,9 @@ public final class BoundedQueueWarningFilter extends TurboFilter {
   private static final String LOGGER_NAME = QueuedThreadPool.class.getName();
   private static final String MESSAGE_PREFIX = "Detected thread pool queue";
 
+  /** Creates the filter; Logback instantiates it by reflection from {@code logback.xml}. */
+  public BoundedQueueWarningFilter() {}
+
   @Override
   public FilterReply decide(
       @Nullable Marker marker,

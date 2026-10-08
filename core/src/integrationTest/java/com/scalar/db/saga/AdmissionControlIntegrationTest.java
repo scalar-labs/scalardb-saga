@@ -12,6 +12,7 @@ import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaOverloadedException;
+import com.scalar.db.saga.integration.IntegrationTestStore;
 import com.scalar.db.saga.store.ScalarDbSagaStoreFactory;
 import com.scalar.db.saga.testing.FakeStep;
 import java.nio.file.Files;
@@ -61,11 +62,8 @@ class AdmissionControlIntegrationTest {
   void setUp() {
     dbPath = tempDir.resolve("admission-control-it.db");
     props = new Properties();
-    props.setProperty("scalar.db.storage", "jdbc");
-    props.setProperty(
-        "scalar.db.contact_points",
-        "jdbc:sqlite:" + dbPath.toAbsolutePath() + "?busy_timeout=10000&journal_mode=WAL");
-    props.setProperty("scalar.db.saga.store.num_buckets", "1");
+    IntegrationTestStore.configure(props, dbPath);
+    props.setProperty("scalar.db.saga.store.scalardb.num_buckets", "1");
     stepRelease = new CountDownLatch(1);
     stepStarted = new CountDownLatch(1);
     concurrentDrives.set(0);

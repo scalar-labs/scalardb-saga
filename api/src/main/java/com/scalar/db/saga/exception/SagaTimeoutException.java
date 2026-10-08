@@ -32,6 +32,7 @@ import org.jspecify.annotations.Nullable;
  */
 public class SagaTimeoutException extends SagaRuntimeException {
 
+  /** The ID the expired wait was waiting on; null for a request timeout. */
   private final @Nullable String sagaId;
 
   private SagaTimeoutException(String sagaId) {
@@ -46,7 +47,12 @@ public class SagaTimeoutException extends SagaRuntimeException {
     this.sagaId = null;
   }
 
-  /** The request itself did not complete before its deadline; the transport status is the cause. */
+  /**
+   * The request itself did not complete before its deadline; the transport status is the cause.
+   *
+   * @param cause the transport status that reported the expired deadline
+   * @return the exception to throw, carrying {@link SagaErrorCode#REQUEST_TIMEOUT}
+   */
   public static SagaTimeoutException requestTimedOut(Throwable cause) {
     return new SagaTimeoutException(SagaErrorCode.REQUEST_TIMEOUT, cause);
   }
@@ -57,6 +63,7 @@ public class SagaTimeoutException extends SagaRuntimeException {
    *
    * @param sagaId the ID the saga was started under: the handle to poll it by, and the key that
    *     resolves whether an ambiguous start landed
+   * @return the exception to throw, carrying {@link SagaErrorCode#SAGA_AWAIT_TIMEOUT}
    */
   public static SagaTimeoutException awaitExpired(String sagaId) {
     return new SagaTimeoutException(sagaId);
@@ -66,6 +73,8 @@ public class SagaTimeoutException extends SagaRuntimeException {
    * The ID the expired wait was waiting on, or null when this is a {@link
    * SagaErrorCode#REQUEST_TIMEOUT}. Non-null for {@link SagaErrorCode#SAGA_AWAIT_TIMEOUT}, where it
    * is what the code's remediation tells the caller to poll.
+   *
+   * @return the saga ID, or {@code null} for a request timeout
    */
   public @Nullable String getSagaId() {
     return sagaId;

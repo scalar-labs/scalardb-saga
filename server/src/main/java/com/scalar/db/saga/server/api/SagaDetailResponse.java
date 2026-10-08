@@ -8,6 +8,11 @@ import java.util.List;
  * (metadata and error/reason only — never raw step payloads). {@code truncated} is true when the
  * timeline holds only the newest events because the saga's history exceeded the server's configured
  * bound; the full history remains in the store.
+ *
+ * @param saga the saga's current state
+ * @param timeline the saga's events, oldest first; metadata and error or reason only, never step
+ *     payloads
+ * @param truncated whether {@code timeline} holds only the newest events
  */
 public record SagaDetailResponse(
     SagaSnapshotResponse saga, List<TimelineEventResponse> timeline, boolean truncated) {

@@ -41,6 +41,9 @@ public class SagaServerCommand implements Callable<Integer> {
 
   private static final Logger logger = LoggerFactory.getLogger(SagaServerCommand.class);
 
+  /** Creates the command; {@link #main} hands it to picocli, which binds the options. */
+  public SagaServerCommand() {}
+
   /**
    * Reports the version {@code --version} prints, read from the jar manifest rather than a constant
    * in the annotation so it cannot drift from the build that produced the jar. Reports {@code

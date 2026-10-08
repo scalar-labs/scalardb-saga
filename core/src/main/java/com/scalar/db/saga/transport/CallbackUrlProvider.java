@@ -17,6 +17,10 @@ public interface CallbackUrlProvider {
   /**
    * Returns the full callback URL (including any auth token) for completing {@code stepName} of
    * {@code sagaId}, or {@code null} if async completion is not configured.
+   *
+   * @param sagaId the saga whose step the callback completes
+   * @param stepName the async step the callback completes
+   * @return the URL to send as {@code X-Saga-Callback-Url}, or {@code null} to omit the header
    */
   @Nullable String callbackUrl(String sagaId, String stepName);
 }

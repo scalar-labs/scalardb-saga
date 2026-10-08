@@ -9,6 +9,10 @@ import org.jspecify.annotations.Nullable;
  * REST response view of a page of sagas: the snapshots plus an opaque {@code nextPageToken} to
  * fetch the following page (absent when this is the last page). The token is passed back verbatim
  * as the {@code pageToken} query parameter; a client treats it as opaque.
+ *
+ * @param sagas the page's saga snapshots, possibly empty
+ * @param nextPageToken the token to pass back as {@code pageToken} for the next page, or absent on
+ *     the last page
  */
 public record SagaListResponse(List<SagaSnapshotResponse> sagas, @Nullable String nextPageToken) {
 

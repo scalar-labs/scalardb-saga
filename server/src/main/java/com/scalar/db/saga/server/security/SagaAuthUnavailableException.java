@@ -21,8 +21,16 @@ public final class SagaAuthUnavailableException extends SagaRuntimeException {
 
   private static final long serialVersionUID = 1L;
 
+  /** The operator-facing reason, logged server-side and never sent on the wire. */
   private final String internalDetail;
 
+  /**
+   * Creates the exception a provider throws when it could not reach what it needs to verify the
+   * credential.
+   *
+   * @param internalDetail which provider failed and why, for the server log only
+   * @param cause the upstream failure, such as the failed JWKS fetch
+   */
   public SagaAuthUnavailableException(String internalDetail, Throwable cause) {
     super(
         SagaErrorCode.SERVICE_UNAVAILABLE,
@@ -31,7 +39,11 @@ public final class SagaAuthUnavailableException extends SagaRuntimeException {
     this.internalDetail = Objects.requireNonNull(internalDetail, "internalDetail must not be null");
   }
 
-  /** The server-side-only reason (never sent on the wire); used by the daemon's log statement. */
+  /**
+   * The server-side-only reason (never sent on the wire); used by the daemon's log statement.
+   *
+   * @return the operator-facing reason
+   */
   public String getInternalDetail() {
     return internalDetail;
   }

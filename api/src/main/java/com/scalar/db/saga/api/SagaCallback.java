@@ -7,10 +7,18 @@ package com.scalar.db.saga.api;
  */
 public interface SagaCallback {
 
-  /** Called when the saga completes successfully (all steps executed and confirmed). */
+  /**
+   * Called when the saga completes successfully (all steps executed and confirmed).
+   *
+   * @param saga the saga's final state
+   */
   void onCompleted(SagaStateSnapshot saga);
 
-  /** Called when the saga is fully compensated (all compensations succeeded). */
+  /**
+   * Called when the saga is fully compensated (all compensations succeeded).
+   *
+   * @param saga the saga's final state
+   */
   void onCompensated(SagaStateSnapshot saga);
 
   /**
@@ -28,6 +36,8 @@ public interface SagaCallback {
    * <p>Defaults to doing nothing, so no implementation has to write a method that all but never
    * runs. It stays on the interface rather than being removed so that the narrow path above still
    * reaches the caller that asked to hear about it.
+   *
+   * @param saga the saga's state at escalation
    */
   default void onEscalated(SagaStateSnapshot saga) {}
 
@@ -55,6 +65,8 @@ public interface SagaCallback {
    * <p>Defaults to doing nothing because observing a park is optional: a saga with no asynchronous
    * step never parks, and such a caller should not be made to write an empty method for it.
    * Override it whenever a saga may contain an asynchronous step.
+   *
+   * @param saga the saga's state at the park
    */
   default void onParked(SagaStateSnapshot saga) {}
 }

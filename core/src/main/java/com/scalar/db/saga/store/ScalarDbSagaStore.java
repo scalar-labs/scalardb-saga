@@ -16,7 +16,6 @@ import com.scalar.db.exception.transaction.CrudConflictException;
 import com.scalar.db.exception.transaction.TransactionException;
 import com.scalar.db.exception.transaction.UnknownTransactionStatusException;
 import com.scalar.db.io.Key;
-import com.scalar.db.io.TimestampTZColumn;
 import com.scalar.db.saga.api.SagaPage;
 import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
@@ -77,6 +76,18 @@ public final class ScalarDbSagaStore implements SagaStore {
           .mapToInt(SagaStatus::getStatusCode)
           .sorted()
           .toArray();
+
+  /**
+   * The earliest instant the epoch-millisecond {@code updated_at} key can hold: -2^53 ms, the low
+   * end of the BIGINT range ScalarDB accepts on every backend. Cosmos DB rejects a key value beyond
+   * it, a scan bound included, so the listing's bounds and open-ended sentinel stay inside it.
+   */
+  static final Instant MIN_KEY_INSTANT = Instant.ofEpochMilli(-(1L << 53));
+
+  /**
+   * The latest instant the {@code updated_at} key can hold: 2^53 ms, the high end of that range.
+   */
+  static final Instant MAX_KEY_INSTANT = Instant.ofEpochMilli(1L << 53);
 
   /** Format version prefix for the opaque list page token. */
   private static final String PAGE_TOKEN_VERSION = "1";
@@ -333,6 +344,10 @@ public final class ScalarDbSagaStore implements SagaStore {
     return registeredAt;
   }
 
+  private static Instant updatedAt(Result row) {
+    return Instant.ofEpochMilli(row.getBigInt("updated_at"));
+  }
+
   // ---------------------------------------------------------------------------
   // Events
   // ---------------------------------------------------------------------------
@@ -509,7 +524,9 @@ public final class ScalarDbSagaStore implements SagaStore {
           tx.insert(buildStateInsert(bucket, updated, ownerId));
 
           for (Result parked : tx.scan(buildParkedIndexScan(sagaId))) {
-            tx.delete(buildParkedDelete(bucket, parked.getTimestampTZ("parked_deadline"), sagaId));
+            tx.delete(
+                buildParkedDelete(
+                    bucket, Instant.ofEpochMilli(parked.getBigInt("parked_deadline")), sagaId));
           }
           return updated;
         },
@@ -772,13 +789,11 @@ public final class ScalarDbSagaStore implements SagaStore {
   public SagaPage<SagaStateSnapshot> listStateSnapshots(SagaQuery query) {
     int numBuckets = schema.getNumBuckets();
     int pageSize = query.getPageSize();
-    @Nullable Instant updatedAfter =
-        requireInTimestampTzRange(query.getUpdatedAfter(), "updatedAfter");
-    @Nullable Instant updatedBefore =
-        requireInTimestampTzRange(query.getUpdatedBefore(), "updatedBefore");
-    // Open-ended upper bound: scan to the max instant TIMESTAMPTZ can store. That sentinel keeps
-    // the end key at the same clustering-key width as the start key.
-    Instant endTs = updatedBefore != null ? updatedBefore : TimestampTZColumn.MAX_VALUE;
+    @Nullable Instant updatedAfter = requireInKeyRange(query.getUpdatedAfter(), "updatedAfter");
+    @Nullable Instant updatedBefore = requireInKeyRange(query.getUpdatedBefore(), "updatedBefore");
+    // Open-ended upper bound: scan to the latest instant the key can hold, so every stored row is
+    // in range. That sentinel keeps the end key at the same clustering-key width as the start key.
+    Instant endTs = updatedBefore != null ? updatedBefore : MAX_KEY_INSTANT;
 
     // Which status slices to sweep, in a stable ascending order, and where a token resumes.
     SagaStatus statusFilter = query.getStatus();
@@ -863,7 +878,7 @@ public final class ScalarDbSagaStore implements SagaStore {
                   buildStateRangeScan(bucket, statusCode, startTs, startInclusive, endTs))) {
             for (Optional<Result> next = scanner.one(); next.isPresent(); next = scanner.one()) {
               Result r = next.get();
-              Instant ts = r.getTimestampTZ("updated_at");
+              Instant ts = updatedAt(r);
               if (rows.size() >= limit && !ts.equals(lastTs)) {
                 break; // limit met and a new cohort begins — leave it for the next page
               }
@@ -890,27 +905,17 @@ public final class ScalarDbSagaStore implements SagaStore {
   }
 
   /**
-   * Rejects an {@code updated_at} bound outside the range this store's TIMESTAMPTZ column can hold,
-   * with a clear message, rather than letting it surface as a lower-level exception when the scan
-   * key is built. Sub-millisecond precision needs no handling here: the scan routes the bound
-   * through {@link TimestampTZColumn#of}, which truncates it to match the millisecond-granular
-   * stored values.
+   * Rejects an {@code updated_at} bound outside the range the key can hold ({@link
+   * #MIN_KEY_INSTANT} to {@link #MAX_KEY_INSTANT}), with a clear message, rather than letting it
+   * surface as a lower-level exception when the scan key is built. Sub-millisecond precision needs
+   * no handling here: {@code toEpochMilli} drops it, the same way the stored values were written.
    *
    * @return {@code bound} unchanged (including {@code null}, which means no bound)
    */
-  private static @Nullable Instant requireInTimestampTzRange(
-      @Nullable Instant bound, String field) {
-    if (bound != null
-        && (bound.isBefore(TimestampTZColumn.MIN_VALUE)
-            || bound.isAfter(TimestampTZColumn.MAX_VALUE))) {
+  private static @Nullable Instant requireInKeyRange(@Nullable Instant bound, String field) {
+    if (bound != null && (bound.isBefore(MIN_KEY_INSTANT) || bound.isAfter(MAX_KEY_INSTANT))) {
       throw new SagaIllegalArgumentException(
-          field
-              + " must be in ["
-              + TimestampTZColumn.MIN_VALUE
-              + ", "
-              + TimestampTZColumn.MAX_VALUE
-              + "]: "
-              + bound);
+          field + " must be in [" + MIN_KEY_INSTANT + ", " + MAX_KEY_INSTANT + "]: " + bound);
     }
     return bound;
   }
@@ -1187,11 +1192,7 @@ public final class ScalarDbSagaStore implements SagaStore {
                   "Cannot delete saga in non-terminal status: " + status);
             }
             tx.delete(
-                buildStateDelete(
-                    r.getInt("bucket"),
-                    r.getInt("status"),
-                    r.getTimestampTZ("updated_at"),
-                    sagaId));
+                buildStateDelete(r.getInt("bucket"), r.getInt("status"), updatedAt(r), sagaId));
           }
 
           List<Result> eventResults =
@@ -1568,12 +1569,15 @@ public final class ScalarDbSagaStore implements SagaStore {
         .table(SagaSchema.STATE_TABLE)
         .partitionKey(Key.ofInt("bucket", bucket))
         .start(
-            Key.newBuilder().addInt("status", status).addTimestampTZ("updated_at", startTs).build(),
+            Key.newBuilder()
+                .addInt("status", status)
+                .addBigInt("updated_at", startTs.toEpochMilli())
+                .build(),
             startInclusive)
         .end(
             Key.newBuilder()
                 .addInt("status", status)
-                .addTimestampTZ("updated_at", endInclusive)
+                .addBigInt("updated_at", endInclusive.toEpochMilli())
                 .build(),
             true)
         .build();
@@ -1585,8 +1589,8 @@ public final class ScalarDbSagaStore implements SagaStore {
         .namespace(SagaSchema.NAMESPACE)
         .table(SagaSchema.PARKED_TABLE)
         .partitionKey(Key.ofInt("bucket", bucket))
-        .start(Key.newBuilder().addTimestampTZ("parked_deadline", Instant.EPOCH).build(), true)
-        .end(Key.newBuilder().addTimestampTZ("parked_deadline", threshold).build(), true)
+        .start(Key.newBuilder().addBigInt("parked_deadline", 0L).build(), true)
+        .end(Key.newBuilder().addBigInt("parked_deadline", threshold.toEpochMilli()).build(), true)
         .build();
   }
 
@@ -1620,7 +1624,7 @@ public final class ScalarDbSagaStore implements SagaStore {
 
   private static Key parkedClusteringKey(Instant parkedDeadline, String sagaId) {
     return Key.newBuilder()
-        .addTimestampTZ("parked_deadline", parkedDeadline)
+        .addBigInt("parked_deadline", parkedDeadline.toEpochMilli())
         .addText("saga_id", sagaId)
         .build();
   }
@@ -1796,7 +1800,7 @@ public final class ScalarDbSagaStore implements SagaStore {
         SagaStatus.fromStatusCode(r.getInt("status")),
         r.getText("definition_version"),
         r.getTimestampTZ("created_at"),
-        r.getTimestampTZ("updated_at"));
+        updatedAt(r));
   }
 
   /**
@@ -1857,7 +1861,7 @@ public final class ScalarDbSagaStore implements SagaStore {
   private static Key stateClusteringKey(int status, Instant updatedAt, String sagaId) {
     return Key.newBuilder()
         .addInt("status", status)
-        .addTimestampTZ("updated_at", updatedAt)
+        .addBigInt("updated_at", updatedAt.toEpochMilli())
         .addText("saga_id", sagaId)
         .build();
   }
@@ -2008,6 +2012,8 @@ public final class ScalarDbSagaStore implements SagaStore {
       if (indexOfStatus(allowedStatusCodes, statusCode) < 0) {
         throw new SagaIllegalArgumentException("Page token does not match the query");
       }
+      // Held to the same range as the query bounds, since it becomes the next scan's start key.
+      requireInKeyRange(updatedAt, "Page token updatedAt");
       return new PageCursor(bucket, statusCode, updatedAt);
     }
   }

@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -183,6 +184,9 @@ public class SagaEngine implements AutoCloseable {
   /**
    * Resumes a saga from a specific step (used by recovery).
    *
+   * @param def the saga's definition, at the version the saga was created with
+   * @param context the execution context rebuilt by {@link #replayEvents}
+   * @param fromStepIndex the index of the first step to execute
    * @return the final state snapshot
    */
   public SagaStateSnapshot resumeFrom(
@@ -202,6 +206,10 @@ public class SagaEngine implements AutoCloseable {
 
   /**
    * Triggers compensation from a specific step (used by recovery for sagas stuck in COMPENSATING).
+   *
+   * @param def the saga's definition, at the version the saga was created with
+   * @param context the execution context rebuilt by {@link #replayEvents}
+   * @param fromStepIndex the index of the first step to compensate, counting backwards from it
    */
   public void compensateFrom(SagaDefinition def, ExecutionContext context, int fromStepIndex) {
     String sagaId = context.getSagaId();
@@ -240,7 +248,15 @@ public class SagaEngine implements AutoCloseable {
     }
   }
 
-  /** Replays events to reconstruct an ExecutionContext for crash recovery. */
+  /**
+   * Replays events to reconstruct an ExecutionContext for crash recovery.
+   *
+   * @param saga the saga's current state snapshot
+   * @param events the saga's complete event stream from sequence 0, in order; a slice yields a
+   *     context whose next sequence is wrong
+   * @return a context holding the saga input, every completed step's output, the failed and
+   *     compensated step indices, and the next event sequence
+   */
   public ExecutionContext replayEvents(SagaStateSnapshot saga, List<SagaEvent> events) {
     ExecutionContext context = new ExecutionContext(saga.getSagaId(), Map.of(), saga);
 
@@ -282,16 +298,55 @@ public class SagaEngine implements AutoCloseable {
     return context;
   }
 
-  /** Initiates graceful shutdown. */
-  void shutdown() {
+  /**
+   * Marks the engine as shutting down without waiting: new drives are refused, and running ones
+   * stop at their next step boundary under {@code WAIT_CURRENT_STEP}. A caller that has other work
+   * to finish first, such as stopping background managers whose drives run through this engine,
+   * calls this before that work, so those drives wind down at once instead of spending the budget.
+   * Idempotent; {@link #shutdown(long)} calls it too.
+   */
+  void beginShutdown() {
     synchronized (shutdownLock) {
       shuttingDown = true;
     }
+  }
 
-    long deadline = clock.millis() + shutdownConfig.timeoutMillis();
+  private void markForRecovery(String sagaId) {
+    try {
+      store.markForRecovery(sagaId);
+      logger.info("Marked saga {} for recovery during shutdown", sagaId);
+    } catch (RuntimeException e) {
+      logger.warn("Failed to mark saga {} for recovery during shutdown", sagaId, e);
+    }
+  }
+
+  /**
+   * Initiates graceful shutdown, waiting up to the configured shutdown timeout for active sagas.
+   */
+  void shutdown() {
+    shutdown(shutdownConfig.timeoutMillis());
+  }
+
+  /**
+   * Initiates graceful shutdown: waits up to {@code waitMillis} for active sagas to finish per the
+   * shutdown mode, then marks whatever is still active for recovery. The caller hands in what is
+   * left of a budget it owns, so a server can bound its whole shutdown by one deadline instead of
+   * this engine starting a clock of its own. The wait is measured with monotonic time, not the
+   * injected clock: that clock stamps saga events and may be stepped by an operator or NTP, and a
+   * step must neither stretch the drain past the caller's deadline nor cut it short. The wait is
+   * the optional part of the drain; the mark is the necessary one, and it runs even when {@code
+   * waitMillis} is zero or already spent: it is one store write per saga, the store is still open
+   * here, and skipping it would cost each saga a full staleness threshold before recovery noticed
+   * it.
+   */
+  void shutdown(long waitMillis) {
+    beginShutdown();
+
+    long deadlineNanos =
+        System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(Math.max(0L, waitMillis));
 
     while (!activeSagas.isEmpty()) {
-      long remaining = deadline - clock.millis();
+      long remaining = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
       if (remaining <= 0) {
         break;
       }
@@ -303,15 +358,18 @@ public class SagaEngine implements AutoCloseable {
       }
     }
 
-    // Mark remaining active sagas for immediate recovery pickup
-    for (String sagaId : activeSagas.keySet()) {
-      try {
-        store.markForRecovery(sagaId);
-        logger.info("Marked saga {} for recovery during shutdown", sagaId);
-      } catch (RuntimeException e) {
-        logger.warn("Failed to mark saga {} for recovery during shutdown", sagaId, e);
-      }
-    }
+    // Mark remaining active sagas for immediate recovery pickup, all at once: each mark is its own
+    // store transaction, so marking one after another would make the tail grow with the number of
+    // active sagas times the store's latency. The store's connection pool bounds the parallelism.
+    // join() is deliberately uninterruptible: the wait above may have left the interrupt flag set,
+    // and a mark cut short costs its saga a full staleness threshold.
+    ExecutorService marker = Executors.newVirtualThreadPerTaskExecutor();
+    CompletableFuture.allOf(
+            List.copyOf(activeSagas.keySet()).stream()
+                .map(sagaId -> CompletableFuture.runAsync(() -> markForRecovery(sagaId), marker))
+                .toArray(CompletableFuture[]::new))
+        .join();
+    marker.shutdown();
 
     executor.shutdownNow();
 

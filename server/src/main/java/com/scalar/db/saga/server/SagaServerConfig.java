@@ -160,11 +160,15 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code shutdown.mode} — {@code WAIT_CURRENT_STEP} (default) finishes the running step and
  *       stops between steps, leaving the saga for recovery; {@code WAIT_ALL_SAGAS} waits for
  *       in-flight sagas to reach a terminal state
- *   <li>{@code shutdown.timeout_millis} — ceiling (ms) on that drain (default {@value
- *       #DEFAULT_SHUTDOWN_TIMEOUT_MILLIS}). It is the second of the two shutdown windows the daemon
- *       spends in sequence; budget a container's termination grace period for their sum. {@code 0}
- *       drains nothing: in-flight work is cancelled at once and left for the recovery scan, which
- *       trades shutdown latency for reclaim latency on the next boot
+ *   <li>{@code shutdown.timeout_millis} — the budget (ms) for the whole drain (default {@value
+ *       #DEFAULT_SHUTDOWN_TIMEOUT_MILLIS}): one deadline, computed once, that the reload stop, both
+ *       transport drains and the saga drain spend in turn. The first three share at most half of it
+ *       and never more than 15s, with the transports draining side by side; the saga drain gets the
+ *       rest. Past the deadline each saga still active is marked for recovery, one store write each
+ *       run in parallel, and the store closes: size a container's termination grace period above
+ *       this value with headroom for that tail. {@code 0} skips every wait but not the marking:
+ *       in-flight requests are dropped, and in-flight work is cancelled at once, marked, and left
+ *       for the recovery scan, which trades shutdown latency for reclaim latency
  * </ul>
  *
  * <h2>Saga detail reads ({@code detail.*})</h2>
@@ -544,6 +548,8 @@ public final class SagaServerConfig {
    * (default {@value #DEFAULT_DETAIL_MAX_TIMELINE_EVENTS}). When a saga's history is longer, the
    * newest events are returned and the detail is flagged truncated; the full history remains in the
    * store.
+   *
+   * @return the maximum number of timeline events one detail read returns
    */
   public int detailMaxTimelineEvents() {
     return detailMaxTimelineEvents;
@@ -552,6 +558,8 @@ public final class SagaServerConfig {
   /**
    * Returns the crash-recovery configuration: how stale a saga must be to be reclaimed, how often
    * the scan runs, and how much work one pass may do.
+   *
+   * @return the recovery configuration
    */
   public RecoveryConfig recoveryConfig() {
     return recoveryConfig;
@@ -560,6 +568,8 @@ public final class SagaServerConfig {
   /**
    * Returns the retention configuration: how long a terminal saga is kept, and the shape of the
    * purge that removes it afterwards.
+   *
+   * @return the retention configuration
    */
   public RetentionConfig retentionConfig() {
     return retentionConfig;
@@ -570,6 +580,8 @@ public final class SagaServerConfig {
    * #DEFAULT_SECURITY_PROVIDER} — no authentication. Selects which {@link
    * com.scalar.db.saga.server.security.SagaSecurityProvider} the server authenticates requests
    * with; the value is validated against the known providers when the provider is built.
+   *
+   * @return the provider name in lower case, such as {@code noop}, {@code jwt} or {@code apikey}
    */
   public String securityProvider() {
     return securityProvider;
@@ -580,6 +592,9 @@ public final class SagaServerConfig {
    * interface (the {@code insecure_mode.enabled} key). Consulted by {@link SagaServer} at startup
    * to gate the {@code noop} provider on a non-loopback host. Defaults to {@value
    * #DEFAULT_INSECURE_MODE_ENABLED}.
+   *
+   * @return {@code true} when the operator acknowledged running unauthenticated on a
+   *     network-reachable interface
    */
   public boolean insecureModeEnabled() {
     return insecureModeEnabled;
@@ -590,6 +605,8 @@ public final class SagaServerConfig {
    * empty, the daemon registers no callback route (async completion is not enabled). The value may
    * be supplied as a {@code ${file:}}/{@code ${env:}} secret reference. Present exactly when {@link
    * #callbackBaseUrl()} is.
+   *
+   * @return the secret, or empty when async completion is not configured
    */
   public Optional<String> callbackSecret() {
     return Optional.ofNullable(callbackSecret);
@@ -599,6 +616,8 @@ public final class SagaServerConfig {
    * Returns the daemon's externally-reachable base URL used to build async-step callback URLs, or
    * empty when unset. Any trailing {@code /} is stripped so a callback path can be appended
    * directly. Present exactly when {@link #callbackSecret()} is.
+   *
+   * @return the base URL without a trailing slash, or empty when async completion is not configured
    */
   public Optional<String> callbackBaseUrl() {
     return Optional.ofNullable(callbackBaseUrl);
@@ -609,6 +628,8 @@ public final class SagaServerConfig {
    * token is older than this is rejected as expired. {@code 0} (the default) disables the check.
    * When enabled it must exceed the longest a step can stay parked (its callback timeout), or a
    * genuine late callback is rejected.
+   *
+   * @return the token age limit in seconds, or {@code 0} when the check is disabled
    */
   public long callbackMaxAgeSeconds() {
     return callbackMaxAgeSeconds;
@@ -621,6 +642,8 @@ public final class SagaServerConfig {
    * daemon-hosted saga cannot run without a deadline. Forwarded to the engine (which applies it at
    * deadline computation on every execution entry) instead of being baked into the stored
    * definition, so changing it never conflicts with stored content.
+   *
+   * @return the default saga timeout in milliseconds, or {@code 0} for none
    */
   public long defaultSagaTimeoutMillis() {
     return defaultSagaTimeoutMillis;
@@ -650,6 +673,8 @@ public final class SagaServerConfig {
    * limiter does the everyday shaping and the cap is the backstop for a duration blowout. If it
    * sits above, callers inside their limits are refused routinely and "server full" stops being an
    * exceptional signal.
+   *
+   * @return the admission cap, or {@code 0} for none
    */
   public int maxConcurrentSagaStarts() {
     return maxConcurrentSagaStarts;
@@ -1464,6 +1489,8 @@ public final class SagaServerConfig {
    * interfaces, the norm for a container behind network controls). Under the {@code noop} security
    * provider the endpoints are unauthenticated, so {@link SagaServer} refuses to start on a
    * non-loopback host unless insecure mode is acknowledged.
+   *
+   * @return the host or interface literal both transports bind to
    */
   public String host() {
     return host;
@@ -1473,6 +1500,8 @@ public final class SagaServerConfig {
    * Returns the identity this instance stamps on the sagas it claims during recovery, defaulting to
    * a random UUID generated per process. Configure it (e.g. from the pod name) to make a claim
    * traceable to a process; distinct live instances must never share a value.
+   *
+   * @return the owner identity, matching {@code [a-zA-Z0-9._-]{1,128}}
    */
   public String ownerId() {
     return ownerId;
@@ -1482,12 +1511,18 @@ public final class SagaServerConfig {
    * Returns whether the HTTP (REST) transport is served (default {@code true}). When {@code false},
    * the server runs gRPC-only and binds no HTTP port. At least one of {@link #httpEnabled()} /
    * {@link #grpcEnabled()} is always {@code true}.
+   *
+   * @return {@code true} when the REST transport is served
    */
   public boolean httpEnabled() {
     return httpEnabled;
   }
 
-  /** Returns the configured HTTP port ({@code 0} binds an ephemeral port). */
+  /**
+   * Returns the configured HTTP port ({@code 0} binds an ephemeral port).
+   *
+   * @return the HTTP port, or {@code 0} for an ephemeral port
+   */
   public int httpPort() {
     return httpPort;
   }
@@ -1496,6 +1531,8 @@ public final class SagaServerConfig {
    * Returns the maximum size of the HTTP (Jetty) request-handling thread pool (default {@value
    * #DEFAULT_MAX_THREADS}). Caps concurrent request threads so a burst of slow requests cannot
    * exhaust threads.
+   *
+   * @return the maximum number of request-handling threads
    */
   public int httpMaxThreads() {
     return httpMaxThreads;
@@ -1504,6 +1541,8 @@ public final class SagaServerConfig {
   /**
    * Returns the minimum (core) size of the HTTP thread pool (default {@value
    * #DEFAULT_MIN_THREADS}).
+   *
+   * @return the minimum number of request-handling threads
    */
   public int httpMinThreads() {
     return httpMinThreads;
@@ -1514,6 +1553,8 @@ public final class SagaServerConfig {
    * busy. Beyond it the server sheds load (fast failure) instead of queueing unboundedly. Defaults
    * to {@value #DEFAULT_MAX_QUEUED_REQUESTS_PER_THREAD} × {@link #httpMaxThreads()}, keeping the
    * worst-case queueing delay proportional to the pool.
+   *
+   * @return the cap on requests queued for a handler thread
    */
   public int httpMaxQueuedRequests() {
     return httpMaxQueuedRequests;
@@ -1523,6 +1564,8 @@ public final class SagaServerConfig {
    * Returns whether the gRPC transport is served (default {@code true}). When {@code false}, the
    * server runs HTTP-only and binds no gRPC port. At least one of {@link #httpEnabled()} / {@link
    * #grpcEnabled()} is always {@code true}.
+   *
+   * @return {@code true} when the gRPC transport is served
    */
   public boolean grpcEnabled() {
     return grpcEnabled;
@@ -1532,6 +1575,8 @@ public final class SagaServerConfig {
    * Returns the configured gRPC port ({@code 0} binds an ephemeral port). The gRPC server binds the
    * same {@link #host()} as HTTP, on its own listener; when both transports are enabled this
    * differs from {@link #httpPort()}.
+   *
+   * @return the gRPC port, or {@code 0} for an ephemeral port
    */
   public int grpcPort() {
     return grpcPort;
@@ -1542,6 +1587,8 @@ public final class SagaServerConfig {
    * #DEFAULT_GRPC_MAX_INBOUND_METADATA_BYTES}), bounding how much header data an unauthenticated
    * caller can push. Raise it when legitimate credentials do not fit — a JWT access token with many
    * claims is the usual reason.
+   *
+   * @return the request metadata cap in bytes
    */
   public int grpcMaxInboundMetadataBytes() {
     return grpcMaxInboundMetadataBytes;
@@ -1552,6 +1599,9 @@ public final class SagaServerConfig {
    * max-event-payload cap so neither transport accepts an input the store would reject. The store's
    * {@code 0} ("no limit") is mapped to {@link Integer#MAX_VALUE} here, since gRPC reads {@code 0}
    * as "reject all non-empty messages". Defaults to {@value #DEFAULT_MAX_EVENT_PAYLOAD_BYTES}.
+   *
+   * @return the inbound message cap in bytes, {@link Integer#MAX_VALUE} when the store sets no
+   *     payload limit
    */
   public int grpcMaxInboundMessageBytes() {
     return grpcMaxInboundMessageBytes;
@@ -1561,6 +1611,8 @@ public final class SagaServerConfig {
    * Whether the daemon serves TLS on both enabled transports (the {@code tls.enabled} key; off when
    * unset). When {@code true}, {@link #tlsCertChainPath()} and {@link #tlsPrivateKeyPath()} are
    * both present — the combination is validated at load.
+   *
+   * @return {@code true} when both enabled transports serve TLS
    */
   public boolean tlsEnabled() {
     return tlsEnabled;
@@ -1627,6 +1679,8 @@ public final class SagaServerConfig {
    * when TLS is disabled. A path configured alongside an explicit {@code tls.enabled=false} is
    * deliberately not returned: the material is ignored, which is what lets an operator toggle TLS
    * off without unmounting it.
+   *
+   * @return the certificate chain path, or empty when TLS is disabled
    */
   public Optional<Path> tlsCertChainPath() {
     return tlsEnabled ? Optional.ofNullable(tlsCertChainPath) : Optional.empty();
@@ -1635,6 +1689,8 @@ public final class SagaServerConfig {
   /**
    * Returns the path to the PEM private key matching {@link #tlsCertChainPath()} — unencrypted
    * PKCS#8, RSA or EC — or empty when TLS is disabled, under the same ignore-when-off rule.
+   *
+   * @return the private key path, or empty when TLS is disabled
    */
   public Optional<Path> tlsPrivateKeyPath() {
     return tlsEnabled ? Optional.ofNullable(tlsPrivateKeyPath) : Optional.empty();
@@ -1646,6 +1702,8 @@ public final class SagaServerConfig {
    * applies. A synchronous start that has not reached a terminal state within the resulting bound
    * returns {@code 202} and the saga keeps running on the engine's executor (the client polls
    * {@code GET /sagas/{id}}).
+   *
+   * @return the timeout in milliseconds, or {@code 0} when unset
    */
   public long syncTimeoutMillis() {
     return syncTimeoutMillis;
@@ -1697,6 +1755,8 @@ public final class SagaServerConfig {
    * server; raising or lowering this value changes how long the server is occupied per call, not
    * how long that caller blocks. The bound on that is the SDK's own default deadline, which is
    * unset — and so unbounded — unless the application configures one.
+   *
+   * @return the ceiling in milliseconds
    */
   public long syncMaxWaitMillis() {
     return syncMaxWaitMillis;
@@ -1729,17 +1789,25 @@ public final class SagaServerConfig {
    * Returns how in-flight sagas are treated on shutdown (default {@link
    * ShutdownMode#WAIT_CURRENT_STEP}): finish the running step and leave the saga for recovery, or
    * wait for in-flight sagas to reach a terminal state.
+   *
+   * @return the shutdown mode
    */
   public ShutdownMode shutdownMode() {
     return shutdownMode;
   }
 
   /**
-   * Returns the ceiling (ms) on the saga-engine drain at shutdown (default {@value
-   * #DEFAULT_SHUTDOWN_TIMEOUT_MILLIS}). Past it, whatever has not drained is abandoned and
-   * reclaimed by the recovery scan after the next start. Raise it together with a container's
-   * termination grace period when {@link #shutdownMode()} is {@link ShutdownMode#WAIT_ALL_SAGAS},
-   * which waits for whole sagas rather than a single step.
+   * Returns the budget (ms) for the whole shutdown drain (default {@value
+   * #DEFAULT_SHUTDOWN_TIMEOUT_MILLIS}): one deadline that the reload stop, both transport drains
+   * and the saga drain spend in turn. The first three share at most half of it and never more than
+   * 15s; the saga drain, which also stops the recovery and retention schedulers, gets the rest, so
+   * it is guaranteed at least half. Past the deadline, whatever has not drained is marked for
+   * recovery and reclaimed by the recovery scan after the next start. Raise it together with a
+   * container's termination grace period when {@link #shutdownMode()} is {@link
+   * ShutdownMode#WAIT_ALL_SAGAS}, which waits for whole sagas rather than a single step and so
+   * needs a budget of the longest saga plus 15s, or twice the longest saga if that is shorter.
+   *
+   * @return the drain budget in milliseconds
    */
   public long shutdownTimeoutMillis() {
     return shutdownTimeoutMillis;
@@ -1748,6 +1816,9 @@ public final class SagaServerConfig {
   /**
    * Returns the per-principal rate limit on saga-start requests ({@code POST}/{@code PUT /sagas}),
    * in requests per minute; {@code 0} (the default) disables rate limiting.
+   *
+   * @return the per-principal limit in requests per minute, or {@code 0} when rate limiting is
+   *     disabled
    */
   public int maxStartRequestsPerMinute() {
     return maxStartRequestsPerMinute;
@@ -1756,6 +1827,8 @@ public final class SagaServerConfig {
   /**
    * Returns a defensive copy of the underlying configuration properties forwarded to construct the
    * saga engine's persistence.
+   *
+   * @return a copy of the resolved properties
    */
   public Properties properties() {
     return copyOf(properties);
@@ -1774,6 +1847,9 @@ public final class SagaServerConfig {
    * Returns the path to the declarative saga definitions: the configured file or directory, or the
    * default directory {@value #DEFAULT_DEFINITIONS_PATH} when the key is unset and that directory
    * exists. Empty when the key is unset and nothing is mounted at the default.
+   *
+   * @return the definitions file or directory, or empty when the key is unset and nothing is
+   *     mounted at the default
    */
   public Optional<Path> definitionsPath() {
     return Optional.ofNullable(definitionsPath);
@@ -1807,9 +1883,11 @@ public final class SagaServerConfig {
   }
 
   /**
-   * Returns the services-directory settings: the directory itself, the reload interval (parsed now,
-   * consumed once the reload pass ships), the secrets root confining {@code ${file:...}} references
-   * in service files, and the optional egress ceiling.
+   * Returns the services-directory settings: the directory itself, the reload interval {@code
+   * SagaConfigReloadManager} runs on, the secrets root confining {@code ${file:...}} references in
+   * service files, and the optional egress ceiling.
+   *
+   * @return the reload configuration
    */
   public ReloadConfig reloadConfig() {
     return reloadConfig;

@@ -138,9 +138,9 @@ public final class ExceptionRegistry {
     // The step-level codes are never top-level RPC errors: a step failure is caught by the engine,
     // recorded as an event, and compensated, so it reaches a caller as saga state rather than as a
     // thrown exception. COMPENSATION_FAILED is the only one the engine actually attaches today;
-    // STEP_TIMEOUT and STEP_USER_FAILURE are reserved and not yet produced anywhere (see
-    // todos/032). All three keep a raw reconstructor so that a code echoed by a future or newer
-    // server still round-trips instead of degrading.
+    // STEP_TIMEOUT and STEP_USER_FAILURE are reserved and not yet produced anywhere. All three
+    // keep a raw reconstructor so that a code echoed by a future or newer server still round-trips
+    // instead of degrading.
     m.put(
         SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED,
         meta ->
@@ -181,6 +181,12 @@ public final class ExceptionRegistry {
    * this client), unregistered, or the metadata doesn't satisfy the code's schema (protocol drift).
    * Empty means "classify some other way", not "no error" — the gRPC client answers it with
    * transport-status dispatch.
+   *
+   * @param wireCode the code string as received, such as {@code DB-SAGA-10201}
+   * @param metadata the metadata map as received; keys the code's schema does not declare are
+   *     dropped
+   * @return the typed exception, or empty when the code is unknown or the metadata does not satisfy
+   *     its schema
    */
   @SuppressFBWarnings(
       value = "DCN_NULLPOINTER_EXCEPTION",

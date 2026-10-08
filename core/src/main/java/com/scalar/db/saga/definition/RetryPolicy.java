@@ -51,37 +51,76 @@ public final class RetryPolicy {
     this.maxIntervalMillis = maxIntervalMillis;
   }
 
-  /** Returns the default retry policy for general step execution. */
+  /**
+   * Returns the default retry policy for general step execution.
+   *
+   * @return the shared policy: 3 attempts, a 1s initial interval doubling up to 30s
+   */
   public static RetryPolicy defaultPolicy() {
     return DEFAULT;
   }
 
-  /** Returns the default retry policy for compensation. */
+  /**
+   * Returns the default retry policy for compensation.
+   *
+   * @return the shared policy: 3 attempts, a 1s initial interval doubling up to 10s
+   */
   public static RetryPolicy compensationDefault() {
     return COMPENSATION_DEFAULT;
   }
 
-  /** Returns the default retry policy for the TCC confirm phase. */
+  /**
+   * Returns the default retry policy for the TCC confirm phase.
+   *
+   * @return the shared policy: 10 attempts, a 500ms initial interval doubling up to 60s
+   */
   public static RetryPolicy confirmDefault() {
     return CONFIRM_DEFAULT;
   }
 
+  /**
+   * Starts building a custom policy. The builder's defaults are those of {@link #defaultPolicy()}.
+   *
+   * @return a new builder
+   */
   public static Builder newBuilder() {
     return new Builder();
   }
 
+  /**
+   * The total number of attempts, the first one included, before the action is given up on.
+   *
+   * @return the attempt limit, at least 1
+   */
   public int getMaxAttempts() {
     return maxAttempts;
   }
 
+  /**
+   * The backoff interval before the first retry, in milliseconds. Each later interval is the
+   * previous one times {@link #getBackoffMultiplier()}, capped at {@link #getMaxIntervalMillis()};
+   * the actual sleep is jittered, see {@link #sleepWithBackoff(long)}.
+   *
+   * @return the initial interval, greater than 0
+   */
   public long getInitialIntervalMillis() {
     return initialIntervalMillis;
   }
 
+  /**
+   * The factor the backoff interval grows by after each retry.
+   *
+   * @return the multiplier, at least 1.0
+   */
   public double getBackoffMultiplier() {
     return backoffMultiplier;
   }
 
+  /**
+   * The ceiling on the backoff interval, in milliseconds.
+   *
+   * @return the maximum interval, at least {@link #getInitialIntervalMillis()}
+   */
   public long getMaxIntervalMillis() {
     return maxIntervalMillis;
   }
@@ -139,6 +178,7 @@ public final class RetryPolicy {
         + '}';
   }
 
+  /** Builder for {@link RetryPolicy}; obtained from {@link RetryPolicy#newBuilder()}. */
   public static final class Builder {
 
     private int maxAttempts = 3;
@@ -148,26 +188,58 @@ public final class RetryPolicy {
 
     private Builder() {}
 
+    /**
+     * Sets the total number of attempts, the first one included. Defaults to 3.
+     *
+     * @param maxAttempts the attempt limit, at least 1
+     * @return this builder
+     */
     public Builder maxAttempts(int maxAttempts) {
       this.maxAttempts = maxAttempts;
       return this;
     }
 
+    /**
+     * Sets the backoff interval before the first retry. Defaults to 1000.
+     *
+     * @param initialIntervalMillis the interval in milliseconds, greater than 0
+     * @return this builder
+     */
     public Builder initialIntervalMillis(long initialIntervalMillis) {
       this.initialIntervalMillis = initialIntervalMillis;
       return this;
     }
 
+    /**
+     * Sets the factor the interval grows by after each retry. Defaults to 2.0.
+     *
+     * @param backoffMultiplier the multiplier, finite and at least 1.0
+     * @return this builder
+     */
     public Builder backoffMultiplier(double backoffMultiplier) {
       this.backoffMultiplier = backoffMultiplier;
       return this;
     }
 
+    /**
+     * Sets the ceiling on the backoff interval. Defaults to 30000.
+     *
+     * @param maxIntervalMillis the maximum interval in milliseconds, at least the initial interval
+     * @return this builder
+     */
     public Builder maxIntervalMillis(long maxIntervalMillis) {
       this.maxIntervalMillis = maxIntervalMillis;
       return this;
     }
 
+    /**
+     * Validates the settings and builds the policy.
+     *
+     * @return the immutable policy
+     * @throws IllegalArgumentException if {@code maxAttempts} is below 1, {@code
+     *     initialIntervalMillis} is not positive, {@code backoffMultiplier} is not finite or is
+     *     below 1.0, or {@code maxIntervalMillis} is below {@code initialIntervalMillis}
+     */
     public RetryPolicy build() {
       if (maxAttempts < 1) {
         throw new IllegalArgumentException("maxAttempts must be >= 1, got " + maxAttempts);
