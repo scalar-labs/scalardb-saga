@@ -18,9 +18,20 @@ public final class RateLimitExceededException extends SagaRuntimeException {
 
   private static final long serialVersionUID = 1L;
 
+  /** The server-side-only reason, never sent on the wire. */
   private final String internalDetail;
+
+  /** The advisory wait until the caller's window resets, in milliseconds. */
   private final long retryAfterMillis;
 
+  /**
+   * Creates the exception; the REST rate-limit handler throws it when the shared {@link
+   * RateLimiter} refuses a start.
+   *
+   * @param internalDetail which principal and operation were refused, for the server-side log only
+   * @param retryAfterMillis the advisory wait until the caller's window resets, in milliseconds
+   * @throws IllegalArgumentException if {@code retryAfterMillis} is not positive
+   */
   public RateLimitExceededException(String internalDetail, long retryAfterMillis) {
     super(SagaErrorCode.RATE_LIMIT_EXCEEDED, ErrorMetadata.of());
     this.internalDetail = Objects.requireNonNull(internalDetail, "internalDetail must not be null");
@@ -31,12 +42,20 @@ public final class RateLimitExceededException extends SagaRuntimeException {
     this.retryAfterMillis = retryAfterMillis;
   }
 
-  /** The advisory wait until the caller's window resets; the 429's Retry-After derives from it. */
+  /**
+   * The advisory wait until the caller's window resets; the 429's Retry-After derives from it.
+   *
+   * @return the wait in milliseconds, always positive
+   */
   public long getRetryAfterMillis() {
     return retryAfterMillis;
   }
 
-  /** The server-side-only reason (never sent on the wire); used by the daemon's log statement. */
+  /**
+   * The server-side-only reason (never sent on the wire); used by the daemon's log statement.
+   *
+   * @return the reason, never {@code null}
+   */
   public String getInternalDetail() {
     return internalDetail;
   }

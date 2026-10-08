@@ -50,6 +50,12 @@ public final class SagaSecurityInterceptor implements ServerInterceptor {
 
   private final SagaSecurityProvider provider;
 
+  /**
+   * Creates the interceptor over the daemon's configured provider.
+   *
+   * @param provider the provider that authenticates every intercepted call, shared with the REST
+   *     handler
+   */
   public SagaSecurityInterceptor(SagaSecurityProvider provider) {
     this.provider = provider;
   }

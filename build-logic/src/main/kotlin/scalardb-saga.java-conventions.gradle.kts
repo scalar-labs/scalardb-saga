@@ -58,6 +58,9 @@ tasks.withType<Javadoc>().configureEach {
     // is read by the developers who change this code as much as by users. Generated sources are the
     // one exception, and the module that has them says so in its own build file.
     (options as StandardJavadocDocletOptions).addStringOption("Xmaxwarns", "10000")
+    // Every module is documented to zero doclint warnings and stays there: any javadoc warning
+    // fails the build, so a gap shows up on the pull request that opens it.
+    (options as StandardJavadocDocletOptions).addBooleanOption("Werror", true)
 }
 
 // ---------------------------------------------------------------------------
@@ -176,6 +179,13 @@ tasks.named("check") {
     // release time. The javadoc is a published artifact, so hold it to the same bar as the code and
     // find out on the pull request instead.
     dependsOn(tasks.named("javadoc"))
+}
+
+// A test-fixtures source set gets a javadoc task of its own, which `check` does not run by default,
+// so a gap there would regress without failing anything. Hold it to the same bar; the task is named
+// rather than resolved because the fixtures plugin may apply after this one.
+plugins.withId("java-test-fixtures") {
+    tasks.named("check") { dependsOn("testFixturesJavadoc") }
 }
 
 dependencies {

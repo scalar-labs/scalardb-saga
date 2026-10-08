@@ -10,6 +10,9 @@ import org.junit.jupiter.api.extension.ExtensionContext;
  */
 public final class IntegrationTestStoreExtension implements BeforeEachCallback {
 
+  /** Creates the extension; JUnit instantiates it through the service-loader registration. */
+  public IntegrationTestStoreExtension() {}
+
   @Override
   public void beforeEach(ExtensionContext context) {
     IntegrationTestStore.reset();

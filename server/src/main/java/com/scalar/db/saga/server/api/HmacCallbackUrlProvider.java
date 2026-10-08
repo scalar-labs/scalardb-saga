@@ -24,6 +24,8 @@ public final class HmacCallbackUrlProvider implements CallbackUrlProvider {
   private final Clock clock;
 
   /**
+   * Creates a provider that signs with {@code secret} and stamps {@code iat} from {@code clock}.
+   *
    * @param baseUrl the daemon's externally-reachable base URL (no trailing slash)
    * @param secret the HMAC callback secret (must match the verifying route's)
    * @param clock the clock for the {@code iat} issue time
