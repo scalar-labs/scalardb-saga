@@ -59,7 +59,11 @@ public final class ErrorMetadataSchema {
     return EMPTY;
   }
 
-  /** The declared keys, in insertion order. */
+  /**
+   * The declared keys, in insertion order.
+   *
+   * @return the keys, unmodifiable; empty for a code whose failure carries no context
+   */
   public List<String> requiredKeys() {
     return requiredKeys;
   }

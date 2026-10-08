@@ -25,6 +25,7 @@ public final class NoopSecurityProvider implements SagaSecurityProvider {
   private static final SagaIdentity ANONYMOUS_ADMIN =
       SagaIdentity.of("anonymous", EnumSet.allOf(SagaRole.class));
 
+  /** Creates the provider, logging the warning that the server will run unauthenticated. */
   public NoopSecurityProvider() {
     logger.warn(
         "Security is DISABLED: the '{}' provider authenticates every request as a full-access"

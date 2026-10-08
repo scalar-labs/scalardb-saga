@@ -19,21 +19,39 @@ public final class SagaAuthorizationException extends SagaRuntimeException {
 
   private static final long serialVersionUID = 1L;
 
+  /** The denied caller's principal, for the audit log. */
   private final String principal;
+
+  /** The role the endpoint required and the caller did not hold. */
   private final SagaRole requiredRole;
 
+  /**
+   * Creates the exception the RBAC check throws when an authenticated caller lacks the required
+   * role.
+   *
+   * @param principal the denied caller's principal
+   * @param requiredRole the minimum role the operation requires
+   */
   public SagaAuthorizationException(String principal, SagaRole requiredRole) {
     super(SagaErrorCode.PERMISSION_DENIED, ErrorMetadata.of());
     this.principal = Objects.requireNonNull(principal, "principal must not be null");
     this.requiredRole = Objects.requireNonNull(requiredRole, "requiredRole must not be null");
   }
 
-  /** Returns the principal of the caller that was denied (for audit). */
+  /**
+   * Returns the principal of the caller that was denied (for audit).
+   *
+   * @return the denied caller's principal
+   */
   public String getPrincipal() {
     return principal;
   }
 
-  /** Returns the role the endpoint required. */
+  /**
+   * Returns the role the endpoint required.
+   *
+   * @return the minimum role the operation requires
+   */
   public SagaRole getRequiredRole() {
     return requiredRole;
   }

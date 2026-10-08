@@ -45,6 +45,9 @@ public final class SagaWaiterRegistry implements SettlementListener {
   private final ConcurrentMap<String, Map<Long, CompletableFuture<SagaStateSnapshot>>> waiters =
       new ConcurrentHashMap<>();
 
+  /** Creates a registry with no waiters. */
+  public SagaWaiterRegistry() {}
+
   /**
    * Registers interest in a saga. Register <b>before</b> reading the saga's state: a completion
    * landing between the read and the registration would otherwise be missed, and the waiter would

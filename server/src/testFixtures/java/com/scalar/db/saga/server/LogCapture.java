@@ -30,17 +30,30 @@ public final class LogCapture implements AutoCloseable {
     logger.addAppender(appender);
   }
 
-  /** Captures the logger named after {@code loggerClass}. */
+  /**
+   * Captures the logger named after {@code loggerClass}.
+   *
+   * @param loggerClass the class whose logger to capture
+   * @return an open capture; close it to detach the appender
+   */
   public static LogCapture of(Class<?> loggerClass) {
     return new LogCapture((Logger) LoggerFactory.getLogger(loggerClass));
   }
 
-  /** Captures the root logger — everything the process logs while the capture is open. */
+  /**
+   * Captures the root logger — everything the process logs while the capture is open.
+   *
+   * @return an open capture; close it to detach the appender
+   */
   public static LogCapture ofRoot() {
     return new LogCapture((Logger) LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME));
   }
 
-  /** The events captured so far, live: grows as the logger emits. */
+  /**
+   * The events captured so far, live: grows as the logger emits.
+   *
+   * @return the captured events, oldest first
+   */
   public List<ILoggingEvent> events() {
     return appender.list;
   }

@@ -8,6 +8,7 @@ import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.exception.SagaIllegalArgumentException;
+import com.scalar.db.saga.integration.IntegrationTestStore;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -39,12 +40,9 @@ class ScalarDbSagaStoreListIntegrationTest {
   void setUp() {
     dbPath = tempDir.resolve("saga-list-it.db");
     Properties props = new Properties();
-    props.setProperty("scalar.db.storage", "jdbc");
-    props.setProperty(
-        "scalar.db.contact_points",
-        "jdbc:sqlite:" + dbPath.toAbsolutePath() + "?busy_timeout=10000&journal_mode=WAL");
+    IntegrationTestStore.configure(props, dbPath);
     // Multiple buckets so pagination must sweep across bucket boundaries.
-    props.setProperty("scalar.db.saga.store.num_buckets", "4");
+    props.setProperty("scalar.db.saga.store.scalardb.num_buckets", "4");
     factory = ScalarDbSagaStoreFactory.create(props); // creates the schema
     store = factory.createStore();
   }

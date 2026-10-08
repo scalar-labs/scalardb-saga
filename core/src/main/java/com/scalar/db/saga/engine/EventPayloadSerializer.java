@@ -81,6 +81,10 @@ public final class EventPayloadSerializer {
    * single bad payload degrades one timeline entry instead of failing the whole read. The
    * placeholder is distinct from {@code null} so an operator can tell a corrupt payload from one
    * that simply recorded no message.
+   *
+   * @param payload the serialized error payload, or {@code null}
+   * @return the message, {@link #UNREADABLE_MESSAGE} for a payload that does not parse, or {@code
+   *     null} when there is no payload or it carries no string message
    */
   public static @Nullable String errorMessage(@Nullable String payload) {
     if (payload == null || payload.isEmpty()) {
@@ -103,6 +107,10 @@ public final class EventPayloadSerializer {
    * Whether a STEP_FAILED error {@code payload} marks the failure as known-not-committed. Defaults
    * to {@code false} — the safe value — for a {@code null}, legacy (pre-flag), or unparseable
    * payload, so recovery compensates the failed step unless non-delivery was positively recorded.
+   *
+   * @param payload the serialized STEP_FAILED payload, or {@code null}
+   * @return {@code true} only when the payload positively records that the step's side effect did
+   *     not commit
    */
   public static boolean isKnownNotCommitted(@Nullable String payload) {
     if (payload == null || payload.isEmpty()) {

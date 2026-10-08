@@ -67,7 +67,13 @@ public final class HttpCall extends CallSpec {
     this.callbackTimeoutMillis = builder.callbackTimeoutMillis;
   }
 
-  /** Creates a builder for a call to {@code path} (resolved against the service's base URL). */
+  /**
+   * Creates a builder for a call to {@code path} (resolved against the service's base URL).
+   *
+   * @param path the URL path template, which may contain {@code ${key}} placeholders; not blank
+   * @return a builder whose verb defaults to {@link HttpMethod#POST}
+   * @throws IllegalArgumentException if {@code path} is blank
+   */
   public static Builder newBuilder(String path) {
     Objects.requireNonNull(path, "path must not be null");
     if (path.isBlank()) {
@@ -81,18 +87,28 @@ public final class HttpCall extends CallSpec {
     return Transport.HTTP;
   }
 
-  /** The HTTP verb. */
+  /**
+   * The HTTP verb.
+   *
+   * @return the verb
+   */
   public HttpMethod getMethod() {
     return method;
   }
 
-  /** The URL path template (e.g. {@code "/accounts/${accountId}/debit"}). */
+  /**
+   * The URL path template (e.g. {@code "/accounts/${accountId}/debit"}).
+   *
+   * @return the path template, resolved against the service's base URL at runtime
+   */
   public String getPath() {
     return path;
   }
 
   /**
    * The query-parameter templates (name → {@code ${key}}-or-literal). Unmodifiable; may be empty.
+   *
+   * @return the query templates by parameter name
    */
   public Map<String, String> getQuery() {
     return query;
@@ -102,6 +118,8 @@ public final class HttpCall extends CallSpec {
    * The request-body field templates (field → {@code ${key}}-or-literal), sent as a JSON object for
    * body-carrying verbs. Unmodifiable; always empty for {@link HttpMethod#GET}/{@link
    * HttpMethod#DELETE}.
+   *
+   * @return the body field templates by field name
    */
   public Map<String, String> getJsonBody() {
     return jsonBody;
@@ -111,6 +129,8 @@ public final class HttpCall extends CallSpec {
    * The raw request-body template (a literal string with {@code ${key}} substitutions), or {@code
    * null} when the body is taken from {@link #getJsonBody()} (or there is no body). Sent verbatim
    * with {@link #getContentType()}. Mutually exclusive with a non-empty {@link #getJsonBody()}.
+   *
+   * @return the body template, or {@code null}
    */
   public @Nullable String getStringBody() {
     return stringBody;
@@ -120,6 +140,8 @@ public final class HttpCall extends CallSpec {
    * The explicit request {@code Content-Type}, or {@code null} to use the implicit default ({@code
    * application/json} for the flat-map {@link #getJsonBody()} body and for a string {@link
    * #getStringBody()}). When set it overrides that default.
+   *
+   * @return the content type, or {@code null} for the default
    */
   public @Nullable String getContentType() {
     return contentType;
@@ -129,6 +151,8 @@ public final class HttpCall extends CallSpec {
    * The output extraction mapping (context key → extraction expression). Each value is either a
    * {@code $.path} JSON-navigation expression or the {@link #BODY_OUTPUT} token (raw response body
    * as a {@code String}). Unmodifiable; may be empty.
+   *
+   * @return the extraction expressions by context key
    */
   public Map<String, String> getOutput() {
     return output;
@@ -247,19 +271,34 @@ public final class HttpCall extends CallSpec {
       this.path = path;
     }
 
-    /** Sets the HTTP verb. Defaults to {@link HttpMethod#POST}. */
+    /**
+     * Sets the HTTP verb. Defaults to {@link HttpMethod#POST}.
+     *
+     * @param method the verb
+     * @return this builder
+     */
     public Builder method(HttpMethod method) {
       this.method = Objects.requireNonNull(method, "method must not be null");
       return this;
     }
 
-    /** Sets the query-parameter templates. Defensively copied. */
+    /**
+     * Sets the query-parameter templates. Defensively copied.
+     *
+     * @param query parameter names to {@code ${key}}-or-literal values
+     * @return this builder
+     */
     public Builder query(Map<String, String> query) {
       this.query = Map.copyOf(query);
       return this;
     }
 
-    /** Sets the request-body field templates. Defensively copied. */
+    /**
+     * Sets the request-body field templates. Defensively copied.
+     *
+     * @param jsonBody field names to {@code ${key}}-or-literal values, sent as a JSON object
+     * @return this builder
+     */
     public Builder jsonBody(Map<String, String> jsonBody) {
       this.jsonBody = Map.copyOf(jsonBody);
       return this;
@@ -269,6 +308,9 @@ public final class HttpCall extends CallSpec {
      * Sets a raw request-body template (a literal string with {@code ${key}} substitutions), sent
      * verbatim with {@link #contentType(String)} (defaulting to {@code application/json}). Mutually
      * exclusive with {@link #jsonBody(Map)}.
+     *
+     * @param stringBody the body template
+     * @return this builder
      */
     public Builder stringBody(String stringBody) {
       this.stringBody = Objects.requireNonNull(stringBody, "stringBody must not be null");
@@ -278,13 +320,22 @@ public final class HttpCall extends CallSpec {
     /**
      * Overrides the request {@code Content-Type} (otherwise the implicit {@code application/json}
      * for a flat-map {@link #jsonBody(Map)} or string {@link #stringBody(String)}).
+     *
+     * @param contentType the {@code Content-Type} header value
+     * @return this builder
      */
     public Builder contentType(String contentType) {
       this.contentType = Objects.requireNonNull(contentType, "contentType must not be null");
       return this;
     }
 
-    /** Sets the output extraction mapping. Defensively copied. */
+    /**
+     * Sets the output extraction mapping. Defensively copied.
+     *
+     * @param output context keys to extraction expressions, each a {@code $.path} or {@link
+     *     #BODY_OUTPUT}
+     * @return this builder
+     */
     public Builder output(Map<String, String> output) {
       this.output = Map.copyOf(output);
       return this;
@@ -295,6 +346,9 @@ public final class HttpCall extends CallSpec {
      * the step later via an external callback (daemon mode), rather than returning the result in
      * the response. Defaults to {@code false}. Valid only on a forward phase — a {@code
      * ServiceStep} rejects an async {@code compensation}/{@code cancellation} call.
+     *
+     * @param async whether the participant may answer {@code 202} and call back later
+     * @return this builder
      */
     public Builder async(boolean async) {
       this.async = async;
@@ -307,6 +361,9 @@ public final class HttpCall extends CallSpec {
      * timed out. {@code 0} (the default) means wait indefinitely, bounded only by the saga-level
      * timeout. Only valid on an async call — {@link #build()} rejects a positive value without
      * {@link #async(boolean)}.
+     *
+     * @param callbackTimeoutMillis the deadline in milliseconds, or {@code 0} for none
+     * @return this builder
      */
     public Builder callbackTimeoutMillis(long callbackTimeoutMillis) {
       this.callbackTimeoutMillis = callbackTimeoutMillis;
@@ -316,6 +373,7 @@ public final class HttpCall extends CallSpec {
     /**
      * Builds the {@link HttpCall}.
      *
+     * @return the immutable call spec
      * @throws IllegalStateException if both a flat-map {@link #jsonBody(Map)} body and a string
      *     {@link #stringBody(String)} are set; if a body-less verb ({@link HttpMethod#GET}/{@link
      *     HttpMethod#DELETE}) declares any request body (a {@link #jsonBody(Map)} map or a {@link

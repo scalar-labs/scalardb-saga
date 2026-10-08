@@ -3,6 +3,7 @@ package com.scalar.db.saga.server;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.scalar.db.saga.integration.IntegrationTestStore;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Properties;
@@ -115,11 +116,8 @@ class SagaServerStartupIntegrationTest {
   /** The store and transport settings every case here needs: a SQLite file and ephemeral ports. */
   private Properties storeProperties() {
     Properties props = new Properties();
-    props.setProperty("scalar.db.storage", "jdbc");
-    props.setProperty(
-        "scalar.db.contact_points",
-        "jdbc:sqlite:" + tempDbPath.toAbsolutePath() + "?busy_timeout=10000&journal_mode=WAL");
-    props.setProperty("scalar.db.saga.store.num_buckets", "1");
+    IntegrationTestStore.configure(props, tempDbPath);
+    props.setProperty("scalar.db.saga.store.scalardb.num_buckets", "1");
     props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     props.setProperty(SagaServerConfig.GRPC_PORT_KEY, "0");

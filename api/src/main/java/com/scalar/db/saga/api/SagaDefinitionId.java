@@ -20,6 +20,7 @@ public final class SagaDefinitionId {
    *
    * @param name the saga definition name
    * @param version the saga definition version
+   * @throws IllegalArgumentException if either is blank or contains {@code ':'}
    */
   public SagaDefinitionId(String name, String version) {
     Objects.requireNonNull(name, "name must not be null");
@@ -42,12 +43,20 @@ public final class SagaDefinitionId {
     this.version = version;
   }
 
-  /** The saga definition name. */
+  /**
+   * The saga definition name.
+   *
+   * @return the name, never blank
+   */
   public String name() {
     return name;
   }
 
-  /** The saga definition version. */
+  /**
+   * The saga definition version.
+   *
+   * @return the version, never blank
+   */
   public String version() {
     return version;
   }

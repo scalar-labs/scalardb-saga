@@ -26,7 +26,13 @@ import java.util.concurrent.TimeUnit;
  */
 public final class TlsTestCerts {
 
-  /** The generated PEM files, plus the parsed certificate for tests that assert against it. */
+  /**
+   * The generated PEM files, plus the parsed certificate for tests that assert against it.
+   *
+   * @param certChainPath the PEM file holding the certificate chain
+   * @param privateKeyPath the PEM file holding the private key
+   * @param certificate the generated certificate, parsed
+   */
   @SuppressFBWarnings(
       value = "EI_EXPOSE_REP",
       justification =
@@ -38,17 +44,35 @@ public final class TlsTestCerts {
 
   private TlsTestCerts() {}
 
-  /** Generates an RSA-2048 pair under {@code dir}, file names derived from {@code baseName}. */
+  /**
+   * Generates an RSA-2048 pair under {@code dir}, file names derived from {@code baseName}.
+   *
+   * @param dir the directory to write the PEM files into
+   * @param baseName the stem of the two file names
+   * @return the written files and the parsed certificate
+   */
   public static PemPair generateRsa(Path dir, String baseName) {
     return generate(dir, baseName, "RSA", "2048");
   }
 
-  /** Generates a P-256 EC pair under {@code dir}, file names derived from {@code baseName}. */
+  /**
+   * Generates a P-256 EC pair under {@code dir}, file names derived from {@code baseName}.
+   *
+   * @param dir the directory to write the PEM files into
+   * @param baseName the stem of the two file names
+   * @return the written files and the parsed certificate
+   */
   public static PemPair generateEc(Path dir, String baseName) {
     return generate(dir, baseName, "EC", "256");
   }
 
-  /** Wraps DER bytes in a PEM block with the given label, 64-column MIME line wrapping. */
+  /**
+   * Wraps DER bytes in a PEM block with the given label, 64-column MIME line wrapping.
+   *
+   * @param label the block label, such as {@code CERTIFICATE}
+   * @param der the DER-encoded bytes
+   * @return the PEM text, including the BEGIN and END lines
+   */
   public static String pem(String label, byte[] der) {
     String base64 =
         Base64.getMimeEncoder(64, "\n".getBytes(StandardCharsets.US_ASCII)).encodeToString(der);

@@ -37,27 +37,47 @@ public final class StatusEvent implements SagaEvent {
 
   /**
    * Creates a {@link EventType#SAGA_STARTED} event with the given payload (serialized input JSON).
+   *
+   * @param payload the serialized saga input, or {@code null}
+   * @return the event, targeting {@code RUNNING}
    */
   public static StatusEvent started(@Nullable String payload) {
     return new StatusEvent(EventType.SAGA_STARTED, SagaStatus.RUNNING, payload, null);
   }
 
-  /** Creates a {@link EventType#SAGA_COMPENSATING} event. */
+  /**
+   * Creates a {@link EventType#SAGA_COMPENSATING} event.
+   *
+   * @return the event, targeting {@code COMPENSATING}
+   */
   public static StatusEvent compensating() {
     return new StatusEvent(EventType.SAGA_COMPENSATING, SagaStatus.COMPENSATING, null, null);
   }
 
-  /** Creates a {@link EventType#SAGA_COMPLETED} event. */
+  /**
+   * Creates a {@link EventType#SAGA_COMPLETED} event.
+   *
+   * @return the event, targeting {@code COMPLETED}
+   */
   public static StatusEvent completed() {
     return new StatusEvent(EventType.SAGA_COMPLETED, SagaStatus.COMPLETED, null, null);
   }
 
-  /** Creates a {@link EventType#SAGA_COMPENSATED} event. */
+  /**
+   * Creates a {@link EventType#SAGA_COMPENSATED} event.
+   *
+   * @return the event, targeting {@code COMPENSATED}
+   */
   public static StatusEvent compensated() {
     return new StatusEvent(EventType.SAGA_COMPENSATED, SagaStatus.COMPENSATED, null, null);
   }
 
-  /** Creates a {@link EventType#SAGA_ESCALATED} event with a reason message. */
+  /**
+   * Creates a {@link EventType#SAGA_ESCALATED} event with a reason message.
+   *
+   * @param reason why the saga was escalated, stored as the payload
+   * @return the event, targeting {@code ESCALATED}
+   */
   public static StatusEvent escalated(String reason) {
     Objects.requireNonNull(reason, "reason must not be null");
     return new StatusEvent(EventType.SAGA_ESCALATED, SagaStatus.ESCALATED, reason, null);
@@ -67,6 +87,10 @@ public final class StatusEvent implements SagaEvent {
    * Creates a {@link EventType#SAGA_FORCE_COMPLETED} event: an operator overrode an {@code
    * ESCALATED} saga to {@code COMPLETED}. The {@code operator} and {@code reason} are recorded in
    * the payload for audit (see {@link AdminAuditPayload}).
+   *
+   * @param operator who performed the intervention
+   * @param reason why the operator completed the saga
+   * @return the event, targeting {@code COMPLETED}
    */
   public static StatusEvent forceCompleted(String operator, String reason) {
     Objects.requireNonNull(operator, "operator must not be null");
@@ -84,6 +108,12 @@ public final class StatusEvent implements SagaEvent {
    * rather than waiting for the scheduled sweep. {@code target} is the resulting status — {@code
    * COMPENSATING} (compensate) or {@code RUNNING} (resume forward). Recorded before the drive it
    * requests, so it names the phase the saga enters; the outcome follows in later events.
+   *
+   * @param target the status to drive to, {@code COMPENSATING} or {@code RUNNING}
+   * @param operator who performed the intervention
+   * @param reason why the operator forced the drive
+   * @return the event, targeting {@code target}
+   * @throws IllegalArgumentException if {@code target} is any other status
    */
   public static StatusEvent recovering(SagaStatus target, String operator, String reason) {
     return intervention(EventType.SAGA_RECOVERING, target, operator, reason);
@@ -93,6 +123,12 @@ public final class StatusEvent implements SagaEvent {
    * Creates a {@link EventType#SAGA_RESET} event: an operator un-escalated an {@code ESCALATED}
    * saga, driving it in the direction recovery would take it. {@code target} is the resulting
    * status — {@code COMPENSATING} (compensate) or {@code RUNNING} (resume forward).
+   *
+   * @param target the status to drive to, {@code COMPENSATING} or {@code RUNNING}
+   * @param operator who performed the intervention
+   * @param reason why the operator un-escalated the saga
+   * @return the event, targeting {@code target}
+   * @throws IllegalArgumentException if {@code target} is any other status
    */
   public static StatusEvent reset(SagaStatus target, String operator, String reason) {
     return intervention(EventType.SAGA_RESET, target, operator, reason);
@@ -130,7 +166,11 @@ public final class StatusEvent implements SagaEvent {
     return eventType;
   }
 
-  /** Returns the target saga status for this transition event. */
+  /**
+   * Returns the target saga status for this transition event.
+   *
+   * @return the status the saga transitions to
+   */
   public SagaStatus getTargetStatus() {
     return targetStatus;
   }
@@ -145,7 +185,12 @@ public final class StatusEvent implements SagaEvent {
     return timestamp;
   }
 
-  /** Returns a new {@code StatusEvent} with the given timestamp set. */
+  /**
+   * Returns a new {@code StatusEvent} with the given timestamp set.
+   *
+   * @param timestamp the store's timestamp for the event
+   * @return a copy of this event carrying the timestamp
+   */
   public StatusEvent withTimestamp(Instant timestamp) {
     Objects.requireNonNull(timestamp, "timestamp must not be null");
     return new StatusEvent(eventType, targetStatus, payload, timestamp);

@@ -17,14 +17,25 @@ public final class CallbackAuthException extends SagaRuntimeException {
 
   private static final long serialVersionUID = 1L;
 
+  /** The server-side-only reason, never sent on the wire. */
   private final String internalDetail;
 
+  /**
+   * Creates the exception; the callback route throws it when the request's token or {@code iat} is
+   * missing, malformed, invalid or expired.
+   *
+   * @param internalDetail which check failed, for the server-side log only
+   */
   public CallbackAuthException(String internalDetail) {
     super(SagaErrorCode.UNAUTHENTICATED, ErrorMetadata.of());
     this.internalDetail = Objects.requireNonNull(internalDetail, "internalDetail must not be null");
   }
 
-  /** The server-side-only reason (never sent on the wire); used by the daemon's log statement. */
+  /**
+   * The server-side-only reason (never sent on the wire); used by the daemon's log statement.
+   *
+   * @return which check failed, never {@code null}
+   */
   public String getInternalDetail() {
     return internalDetail;
   }

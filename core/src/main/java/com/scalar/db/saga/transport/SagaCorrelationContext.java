@@ -30,6 +30,11 @@ public final class SagaCorrelationContext {
    * measured against {@code clock} — the engine's configured {@link Clock} (the system clock in
    * production) — or {@code 0} when the step has no deadline. {@link #remaining()} computes the
    * budget with that same clock so timeouts honor a test clock.
+   *
+   * @param sagaId the saga the running step belongs to
+   * @param stepName the running step
+   * @param deadlineMillis the step's absolute deadline against {@code clock}, or {@code 0} for none
+   * @param clock the clock the deadline is measured against
    */
   public record Correlation(String sagaId, String stepName, long deadlineMillis, Clock clock) {}
 
@@ -44,6 +49,12 @@ public final class SagaCorrelationContext {
    * deadlineMillis} is the step's absolute deadline measured against {@code clock} ({@code 0} for
    * none); {@code clock} is the engine's configured {@link Clock}, so a per-request timeout derived
    * from it honors a test clock instead of bypassing it.
+   *
+   * @param sagaId the saga the step belongs to
+   * @param stepName the step about to run
+   * @param deadlineMillis the step's absolute deadline against {@code clock}, or {@code 0} for none
+   * @param clock the engine's configured clock
+   * @return the binding this one replaced, or {@code null} if the thread had none
    */
   public static @Nullable Correlation bind(
       String sagaId, String stepName, long deadlineMillis, Clock clock) {
@@ -52,7 +63,11 @@ public final class SagaCorrelationContext {
     return previous;
   }
 
-  /** Restores (or clears) the correlation binding to {@code previous}. */
+  /**
+   * Restores (or clears) the correlation binding to {@code previous}.
+   *
+   * @param previous the binding returned by {@link #bind}, or {@code null} to clear
+   */
   public static void restore(@Nullable Correlation previous) {
     if (previous == null) {
       CURRENT.remove();

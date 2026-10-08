@@ -47,6 +47,8 @@ public final class SagaDefinitionParser {
    * Parses a saga definition from a file. Detects JSON or YAML by extension ({@code .json} for
    * JSON; {@code .yaml} or {@code .yml} for YAML).
    *
+   * @param path the definition file; any other extension is reported as an unreadable source
+   * @return the validated definition
    * @throws SagaDefinitionException if the file cannot be parsed or fails validation
    */
   public static SagaDefinition parseFile(Path path) {
@@ -70,6 +72,8 @@ public final class SagaDefinitionParser {
   /**
    * Parses a saga definition from a classpath resource.
    *
+   * @param resourcePath the resource name, with the same extensions as {@link #parseFile(Path)}
+   * @return the validated definition
    * @throws SagaDefinitionException if the resource cannot be parsed or fails validation
    */
   public static SagaDefinition parseResource(String resourcePath) {
@@ -92,6 +96,8 @@ public final class SagaDefinitionParser {
   /**
    * Parses a saga definition from a JSON string.
    *
+   * @param json the definition document
+   * @return the validated definition
    * @throws SagaDefinitionException if the string cannot be parsed or fails validation
    */
   public static SagaDefinition parseJson(String json) {
@@ -106,6 +112,8 @@ public final class SagaDefinitionParser {
   /**
    * Parses a saga definition from a YAML string.
    *
+   * @param yaml the definition document
+   * @return the validated definition
    * @throws SagaDefinitionException if the string cannot be parsed or fails validation
    */
   public static SagaDefinition parseYaml(String yaml) {

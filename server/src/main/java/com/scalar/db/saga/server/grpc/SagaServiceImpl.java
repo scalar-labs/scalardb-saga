@@ -73,6 +73,15 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
   private final SagaWaiterRegistry waiterRegistry;
   private final ObjectMapper objectMapper = new ObjectMapper();
 
+  /**
+   * Creates the service over the daemon's shared, process-wide collaborators.
+   *
+   * @param orchestrator the orchestrator the RPCs drive, shared with the REST routes
+   * @param syncWaitBound the synchronous-wait policy: given a per-call cap in milliseconds, returns
+   *     the bound a synchronous start or await may block for
+   * @param shutdownSignal completes when the server begins shutting down, ending every bounded wait
+   * @param waiterRegistry wakes a bounded wait the moment its saga settles on this process
+   */
   public SagaServiceImpl(
       DefaultSagaOrchestrator orchestrator,
       LongUnaryOperator syncWaitBound,

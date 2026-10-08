@@ -248,13 +248,18 @@ class SagaServerTest {
   }
 
   @Test
-  void constructor_noDefinitionsPath_throwsAndClosesOrchestrator() {
+  void constructor_noDefinitionsPath_throwsAndClosesOrchestrator(@TempDir Path conf) {
+    // The key unset and nothing at the default: the temp conf dir stands in for the image's
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.HTTP_PORT_KEY, "0");
     DefaultSagaOrchestrator orchestrator = mockOrchestrator();
 
-    assertThatThrownBy(() -> new SagaServer(SagaServerConfig.load(props), orchestrator))
-        .isInstanceOf(IllegalStateException.class);
+    assertThatThrownBy(() -> new SagaServer(SagaServerConfig.load(props, null, conf), orchestrator))
+        .isInstanceOf(IllegalStateException.class)
+        // The key is unset, so the refusal names the default directory it looked in
+        .hasMessageContaining(SagaServerConfig.DEFINITIONS_PATH_KEY)
+        .hasMessageContaining("is not set")
+        .hasMessageContaining(SagaServerConfig.DEFAULT_DEFINITIONS_PATH);
     verify(orchestrator, never()).register(any(SagaDefinition.class));
     verify(orchestrator).close();
   }
@@ -266,7 +271,12 @@ class SagaServerTest {
     DefaultSagaOrchestrator orchestrator = mockOrchestrator();
 
     assertThatThrownBy(() -> new SagaServer(configWithDefinitionsPath(dir), orchestrator))
-        .isInstanceOf(IllegalStateException.class);
+        .isInstanceOf(IllegalStateException.class)
+        // The operator named the path, so the refusal blames it — and, as with every configured
+        // value, echoes neither it nor the default it did not use
+        .hasMessageContaining("named by '" + SagaServerConfig.DEFINITIONS_PATH_KEY + "'")
+        .hasMessageNotContaining(dir.toString())
+        .hasMessageNotContaining(SagaServerConfig.DEFAULT_DEFINITIONS_PATH);
     verify(orchestrator, never()).register(any(SagaDefinition.class));
     verify(orchestrator).close();
   }

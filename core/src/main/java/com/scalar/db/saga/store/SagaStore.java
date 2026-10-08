@@ -59,15 +59,28 @@ public interface SagaStore extends AutoCloseable {
       Map<String, Object> input,
       String definitionVersion);
 
-  /** Persists a saga definition. Called once per definition version at registration time. */
+  /**
+   * Persists a saga definition. Called once per definition version at registration time.
+   *
+   * @param definition the definition to persist
+   */
   void registerDefinition(SagaDefinition definition);
 
-  /** Looks up a saga definition by name and version. */
+  /**
+   * Looks up a saga definition by name and version.
+   *
+   * @param sagaName the saga definition name
+   * @param definitionVersion the version to look up
+   * @return the definition, or empty if that name and version is not registered
+   */
   Optional<SagaDefinition> getDefinition(String sagaName, String definitionVersion);
 
   /**
    * Looks up the latest version of a saga definition by name. "Latest" is determined by the most
    * recent {@code registered_at} timestamp.
+   *
+   * @param sagaName the saga definition name
+   * @return the most recently registered version, or empty if none is registered under the name
    */
   Optional<SagaDefinition> getDefinition(String sagaName);
 
@@ -229,10 +242,20 @@ public interface SagaStore extends AutoCloseable {
   SagaStateSnapshot redriveParkedStep(
       SagaStateSnapshot current, int sequence, StepEvent redriveEvent);
 
-  /** Returns all events for the given saga, ordered by sequence number. */
+  /**
+   * Returns all events for the given saga, ordered by sequence number.
+   *
+   * @param sagaId the saga instance ID
+   * @return the saga's events in ascending sequence order
+   */
   List<SagaEvent> getEvents(String sagaId);
 
-  /** Returns the event count for the given saga without materializing all events. */
+  /**
+   * Returns the event count for the given saga without materializing all events.
+   *
+   * @param sagaId the saga instance ID
+   * @return the number of events in the saga's stream
+   */
   int getEventCount(String sagaId);
 
   /**
@@ -275,7 +298,12 @@ public interface SagaStore extends AutoCloseable {
   // Queries
   // ---------------------------------------------------------------------------
 
-  /** Looks up the current state snapshot for the given saga. */
+  /**
+   * Looks up the current state snapshot for the given saga.
+   *
+   * @param sagaId the saga instance ID
+   * @return the snapshot, or empty if no saga has that ID
+   */
   Optional<SagaStateSnapshot> getStateSnapshot(String sagaId);
 
   /**
@@ -301,6 +329,7 @@ public interface SagaStore extends AutoCloseable {
    *
    * @param sagaId the saga id
    * @param maxEvents the maximum number of events to return; must be positive
+   * @return the snapshot paired with its events, or empty if the saga does not exist
    */
   Optional<SagaStateAndEvents> getStateWithEvents(String sagaId, int maxEvents);
 
@@ -490,7 +519,11 @@ public interface SagaStore extends AutoCloseable {
       sagas = List.copyOf(sagas);
     }
 
-    /** Returns {@code true} if there are more results to fetch. */
+    /**
+     * Returns {@code true} if there are more results to fetch.
+     *
+     * @return whether {@code nextCursor} is non-null
+     */
     public boolean hasMore() {
       return nextCursor != null;
     }
@@ -510,7 +543,11 @@ public interface SagaStore extends AutoCloseable {
       sagaIds = List.copyOf(sagaIds);
     }
 
-    /** Returns {@code true} if there are more results to fetch. */
+    /**
+     * Returns {@code true} if there are more results to fetch.
+     *
+     * @return whether {@code nextCursor} is non-null
+     */
     public boolean hasMore() {
       return nextCursor != null;
     }

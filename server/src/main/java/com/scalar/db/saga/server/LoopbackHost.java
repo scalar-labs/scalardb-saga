@@ -20,7 +20,14 @@ public final class LoopbackHost {
 
   private LoopbackHost() {}
 
-  /** Whether {@code host} (a URL or bind host literal, never DNS-resolved) is loopback. */
+  /**
+   * Whether {@code host} (a URL or bind host literal, never DNS-resolved) is loopback.
+   *
+   * @param host the host literal, with or without IPv6 brackets; {@code null} and empty are not
+   *     loopback
+   * @return {@code true} for {@code localhost}, {@code ::1} or a dotted-decimal address in {@code
+   *     127.0.0.0/8}
+   */
   public static boolean isLoopback(@Nullable String host) {
     if (host == null || host.isEmpty()) {
       return false;

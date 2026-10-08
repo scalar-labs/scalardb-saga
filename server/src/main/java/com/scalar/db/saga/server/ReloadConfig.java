@@ -16,7 +16,8 @@ import org.jspecify.annotations.Nullable;
  * included, when TLS is on — and {@code 0} disables reload entirely (startup-only loading).
  *
  * @param servicesPath directory of per-service {@code <name>.properties} files, or {@code null}
- *     when no services are configured
+ *     when {@code services_path} is unset and nothing is mounted at its default directory (no
+ *     services)
  * @param intervalSeconds seconds between reload passes; {@code 0} disables reload (startup-only
  *     loading)
  * @param secretsRoot directory that {@code ${file:...}} references in service files must resolve
@@ -33,6 +34,11 @@ public record ReloadConfig(
     List<String> allowedHostsCeiling,
     Clock clock) {
 
+  /**
+   * Rejects a negative interval and copies {@code allowedHostsCeiling} into an unmodifiable list.
+   *
+   * @throws IllegalArgumentException if {@code intervalSeconds} is negative
+   */
   public ReloadConfig {
     // No requireNonNull here: this record is internal to the unpublished server module, where
     // @NullMarked + NullAway carry the null contract (unlike core's RecoveryConfig/RetentionConfig,
