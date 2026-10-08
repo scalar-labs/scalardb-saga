@@ -9,6 +9,7 @@ import static org.mockito.Mockito.verify;
 import com.scalar.db.api.Admin;
 import com.scalar.db.api.TableMetadata;
 import com.scalar.db.exception.storage.ExecutionException;
+import com.scalar.db.io.DataType;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -130,6 +131,7 @@ class SagaSchemaTest {
             "created_at");
     assertThat(metadata.getPartitionKeyNames()).containsExactly("bucket");
     assertThat(metadata.getClusteringKeyNames()).containsExactly("status", "updated_at", "saga_id");
+    assertThat(metadata.getColumnDataType("updated_at")).isEqualTo(DataType.BIGINT);
     assertThat(metadata.getSecondaryIndexNames()).contains("saga_id");
   }
 
@@ -143,6 +145,7 @@ class SagaSchemaTest {
         .containsExactlyInAnyOrder("bucket", "parked_deadline", "saga_id");
     assertThat(metadata.getPartitionKeyNames()).containsExactly("bucket");
     assertThat(metadata.getClusteringKeyNames()).containsExactly("parked_deadline", "saga_id");
+    assertThat(metadata.getColumnDataType("parked_deadline")).isEqualTo(DataType.BIGINT);
     assertThat(metadata.getSecondaryIndexNames()).contains("saga_id");
   }
 

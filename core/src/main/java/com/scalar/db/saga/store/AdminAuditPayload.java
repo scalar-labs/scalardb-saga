@@ -65,12 +65,22 @@ public final class AdminAuditPayload {
     }
   }
 
-  /** The operator recorded in {@code payload}, or {@code null} if absent. */
+  /**
+   * The operator recorded in {@code payload}, or {@code null} if absent.
+   *
+   * @param payload the audit payload JSON as stored on the event, or {@code null}
+   * @return the operator, or {@code null} when the payload is absent or carries none
+   */
   public static @Nullable String operator(@Nullable String payload) {
     return decode(payload).get(OPERATOR) instanceof String operator ? operator : null;
   }
 
-  /** The reason recorded in {@code payload}, or {@code null} if absent. */
+  /**
+   * The reason recorded in {@code payload}, or {@code null} if absent.
+   *
+   * @param payload the audit payload JSON as stored on the event, or {@code null}
+   * @return the reason, or {@code null} when the payload is absent or carries none
+   */
   public static @Nullable String reason(@Nullable String payload) {
     return decode(payload).get(REASON) instanceof String reason ? reason : null;
   }

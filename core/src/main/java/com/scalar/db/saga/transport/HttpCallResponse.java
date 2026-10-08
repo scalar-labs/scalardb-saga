@@ -38,29 +38,53 @@ public final class HttpCallResponse {
     this.mapper = mapper;
   }
 
-  /** The HTTP status code. */
+  /**
+   * The HTTP status code.
+   *
+   * @return the status code, such as {@code 200}
+   */
   public int status() {
     return status;
   }
 
-  /** Whether the status is 2xx. */
+  /**
+   * Whether the status is 2xx.
+   *
+   * @return {@code true} for a 2xx status
+   */
   public boolean isSuccess() {
     return HttpStatusClassifier.isSuccess(status);
   }
 
-  /** The first value of the named response header (case-insensitive), if present. */
+  /**
+   * The first value of the named response header (case-insensitive), if present.
+   *
+   * @param name the header name, matched case-insensitively
+   * @return the first value, or empty if the response carries no such header
+   */
   public Optional<String> header(String name) {
     List<String> values = headers.get(name);
     return values == null || values.isEmpty() ? Optional.empty() : Optional.of(values.get(0));
   }
 
-  /** All values of the named response header (case-insensitive); empty if absent. */
+  /**
+   * All values of the named response header (case-insensitive); empty if absent.
+   *
+   * @param name the header name, matched case-insensitively
+   * @return the values in response order, or an empty list
+   */
   public List<String> headers(String name) {
     List<String> values = headers.get(name);
     return values == null ? List.of() : values;
   }
 
-  /** All response headers, keyed by name (case-insensitive) to the list of values. */
+  /**
+   * All response headers, keyed by header name in the spelling the HTTP client reports, to the list
+   * of values. The returned map is a plain copy, so lookups on it are case-sensitive; use {@link
+   * #header(String)} or {@link #headers(String)} for a case-insensitive lookup.
+   *
+   * @return every response header with all of its values, unmodifiable
+   */
   public Map<String, List<String>> headers() {
     return Map.copyOf(headers);
   }
@@ -69,6 +93,9 @@ public final class HttpCallResponse {
    * Decodes the body as a value of the given type. An empty body decodes the literal empty input,
    * which Jackson maps to {@code null} for most types.
    *
+   * @param <T> the type to decode into
+   * @param type the class of {@code T}
+   * @return the decoded value
    * @throws HttpCallException (non-retryable) if the body cannot be decoded as {@code type}
    */
   public <T> T bodyJson(Class<T> type) throws HttpCallException {
@@ -82,6 +109,7 @@ public final class HttpCallResponse {
   /**
    * Decodes the body as a JSON object. An empty body yields an empty map.
    *
+   * @return the object's members, keyed by name; empty for an empty body
    * @throws HttpCallException (non-retryable) if the body is not a JSON object
    */
   public Map<String, Object> bodyJsonObject() throws HttpCallException {
@@ -98,6 +126,7 @@ public final class HttpCallResponse {
   /**
    * Decodes the body as a JSON array. An empty body yields an empty list.
    *
+   * @return the array's elements; empty for an empty body
    * @throws HttpCallException (non-retryable) if the body is not a JSON array
    */
   public List<Object> bodyJsonArray() throws HttpCallException {
@@ -115,12 +144,18 @@ public final class HttpCallResponse {
    * The body decoded as text using the charset from the response {@code Content-Type} (defaulting
    * to UTF-8). Prefer this over {@code new String(bodyBytes())}, which uses the platform default
    * charset.
+   *
+   * @return the body as text
    */
   public String bodyString() {
     return new String(body, charset());
   }
 
-  /** The raw response body bytes. */
+  /**
+   * The raw response body bytes.
+   *
+   * @return a copy of the body exactly as received
+   */
   public byte[] bodyBytes() {
     return body.clone();
   }
