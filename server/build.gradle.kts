@@ -90,6 +90,7 @@ dependencies {
     testImplementation(libs.grpc.inprocess)
 
     "integrationTestImplementation"(project(":core"))
+    "integrationTestImplementation"(testFixtures(project(":core")))
     "integrationTestImplementation"(project(":client"))
     // The TLS test-certificate generator. It shells out to the JDK's own keytool, deliberately
     // adding no crypto dependency: BouncyCastle on this classpath would silently widen Netty's

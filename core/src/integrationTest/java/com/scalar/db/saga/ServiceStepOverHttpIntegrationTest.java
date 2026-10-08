@@ -8,6 +8,7 @@ import com.scalar.db.saga.definition.HttpCall;
 import com.scalar.db.saga.definition.RetryPolicy;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
+import com.scalar.db.saga.integration.IntegrationTestStore;
 import com.scalar.db.saga.store.ScalarDbSagaStoreFactory;
 import com.scalar.db.saga.transport.HttpServiceConfig;
 import com.sun.net.httpserver.HttpExchange;
@@ -62,10 +63,7 @@ class ServiceStepOverHttpIntegrationTest {
   void setUp() throws Exception {
     tempDbPath = Files.createTempFile("saga-declarative-test-", ".db");
     props = new Properties();
-    props.setProperty("scalar.db.storage", "jdbc");
-    props.setProperty(
-        "scalar.db.contact_points",
-        "jdbc:sqlite:" + tempDbPath.toAbsolutePath() + "?busy_timeout=10000&journal_mode=WAL");
+    IntegrationTestStore.configure(props, tempDbPath);
     props.setProperty("scalar.db.saga.store.num_buckets", "1");
 
     server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);

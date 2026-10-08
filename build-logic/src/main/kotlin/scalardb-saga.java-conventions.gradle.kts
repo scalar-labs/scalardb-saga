@@ -149,6 +149,26 @@ testing {
     }
 }
 
+// The integration tests run against a private SQLite file unless this names a ScalarDB
+// properties file (see IntegrationTestStore in :core's test fixtures). A test JVM does not
+// inherit the Gradle invocation's -D flags, so the value is passed on by hand. Each test JVM runs
+// in its own project directory, so a relative path is resolved against the repository root first;
+// otherwise the core and server suites would each look for the file in a different place.
+val integrationTestStore = providers.systemProperty("scalardb.saga.integration_test.properties")
+tasks.named<Test>("integrationTest") {
+    if (integrationTestStore.isPresent) {
+        // Only the path is a task input, not the file's contents or the store behind it, so a rerun
+        // after editing the file would otherwise be UP-TO-DATE, or FROM-CACHE after a clean.
+        doNotTrackState("an external store is not a tracked input")
+        systemProperty(
+            "scalardb.saga.integration_test.properties",
+            rootDir.resolve(integrationTestStore.get()).absolutePath,
+        )
+        // Registers IntegrationTestStoreExtension, which empties the shared store before each test.
+        systemProperty("junit.jupiter.extensions.autodetection.enabled", "true")
+    }
+}
+
 tasks.named("check") {
     dependsOn(testing.suites.named("integrationTest"))
     // Javadoc is not part of `check` by default, so an unresolvable {@link} or a malformed tag fails
