@@ -63,7 +63,7 @@ class AdmissionControlIntegrationTest {
     dbPath = tempDir.resolve("admission-control-it.db");
     props = new Properties();
     IntegrationTestStore.configure(props, dbPath);
-    props.setProperty("scalar.db.saga.store.num_buckets", "1");
+    props.setProperty("scalar.db.saga.store.scalardb.num_buckets", "1");
     stepRelease = new CountDownLatch(1);
     stepStarted = new CountDownLatch(1);
     concurrentDrives.set(0);

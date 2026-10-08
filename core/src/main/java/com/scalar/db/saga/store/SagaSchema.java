@@ -5,6 +5,7 @@ import com.scalar.db.api.Scan;
 import com.scalar.db.api.TableMetadata;
 import com.scalar.db.exception.storage.ExecutionException;
 import com.scalar.db.io.DataType;
+import java.util.Map;
 
 /**
  * Schema definitions for the saga persistence tables.
@@ -195,16 +196,19 @@ public final class SagaSchema {
   }
 
   /**
-   * Creates all saga tables using the ScalarDB Admin API. Idempotent — uses {@code ifNotExists}.
+   * Creates all saga tables using the ScalarDB Admin API, passing {@code options} to the namespace
+   * and every table. Idempotent — uses {@code ifNotExists}, so the options only shape what is
+   * created now.
    *
    * @param admin the ScalarDB admin interface
+   * @param options ScalarDB creation options, such as {@code replication-factor} for Cassandra
    * @throws ExecutionException if a table creation fails
    */
-  public static void createAll(Admin admin) throws ExecutionException {
-    admin.createNamespace(NAMESPACE, true);
-    admin.createTable(NAMESPACE, EVENTS_TABLE, sagaEventsTable(), true);
-    admin.createTable(NAMESPACE, STATE_TABLE, sagaStateTable(), true);
-    admin.createTable(NAMESPACE, PARKED_TABLE, sagaParkedTable(), true);
-    admin.createTable(NAMESPACE, DEFINITIONS_TABLE, sagaDefinitionsTable(), true);
+  public static void createAll(Admin admin, Map<String, String> options) throws ExecutionException {
+    admin.createNamespace(NAMESPACE, true, options);
+    admin.createTable(NAMESPACE, EVENTS_TABLE, sagaEventsTable(), true, options);
+    admin.createTable(NAMESPACE, STATE_TABLE, sagaStateTable(), true, options);
+    admin.createTable(NAMESPACE, PARKED_TABLE, sagaParkedTable(), true, options);
+    admin.createTable(NAMESPACE, DEFINITIONS_TABLE, sagaDefinitionsTable(), true, options);
   }
 }

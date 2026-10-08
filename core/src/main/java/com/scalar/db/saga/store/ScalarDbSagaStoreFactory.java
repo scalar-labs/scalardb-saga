@@ -5,8 +5,11 @@ import com.scalar.db.api.DistributedTransactionAdmin;
 import com.scalar.db.saga.definition.RetryPolicy;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.service.TransactionFactory;
+import java.util.Collections;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
+import java.util.TreeMap;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -31,15 +34,32 @@ import org.slf4j.LoggerFactory;
  *     .build();
  * }</pre>
  *
- * <p>Store-specific properties (all optional):
+ * <p>Store properties (all optional). Keys directly under {@code scalar.db.saga.store.} describe
+ * what any {@link SagaStore} implementation is asked to honor:
  *
  * <ul>
  *   <li>{@code scalar.db.saga.store.max_event_payload_bytes} — maximum event payload size in bytes
  *       ({@code 0} = no limit, default: {@code 0})
  *   <li>{@code scalar.db.saga.store.transaction_retry_count} — max transaction retry attempts
  *       (default: {@code 3})
- *   <li>{@code scalar.db.saga.store.num_buckets} — number of state-table bucket partitions
+ * </ul>
+ *
+ * <p>Keys under {@code scalar.db.saga.store.scalardb.} are specific to this ScalarDB-backed store:
+ *
+ * <ul>
+ *   <li>{@code scalar.db.saga.store.scalardb.num_buckets} — number of state-table bucket partitions
  *       (default: {@code 16})
+ *   <li>{@code scalar.db.saga.store.scalardb.creation_options.<name>} — a ScalarDB creation option
+ *       passed, with its value, to every namespace, table, and coordinator-table creation call when
+ *       the store creates its schema. The names and defaults are ScalarDB's own; see the
+ *       creation-options tables in the <a
+ *       href="https://scalardb.scalar-labs.com/docs/latest/api-guide/#creation-options">ScalarDB
+ *       API guide</a>. A backend ignores the options it does not know, and the options only take
+ *       effect when a table is created, not on one that already exists. Unset, ScalarDB's defaults
+ *       apply; on Cassandra that is {@code SimpleStrategy} with {@code replication-factor} 1, so a
+ *       production cluster sets the factor here before the first start, and a multi-datacenter
+ *       layout, which these options cannot express, has its saga and coordinator keyspaces created
+ *       beforehand.
  * </ul>
  */
 public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
@@ -47,6 +67,8 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
   private static final Logger logger = LoggerFactory.getLogger(ScalarDbSagaStoreFactory.class);
 
   private static final String PROP_PREFIX = "scalar.db.saga.store.";
+  private static final String SCALARDB_PREFIX = PROP_PREFIX + "scalardb.";
+  private static final String CREATION_OPTIONS_PREFIX = SCALARDB_PREFIX + "creation_options.";
 
   /**
    * Boot-time schema creation: ten attempts, pausing from about half a second and doubling to a
@@ -88,9 +110,10 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
     Objects.requireNonNull(properties, "properties must not be null");
 
     ScalarDbSagaStoreConfig config = parseConfig(properties);
+    Map<String, String> creationOptions = parseCreationOptions(properties);
 
     TransactionFactory transactionFactory = TransactionFactory.create(properties);
-    createSchema(transactionFactory::getTransactionAdmin, SCHEMA_CREATE_RETRY);
+    createSchema(transactionFactory::getTransactionAdmin, SCHEMA_CREATE_RETRY, creationOptions);
     // Defense in depth against polymorphic-deserialization gadgets (off by default in Jackson 2.x).
     ObjectMapper objectMapper = new ObjectMapper().deactivateDefaultTyping();
     return new ScalarDbSagaStoreFactory(transactionFactory, config, objectMapper);
@@ -128,15 +151,19 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
    *
    * @param admins produces a fresh admin per attempt; each is closed after use
    * @param retry how many attempts to make, and how long to pause between them
+   * @param options ScalarDB creation options passed to every creation call
    * @throws SagaPersistenceException if every attempt fails, or a pause is interrupted
    */
-  static void createSchema(Supplier<DistributedTransactionAdmin> admins, RetryPolicy retry) {
+  static void createSchema(
+      Supplier<DistributedTransactionAdmin> admins,
+      RetryPolicy retry,
+      Map<String, String> options) {
     long interval = retry.getInitialIntervalMillis();
     for (int attempt = 1; ; attempt++) {
       Exception failure;
       try (DistributedTransactionAdmin admin = admins.get()) {
-        admin.createCoordinatorTables(true);
-        SagaSchema.createAll(admin);
+        admin.createCoordinatorTables(true, options);
+        SagaSchema.createAll(admin, options);
         return;
       } catch (Exception e) {
         failure = e;
@@ -171,11 +198,33 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
     if (retryCount != null) {
       builder.transactionRetryCount(parseIntProperty("transaction_retry_count", retryCount));
     }
-    String numBuckets = properties.getProperty(PROP_PREFIX + "num_buckets");
+    String numBuckets = properties.getProperty(SCALARDB_PREFIX + "num_buckets");
     if (numBuckets != null) {
-      builder.numBuckets(parseIntProperty("num_buckets", numBuckets));
+      builder.numBuckets(parseIntProperty("scalardb.num_buckets", numBuckets));
     }
     return builder.build();
+  }
+
+  /**
+   * Collects the {@code scalar.db.saga.store.scalardb.creation_options.<name>} keys into the option
+   * map ScalarDB's admin takes, the value trimmed and passed through untouched, so an option
+   * ScalarDB adds later needs no change here. A key with no name after the prefix is rejected:
+   * ScalarDB would silently ignore it.
+   */
+  static Map<String, String> parseCreationOptions(Properties properties) {
+    Map<String, String> options = new TreeMap<>();
+    for (String key : properties.stringPropertyNames()) {
+      if (!key.startsWith(CREATION_OPTIONS_PREFIX)) {
+        continue;
+      }
+      String name = key.substring(CREATION_OPTIONS_PREFIX.length()).trim();
+      if (name.isEmpty()) {
+        throw new IllegalArgumentException(
+            "'" + key + "' names no option; use " + CREATION_OPTIONS_PREFIX + "<name>=<value>");
+      }
+      options.put(name, properties.getProperty(key).trim());
+    }
+    return Collections.unmodifiableMap(options);
   }
 
   /**
@@ -184,6 +233,16 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
    * and runs on a default the operator believes they overrode.
    */
   private static void rejectRemovedKeys(Properties properties) {
+    String numBuckets = PROP_PREFIX + "num_buckets";
+    if (properties.getProperty(numBuckets) != null) {
+      throw new IllegalArgumentException(
+          "'"
+              + numBuckets
+              + "' has been renamed to '"
+              + SCALARDB_PREFIX
+              + "num_buckets', since it describes this ScalarDB store's table layout. Rename the"
+              + " key.");
+    }
     String scanLimit = PROP_PREFIX + "recovery_scan_limit";
     if (properties.getProperty(scanLimit) != null) {
       throw new IllegalArgumentException(

@@ -64,7 +64,7 @@ class ServiceStepOverHttpIntegrationTest {
     tempDbPath = Files.createTempFile("saga-declarative-test-", ".db");
     props = new Properties();
     IntegrationTestStore.configure(props, tempDbPath);
-    props.setProperty("scalar.db.saga.store.num_buckets", "1");
+    props.setProperty("scalar.db.saga.store.scalardb.num_buckets", "1");
 
     server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
     server.createContext(
