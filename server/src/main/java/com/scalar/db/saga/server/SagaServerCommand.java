@@ -222,6 +222,7 @@ public class SagaServerCommand implements Callable<Integer> {
           unresolvedWarnings(unresolved),
           0,
           0,
+          null,
           "The server settings are read in order and reading stopped here, so there may be more"
               + " problems after this one.");
     }
@@ -247,7 +248,7 @@ public class SagaServerCommand implements Callable<Integer> {
     // rather than in the pass — so a validator that did not mirror it would pass a configuration
     // that cannot boot, which is the one thing this command exists to prevent.
     if (problems.isEmpty() && result.definitionCount() == 0) {
-      problems.add(SagaServer.noDefinitionsMessage());
+      problems.add(SagaServer.noDefinitionsMessage(config));
     }
     List<String> warnings = unresolvedWarnings(unresolved);
     // The other guard that refuses a boot on configuration alone. Reported alongside the rest
@@ -283,7 +284,14 @@ public class SagaServerCommand implements Callable<Integer> {
     }
     warnings.addAll(result.warnings());
     return report(
-        out, path, problems, warnings, result.serviceCount(), result.definitionCount(), null);
+        out,
+        path,
+        problems,
+        warnings,
+        result.serviceCount(),
+        result.definitionCount(),
+        config.tlsSummary(),
+        null);
   }
 
   /**
@@ -308,7 +316,9 @@ public class SagaServerCommand implements Callable<Integer> {
   /**
    * Prints the report and returns the exit code. Problems first, because that is what the reader
    * came for; the enumeration of what could not be checked comes last, where it qualifies the
-   * verdict above it.
+   * verdict above it. The TLS line ({@code null} when the settings never loaded) says whether the
+   * daemon will serve TLS and where the pair comes from, since a pair found at the conventional
+   * mount is not written in the file.
    */
   private static int report(
       PrintWriter out,
@@ -317,9 +327,14 @@ public class SagaServerCommand implements Callable<Integer> {
       List<String> warnings,
       int serviceCount,
       int definitionCount,
+      @Nullable String tlsSummary,
       @Nullable String truncationNote) {
     out.println("Validating " + path);
     out.println();
+    if (tlsSummary != null) {
+      out.println(tlsSummary);
+      out.println();
+    }
     if (problems.isEmpty()) {
       out.println(
           "Checked "
