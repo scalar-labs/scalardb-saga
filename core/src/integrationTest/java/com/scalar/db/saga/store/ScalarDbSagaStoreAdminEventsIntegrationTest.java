@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.integration.IntegrationTestStore;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -36,10 +37,7 @@ class ScalarDbSagaStoreAdminEventsIntegrationTest {
   void setUp() {
     dbPath = tempDir.resolve("saga-admin-events-it.db");
     Properties props = new Properties();
-    props.setProperty("scalar.db.storage", "jdbc");
-    props.setProperty(
-        "scalar.db.contact_points",
-        "jdbc:sqlite:" + dbPath.toAbsolutePath() + "?busy_timeout=10000&journal_mode=WAL");
+    IntegrationTestStore.configure(props, dbPath);
     props.setProperty("scalar.db.saga.store.num_buckets", "1");
     store = ScalarDbSagaStoreFactory.create(props).createStore();
   }
