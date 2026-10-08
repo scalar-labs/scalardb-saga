@@ -13,9 +13,10 @@ import org.slf4j.LoggerFactory;
  * reload, shaped like its living siblings {@code SagaRecoveryManager}/{@code SagaRetentionManager}:
  * a single-thread named daemon scheduler, a {@code reloadSafely()} wrapper so nothing escapes to
  * the scheduler, and a deadline-bounded {@code stop(deadlineNanos)} that awaits the in-flight pass
- * before the server's drain. When TLS is on, the certificate pass ({@link TlsReloader}) runs right
- * after the configuration pass in the same task: the certificate files need no schedule of their
- * own, and one thread serializes the two passes.
+ * before the server's drain. When the server serves TLS or trusts an outbound CA bundle, the
+ * certificate pass ({@link TlsReloader}, {@link EgressTrust}) runs right after the configuration
+ * pass in the same task: the certificate files need no schedule of their own, and one thread
+ * serializes the passes.
  *
  * <p>{@code scheduleWithFixedDelay} inherently serializes passes; the first scheduled pass runs one
  * full interval after {@link #start()}, because the boot pass has already applied the current
@@ -27,17 +28,17 @@ final class SagaConfigReloadManager {
   private static final Logger logger = LoggerFactory.getLogger(SagaConfigReloadManager.class);
 
   private final ConfigReconciler reconciler;
-  // The TLS certificate pass, or null when TLS is disabled.
-  private final @Nullable Runnable tlsReload;
+  // Reloads the server's TLS material and the outbound CA bundle; null when neither is in use.
+  private final @Nullable Runnable certificateReload;
   private final long intervalSeconds;
   private final ScheduledExecutorService scheduler;
 
   SagaConfigReloadManager(
-      ConfigReconciler reconciler, ReloadConfig config, @Nullable Runnable tlsReload) {
+      ConfigReconciler reconciler, ReloadConfig config, @Nullable Runnable certificateReload) {
     this(
         reconciler,
         config,
-        tlsReload,
+        certificateReload,
         Executors.newSingleThreadScheduledExecutor(
             runnable -> {
               Thread thread = new Thread(runnable, "saga-config-reload");
@@ -50,10 +51,10 @@ final class SagaConfigReloadManager {
   SagaConfigReloadManager(
       ConfigReconciler reconciler,
       ReloadConfig config,
-      @Nullable Runnable tlsReload,
+      @Nullable Runnable certificateReload,
       ScheduledExecutorService scheduler) {
     this.reconciler = reconciler;
-    this.tlsReload = tlsReload;
+    this.certificateReload = certificateReload;
     this.intervalSeconds = config.intervalSeconds();
     this.scheduler = scheduler;
   }
@@ -64,8 +65,8 @@ final class SagaConfigReloadManager {
     scheduler.scheduleWithFixedDelay(
         this::reloadSafely, intervalSeconds, intervalSeconds, TimeUnit.SECONDS);
     logger.info("Config reload enabled: every {}s", intervalSeconds);
-    if (tlsReload != null) {
-      logger.info("TLS certificate reload enabled: every {}s", intervalSeconds);
+    if (certificateReload != null) {
+      logger.info("Certificate reload enabled: every {}s", intervalSeconds);
     }
   }
 
@@ -81,11 +82,11 @@ final class SagaConfigReloadManager {
     } catch (Throwable t) {
       logger.error("Config reload pass failed unexpectedly", t);
     }
-    if (tlsReload != null) {
+    if (certificateReload != null) {
       try {
-        tlsReload.run();
+        certificateReload.run();
       } catch (Throwable t) {
-        logger.error("TLS reload pass failed unexpectedly", t);
+        logger.error("Certificate reload pass failed unexpectedly", t);
       }
     }
   }

@@ -5,6 +5,8 @@ import com.scalar.db.saga.server.security.JwtSecurityProvider;
 import com.scalar.db.saga.server.security.NoopSecurityProvider;
 import com.scalar.db.saga.server.security.SagaSecurityProvider;
 import java.util.Set;
+import javax.net.ssl.SSLSocketFactory;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Builds the configured {@link SagaSecurityProvider} from a {@link SagaServerConfig}, selected by
@@ -65,14 +67,17 @@ final class SecurityProviderFactory {
    * Creates the provider named by {@code config.securityProvider()}.
    *
    * @param config the server configuration
+   * @param egressSocketFactory the outbound TLS socket factory a JWKS fetch connects through;
+   *     {@code null} for the JVM default
    * @return the security provider
    * @throws IllegalArgumentException if the configured provider name is not recognized
    */
-  static SagaSecurityProvider create(SagaServerConfig config) {
+  static SagaSecurityProvider create(
+      SagaServerConfig config, @Nullable SSLSocketFactory egressSocketFactory) {
     String name = config.securityProvider();
     return switch (name) {
       case "noop" -> new NoopSecurityProvider();
-      case "jwt" -> JwtSecurityProvider.create(config.properties());
+      case "jwt" -> JwtSecurityProvider.create(config.properties(), egressSocketFactory);
       case "apikey" -> ApiKeySecurityProvider.create(config.properties(), config.rawProperties());
       default -> throw unknownProvider(name);
     };

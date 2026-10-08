@@ -3,11 +3,25 @@ package com.scalar.db.saga.server;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.nimbusds.jose.JWSAlgorithm;
+import com.nimbusds.jose.JWSHeader;
+import com.nimbusds.jose.crypto.RSASSASigner;
+import com.nimbusds.jose.jwk.JWKSet;
+import com.nimbusds.jose.jwk.RSAKey;
+import com.nimbusds.jose.jwk.gen.RSAKeyGenerator;
+import com.nimbusds.jwt.JWTClaimsSet;
+import com.nimbusds.jwt.SignedJWT;
 import com.scalar.db.saga.server.security.NoopSecurityProvider;
+import com.scalar.db.saga.server.security.SagaAuthRequest;
+import com.scalar.db.saga.server.security.SagaIdentity;
 import com.scalar.db.saga.server.security.SagaSecurityProvider;
+import com.sun.net.httpserver.HttpsServer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
+import java.util.Date;
+import java.util.Map;
 import java.util.Properties;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -20,11 +34,68 @@ class SecurityProviderFactoryTest {
     SagaServerConfig config = SagaServerConfig.load(new Properties());
 
     // Act
-    SagaSecurityProvider provider = SecurityProviderFactory.create(config);
+    SagaSecurityProvider provider = SecurityProviderFactory.create(config, null);
 
     // Assert
     assertThat(provider).isInstanceOf(NoopSecurityProvider.class);
     assertThat(provider.name()).isEqualTo("noop");
+  }
+
+  @Test
+  void create_jwtWithEgressSocketFactoryGiven_fetchesTheJwksThroughIt(@TempDir Path dir)
+      throws Exception {
+    // Arrange — a JWKS host behind a private CA, reachable only through the egress trust's socket
+    // factory; a factory dropped on the way to the retriever leaves the token unverifiable
+    RSAKey signingKey = new RSAKeyGenerator(2048).keyID("k1").generate();
+    TlsTestCerts.PemPair jwksCert = TlsTestCerts.generateRsa(dir, "jwks");
+    HttpsServer jwks = startJwksHost(jwksCert, signingKey);
+    try {
+      Properties properties = new Properties();
+      properties.setProperty(SagaServerConfig.SECURITY_PROVIDER_KEY, "jwt");
+      properties.setProperty(
+          "scalar.db.saga.server.security.jwt.jwks_url",
+          "https://localhost:" + jwks.getAddress().getPort() + "/jwks.json");
+      properties.setProperty("scalar.db.saga.server.security.jwt.issuer", "https://issuer.example");
+      properties.setProperty("scalar.db.saga.server.security.jwt.audience", "saga-daemon");
+      EgressTrust trust = new EgressTrust(jwksCert.certChainPath());
+
+      try (SagaSecurityProvider provider =
+          SecurityProviderFactory.create(
+              SagaServerConfig.load(properties), trust.sslContext().getSocketFactory())) {
+        // Act
+        SagaIdentity identity =
+            provider.authenticate(
+                SagaAuthRequest.fromHeaders(
+                    "GET /sagas/x", null, Map.of("Authorization", "Bearer " + token(signingKey))));
+
+        // Assert
+        assertThat(identity.principal()).isEqualTo("alice");
+      }
+    } finally {
+      jwks.stop(0);
+    }
+  }
+
+  private static HttpsServer startJwksHost(TlsTestCerts.PemPair cert, RSAKey signingKey) {
+    return TlsTestCerts.startHttpsServer(
+        cert,
+        "/jwks.json",
+        new JWKSet(signingKey.toPublicJWK()).toString().getBytes(StandardCharsets.UTF_8));
+  }
+
+  private static String token(RSAKey signingKey) throws Exception {
+    JWTClaimsSet claims =
+        new JWTClaimsSet.Builder()
+            .subject("alice")
+            .issuer("https://issuer.example")
+            .audience("saga-daemon")
+            .expirationTime(Date.from(Instant.now().plusSeconds(300)))
+            .build();
+    SignedJWT jwt =
+        new SignedJWT(
+            new JWSHeader.Builder(JWSAlgorithm.RS256).keyID(signingKey.getKeyID()).build(), claims);
+    jwt.sign(new RSASSASigner(signingKey));
+    return jwt.serialize();
   }
 
   @Test
@@ -35,7 +106,7 @@ class SecurityProviderFactoryTest {
 
     // Act
     SagaSecurityProvider provider =
-        SecurityProviderFactory.create(SagaServerConfig.load(properties));
+        SecurityProviderFactory.create(SagaServerConfig.load(properties), null);
 
     // Assert — case-insensitive selection
     assertThat(provider).isInstanceOf(NoopSecurityProvider.class);
@@ -49,7 +120,8 @@ class SecurityProviderFactoryTest {
     properties.setProperty(SagaServerConfig.SECURITY_PROVIDER_KEY, "swordfish-like-a-secret");
 
     // Act / Assert
-    assertThatThrownBy(() -> SecurityProviderFactory.create(SagaServerConfig.load(properties)))
+    assertThatThrownBy(
+            () -> SecurityProviderFactory.create(SagaServerConfig.load(properties), null))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining(SagaServerConfig.SECURITY_PROVIDER_KEY)
         .hasMessageNotContaining("swordfish")
@@ -68,7 +140,7 @@ class SecurityProviderFactoryTest {
 
     // Act
     SagaSecurityProvider provider =
-        SecurityProviderFactory.create(SagaServerConfig.load(properties));
+        SecurityProviderFactory.create(SagaServerConfig.load(properties), null);
 
     // Assert
     assertThat(provider.name()).isEqualTo("jwt");
@@ -81,7 +153,8 @@ class SecurityProviderFactoryTest {
     properties.setProperty(SagaServerConfig.SECURITY_PROVIDER_KEY, "jwt");
 
     // Act / Assert
-    assertThatThrownBy(() -> SecurityProviderFactory.create(SagaServerConfig.load(properties)))
+    assertThatThrownBy(
+            () -> SecurityProviderFactory.create(SagaServerConfig.load(properties), null))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
@@ -98,7 +171,7 @@ class SecurityProviderFactoryTest {
 
     // Act
     SagaSecurityProvider provider =
-        SecurityProviderFactory.create(SagaServerConfig.load(properties));
+        SecurityProviderFactory.create(SagaServerConfig.load(properties), null);
 
     // Assert
     assertThat(provider.name()).isEqualTo("apikey");
@@ -119,7 +192,8 @@ class SecurityProviderFactoryTest {
         "scalar.db.saga.server.security.apikey.key.svc.roles", "${file:UTF-8:" + keyFile + "}");
 
     // Act / Assert
-    assertThatThrownBy(() -> SecurityProviderFactory.create(SagaServerConfig.load(properties)))
+    assertThatThrownBy(
+            () -> SecurityProviderFactory.create(SagaServerConfig.load(properties), null))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("scalar.db.saga.server.security.apikey.key.svc.roles")
         .hasMessageNotContaining("s3cr3t")
@@ -136,7 +210,8 @@ class SecurityProviderFactoryTest {
     properties.setProperty("scalar.db.saga.server.security.apikey.key.svc.roles", "saga:read");
 
     // Act / Assert
-    assertThatThrownBy(() -> SecurityProviderFactory.create(SagaServerConfig.load(properties)))
+    assertThatThrownBy(
+            () -> SecurityProviderFactory.create(SagaServerConfig.load(properties), null))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
@@ -147,7 +222,8 @@ class SecurityProviderFactoryTest {
     properties.setProperty(SagaServerConfig.SECURITY_PROVIDER_KEY, "apikey");
 
     // Act / Assert
-    assertThatThrownBy(() -> SecurityProviderFactory.create(SagaServerConfig.load(properties)))
+    assertThatThrownBy(
+            () -> SecurityProviderFactory.create(SagaServerConfig.load(properties), null))
         .isInstanceOf(IllegalArgumentException.class);
   }
 }

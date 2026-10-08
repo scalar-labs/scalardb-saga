@@ -17,6 +17,8 @@ import com.scalar.db.saga.server.grpc.SagaServiceImpl;
 import com.scalar.db.saga.server.security.SagaSecurityHandler;
 import com.scalar.db.saga.server.security.SagaSecurityProvider;
 import com.scalar.db.saga.store.ScalarDbSagaStoreFactory;
+import com.scalar.db.saga.transport.HttpEndpointRegistrar;
+import com.scalar.db.saga.transport.HttpServiceConfig;
 import io.grpc.BindableService;
 import io.grpc.Server;
 import io.grpc.ServerInterceptor;
@@ -31,12 +33,15 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.net.http.HttpClient;
 import java.nio.file.Path;
 import java.security.GeneralSecurityException;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -91,6 +96,9 @@ public final class SagaServer implements AutoCloseable {
   private static final long FRONT_PHASE_MAX_MILLIS = 15_000L;
   private static final long THREAD_POOL_IDLE_TIMEOUT_MILLIS = 60_000L;
   private static final long RATE_LIMIT_WINDOW_MILLIS = 60_000L;
+  // The connect phase of the shared outbound client; the same bound core's HttpEndpoint gives the
+  // client it builds for itself, so a black-holed participant fails as fast either way.
+  private static final Duration EGRESS_CONNECT_TIMEOUT = Duration.ofSeconds(10);
 
   // The most of the front phase the reload stop may take. It runs before the transports drain, in
   // the same slice, so without this a pass stuck on a slow store would leave them nothing: Jetty
@@ -110,6 +118,10 @@ public final class SagaServer implements AutoCloseable {
   // disabled. Built before anything else is wired, so a bad certificate or key fails construction,
   // long before either port could bind.
   private final @Nullable TlsReloader tlsReloader;
+  private final @Nullable EgressTrust egressTrust;
+  // The client every participant endpoint shares when an egress CA bundle is configured. The
+  // endpoints treat a supplied client as the caller's, so this server shuts it down at close.
+  private final @Nullable HttpClient egressClient;
   // Each transport is null when disabled; SagaServerConfig guarantees at least one is enabled.
   private final @Nullable Javalin httpServer;
   private final @Nullable ExecutorService httpVirtualThreads;
@@ -159,10 +171,11 @@ public final class SagaServer implements AutoCloseable {
     // No null check: unlike the two above, this argument reaches no caller outside this class.
     this.waiterRegistry = waiterRegistry;
     // TLS material is validated first, in its own guarded step: the orchestrator is the only
-    // resource alive yet, and both transports below consume the result.
+    // resource alive yet, and both transports and every outbound client below consume the result.
     TlsReloader tlsReloader = null;
-    if (config.tlsEnabled()) {
-      try {
+    EgressTrust egressTrust = null;
+    try {
+      if (config.tlsEnabled()) {
         Path certChainPath = config.tlsCertChainPath().orElseThrow();
         Path privateKeyPath = config.tlsPrivateKeyPath().orElseThrow();
         tlsReloader =
@@ -171,12 +184,16 @@ public final class SagaServer implements AutoCloseable {
                 privateKeyPath,
                 config.reloadConfig().clock(),
                 TlsMaterial.load(certChainPath, privateKeyPath));
-      } catch (RuntimeException e) {
-        orchestrator.close();
-        throw e;
       }
+      egressTrust = config.egressCaCertPath().map(EgressTrust::new).orElse(null);
+    } catch (RuntimeException e) {
+      orchestrator.close();
+      throw e;
     }
     this.tlsReloader = tlsReloader;
+    this.egressTrust = egressTrust;
+    HttpClient egressClient = egressTrust == null ? null : buildEgressClient(egressTrust);
+    this.egressClient = egressClient;
     // Created here rather than inside createHttpServer so the server owns it: Jetty never stops
     // an executor it was handed, and close() must be able to wait for handler bodies.
     ExecutorService httpVirtualThreads =
@@ -196,7 +213,9 @@ public final class SagaServer implements AutoCloseable {
     // read the final field to find out.
     @Nullable SagaConfigReloadManager manager = null;
     try {
-      provider = SecurityProviderFactory.create(config);
+      provider =
+          SecurityProviderFactory.create(
+              config, egressTrust == null ? null : egressTrust.sslContext().getSocketFactory());
       this.securityProvider = provider;
       // Boot goes through the same pass reload uses: snapshot, validate (aggregated), apply. It is
       // the only thing that installs endpoints, so "any set a reload accepted also cold-boots a
@@ -207,7 +226,9 @@ public final class SagaServer implements AutoCloseable {
               config.definitionsPath().orElse(null),
               config.callbackBaseUrl().isPresent() && config.callbackSecret().isPresent(),
               new ServiceSecretResolver(config.reloadConfig().secretsRoot()),
-              orchestrator.httpEndpointRegistrar(),
+              egressClient == null
+                  ? orchestrator.httpEndpointRegistrar()
+                  : withEgressClient(orchestrator.httpEndpointRegistrar(), egressClient),
               new DefinitionStore() {
                 @Override
                 public void register(SagaDefinition definition) {
@@ -237,14 +258,14 @@ public final class SagaServer implements AutoCloseable {
         throw new IllegalStateException(noDefinitionsMessage(config));
       }
       logger.info("Registered {} saga definition(s)", configReconciler.appliedDefinitionCount());
-      // The certificate pass rides the same schedule: it needs no interval of its own, and one
-      // thread serializes the two passes.
+      // The certificate passes ride the same schedule: they need no interval of their own, and one
+      // thread serializes them with the configuration pass.
       manager =
           config.reloadConfig().intervalSeconds() > 0
               ? new SagaConfigReloadManager(
                   configReconciler,
                   config.reloadConfig(),
-                  tlsReloader == null ? null : tlsReloader::run)
+                  certificatePasses(tlsReloader, egressTrust))
               : null;
       this.reloadManager = manager;
       // Built here rather than with the executors above: Javalin takes its routes at creation, and
@@ -281,6 +302,7 @@ public final class SagaServer implements AutoCloseable {
       }
       closeSecurityProvider(provider);
       orchestrator.close();
+      shutdownEgressClient(egressClient);
       throw e;
     }
   }
@@ -365,6 +387,81 @@ public final class SagaServer implements AutoCloseable {
       interceptors.add(new SagaRateLimitInterceptor(rateLimiter));
     }
     return ServerInterceptors.interceptForward(service, interceptors);
+  }
+
+  /**
+   * The one outbound client every participant endpoint shares when an egress CA bundle is
+   * configured, built as {@code HttpEndpoint} builds its own: no redirects, which keeps a service's
+   * {@code allowed_hosts} from being bypassed by a 3xx, and a bounded connect phase.
+   */
+  private static HttpClient buildEgressClient(EgressTrust egressTrust) {
+    return HttpClient.newBuilder()
+        .connectTimeout(EGRESS_CONNECT_TIMEOUT)
+        .followRedirects(HttpClient.Redirect.NEVER)
+        .sslContext(egressTrust.sslContext())
+        .build();
+  }
+
+  /**
+   * Releases the shared outbound client's selector thread and pooled connections. {@code
+   * shutdown()}, never {@code close()}, for the reason {@code HttpEndpointManager} gives: close may
+   * block indefinitely on an abandoned streaming body.
+   */
+  private static void shutdownEgressClient(@Nullable HttpClient egressClient) {
+    if (egressClient != null) {
+      egressClient.shutdown();
+    }
+  }
+
+  /**
+   * Wraps {@code registrar} so every service it installs connects through {@code client}. The
+   * reconciler describes services without a client, and the same client instance on every pass
+   * keeps an unchanged service's config equal, so the registrar still reuses its endpoint.
+   *
+   * <p>Visible for testing.
+   */
+  static HttpEndpointRegistrar withEgressClient(
+      HttpEndpointRegistrar registrar, HttpClient client) {
+    return services -> {
+      Map<String, HttpServiceConfig> withClient = new LinkedHashMap<>();
+      services.forEach(
+          (name, service) ->
+              withClient.put(
+                  name,
+                  new HttpServiceConfig(
+                      service.baseUrl(),
+                      service.allowedHosts(),
+                      service.maxBodyBytes(),
+                      client,
+                      service.defaultHeaders())));
+      registrar.swapHttpEndpoints(withClient);
+    };
+  }
+
+  /**
+   * The reload manager's certificate hook: the server's own TLS pass and the outbound trust pass,
+   * or {@code null} when there is neither. Each pass logs its own rejections; the {@code finally}
+   * keeps an unexpected failure in the first from costing the second its turn, as the manager does
+   * for its passes.
+   *
+   * <p>Visible for testing.
+   */
+  static @Nullable Runnable certificatePasses(
+      @Nullable TlsReloader tlsReloader, @Nullable EgressTrust egressTrust) {
+    if (tlsReloader == null && egressTrust == null) {
+      return null;
+    }
+    return () -> {
+      try {
+        if (tlsReloader != null) {
+          tlsReloader.run();
+        }
+      } finally {
+        if (egressTrust != null) {
+          egressTrust.run();
+        }
+      }
+    };
   }
 
   private static DefaultSagaOrchestrator buildDefaultSagaOrchestrator(
@@ -812,6 +909,14 @@ public final class SagaServer implements AutoCloseable {
     Objects.requireNonNull(tlsReloader, "TLS is not enabled").run();
   }
 
+  /**
+   * Runs one outbound CA bundle reload pass synchronously, for the same reason as {@link
+   * #reloadTlsNow}.
+   */
+  void reloadEgressTrustNow() {
+    Objects.requireNonNull(egressTrust, "No outbound CA bundle is configured").run();
+  }
+
   @Override
   public void close() {
     // Idempotent: start() calls close() on a bind failure, and try-with-resources will call it
@@ -864,6 +969,8 @@ public final class SagaServer implements AutoCloseable {
     }
     closeSecurityProvider(securityProvider);
     orchestrator.close(deadlineNanos);
+    // After the orchestrator has drained, so no participant call is still using the client.
+    shutdownEgressClient(egressClient);
     logger.info("SagaServer stopped");
   }
 

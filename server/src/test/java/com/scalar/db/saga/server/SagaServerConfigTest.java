@@ -246,6 +246,55 @@ class SagaServerConfigTest {
   }
 
   @Test
+  void load_egressCaUnsetAndNothingMounted_trustsTheJvmDefaultsOnly(@TempDir Path conf) {
+    // Act
+    SagaServerConfig config = SagaServerConfig.load(new Properties(), null, conf);
+
+    // Assert
+    assertThat(config.egressCaCertPath()).isEmpty();
+    assertThat(config.egressTrustSummary())
+        .contains("JVM's default CAs only")
+        .contains(SagaServerConfig.DEFAULT_EGRESS_CA_CERT_PATH);
+  }
+
+  @Test
+  void load_egressCaUnsetAndBundleMounted_usesTheMountedBundleWithoutASwitch(@TempDir Path conf)
+      throws IOException {
+    // Arrange — a bundle never disables validation or hostname checks, so mounting it is enough
+    Path dir = Files.createDirectories(conf.resolve(SagaServerConfig.TLS_EGRESS_DIR));
+    Path bundle = Files.writeString(dir.resolve(SagaServerConfig.EGRESS_CA_FILE), "bundle");
+
+    // Act
+    SagaServerConfig config = SagaServerConfig.load(new Properties(), null, conf);
+
+    // Assert
+    assertThat(config.egressCaCertPath()).contains(bundle);
+    assertThat(config.egressTrustSummary())
+        .contains(
+            "plus the bundle from the file at " + SagaServerConfig.DEFAULT_EGRESS_CA_CERT_PATH);
+  }
+
+  @Test
+  void load_egressCaPathGivenAndBundleMounted_explicitValueWins(@TempDir Path conf)
+      throws IOException {
+    // Arrange
+    Path dir = Files.createDirectories(conf.resolve(SagaServerConfig.TLS_EGRESS_DIR));
+    Files.writeString(dir.resolve(SagaServerConfig.EGRESS_CA_FILE), "bundle");
+    Path explicit = conf.resolve("elsewhere.crt");
+    Properties props = new Properties();
+    props.setProperty(SagaServerConfig.EGRESS_CA_CERT_PATH_KEY, explicit.toString());
+
+    // Act
+    SagaServerConfig config = SagaServerConfig.load(props, null, conf);
+
+    // Assert — the summary names the key, never the configured value
+    assertThat(config.egressCaCertPath()).contains(explicit);
+    assertThat(config.egressTrustSummary())
+        .contains("the path in '" + SagaServerConfig.EGRESS_CA_CERT_PATH_KEY + "'")
+        .doesNotContain(explicit.toString());
+  }
+
+  @Test
   void load_tlsUnsetAndNothingMounted_isPlaintext(@TempDir Path conf) {
     // Arrange — no tls.* key and nothing under the stand-in conf directory
 
