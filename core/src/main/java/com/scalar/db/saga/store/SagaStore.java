@@ -312,6 +312,9 @@ public interface SagaStore extends AutoCloseable {
    * from the event log for example: on a backend whose secondary-index reads lag the base table, a
    * lookup by ID can miss a just-written row, while this read cannot.
    *
+   * @param sagaId the saga instance ID
+   * @param status the status the state row must be at
+   * @param updatedAt the row's last state-change time, as the event log recorded it
    * @return the snapshot, or empty when the saga is not at that status and timestamp
    */
   Optional<SagaStateSnapshot> getStateSnapshot(String sagaId, SagaStatus status, Instant updatedAt);

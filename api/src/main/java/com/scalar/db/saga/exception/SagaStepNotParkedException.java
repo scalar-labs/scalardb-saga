@@ -15,9 +15,19 @@ import java.util.Objects;
  */
 public class SagaStepNotParkedException extends SagaRuntimeException {
 
+  /** The saga the callback named. */
   private final String sagaId;
+
+  /** The step the callback tried to complete. */
   private final String stepName;
 
+  /**
+   * A callback for {@code stepName} arrived before saga {@code sagaId} recorded its park. Carries
+   * {@link SagaErrorCode#SAGA_STEP_NOT_PARKED} with both names in its metadata.
+   *
+   * @param sagaId the saga the callback named
+   * @param stepName the step the callback tried to complete
+   */
   public SagaStepNotParkedException(String sagaId, String stepName) {
     super(
         SagaErrorCode.SAGA_STEP_NOT_PARKED,
@@ -37,10 +47,20 @@ public class SagaStepNotParkedException extends SagaRuntimeException {
         Objects.requireNonNull(metadata.get("step_name"), "stepName must not be null"));
   }
 
+  /**
+   * Returns the saga the callback named.
+   *
+   * @return the saga ID
+   */
   public String getSagaId() {
     return sagaId;
   }
 
+  /**
+   * Returns the step the callback tried to complete.
+   *
+   * @return the step name
+   */
   public String getStepName() {
     return stepName;
   }
