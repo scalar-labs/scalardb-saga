@@ -3,7 +3,7 @@ package com.scalar.db.saga.server.api;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
-import com.scalar.db.saga.api.SagaOrchestrator;
+import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.server.SagaWaiterRegistry;
 import com.scalar.db.saga.server.security.SagaAuthRequest;
 import com.scalar.db.saga.server.security.SagaIdentity;
@@ -47,7 +47,7 @@ class HeadMethodTest {
               HealthResource.register(cfg.routes);
               SagaResource.register(
                   cfg.routes,
-                  mock(SagaOrchestrator.class),
+                  mock(DefaultSagaOrchestrator.class),
                   0L,
                   new java.util.concurrent.CompletableFuture<>(),
                   new SagaWaiterRegistry());

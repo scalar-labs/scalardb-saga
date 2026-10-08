@@ -38,6 +38,7 @@ import com.scalar.db.saga.exception.SagaDefinitionNotServedException;
 import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaOverloadedException;
+import com.scalar.db.saga.exception.SagaStepNotParkedException;
 import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaStateAndEvents;
@@ -408,6 +409,40 @@ class DefaultSagaOrchestratorTest {
 
   @Nested
   class StartAsync {
+
+    @Test
+    void startAsyncReturningSnapshot_latestVersion_returnsTheCreatedSnapshotNotJustTheId() {
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot created = snapshot("saga-1", SagaStatus.RUNNING);
+      when(definitionRegistry.resolve("transfer")).thenReturn(def);
+      when(engine.createSaga(eq(def), isNull(), any())).thenReturn(created);
+
+      // Act
+      SagaStateSnapshot result =
+          orchestrator.startAsyncReturningSnapshot(null, "transfer", null, Map.of(), null);
+
+      // Assert — the snapshot in hand, so a front end never has to read the saga back by ID
+      assertThat(result).isSameAs(created);
+      verify(store, never()).getStateSnapshot(any());
+    }
+
+    @Test
+    void startAsyncReturningSnapshot_versionAndClientIdGiven_startsThatVersionUnderThatId() {
+      // Arrange
+      SagaDefinition def = definition("transfer");
+      SagaStateSnapshot created = snapshot("my-id", SagaStatus.RUNNING);
+      when(definitionRegistry.resolve("transfer", "1.0")).thenReturn(def);
+      when(engine.createSaga(eq(def), eq("my-id"), any())).thenReturn(created);
+
+      // Act
+      SagaStateSnapshot result =
+          orchestrator.startAsyncReturningSnapshot("my-id", "transfer", "1.0", Map.of(), null);
+
+      // Assert
+      assertThat(result).isSameAs(created);
+      verify(definitionRegistry).resolve("transfer", "1.0");
+    }
 
     @Test
     void startAsync_serverGeneratedId_returnsSagaIdImmediately() {
@@ -1407,16 +1442,142 @@ class DefaultSagaOrchestratorTest {
     }
 
     @Test
-    void completeStepAsync_nonWaitingSaga_throwsIllegalState() {
-      // Arrange — the WAITING check is phase 1 (synchronous), so completeStepAsync still throws
-      // before dispatching anything, preserving the daemon's synchronous error mapping.
+    void completeStepAsync_callbackBeforeThePark_throwsStepNotParkedAndRecordsNothing() {
+      // Arrange — the engine parks only after the participant accepted the call, so a participant
+      // calling back at once finds the saga RUNNING with no record of the step. Acking it would
+      // lose the callback and leave the saga waiting on it after the park.
       SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
       when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(saga));
+      when(store.getEvents("saga-1"))
+          .thenReturn(List.of(StatusEvent.started(null), StepEvent.completed(0, "s0", null)));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.completeStepAsync("saga-1", "s1", Map.of()))
+          .isInstanceOf(SagaStepNotParkedException.class);
+      verify(store, never()).resumeParkedStep(any(), anyInt(), any());
+      verify(engine, never()).resumeFrom(any(), any(), anyInt());
+    }
+
+    @Test
+    void completeStepAsync_lookupMissesASagaTheLogShows_throwsStepNotParkedNotNotFound() {
+      // Arrange — a first step that is async, called back at once: the log already has the start,
+      // but on DynamoDB the lookup by ID can still miss the new row. A 404 would end the callback.
+      when(store.getEvents("saga-1")).thenReturn(List.of(StatusEvent.started(null)));
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.empty());
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.completeStepAsync("saga-1", "s1", Map.of()))
+          .isInstanceOf(SagaStepNotParkedException.class);
+    }
+
+    @Test
+    void completeStepAsync_unknownSaga_throwsSagaNotFound() {
+      // Arrange — no events and no row: the saga does not exist
+      when(store.getEvents("nope")).thenReturn(List.of());
+      when(store.getStateSnapshot("nope")).thenReturn(Optional.empty());
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.completeStepAsync("nope", "s1", Map.of()))
+          .isInstanceOf(SagaNotFoundException.class);
+    }
+
+    @Test
+    void completeStepAsync_failedStepOnARunningSaga_throwsStepNotParked() {
+      // Arrange — the step failed and the saga is still RUNNING, so the sweep is about to re-drive
+      // it
+      // forward with no intervention event in between, and its participant calls back before the
+      // new
+      // park. A standing failure settles nothing.
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(saga));
+      when(store.getEvents("saga-1"))
+          .thenReturn(List.of(StatusEvent.started(null), StepEvent.failed(1, "s1", null)));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.completeStepAsync("saga-1", "s1", Map.of()))
+          .isInstanceOf(SagaStepNotParkedException.class);
+      verify(engine, never()).resumeFrom(any(), any(), anyInt());
+    }
+
+    @Test
+    void completeStepAsync_failedStepRedrivenAfterAReset_throwsStepNotParked() {
+      // Arrange — the step failed, an operator reset the saga to RUNNING, and the re-driven step's
+      // participant calls back before its new park. The old failure no longer settles the step.
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(saga));
+      when(store.getEvents("saga-1"))
+          .thenReturn(
+              List.of(
+                  StatusEvent.started(null),
+                  StepEvent.failed(1, "s1", null),
+                  StatusEvent.reset(SagaStatus.RUNNING, "ops", "retry")));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.completeStepAsync("saga-1", "s1", Map.of()))
+          .isInstanceOf(SagaStepNotParkedException.class);
+    }
+
+    @Test
+    void completeStepAsync_completedStepAfterAReset_staysADuplicate() {
+      // Arrange — a reset does not re-run a completed step, so its callback is still a duplicate
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(saga));
+      when(store.getEvents("saga-1"))
+          .thenReturn(
+              List.of(
+                  StatusEvent.started(null),
+                  StepEvent.completed(1, "s1", null),
+                  StatusEvent.reset(SagaStatus.RUNNING, "ops", "retry")));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.completeStepAsync("saga-1", "s1", Map.of()))
+          .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void completeStepAsync_stepAlreadyCompleted_throwsIllegalStateAsADuplicate() {
+      // Arrange — the step's outcome is recorded, so this callback repeats one already applied;
+      // the endpoint answers IllegalStateException as an idempotent duplicate
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(saga));
+      when(store.getEvents("saga-1"))
+          .thenReturn(
+              List.of(
+                  StatusEvent.started(null),
+                  StepEvent.pending(1, "s1"),
+                  StepEvent.completed(1, "s1", null)));
 
       // Act & Assert
       assertThatThrownBy(() -> orchestrator.completeStepAsync("saga-1", "s1", Map.of()))
           .isInstanceOf(IllegalStateException.class);
       verify(engine, never()).resumeFrom(any(), any(), anyInt());
+    }
+
+    @Test
+    void completeStepAsync_parkInTheLog_readsTheWaitingRowByItsKeyNotById() {
+      // Arrange — the park's STEP_PENDING and the WAITING row share one timestamp, so the row is
+      // read by its full key; the lookup by ID can lag the write on DynamoDB
+      Instant parkedAt = Instant.parse("2026-10-07T00:00:00.123Z");
+      SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
+      SagaDefinition def = definition("test-saga");
+      SagaStateSnapshot running = snapshot("saga-1", SagaStatus.RUNNING);
+      List<SagaEvent> events =
+          List.of(StatusEvent.started(null), StepEvent.pending(1, "s1").withTimestamp(parkedAt));
+      when(store.getEvents("saga-1")).thenReturn(events);
+      when(store.getStateSnapshot("saga-1", SagaStatus.WAITING, parkedAt))
+          .thenReturn(Optional.of(waiting));
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(store.resumeParkedStep(eq(waiting), eq(events.size()), any(StepEvent.class)))
+          .thenReturn(running);
+      when(engine.replayEvents(eq(running), any()))
+          .thenReturn(new ExecutionContext("saga-1", Map.of(), running));
+
+      // Act
+      SagaStateSnapshot result = orchestrator.completeStepAsync("saga-1", "s1", Map.of());
+
+      // Assert
+      assertThat(result).isSameAs(running);
+      verify(store, never()).getStateSnapshot("saga-1");
     }
 
     @Test
@@ -1546,8 +1707,9 @@ class DefaultSagaOrchestratorTest {
     }
 
     @Test
-    void completeStepAsync_noParkedStep_throwsIllegalState() {
-      // Arrange — WAITING but no STEP_PENDING marker in history (defensive)
+    void completeStepAsync_waitingButParkMissingFromTheLog_throwsStepNotParked() {
+      // Arrange — the log was read before the park landed and the state after it: retrying the
+      // callback finds both agreeing, where acking it now would lose it
       SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
       List<SagaEvent> events = List.of(StatusEvent.started(null));
       when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(waiting));
@@ -1555,7 +1717,8 @@ class DefaultSagaOrchestratorTest {
 
       // Act & Assert
       assertThatThrownBy(() -> orchestrator.completeStepAsync("saga-1", "s1", Map.of()))
-          .isInstanceOf(IllegalStateException.class);
+          .isInstanceOf(SagaStepNotParkedException.class);
+      verify(store, never()).resumeParkedStep(any(), anyInt(), any());
     }
 
     @Test

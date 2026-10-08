@@ -14,6 +14,7 @@ import com.scalar.db.saga.exception.SagaOverloadedException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
+import com.scalar.db.saga.exception.SagaStepNotParkedException;
 import com.scalar.db.saga.server.security.SagaAuthUnavailableException;
 import com.scalar.db.saga.server.security.SagaAuthenticationException;
 import com.scalar.db.saga.server.security.SagaAuthorizationException;
@@ -79,6 +80,13 @@ public final class ErrorMapper {
    * second is short enough to keep a queue draining and long enough not to be a hot loop.
    */
   public static final long OVERLOAD_RETRY_AFTER_MILLIS = 1_000L;
+
+  /**
+   * The wait suggested to a participant whose callback arrived before the saga finished parking.
+   * The park is one transaction already under way, so the shortest wait Retry-After can express is
+   * plenty.
+   */
+  public static final long STEP_NOT_PARKED_RETRY_AFTER_MILLIS = 1_000L;
 
   private static final Logger logger = LoggerFactory.getLogger(ErrorMapper.class);
 
@@ -188,6 +196,19 @@ public final class ErrorMapper {
         (e, ctx) -> {
           logger.debug("{} on {} {}", e.getMessage(), ctx.method(), ctx.path());
           ctx.header("Retry-After", Long.toString((OVERLOAD_RETRY_AFTER_MILLIS + 999) / 1000));
+          respond(ctx, 503, e);
+        });
+
+    // ── Callback ahead of its park (503) ─────────────────────────────────
+    // A participant that calls back at once can beat the park it is completing. That is expected,
+    // not a failure, so it logs at DEBUG rather than through the fallback's ERROR, and answers 503
+    // because a participant's generic HTTP retry treats 503 as "try again", which is the point.
+    routes.exception(
+        SagaStepNotParkedException.class,
+        (e, ctx) -> {
+          logger.debug("{} on {} {}", e.getMessage(), ctx.method(), ctx.path());
+          ctx.header(
+              "Retry-After", Long.toString((STEP_NOT_PARKED_RETRY_AFTER_MILLIS + 999) / 1000));
           respond(ctx, 503, e);
         });
 

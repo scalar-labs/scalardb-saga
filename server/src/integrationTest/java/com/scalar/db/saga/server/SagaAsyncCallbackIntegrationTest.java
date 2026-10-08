@@ -31,7 +31,12 @@ class SagaAsyncCallbackIntegrationTest extends ServerIntegrationTestSupport {
   private static final String SAGA_NAME = "payment";
   private static final String SECRET = "integration-callback-secret";
 
+  private static final String EAGER_SAGA_NAME = "payment-eager";
+
   private final AtomicReference<String> capturedCallbackUrl = new AtomicReference<>();
+  private final AtomicReference<String> eagerCallbackUrl = new AtomicReference<>();
+  private final AtomicReference<HttpResponse<String>> eagerCallbackResponse =
+      new AtomicReference<>();
   private final HttpClient http = HttpClient.newHttpClient();
 
   private static final String DEFINITION =
@@ -40,6 +45,17 @@ class SagaAsyncCallbackIntegrationTest extends ServerIntegrationTestSupport {
           { "name": "payment", "mode": "SAGA", "steps": [
             { "name": "charge", "service": "$svc",
               "execution":    { "method": "POST", "path": "/charge", "async": true },
+              "compensation": { "method": "POST", "path": "/charge-undo" } } ] }
+          """);
+
+  // A participant that calls back before it answers the step, so the callback is certain to arrive
+  // before the saga records its park.
+  private static final String EAGER_DEFINITION =
+      withService(
+          """
+          { "name": "payment-eager", "mode": "SAGA", "steps": [
+            { "name": "charge", "service": "$svc",
+              "execution":    { "method": "POST", "path": "/charge-eager", "async": true },
               "compensation": { "method": "POST", "path": "/charge-undo" } } ] }
           """);
 
@@ -53,12 +69,25 @@ class SagaAsyncCallbackIntegrationTest extends ServerIntegrationTestSupport {
           capturedCallbackUrl.set(ex.getRequestHeaders().getFirst("X-Saga-Callback-Url"));
           respond(ex, 202, "{}");
         });
+    participant.createContext(
+        "/charge-eager",
+        ex -> {
+          String url = ex.getRequestHeaders().getFirst("X-Saga-Callback-Url");
+          eagerCallbackUrl.set(url);
+          try {
+            eagerCallbackResponse.set(postAbsolute(url, "{\"paymentId\":\"P-2\"}"));
+          } catch (Exception e) {
+            throw new IOException(e);
+          }
+          respond(ex, 202, "{}");
+        });
     route(participant, "/charge-undo", 200); // compensation (not exercised on the happy path)
   }
 
   @Override
   protected void writeDefinitions(Path definitionsDir) throws IOException {
     writeDefinition(definitionsDir, SAGA_NAME, DEFINITION);
+    writeDefinition(definitionsDir, EAGER_SAGA_NAME, EAGER_DEFINITION);
   }
 
   @Override
@@ -113,6 +142,29 @@ class SagaAsyncCallbackIntegrationTest extends ServerIntegrationTestSupport {
 
     assertThat(callback.statusCode()).isEqualTo(401);
     assertThat(status(get("/sagas/" + sagaId))).isEqualTo("WAITING");
+  }
+
+  @Test
+  void callback_beforeTheParkIsRecorded_isRefusedRetryablyThenCompletesOnRetry() throws Exception {
+    // The participant calls back before it has even answered the step, so the saga has not parked.
+    HttpResponse<String> start =
+        post("/sagas", "{\"sagaName\":\"" + EAGER_SAGA_NAME + "\",\"input\":{}}");
+    String sagaId = MAPPER.readTree(start.body()).get("sagaId").asText();
+    assertThat(status(start)).isEqualTo("WAITING");
+
+    // That early callback was refused with a status a generic HTTP retry acts on, not acked and
+    // lost: before the fix it answered 200 and the saga waited on it until its timeout.
+    HttpResponse<String> early =
+        Objects.requireNonNull(eagerCallbackResponse.get(), "the participant was never called");
+    assertThat(early.statusCode()).isEqualTo(503);
+    assertThat(early.headers().firstValue("Retry-After")).isPresent();
+    assertThat(early.body()).contains("DB-SAGA-20007");
+
+    // The participant's retry of the same callback completes the step.
+    HttpResponse<String> retry =
+        postAbsolute(Objects.requireNonNull(eagerCallbackUrl.get()), "{\"paymentId\":\"P-2\"}");
+    assertThat(retry.statusCode()).isEqualTo(200);
+    assertThat(pollUntilTerminal(sagaId)).isEqualTo("COMPLETED");
   }
 
   private HttpResponse<String> postAbsolute(String url, String body) throws Exception {

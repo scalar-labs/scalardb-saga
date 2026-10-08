@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -13,12 +14,13 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.scalar.db.saga.api.SagaCallback;
-import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaIllegalArgumentException;
+import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.server.SagaWaiterRegistry;
 import com.scalar.db.saga.server.security.SagaAuthRequest;
 import com.scalar.db.saga.server.security.SagaAuthenticationException;
@@ -58,14 +60,14 @@ class SagaResourceStartTest {
 
   private final HttpClient http = HttpClient.newHttpClient();
   private Javalin app;
-  private SagaOrchestrator orchestrator;
+  private DefaultSagaOrchestrator orchestrator;
   private CompletableFuture<Void> shutdownSignal;
   // Held so a test can settle a saga through it, which is what a resumed drive does.
   private SagaWaiterRegistry waiterRegistry;
 
   private void startServer(long syncWaitBoundMillis) {
     shutdownSignal = new CompletableFuture<>();
-    orchestrator = mock(SagaOrchestrator.class);
+    orchestrator = mock(DefaultSagaOrchestrator.class);
     waiterRegistry = new SagaWaiterRegistry();
     app =
         Javalin.create(
@@ -96,13 +98,14 @@ class SagaResourceStartTest {
   @Test
   void postSagas_withDefaultConfig_dispatchesToStartAsyncNotStart() throws Exception {
     // Arrange — the saga finishes immediately, via the callback the resource registers.
-    when(orchestrator.startAsync(eq(SAGA_NAME), anyMap(), any(SagaCallback.class)))
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq(SAGA_NAME), isNull(), anyMap(), any(SagaCallback.class)))
         .thenAnswer(
             invocation -> {
               invocation
-                  .getArgument(2, SagaCallback.class)
+                  .getArgument(4, SagaCallback.class)
                   .onCompleted(snapshot(SagaStatus.COMPLETED));
-              return SAGA_ID;
+              return snapshot(SagaStatus.RUNNING);
             });
 
     // Act
@@ -110,20 +113,23 @@ class SagaResourceStartTest {
 
     // Assert — the saga never runs on the request thread.
     assertThat(response.statusCode()).isEqualTo(200);
-    verify(orchestrator).startAsync(eq(SAGA_NAME), anyMap(), any(SagaCallback.class));
+    verify(orchestrator)
+        .startAsyncReturningSnapshot(
+            isNull(), eq(SAGA_NAME), isNull(), anyMap(), any(SagaCallback.class));
     verify(orchestrator, never()).start(any(String.class), anyMap());
   }
 
   @Test
   void postSagas_sagaCompletesWithinBound_returns200WithTerminalSnapshot() throws Exception {
     // Arrange
-    when(orchestrator.startAsync(eq(SAGA_NAME), anyMap(), any(SagaCallback.class)))
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq(SAGA_NAME), isNull(), anyMap(), any(SagaCallback.class)))
         .thenAnswer(
             invocation -> {
               invocation
-                  .getArgument(2, SagaCallback.class)
+                  .getArgument(4, SagaCallback.class)
                   .onCompensated(snapshot(SagaStatus.COMPENSATED));
-              return SAGA_ID;
+              return snapshot(SagaStatus.RUNNING);
             });
 
     // Act
@@ -139,8 +145,9 @@ class SagaResourceStartTest {
     // Arrange — a bound that expires before the saga does; the callback is never invoked.
     app.stop();
     startServer(50L);
-    when(orchestrator.startAsync(eq(SAGA_NAME), anyMap(), any(SagaCallback.class)))
-        .thenReturn(SAGA_ID);
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq(SAGA_NAME), isNull(), anyMap(), any(SagaCallback.class)))
+        .thenReturn(snapshot(SagaStatus.RUNNING));
     when(orchestrator.getStateSnapshot(SAGA_ID)).thenReturn(snapshot(SagaStatus.RUNNING));
 
     // Act
@@ -160,11 +167,12 @@ class SagaResourceStartTest {
     // until then, so the read where polling begins finds it still running and the wait continues.
     app.stop();
     startServer(300L);
-    when(orchestrator.startAsync(eq(SAGA_NAME), anyMap(), any(SagaCallback.class)))
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq(SAGA_NAME), isNull(), anyMap(), any(SagaCallback.class)))
         .thenAnswer(
             invocation -> {
-              invocation.getArgument(2, SagaCallback.class).onParked(snapshot(SagaStatus.WAITING));
-              return SAGA_ID;
+              invocation.getArgument(4, SagaCallback.class).onParked(snapshot(SagaStatus.WAITING));
+              return snapshot(SagaStatus.RUNNING);
             });
     when(orchestrator.getStateSnapshot(SAGA_ID))
         .thenReturn(snapshot(SagaStatus.WAITING), snapshot(SagaStatus.COMPLETED));
@@ -191,11 +199,12 @@ class SagaResourceStartTest {
     // no SagaCallback, so the registry is the only thing that can wake the waiter. The bound is 30s
     // and the store would report WAITING, so answering COMPLETED promptly is only possible if the
     // registry did the waking.
-    when(orchestrator.startAsync(eq(SAGA_NAME), anyMap(), any(SagaCallback.class)))
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq(SAGA_NAME), isNull(), anyMap(), any(SagaCallback.class)))
         .thenAnswer(
             invocation -> {
-              invocation.getArgument(2, SagaCallback.class).onParked(snapshot(SagaStatus.WAITING));
-              return SAGA_ID;
+              invocation.getArgument(4, SagaCallback.class).onParked(snapshot(SagaStatus.WAITING));
+              return snapshot(SagaStatus.RUNNING);
             });
     when(orchestrator.getStateSnapshot(SAGA_ID)).thenReturn(snapshot(SagaStatus.WAITING));
     CompletableFuture<Void> resume =
@@ -223,11 +232,12 @@ class SagaResourceStartTest {
     // this would answer at 6s from the read at bound expiry.
     app.stop();
     startServer(6_000L);
-    when(orchestrator.startAsync(eq(SAGA_NAME), anyMap(), any(SagaCallback.class)))
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq(SAGA_NAME), isNull(), anyMap(), any(SagaCallback.class)))
         .thenAnswer(
             invocation -> {
-              invocation.getArgument(2, SagaCallback.class).onParked(snapshot(SagaStatus.WAITING));
-              return SAGA_ID;
+              invocation.getArgument(4, SagaCallback.class).onParked(snapshot(SagaStatus.WAITING));
+              return snapshot(SagaStatus.RUNNING);
             });
     when(orchestrator.getStateSnapshot(SAGA_ID))
         .thenReturn(snapshot(SagaStatus.WAITING), snapshot(SagaStatus.COMPLETED));
@@ -251,11 +261,12 @@ class SagaResourceStartTest {
     // buys nothing, and it must still answer correctly.
     app.stop();
     startServer(300L);
-    when(orchestrator.startAsync(eq(SAGA_NAME), anyMap(), any(SagaCallback.class)))
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq(SAGA_NAME), isNull(), anyMap(), any(SagaCallback.class)))
         .thenAnswer(
             invocation -> {
-              invocation.getArgument(2, SagaCallback.class).onParked(snapshot(SagaStatus.WAITING));
-              return SAGA_ID;
+              invocation.getArgument(4, SagaCallback.class).onParked(snapshot(SagaStatus.WAITING));
+              return snapshot(SagaStatus.RUNNING);
             });
     when(orchestrator.getStateSnapshot(SAGA_ID)).thenReturn(snapshot(SagaStatus.WAITING));
 
@@ -272,8 +283,9 @@ class SagaResourceStartTest {
     // Arrange — a saga that never settles, against setUp's 30s bound. Shutdown must end the wait:
     // the bound is a maximum, not a promise to wait, and a terminating server cannot advance the
     // saga anyway, so holding the request would answer the same 202 up to 30s later.
-    when(orchestrator.startAsync(eq(SAGA_NAME), anyMap(), any(SagaCallback.class)))
-        .thenReturn(SAGA_ID);
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq(SAGA_NAME), isNull(), anyMap(), any(SagaCallback.class)))
+        .thenReturn(snapshot(SagaStatus.RUNNING));
     when(orchestrator.getStateSnapshot(SAGA_ID)).thenReturn(snapshot(SagaStatus.RUNNING));
 
     // Act — trip the signal just after the request is in flight.
@@ -302,8 +314,9 @@ class SagaResourceStartTest {
   void postSagas_shutdownAfterTheSagaCompleted_stillAnswers200() throws Exception {
     // Arrange — the narrow case the short-circuit must not lose: the saga finished, and shutdown
     // wakes the waiter. Re-reading the state is what keeps this a 200 rather than a blanket 202.
-    when(orchestrator.startAsync(eq(SAGA_NAME), anyMap(), any(SagaCallback.class)))
-        .thenReturn(SAGA_ID);
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq(SAGA_NAME), isNull(), anyMap(), any(SagaCallback.class)))
+        .thenReturn(snapshot(SagaStatus.RUNNING));
     when(orchestrator.getStateSnapshot(SAGA_ID)).thenReturn(snapshot(SagaStatus.COMPLETED));
 
     // Act
@@ -328,31 +341,88 @@ class SagaResourceStartTest {
   @Test
   void postSagas_asyncQueryParamGiven_returns202WithoutWaiting() throws Exception {
     // Arrange
-    when(orchestrator.startAsync(eq(SAGA_NAME), anyMap())).thenReturn(SAGA_ID);
-    when(orchestrator.getStateSnapshot(SAGA_ID)).thenReturn(snapshot(SagaStatus.RUNNING));
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq(SAGA_NAME), isNull(), anyMap(), isNull()))
+        .thenReturn(snapshot(SagaStatus.RUNNING));
 
     // Act
     HttpResponse<String> response =
         post("/sagas?async=true", "{\"sagaName\":\"" + SAGA_NAME + "\"}");
 
-    // Assert — the no-callback overload, so nothing waits.
+    // Assert — no callback, so nothing waits.
     assertThat(response.statusCode()).isEqualTo(202);
-    verify(orchestrator).startAsync(eq(SAGA_NAME), anyMap());
+    verify(orchestrator)
+        .startAsyncReturningSnapshot(isNull(), eq(SAGA_NAME), isNull(), anyMap(), isNull());
+  }
+
+  @Test
+  void postSagas_asyncQueryParamGiven_answersFromTheStartSnapshotWithoutReadingBack()
+      throws Exception {
+    // Arrange
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq(SAGA_NAME), isNull(), anyMap(), isNull()))
+        .thenReturn(snapshot(SagaStatus.RUNNING));
+
+    // Act
+    HttpResponse<String> response =
+        post("/sagas?async=true", "{\"sagaName\":\"" + SAGA_NAME + "\"}");
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(202);
+    assertThat(response.body()).contains(SAGA_ID).contains("RUNNING");
+    verify(orchestrator, never()).getStateSnapshot(any(String.class));
+  }
+
+  @Test
+  void putSagasById_asyncQueryParamGiven_answersFromTheStartSnapshotWithoutReadingBack()
+      throws Exception {
+    // Arrange
+    when(orchestrator.startAsyncReturningSnapshot(
+            eq(SAGA_ID), eq(SAGA_NAME), isNull(), anyMap(), isNull()))
+        .thenReturn(snapshot(SagaStatus.RUNNING));
+
+    // Act
+    HttpResponse<String> response =
+        put("/sagas/" + SAGA_ID + "?async=true", "{\"sagaName\":\"" + SAGA_NAME + "\"}");
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(202);
+    assertThat(response.body()).contains(SAGA_ID).contains("RUNNING");
+    verify(orchestrator, never()).getStateSnapshot(any(String.class));
+  }
+
+  @Test
+  void postSagas_boundElapsesAndTheReadMissesTheNewSaga_returns202WithTheCreatedSnapshot()
+      throws Exception {
+    // Arrange — the read-back on a backend whose index lags the write (DynamoDB).
+    app.stop();
+    startServer(50L);
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq(SAGA_NAME), isNull(), anyMap(), any(SagaCallback.class)))
+        .thenReturn(snapshot(SagaStatus.RUNNING));
+    when(orchestrator.getStateSnapshot(SAGA_ID)).thenThrow(new SagaNotFoundException(SAGA_ID));
+
+    // Act
+    HttpResponse<String> response = post("/sagas", "{\"sagaName\":\"" + SAGA_NAME + "\"}");
+
+    // Assert — the saga exists, so not a 404.
+    assertThat(response.statusCode()).isEqualTo(202);
+    assertThat(response.body()).contains(SAGA_ID).contains("RUNNING");
   }
 
   @Test
   void putSagasById_withDefaultConfig_dispatchesToStartAsyncNotStart() throws Exception {
-    // Arrange — the client-supplied-ID endpoint gets the same treatment as POST. The void overload
-    // needs doAnswer to fire the callback; without it the request would wait out the whole bound.
+    // Arrange — the client-supplied-ID endpoint gets the same treatment as POST.
     doAnswer(
             invocation -> {
               invocation
-                  .getArgument(3, SagaCallback.class)
+                  .getArgument(4, SagaCallback.class)
                   .onCompleted(snapshot(SagaStatus.COMPLETED));
-              return null;
+              return snapshot(SagaStatus.RUNNING);
             })
         .when(orchestrator)
-        .startAsync(eq(SAGA_ID), eq(SAGA_NAME), anyMap(), any(SagaCallback.class));
+        .startAsyncReturningSnapshot(
+            eq(SAGA_ID), eq(SAGA_NAME), isNull(), anyMap(), any(SagaCallback.class));
 
     // Act
     HttpResponse<String> response =
@@ -360,7 +430,9 @@ class SagaResourceStartTest {
 
     // Assert
     assertThat(response.statusCode()).isEqualTo(200);
-    verify(orchestrator).startAsync(eq(SAGA_ID), eq(SAGA_NAME), anyMap(), any(SagaCallback.class));
+    verify(orchestrator)
+        .startAsyncReturningSnapshot(
+            eq(SAGA_ID), eq(SAGA_NAME), isNull(), anyMap(), any(SagaCallback.class));
     verify(orchestrator, never()).start(any(String.class), any(String.class), anyMap());
   }
 
@@ -370,7 +442,8 @@ class SagaResourceStartTest {
     // throws on the request thread and reaches ErrorMapper, rather than failing on the executor
     // where nothing reports it. Before this, such a request waited out the full bound and answered
     // 202 for a saga that could never run — with setUp's 30s bound, a 30s wait for bad JSON.
-    when(orchestrator.startAsync(eq(SAGA_NAME), anyMap(), any(SagaCallback.class)))
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq(SAGA_NAME), isNull(), anyMap(), any(SagaCallback.class)))
         .thenThrow(new SagaIllegalArgumentException("SagaContext does not allow null values"));
 
     // Act
@@ -395,7 +468,8 @@ class SagaResourceStartTest {
         new SagaStateSnapshot(SAGA_ID, "someone-elses-saga", SagaStatus.RUNNING, "v1", TS, TS);
     doThrow(new SagaAlreadyExistsException(SAGA_ID, victim))
         .when(orchestrator)
-        .startAsync(eq(SAGA_ID), eq(SAGA_NAME), anyMap(), any(SagaCallback.class));
+        .startAsyncReturningSnapshot(
+            eq(SAGA_ID), eq(SAGA_NAME), isNull(), anyMap(), any(SagaCallback.class));
 
     // Act
     HttpResponse<String> response =

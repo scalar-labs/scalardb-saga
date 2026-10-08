@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
@@ -507,10 +508,11 @@ class SagaServerTest {
         new SagaStateSnapshot(
             "s1", "saga", SagaStatus.COMPLETED, "v1", Instant.EPOCH, Instant.EPOCH);
     // Completes only after a delay, so answering before the callback proves the wait was skipped.
-    when(orchestrator.startAsync(eq("saga"), anyMap(), any(SagaCallback.class)))
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq("saga"), isNull(), anyMap(), any(SagaCallback.class)))
         .thenAnswer(
             invocation -> {
-              SagaCallback callback = invocation.getArgument(2, SagaCallback.class);
+              SagaCallback callback = invocation.getArgument(4, SagaCallback.class);
               Thread.ofVirtual()
                   .start(
                       () -> {
@@ -522,7 +524,8 @@ class SagaServerTest {
                         }
                         callback.onCompleted(completed);
                       });
-              return "s1";
+              return new SagaStateSnapshot(
+                  "s1", "saga", SagaStatus.RUNNING, "v1", Instant.EPOCH, Instant.EPOCH);
             });
 
     // Act

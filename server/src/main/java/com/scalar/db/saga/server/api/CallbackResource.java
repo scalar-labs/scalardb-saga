@@ -158,7 +158,10 @@ public final class CallbackResource {
    * SagaConcurrentModificationException}) returns the saga's current state instead of failing. A
    * wrong step name or an output value a context cannot carry ({@code
    * SagaIllegalArgumentException}) and an unknown saga ({@code SagaNotFoundException}) propagate to
-   * the error mapper (400 / 404).
+   * the error mapper (400 / 404). So does a callback that arrived before the saga finished parking
+   * on its step ({@code SagaStepNotParkedException}), which answers 503 with {@code Retry-After}:
+   * acking it would lose the callback, and the participant's retry completes the step once the park
+   * is recorded.
    *
    * <p>Only the two idempotent cases are caught below, and they are caught by type. {@code
    * SagaIllegalArgumentException} extends {@code SagaRuntimeException}, not {@link

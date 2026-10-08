@@ -170,7 +170,7 @@ class TransportPolicyParityTest {
               HealthResource.register(cfg.routes);
               SagaResource.register(
                   cfg.routes,
-                  mock(SagaOrchestrator.class),
+                  mock(DefaultSagaOrchestrator.class),
                   0L,
                   new java.util.concurrent.CompletableFuture<>(),
                   new SagaWaiterRegistry());
@@ -234,7 +234,8 @@ class TransportPolicyParityTest {
 
   /**
    * No code path in {@link SagaResource} may call a {@link SagaOrchestrator} {@code start}
-   * overload.
+   * overload, whether through the interface or through {@link DefaultSagaOrchestrator}, which the
+   * resource is typed against.
    *
    * <p>Asserted structurally, by reading the compiled class's constant pool, rather than by driving
    * the routes: a behavioural check only covers the routes a test happens to exercise, so a newly
@@ -244,8 +245,8 @@ class TransportPolicyParityTest {
    * <p>Why it matters: the synchronous {@code start} overloads run the entire saga on the calling
    * thread, which on this layer is a request thread. That was the P1 in {@code todos/076} — ~200
    * concurrent slow sagas exhausted the Jetty pool. Every REST start must go through {@code
-   * startAsync} with a bound. {@code start} remains correct API for embedded callers, which is why
-   * it still exists and why this guard is scoped to this one class.
+   * startAsyncReturningSnapshot} with a bound. {@code start} remains correct API for embedded
+   * callers, which is why it still exists and why this guard is scoped to this one class.
    */
   @Test
   void sagaResource_containsNoReferenceToASynchronousStartOverload() throws Exception {
@@ -257,18 +258,22 @@ class TransportPolicyParityTest {
       classFile = Objects.requireNonNull(in, "SagaResource.class not found").readAllBytes();
     }
 
-    // Act — collect every method name this class file references on SagaOrchestrator.
-    Set<String> orchestratorCalls = referencedMethodsOn(classFile, SagaOrchestrator.class);
+    // Act — collect every method name this class file references on either orchestrator type. A
+    // call compiles against the static type of its receiver, so scanning only one would miss the
+    // other.
+    Set<String> orchestratorCalls = new LinkedHashSet<>();
+    orchestratorCalls.addAll(referencedMethodsOn(classFile, SagaOrchestrator.class));
+    orchestratorCalls.addAll(referencedMethodsOn(classFile, DefaultSagaOrchestrator.class));
 
-    // Assert — startAsync is expected; start is the regression.
+    // Assert — startAsyncReturningSnapshot is expected; start is the regression.
     assertThat(orchestratorCalls)
         .as(
             "SagaResource must not call SagaOrchestrator.start(...) — it runs the saga on the "
-                + "request thread. Use startAsync with a bound (todos/076).")
+                + "request thread. Use startAsyncReturningSnapshot with a bound (todos/076).")
         .doesNotContain("start");
     assertThat(orchestratorCalls)
         .as("sanity: the scan must actually be seeing the orchestrator calls it inspects")
-        .contains("startAsync");
+        .contains("startAsyncReturningSnapshot");
   }
 
   /**

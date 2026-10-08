@@ -19,6 +19,7 @@ import com.scalar.db.saga.exception.SagaOverloadedException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
+import com.scalar.db.saga.exception.SagaStepNotParkedException;
 import com.scalar.db.saga.server.LogCapture;
 import com.scalar.db.saga.server.security.SagaAuthUnavailableException;
 import com.scalar.db.saga.server.security.SagaAuthenticationException;
@@ -340,6 +341,10 @@ class ErrorMapperTest {
             SagaErrorCode.SAGA_DEFINITION_NOT_SERVED),
         new Arm(new SagaOverloadedException(), 503, SagaErrorCode.ENGINE_OVERLOADED),
         new Arm(
+            new SagaStepNotParkedException("s-1", "charge"),
+            503,
+            SagaErrorCode.SAGA_STEP_NOT_PARKED),
+        new Arm(
             SagaPersistenceException.storeUnavailable(new RuntimeException("db down")),
             503,
             SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE),
@@ -538,6 +543,28 @@ class ErrorMapperTest {
 
     // Assert
     assertThat(response.headers().firstValue("Retry-After")).contains("1");
+  }
+
+  @Test
+  void dispatch_stepNotParkedGiven_returns503WithRetryAfterAndLogsNothingAboveDebug()
+      throws Exception {
+    // A callback that beats its park is expected, not a failure: the participant must see a status
+    // its generic HTTP retry acts on, with a pacing hint, and the log must not record an error.
+    // Arrange
+    toThrow = new SagaStepNotParkedException("s-1", "charge");
+
+    try (LogCapture logs = LogCapture.of(ErrorMapper.class)) {
+      // Act
+      HttpResponse<String> response = get("/throw-dispatch");
+
+      // Assert
+      assertThat(response.statusCode()).isEqualTo(503);
+      assertThat(response.headers().firstValue("Retry-After")).contains("1");
+      assertThat(logs.events())
+          .allSatisfy(
+              event ->
+                  assertThat(event.getLevel().toInt()).isLessThanOrEqualTo(Level.DEBUG.toInt()));
+    }
   }
 
   private HttpResponse<String> get(String path) throws Exception {
