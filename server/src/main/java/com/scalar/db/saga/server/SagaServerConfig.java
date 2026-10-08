@@ -1664,6 +1664,9 @@ public final class SagaServerConfig {
    * Returns the PEM bundle of CA certificates trusted on outbound HTTPS in addition to the JVM's
    * defaults: the path in {@code egress.ca_cert_path}, or the file at {@value
    * #DEFAULT_EGRESS_CA_CERT_PATH} when the key is unset and that file exists, or empty.
+   *
+   * @return the CA bundle file, or empty when the key is unset and nothing is mounted at the
+   *     default
    */
   public Optional<Path> egressCaCertPath() {
     return Optional.ofNullable(egressCaCertPath);

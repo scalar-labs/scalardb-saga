@@ -76,6 +76,11 @@ public final class TlsTestCerts {
    * IPv6 loopback reach it) presenting {@code pair}, answering {@code path} with 200 and {@code
    * body}. The caller stops it. Loads the keystore {@link #generateRsa} and {@link #generateEc}
    * write beside the PEM files.
+   *
+   * @param pair the certificate and key the server presents
+   * @param path the request path answered with 200; any other path gets the JDK's default 404
+   * @param body the response body, copied; empty for a bodiless 200
+   * @return the started server, which the caller stops
    */
   @SuppressFBWarnings(
       value = "HARD_CODE_PASSWORD",
