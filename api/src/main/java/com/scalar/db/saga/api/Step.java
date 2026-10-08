@@ -19,7 +19,11 @@ import com.scalar.db.saga.exception.StepExecutionException;
  */
 public interface Step {
 
-  /** Returns the unique name of this step within a saga definition. */
+  /**
+   * Returns the unique name of this step within a saga definition.
+   *
+   * @return the step name
+   */
   String getName();
 
   /**

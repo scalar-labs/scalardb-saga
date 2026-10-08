@@ -27,6 +27,9 @@ package com.scalar.db.saga.exception;
  */
 public class SagaOverloadedException extends SagaRuntimeException {
 
+  /**
+   * The engine refused a start because it is at its concurrent saga limit. Nothing was persisted.
+   */
   public SagaOverloadedException() {
     super(SagaErrorCode.ENGINE_OVERLOADED, ErrorMetadata.of());
   }

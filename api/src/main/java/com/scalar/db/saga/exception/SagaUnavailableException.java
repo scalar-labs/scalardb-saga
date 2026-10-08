@@ -20,10 +20,16 @@ import java.util.Objects;
  */
 public class SagaUnavailableException extends SagaRuntimeException {
 
+  /** The service is temporarily unavailable, with no transport failure to attach as the cause. */
   public SagaUnavailableException() {
     super(SagaErrorCode.SERVICE_UNAVAILABLE, ErrorMetadata.of());
   }
 
+  /**
+   * The service is temporarily unavailable.
+   *
+   * @param cause the transport status or connectivity failure behind it
+   */
   public SagaUnavailableException(Throwable cause) {
     super(
         SagaErrorCode.SERVICE_UNAVAILABLE,

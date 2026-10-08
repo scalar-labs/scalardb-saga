@@ -12,10 +12,16 @@ import java.util.Objects;
  */
 public class SagaUnauthenticatedException extends SagaRuntimeException {
 
+  /** The request presented no valid credential, with no transport status to attach as the cause. */
   public SagaUnauthenticatedException() {
     super(SagaErrorCode.UNAUTHENTICATED, ErrorMetadata.of());
   }
 
+  /**
+   * The request presented no valid credential.
+   *
+   * @param cause the transport status that reported it
+   */
   public SagaUnauthenticatedException(Throwable cause) {
     super(
         SagaErrorCode.UNAUTHENTICATED,

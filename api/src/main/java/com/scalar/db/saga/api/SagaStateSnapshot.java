@@ -26,6 +26,16 @@ public final class SagaStateSnapshot {
   private final Instant createdAt;
   private final Instant updatedAt;
 
+  /**
+   * Creates a snapshot of a saga instance.
+   *
+   * @param sagaId the saga instance id
+   * @param sagaName the name of the saga definition the instance runs
+   * @param status the instance's current lifecycle status
+   * @param definitionVersion the version of the saga definition the instance runs
+   * @param createdAt when the instance was created
+   * @param updatedAt when the instance's state last changed
+   */
   public SagaStateSnapshot(
       String sagaId,
       String sagaName,
@@ -42,7 +52,13 @@ public final class SagaStateSnapshot {
     this.updatedAt = Objects.requireNonNull(updatedAt, "updatedAt must not be null");
   }
 
-  /** Creates a new snapshot with updated status and timestamp. */
+  /**
+   * Creates a new snapshot with updated status and timestamp.
+   *
+   * @param newStatus the status the saga transitioned to
+   * @param newUpdatedAt when the transition happened
+   * @return a snapshot equal to this one except for its status and update time
+   */
   public SagaStateSnapshot withTransition(SagaStatus newStatus, Instant newUpdatedAt) {
     Objects.requireNonNull(newStatus, "newStatus must not be null");
     Objects.requireNonNull(newUpdatedAt, "newUpdatedAt must not be null");
@@ -50,26 +66,56 @@ public final class SagaStateSnapshot {
         sagaId, sagaName, newStatus, definitionVersion, createdAt, newUpdatedAt);
   }
 
+  /**
+   * Returns the saga instance id.
+   *
+   * @return the saga instance id
+   */
   public String getSagaId() {
     return sagaId;
   }
 
+  /**
+   * Returns the name of the saga definition this instance runs.
+   *
+   * @return the saga definition name
+   */
   public String getSagaName() {
     return sagaName;
   }
 
+  /**
+   * Returns the instance's current lifecycle status.
+   *
+   * @return the current status
+   */
   public SagaStatus getStatus() {
     return status;
   }
 
+  /**
+   * Returns the version of the saga definition this instance runs.
+   *
+   * @return the saga definition version
+   */
   public String getDefinitionVersion() {
     return definitionVersion;
   }
 
+  /**
+   * Returns when the instance was created.
+   *
+   * @return the creation time
+   */
   public Instant getCreatedAt() {
     return createdAt;
   }
 
+  /**
+   * Returns when the instance's state last changed.
+   *
+   * @return the time of the last state change
+   */
   public Instant getUpdatedAt() {
     return updatedAt;
   }

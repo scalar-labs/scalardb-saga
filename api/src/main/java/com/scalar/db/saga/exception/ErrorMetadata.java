@@ -21,14 +21,35 @@ public final class ErrorMetadata {
 
   private ErrorMetadata() {}
 
+  /**
+   * An empty metadata map, for a code whose schema declares no keys.
+   *
+   * @return an unmodifiable empty map
+   */
   public static Map<String, String> of() {
     return Collections.emptyMap();
   }
 
+  /**
+   * A metadata map with one entry.
+   *
+   * @param k1 the key
+   * @param v1 its value
+   * @return an unmodifiable map holding the entry
+   */
   public static Map<String, String> of(String k1, String v1) {
     return Collections.singletonMap(k1, v1);
   }
 
+  /**
+   * A metadata map with two entries, in argument order.
+   *
+   * @param k1 the first key
+   * @param v1 its value
+   * @param k2 the second key
+   * @param v2 its value
+   * @return an unmodifiable map holding the entries
+   */
   public static Map<String, String> of(String k1, String v1, String k2, String v2) {
     Map<String, String> m = new LinkedHashMap<>();
     m.put(k1, v1);
@@ -36,6 +57,17 @@ public final class ErrorMetadata {
     return Collections.unmodifiableMap(m);
   }
 
+  /**
+   * A metadata map with three entries, in argument order.
+   *
+   * @param k1 the first key
+   * @param v1 its value
+   * @param k2 the second key
+   * @param v2 its value
+   * @param k3 the third key
+   * @param v3 its value
+   * @return an unmodifiable map holding the entries
+   */
   public static Map<String, String> of(
       String k1, String v1, String k2, String v2, String k3, String v3) {
     Map<String, String> m = new LinkedHashMap<>();
