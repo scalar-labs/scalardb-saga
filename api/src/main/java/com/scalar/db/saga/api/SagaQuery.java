@@ -45,22 +45,38 @@ public final class SagaQuery {
     this.pageToken = builder.pageToken;
   }
 
-  /** Returns a new builder. */
+  /**
+   * Returns a new builder.
+   *
+   * @return a builder with no filters, the default page size, and no page token
+   */
   public static Builder newBuilder() {
     return new Builder();
   }
 
-  /** The status to filter by, or {@code null} to list all statuses. */
+  /**
+   * The status to filter by, or {@code null} to list all statuses.
+   *
+   * @return the status filter, or {@code null} when unset
+   */
   public @Nullable SagaStatus getStatus() {
     return status;
   }
 
-  /** Inclusive lower bound on {@code updated_at}, or {@code null} for no lower bound. */
+  /**
+   * Inclusive lower bound on {@code updated_at}, or {@code null} for no lower bound.
+   *
+   * @return the lower bound, or {@code null} when unset
+   */
   public @Nullable Instant getUpdatedAfter() {
     return updatedAfter;
   }
 
-  /** Inclusive upper bound on {@code updated_at}, or {@code null} for no upper bound. */
+  /**
+   * Inclusive upper bound on {@code updated_at}, or {@code null} for no upper bound.
+   *
+   * @return the upper bound, or {@code null} when unset
+   */
   public @Nullable Instant getUpdatedBefore() {
     return updatedBefore;
   }
@@ -69,12 +85,18 @@ public final class SagaQuery {
    * The <b>target</b> number of results per page. A returned {@link SagaPage} may exceed this
    * target by up to a full {@code updated_at} cohort, which is not bounded by the target — see
    * {@link Builder#pageSize(int)}.
+   *
+   * @return the target results per page, in {@code [1, MAX_PAGE_SIZE]}
    */
   public int getPageSize() {
     return pageSize;
   }
 
-  /** The opaque continuation token, or {@code null} to start from the beginning. */
+  /**
+   * The opaque continuation token, or {@code null} to start from the beginning.
+   *
+   * @return the token from the previous page, or {@code null} for the first page
+   */
   public @Nullable String getPageToken() {
     return pageToken;
   }
@@ -123,19 +145,34 @@ public final class SagaQuery {
 
     private Builder() {}
 
-    /** Sets the status filter (or {@code null} to list all statuses). */
+    /**
+     * Sets the status filter (or {@code null} to list all statuses).
+     *
+     * @param status the status to list, or {@code null} for all
+     * @return this builder, for chaining
+     */
     public Builder status(@Nullable SagaStatus status) {
       this.status = status;
       return this;
     }
 
-    /** Sets the inclusive {@code updated_at} lower bound (or {@code null} for no lower bound). */
+    /**
+     * Sets the inclusive {@code updated_at} lower bound (or {@code null} for no lower bound).
+     *
+     * @param updatedAfter the earliest {@code updated_at} to include, or {@code null}
+     * @return this builder, for chaining
+     */
     public Builder updatedAfter(@Nullable Instant updatedAfter) {
       this.updatedAfter = updatedAfter;
       return this;
     }
 
-    /** Sets the inclusive {@code updated_at} upper bound (or {@code null} for no upper bound). */
+    /**
+     * Sets the inclusive {@code updated_at} upper bound (or {@code null} for no upper bound).
+     *
+     * @param updatedBefore the latest {@code updated_at} to include, or {@code null}
+     * @return this builder, for chaining
+     */
     public Builder updatedBefore(@Nullable Instant updatedBefore) {
       this.updatedBefore = updatedBefore;
       return this;
@@ -154,6 +191,7 @@ public final class SagaQuery {
      * bounds the requested target only, in {@code [1, MAX_PAGE_SIZE]}.
      *
      * @param pageSize the target results per page, in {@code [1, MAX_PAGE_SIZE]}
+     * @return this builder, for chaining
      * @throws IllegalArgumentException if out of range
      */
     public Builder pageSize(int pageSize) {
@@ -165,7 +203,13 @@ public final class SagaQuery {
       return this;
     }
 
-    /** Sets the opaque continuation token. */
+    /**
+     * Sets the opaque continuation token.
+     *
+     * @param pageToken the token from the previous {@link SagaPage#getNextPageToken()}, or {@code
+     *     null} to start from the beginning
+     * @return this builder, for chaining
+     */
     public Builder pageToken(@Nullable String pageToken) {
       this.pageToken = pageToken;
       return this;
@@ -174,6 +218,7 @@ public final class SagaQuery {
     /**
      * Builds the query.
      *
+     * @return the immutable query
      * @throws IllegalArgumentException if both {@code updatedAfter} and {@code updatedBefore} are
      *     set and {@code updatedAfter} is strictly after {@code updatedBefore} (an empty window).
      *     The bounds are inclusive, so an equal {@code updatedAfter} and {@code updatedBefore} is

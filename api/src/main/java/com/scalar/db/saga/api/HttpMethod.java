@@ -7,13 +7,22 @@ package com.scalar.db.saga.api;
  * {@code HttpCall}).
  */
 public enum HttpMethod {
+  /** Reads a resource; carries no request body. */
   GET,
+  /** Creates a resource or submits data; carries a request body. */
   POST,
+  /** Replaces a resource; carries a request body. */
   PUT,
+  /** Partially updates a resource; carries a request body. */
   PATCH,
+  /** Removes a resource; carries no request body. */
   DELETE;
 
-  /** Whether this verb sends a request body. {@code false} for {@link #GET} and {@link #DELETE}. */
+  /**
+   * Whether this verb sends a request body. {@code false} for {@link #GET} and {@link #DELETE}.
+   *
+   * @return {@code true} for {@link #POST}, {@link #PUT}, and {@link #PATCH}
+   */
   public boolean hasBody() {
     return this == POST || this == PUT || this == PATCH;
   }

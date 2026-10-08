@@ -15,20 +15,41 @@ import org.jspecify.annotations.Nullable;
  */
 public class SagaDefinitionNotFoundException extends SagaRuntimeException {
 
+  /** The saga name that was looked up. */
   private final String sagaName;
+
+  /** The version that was looked up; null when the lookup was by name alone. */
   private final @Nullable String version;
 
-  /** No definition is registered under {@code sagaName} at all. */
+  /**
+   * No definition is registered under {@code sagaName} at all.
+   *
+   * @param sagaName the name no definition is registered under
+   * @return the exception to throw, carrying {@link SagaErrorCode#SAGA_DEFINITION_NOT_FOUND}
+   */
   public static SagaDefinitionNotFoundException byName(String sagaName) {
     return new SagaDefinitionNotFoundException(sagaName);
   }
 
-  /** The definition exists, but not at the requested {@code version}. */
+  /**
+   * The definition exists, but not at the requested {@code version}.
+   *
+   * @param sagaName the name the definition is registered under
+   * @param version the version that is not registered
+   * @return the exception to throw, carrying {@link
+   *     SagaErrorCode#SAGA_DEFINITION_VERSION_NOT_FOUND}
+   */
   public static SagaDefinitionNotFoundException byNameAndVersion(String sagaName, String version) {
     return new SagaDefinitionNotFoundException(sagaName, version);
   }
 
-  /** As {@link #byNameAndVersion(String, String)}, from a {@link SagaDefinitionId}. */
+  /**
+   * As {@link #byNameAndVersion(String, String)}, from a {@link SagaDefinitionId}.
+   *
+   * @param id the name and version that were looked up
+   * @return the exception to throw, carrying {@link
+   *     SagaErrorCode#SAGA_DEFINITION_VERSION_NOT_FOUND}
+   */
   public static SagaDefinitionNotFoundException byId(SagaDefinitionId id) {
     return new SagaDefinitionNotFoundException(id.name(), id.version());
   }
@@ -77,10 +98,20 @@ public class SagaDefinitionNotFoundException extends SagaRuntimeException {
     this.version = version;
   }
 
+  /**
+   * The saga name that was looked up.
+   *
+   * @return the name, never {@code null}
+   */
   public String getSagaName() {
     return sagaName;
   }
 
+  /**
+   * The version that was looked up.
+   *
+   * @return the version, or {@code null} when the lookup was by name alone
+   */
   public @Nullable String getVersion() {
     return version;
   }

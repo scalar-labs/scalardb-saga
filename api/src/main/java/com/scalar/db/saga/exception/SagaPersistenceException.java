@@ -28,6 +28,7 @@ import java.util.Objects;
  */
 public class SagaPersistenceException extends SagaRuntimeException {
 
+  /** Whether the code's category is retryable; see {@link #isRetryable()}. */
   private final boolean retryable;
 
   private SagaPersistenceException(SagaErrorCode code, Throwable cause) {
@@ -69,6 +70,9 @@ public class SagaPersistenceException extends SagaRuntimeException {
   /**
    * A transient store failure — a store outage, an unresolvable transaction commit, or a
    * retry-exhausted operation — that may succeed if the operation is retried.
+   *
+   * @param cause the store failure
+   * @return the exception to throw, carrying {@link SagaErrorCode#PERSISTENCE_STORE_UNAVAILABLE}
    */
   public static SagaPersistenceException storeUnavailable(Throwable cause) {
     return new SagaPersistenceException(SagaErrorCode.PERSISTENCE_STORE_UNAVAILABLE, cause);
@@ -78,6 +82,9 @@ public class SagaPersistenceException extends SagaRuntimeException {
    * The server abandoned the store operation mid-flight — typically an interrupt during shutdown —
    * rather than the store failing. Retryable: the retry lands on another replica, or on this server
    * after it restarts. Not a store outage, so it must not be reported as one.
+   *
+   * @param cause the interrupt or abort that ended the operation
+   * @return the exception to throw, carrying {@link SagaErrorCode#OPERATION_ABORTED}
    */
   public static SagaPersistenceException operationAborted(Throwable cause) {
     return new SagaPersistenceException(SagaErrorCode.OPERATION_ABORTED, cause);
@@ -86,6 +93,9 @@ public class SagaPersistenceException extends SagaRuntimeException {
   /**
    * A permanent JSON-serialization failure — the payload cannot be encoded, so retrying always
    * fails the same way.
+   *
+   * @param cause the serialization failure
+   * @return the exception to throw, carrying {@link SagaErrorCode#PERSISTENCE_SERIALIZATION_FAILED}
    */
   public static SagaPersistenceException serializationFailed(Throwable cause) {
     return new SagaPersistenceException(SagaErrorCode.PERSISTENCE_SERIALIZATION_FAILED, cause);
@@ -94,6 +104,10 @@ public class SagaPersistenceException extends SagaRuntimeException {
   /**
    * A permanent JSON-deserialization or event-stream parse failure — the stored data cannot be
    * decoded, so retrying always fails the same way.
+   *
+   * @param cause the parse failure
+   * @return the exception to throw, carrying {@link
+   *     SagaErrorCode#PERSISTENCE_DESERIALIZATION_FAILED}
    */
   public static SagaPersistenceException deserializationFailed(Throwable cause) {
     return new SagaPersistenceException(SagaErrorCode.PERSISTENCE_DESERIALIZATION_FAILED, cause);
@@ -102,6 +116,8 @@ public class SagaPersistenceException extends SagaRuntimeException {
   /**
    * Whether retrying the failed operation may succeed (a transient failure) rather than fail
    * identically (a permanent failure). Derived from the code's {@link SagaErrorCode.Category}.
+   *
+   * @return {@code true} if retrying may succeed
    */
   public boolean isRetryable() {
     return retryable;

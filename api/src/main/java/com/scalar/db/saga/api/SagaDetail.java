@@ -33,6 +33,8 @@ public final class SagaDetail {
   }
 
   /**
+   * Creates a detail whose timeline may have been cut to the newest events.
+   *
    * @param snapshot the saga's current state
    * @param timeline the saga's events in sequence order (defensively copied)
    * @param truncated whether the timeline was cut to the newest events because the saga's history
@@ -45,12 +47,20 @@ public final class SagaDetail {
     this.truncated = truncated;
   }
 
-  /** The saga's current state snapshot. */
+  /**
+   * The saga's current state snapshot.
+   *
+   * @return the current state
+   */
   public SagaStateSnapshot getSnapshot() {
     return snapshot;
   }
 
-  /** The saga's events in sequence order (unmodifiable). */
+  /**
+   * The saga's events in sequence order (unmodifiable).
+   *
+   * @return the events, oldest first
+   */
   public List<TimelineEvent> getTimeline() {
     return timeline;
   }
@@ -58,6 +68,8 @@ public final class SagaDetail {
   /**
    * Whether the timeline holds only the newest events because the saga's history exceeded the
    * configured bound. The full history remains in the store.
+   *
+   * @return whether the timeline was cut
    */
   public boolean isTruncated() {
     return truncated;
