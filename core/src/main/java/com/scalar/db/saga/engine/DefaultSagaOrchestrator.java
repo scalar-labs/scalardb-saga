@@ -804,7 +804,10 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * @param stepName the step the callback completes (must be the currently parked step)
    * @param output the step's output, merged into the saga context for downstream steps
    * @return the {@code RUNNING} snapshot immediately after the parked step is resumed
-   * @throws IllegalStateException if the saga is not {@code WAITING}
+   * @throws SagaStepNotParkedException if the step has not parked yet, or the saga's row lags its
+   *     log; retryable, since the park is about to be recorded
+   * @throws IllegalStateException if the step is already completed or the saga has moved on, which
+   *     the callback endpoint answers as an idempotent duplicate
    * @throws SagaIllegalArgumentException if {@code stepName} is not the currently parked step, or
    *     if {@code output} holds a value a saga context cannot carry. Both are thrown before
    *     anything is recorded, so the step stays parked and the callback can be retried once
@@ -932,7 +935,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    *       the call, so a participant that calls back at once can arrive first. That is {@link
    *       SagaStepNotParkedException}, a retryable refusal, because a callback acked now would be
    *       lost and the saga would wait on it until its timeout, or forever on an unbounded park.
-   *   <li>The step was already resolved, or the saga moved on: {@link IllegalStateException}, which
+   *   <li>The step is already completed, or the saga moved on: {@link IllegalStateException}, which
    *       the callback endpoint answers as an idempotent duplicate.
    * </ul>
    */
@@ -965,7 +968,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     }
     boolean stillAhead =
         saga.getStatus() == SagaStatus.RUNNING || saga.getStatus() == SagaStatus.WAITING;
-    if (stillAhead && !forwardOutcomeStands(events, stepName)) {
+    if (stillAhead && !completionStands(events, stepName)) {
       throw new SagaStepNotParkedException(sagaId, stepName);
     }
     throw new IllegalStateException(
@@ -973,28 +976,20 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   }
 
   /**
-   * Whether {@code stepName}'s forward outcome is recorded and still stands, judged by the step's
-   * latest event rather than any outcome ever recorded. A later {@code STEP_PENDING} or {@code
-   * STEP_REISSUING} reopens the step, and so does an operator's {@code SAGA_RESET} or {@code
-   * SAGA_RECOVERING} after a failure, since that intervention can drive the failed step again. A
-   * completed step stays completed: an intervention does not re-run it.
+   * Whether {@code stepName}'s latest event is its completion. Only a completion settles a step
+   * while the saga is {@code RUNNING} or {@code WAITING}: a failure there is about to be retried
+   * forward, or to move the saga to {@code COMPENSATING}, so a callback that meets it is refused
+   * and retried rather than acked and lost. Any later event on the step, a {@code STEP_PENDING} or
+   * {@code STEP_REISSUING} above all, reopens it.
    */
-  private static boolean forwardOutcomeStands(List<SagaEvent> events, String stepName) {
-    EventType outcome = null;
+  private static boolean completionStands(List<SagaEvent> events, String stepName) {
+    boolean completed = false;
     for (SagaEvent event : events) {
-      EventType type = event.getEventType();
       if (event instanceof StepEvent step && step.getStepName().equals(stepName)) {
-        if (type == EventType.STEP_COMPLETED || type == EventType.STEP_FAILED) {
-          outcome = type;
-        } else if (type == EventType.STEP_PENDING || type == EventType.STEP_REISSUING) {
-          outcome = null;
-        }
-      } else if ((type == EventType.SAGA_RESET || type == EventType.SAGA_RECOVERING)
-          && outcome == EventType.STEP_FAILED) {
-        outcome = null;
+        completed = event.getEventType() == EventType.STEP_COMPLETED;
       }
     }
-    return outcome != null;
+    return completed;
   }
 
   /** Phase-1 result of completing a parked step: the resumed saga and where to drive it from. */

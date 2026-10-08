@@ -1482,6 +1482,24 @@ class DefaultSagaOrchestratorTest {
     }
 
     @Test
+    void completeStepAsync_failedStepOnARunningSaga_throwsStepNotParked() {
+      // Arrange — the step failed and the saga is still RUNNING, so the sweep is about to re-drive
+      // it
+      // forward with no intervention event in between, and its participant calls back before the
+      // new
+      // park. A standing failure settles nothing.
+      SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
+      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(saga));
+      when(store.getEvents("saga-1"))
+          .thenReturn(List.of(StatusEvent.started(null), StepEvent.failed(1, "s1", null)));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.completeStepAsync("saga-1", "s1", Map.of()))
+          .isInstanceOf(SagaStepNotParkedException.class);
+      verify(engine, never()).resumeFrom(any(), any(), anyInt());
+    }
+
+    @Test
     void completeStepAsync_failedStepRedrivenAfterAReset_throwsStepNotParked() {
       // Arrange — the step failed, an operator reset the saga to RUNNING, and the re-driven step's
       // participant calls back before its new park. The old failure no longer settles the step.
