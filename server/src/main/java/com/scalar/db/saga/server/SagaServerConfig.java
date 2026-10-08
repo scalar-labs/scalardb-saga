@@ -1666,9 +1666,9 @@ public final class SagaServerConfig {
   }
 
   /**
-   * Returns the services-directory settings: the directory itself, the reload interval (parsed now,
-   * consumed once the reload pass ships), the secrets root confining {@code ${file:...}} references
-   * in service files, and the optional egress ceiling.
+   * Returns the services-directory settings: the directory itself, the reload interval {@code
+   * SagaConfigReloadManager} runs on, the secrets root confining {@code ${file:...}} references in
+   * service files, and the optional egress ceiling.
    *
    * @return the reload configuration
    */

@@ -8,17 +8,17 @@ import org.jspecify.annotations.Nullable;
  * REST response view of one {@link TimelineEvent}. Carries metadata plus the failure error or
  * intervention reason only — never a raw step input/output payload, exactly as the core value type
  * already redacts. Timestamps are ISO-8601 strings to keep the JSON independent of the server's
- * date handling; the resulting status is its enum name; the nullable fields are omitted by the JSON
- * mapper when null.
+ * date handling; the resulting status is its enum name; the nullable fields are {@code null} when
+ * absent.
  *
  * @param timestamp when the event was recorded, as an ISO-8601 instant
  * @param type the event type name, such as {@code "STEP_FAILED"}
- * @param stepIndex the step index for a step-level event, omitted for a saga-level one
- * @param stepName the step name for a step-level event, omitted for a saga-level one
- * @param resultingStatus the {@code SagaStatus} name the event transitioned to, omitted for a
+ * @param stepIndex the step index for a step-level event, {@code null} for a saga-level one
+ * @param stepName the step name for a step-level event, {@code null} for a saga-level one
+ * @param resultingStatus the {@code SagaStatus} name the event transitioned to, {@code null} for a
  *     step-level event
- * @param detail the failure error or intervention reason, omitted when the event carries none
- * @param operator who performed an intervention, omitted for any other event
+ * @param detail the failure error or intervention reason, {@code null} when the event carries none
+ * @param operator who performed an intervention, {@code null} for any other event
  */
 public record TimelineEventResponse(
     String timestamp,

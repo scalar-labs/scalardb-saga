@@ -17,7 +17,8 @@ import org.jspecify.annotations.Nullable;
  *     for none
  * @param updatedBefore inclusive upper bound on {@code updatedAt}, an ISO-8601 instant, or absent
  *     for none
- * @param pageSize the number of sagas to sweep in this call, or absent for the query's default
+ * @param pageSize the target number of sagas to sweep in this call; a page can run over by one
+ *     {@code updatedAt} cohort. Absent for the query's default
  * @param pageToken the {@code nextPageToken} of the previous response, or absent to start the sweep
  */
 public record BulkResetRequest(
