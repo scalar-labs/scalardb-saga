@@ -30,6 +30,10 @@ import java.lang.annotation.Target;
 @Target(ElementType.PARAMETER)
 public @interface Named {
 
-  /** The qualifier name. Must match the name used when registering the resource. */
+  /**
+   * The qualifier name. Must match the name used when registering the resource.
+   *
+   * @return the name the resource was registered under
+   */
   String value();
 }

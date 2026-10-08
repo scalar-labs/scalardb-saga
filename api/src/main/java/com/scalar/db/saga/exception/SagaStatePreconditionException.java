@@ -20,6 +20,7 @@ import java.util.Objects;
  */
 public class SagaStatePreconditionException extends SagaRuntimeException {
 
+  /** The saga the rejected operation targeted. */
   private final String sagaId;
 
   private SagaStatePreconditionException(SagaErrorCode code, Map<String, String> metadata) {
@@ -35,6 +36,7 @@ public class SagaStatePreconditionException extends SagaRuntimeException {
    * @param sagaId the saga instance id
    * @param currentState the saga's current status name (e.g. {@code "RUNNING"})
    * @param requestedOperation a short operation label (e.g. {@code "force-complete"})
+   * @return the exception to throw
    */
   public static SagaStatePreconditionException wrongState(
       String sagaId, String currentState, String requestedOperation) {
@@ -50,6 +52,9 @@ public class SagaStatePreconditionException extends SagaRuntimeException {
   /**
    * The saga is {@code WAITING} on an async callback and resolves via callback or timeout — carries
    * {@link SagaErrorCode#SAGA_PARKED}.
+   *
+   * @param sagaId the saga instance id
+   * @return the exception to throw
    */
   public static SagaStatePreconditionException parked(String sagaId) {
     return new SagaStatePreconditionException(
@@ -76,6 +81,11 @@ public class SagaStatePreconditionException extends SagaRuntimeException {
     return new SagaStatePreconditionException(code, metadata);
   }
 
+  /**
+   * The saga the rejected operation targeted.
+   *
+   * @return the saga instance id, never {@code null}
+   */
   public String getSagaId() {
     return sagaId;
   }

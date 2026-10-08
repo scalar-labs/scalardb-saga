@@ -28,12 +28,25 @@ import java.util.Objects;
  */
 public class SagaIllegalArgumentException extends SagaRuntimeException {
 
+  /**
+   * A value the caller passed failed validation. Carries {@link SagaErrorCode#INVALID_ARGUMENT}
+   * with {@code detail} in its metadata.
+   *
+   * @param detail which value was rejected, and why
+   */
   public SagaIllegalArgumentException(String detail) {
     super(
         SagaErrorCode.INVALID_ARGUMENT,
         ErrorMetadata.of("detail", Objects.requireNonNull(detail, "detail must not be null")));
   }
 
+  /**
+   * As {@link #SagaIllegalArgumentException(String)}, with the failure that detected the bad value
+   * as the cause.
+   *
+   * @param detail which value was rejected, and why
+   * @param cause the failure that detected it
+   */
   public SagaIllegalArgumentException(String detail, Throwable cause) {
     super(
         SagaErrorCode.INVALID_ARGUMENT,

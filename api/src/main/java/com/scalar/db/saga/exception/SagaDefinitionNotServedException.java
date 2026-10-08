@@ -24,12 +24,14 @@ import java.util.Objects;
  */
 public class SagaDefinitionNotServedException extends SagaRuntimeException {
 
+  /** The saga whose start was refused. */
   private final String sagaName;
 
   /**
    * The saga named {@code sagaName} is registered but not served here.
    *
    * @param sagaName the saga whose start was refused
+   * @return the exception to throw
    */
   public static SagaDefinitionNotServedException of(String sagaName) {
     return new SagaDefinitionNotServedException(sagaName);
@@ -49,6 +51,11 @@ public class SagaDefinitionNotServedException extends SagaRuntimeException {
         Objects.requireNonNull(metadata.get("saga_name"), "sagaName must not be null"));
   }
 
+  /**
+   * The saga whose start was refused.
+   *
+   * @return the saga name, never {@code null}
+   */
   public String getSagaName() {
     return sagaName;
   }

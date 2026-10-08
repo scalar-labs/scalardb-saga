@@ -25,3 +25,10 @@ tasks.named<JavaCompile>("compileJava") {
     // unchecked/deprecation coverage we want to keep here.
     options.compilerArgs.add("-Xlint:all,-options,-serial")
 }
+
+// The published Java 8 surface is documented to zero doclint warnings and stays there: any javadoc
+// warning fails the build. The generated stubs in :rpc narrow doclint in their own build file, and
+// this gate still applies to whatever that leaves.
+tasks.withType<Javadoc>().configureEach {
+    (options as StandardJavadocDocletOptions).addBooleanOption("Werror", true)
+}

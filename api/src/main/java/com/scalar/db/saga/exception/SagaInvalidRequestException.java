@@ -5,7 +5,7 @@ import java.util.Objects;
 
 /**
  * Thrown when the request message itself fails validation at the daemon edge — a missing or
- * malformed field, an unparseable body, an unrecognized query parameter. Carries {@link
+ * malformed field, an unparseable body, an invalid query-parameter value. Carries {@link
  * SagaErrorCode#INVALID_REQUEST} with the daemon-authored specifics in the {@code detail} metadata,
  * so the caller can fix the offending field.
  *
@@ -16,6 +16,12 @@ import java.util.Objects;
  */
 public class SagaInvalidRequestException extends SagaRuntimeException {
 
+  /**
+   * The request message failed validation at the daemon edge. Carries {@link
+   * SagaErrorCode#INVALID_REQUEST} with {@code detail} in its metadata.
+   *
+   * @param detail which part of the request was rejected, and why
+   */
   public SagaInvalidRequestException(String detail) {
     super(
         SagaErrorCode.INVALID_REQUEST,
