@@ -64,6 +64,10 @@ public final class CallSpecCodec {
   /**
    * Reads the {@code transport} field of a declaratively-defined service step node, defaulting to
    * {@link CallSpec.Transport#HTTP} when absent. Rejects an unknown or not-yet-supported transport.
+   *
+   * @param stepNode the step's JSON node
+   * @param stepName the step's name, for the error message
+   * @return the declared transport, or HTTP when the field is absent
    */
   public static CallSpec.Transport parseTransport(JsonNode stepNode, String stepName) {
     if (!isPresent(stepNode, TRANSPORT)) {
@@ -85,7 +89,14 @@ public final class CallSpecCodec {
     return transport;
   }
 
-  /** Reads one phase's {@link CallSpec} for {@code transport} from its JSON node. */
+  /**
+   * Reads one phase's {@link CallSpec} for {@code transport} from its JSON node.
+   *
+   * @param transport the step's transport, as {@link #parseTransport} returned it
+   * @param node the phase's JSON node, an object holding the call's fields
+   * @param stepName the step's name, for the error message
+   * @return the parsed and validated call spec
+   */
   public static CallSpec parseCallSpec(
       CallSpec.Transport transport, JsonNode node, String stepName) {
     // Only HTTP is supported today; parseTransport rejects anything else first.
@@ -146,7 +157,13 @@ public final class CallSpecCodec {
     }
   }
 
-  /** Writes {@code spec} as a JSON object — the inverse of {@link #parseCallSpec}. */
+  /**
+   * Writes {@code spec} as a JSON object — the inverse of {@link #parseCallSpec}.
+   *
+   * @param mapper the mapper that creates the node
+   * @param spec the call spec to write
+   * @return a JSON object holding only the fields the spec sets
+   */
   public static ObjectNode serializeCallSpec(ObjectMapper mapper, CallSpec spec) {
     ObjectNode node = mapper.createObjectNode();
     switch (spec) {
@@ -204,6 +221,11 @@ public final class CallSpecCodec {
    * rejecting a step that mixes a {@code stepClass} with {@code service}/phases or defines neither.
    * Shared by {@link SagaDefinitionParser} and the store serializer; each passes {@code error} so
    * the failure type matches its layer (a public definition error vs an internal one).
+   *
+   * @param stepNode the step's JSON node
+   * @param name the step's name, for the error message
+   * @param error builds the exception to throw from a message
+   * @return the step class name, or {@code null} for a service step
    */
   public static @Nullable String classStepOrNull(
       JsonNode stepNode, String name, Function<String, RuntimeException> error) {
@@ -224,7 +246,13 @@ public final class CallSpecCodec {
     return null;
   }
 
-  /** Rejects a SAGA-mode service step that carries TCC phases or omits a SAGA phase. */
+  /**
+   * Rejects a SAGA-mode service step that carries TCC phases or omits a SAGA phase.
+   *
+   * @param stepNode the step's JSON node
+   * @param name the step's name, for the error message
+   * @param error builds the exception to throw from a message
+   */
   public static void requireSagaPhases(
       JsonNode stepNode, String name, Function<String, RuntimeException> error) {
     if (hasTccPhase(stepNode)) {
@@ -242,7 +270,13 @@ public final class CallSpecCodec {
     }
   }
 
-  /** Rejects a TCC-mode service step that carries SAGA phases or omits a TCC phase. */
+  /**
+   * Rejects a TCC-mode service step that carries SAGA phases or omits a TCC phase.
+   *
+   * @param stepNode the step's JSON node
+   * @param name the step's name, for the error message
+   * @param error builds the exception to throw from a message
+   */
   public static void requireTccPhases(
       JsonNode stepNode, String name, Function<String, RuntimeException> error) {
     if (hasSagaPhase(stepNode)) {
@@ -269,6 +303,10 @@ public final class CallSpecCodec {
    * synchronously. This is a parse-path precheck (called by {@code SagaDefinitionParser}); the
    * {@code error} factory keeps the failure type layer-appropriate. The programmatic-builder and
    * store-reload paths are guarded independently by the {@code ServiceStep} constructor.
+   *
+   * @param stepNode the step's JSON node
+   * @param name the step's name, for the error message
+   * @param error builds the exception to throw from a message
    */
   public static void rejectAsyncOnBackwardPhase(
       JsonNode stepNode, String name, Function<String, RuntimeException> error) {
@@ -286,12 +324,23 @@ public final class CallSpecCodec {
     }
   }
 
-  /** Whether the step node declares any SAGA phase (execution/compensation). */
+  /**
+   * Whether the step node declares any SAGA phase (execution/compensation).
+   *
+   * @param stepNode the step's JSON node
+   * @return {@code true} if {@code execution} or {@code compensation} is present and not null
+   */
   public static boolean hasSagaPhase(JsonNode stepNode) {
     return isPresent(stepNode, EXECUTION) || isPresent(stepNode, COMPENSATION);
   }
 
-  /** Whether the step node declares any TCC phase (reservation/confirmation/cancellation). */
+  /**
+   * Whether the step node declares any TCC phase (reservation/confirmation/cancellation).
+   *
+   * @param stepNode the step's JSON node
+   * @return {@code true} if {@code reservation}, {@code confirmation} or {@code cancellation} is
+   *     present and not null
+   */
   public static boolean hasTccPhase(JsonNode stepNode) {
     return isPresent(stepNode, RESERVATION)
         || isPresent(stepNode, CONFIRMATION)

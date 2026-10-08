@@ -25,7 +25,10 @@ import java.util.Objects;
  */
 public class SagaRuntimeException extends RuntimeException {
 
+  /** The error code; never null. */
   private final SagaErrorCode errorCode;
+
+  /** The schema-validated metadata, in schema-declared order; never null. */
   private final Map<String, String> metadata;
 
   /**
@@ -36,6 +39,8 @@ public class SagaRuntimeException extends RuntimeException {
    * {@code SagaRuntimeException} with a code is reserved for cases with no natural typed home,
    * notably the client SDK's {@link SagaErrorCode#UNRECOGNIZED_SERVER_ERROR} fallback.
    *
+   * @param code the error code
+   * @param metadata the metadata the code's schema declares, keyed by schema key
    * @throws NullPointerException if {@code code} or {@code metadata} is null
    * @throws IllegalArgumentException if {@code metadata} does not satisfy the code's schema
    */
@@ -51,6 +56,9 @@ public class SagaRuntimeException extends RuntimeException {
    * Constructs an exception carrying a {@link SagaErrorCode}, its metadata, and an underlying
    * cause. Validation is the same as the two-argument constructor.
    *
+   * @param code the error code
+   * @param metadata the metadata the code's schema declares, keyed by schema key
+   * @param cause the underlying failure
    * @throws NullPointerException if any argument is null
    * @throws IllegalArgumentException if {@code metadata} does not satisfy the code's schema
    */
@@ -60,7 +68,11 @@ public class SagaRuntimeException extends RuntimeException {
     this.metadata = Collections.unmodifiableMap(new LinkedHashMap<>(metadata));
   }
 
-  /** The exception's error code — always non-null. */
+  /**
+   * The exception's error code — always non-null.
+   *
+   * @return the error code
+   */
   public SagaErrorCode getErrorCode() {
     return errorCode;
   }
@@ -78,6 +90,8 @@ public class SagaRuntimeException extends RuntimeException {
   /**
    * The metadata attached to the error code, in schema-declared order. Always non-null; empty when
    * the code has a schemaless (no-key) shape.
+   *
+   * @return the metadata, unmodifiable
    */
   public Map<String, String> getMetadata() {
     return metadata;

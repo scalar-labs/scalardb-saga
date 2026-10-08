@@ -9,6 +9,9 @@ import org.jspecify.annotations.Nullable;
 /**
  * Request body for starting a saga: the definition {@code sagaName} and the initial {@code input}
  * for the saga context.
+ *
+ * @param sagaName the registered definition name; required, checked by {@link #requireSagaName()}
+ * @param input the initial saga context, copied on construction, or absent for none
  */
 public record StartSagaRequest(@Nullable String sagaName, @Nullable Map<String, Object> input) {
 
@@ -30,7 +33,11 @@ public record StartSagaRequest(@Nullable String sagaName, @Nullable Map<String, 
     return sagaName;
   }
 
-  /** Returns the input map, or an empty map if none was provided. */
+  /**
+   * Returns the input map, or an empty map if none was provided.
+   *
+   * @return the input, unmodifiable; empty when the body carried none
+   */
   public Map<String, Object> inputOrEmpty() {
     return input == null ? Map.of() : input;
   }

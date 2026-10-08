@@ -100,6 +100,12 @@ public class ExecutionContext implements SagaContext {
 
   // --- Engine-internal (not accessible from Step implementations) ---
 
+  /**
+   * The sequence number the next event appended for this saga will carry, which is the count of
+   * events recorded so far.
+   *
+   * @return the next event sequence
+   */
   public int nextSequence() {
     return nextEventSequence;
   }
@@ -112,6 +118,11 @@ public class ExecutionContext implements SagaContext {
     this.nextEventSequence = seq;
   }
 
+  /**
+   * The saga's state as this execution last read it from or wrote it to the store.
+   *
+   * @return the current state snapshot
+   */
   public SagaStateSnapshot getCurrentState() {
     return currentState;
   }

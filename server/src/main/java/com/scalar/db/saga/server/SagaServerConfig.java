@@ -4,6 +4,8 @@ import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.engine.RecoveryConfig;
 import com.scalar.db.saga.engine.RetentionConfig;
 import com.scalar.db.saga.engine.ShutdownMode;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.time.Clock;
@@ -46,7 +48,10 @@ import org.jspecify.annotations.Nullable;
  *       retention sweep scatter (bucket order and schedule offset), so a stable value gives stable
  *       sweep phases across restarts. Must match {@code [a-zA-Z0-9._-]{1,128}} — it is stamped on
  *       claimed rows and echoed in log lines
- *   <li>{@code definitions_path} — path to a JSON/YAML saga definition file or directory
+ *   <li>{@code definitions_path} — path to a JSON/YAML saga definition file or directory. Unset, it
+ *       is the image's mount point {@value #DEFAULT_DEFINITIONS_PATH} when that directory exists,
+ *       so a Deployment that mounts there declares the path once; outside the image the key is set
+ *       explicitly
  *   <li>{@code default_saga_timeout_millis} — a default saga timeout enforced at execution for
  *       definitions that set none ({@code 0} = unbounded); {@code 0} (default) disables it. A
  *       definition's own timeout always wins. Applied at every execution entry (start, recovery
@@ -107,18 +112,21 @@ import org.jspecify.annotations.Nullable;
  * load balancer remains the recommended deployment; enable this where no such layer exists.
  *
  * <ul>
- *   <li>{@code tls.enabled} — serve TLS on both enabled transports (default {@value
- *       #DEFAULT_TLS_ENABLED}). Requires both paths below. Setting either path without this key is
- *       rejected, so mounted certificates cannot sit unused behind a forgotten switch while the
- *       server silently serves plaintext; {@code tls.enabled=false} with paths set is legal and
- *       ignores them, which is how an operator toggles TLS off without unmounting the material.
- *       Ignored values must still be well-formed: shape checks run regardless of the toggle, as for
- *       every key here, so the file stays valid for the day the toggle flips back
- *   <li>{@code tls.cert_chain_path} — path to the PEM certificate chain, leaf first
+ *   <li>{@code tls.enabled} — serve TLS on both enabled transports (off when unset). Requires the
+ *       pair below, configured by its keys or mounted at their default locations. Material without
+ *       this key, whether configured or mounted, is rejected, so certificates cannot sit unused
+ *       behind a forgotten switch while the server silently serves plaintext; {@code
+ *       tls.enabled=false} with material present is legal and ignores it, which is how an operator
+ *       toggles TLS off without unmounting the material. Ignored values must still be well-formed:
+ *       shape checks run regardless of the toggle, as for every key here, so the file stays valid
+ *       for the day the toggle flips back
+ *   <li>{@code tls.cert_chain_path} — path to the PEM certificate chain, leaf first; defaults to
+ *       {@value #DEFAULT_TLS_CERT_CHAIN_PATH} when that file exists
  *   <li>{@code tls.private_key_path} — path to the matching PEM private key: unencrypted PKCS#8
- *       ({@code BEGIN PRIVATE KEY}), RSA or EC. PKCS#1/SEC1 ({@code BEGIN RSA/EC PRIVATE KEY}) and
- *       encrypted keys are rejected with conversion guidance; note that cert-manager and Vault emit
- *       those legacy encodings unless asked for PKCS#8
+ *       ({@code BEGIN PRIVATE KEY}), RSA or EC; defaults to {@value #DEFAULT_TLS_PRIVATE_KEY_PATH}
+ *       when that file exists. PKCS#1/SEC1 ({@code BEGIN RSA/EC PRIVATE KEY}) and encrypted keys
+ *       are rejected with conversion guidance; note that cert-manager and Vault emit those legacy
+ *       encodings unless asked for PKCS#8
  * </ul>
  *
  * <p>The keys take paths, never certificate or key contents, so the material stays re-readable: the
@@ -265,7 +273,8 @@ import org.jspecify.annotations.Nullable;
  * <p>The directory-level keys:
  *
  * <ul>
- *   <li>{@code services_path} — the directory of service files; unset = no services
+ *   <li>{@code services_path} — the directory of service files. Unset, it is the image's mount
+ *       point {@value #DEFAULT_SERVICES_PATH} when that directory exists, and otherwise no services
  *   <li>{@code reload.interval_seconds} — seconds between configuration reload passes (default
  *       {@value #DEFAULT_RELOAD_INTERVAL_SECONDS}): service files and definitions are re-read and
  *       validated as a complete set, so changes land without a restart. Validation is all or
@@ -457,6 +466,22 @@ public final class SagaServerConfig {
 
   static final long DEFAULT_RELOAD_INTERVAL_SECONDS = 30L;
   static final String DEFAULT_SECRETS_ROOT = "/run/secrets";
+  // The image's conventional configuration mount (see server/docker), where the path keys look when
+  // unset. Container paths: outside the image the keys are set explicitly.
+  static final String DEFAULT_CONF_DIR = "/scalardb-saga/conf";
+  static final String DEFAULT_DEFINITIONS_PATH = DEFAULT_CONF_DIR + "/definitions";
+  static final String DEFAULT_SERVICES_PATH = DEFAULT_CONF_DIR + "/services";
+  // The server's own TLS material, under tls/ so later material (CAs trusted on outbound calls,
+  // per-participant client certificates) gets sibling directories rather than a share of this one.
+  // The file names are the ones a Kubernetes TLS Secret publishes, so the Secret mounts as-is.
+  static final String TLS_SERVER_DIR = "tls/server";
+  static final String TLS_CERT_CHAIN_FILE = "tls.crt";
+  static final String TLS_PRIVATE_KEY_FILE = "tls.key";
+  static final String DEFAULT_TLS_SERVER_DIR = DEFAULT_CONF_DIR + "/" + TLS_SERVER_DIR;
+  static final String DEFAULT_TLS_CERT_CHAIN_PATH =
+      DEFAULT_TLS_SERVER_DIR + "/" + TLS_CERT_CHAIN_FILE;
+  static final String DEFAULT_TLS_PRIVATE_KEY_PATH =
+      DEFAULT_TLS_SERVER_DIR + "/" + TLS_PRIVATE_KEY_FILE;
 
   static final String STORE_MAX_EVENT_PAYLOAD_BYTES_KEY = PREFIX + "store.max_event_payload_bytes";
 
@@ -465,7 +490,6 @@ public final class SagaServerConfig {
   static final int DEFAULT_GRPC_PORT = 12051;
   static final boolean DEFAULT_HTTP_ENABLED = true;
   static final boolean DEFAULT_GRPC_ENABLED = true;
-  static final boolean DEFAULT_TLS_ENABLED = false; // plaintext; a mesh/ingress terminates TLS
   static final int DEFAULT_GRPC_MAX_INBOUND_METADATA_BYTES = 8 * 1024;
   static final int DEFAULT_MAX_EVENT_PAYLOAD_BYTES = 1_048_576; // 1 MiB
   // 0 = no extra tightening, NOT an unbounded wait: sync.max_wait_millis is the ceiling and always
@@ -504,6 +528,8 @@ public final class SagaServerConfig {
    * (default {@value #DEFAULT_DETAIL_MAX_TIMELINE_EVENTS}). When a saga's history is longer, the
    * newest events are returned and the detail is flagged truncated; the full history remains in the
    * store.
+   *
+   * @return the maximum number of timeline events one detail read returns
    */
   public int detailMaxTimelineEvents() {
     return detailMaxTimelineEvents;
@@ -512,6 +538,8 @@ public final class SagaServerConfig {
   /**
    * Returns the crash-recovery configuration: how stale a saga must be to be reclaimed, how often
    * the scan runs, and how much work one pass may do.
+   *
+   * @return the recovery configuration
    */
   public RecoveryConfig recoveryConfig() {
     return recoveryConfig;
@@ -520,6 +548,8 @@ public final class SagaServerConfig {
   /**
    * Returns the retention configuration: how long a terminal saga is kept, and the shape of the
    * purge that removes it afterwards.
+   *
+   * @return the retention configuration
    */
   public RetentionConfig retentionConfig() {
     return retentionConfig;
@@ -530,6 +560,8 @@ public final class SagaServerConfig {
    * #DEFAULT_SECURITY_PROVIDER} — no authentication. Selects which {@link
    * com.scalar.db.saga.server.security.SagaSecurityProvider} the server authenticates requests
    * with; the value is validated against the known providers when the provider is built.
+   *
+   * @return the provider name in lower case, such as {@code noop}, {@code jwt} or {@code apikey}
    */
   public String securityProvider() {
     return securityProvider;
@@ -540,6 +572,9 @@ public final class SagaServerConfig {
    * interface (the {@code insecure_mode.enabled} key). Consulted by {@link SagaServer} at startup
    * to gate the {@code noop} provider on a non-loopback host. Defaults to {@value
    * #DEFAULT_INSECURE_MODE_ENABLED}.
+   *
+   * @return {@code true} when the operator acknowledged running unauthenticated on a
+   *     network-reachable interface
    */
   public boolean insecureModeEnabled() {
     return insecureModeEnabled;
@@ -550,6 +585,8 @@ public final class SagaServerConfig {
    * empty, the daemon registers no callback route (async completion is not enabled). The value may
    * be supplied as a {@code ${file:}}/{@code ${env:}} secret reference. Present exactly when {@link
    * #callbackBaseUrl()} is.
+   *
+   * @return the secret, or empty when async completion is not configured
    */
   public Optional<String> callbackSecret() {
     return Optional.ofNullable(callbackSecret);
@@ -559,6 +596,8 @@ public final class SagaServerConfig {
    * Returns the daemon's externally-reachable base URL used to build async-step callback URLs, or
    * empty when unset. Any trailing {@code /} is stripped so a callback path can be appended
    * directly. Present exactly when {@link #callbackSecret()} is.
+   *
+   * @return the base URL without a trailing slash, or empty when async completion is not configured
    */
   public Optional<String> callbackBaseUrl() {
     return Optional.ofNullable(callbackBaseUrl);
@@ -569,6 +608,8 @@ public final class SagaServerConfig {
    * token is older than this is rejected as expired. {@code 0} (the default) disables the check.
    * When enabled it must exceed the longest a step can stay parked (its callback timeout), or a
    * genuine late callback is rejected.
+   *
+   * @return the token age limit in seconds, or {@code 0} when the check is disabled
    */
   public long callbackMaxAgeSeconds() {
     return callbackMaxAgeSeconds;
@@ -581,6 +622,8 @@ public final class SagaServerConfig {
    * daemon-hosted saga cannot run without a deadline. Forwarded to the engine (which applies it at
    * deadline computation on every execution entry) instead of being baked into the stored
    * definition, so changing it never conflicts with stored content.
+   *
+   * @return the default saga timeout in milliseconds, or {@code 0} for none
    */
   public long defaultSagaTimeoutMillis() {
     return defaultSagaTimeoutMillis;
@@ -610,6 +653,8 @@ public final class SagaServerConfig {
    * limiter does the everyday shaping and the cap is the backstop for a duration blowout. If it
    * sits above, callers inside their limits are refused routinely and "server full" stops being an
    * exceptional signal.
+   *
+   * @return the admission cap, or {@code 0} for none
    */
   public int maxConcurrentSagaStarts() {
     return maxConcurrentSagaStarts;
@@ -712,12 +757,15 @@ public final class SagaServerConfig {
   private final int grpcMaxInboundMetadataBytes;
   private final int grpcMaxInboundMessageBytes;
   private final boolean tlsEnabled;
-  // Whether tls.enabled appeared in the properties at all. Consumed only by validateCombinations,
-  // which treats paths-with-absent-switch as a forgotten 'true' but paths-with-explicit-false as a
-  // deliberate toggle-off.
+  // Whether tls.enabled appeared in the properties at all. Consumed by validateCombinations, which
+  // treats material-with-absent-switch as a forgotten 'true' but material-with-explicit-false as a
+  // deliberate toggle-off, and by the validation report.
   private final boolean tlsEnabledKeySet;
   private final @Nullable Path tlsCertChainPath;
   private final @Nullable Path tlsPrivateKeyPath;
+  // Whether each path key was left unset, so the path above is the conventional file or absent.
+  private final boolean tlsCertChainPathDefaulted;
+  private final boolean tlsPrivateKeyPathDefaulted;
   private final long syncTimeoutMillis;
   private final long syncMaxWaitMillis;
   private final ShutdownMode shutdownMode;
@@ -736,6 +784,8 @@ public final class SagaServerConfig {
   private final Properties properties;
   private final Properties rawProperties;
   private final @Nullable Path definitionsPath;
+  // Whether definitions_path was left unset, so the path above is the default directory or absent.
+  private final boolean definitionsPathDefaulted;
   private final ReloadConfig reloadConfig;
 
   /**
@@ -744,8 +794,10 @@ public final class SagaServerConfig {
    *
    * @param resolved the secret-resolved properties
    * @param raw the pre-resolution properties (see {@link #rawProperties()})
+   * @param confDir the directory whose {@code definitions} and {@code services} subdirectories the
+   *     two path keys default to when unset
    */
-  private SagaServerConfig(Properties resolved, Properties raw) {
+  private SagaServerConfig(Properties resolved, Properties raw, Path confDir) {
     rejectUnknownKeys(resolved);
     this.host = parseHost(resolved.getProperty(HOST_KEY));
     this.ownerId = parseOwnerId(resolved.getProperty(OWNER_ID_KEY));
@@ -790,17 +842,29 @@ public final class SagaServerConfig {
             GRPC_MAX_INBOUND_METADATA_BYTES_KEY,
             DEFAULT_GRPC_MAX_INBOUND_METADATA_BYTES,
             1);
-    // tls.enabled rejects blank (its default leaves the protection off); the paths follow the
-    // ordinary blank-is-unset rule, so the pairing checks in validateCombinations see a blank path
-    // exactly as an absent one.
+    // tls.enabled rejects blank: unset leaves the protection off, and blank must not pass for it.
+    // The paths follow the usual blank-is-unset rule, and an unset path falls back to the file at
+    // the image's conventional mount when one exists, so a Secret mounted there needs only the
+    // switch. The pairing checks in validateCombinations see a blank path exactly as an absent one.
     String tlsEnabledValue =
         requireNonBlankIfSet(TLS_ENABLED_KEY, resolved.getProperty(TLS_ENABLED_KEY));
     this.tlsEnabledKeySet = tlsEnabledValue != null;
-    this.tlsEnabled = parseBoolean(tlsEnabledValue, TLS_ENABLED_KEY, DEFAULT_TLS_ENABLED);
-    this.tlsCertChainPath =
+    this.tlsEnabled = parseBoolean(tlsEnabledValue, TLS_ENABLED_KEY, false);
+    Path tlsCertChainPath =
         parseOptionalPath(resolved.getProperty(TLS_CERT_CHAIN_PATH_KEY), TLS_CERT_CHAIN_PATH_KEY);
-    this.tlsPrivateKeyPath =
+    Path tlsPrivateKeyPath =
         parseOptionalPath(resolved.getProperty(TLS_PRIVATE_KEY_PATH_KEY), TLS_PRIVATE_KEY_PATH_KEY);
+    this.tlsCertChainPathDefaulted = tlsCertChainPath == null;
+    this.tlsPrivateKeyPathDefaulted = tlsPrivateKeyPath == null;
+    Path tlsServerDir = confDir.resolve(TLS_SERVER_DIR);
+    this.tlsCertChainPath =
+        tlsCertChainPath != null
+            ? tlsCertChainPath
+            : existingFile(tlsServerDir.resolve(TLS_CERT_CHAIN_FILE));
+    this.tlsPrivateKeyPath =
+        tlsPrivateKeyPath != null
+            ? tlsPrivateKeyPath
+            : existingFile(tlsServerDir.resolve(TLS_PRIVATE_KEY_FILE));
     this.syncTimeoutMillis =
         parseBoundedLong(
             resolved.getProperty(SYNC_TIMEOUT_MILLIS_KEY),
@@ -875,9 +939,14 @@ public final class SagaServerConfig {
             MAX_START_REQUESTS_PER_MINUTE_KEY,
             DEFAULT_MAX_START_REQUESTS_PER_MINUTE,
             0);
-    this.definitionsPath =
+    Path definitionsPath =
         parseOptionalPath(resolved.getProperty(DEFINITIONS_PATH_KEY), DEFINITIONS_PATH_KEY);
-    this.reloadConfig = parseReloadConfig(resolved);
+    this.definitionsPathDefaulted = definitionsPath == null;
+    this.definitionsPath =
+        definitionsPath != null
+            ? definitionsPath
+            : existingDirectory(confDir.resolve("definitions"));
+    this.reloadConfig = parseReloadConfig(resolved, confDir);
     this.properties = applyStoreDefaults(copyOf(resolved));
     this.grpcMaxInboundMessageBytes = parseGrpcMaxInboundMessageBytes(this.properties);
     this.rawProperties = copyOf(raw);
@@ -929,37 +998,58 @@ public final class SagaServerConfig {
               + " back. Set both, or neither to leave async completion disabled.");
     }
     // TLS needs both halves of the key pair; either alone is a half-configured feature that would
-    // otherwise surface only as handshake failures after the ports are already serving.
+    // otherwise surface only as handshake failures after the ports are already serving. A missing
+    // half is one whose key is unset and whose conventional file is absent, so the message names
+    // both places it looked: the default paths are constants, safe to echo, where the configured
+    // values never are.
     if (tlsEnabled && (tlsCertChainPath == null || tlsPrivateKeyPath == null)) {
-      boolean bothMissing = tlsCertChainPath == null && tlsPrivateKeyPath == null;
-      String missing =
-          bothMissing
-              ? "'" + TLS_CERT_CHAIN_PATH_KEY + "' and '" + TLS_PRIVATE_KEY_PATH_KEY + "' are"
-              : "'"
-                  + (tlsCertChainPath == null ? TLS_CERT_CHAIN_PATH_KEY : TLS_PRIVATE_KEY_PATH_KEY)
-                  + "' is";
+      String missing;
+      if (tlsCertChainPath == null && tlsPrivateKeyPath == null) {
+        missing =
+            "neither '"
+                + TLS_CERT_CHAIN_PATH_KEY
+                + "' nor '"
+                + TLS_PRIVATE_KEY_PATH_KEY
+                + "' is set, and neither "
+                + DEFAULT_TLS_CERT_CHAIN_PATH
+                + " nor "
+                + DEFAULT_TLS_PRIVATE_KEY_PATH
+                + " exists";
+      } else if (tlsCertChainPath == null) {
+        missing = tlsAbsence(TLS_CERT_CHAIN_PATH_KEY, DEFAULT_TLS_CERT_CHAIN_PATH);
+      } else {
+        missing = tlsAbsence(TLS_PRIVATE_KEY_PATH_KEY, DEFAULT_TLS_PRIVATE_KEY_PATH);
+      }
       throw new IllegalArgumentException(
           "'"
               + TLS_ENABLED_KEY
               + "' is true but "
               + missing
-              + " not set. Serving TLS needs both the certificate chain and its private key. Set"
-              + " both paths, or set '"
+              + ". Serving TLS needs both the certificate chain and its private key: set both paths,"
+              + " mount both files under "
+              + DEFAULT_TLS_SERVER_DIR
+              + ", or set '"
               + TLS_ENABLED_KEY
               + "=false' to serve plaintext.");
     }
-    // Material without the switch: an operator who mounts certificates but forgets tls.enabled=true
-    // would silently serve plaintext. Explicit tls.enabled=false stays legal — that is the
-    // deliberate "toggle TLS off, leave the material mounted" move.
+    // Material without the switch: an operator who mounts or configures certificates but forgets
+    // tls.enabled=true would silently serve plaintext. An explicit false stays legal: that is the
+    // deliberate "toggle TLS off, leave the material mounted" move. The message says how the
+    // material got here, by key or by the conventional file; a mounted file has no key to name.
     if (!tlsEnabledKeySet && (tlsCertChainPath != null || tlsPrivateKeyPath != null)) {
       String present =
-          tlsCertChainPath != null ? TLS_CERT_CHAIN_PATH_KEY : TLS_PRIVATE_KEY_PATH_KEY;
+          tlsCertChainPath != null
+              ? tlsPresence(
+                  TLS_CERT_CHAIN_PATH_KEY, DEFAULT_TLS_CERT_CHAIN_PATH, tlsCertChainPathDefaulted)
+              : tlsPresence(
+                  TLS_PRIVATE_KEY_PATH_KEY,
+                  DEFAULT_TLS_PRIVATE_KEY_PATH,
+                  tlsPrivateKeyPathDefaulted);
       throw new IllegalArgumentException(
-          "'"
-              + present
-              + "' is set but '"
+          present
+              + " but '"
               + TLS_ENABLED_KEY
-              + "' is not. Set '"
+              + "' is not set. Set '"
               + TLS_ENABLED_KEY
               + "=true' to serve TLS with this material, or '"
               + TLS_ENABLED_KEY
@@ -967,6 +1057,18 @@ public final class SagaServerConfig {
               + " a forgotten 'true' cannot leave the server silently serving plaintext with"
               + " certificates mounted.");
     }
+  }
+
+  /** How one half of the TLS pair came to be present: by its key, or by the conventional file. */
+  private static String tlsPresence(String key, String defaultPath, boolean defaulted) {
+    return defaulted ? defaultPath + " exists" : "'" + key + "' is set";
+  }
+
+  /**
+   * Why one half of the TLS pair is absent: its key is unset and its conventional file is missing.
+   */
+  private static String tlsAbsence(String key, String defaultPath) {
+    return "'" + key + "' is not set and " + defaultPath + " does not exist";
   }
 
   /**
@@ -1037,12 +1139,28 @@ public final class SagaServerConfig {
    * @param unresolved collector for unreadable secret references, or {@code null} to fail on one
    * @return the parsed configuration
    */
+  @SuppressFBWarnings(
+      value = "DMI_HARDCODED_ABSOLUTE_FILENAME",
+      justification =
+          "The image's conventional mount point is a deliberate container-absolute default, like"
+              + " DEFAULT_SECRETS_ROOT; tests stage the directories elsewhere through the overload"
+              + " that takes the directory")
   static SagaServerConfig load(Properties properties, @Nullable UnresolvedSecrets unresolved) {
+    return load(properties, unresolved, Path.of(DEFAULT_CONF_DIR));
+  }
+
+  /**
+   * Visible for testing: {@code confDir} stands in for the image's {@value #DEFAULT_CONF_DIR}, the
+   * directory the two path keys default into, so a test can stage the default directories in a
+   * temporary location instead of on the machine's root file system.
+   */
+  static SagaServerConfig load(
+      Properties properties, @Nullable UnresolvedSecrets unresolved, Path confDir) {
     Objects.requireNonNull(properties, "properties must not be null");
     // Keep the pre-resolution properties so a provider can tell a secret reference from an inline
     // value (both look identical after resolution) — e.g. the API-key provider requires references.
     try {
-      return new SagaServerConfig(resolveSecrets(properties, unresolved), properties);
+      return new SagaServerConfig(resolveSecrets(properties, unresolved), properties, confDir);
     } catch (RuntimeException e) {
       if (unresolved == null || unresolved.isEmpty()) {
         throw e;
@@ -1063,7 +1181,8 @@ public final class SagaServerConfig {
           });
       // Anything unreadable was just removed, so nothing new can be recorded; a fresh collector
       // keeps the caller's list to what the first pass found.
-      return new SagaServerConfig(resolveSecrets(readable, new UnresolvedSecrets()), properties);
+      return new SagaServerConfig(
+          resolveSecrets(readable, new UnresolvedSecrets()), properties, confDir);
     }
   }
 
@@ -1290,14 +1409,16 @@ public final class SagaServerConfig {
    * live, how often they are re-read, where their secret references may resolve, and the optional
    * egress ceiling. The files themselves are read by the reconciler, not here.
    */
-  private static ReloadConfig parseReloadConfig(Properties resolved) {
+  private static ReloadConfig parseReloadConfig(Properties resolved, Path confDir) {
+    Path servicesPath =
+        parseOptionalPath(resolved.getProperty(SERVICES_PATH_KEY), SERVICES_PATH_KEY);
     String secretsRoot = resolved.getProperty(SECRETS_ROOT_KEY);
     String ceiling =
         requireNonBlankIfSet(
             EGRESS_ALLOWED_HOSTS_CEILING_KEY,
             resolved.getProperty(EGRESS_ALLOWED_HOSTS_CEILING_KEY));
     return new ReloadConfig(
-        parseOptionalPath(resolved.getProperty(SERVICES_PATH_KEY), SERVICES_PATH_KEY),
+        servicesPath != null ? servicesPath : existingDirectory(confDir.resolve("services")),
         parseBoundedLong(
             resolved.getProperty(RELOAD_INTERVAL_SECONDS_KEY),
             RELOAD_INTERVAL_SECONDS_KEY,
@@ -1337,6 +1458,8 @@ public final class SagaServerConfig {
    * interfaces, the norm for a container behind network controls). Under the {@code noop} security
    * provider the endpoints are unauthenticated, so {@link SagaServer} refuses to start on a
    * non-loopback host unless insecure mode is acknowledged.
+   *
+   * @return the host or interface literal both transports bind to
    */
   public String host() {
     return host;
@@ -1346,6 +1469,8 @@ public final class SagaServerConfig {
    * Returns the identity this instance stamps on the sagas it claims during recovery, defaulting to
    * a random UUID generated per process. Configure it (e.g. from the pod name) to make a claim
    * traceable to a process; distinct live instances must never share a value.
+   *
+   * @return the owner identity, matching {@code [a-zA-Z0-9._-]{1,128}}
    */
   public String ownerId() {
     return ownerId;
@@ -1355,12 +1480,18 @@ public final class SagaServerConfig {
    * Returns whether the HTTP (REST) transport is served (default {@code true}). When {@code false},
    * the server runs gRPC-only and binds no HTTP port. At least one of {@link #httpEnabled()} /
    * {@link #grpcEnabled()} is always {@code true}.
+   *
+   * @return {@code true} when the REST transport is served
    */
   public boolean httpEnabled() {
     return httpEnabled;
   }
 
-  /** Returns the configured HTTP port ({@code 0} binds an ephemeral port). */
+  /**
+   * Returns the configured HTTP port ({@code 0} binds an ephemeral port).
+   *
+   * @return the HTTP port, or {@code 0} for an ephemeral port
+   */
   public int httpPort() {
     return httpPort;
   }
@@ -1369,6 +1500,8 @@ public final class SagaServerConfig {
    * Returns the maximum size of the HTTP (Jetty) request-handling thread pool (default {@value
    * #DEFAULT_MAX_THREADS}). Caps concurrent request threads so a burst of slow requests cannot
    * exhaust threads.
+   *
+   * @return the maximum number of request-handling threads
    */
   public int httpMaxThreads() {
     return httpMaxThreads;
@@ -1377,6 +1510,8 @@ public final class SagaServerConfig {
   /**
    * Returns the minimum (core) size of the HTTP thread pool (default {@value
    * #DEFAULT_MIN_THREADS}).
+   *
+   * @return the minimum number of request-handling threads
    */
   public int httpMinThreads() {
     return httpMinThreads;
@@ -1387,6 +1522,8 @@ public final class SagaServerConfig {
    * busy. Beyond it the server sheds load (fast failure) instead of queueing unboundedly. Defaults
    * to {@value #DEFAULT_MAX_QUEUED_REQUESTS_PER_THREAD} × {@link #httpMaxThreads()}, keeping the
    * worst-case queueing delay proportional to the pool.
+   *
+   * @return the cap on requests queued for a handler thread
    */
   public int httpMaxQueuedRequests() {
     return httpMaxQueuedRequests;
@@ -1396,6 +1533,8 @@ public final class SagaServerConfig {
    * Returns whether the gRPC transport is served (default {@code true}). When {@code false}, the
    * server runs HTTP-only and binds no gRPC port. At least one of {@link #httpEnabled()} / {@link
    * #grpcEnabled()} is always {@code true}.
+   *
+   * @return {@code true} when the gRPC transport is served
    */
   public boolean grpcEnabled() {
     return grpcEnabled;
@@ -1405,6 +1544,8 @@ public final class SagaServerConfig {
    * Returns the configured gRPC port ({@code 0} binds an ephemeral port). The gRPC server binds the
    * same {@link #host()} as HTTP, on its own listener; when both transports are enabled this
    * differs from {@link #httpPort()}.
+   *
+   * @return the gRPC port, or {@code 0} for an ephemeral port
    */
   public int grpcPort() {
     return grpcPort;
@@ -1415,6 +1556,8 @@ public final class SagaServerConfig {
    * #DEFAULT_GRPC_MAX_INBOUND_METADATA_BYTES}), bounding how much header data an unauthenticated
    * caller can push. Raise it when legitimate credentials do not fit — a JWT access token with many
    * claims is the usual reason.
+   *
+   * @return the request metadata cap in bytes
    */
   public int grpcMaxInboundMetadataBytes() {
     return grpcMaxInboundMetadataBytes;
@@ -1425,18 +1568,54 @@ public final class SagaServerConfig {
    * max-event-payload cap so neither transport accepts an input the store would reject. The store's
    * {@code 0} ("no limit") is mapped to {@link Integer#MAX_VALUE} here, since gRPC reads {@code 0}
    * as "reject all non-empty messages". Defaults to {@value #DEFAULT_MAX_EVENT_PAYLOAD_BYTES}.
+   *
+   * @return the inbound message cap in bytes, {@link Integer#MAX_VALUE} when the store sets no
+   *     payload limit
    */
   public int grpcMaxInboundMessageBytes() {
     return grpcMaxInboundMessageBytes;
   }
 
   /**
-   * Whether the daemon serves TLS on both enabled transports (the {@code tls.enabled} key; default
-   * {@value #DEFAULT_TLS_ENABLED}). When {@code true}, {@link #tlsCertChainPath()} and {@link
-   * #tlsPrivateKeyPath()} are both present — the combination is validated at load.
+   * Whether the daemon serves TLS on both enabled transports (the {@code tls.enabled} key; off when
+   * unset). When {@code true}, {@link #tlsCertChainPath()} and {@link #tlsPrivateKeyPath()} are
+   * both present — the combination is validated at load.
+   *
+   * @return {@code true} when both enabled transports serve TLS
    */
   public boolean tlsEnabled() {
     return tlsEnabled;
+  }
+
+  /**
+   * One line for the configuration validator's report: whether the daemon will serve TLS and where
+   * the pair comes from, since a pair found at the conventional mount is not written in the file.
+   * Names keys and the constant default paths only, never a configured value.
+   */
+  String tlsSummary() {
+    if (!tlsEnabled) {
+      if (!tlsEnabledKeySet) {
+        return "TLS off: '"
+            + TLS_ENABLED_KEY
+            + "' is not set, and nothing is mounted under "
+            + DEFAULT_TLS_SERVER_DIR
+            + ".";
+      }
+      return tlsCertChainPath != null || tlsPrivateKeyPath != null
+          ? "TLS off: '" + TLS_ENABLED_KEY + "=false' leaves the certificate material unused."
+          : "TLS off: '" + TLS_ENABLED_KEY + "=false'.";
+    }
+    return "TLS on: certificate from "
+        + tlsSource(TLS_CERT_CHAIN_PATH_KEY, DEFAULT_TLS_CERT_CHAIN_PATH, tlsCertChainPathDefaulted)
+        + ", key from "
+        + tlsSource(
+            TLS_PRIVATE_KEY_PATH_KEY, DEFAULT_TLS_PRIVATE_KEY_PATH, tlsPrivateKeyPathDefaulted)
+        + ".";
+  }
+
+  /** Where one half of the TLS pair comes from: the conventional file, or the path in its key. */
+  private static String tlsSource(String key, String defaultPath, boolean defaulted) {
+    return defaulted ? "the file at " + defaultPath : "the path in '" + key + "'";
   }
 
   /**
@@ -1444,6 +1623,8 @@ public final class SagaServerConfig {
    * when TLS is disabled. A path configured alongside an explicit {@code tls.enabled=false} is
    * deliberately not returned: the material is ignored, which is what lets an operator toggle TLS
    * off without unmounting it.
+   *
+   * @return the certificate chain path, or empty when TLS is disabled
    */
   public Optional<Path> tlsCertChainPath() {
     return tlsEnabled ? Optional.ofNullable(tlsCertChainPath) : Optional.empty();
@@ -1452,6 +1633,8 @@ public final class SagaServerConfig {
   /**
    * Returns the path to the PEM private key matching {@link #tlsCertChainPath()} — unencrypted
    * PKCS#8, RSA or EC — or empty when TLS is disabled, under the same ignore-when-off rule.
+   *
+   * @return the private key path, or empty when TLS is disabled
    */
   public Optional<Path> tlsPrivateKeyPath() {
     return tlsEnabled ? Optional.ofNullable(tlsPrivateKeyPath) : Optional.empty();
@@ -1463,6 +1646,8 @@ public final class SagaServerConfig {
    * applies. A synchronous start that has not reached a terminal state within the resulting bound
    * returns {@code 202} and the saga keeps running on the engine's executor (the client polls
    * {@code GET /sagas/{id}}).
+   *
+   * @return the timeout in milliseconds, or {@code 0} when unset
    */
   public long syncTimeoutMillis() {
     return syncTimeoutMillis;
@@ -1514,6 +1699,8 @@ public final class SagaServerConfig {
    * server; raising or lowering this value changes how long the server is occupied per call, not
    * how long that caller blocks. The bound on that is the SDK's own default deadline, which is
    * unset — and so unbounded — unless the application configures one.
+   *
+   * @return the ceiling in milliseconds
    */
   public long syncMaxWaitMillis() {
     return syncMaxWaitMillis;
@@ -1546,6 +1733,8 @@ public final class SagaServerConfig {
    * Returns how in-flight sagas are treated on shutdown (default {@link
    * ShutdownMode#WAIT_CURRENT_STEP}): finish the running step and leave the saga for recovery, or
    * wait for in-flight sagas to reach a terminal state.
+   *
+   * @return the shutdown mode
    */
   public ShutdownMode shutdownMode() {
     return shutdownMode;
@@ -1561,6 +1750,8 @@ public final class SagaServerConfig {
    * container's termination grace period when {@link #shutdownMode()} is {@link
    * ShutdownMode#WAIT_ALL_SAGAS}, which waits for whole sagas rather than a single step and so
    * needs a budget of the longest saga plus 15s, or twice the longest saga if that is shorter.
+   *
+   * @return the drain budget in milliseconds
    */
   public long shutdownTimeoutMillis() {
     return shutdownTimeoutMillis;
@@ -1569,6 +1760,9 @@ public final class SagaServerConfig {
   /**
    * Returns the per-principal rate limit on saga-start requests ({@code POST}/{@code PUT /sagas}),
    * in requests per minute; {@code 0} (the default) disables rate limiting.
+   *
+   * @return the per-principal limit in requests per minute, or {@code 0} when rate limiting is
+   *     disabled
    */
   public int maxStartRequestsPerMinute() {
     return maxStartRequestsPerMinute;
@@ -1577,6 +1771,8 @@ public final class SagaServerConfig {
   /**
    * Returns a defensive copy of the underlying configuration properties forwarded to construct the
    * saga engine's persistence.
+   *
+   * @return a copy of the resolved properties
    */
   public Properties properties() {
     return copyOf(properties);
@@ -1591,15 +1787,51 @@ public final class SagaServerConfig {
     return copyOf(rawProperties);
   }
 
-  /** Returns the optional path to declarative saga definitions loaded at startup. */
+  /**
+   * Returns the path to the declarative saga definitions: the configured file or directory, or the
+   * default directory {@value #DEFAULT_DEFINITIONS_PATH} when the key is unset and that directory
+   * exists. Empty when the key is unset and nothing is mounted at the default.
+   *
+   * @return the definitions file or directory, or empty when the key is unset and nothing is
+   *     mounted at the default
+   */
   public Optional<Path> definitionsPath() {
     return Optional.ofNullable(definitionsPath);
   }
 
   /**
-   * Returns the services-directory settings: the directory itself, the reload interval (parsed now,
-   * consumed once the reload pass ships), the secrets root confining {@code ${file:...}} references
-   * in service files, and the optional egress ceiling.
+   * Whether {@code definitions_path} was left unset, so {@link #definitionsPath()} is the default
+   * directory or empty; what lets the no-definitions refusal name the directory it looked in.
+   */
+  boolean definitionsPathDefaulted() {
+    return definitionsPathDefaulted;
+  }
+
+  /**
+   * A default path, or {@code null} when nothing of the expected kind exists there. An absent
+   * default means "nothing configured": the image ships no definitions, services, or certificates
+   * of its own, so the path exists only where an operator mounted one. An absent <em>explicit</em>
+   * path stays the hard error its reader raises, because an operator who named a path meant it.
+   * Probed once, here, so what the daemon reads is pinned for the process lifetime like every
+   * configured path.
+   */
+  private static @Nullable Path existingDirectory(Path candidate) {
+    return Files.isDirectory(candidate) ? candidate : null;
+  }
+
+  /**
+   * The {@link #existingDirectory} rule for a default file: the TLS pair at the conventional mount.
+   */
+  private static @Nullable Path existingFile(Path candidate) {
+    return Files.isRegularFile(candidate) ? candidate : null;
+  }
+
+  /**
+   * Returns the services-directory settings: the directory itself, the reload interval {@code
+   * SagaConfigReloadManager} runs on, the secrets root confining {@code ${file:...}} references in
+   * service files, and the optional egress ceiling.
+   *
+   * @return the reload configuration
    */
   public ReloadConfig reloadConfig() {
     return reloadConfig;

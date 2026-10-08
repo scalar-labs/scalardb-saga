@@ -37,6 +37,19 @@ public record HttpServiceConfig(
     @Nullable HttpClient httpClient,
     Map<String, String> defaultHeaders) {
 
+  /**
+   * Validates the base URL and defensively copies the two collections, so no construction path can
+   * bypass either.
+   *
+   * @param baseUrl the service base URL
+   * @param allowedHosts the SSRF allowlist; empty = allow all
+   * @param maxBodyBytes the max request or response body size in bytes; {@code <= 0} means the
+   *     default
+   * @param httpClient a caller-owned client, or {@code null} for the shared default
+   * @param defaultHeaders headers applied to every request to this endpoint
+   * @throws IllegalArgumentException if {@code baseUrl} is not a valid absolute {@code http} or
+   *     {@code https} URL with a host and no user-info component
+   */
   public HttpServiceConfig {
     // Every construction path flows through here — the orchestrator builder and every
     // configuration swap — so a malformed or misleading base URL can never reach an endpoint,
@@ -75,6 +88,7 @@ public record HttpServiceConfig(
    * been resolved from a secret reference, and these messages reach logs. Callers that know the
    * value is safe to name add their own context.
    *
+   * @param baseUrl the service base URL to validate
    * @throws IllegalArgumentException naming the violated rule
    */
   public static void validateBaseUrl(String baseUrl) {

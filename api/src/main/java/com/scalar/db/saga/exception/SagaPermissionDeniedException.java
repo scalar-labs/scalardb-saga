@@ -12,10 +12,19 @@ import java.util.Objects;
  */
 public class SagaPermissionDeniedException extends SagaRuntimeException {
 
+  /**
+   * The caller lacks the role the operation requires, with no transport status to attach as the
+   * cause.
+   */
   public SagaPermissionDeniedException() {
     super(SagaErrorCode.PERMISSION_DENIED, ErrorMetadata.of());
   }
 
+  /**
+   * The caller lacks the role the operation requires.
+   *
+   * @param cause the transport status that reported it
+   */
   public SagaPermissionDeniedException(Throwable cause) {
     super(
         SagaErrorCode.PERMISSION_DENIED,

@@ -24,7 +24,12 @@ public final class Redaction {
 
   private Redaction() {}
 
-  /** Describes {@code value} without echoing it, e.g. {@code (value redacted, 12 chars)}. */
+  /**
+   * Describes {@code value} without echoing it, e.g. {@code (value redacted, 12 chars)}.
+   *
+   * @param value the rejected value, which may be a resolved secret
+   * @return a description carrying only the value's length
+   */
   public static String redacted(String value) {
     return "(value redacted, " + value.length() + " chars)";
   }
@@ -38,6 +43,10 @@ public final class Redaction {
    * on keys, so a key written as {@code a\nb} arrives carrying a real newline. And a wrapped parse
    * error puts its source location on a second line, which would split a startup report in two and
    * leave a log pipeline keying off the first line alone.
+   *
+   * @param value the text to flatten
+   * @return the stripped text with every line break, and the whitespace around it, replaced by one
+   *     space
    */
   public static String oneLine(String value) {
     return LINE_BREAK.matcher(value.strip()).replaceAll(" ");

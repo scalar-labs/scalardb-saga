@@ -39,6 +39,9 @@ public final class SweepScatter {
   /**
    * The scatter seed for a replica, an avalanche-mixed hash of its owner ID. The seed, not the
    * owner ID, is what sweep cursors carry.
+   *
+   * @param ownerId the replica's owner ID
+   * @return the avalanche-mixed seed
    */
   public static int seed(String ownerId) {
     return mix(ownerId.hashCode());
@@ -47,6 +50,10 @@ public final class SweepScatter {
   /**
    * The bucket sweep order for a seed: a pseudo-random permutation of {@code [0, numBuckets)},
    * stable for a given {@code (seed, numBuckets)} pair.
+   *
+   * @param seed the scatter seed from {@link #seed}
+   * @param numBuckets the number of buckets to order
+   * @return the bucket indices {@code [0, numBuckets)} in this replica's sweep order
    */
   public static int[] permutation(int seed, int numBuckets) {
     Integer[] buckets = new Integer[numBuckets];
@@ -70,6 +77,11 @@ public final class SweepScatter {
    * {@code "retention"}) is mixed in so a replica's different sweeps get independent offsets:
    * without it, two sweeps configured with equal intervals would fire at the same instant for the
    * life of the process — exactly the coincident load the offset exists to prevent.
+   *
+   * @param ownerId the replica's owner ID
+   * @param purpose the sweep's name, such as {@code "recovery"} or {@code "retention"}
+   * @param intervalSeconds the sweep interval the offset falls within
+   * @return an offset in {@code [0, intervalSeconds)}
    */
   public static long offsetSeconds(String ownerId, String purpose, long intervalSeconds) {
     return Math.floorMod(

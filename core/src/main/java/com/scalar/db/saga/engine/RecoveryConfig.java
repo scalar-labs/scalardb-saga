@@ -85,6 +85,8 @@ public record RecoveryConfig(
   /**
    * Default: 60s staleness threshold, scan every 30s, 4-hour grace period, 1000 recoveries per
    * sweep, 10 concurrent recoveries.
+   *
+   * @return the default configuration on the system UTC clock
    */
   public static RecoveryConfig defaults() {
     return defaults(Clock.systemUTC());
@@ -94,6 +96,7 @@ public record RecoveryConfig(
    * Default configuration with a custom clock. Useful for testing with a fixed clock.
    *
    * @param clock clock for time-based decisions
+   * @return the default configuration on that clock
    */
   public static RecoveryConfig defaults(Clock clock) {
     return new RecoveryConfig(60_000, 30, Duration.ofHours(4), 1000, 10, clock);

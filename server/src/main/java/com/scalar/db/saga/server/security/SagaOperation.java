@@ -114,12 +114,18 @@ public enum SagaOperation implements RouteRole {
    * Returns the minimum role a caller must hold to invoke this operation, or {@code null} if the
    * operation is exempt from authentication entirely (see the class javadoc). Callers must handle
    * the {@code null} case explicitly rather than defaulting it to a role.
+   *
+   * @return the minimum role, or {@code null} for an operation exempt from authentication
    */
   public @Nullable SagaRole requiredRole() {
     return requiredRole;
   }
 
-  /** Returns whether invoking this operation consumes the caller's rate-limit budget. */
+  /**
+   * Returns whether invoking this operation consumes the caller's rate-limit budget.
+   *
+   * @return {@code true} if the operation is rate-limited per principal
+   */
   public boolean rateLimited() {
     return rateLimited;
   }

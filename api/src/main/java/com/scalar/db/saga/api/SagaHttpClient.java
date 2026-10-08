@@ -46,22 +46,53 @@ import java.util.Map;
  */
 public interface SagaHttpClient {
 
-  /** Begins a GET request to {@code path} (resolved against the endpoint base URL). */
+  /**
+   * Begins a GET request to {@code path} (resolved against the endpoint base URL).
+   *
+   * @param path the request path, relative to the endpoint base URL
+   * @return a single-use builder for the request
+   */
   Request get(String path);
 
-  /** Begins a POST request to {@code path} (resolved against the endpoint base URL). */
+  /**
+   * Begins a POST request to {@code path} (resolved against the endpoint base URL).
+   *
+   * @param path the request path, relative to the endpoint base URL
+   * @return a single-use builder for the request
+   */
   Request post(String path);
 
-  /** Begins a PUT request to {@code path} (resolved against the endpoint base URL). */
+  /**
+   * Begins a PUT request to {@code path} (resolved against the endpoint base URL).
+   *
+   * @param path the request path, relative to the endpoint base URL
+   * @return a single-use builder for the request
+   */
   Request put(String path);
 
-  /** Begins a DELETE request to {@code path} (resolved against the endpoint base URL). */
+  /**
+   * Begins a DELETE request to {@code path} (resolved against the endpoint base URL).
+   *
+   * @param path the request path, relative to the endpoint base URL
+   * @return a single-use builder for the request
+   */
   Request delete(String path);
 
-  /** Begins a PATCH request to {@code path} (resolved against the endpoint base URL). */
+  /**
+   * Begins a PATCH request to {@code path} (resolved against the endpoint base URL).
+   *
+   * @param path the request path, relative to the endpoint base URL
+   * @return a single-use builder for the request
+   */
   Request patch(String path);
 
-  /** Begins a request with an explicit {@code method} to {@code path}. */
+  /**
+   * Begins a request with an explicit {@code method} to {@code path}.
+   *
+   * @param method the HTTP verb
+   * @param path the request path, relative to the endpoint base URL
+   * @return a single-use builder for the request
+   */
   Request method(HttpMethod method, String path);
 
   /**
@@ -77,34 +108,74 @@ public interface SagaHttpClient {
    */
   interface Request {
 
-    /** Adds a request header. Repeatable for multi-valued headers. */
+    /**
+     * Adds a request header. Repeatable for multi-valued headers.
+     *
+     * @param name the header name
+     * @param value the header value
+     * @return this request, for chaining
+     */
     Request header(String name, String value);
 
-    /** Adds all entries of {@code headers} as request headers. */
+    /**
+     * Adds all entries of {@code headers} as request headers.
+     *
+     * @param headers header names to values
+     * @return this request, for chaining
+     */
     Request headers(Map<String, String> headers);
 
-    /** Adds a query parameter (URL-encoded and appended to the path). Repeatable. */
+    /**
+     * Adds a query parameter (URL-encoded and appended to the path). Repeatable.
+     *
+     * @param name the parameter name, not yet URL-encoded
+     * @param value the parameter value, not yet URL-encoded
+     * @return this request, for chaining
+     */
     Request query(String name, String value);
 
-    /** Adds all entries of {@code params} as query parameters. */
+    /**
+     * Adds all entries of {@code params} as query parameters.
+     *
+     * @param params parameter names to values, not yet URL-encoded
+     * @return this request, for chaining
+     */
     Request query(Map<String, String> params);
 
-    /** Sets the request body to any JSON value (sent as {@code application/json}). */
+    /**
+     * Sets the request body to any JSON value (sent as {@code application/json}).
+     *
+     * @param value the value to serialize as JSON
+     * @return this request, for chaining
+     */
     Request jsonBody(Object value);
 
     /**
      * Sets a string request body with an explicit {@code Content-Type}. The body is encoded using
      * the charset named in {@code contentType} (defaulting to UTF-8 when none is declared, or when
      * the named charset is unknown/unsupported).
+     *
+     * @param body the body text
+     * @param contentType the {@code Content-Type} header value, optionally naming a charset
+     * @return this request, for chaining
      */
     Request stringBody(String body, String contentType);
 
-    /** Sets a raw byte request body with an explicit {@code Content-Type}. */
+    /**
+     * Sets a raw byte request body with an explicit {@code Content-Type}.
+     *
+     * @param body the body bytes, sent as-is
+     * @param contentType the {@code Content-Type} header value
+     * @return this request, for chaining
+     */
     Request bytesBody(byte[] body, String contentType);
 
     /**
      * Sets a URL-encoded form body ({@code application/x-www-form-urlencoded}) from {@code form}'s
      * entries.
+     *
+     * @param form field names to values, URL-encoded by the client
+     * @return this request, for chaining
      */
     Request formBody(Map<String, String> form);
 
