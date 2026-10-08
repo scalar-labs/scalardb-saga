@@ -121,10 +121,10 @@ class ScalarDbSagaStoreCostIntegrationTest {
 
     // Assert
     System.out.println(report());
+    assertThat(measured.keySet()).containsExactlyElementsOf(BASELINE.keySet());
     measured.forEach(
         (useCase, cost) -> {
           long[] baseline = BASELINE.get(useCase);
-          assertThat(baseline).as(useCase + " has a baseline").isNotNull();
           if (baseline != null) {
             assertThat(cost.roundTrips())
                 .as(useCase + " round trips")

@@ -167,6 +167,12 @@ final class CountingStorage {
     if (value instanceof ByteBuffer buffer) {
       return buffer.remaining();
     }
+    if (value instanceof Integer || value instanceof Float) {
+      return 4;
+    }
+    if (value instanceof Boolean) {
+      return 1;
+    }
     return 8;
   }
 
