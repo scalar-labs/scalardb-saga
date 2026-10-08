@@ -29,6 +29,11 @@ public abstract class ForwardingSagaStore implements SagaStore {
 
   private final SagaStore delegate;
 
+  /**
+   * Creates a decorator over {@code delegate}.
+   *
+   * @param delegate the store every non-overridden call forwards to
+   */
   @SuppressFBWarnings(
       value = "CT_CONSTRUCTOR_THROW",
       justification =
@@ -39,7 +44,11 @@ public abstract class ForwardingSagaStore implements SagaStore {
     this.delegate = Objects.requireNonNull(delegate, "delegate must not be null");
   }
 
-  /** The store every non-overridden call forwards to. */
+  /**
+   * The store every non-overridden call forwards to.
+   *
+   * @return the delegate store
+   */
   protected final SagaStore delegate() {
     return delegate;
   }

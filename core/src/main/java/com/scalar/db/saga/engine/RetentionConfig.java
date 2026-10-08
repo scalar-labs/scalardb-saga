@@ -47,7 +47,11 @@ public record RetentionConfig(
     Objects.requireNonNull(clock, "clock must not be null");
   }
 
-  /** Default: 7-day retention, cleanup every 60 seconds, 10,000 purges per pass. */
+  /**
+   * Default: 7-day retention, cleanup every 60 seconds, 10,000 purges per pass.
+   *
+   * @return the default configuration on the system UTC clock
+   */
   public static RetentionConfig defaults() {
     return defaults(Clock.systemUTC());
   }
@@ -56,6 +60,7 @@ public record RetentionConfig(
    * Default configuration with a custom clock. Useful for testing with a fixed clock.
    *
    * @param clock clock for time-based decisions
+   * @return the default configuration on that clock
    */
   public static RetentionConfig defaults(Clock clock) {
     return new RetentionConfig(Duration.ofDays(7), 60, 10_000, 10, clock);
