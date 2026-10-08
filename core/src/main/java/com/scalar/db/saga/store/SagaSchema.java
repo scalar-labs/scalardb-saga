@@ -98,6 +98,10 @@ public final class SagaSchema {
    * status} and {@code updated_at} are part of the clustering key (immutable in ScalarDB),
    * transitions require DELETE old row + INSERT new row in one transaction.
    *
+   * <p>{@code updated_at} holds epoch milliseconds in a {@code BIGINT}, not a {@code TIMESTAMPTZ}:
+   * Oracle rejects a time-zone timestamp in a primary key, and the integer sorts the same way on
+   * every backend.
+   *
    * <p>Bucket-based partitioning distributes recovery scans across database nodes — each bucket is
    * a separate partition, avoiding hot-partition problems that would occur if status alone were the
    * partition key. Clustering key design enables efficient recovery scans: scan each bucket with
@@ -107,7 +111,7 @@ public final class SagaSchema {
     return TableMetadata.newBuilder()
         .addColumn("bucket", DataType.INT) // PK: hash(saga_id) % numBuckets
         .addColumn("status", DataType.INT) // CK1: SagaStatus ordinal
-        .addColumn("updated_at", DataType.TIMESTAMPTZ) // CK2: last state-change time
+        .addColumn("updated_at", DataType.BIGINT) // CK2: last state-change time, epoch millis
         .addColumn("saga_id", DataType.TEXT) // CK3: unique identifier
         .addColumn("saga_name", DataType.TEXT)
         .addColumn("owner_id", DataType.TEXT) // replica processing this saga (observability)
@@ -134,11 +138,15 @@ public final class SagaSchema {
    * the expired ones. A step with no timeout (wait indefinitely) has no row here. Kept out of
    * {@code saga_state} so parking — a minority feature — never touches the recovery/retention
    * clustering key.
+   *
+   * <p>{@code parked_deadline} holds epoch milliseconds in a {@code BIGINT}, like {@code
+   * saga_state.updated_at} and for the same reason: Oracle rejects a time-zone timestamp in a
+   * primary key.
    */
   public static TableMetadata sagaParkedTable() {
     return TableMetadata.newBuilder()
         .addColumn("bucket", DataType.INT) // PK: hash(saga_id) % numBuckets
-        .addColumn("parked_deadline", DataType.TIMESTAMPTZ) // CK1: absolute timeout deadline
+        .addColumn("parked_deadline", DataType.BIGINT) // CK1: timeout deadline, epoch millis
         .addColumn("saga_id", DataType.TEXT) // CK2: unique identifier
         .addPartitionKey("bucket")
         .addClusteringKey("parked_deadline", Scan.Ordering.Order.ASC)
