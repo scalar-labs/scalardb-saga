@@ -9,9 +9,9 @@ import org.jspecify.annotations.Nullable;
 /**
  * Thrown when a step's compensation ({@code compensate} or {@code cancel}) fails.
  *
- * <p>Compensation failures are never retryable inline — the saga stays {@code COMPENSATING} and
- * periodic recovery retries the compensation, escalating it only if it stays stuck past the grace
- * period.
+ * <p>A compensation that throws is retried in-process up to the step's compensation retry policy;
+ * once those attempts are spent, the saga stays {@code COMPENSATING} and periodic recovery retries
+ * the compensation, escalating it only if it stays stuck past the grace period.
  *
  * <p>Deliberately extends {@link RuntimeException} directly, not {@link SagaRuntimeException} — the
  * step-level exceptions are a separate hierarchy that user code throws (users implementing {@code

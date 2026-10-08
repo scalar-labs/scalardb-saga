@@ -10,6 +10,7 @@ import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.api.TimelineEvent;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
+import com.scalar.db.saga.integration.IntegrationTestStore;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.ScalarDbSagaStoreFactory;
 import com.scalar.db.saga.store.StatusEvent;
@@ -40,10 +41,7 @@ class SagaAdminServiceIntegrationTest {
   void setUp() {
     dbPath = tempDir.resolve("saga-admin-it.db");
     java.util.Properties props = new java.util.Properties();
-    props.setProperty("scalar.db.storage", "jdbc");
-    props.setProperty(
-        "scalar.db.contact_points",
-        "jdbc:sqlite:" + dbPath.toAbsolutePath() + "?busy_timeout=10000&journal_mode=WAL");
+    IntegrationTestStore.configure(props, dbPath);
     props.setProperty("scalar.db.saga.store.num_buckets", "1");
     // Share one store instance between direct seeding and the orchestrator's admin service.
     store = ScalarDbSagaStoreFactory.create(props).createStore();

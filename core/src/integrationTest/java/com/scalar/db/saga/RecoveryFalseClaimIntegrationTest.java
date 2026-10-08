@@ -10,6 +10,7 @@ import com.scalar.db.saga.api.StepResult;
 import com.scalar.db.saga.definition.SagaDefinition;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.engine.RecoveryConfig;
+import com.scalar.db.saga.integration.IntegrationTestStore;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.ScalarDbSagaStoreFactory;
 import java.nio.file.Files;
@@ -188,10 +189,7 @@ class RecoveryFalseClaimIntegrationTest {
 
   private Properties storeProps() {
     Properties props = new Properties();
-    props.setProperty("scalar.db.storage", "jdbc");
-    props.setProperty(
-        "scalar.db.contact_points",
-        "jdbc:sqlite:" + dbPath.toAbsolutePath() + "?busy_timeout=10000&journal_mode=WAL");
+    IntegrationTestStore.configure(props, dbPath);
     props.setProperty("scalar.db.saga.store.num_buckets", "1");
     return props;
   }

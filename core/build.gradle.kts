@@ -1,6 +1,7 @@
 plugins {
     id("scalardb-saga.java-conventions")
     id("scalardb-saga.publishing-conventions")
+    `java-test-fixtures`
 }
 
 // The saga engine itself. Published because embedded mode — running the orchestrator in the
@@ -31,4 +32,21 @@ dependencies {
     "integrationTestImplementation"(libs.scalardb)
     "integrationTestImplementation"(libs.sqlite.jdbc)
     "integrationTestCompileOnly"(libs.jspecify)
+    "integrationTestImplementation"(testFixtures(project(":core")))
+
+    // IntegrationTestStore, the store switch shared with :server's integration tests.
+    "testFixturesImplementation"(libs.scalardb)
+    "testFixturesCompileOnly"(libs.jspecify)
+    "testFixturesCompileOnly"(libs.junit.jupiter)
+}
+
+// The test fixtures exist for this build's own suites. java-test-fixtures adds them to the
+// published component by default, which would ship a jar nobody consumes.
+// Deferred because the sources variant only exists once the publishing convention has enabled
+// the sources jar, which happens after this script runs.
+afterEvaluate {
+    val javaComponent = components["java"] as AdhocComponentWithVariants
+    listOf("testFixturesApiElements", "testFixturesRuntimeElements", "testFixturesSourcesElements")
+        .mapNotNull { configurations.findByName(it) }
+        .forEach { javaComponent.withVariantsFromConfiguration(it) { skip() } }
 }

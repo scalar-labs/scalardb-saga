@@ -56,7 +56,7 @@ public enum SagaErrorCode {
   // ── Bad request (100xx) ──────────────────────────────────────────────
   /**
    * The request message itself failed validation at the server edge: a missing or malformed field,
-   * an unparseable body, or an unrecognized query parameter. Only a remote caller can produce it,
+   * an unparseable body, or an invalid query-parameter value. Only a remote caller can produce it,
    * since the embedded engine has no request to validate; a caller value the engine rejected is
    * {@link #INVALID_ARGUMENT} instead. HTTP 400.
    */
@@ -65,7 +65,7 @@ public enum SagaErrorCode {
       Category.USER_ERROR,
       "Request is invalid",
       ErrorMetadataSchema.of("detail"),
-      "The request message itself failed validation at the server edge: a missing or malformed field, an unparseable body, or an unrecognized query parameter. Only a remote caller can produce this; the embedded engine has no request to validate. A caller value the engine rejected is INVALID_ARGUMENT instead.",
+      "The request message itself failed validation at the server edge: a missing or malformed field, an unparseable body, or an invalid query-parameter value. Only a remote caller can produce this; the embedded engine has no request to validate. A caller value the engine rejected is INVALID_ARGUMENT instead.",
       "Fix the request per the detail and retry."),
 
   /**
@@ -418,7 +418,7 @@ public enum SagaErrorCode {
       "Step timed out",
       ErrorMetadataSchema.of("step_name", "step_index"),
       "The step exceeded its configured timeout before returning a result.",
-      "Increase the step's timeout or optimize the step; the saga is escalated pending intervention."),
+      "Increase the step's timeout or optimize the step; the saga compensates and settles."),
 
   /**
    * Reserved, not yet produced, for the same reason as {@link #STEP_TIMEOUT}: a step threw a non-
