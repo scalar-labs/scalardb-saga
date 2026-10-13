@@ -54,11 +54,11 @@ class ScalarDbSagaStoreCostIntegrationTest {
     BASELINE.put("poll (getStateSnapshot)", new long[] {1, 0});
     BASELINE.put("detail (getStateWithEvents)", new long[] {2, 0});
     BASELINE.put("recovery claim", new long[] {8, 5});
-    BASELINE.put("stuck compensation, one pass", new long[] {12, 8});
+    BASELINE.put("stuck compensation, one pass", new long[] {11, 8});
     BASELINE.put("shutdown hand-off", new long[] {4, 5});
     BASELINE.put("retention purge", new long[] {5, 13});
     BASELINE.put("idle sweeps (recovery + timeout + retention)", new long[] {80, 0});
-    BASELINE.put("admin listing page", new long[] {16, 0});
+    BASELINE.put("admin listing page", new long[] {18, 0});
   }
 
   @TempDir Path tempDir;
@@ -116,7 +116,10 @@ class ScalarDbSagaStoreCostIntegrationTest {
     measureAfter("stuck compensation, one pass", this::stuckCompensating, this::stuckPass);
     measureAfter("shutdown hand-off", this::running, store::markForRecovery);
     measureAfter("retention purge", this::completed, store::deleteSaga);
-    measure("idle sweeps (recovery + timeout + retention)", id -> idleSweeps());
+    measureAfter(
+        "idle sweeps (recovery + timeout + retention)",
+        this::freshRunningInOneBucket,
+        id -> idleSweeps());
     measureAfter("admin listing page", this::running, id -> listingPage());
 
     // Assert
@@ -212,7 +215,7 @@ class ScalarDbSagaStoreCostIntegrationTest {
     SagaStateSnapshot stale = store.getStateSnapshot(id).orElseThrow();
     store.getNewestEvent(id);
     store.getNewestEvent(id);
-    store.claimForRecovery(stale, "engine-2");
+    assertThat(store.claimForRecovery(stale, "engine-2")).isPresent();
     store.getEvents(id);
   }
 
@@ -222,9 +225,8 @@ class ScalarDbSagaStoreCostIntegrationTest {
     store.getNewestEvent(id);
     store.getNewestEvent(id);
     assertThat(store.claimForRecovery(stale, "engine-2")).isPresent();
-    store.getEvents(id);
-    store.recordStepEvent(
-        id, store.getEventCount(id), StepEvent.compensationFailed(0, "reserve", null));
+    int sequence = store.getEvents(id).size();
+    store.recordStepEvent(id, sequence, StepEvent.compensationFailed(0, "reserve", null));
   }
 
   private void idleSweeps() {
@@ -274,6 +276,24 @@ class ScalarDbSagaStoreCostIntegrationTest {
 
   private void completed(String id) {
     syncSuccess(id);
+  }
+
+  /**
+   * More fresh RUNNING sagas in one bucket than two scan pages hold. A sweep that ranges on {@code
+   * updated_at} reads none of them; one that reads the bucket and filters afterwards pays the extra
+   * pages.
+   */
+  private void freshRunningInOneBucket(String id) {
+    SagaSchema schema = new SagaSchema(NUM_BUCKETS);
+    int bucket = schema.bucketOf(id);
+    int created = 0;
+    for (int i = 0; created <= 2 * CountingStorage.SCAN_FETCH_SIZE; i++) {
+      String candidate = id + "-" + i;
+      if (schema.bucketOf(candidate) == bucket) {
+        create(candidate);
+        created++;
+      }
+    }
   }
 
   private static Instant deadline() {

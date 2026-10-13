@@ -389,6 +389,22 @@ class ScalarDbSagaStoreContractIntegrationTest {
   }
 
   @Test
+  void resumeParkedStep_afterRedriveAndRepark_throwsSagaConcurrentModificationException() {
+    // Arrange — the saga is WAITING again, so only the moved state row can refuse the stale resume
+    SagaStateSnapshot firstPark = parkedSaga("saga-1", Instant.now().minus(Duration.ofMinutes(1)));
+    SagaStateSnapshot redriven =
+        store.redriveParkedStep(firstPark, 2, StepEvent.reissuing(0, "approve"));
+    store.park(redriven, 3, StepEvent.pending(0, "approve"), Instant.now().plus(HOUR));
+
+    // Act & Assert
+    assertThatThrownBy(
+            () -> store.resumeParkedStep(firstPark, 4, StepEvent.completed(0, "approve", "{}")))
+        .isInstanceOf(SagaConcurrentModificationException.class);
+    assertThat(store.getStateSnapshot("saga-1").orElseThrow().getStatus())
+        .isEqualTo(SagaStatus.WAITING);
+  }
+
+  @Test
   void parkAfterResume_newDeadline_isOverdueOnlyByTheNewDeadline() {
     // Arrange
     SagaStateSnapshot parked = parkedSaga("saga-1", Instant.now().minus(Duration.ofMinutes(1)));
