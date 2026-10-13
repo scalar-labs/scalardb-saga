@@ -1483,10 +1483,8 @@ class DefaultSagaOrchestratorTest {
 
     @Test
     void completeStepAsync_failedStepOnARunningSaga_throwsStepNotParked() {
-      // Arrange — the step failed and the saga is still RUNNING, so the sweep is about to re-drive
-      // it
-      // forward with no intervention event in between, and its participant calls back before the
-      // new
+      // Arrange — the step failed and the saga is still RUNNING. The sweep re-drives it forward
+      // with no intervention event in between, and its participant calls back before the new
       // park. A standing failure settles nothing.
       SagaStateSnapshot saga = snapshot("saga-1", SagaStatus.RUNNING);
       when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(saga));
