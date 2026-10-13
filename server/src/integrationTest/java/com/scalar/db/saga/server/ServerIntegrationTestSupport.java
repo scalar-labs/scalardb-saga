@@ -199,6 +199,11 @@ abstract class ServerIntegrationTestSupport {
     server.reloadTlsNow();
   }
 
+  /** Runs one outbound CA bundle reload pass synchronously, as {@link #reloadNow} does. */
+  protected final void reloadEgressTrustNow() {
+    server.reloadEgressTrustNow();
+  }
+
   // --- optional apikey security wiring (shared by the admin integration tests) ----------------
 
   /** The header the {@code apikey} provider reads the credential from, once enabled. */

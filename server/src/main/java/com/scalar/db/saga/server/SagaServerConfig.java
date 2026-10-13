@@ -290,6 +290,20 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code egress.allowed_hosts_ceiling} — optional comma-separated ceiling; when set, every
  *       service's {@code allowed_hosts} must be a non-empty subset of it, so no service file can
  *       authorize egress beyond what the operator allowed
+ *   <li>{@code egress.ca_cert_path} — a PEM bundle of one or more CA certificates trusted on
+ *       outbound HTTPS, participant calls and JWKS fetches alike, in addition to the JVM's default
+ *       trust store; defaults to {@value #DEFAULT_EGRESS_CA_CERT_PATH} when that file exists. Used
+ *       whenever present, with no switch: unlike a forgotten {@code tls.enabled}, a bundle never
+ *       disables anything, since the default CAs, certificate validation and hostname verification
+ *       all stay on, and a missing bundle fails loudly, as a certificate error on the first call to
+ *       a private-CA participant. Each CA it holds can vouch for every participant and the JWKS
+ *       host, so mount only CAs trusted for all of them; a bundled CA's own name constraints are
+ *       not enforced, so to confine one, bundle its root and let a name-constrained intermediate
+ *       carry the limit. The bundle holds certificates only; one carrying a private key is
+ *       rejected. It is validated at startup and, while reload is enabled, re-read on every reload
+ *       pass, so a CA rotation (old and new CA in one file, then the old one removed) needs no
+ *       restart; a bundle that fails validation is rejected and the previous trust stays in place,
+ *       while a deleted bundle drops its CAs at the next pass
  * </ul>
  *
  * <h2>Async callbacks ({@code callback.*})</h2>
@@ -463,6 +477,7 @@ public final class SagaServerConfig {
   static final String SECRETS_ROOT_KEY = SERVER_PREFIX + "secrets_root";
   static final String EGRESS_ALLOWED_HOSTS_CEILING_KEY =
       SERVER_PREFIX + "egress.allowed_hosts_ceiling";
+  static final String EGRESS_CA_CERT_PATH_KEY = SERVER_PREFIX + "egress.ca_cert_path";
 
   static final long DEFAULT_RELOAD_INTERVAL_SECONDS = 30L;
   static final String DEFAULT_SECRETS_ROOT = "/run/secrets";
@@ -482,6 +497,11 @@ public final class SagaServerConfig {
       DEFAULT_TLS_SERVER_DIR + "/" + TLS_CERT_CHAIN_FILE;
   static final String DEFAULT_TLS_PRIVATE_KEY_PATH =
       DEFAULT_TLS_SERVER_DIR + "/" + TLS_PRIVATE_KEY_FILE;
+  // CAs trusted on outbound calls, beside tls/server rather than inside it.
+  static final String TLS_EGRESS_DIR = "tls/egress";
+  static final String EGRESS_CA_FILE = "ca.crt";
+  static final String DEFAULT_EGRESS_CA_CERT_PATH =
+      DEFAULT_CONF_DIR + "/" + TLS_EGRESS_DIR + "/" + EGRESS_CA_FILE;
 
   static final String STORE_MAX_EVENT_PAYLOAD_BYTES_KEY = PREFIX + "store.max_event_payload_bytes";
 
@@ -674,6 +694,7 @@ public final class SagaServerConfig {
           RELOAD_INTERVAL_SECONDS_KEY,
           SECRETS_ROOT_KEY,
           EGRESS_ALLOWED_HOSTS_CEILING_KEY,
+          EGRESS_CA_CERT_PATH_KEY,
           DEFAULT_SAGA_TIMEOUT_MILLIS_KEY,
           MAX_START_REQUESTS_PER_MINUTE_KEY,
           HTTP_ENABLED_KEY,
@@ -766,6 +787,9 @@ public final class SagaServerConfig {
   // Whether each path key was left unset, so the path above is the conventional file or absent.
   private final boolean tlsCertChainPathDefaulted;
   private final boolean tlsPrivateKeyPathDefaulted;
+  private final @Nullable Path egressCaCertPath;
+  // Whether egress.ca_cert_path was left unset: the path above is then the mounted file, if any.
+  private final boolean egressCaCertPathDefaulted;
   private final long syncTimeoutMillis;
   private final long syncMaxWaitMillis;
   private final ShutdownMode shutdownMode;
@@ -865,6 +889,13 @@ public final class SagaServerConfig {
         tlsPrivateKeyPath != null
             ? tlsPrivateKeyPath
             : existingFile(tlsServerDir.resolve(TLS_PRIVATE_KEY_FILE));
+    Path egressCaCertPath =
+        parseOptionalPath(resolved.getProperty(EGRESS_CA_CERT_PATH_KEY), EGRESS_CA_CERT_PATH_KEY);
+    this.egressCaCertPathDefaulted = egressCaCertPath == null;
+    this.egressCaCertPath =
+        egressCaCertPath != null
+            ? egressCaCertPath
+            : existingFile(confDir.resolve(TLS_EGRESS_DIR).resolve(EGRESS_CA_FILE));
     this.syncTimeoutMillis =
         parseBoundedLong(
             resolved.getProperty(SYNC_TIMEOUT_MILLIS_KEY),
@@ -1613,7 +1644,35 @@ public final class SagaServerConfig {
         + ".";
   }
 
-  /** Where one half of the TLS pair comes from: the conventional file, or the path in its key. */
+  /**
+   * One line for the configuration validator's report: whether outbound HTTPS trusts a CA bundle
+   * beyond the JVM's defaults, and where it comes from, since a bundle found at the conventional
+   * mount is not written in the file. Names the key and the constant default path only.
+   */
+  String egressTrustSummary() {
+    if (egressCaCertPath == null) {
+      return "Outbound trust: the JVM's default CAs only; nothing is mounted at "
+          + DEFAULT_EGRESS_CA_CERT_PATH
+          + ".";
+    }
+    return "Outbound trust: the JVM's default CAs plus the bundle from "
+        + tlsSource(EGRESS_CA_CERT_PATH_KEY, DEFAULT_EGRESS_CA_CERT_PATH, egressCaCertPathDefaulted)
+        + ".";
+  }
+
+  /**
+   * Returns the PEM bundle of CA certificates trusted on outbound HTTPS in addition to the JVM's
+   * defaults: the path in {@code egress.ca_cert_path}, or the file at {@value
+   * #DEFAULT_EGRESS_CA_CERT_PATH} when the key is unset and that file exists, or empty.
+   *
+   * @return the CA bundle file, or empty when the key is unset and nothing is mounted at the
+   *     default
+   */
+  public Optional<Path> egressCaCertPath() {
+    return Optional.ofNullable(egressCaCertPath);
+  }
+
+  /** Where a TLS file comes from: the conventional file, or the path in its key. */
   private static String tlsSource(String key, String defaultPath, boolean defaulted) {
     return defaulted ? "the file at " + defaultPath : "the path in '" + key + "'";
   }

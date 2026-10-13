@@ -27,14 +27,15 @@ docker run --rm \
 ```
 
 Mount over `/scalardb-saga/conf` with your own `server.properties`, `definitions/`, `services/` when
-you configure downstream services, and `tls/server/` when the daemon itself terminates TLS (see
-[TLS](#tls)). Start from the template in this directory — every key is documented there and on
+you configure downstream services, `tls/server/` when the daemon itself terminates TLS, and
+`tls/egress/ca.crt` when a participant or the JWKS host sits behind a private CA (see [TLS](#tls)). Start from the template in this directory — every key is documented there and on
 `SagaServerConfig`, or on `JwtConfig` and `ApiKeyConfig` for the security keys of each provider.
 
 Mounted there, the two directories need no keys: `definitions_path` and `services_path` default to
 `/scalardb-saga/conf/definitions` and `/scalardb-saga/conf/services` whenever those directories
 exist, so a Deployment declares each mount once instead of repeating the path in a ConfigMap. The
-TLS certificate pair follows the same rule under `tls/server/`. Set a key only to read from somewhere
+TLS certificate pair follows the same rule under `tls/server/`, and the outbound CA bundle at
+`tls/egress/ca.crt`. Set a key only to read from somewhere
 else, or outside this image, where those directories do not exist: there, set `definitions_path`,
 and `services_path` if you use services. A path you set must exist; an absent default simply means
 nothing is mounted, and for definitions the boot refusal then names the directory it looked in.
@@ -242,10 +243,18 @@ Two operational notes:
 - **Async callbacks**: with TLS on, `callback.base_url` should be an `https` URL — participants dial
   it, and a plain `http` URL pointing back at this server dies at the handshake on the first async
   step. The daemon warns at startup about that combination.
-- **Outbound calls are unaffected**: participant calls (each service file's `base_url`) and JWKS fetches
-  verify against the JVM's default trust store. A participant behind a private CA needs that CA in
-  the daemon's trust store (`JAVA_OPTS=-Djavax.net.ssl.trustStore=...`); there is deliberately no
-  per-service trust knob.
+- **Outbound calls are separate**: the server's own certificate plays no part in participant calls
+  (each service file's `base_url`) or JWKS fetches. Those trust the JVM's default CAs plus, when a
+  participant or the JWKS host sits behind a private CA, a PEM bundle of CA certificates mounted at
+  `/scalardb-saga/conf/tls/egress/ca.crt` or named by `egress.ca_cert_path`. The bundle adds to the
+  JVM's trust rather than replacing it, holds any number of certificates, and needs no switch:
+  certificate validation and hostname verification stay on. One bundle covers every service and the
+  JWKS host, so each CA in it can vouch for all of them; mount only CAs you trust that far. A
+  bundled CA's own name constraints are not enforced: to confine a CA to certain hosts, bundle its
+  root and let a name-constrained intermediate carry the limit. While reload is enabled
+  (`reload.interval_seconds` above zero) the bundle is re-read on every pass, so a CA rotation (old
+  and new CA in one file, then the old one removed) needs no restart. A bundle that fails
+  validation is rejected and the previous trust stays; deleting the file drops its CAs instead.
 
 Java clients of the SDK enable TLS with `useTransportSecurity()`; against a private CA, add
 `trustCaCertificate(path)` (and `overrideAuthority(name)` when dialing by IP or through a
