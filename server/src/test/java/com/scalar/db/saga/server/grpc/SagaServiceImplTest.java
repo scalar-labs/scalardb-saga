@@ -4,9 +4,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -14,12 +16,12 @@ import static org.mockito.Mockito.when;
 
 import com.google.protobuf.ByteString;
 import com.scalar.db.saga.api.SagaCallback;
-import com.scalar.db.saga.api.SagaDefinitionId;
 import com.scalar.db.saga.api.SagaDetail;
 import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.api.TimelineEvent;
+import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaDefinitionNotFoundException;
 import com.scalar.db.saga.exception.SagaErrorCode;
@@ -70,7 +72,7 @@ class SagaServiceImplTest {
 
   private static final Instant TS = Instant.ofEpochSecond(1_700_000_000L, 123);
 
-  private SagaOrchestrator orchestrator;
+  private DefaultSagaOrchestrator orchestrator;
   // The registry every stub in a test shares, so a test can play the part of a drive that settles
   // the saga without going through the orchestrator — which is exactly what a resumed drive does.
   private final SagaWaiterRegistry waiterRegistry = new SagaWaiterRegistry();
@@ -79,7 +81,7 @@ class SagaServiceImplTest {
 
   @BeforeEach
   void setUp() {
-    orchestrator = mock(SagaOrchestrator.class);
+    orchestrator = mock(DefaultSagaOrchestrator.class);
   }
 
   @AfterEach
@@ -93,43 +95,42 @@ class SagaServiceImplTest {
   // ---------------------------------------------------------------------------
 
   @Test
-  void startSaga_byNameServerGeneratedAsync_delegatesToStartAsyncAndReturnsRunningSnapshot() {
+  void startSaga_byNameServerGeneratedAsync_startsWithoutIdOrVersionAndReturnsRunningSnapshot() {
     // Arrange
-    when(orchestrator.startAsync("transfer", Map.of())).thenReturn("gen-1");
-    when(orchestrator.getStateSnapshot("gen-1")).thenReturn(snapshot("gen-1", SagaStatus.RUNNING));
+    when(orchestrator.startAsyncReturningSnapshot(null, "transfer", null, Map.of(), null))
+        .thenReturn(snapshot("gen-1", SagaStatus.RUNNING));
 
     // Act
     SagaSnapshot response = stub(0).startSaga(startByName("transfer", true));
 
     // Assert
-    verify(orchestrator).startAsync("transfer", Map.of());
+    verify(orchestrator).startAsyncReturningSnapshot(null, "transfer", null, Map.of(), null);
     assertThat(response.getSagaId()).isEqualTo("gen-1");
     assertThat(response.getStatus())
         .isEqualTo(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_RUNNING);
   }
 
   @Test
-  void startSaga_byNameAndVersionAsync_delegatesToVersionedStartAsync() {
+  void startSaga_byNameAndVersionAsync_passesTheVersion() {
     // Arrange
-    when(orchestrator.startAsync(any(SagaDefinitionId.class), eq(Map.of()))).thenReturn("gen-2");
-    when(orchestrator.getStateSnapshot("gen-2")).thenReturn(snapshot("gen-2", SagaStatus.RUNNING));
+    when(orchestrator.startAsyncReturningSnapshot(null, "transfer", "v2", Map.of(), null))
+        .thenReturn(snapshot("gen-2", SagaStatus.RUNNING));
     StartSagaRequest request =
         StartSagaRequest.newBuilder().setName("transfer").setVersion("v2").setAsync(true).build();
 
     // Act
-    stub(0).startSaga(request);
+    SagaSnapshot response = stub(0).startSaga(request);
 
     // Assert
-    ArgumentCaptor<SagaDefinitionId> captor = ArgumentCaptor.forClass(SagaDefinitionId.class);
-    verify(orchestrator).startAsync(captor.capture(), eq(Map.of()));
-    assertThat(captor.getValue().name()).isEqualTo("transfer");
-    assertThat(captor.getValue().version()).isEqualTo("v2");
+    verify(orchestrator).startAsyncReturningSnapshot(null, "transfer", "v2", Map.of(), null);
+    assertThat(response.getSagaId()).isEqualTo("gen-2");
   }
 
   @Test
-  void startSaga_clientSuppliedIdAsync_delegatesToVoidStartAsyncWithThatId() {
+  void startSaga_clientSuppliedIdAsync_passesThatId() {
     // Arrange
-    when(orchestrator.getStateSnapshot("my-id")).thenReturn(snapshot("my-id", SagaStatus.RUNNING));
+    when(orchestrator.startAsyncReturningSnapshot("my-id", "transfer", null, Map.of(), null))
+        .thenReturn(snapshot("my-id", SagaStatus.RUNNING));
     StartSagaRequest request =
         StartSagaRequest.newBuilder().setSagaId("my-id").setName("transfer").setAsync(true).build();
 
@@ -137,8 +138,24 @@ class SagaServiceImplTest {
     SagaSnapshot response = stub(0).startSaga(request);
 
     // Assert
-    verify(orchestrator).startAsync("my-id", "transfer", Map.of());
+    verify(orchestrator).startAsyncReturningSnapshot("my-id", "transfer", null, Map.of(), null);
     assertThat(response.getSagaId()).isEqualTo("my-id");
+  }
+
+  @Test
+  void startSaga_async_answersFromTheStartSnapshotWithoutReadingBack() {
+    // Arrange
+    when(orchestrator.startAsyncReturningSnapshot(null, "transfer", null, Map.of(), null))
+        .thenReturn(snapshot("gen-a", SagaStatus.RUNNING));
+
+    // Act
+    SagaSnapshot response = stub(0).startSaga(startByName("transfer", true));
+
+    // Assert
+    assertThat(response.getSagaId()).isEqualTo("gen-a");
+    assertThat(response.getStatus())
+        .isEqualTo(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_RUNNING);
+    verify(orchestrator, never()).getStateSnapshot(any(String.class));
   }
 
   @Test
@@ -208,8 +225,9 @@ class SagaServiceImplTest {
   void startSaga_withJsonInput_passesParsedMapPreservingLongPrecision() {
     // Arrange — 2^53+1 would round to a double under google.protobuf.Struct, so input is sent as
     // JSON bytes.
-    when(orchestrator.startAsync(eq("transfer"), any())).thenReturn("gen-3");
-    when(orchestrator.getStateSnapshot("gen-3")).thenReturn(snapshot("gen-3", SagaStatus.RUNNING));
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq("transfer"), isNull(), any(), isNull()))
+        .thenReturn(snapshot("gen-3", SagaStatus.RUNNING));
     StartSagaRequest request =
         StartSagaRequest.newBuilder()
             .setName("transfer")
@@ -223,7 +241,9 @@ class SagaServiceImplTest {
     // Assert
     @SuppressWarnings("unchecked")
     ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
-    verify(orchestrator).startAsync(eq("transfer"), captor.capture());
+    verify(orchestrator)
+        .startAsyncReturningSnapshot(
+            isNull(), eq("transfer"), isNull(), captor.capture(), isNull());
     assertThat(captor.getValue())
         .containsEntry("to", "alice")
         .containsEntry("id", 9007199254740993L);
@@ -243,20 +263,27 @@ class SagaServiceImplTest {
   }
 
   @Test
-  void startSaga_snapshotMissingAfterStart_returnsInternalNotNotFound() {
-    // The just-started saga vanishes before the post-start read — a server invariant violation, not
-    // a
-    // client error: surface INTERNAL, not NOT_FOUND (which the client would map to the wrong
-    // SagaDefinitionNotFoundException).
-    when(orchestrator.startAsync("transfer", Map.of())).thenReturn("gen-x");
+  void startSaga_syncReadMissesTheNewSaga_returnsTheCreatedRunningSnapshot() {
+    // Arrange — the read-back on a backend whose index lags the write (DynamoDB). The callback
+    // never fires, so the bound elapses and the wait reads the store, which misses the new row.
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq("transfer"), isNull(), eq(Map.of()), any(SagaCallback.class)))
+        .thenReturn(snapshot("gen-x", SagaStatus.RUNNING));
     when(orchestrator.getStateSnapshot("gen-x")).thenThrow(new SagaNotFoundException("gen-x"));
 
-    assertCode(() -> stub(0).startSaga(startByName("transfer", true)), Status.Code.INTERNAL);
+    // Act
+    SagaSnapshot response = stub(50).startSaga(startByName("transfer", false));
+
+    // Assert — the saga exists, so neither INTERNAL nor NOT_FOUND.
+    assertThat(response.getSagaId()).isEqualTo("gen-x");
+    assertThat(response.getStatus())
+        .isEqualTo(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_RUNNING);
+    verify(orchestrator).getStateSnapshot("gen-x");
   }
 
   @Test
   void startSaga_definitionNotFound_returnsNotFound() {
-    when(orchestrator.startAsync("unknown", Map.of()))
+    when(orchestrator.startAsyncReturningSnapshot(null, "unknown", null, Map.of(), null))
         .thenThrow(SagaDefinitionNotFoundException.byName("unknown"));
 
     assertCode(() -> stub(0).startSaga(startByName("unknown", true)), Status.Code.NOT_FOUND);
@@ -303,7 +330,7 @@ class SagaServiceImplTest {
     // operation checker throws a bare IllegalArgumentException and nothing between here and the
     // mapper wraps it. Every caller-input rejection on this path carries a typed exception, so a
     // stdlib one is the server's problem and must not be attributed to whoever happened to call.
-    when(orchestrator.startAsync("transfer", Map.of()))
+    when(orchestrator.startAsyncReturningSnapshot(null, "transfer", null, Map.of(), null))
         .thenThrow(new IllegalArgumentException("Table not found: saga.saga_state"));
 
     // Act & Assert
@@ -322,7 +349,7 @@ class SagaServiceImplTest {
   void startSaga_duplicateClientSuppliedId_returnsAlreadyExists() {
     doThrow(new SagaAlreadyExistsException("dup", snapshot("dup", SagaStatus.RUNNING)))
         .when(orchestrator)
-        .startAsync("dup", "transfer", Map.of());
+        .startAsyncReturningSnapshot("dup", "transfer", null, Map.of(), null);
     StartSagaRequest request =
         StartSagaRequest.newBuilder().setSagaId("dup").setName("transfer").setAsync(true).build();
 
@@ -335,7 +362,7 @@ class SagaServiceImplTest {
 
   @Test
   void startSaga_retryablePersistenceError_returnsUnavailableWithoutLeakingMessage() {
-    when(orchestrator.startAsync("transfer", Map.of()))
+    when(orchestrator.startAsyncReturningSnapshot(null, "transfer", null, Map.of(), null))
         .thenThrow(
             SagaPersistenceException.storeUnavailable(
                 new RuntimeException("DB write failed on secret_table host=10.0.0.5")));
@@ -355,7 +382,7 @@ class SagaServiceImplTest {
   void startSaga_permanentPersistenceError_returnsInternalWithoutLeakingMessage() {
     // A permanent persistence failure (e.g. serialization) must not be reported as a retryable
     // UNAVAILABLE — the client would retry it futilely. It maps to INTERNAL instead.
-    when(orchestrator.startAsync("transfer", Map.of()))
+    when(orchestrator.startAsyncReturningSnapshot(null, "transfer", null, Map.of(), null))
         .thenThrow(
             SagaPersistenceException.serializationFailed(
                 new RuntimeException("Failed to serialize payload for secret_table")));
@@ -373,7 +400,7 @@ class SagaServiceImplTest {
 
   @Test
   void startSaga_unmappedRuntimeException_returnsInternalWithoutLeakingMessage() {
-    when(orchestrator.startAsync("transfer", Map.of()))
+    when(orchestrator.startAsyncReturningSnapshot(null, "transfer", null, Map.of(), null))
         .thenThrow(new IllegalStateException("SECRET stacktrace detail at Engine.java:42"));
 
     assertThatThrownBy(() -> stub(0).startSaga(startByName("transfer", true)))
@@ -398,11 +425,12 @@ class SagaServiceImplTest {
     // not exercised. This covers the "terminal reached" branch deterministically; the genuine
     // within-bound timing is covered by the next test.
     SagaStateSnapshot terminal = snapshot("gen-s", SagaStatus.COMPLETED);
-    when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq("transfer"), isNull(), eq(Map.of()), any(SagaCallback.class)))
         .thenAnswer(
             invocation -> {
-              invocation.getArgument(2, SagaCallback.class).onCompleted(terminal);
-              return "gen-s";
+              invocation.getArgument(4, SagaCallback.class).onCompleted(terminal);
+              return snapshot("gen-s", SagaStatus.RUNNING);
             });
 
     // Act — the bound is irrelevant (the callback already fired); kept small to make that clear.
@@ -421,11 +449,12 @@ class SagaServiceImplTest {
     // replica), so the callback registered here never fires again: what decides the response is
     // the read at bound expiry, which by then sees a completed saga.
     SagaStateSnapshot parked = snapshot("gen-p", SagaStatus.WAITING);
-    when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq("transfer"), isNull(), eq(Map.of()), any(SagaCallback.class)))
         .thenAnswer(
             invocation -> {
-              invocation.getArgument(2, SagaCallback.class).onParked(parked);
-              return "gen-p";
+              invocation.getArgument(4, SagaCallback.class).onParked(parked);
+              return snapshot("gen-p", SagaStatus.RUNNING);
             });
     // Parked in the store until the bound expires, so the read where polling begins finds it
     // still running and the wait continues rather than answering from it.
@@ -455,11 +484,12 @@ class SagaServiceImplTest {
     // and the store would report WAITING, so answering COMPLETED promptly is only possible if the
     // registry did the waking.
     SagaStateSnapshot parked = snapshot("gen-r", SagaStatus.WAITING);
-    when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq("transfer"), isNull(), eq(Map.of()), any(SagaCallback.class)))
         .thenAnswer(
             invocation -> {
-              invocation.getArgument(2, SagaCallback.class).onParked(parked);
-              return "gen-r";
+              invocation.getArgument(4, SagaCallback.class).onParked(parked);
+              return snapshot("gen-r", SagaStatus.RUNNING);
             });
     when(orchestrator.getStateSnapshot("gen-r")).thenReturn(parked);
     CompletableFuture<Void> resume =
@@ -484,8 +514,9 @@ class SagaServiceImplTest {
     // would have delivered sooner, so the wait must not read the store at all — only the one read
     // that decides the response when the bound elapses. A 2s bound derives the 1s interval floor,
     // so polling would be plainly visible as extra reads.
-    when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
-        .thenReturn("gen-np");
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq("transfer"), isNull(), eq(Map.of()), any(SagaCallback.class)))
+        .thenReturn(snapshot("gen-np", SagaStatus.RUNNING));
     when(orchestrator.getStateSnapshot("gen-np"))
         .thenReturn(snapshot("gen-np", SagaStatus.RUNNING));
 
@@ -504,11 +535,12 @@ class SagaServiceImplTest {
     // moment it is least able to serve them. Bound 2s, interval 1s, and the single tick at 1s
     // takes 1.5s — so it returns half a second past the deadline.
     SagaStateSnapshot parked = snapshot("gen-slow", SagaStatus.WAITING);
-    when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq("transfer"), isNull(), eq(Map.of()), any(SagaCallback.class)))
         .thenAnswer(
             invocation -> {
-              invocation.getArgument(2, SagaCallback.class).onParked(parked);
-              return "gen-slow";
+              invocation.getArgument(4, SagaCallback.class).onParked(parked);
+              return snapshot("gen-slow", SagaStatus.RUNNING);
             });
     // Fast where polling begins, slow at the tick. The read that has to outlive the bound is the
     // tick's; making the first one slow instead would spend the whole bound before any tick ran,
@@ -540,11 +572,12 @@ class SagaServiceImplTest {
     // where no push reaches this process — so polling becomes the only way to notice before the
     // bound.
     SagaStateSnapshot parked = snapshot("gen-pk", SagaStatus.WAITING);
-    when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq("transfer"), isNull(), eq(Map.of()), any(SagaCallback.class)))
         .thenAnswer(
             invocation -> {
-              invocation.getArgument(2, SagaCallback.class).onParked(parked);
-              return "gen-pk";
+              invocation.getArgument(4, SagaCallback.class).onParked(parked);
+              return snapshot("gen-pk", SagaStatus.RUNNING);
             });
     when(orchestrator.getStateSnapshot("gen-pk")).thenReturn(parked);
 
@@ -564,11 +597,12 @@ class SagaServiceImplTest {
     // the bound. A 6s bound derives the 1s floor, so a tick lands well inside it; without the tick
     // this would answer at 6s from the read at bound expiry.
     SagaStateSnapshot parked = snapshot("gen-e", SagaStatus.WAITING);
-    when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq("transfer"), isNull(), eq(Map.of()), any(SagaCallback.class)))
         .thenAnswer(
             invocation -> {
-              invocation.getArgument(2, SagaCallback.class).onParked(parked);
-              return "gen-e";
+              invocation.getArgument(4, SagaCallback.class).onParked(parked);
+              return snapshot("gen-e", SagaStatus.RUNNING);
             });
     when(orchestrator.getStateSnapshot("gen-e"))
         .thenReturn(parked, snapshot("gen-e", SagaStatus.COMPLETED));
@@ -654,11 +688,12 @@ class SagaServiceImplTest {
     // genuinely unfinished. Non-terminal is the gRPC analogue of REST's 202 and the saga keeps
     // running.
     SagaStateSnapshot parked = snapshot("gen-p2", SagaStatus.WAITING);
-    when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq("transfer"), isNull(), eq(Map.of()), any(SagaCallback.class)))
         .thenAnswer(
             invocation -> {
-              invocation.getArgument(2, SagaCallback.class).onParked(parked);
-              return "gen-p2";
+              invocation.getArgument(4, SagaCallback.class).onParked(parked);
+              return snapshot("gen-p2", SagaStatus.RUNNING);
             });
     when(orchestrator.getStateSnapshot("gen-p2")).thenReturn(parked);
 
@@ -678,10 +713,11 @@ class SagaServiceImplTest {
     // callback fires from a separate thread *while* the server is blocked in the bounded wait, so
     // this genuinely exercises "await blocks until the saga is terminal, then returns it".
     SagaStateSnapshot terminal = snapshot("gen-s2", SagaStatus.COMPLETED);
-    when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq("transfer"), isNull(), eq(Map.of()), any(SagaCallback.class)))
         .thenAnswer(
             invocation -> {
-              SagaCallback callback = invocation.getArgument(2, SagaCallback.class);
+              SagaCallback callback = invocation.getArgument(4, SagaCallback.class);
               Thread completer =
                   new Thread(
                       () -> {
@@ -694,7 +730,7 @@ class SagaServiceImplTest {
                       });
               completer.setDaemon(true);
               completer.start();
-              return "gen-s2";
+              return snapshot("gen-s2", SagaStatus.RUNNING);
             });
 
     // Act
@@ -710,8 +746,9 @@ class SagaServiceImplTest {
   void startSaga_syncBoundElapsesBeforeTerminal_returnsRunningSnapshotWithoutCancelling() {
     // Arrange — the callback never fires, so the (50ms) bound elapses; the saga keeps running and
     // the server returns the in-flight snapshot fetched via getStateSnapshot (no cancellation).
-    when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
-        .thenReturn("gen-t");
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq("transfer"), isNull(), eq(Map.of()), any(SagaCallback.class)))
+        .thenReturn(snapshot("gen-t", SagaStatus.RUNNING));
     when(orchestrator.getStateSnapshot("gen-t")).thenReturn(snapshot("gen-t", SagaStatus.RUNNING));
 
     // Act
@@ -730,8 +767,9 @@ class SagaServiceImplTest {
     // deadline side wins: the wait ends ~one slack before the gRPC deadline and the server returns
     // OK + RUNNING (the saga keeps running) rather than letting the call expire as
     // DEADLINE_EXCEEDED.
-    when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
-        .thenReturn("gen-d");
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq("transfer"), isNull(), eq(Map.of()), any(SagaCallback.class)))
+        .thenReturn(snapshot("gen-d", SagaStatus.RUNNING));
     when(orchestrator.getStateSnapshot("gen-d")).thenReturn(snapshot("gen-d", SagaStatus.RUNNING));
 
     // Act — sync.timeout_millis is large (30s) so the client's 500ms deadline is the binding bound.
@@ -752,11 +790,12 @@ class SagaServiceImplTest {
     // sync.max_wait_millis ceiling. The callback fires synchronously, so it returns the terminal
     // snapshot immediately, well under the ceiling.
     SagaStateSnapshot terminal = snapshot("gen-u", SagaStatus.COMPLETED);
-    when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq("transfer"), isNull(), eq(Map.of()), any(SagaCallback.class)))
         .thenAnswer(
             invocation -> {
-              invocation.getArgument(2, SagaCallback.class).onCompleted(terminal);
-              return "gen-u";
+              invocation.getArgument(4, SagaCallback.class).onCompleted(terminal);
+              return snapshot("gen-u", SagaStatus.RUNNING);
             });
 
     // Act — sync.timeout_millis=0, no deadline.
@@ -773,8 +812,9 @@ class SagaServiceImplTest {
     // Arrange — sync.timeout_millis=0 and no deadline, so a small sync.max_wait_millis is the only
     // ceiling on the wait. The callback never fires, so that ceiling elapses and the server returns
     // the in-flight RUNNING snapshot (the saga keeps running) rather than blocking forever.
-    when(orchestrator.startAsync(eq("transfer"), eq(Map.of()), any(SagaCallback.class)))
-        .thenReturn("gen-m");
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq("transfer"), isNull(), eq(Map.of()), any(SagaCallback.class)))
+        .thenReturn(snapshot("gen-m", SagaStatus.RUNNING));
     when(orchestrator.getStateSnapshot("gen-m")).thenReturn(snapshot("gen-m", SagaStatus.RUNNING));
 
     // Act — sync.timeout_millis=0, no deadline, a 50ms ceiling.

@@ -8,9 +8,9 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.rpc.GetSagaRequest;
 import com.scalar.db.saga.rpc.SagaServiceGrpc;
@@ -61,9 +61,10 @@ class SagaSecurityInterceptorTest {
 
   @BeforeEach
   void setUp() throws IOException {
-    SagaOrchestrator orchestrator = mock(SagaOrchestrator.class);
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
     when(orchestrator.getStateSnapshot(any())).thenReturn(snapshot("s-1", SagaStatus.RUNNING));
-    when(orchestrator.startAsync(anyString(), anyMap())).thenReturn("gen-1");
+    when(orchestrator.startAsyncReturningSnapshot(any(), anyString(), any(), anyMap(), any()))
+        .thenReturn(snapshot("s-1", SagaStatus.RUNNING));
     String name = InProcessServerBuilder.generateName();
     Server server =
         InProcessServerBuilder.forName(name)
@@ -138,7 +139,7 @@ class SagaSecurityInterceptorTest {
     // Act — WRITE satisfies StartSaga; the call reaches the handler and returns the snapshot
     SagaSnapshot response = stub("write").startSaga(startByName("transfer"));
 
-    // Assert (the id is the mocked getStateSnapshot's; reaching it proves auth passed)
+    // Assert (the id is the mocked start's; reaching it proves auth passed)
     assertThat(response.getSagaId()).isEqualTo("s-1");
   }
 
@@ -198,7 +199,7 @@ class SagaSecurityInterceptorTest {
   }
 
   private SagaServiceBlockingStub stubFor(SagaSecurityProvider provider) throws IOException {
-    SagaOrchestrator orchestrator = mock(SagaOrchestrator.class);
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
     when(orchestrator.getStateSnapshot(any())).thenReturn(snapshot("s-1", SagaStatus.RUNNING));
     String name = InProcessServerBuilder.generateName();
     Server server =

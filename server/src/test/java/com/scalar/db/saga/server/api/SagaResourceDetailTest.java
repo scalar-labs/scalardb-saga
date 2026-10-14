@@ -5,10 +5,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.scalar.db.saga.api.SagaDetail;
-import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.api.TimelineEvent;
+import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.server.SagaWaiterRegistry;
 import com.scalar.db.saga.server.security.SagaAuthRequest;
@@ -44,11 +44,11 @@ class SagaResourceDetailTest {
 
   private final HttpClient http = HttpClient.newHttpClient();
   private Javalin app;
-  private SagaOrchestrator orchestrator;
+  private DefaultSagaOrchestrator orchestrator;
 
   @BeforeEach
   void setUp() {
-    orchestrator = mock(SagaOrchestrator.class);
+    orchestrator = mock(DefaultSagaOrchestrator.class);
     app =
         Javalin.create(
             cfg -> {

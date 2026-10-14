@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
@@ -57,9 +58,9 @@ class HttpDrainTest {
   void close_requestInFlight_answersItAndWaitsForTheHandlerBeforeClosingTheStore(@TempDir Path dir)
       throws Exception {
     // Arrange — a handler that is slow for a reason shutdown cannot short-circuit: it is inside a
-    // store read, not a bounded wait. (A bounded wait is deliberately woken by shutdown, so it
-    // would no longer exercise the drain.) The async start route calls getStateSnapshot after
-    // dispatching, so blocking that read parks the handler mid-request.
+    // store call, not a bounded wait. (A bounded wait is deliberately woken by shutdown, so it
+    // would no longer exercise the drain.) The async start route persists the saga before it
+    // answers, so blocking that start parks the handler mid-request.
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
@@ -78,8 +79,8 @@ class HttpDrainTest {
 
     DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
     lenient().when(orchestrator.httpEndpointRegistrar()).thenReturn(endpoints -> {});
-    when(orchestrator.startAsync(eq("saga"), anyMap())).thenReturn("s1");
-    when(orchestrator.getStateSnapshot("s1"))
+    when(orchestrator.startAsyncReturningSnapshot(
+            isNull(), eq("saga"), isNull(), anyMap(), isNull()))
         .thenAnswer(
             invocation -> {
               entered.countDown();

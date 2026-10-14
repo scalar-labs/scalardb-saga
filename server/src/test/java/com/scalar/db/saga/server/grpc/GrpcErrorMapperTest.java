@@ -26,6 +26,7 @@ import com.scalar.db.saga.exception.SagaOverloadedException;
 import com.scalar.db.saga.exception.SagaPersistenceException;
 import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
+import com.scalar.db.saga.exception.SagaStepNotParkedException;
 import com.scalar.db.saga.server.LogCapture;
 import com.scalar.db.saga.server.api.ErrorMapper;
 import io.grpc.Status;
@@ -281,6 +282,10 @@ class GrpcErrorMapperTest {
             new SagaOverloadedException(),
             Status.Code.UNAVAILABLE,
             SagaErrorCode.ENGINE_OVERLOADED),
+        new Arm(
+            new SagaStepNotParkedException("s-1", "charge"),
+            Status.Code.UNAVAILABLE,
+            SagaErrorCode.SAGA_STEP_NOT_PARKED),
         new Arm(
             SagaPersistenceException.storeUnavailable(new RuntimeException("db down")),
             Status.Code.UNAVAILABLE,

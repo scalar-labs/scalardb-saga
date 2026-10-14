@@ -9,9 +9,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.google.protobuf.Duration;
-import com.scalar.db.saga.api.SagaOrchestrator;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.rpc.GetSagaRequest;
 import com.scalar.db.saga.rpc.SagaServiceGrpc;
@@ -61,9 +61,10 @@ class SagaRateLimitInterceptorTest {
   private @Nullable ManagedChannel channel;
 
   private void startServer(int limit) throws IOException {
-    SagaOrchestrator orchestrator = mock(SagaOrchestrator.class);
+    DefaultSagaOrchestrator orchestrator = mock(DefaultSagaOrchestrator.class);
     when(orchestrator.getStateSnapshot(any())).thenReturn(snapshot("s-1", SagaStatus.RUNNING));
-    when(orchestrator.startAsync(anyString(), anyMap())).thenReturn("gen-1");
+    when(orchestrator.startAsyncReturningSnapshot(any(), anyString(), any(), anyMap(), any()))
+        .thenReturn(snapshot("s-1", SagaStatus.RUNNING));
     String name = InProcessServerBuilder.generateName();
     Server server =
         InProcessServerBuilder.forName(name)

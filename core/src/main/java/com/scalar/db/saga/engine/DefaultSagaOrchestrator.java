@@ -15,6 +15,7 @@ import com.scalar.db.saga.exception.SagaDefinitionNotServedException;
 import com.scalar.db.saga.exception.SagaIllegalArgumentException;
 import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.exception.SagaOverloadedException;
+import com.scalar.db.saga.exception.SagaStepNotParkedException;
 import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaEvent;
 import com.scalar.db.saga.store.SagaStore;
@@ -27,12 +28,14 @@ import com.scalar.db.saga.transport.HttpServiceConfig;
 import java.net.http.HttpClient;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -442,6 +445,45 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   }
 
   /**
+   * Starts a saga as {@code startAsync} does and returns the snapshot of the saga it created
+   * instead of only its ID. Not part of {@link SagaOrchestrator}: it serves the server's start
+   * endpoints, which answer with the saga's state. Reading the saga back by ID for that answer
+   * could miss the row just written on a backend whose index lags the write, such as DynamoDB, and
+   * report a running saga as not found; the snapshot in hand cannot.
+   *
+   * <p>The snapshot is the saga as created, {@code RUNNING}; the drive is already under way, so it
+   * may have moved on by the time the caller reads it.
+   *
+   * <p><b>For the process hosting the engine, not for applications.</b> Like this class's other
+   * methods outside {@link SagaOrchestrator}, such as {@link #completeStepAsync} and {@link
+   * #adminService(OperatorContext, long)}, it serves the server that embeds the engine. An
+   * application should program to {@link SagaOrchestrator}, which the client SDK implements too;
+   * code written against this method runs only embedded.
+   *
+   * @param sagaId the caller-supplied saga ID, or {@code null} to generate one
+   * @param sagaName the definition name
+   * @param version the exact definition version, or {@code null} for the latest
+   * @param input the saga input
+   * @param callback notified of the outcome as {@code startAsync}'s callback is, or {@code null}
+   * @return the created saga's snapshot
+   */
+  public SagaStateSnapshot startAsyncReturningSnapshot(
+      @Nullable String sagaId,
+      String sagaName,
+      @Nullable String version,
+      Map<String, Object> input,
+      @Nullable SagaCallback callback) {
+    Objects.requireNonNull(sagaName, "sagaName must not be null");
+    Objects.requireNonNull(input, "input must not be null");
+    ensureOpen();
+    Supplier<SagaDefinition> definition =
+        version == null
+            ? () -> requireLatestDefinition(sagaName)
+            : () -> requireVersionedDefinition(new SagaDefinitionId(sagaName, version));
+    return startAsyncInternal(definition, sagaId, input, callback);
+  }
+
+  /**
    * Takes a permit for a drive about to start, or refuses the start.
    *
    * <p>Called before the definition is resolved, and that ordering is the deliberate part.
@@ -793,7 +835,10 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * @param stepName the step the callback completes (must be the currently parked step)
    * @param output the step's output, merged into the saga context for downstream steps
    * @return the {@code RUNNING} snapshot immediately after the parked step is resumed
-   * @throws IllegalStateException if the saga is not {@code WAITING}
+   * @throws SagaStepNotParkedException if the step has not parked yet, or the saga's row lags its
+   *     log; retryable, since the park is about to be recorded
+   * @throws IllegalStateException if the step is already completed or the saga has moved on, which
+   *     the callback endpoint answers as an idempotent duplicate
    * @throws SagaIllegalArgumentException if {@code stepName} is not the currently parked step, or
    *     if {@code output} holds a value a saga context cannot carry. Both are thrown before
    *     anything is recorded, so the step stays parked and the callback can be retried once
@@ -855,13 +900,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     Objects.requireNonNull(output, "output must not be null");
     ensureOpen();
 
-    SagaStateSnapshot saga = getStateSnapshot(sagaId);
-    if (saga.getStatus() != SagaStatus.WAITING) {
-      throw new IllegalStateException(
-          "Cannot complete step for saga " + sagaId + " in status " + saga.getStatus());
-    }
-
     List<SagaEvent> events = store.getEvents(sagaId);
+    SagaStateSnapshot saga = parkedSnapshot(sagaId, stepName, events);
     int stepIndex = parkedStepIndex(events, sagaId, stepName);
 
     // Before the commit, for the same reason SagaEngine.createSaga validates before persisting: the
@@ -910,6 +950,77 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     updatedEvents.add(completedEvent);
     ExecutionContext context = engine.replayEvents(running, updatedEvents);
     return new ResumedStep(running, def, context, stepIndex);
+  }
+
+  /**
+   * The {@code WAITING} snapshot a callback on {@code stepName} completes, judged from the event
+   * log first. The log is partitioned by saga ID, so reading it is strongly consistent on every
+   * backend. A lookup by saga ID is not: on DynamoDB it reads an index that lags the table.
+   *
+   * <p>A parked saga's newest event is its {@code STEP_PENDING}, written in the same transaction as
+   * the {@code WAITING} row with the same timestamp, so that row is read by its full key. Otherwise
+   * the lookup by ID decides between the two cases the callback contract keeps apart:
+   *
+   * <ul>
+   *   <li>The step has not been parked yet: the engine parks only after the participant accepted
+   *       the call, so a participant that calls back at once can arrive first. That is {@link
+   *       SagaStepNotParkedException}, a retryable refusal, because a callback acked now would be
+   *       lost and the saga would wait on it until its timeout, or forever on an unbounded park.
+   *   <li>The step is already completed, or the saga moved on: {@link IllegalStateException}, which
+   *       the callback endpoint answers as an idempotent duplicate.
+   * </ul>
+   */
+  private SagaStateSnapshot parkedSnapshot(String sagaId, String stepName, List<SagaEvent> events) {
+    SagaEvent newest = events.isEmpty() ? null : events.get(events.size() - 1);
+    Instant parkedAt = newest == null ? null : newest.getTimestamp();
+    boolean loggedAsParked = newest != null && newest.getEventType() == EventType.STEP_PENDING;
+    if (loggedAsParked && parkedAt != null) {
+      Optional<SagaStateSnapshot> waiting =
+          store.getStateSnapshot(sagaId, SagaStatus.WAITING, parkedAt);
+      if (waiting.isPresent()) {
+        return waiting.get();
+      }
+    }
+    SagaStateSnapshot saga;
+    try {
+      saga = getStateSnapshot(sagaId);
+    } catch (SagaNotFoundException e) {
+      if (events.isEmpty()) {
+        throw e;
+      }
+      // The log proves the saga exists. The lookup missed it because its index lags the write, as
+      // on DynamoDB, so the callback is ahead of the row and is retried.
+      throw new SagaStepNotParkedException(sagaId, stepName);
+    }
+    if (saga.getStatus() == SagaStatus.WAITING && loggedAsParked) {
+      // The keyed read missed although both the log and the lookup say parked: proceed on the
+      // lookup's snapshot, as before, rather than refuse a callback that can be applied.
+      return saga;
+    }
+    boolean stillAhead =
+        saga.getStatus() == SagaStatus.RUNNING || saga.getStatus() == SagaStatus.WAITING;
+    if (stillAhead && !completionStands(events, stepName)) {
+      throw new SagaStepNotParkedException(sagaId, stepName);
+    }
+    throw new IllegalStateException(
+        "Cannot complete step for saga " + sagaId + " in status " + saga.getStatus());
+  }
+
+  /**
+   * Whether {@code stepName}'s latest event is its completion. Only a completion settles a step
+   * while the saga is {@code RUNNING} or {@code WAITING}: a failure there is about to be retried
+   * forward, or to move the saga to {@code COMPENSATING}, so a callback that meets it is refused
+   * and retried rather than acked and lost. Any later event on the step, a {@code STEP_PENDING} or
+   * {@code STEP_REISSUING} above all, reopens it.
+   */
+  private static boolean completionStands(List<SagaEvent> events, String stepName) {
+    boolean completed = false;
+    for (SagaEvent event : events) {
+      if (event instanceof StepEvent step && step.getStepName().equals(stepName)) {
+        completed = event.getEventType() == EventType.STEP_COMPLETED;
+      }
+    }
+    return completed;
   }
 
   /** Phase-1 result of completing a parked step: the resumed saga and where to drive it from. */
