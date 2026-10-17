@@ -1,0 +1,73 @@
+name: Clean up ghcr.io
+
+# Every snapshot push moves its tag and leaves the previous image behind untagged: its index and both
+# platform manifests. ghcr.io never collects them by itself, so this deletes them weekly.
+#
+# A blanket "delete untagged" is not an option here. A release image is a multi-arch index whose
+# platform and attestation manifests are untagged by construction; they are the image's contents, and
+# deleting them breaks every release ever published. snok/container-retention-policy reads the index
+# of every tagged version it keeps and leaves its children alone, which is what makes this safe.
+# Tagged versions are never selected at all, so release tags and the live snapshot tags stay.
+on:
+  schedule:
+    - cron: "0 3 * * 1" # Mondays 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: List what would be deleted without deleting it
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ghcr-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # snok/container-retention-policy v3.1.0, run as its container by digest rather than through
+      # its action. The action pins only its metadata: its action.yaml starts the container by the
+      # tag v3.1.0, which can be moved, and the container holds this job's packages:write token. That
+      # token reaches this repository's own package, release tags included, so a swapped container
+      # could delete or replace a release image.
+      #
+      # The digest is the v3.1.0 multi-arch index. Its provenance names snok commit 7829d4c2, two
+      # commits before the v3.1.0 tag, which changed only snok's own test workflow. The arguments
+      # mirror the args block of that action.yaml, one per input. To move to a newer release, take
+      # the new tag's index digest, check its provenance names a commit of that release, and
+      # re-check the arguments against its action.yaml. Dependabot cannot do this; it does not
+      # update docker:// references.
+      #
+      # GITHUB_TOKEN works only because this repository published the package, which gives it the
+      # Admin role on it. The token also rules out wildcards, so the package is named exactly.
+      #
+      # --tag-selection=untagged: tagged versions are never candidates.
+      # --cut-off=1d: a multi-arch push uploads the platform manifests before the index that
+      #   references them, and a run landing in between would see them unreferenced. Only versions
+      #   a day old are considered; no push takes that long.
+      # --dry-run: a scheduled run has no inputs, so this is false there; a manual run defaults to
+      #   true.
+      - name: Delete untagged versions
+        uses: docker://ghcr.io/snok/container-retention-policy@sha256:884037f146d6ef574b61fbcc59bef490f887322e6b9dc2eefcf364cb4e9b4112
+        env:
+          RUST_LOG: container_retention_policy=INFO
+        with:
+          args: >-
+            --account=scalar-labs
+            --token=${{ secrets.GITHUB_TOKEN }}
+            --image-names=scalardb-saga-server
+            --image-tags=
+            --shas-to-skip=
+            --tag-selection=untagged
+            --keep-n-most-recent=0
+            --timestamp-to-use=updated_at
+            --cut-off=1d
+            --dry-run=${{ inputs.dry-run == true }}
