@@ -34,11 +34,14 @@ jobs:
   # development bump. Publishing that as a snapshot would be confusing at best; for the image it would
   # be worse, because the tag is the release's own and the release workflow owns it.
   #
-  # A freshly cut branch still carries main's version until one of them is bumped, and a scratch
-  # branch such as the rehearsal's `0.0` carries it for good. Publishing from there would overwrite
-  # main's snapshot, and since the two branches run in different concurrency groups, an older commit
-  # could land last. So a version branch publishes only a version on its own line: `1.0` publishes
-  # `1.0.*`, and `1` publishes `1.*`. main publishes whatever it carries.
+  # A scratch branch such as the rehearsal's `0.0` carries main's version for good. Publishing from
+  # there would overwrite main's snapshot, and since the two branches run in different concurrency
+  # groups, an older commit could land last. So a version branch publishes only a version on its own
+  # line: `1.0` publishes `1.0.*`, and `1` publishes `1.*`. main publishes whatever it carries.
+  #
+  # That check cannot separate a branch from its parent while both carry the same version, `1` and
+  # `1.2` both at `1.2.0-SNAPSHOT`. RELEASING.md avoids that state instead: the parent is bumped
+  # before the branch is cut from the commit just before the bump.
   version:
     runs-on: ubuntu-latest
     timeout-minutes: 5

@@ -87,13 +87,20 @@ after it, live only on that branch and are unreachable from `main` by design.
 
 1. **Make sure the release branch exists and carries the change.**
 
-   For the first release of a minor version, cut its branch from `main` and bump `main` to the next
-   minor snapshot so trunk and the branch stop claiming the same version:
+   For the first release of a minor version, cut its branch from the branch above it: `main` until a
+   major version branch exists, the major version branch after that (`1` for `1.2`). Bump that parent
+   to its next snapshot version first, then cut the new branch from the commit just before the bump.
+   Cutting first would leave both branches carrying the same version until the bump landed, and each
+   would publish its own build under that one snapshot version:
 
    ```bash
-   git switch main && git pull
-   git switch -c <release-branch> && git push -u origin <release-branch>
+   # after the bump has merged into <parent>
+   git switch <parent> && git pull
+   git switch -c <release-branch> <bump-commit>~1 && git push -u origin <release-branch>
    ```
+
+   `<bump-commit>~1` is the commit just before the bump, so the new branch takes everything up to it
+   and nothing that lands on the parent afterwards.
 
    A newly cut branch also needs two pieces of update plumbing.
 
@@ -209,8 +216,10 @@ fixed.
 Every commit on `main` and on each release branch publishes a `-SNAPSHOT` to the Central snapshot
 repository, and the server image under the same version to `ghcr.io`, so downstream work can track
 either trunk or a maintenance line without waiting for a tag. A version branch publishes only a
-version on its own line (`1.0` publishes `1.0.*`, `1` publishes `1.*`), so a freshly cut or scratch
-branch still carrying main's version cannot overwrite main's snapshot.
+version on its own line (`1.0` publishes `1.0.*`, `1` publishes `1.*`), so a scratch branch still
+carrying main's version cannot overwrite main's snapshot. That check cannot tell `1` and `1.2` apart
+while both carry `1.2.0-SNAPSHOT`, which is why [cutting a release](#cutting-a-release) bumps the
+parent before cutting the branch.
 
 Central purges old snapshots by itself; `ghcr.io` keeps everything forever. Each push moves the
 snapshot tag and leaves the previous image behind untagged, so
