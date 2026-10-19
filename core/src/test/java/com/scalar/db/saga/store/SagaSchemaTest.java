@@ -11,6 +11,7 @@ import com.scalar.db.api.TableMetadata;
 import com.scalar.db.exception.storage.ExecutionException;
 import com.scalar.db.io.DataType;
 import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.exception.SagaPersistenceException;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -179,10 +180,10 @@ class SagaSchemaTest {
   }
 
   @Test
-  void statusOfSlice_unknownSliceGiven_throwsIllegalArgumentException() {
+  void statusOfSlice_unknownSliceGiven_throwsSagaPersistenceException() {
     // Act & Assert
     assertThatThrownBy(() -> SagaSchema.statusOfSlice(SagaSchema.WAITING_WITH_TIMEOUT_SLICE + 1))
-        .isInstanceOf(IllegalArgumentException.class);
+        .isInstanceOf(SagaPersistenceException.class);
   }
 
   @Test

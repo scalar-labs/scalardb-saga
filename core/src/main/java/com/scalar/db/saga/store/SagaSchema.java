@@ -6,6 +6,7 @@ import com.scalar.db.api.TableMetadata;
 import com.scalar.db.exception.storage.ExecutionException;
 import com.scalar.db.io.DataType;
 import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.exception.SagaPersistenceException;
 import java.util.Map;
 
 /**
@@ -182,14 +183,21 @@ public final class SagaSchema {
   /**
    * The status a sweep slice holds.
    *
-   * @param slice a slice code
+   * @param slice a slice code, as read from a stored row
    * @return the status
-   * @throws IllegalArgumentException if {@code slice} is not a slice code
+   * @throws SagaPersistenceException if {@code slice} is not a slice code this version knows
    */
   static SagaStatus statusOfSlice(int slice) {
-    return slice == WAITING_WITH_TIMEOUT_SLICE
-        ? SagaStatus.WAITING
-        : SagaStatus.fromStatusCode(slice);
+    if (slice == WAITING_WITH_TIMEOUT_SLICE) {
+      return SagaStatus.WAITING;
+    }
+    try {
+      return SagaStatus.fromStatusCode(slice);
+    } catch (IllegalArgumentException e) {
+      // During a rolling upgrade an older replica reading a slice only a newer one writes lands
+      // here; a raw IllegalArgumentException would escape the store's methods unwrapped.
+      throw SagaPersistenceException.deserializationFailed(e);
+    }
   }
 
   /**
