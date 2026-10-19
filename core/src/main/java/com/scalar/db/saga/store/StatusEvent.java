@@ -134,6 +134,33 @@ public final class StatusEvent implements SagaEvent {
     return intervention(EventType.SAGA_RESET, target, operator, reason);
   }
 
+  /**
+   * Creates a {@link EventType#SAGA_CLAIMED} event: a recovery replica took the saga over. The saga
+   * keeps its status; the payload names the claiming replica as the operator.
+   *
+   * @param status the saga's status, {@code RUNNING} or {@code COMPENSATING}
+   * @param replicaId the claiming replica's ID
+   * @return the event, targeting {@code status}
+   */
+  static StatusEvent claimed(SagaStatus status, String replicaId) {
+    return new StatusEvent(
+        EventType.SAGA_CLAIMED,
+        status,
+        AdminAuditPayload.encode(replicaId, "recovery claim", status),
+        null);
+  }
+
+  /**
+   * Creates a {@link EventType#SAGA_RELEASED} event: the replica driving the saga handed it to
+   * recovery while shutting down. The saga keeps its status.
+   *
+   * @param status the saga's status, {@code RUNNING} or {@code COMPENSATING}
+   * @return the event, targeting {@code status}
+   */
+  static StatusEvent released(SagaStatus status) {
+    return new StatusEvent(EventType.SAGA_RELEASED, status, null, null);
+  }
+
   private static StatusEvent intervention(
       EventType eventType, SagaStatus target, String operator, String reason) {
     Objects.requireNonNull(target, "target must not be null");

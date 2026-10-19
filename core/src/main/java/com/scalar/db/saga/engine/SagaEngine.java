@@ -931,11 +931,11 @@ public class SagaEngine implements AutoCloseable {
    *
    * <p>The two refusals are not interchangeable and the difference must be decided under {@link
    * #shutdownLock}. Shutting down means nobody here will run this saga, so it has to be marked.
-   * Already active means a healthy drive owns it, and marking would stamp the epoch on that drive's
-   * row — rewriting the clustering key it holds and killing it, turning a duplicate dispatch into a
-   * failed saga. Deciding outside the lock would reopen exactly that race: {@code putIfAbsent}
-   * could fail because a live drive owns the saga, shutdown could flip, and the caller would mark
-   * it.
+   * Already active means a healthy drive owns it, and marking would append a hand-off at the
+   * sequence that drive writes next — failing its next write and stopping it, so a duplicate
+   * dispatch would halt a healthy saga. Deciding outside the lock would reopen exactly that race:
+   * {@code putIfAbsent} could fail because a live drive owns the saga, shutdown could flip, and the
+   * caller would mark it.
    *
    * <p>The store write is deliberately outside the lock; only the decision needs to be inside.
    *

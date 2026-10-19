@@ -113,12 +113,14 @@ class ScalarDbSagaStoreTest {
     assertThat(result.getSagaName()).isEqualTo("order-saga");
     assertThat(result.getStatus()).isEqualTo(SagaStatus.RUNNING);
     assertThat(result.getDefinitionVersion()).isEqualTo("v1");
-    // event insert + state insert
-    verify(tx, times(2)).insert(any(Insert.class));
     verify(tx).commit();
-    // The owner is not a component of the snapshot; it is stamped on the state row, so that is
-    // where stamping it is verified.
-    assertThat(capturedTextColumn(tx, "owner_id")).isEqualTo("engine-1");
+    // The seq-0 event carries the saga's state, and its sweep row goes in alongside it
+    Map<String, Insert> inserts = insertsByTable(tx);
+    assertThat(inserts.keySet())
+        .containsExactlyInAnyOrder(SagaSchema.EVENTS_TABLE, SagaSchema.SWEEP_TABLE);
+    Insert event = Objects.requireNonNull(inserts.get(SagaSchema.EVENTS_TABLE));
+    assertThat(Objects.requireNonNull(event.getColumns().get("state_slice")).getIntValue())
+        .isEqualTo(SagaStatus.RUNNING.getStatusCode());
   }
 
   @Test
@@ -148,7 +150,7 @@ class ScalarDbSagaStoreTest {
     DistributedTransaction txLookup = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(txLookup);
     Result stateResult = mockStateResult("saga-1", SagaStatus.RUNNING);
-    when(txLookup.scan(any(Scan.class))).thenReturn(List.of(stateResult));
+    stubStateRead(txLookup, stateResult);
 
     // Act & Assert
     assertThatThrownBy(() -> store.createSaga("saga-1", "order-saga", "engine-1", Map.of(), "v1"))
@@ -161,7 +163,7 @@ class ScalarDbSagaStoreTest {
     doThrow(mock(CommitConflictException.class)).when(tx).commit();
     DistributedTransaction txLookup = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(txLookup);
-    when(txLookup.scan(any(Scan.class))).thenReturn(List.of());
+    stubStateRead(txLookup);
 
     // Act & Assert
     assertThatThrownBy(() -> store.createSaga("saga-1", "order-saga", "engine-1", Map.of(), "v1"))
@@ -190,7 +192,7 @@ class ScalarDbSagaStoreTest {
     when(foreignEvent.getText("append_id")).thenReturn(OTHER_APPEND_ID);
     Result foreignState = mockStateResult("saga-1", SagaStatus.RUNNING);
     when(readTx.get(any(Get.class))).thenReturn(Optional.of(foreignEvent));
-    when(readTx.scan(any(Scan.class))).thenReturn(List.of(foreignState));
+    stubStateRead(readTx, foreignState);
 
     // Act & Assert — the duplicate, not SagaConcurrentModificationException: retrying an id that
     // another saga permanently owns can never succeed, so "typically transient" would misdirect.
@@ -214,7 +216,7 @@ class ScalarDbSagaStoreTest {
     when(ownEvent.getText("append_id")).thenReturn(OWN_APPEND_ID);
     when(verifyTx.get(any(Get.class))).thenReturn(Optional.of(ownEvent));
     Result ownState = mockStateResult("saga-1", SagaStatus.RUNNING);
-    when(loadTx.scan(any(Scan.class))).thenReturn(List.of(ownState));
+    stubStateRead(loadTx, ownState);
 
     // Act
     SagaStateSnapshot result =
@@ -238,7 +240,7 @@ class ScalarDbSagaStoreTest {
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx).thenReturn(lookupTx);
     doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
     when(verifyTx.get(any(Get.class))).thenReturn(Optional.empty());
-    when(lookupTx.scan(any(Scan.class))).thenReturn(List.of());
+    stubStateRead(lookupTx);
 
     // Act & Assert
     assertThatThrownBy(
@@ -730,6 +732,23 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
+  void recordStepEvent_validEventGiven_leavesTheStateColumnsOut() throws Exception {
+    // Arrange — a step event carries no state, and writing nulls would leave tombstones on
+    // Cassandra for every step
+    StepEvent event = StepEvent.completed(0, "debit", "{\"ok\":true}");
+
+    // Act
+    store.recordStepEvent("saga-1", 1, event);
+
+    // Assert
+    ArgumentCaptor<Insert> captor = ArgumentCaptor.forClass(Insert.class);
+    verify(tx).insert(captor.capture());
+    assertThat(captor.getValue().getColumns())
+        .doesNotContainKeys(
+            "state_slice", "sweep_at", "saga_name", "definition_version", "saga_created_at");
+  }
+
+  @Test
   void
       recordStepEvent_commitConflictExhaustedAndAnotherWritersEventAtSequence_throwsSagaConcurrentModification()
           throws Exception {
@@ -872,8 +891,7 @@ class ScalarDbSagaStoreTest {
   // ---------------------------------------------------------------------------
 
   @Test
-  void recordStatusEvent_validTransition_deletesOldInsertsNewAndReturnsUpdatedSnapshot()
-      throws Exception {
+  void recordStatusEvent_validTransition_movesTheSweepRowAndRecordsTheNewState() throws Exception {
     // Arrange
     Instant now = Instant.now();
     SagaStateSnapshot current =
@@ -882,7 +900,7 @@ class ScalarDbSagaStoreTest {
     Result existingRow = mock(Result.class);
     when(tx.get(any(Get.class))).thenReturn(Optional.of(existingRow));
 
-    // Act — a different replica records the transition; owner_id is re-stamped to it
+    // Act
     SagaStateSnapshot result = store.recordStatusEvent(current, 5, event, "engine-2");
 
     // Assert
@@ -890,17 +908,38 @@ class ScalarDbSagaStoreTest {
     assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPLETED);
     assertThat(result.getUpdatedAt()).isAfterOrEqualTo(now);
     verify(tx).get(any(Get.class));
-    // event insert + state insert
-    verify(tx, times(2)).insert(any(Insert.class));
-    verify(tx).delete(any(Delete.class));
+    assertThat(deletedSweepSlice(tx)).isEqualTo(SagaStatus.RUNNING.getStatusCode());
     verify(tx).commit();
-    // The re-stamp is the point of this test: engine-2 recorded the transition, so the state row's
-    // owner_id becomes engine-2. Asserted on the column, which is where the owner lives.
-    assertThat(capturedTextColumn(tx, "owner_id")).isEqualTo("engine-2");
+    Map<String, Insert> inserts = insertsByTable(tx);
+    assertThat(
+            Objects.requireNonNull(inserts.get(SagaSchema.SWEEP_TABLE))
+                .getClusteringKey()
+                .orElseThrow()
+                .getIntValue(0))
+        .isEqualTo(SagaStatus.COMPLETED.getStatusCode());
+    Insert stateEvent = Objects.requireNonNull(inserts.get(SagaSchema.EVENTS_TABLE));
+    assertThat(stateEvent.getClusteringKey().orElseThrow().getIntValue(0)).isEqualTo(5);
+    assertThat(Objects.requireNonNull(stateEvent.getColumns().get("state_slice")).getIntValue())
+        .isEqualTo(SagaStatus.COMPLETED.getStatusCode());
   }
 
   @Test
-  void recordStatusEvent_epochUpdatedAtGiven_stampsStateRowForImmediateRecovery() throws Exception {
+  void recordStatusEvent_waitingSagaGiven_throwsIllegalArgumentException() throws Exception {
+    // Arrange — a parked saga's sweep key can be its deadline, which the snapshot does not carry
+    Instant now = Instant.now();
+    SagaStateSnapshot waiting =
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
+
+    // Act & Assert
+    assertThatThrownBy(
+            () -> store.recordStatusEvent(waiting, 5, StatusEvent.compensating(), "engine-1"))
+        .isInstanceOf(IllegalArgumentException.class);
+    verify(txManager, never()).begin();
+  }
+
+  @Test
+  void recordStatusEvent_epochUpdatedAtGiven_putsTheSweepRowAtEpochForImmediateRecovery()
+      throws Exception {
     // Arrange
     Instant now = Instant.now();
     SagaStateSnapshot current =
@@ -913,8 +952,8 @@ class ScalarDbSagaStoreTest {
     SagaStateSnapshot result =
         store.recordStatusEvent(current, 5, event, "engine-2", Instant.EPOCH);
 
-    // Assert — the transition applies, and the state row's recovery-scan key is EPOCH (immediate
-    // pickup by the sweeper), all within a single transaction: event insert + state insert + commit
+    // Assert — the transition applies, and the saga's sweep key is EPOCH (immediate pickup by the
+    // sweeper), all within a single transaction: event insert + sweep insert + commit
     assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPENSATING);
     assertThat(result.getUpdatedAt()).isEqualTo(Instant.EPOCH);
     verify(tx, times(2)).insert(any(Insert.class));
@@ -949,8 +988,8 @@ class ScalarDbSagaStoreTest {
     ScalarDbSagaStore singleAttemptStore = singleAttemptStore();
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
-    Result precheckRow = stateRowWithOwner();
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
+    Result sweepRow = mock(Result.class);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(sweepRow));
     doThrow(mock(CommitConflictException.class)).when(tx).commit();
     Result otherWritersEvent = mock(Result.class);
     when(otherWritersEvent.getText("append_id")).thenReturn(OTHER_APPEND_ID);
@@ -976,8 +1015,8 @@ class ScalarDbSagaStoreTest {
     ScalarDbSagaStore singleAttemptStore = singleAttemptStore();
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
-    Result precheckRow = stateRowWithOwner();
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
+    Result sweepRow = mock(Result.class);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(sweepRow));
     doThrow(mock(CommitConflictException.class)).when(tx).commit();
     when(verifyTx.get(any(Get.class))).thenReturn(Optional.empty());
 
@@ -1056,8 +1095,8 @@ class ScalarDbSagaStoreTest {
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
     // Attempt 1: the optimistic CK check passes, then commit is ambiguous.
-    Result precheckRow = stateRowWithOwner();
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
+    Result sweepRow = mock(Result.class);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(sweepRow));
     doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
     // Verifier: the persisted event at the sequence has another writer's append_id.
     Result otherWritersEvent = mock(Result.class);
@@ -1081,14 +1120,14 @@ class ScalarDbSagaStoreTest {
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     DistributedTransaction loadTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx).thenReturn(loadTx);
-    Result precheckRow = stateRowWithOwner();
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
+    Result sweepRow = mock(Result.class);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(sweepRow));
     doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
     Result ownEvent = mock(Result.class);
     when(ownEvent.getText("append_id")).thenReturn(OWN_APPEND_ID);
     when(verifyTx.get(any(Get.class))).thenReturn(Optional.of(ownEvent));
     Result compensatingState = mockStateResult("saga-1", SagaStatus.COMPENSATING);
-    when(loadTx.scan(any(Scan.class))).thenReturn(List.of(compensatingState));
+    stubStateRead(loadTx, compensatingState);
 
     // Act
     SagaStateSnapshot result =
@@ -1103,83 +1142,56 @@ class ScalarDbSagaStoreTest {
   // ---------------------------------------------------------------------------
 
   @Test
-  void park_boundedDeadlineGiven_transitionsToWaitingAndInsertsParkedRow() throws Exception {
+  void park_boundedDeadlineGiven_movesTheSweepRowToTheDeadlineInTheTimeoutSlice() throws Exception {
     // Arrange
     Instant now = Instant.now();
+    Instant deadline = now.plusSeconds(600);
     SagaStateSnapshot current =
         new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
-    Result precheckRow = stateRowWithOwner();
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
+    Result sweepRow = mock(Result.class);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(sweepRow));
 
     // Act
-    SagaStateSnapshot result =
-        store.park(current, 3, StepEvent.pending(1, "charge"), now.plusSeconds(600));
+    SagaStateSnapshot result = store.park(current, 3, StepEvent.pending(1, "charge"), deadline);
 
     // Assert
     assertThat(result.getStatus()).isEqualTo(SagaStatus.WAITING);
-    verify(tx).get(any(Get.class));
-    // STEP_PENDING event insert + state insert + parked-row insert
-    verify(tx, times(3)).insert(any(Insert.class));
-    verify(tx).delete(any(Delete.class));
+    assertThat(deletedSweepSlice(tx)).isEqualTo(SagaStatus.RUNNING.getStatusCode());
     verify(tx).commit();
-    // A park does not change the owner, and the snapshot no longer carries it, so the owner has to
-    // come off the row being replaced. Assert the column: nothing else here would notice a blank.
-    assertThat(capturedTextColumn(tx, "owner_id")).isEqualTo("engine-1");
+    Map<String, Insert> inserts = insertsByTable(tx);
+    Key sweepKey =
+        Objects.requireNonNull(inserts.get(SagaSchema.SWEEP_TABLE))
+            .getClusteringKey()
+            .orElseThrow();
+    assertThat(sweepKey.getIntValue(0)).isEqualTo(SagaSchema.WAITING_WITH_TIMEOUT_SLICE);
+    assertThat(sweepKey.getBigIntValue(1)).isEqualTo(deadline.toEpochMilli());
+    Insert event = Objects.requireNonNull(inserts.get(SagaSchema.EVENTS_TABLE));
+    assertThat(Objects.requireNonNull(event.getColumns().get("state_slice")).getIntValue())
+        .isEqualTo(SagaSchema.WAITING_WITH_TIMEOUT_SLICE);
+    assertThat(Objects.requireNonNull(event.getColumns().get("sweep_at")).getBigIntValue())
+        .isEqualTo(deadline.toEpochMilli());
   }
 
   @Test
-  void park_nullDeadlineGiven_writesNoParkedRow() throws Exception {
+  void park_nullDeadlineGiven_putsTheSweepRowInTheWaitingSlice() throws Exception {
     // Arrange
     Instant now = Instant.now();
     SagaStateSnapshot current =
         new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
-    Result precheckRow = stateRowWithOwner();
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
+    Result sweepRow = mock(Result.class);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(sweepRow));
 
     // Act
     SagaStateSnapshot result = store.park(current, 3, StepEvent.pending(1, "charge"), null);
 
     // Assert
     assertThat(result.getStatus()).isEqualTo(SagaStatus.WAITING);
-    // event insert + state insert only — no parked row
+    // event insert + sweep insert, in the slice without a timeout
     verify(tx, times(2)).insert(any(Insert.class));
+    Insert sweep = Objects.requireNonNull(insertsByTable(tx).get(SagaSchema.SWEEP_TABLE));
+    assertThat(sweep.getClusteringKey().orElseThrow().getIntValue(0))
+        .isEqualTo(SagaStatus.WAITING.getStatusCode());
     verify(tx).commit();
-  }
-
-  @Test
-  void park_subMillisecondStampsGiven_writesBothKeyColumnsAsEpochMillis() throws Exception {
-    // Arrange — sub-millisecond digits on both stamps, which the BIGINT keys drop
-    Instant now = Instant.parse("2026-08-26T12:00:00.123456789Z");
-    Instant deadline = Instant.parse("2026-08-26T12:10:00.987654321Z");
-    ScalarDbSagaStore clockedStore =
-        new ScalarDbSagaStore(
-            txManager,
-            objectMapper,
-            schema,
-            ScalarDbSagaStoreConfig.builder().build(),
-            () -> OWN_APPEND_ID,
-            () -> now);
-    SagaStateSnapshot current =
-        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
-    Result precheckRow = stateRowWithOwner();
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
-
-    // Act
-    clockedStore.park(current, 3, StepEvent.pending(1, "charge"), deadline);
-
-    // Assert
-    ArgumentCaptor<Insert> captor = ArgumentCaptor.forClass(Insert.class);
-    verify(tx, times(3)).insert(captor.capture());
-    Map<String, Key> keysByTable =
-        captor.getAllValues().stream()
-            .collect(
-                Collectors.toMap(
-                    insert -> insert.forTable().orElseThrow(),
-                    insert -> insert.getClusteringKey().orElseThrow()));
-    assertThat(Objects.requireNonNull(keysByTable.get(SagaSchema.STATE_TABLE)).getBigIntValue(1))
-        .isEqualTo(Instant.parse("2026-08-26T12:00:00.123Z").toEpochMilli());
-    assertThat(Objects.requireNonNull(keysByTable.get(SagaSchema.PARKED_TABLE)).getBigIntValue(0))
-        .isEqualTo(Instant.parse("2026-08-26T12:10:00.987Z").toEpochMilli());
   }
 
   @Test
@@ -1197,16 +1209,13 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
-  void resumeParkedStep_parkedRowExists_transitionsToRunningAndDeletesParkedRow() throws Exception {
+  void resumeParkedStep_boundedPark_movesTheSweepRowOutOfTheTimeoutSlice() throws Exception {
     // Arrange
     Instant now = Instant.now();
     SagaStateSnapshot current =
         new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
-    Result precheckRow = stateRowWithOwner();
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
-    Result parkedRow = mock(Result.class);
-    when(parkedRow.getBigInt("parked_deadline")).thenReturn(now.plusSeconds(600).toEpochMilli());
-    when(tx.scan(any(Scan.class))).thenReturn(List.of(parkedRow));
+    Result parkEvent = boundedParkEventRow(now, now.plusSeconds(600));
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(parkEvent));
 
     // Act
     SagaStateSnapshot result =
@@ -1215,26 +1224,21 @@ class ScalarDbSagaStoreTest {
 
     // Assert
     assertThat(result.getStatus()).isEqualTo(SagaStatus.RUNNING);
-    // STEP_COMPLETED event insert + state insert
+    // STEP_COMPLETED event insert + sweep insert; the sweep row leaves the timeout slice
     verify(tx, times(2)).insert(any(Insert.class));
-    // state delete + parked-row delete
-    verify(tx, times(2)).delete(any(Delete.class));
+    assertThat(deletedSweepSlice(tx)).isEqualTo(SagaSchema.WAITING_WITH_TIMEOUT_SLICE);
     verify(tx).commit();
-    // Covers all three transitions out of WAITING: resume, fail and redrive share
-    // transitionParkedStep's body, so one assertion guards the owner on all of them.
-    assertThat(capturedTextColumn(tx, "owner_id")).isEqualTo("engine-1");
   }
 
   @Test
-  void resumeParkedStep_unboundedPark_transitionsToRunningWithoutDeletingRow() throws Exception {
-    // Arrange — an unbounded park (callbackTimeoutMillis=0 and no saga-level timeout) wrote no
-    // saga_parked row, so the resume finds nothing to delete
+  void resumeParkedStep_unboundedPark_movesTheSweepRowOutOfTheWaitingSlice() throws Exception {
+    // Arrange — an unbounded park (callbackTimeoutMillis=0 and no saga-level timeout) sits in the
+    // plain WAITING slice
     Instant now = Instant.now();
     SagaStateSnapshot current =
         new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
-    Result precheckRow = stateRowWithOwner();
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
-    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    Result parkEvent = parkEventRow(now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(parkEvent));
 
     // Act
     SagaStateSnapshot result =
@@ -1243,8 +1247,7 @@ class ScalarDbSagaStoreTest {
     // Assert
     assertThat(result.getStatus()).isEqualTo(SagaStatus.RUNNING);
     verify(tx, times(2)).insert(any(Insert.class));
-    // only the state delete — no parked-row delete
-    verify(tx).delete(any(Delete.class));
+    assertThat(deletedSweepSlice(tx)).isEqualTo(SagaStatus.WAITING.getStatusCode());
     verify(tx).commit();
   }
 
@@ -1263,23 +1266,124 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
+  void resumeParkedStep_sweepRowGone_throwsSagaConcurrentModificationException() throws Exception {
+    // Arrange — the park event matches, but another writer already moved the saga's sweep row
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
+    Result parkEvent = parkEventRow(now);
+    when(tx.get(getOn(SagaSchema.EVENTS_TABLE))).thenReturn(Optional.of(parkEvent));
+    when(tx.get(getOn(SagaSchema.SWEEP_TABLE))).thenReturn(Optional.empty());
+
+    // Act & Assert
+    assertThatThrownBy(
+            () -> store.resumeParkedStep(current, 4, StepEvent.completed(1, "charge", null)))
+        .isInstanceOf(SagaConcurrentModificationException.class);
+    verify(tx, never()).insert(any(Insert.class));
+  }
+
+  @Test
+  void resumeParkedStep_firstSequenceGiven_throwsSagaConcurrentModificationExceptionWithoutReading()
+      throws Exception {
+    // Arrange — no event precedes sequence 0, so no park can
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
+
+    // Act & Assert
+    assertThatThrownBy(
+            () -> store.resumeParkedStep(current, 0, StepEvent.completed(1, "charge", null)))
+        .isInstanceOf(SagaConcurrentModificationException.class);
+    verify(tx, never()).get(any(Get.class));
+  }
+
+  @Test
+  void resumeParkedStep_stepEventBeforeAndSagaMovedOn_throwsSagaConcurrentModificationException()
+      throws Exception {
+    // Arrange — the caller is behind: the saga resumed and later step events filled the log
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
+    Result stepEvent = stepEventRow(3, EventType.STEP_FAILED, now.plusSeconds(1));
+    when(tx.get(getOn(SagaSchema.EVENTS_TABLE))).thenReturn(Optional.of(stepEvent));
+    stubScanner(
+        stepEvent,
+        stateEventRow(2, EventType.STEP_COMPLETED, SagaStatus.RUNNING, now.plusSeconds(1)));
+
+    // Act & Assert
+    assertThatThrownBy(
+            () -> store.resumeParkedStep(current, 4, StepEvent.completed(1, "charge", null)))
+        .isInstanceOf(SagaConcurrentModificationException.class);
+  }
+
+  @Test
+  void resumeParkedStep_stepEventBeforeAndSagaStillParked_throwsNonRetryablePersistenceException()
+      throws Exception {
+    // Arrange — a still-parked saga whose log grew by an event that changed nothing: damage, not a
+    // race, so it must not be reported as one and stall the saga silently
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
+    Result stepEvent = stepEventRow(3, EventType.STEP_FAILED, now);
+    when(tx.get(getOn(SagaSchema.EVENTS_TABLE))).thenReturn(Optional.of(stepEvent));
+    stubScanner(stepEvent, parkEventRow(now));
+
+    // Act & Assert
+    assertThatThrownBy(
+            () -> store.resumeParkedStep(current, 4, StepEvent.completed(1, "charge", null)))
+        .isInstanceOfSatisfying(
+            SagaPersistenceException.class, e -> assertThat(e.isRetryable()).isFalse());
+  }
+
+  @Test
+  void resumeParkedStep_eventBeforeIsNotAPark_throwsSagaConcurrentModificationException()
+      throws Exception {
+    // Arrange — the event before the caller's sequence moved the saga to RUNNING
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
+    Result running = stateEventRow(3, EventType.STEP_COMPLETED, SagaStatus.RUNNING, now);
+    when(tx.get(getOn(SagaSchema.EVENTS_TABLE))).thenReturn(Optional.of(running));
+
+    // Act & Assert
+    assertThatThrownBy(
+            () -> store.resumeParkedStep(current, 4, StepEvent.completed(1, "charge", null)))
+        .isInstanceOf(SagaConcurrentModificationException.class);
+  }
+
+  @Test
+  void resumeParkedStep_parkedAtAnotherTime_throwsSagaConcurrentModificationException()
+      throws Exception {
+    // Arrange — a later park than the one the caller saw: the saga resumed and parked again
+    Instant now = Instant.now();
+    SagaStateSnapshot current =
+        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
+    Result laterPark = parkEventRow(now.plusSeconds(1));
+    when(tx.get(getOn(SagaSchema.EVENTS_TABLE))).thenReturn(Optional.of(laterPark));
+
+    // Act & Assert
+    assertThatThrownBy(
+            () -> store.resumeParkedStep(current, 4, StepEvent.completed(1, "charge", null)))
+        .isInstanceOf(SagaConcurrentModificationException.class);
+  }
+
+  @Test
   void
       resumeParkedStep_commitConflictExhaustedAndNoEventAtSequence_throwsRetryablePersistenceException()
           throws Exception {
-    // Arrange — a callback under sustained contention: the WAITING-CK pre-check keeps finding the
+    // Arrange — a callback under sustained contention: the parked-state pre-check keeps finding the
     // row (we never observe another writer take it) and every commit conflicts, so nothing was
     // written by anyone. This must stay a retryable 503. Reporting a proven collision would have
     // the daemon ack the participant 200 for a step that was never recorded, and an unbounded park
-    // writes no saga_parked row, so nothing would ever re-deliver it.
+    // has no deadline, so nothing would ever re-deliver it.
     Instant now = Instant.now();
     SagaStateSnapshot current =
         new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
     ScalarDbSagaStore singleAttemptStore = singleAttemptStore();
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
-    Result precheckRow = stateRowWithOwner();
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
-    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    Result parkEvent = parkEventRow(now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(parkEvent));
     doThrow(mock(CommitConflictException.class)).when(tx).commit();
     when(verifyTx.get(any(Get.class))).thenReturn(Optional.empty());
 
@@ -1305,9 +1409,8 @@ class ScalarDbSagaStoreTest {
     ScalarDbSagaStore singleAttemptStore = singleAttemptStore();
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
-    Result precheckRow = stateRowWithOwner();
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
-    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    Result parkEvent = parkEventRow(now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(parkEvent));
     doThrow(mock(CommitConflictException.class)).when(tx).commit();
     Result otherWritersEvent = mock(Result.class);
     when(otherWritersEvent.getText("append_id")).thenReturn(OTHER_APPEND_ID);
@@ -1326,7 +1429,8 @@ class ScalarDbSagaStoreTest {
       resumeParkedStep_unknownStatusAndVerifierFindsAnotherWritersEvent_throwsSagaConcurrentModificationException()
           throws Exception {
     // Arrange — the callback's commit returns an unknown status, and a concurrent timeout sweep won
-    // the WAITING CK and wrote its own event at the same sequence. The verifier must NOT mistake
+    // the parked sweep row and wrote its own event at the same sequence. The verifier must NOT
+    // mistake
     // that other writer's row for ours: append_id differs, a proven collision, so it throws
     // SagaConcurrentModificationException at once rather than reporting a retryable failure.
     Instant now = Instant.now();
@@ -1334,10 +1438,9 @@ class ScalarDbSagaStoreTest {
         new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
-    // Attempt 1: the optimistic WAITING-CK check passes, then commit is ambiguous.
-    Result precheckRow = stateRowWithOwner();
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
-    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    // Attempt 1: the optimistic parked-state check passes, then commit is ambiguous.
+    Result parkEvent = parkEventRow(now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(parkEvent));
     doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
     // Verifier: the persisted event at the sequence has another writer's append_id.
     Result otherWritersEvent = mock(Result.class);
@@ -1361,16 +1464,15 @@ class ScalarDbSagaStoreTest {
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     DistributedTransaction loadTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx).thenReturn(loadTx);
-    Result precheckRow = stateRowWithOwner();
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
-    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    Result parkEvent = parkEventRow(now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(parkEvent));
     doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
     // Verifier finds our own event by append_id, then loadStateSnapshot re-reads the state.
     Result ownEvent = mock(Result.class);
     when(ownEvent.getText("append_id")).thenReturn(OWN_APPEND_ID);
     when(verifyTx.get(any(Get.class))).thenReturn(Optional.of(ownEvent));
     Result runningState = mockStateResult("saga-1", SagaStatus.RUNNING);
-    when(loadTx.scan(any(Scan.class))).thenReturn(List.of(runningState));
+    stubStateRead(loadTx, runningState);
 
     // Act
     SagaStateSnapshot result =
@@ -1385,16 +1487,13 @@ class ScalarDbSagaStoreTest {
   // ---------------------------------------------------------------------------
 
   @Test
-  void failParkedStep_toCompensating_transitionsAndDeletesParkedRow() throws Exception {
-    // Arrange — pre-pivot timeout: WAITING -> COMPENSATING, STEP_FAILED, delete the parked row
+  void failParkedStep_toCompensating_movesTheSweepRowOutOfTheTimeoutSlice() throws Exception {
+    // Arrange — pre-pivot timeout: WAITING -> COMPENSATING, STEP_FAILED
     Instant now = Instant.now();
     SagaStateSnapshot current =
         new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
-    Result precheckRow = stateRowWithOwner();
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
-    Result parkedRow = mock(Result.class);
-    when(parkedRow.getBigInt("parked_deadline")).thenReturn(now.plusSeconds(600).toEpochMilli());
-    when(tx.scan(any(Scan.class))).thenReturn(List.of(parkedRow));
+    Result parkEvent = boundedParkEventRow(now, now.plusSeconds(600));
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(parkEvent));
 
     // Act
     SagaStateSnapshot result =
@@ -1403,22 +1502,21 @@ class ScalarDbSagaStoreTest {
 
     // Assert
     assertThat(result.getStatus()).isEqualTo(SagaStatus.COMPENSATING);
-    // STEP_FAILED event insert + state insert
+    // STEP_FAILED event insert + sweep insert; the sweep row leaves the timeout slice
     verify(tx, times(2)).insert(any(Insert.class));
-    // state delete + parked-row delete
-    verify(tx, times(2)).delete(any(Delete.class));
+    assertThat(deletedSweepSlice(tx)).isEqualTo(SagaSchema.WAITING_WITH_TIMEOUT_SLICE);
     verify(tx).commit();
   }
 
   @Test
-  void failParkedStep_toEscalatedUnboundedPark_transitionsWithoutDeletingRow() throws Exception {
-    // Arrange — post-pivot timeout of an unbounded park: WAITING -> ESCALATED, no parked row
+  void failParkedStep_toEscalatedUnboundedPark_movesTheSweepRowOutOfTheWaitingSlice()
+      throws Exception {
+    // Arrange — post-pivot timeout of an unbounded park: WAITING -> ESCALATED
     Instant now = Instant.now();
     SagaStateSnapshot current =
         new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
-    Result precheckRow = stateRowWithOwner();
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
-    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    Result parkEvent = parkEventRow(now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(parkEvent));
 
     // Act
     SagaStateSnapshot result =
@@ -1427,8 +1525,7 @@ class ScalarDbSagaStoreTest {
     // Assert
     assertThat(result.getStatus()).isEqualTo(SagaStatus.ESCALATED);
     verify(tx, times(2)).insert(any(Insert.class));
-    // only the state delete — no parked-row delete
-    verify(tx).delete(any(Delete.class));
+    assertThat(deletedSweepSlice(tx)).isEqualTo(SagaStatus.WAITING.getStatusCode());
     verify(tx).commit();
   }
 
@@ -1449,7 +1546,7 @@ class ScalarDbSagaStoreTest {
 
   @Test
   void failParkedStep_rowNotFound_throwsSagaConcurrentModificationException() throws Exception {
-    // Arrange — a concurrent callback won the WAITING CK
+    // Arrange — a concurrent callback won the parked sweep row
     Instant now = Instant.now();
     SagaStateSnapshot current =
         new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
@@ -1468,7 +1565,8 @@ class ScalarDbSagaStoreTest {
       failParkedStep_unknownStatusAndVerifierFindsAnotherWritersEvent_throwsSagaConcurrentModificationException()
           throws Exception {
     // Symmetric to the resume case: the sweep's commit is ambiguous and a concurrent callback won
-    // the WAITING CK, writing its own event at the sequence. The verifier must not accept that
+    // the parked sweep row, writing its own event at the sequence. The verifier must not accept
+    // that
     // other writer's row (different append_id) as its own — a proven collision, so it throws
     // SagaConcurrentModificationException at once.
     Instant now = Instant.now();
@@ -1476,9 +1574,8 @@ class ScalarDbSagaStoreTest {
         new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
-    Result precheckRow = stateRowWithOwner();
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
-    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    Result parkEvent = parkEventRow(now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(parkEvent));
     doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
     Result otherWritersEvent = mock(Result.class);
     when(otherWritersEvent.getText("append_id")).thenReturn(OTHER_APPEND_ID);
@@ -1497,18 +1594,13 @@ class ScalarDbSagaStoreTest {
   // ---------------------------------------------------------------------------
 
   @Test
-  void redriveParkedStep_parkedRowExists_transitionsToRunningAndDeletesParkedRow()
-      throws Exception {
-    // Arrange — un-park a timed-out step to re-drive it: WAITING -> RUNNING, STEP_REISSUING, clear
-    // the parked row.
+  void redriveParkedStep_boundedPark_movesTheSweepRowOutOfTheTimeoutSlice() throws Exception {
+    // Arrange — un-park a timed-out step to re-drive it: WAITING -> RUNNING, STEP_REISSUING
     Instant now = Instant.now();
     SagaStateSnapshot current =
         new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
-    Result precheckRow = stateRowWithOwner();
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
-    Result parkedRow = mock(Result.class);
-    when(parkedRow.getBigInt("parked_deadline")).thenReturn(now.plusSeconds(600).toEpochMilli());
-    when(tx.scan(any(Scan.class))).thenReturn(List.of(parkedRow));
+    Result parkEvent = boundedParkEventRow(now, now.plusSeconds(600));
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(parkEvent));
 
     // Act
     SagaStateSnapshot result =
@@ -1516,16 +1608,15 @@ class ScalarDbSagaStoreTest {
 
     // Assert
     assertThat(result.getStatus()).isEqualTo(SagaStatus.RUNNING);
-    // STEP_REISSUING event insert + state insert
+    // STEP_REISSUING event insert + sweep insert
     verify(tx, times(2)).insert(any(Insert.class));
-    // state delete + parked-row delete
-    verify(tx, times(2)).delete(any(Delete.class));
+    assertThat(deletedSweepSlice(tx)).isEqualTo(SagaSchema.WAITING_WITH_TIMEOUT_SLICE);
     verify(tx).commit();
   }
 
   @Test
   void redriveParkedStep_rowNotFound_throwsSagaConcurrentModificationException() throws Exception {
-    // Arrange — a concurrent callback / timeout won the WAITING CK
+    // Arrange — a concurrent callback / timeout won the parked sweep row
     Instant now = Instant.now();
     SagaStateSnapshot current =
         new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
@@ -1541,7 +1632,8 @@ class ScalarDbSagaStoreTest {
       redriveParkedStep_unknownStatusAndVerifierFindsAnotherWritersEvent_throwsSagaConcurrentModificationException()
           throws Exception {
     // Arrange — the re-drive's commit returns an unknown status, and a concurrent callback won the
-    // WAITING CK and wrote its own event at the same sequence. The verifier must NOT mistake that
+    // parked sweep row and wrote its own event at the same sequence. The verifier must NOT mistake
+    // that
     // other writer's row (different append_id) for our STEP_REISSUING: a proven collision, so it
     // throws SagaConcurrentModificationException at once rather than reporting a retryable failure.
     Instant now = Instant.now();
@@ -1549,10 +1641,9 @@ class ScalarDbSagaStoreTest {
         new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
-    // Attempt 1: the optimistic WAITING-CK check passes, then commit is ambiguous.
-    Result precheckRow = stateRowWithOwner();
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
-    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    // Attempt 1: the optimistic parked-state check passes, then commit is ambiguous.
+    Result parkEvent = parkEventRow(now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(parkEvent));
     doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
     // Verifier: the persisted event at the sequence has another writer's append_id.
     Result otherWritersEvent = mock(Result.class);
@@ -1575,16 +1666,15 @@ class ScalarDbSagaStoreTest {
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     DistributedTransaction loadTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx).thenReturn(loadTx);
-    Result precheckRow = stateRowWithOwner();
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
-    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    Result parkEvent = parkEventRow(now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(parkEvent));
     doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
     // Verifier finds our own event by append_id, then loadStateSnapshot re-reads the state.
     Result ownEvent = mock(Result.class);
     when(ownEvent.getText("append_id")).thenReturn(OWN_APPEND_ID);
     when(verifyTx.get(any(Get.class))).thenReturn(Optional.of(ownEvent));
     Result runningState = mockStateResult("saga-1", SagaStatus.RUNNING);
-    when(loadTx.scan(any(Scan.class))).thenReturn(List.of(runningState));
+    stubStateRead(loadTx, runningState);
 
     // Act
     SagaStateSnapshot result =
@@ -1616,8 +1706,8 @@ class ScalarDbSagaStoreTest {
     Instant now = Instant.now();
     SagaStateSnapshot current =
         new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
-    Result precheckRow = stateRowWithOwner();
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
+    Result sweepRow = mock(Result.class);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(sweepRow));
 
     // Act
     store.recordStatusEvent(current, 5, StatusEvent.compensating(), "engine-1");
@@ -1632,8 +1722,8 @@ class ScalarDbSagaStoreTest {
     Instant now = Instant.now();
     SagaStateSnapshot current =
         new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
-    Result precheckRow = stateRowWithOwner();
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
+    Result sweepRow = mock(Result.class);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(sweepRow));
 
     // Act
     store.park(current, 3, StepEvent.pending(1, "charge"), null);
@@ -1648,9 +1738,8 @@ class ScalarDbSagaStoreTest {
     Instant now = Instant.now();
     SagaStateSnapshot current =
         new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.WAITING, "v1", now, now);
-    Result precheckRow = stateRowWithOwner();
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
-    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    Result parkEvent = parkEventRow(now);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(parkEvent));
 
     // Act
     store.resumeParkedStep(current, 4, StepEvent.completed(1, "charge", null));
@@ -1806,7 +1895,7 @@ class ScalarDbSagaStoreTest {
   @Test
   void getNewestEvent_noEvents_returnsEmpty() throws Exception {
     // Arrange
-    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    stubScanner();
 
     // Act
     Optional<SagaStore.NewestEvent> newest = store.getNewestEvent("saga-1");
@@ -1816,45 +1905,93 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
-  void getNewestEvent_eventsExist_returnsNewestStamp() throws Exception {
-    // Arrange
-    // The scan is ordered desc on sequence and limited to one row, so the store sees only the
-    // newest event; the test asserts it reports that row's stamp rather than reducing over rows.
+  void getNewestEvent_eventsExist_returnsNewestEventAndItsSequence() throws Exception {
+    // Arrange — a step event newer than the saga's last status change
     Instant newestStamp = Instant.parse("2026-08-25T10:00:00Z");
-    Result newestRow = mock(Result.class);
-    when(newestRow.getTimestampTZ("created_at")).thenReturn(newestStamp);
-    when(newestRow.getText("event_type")).thenReturn("STEP_COMPLETED");
-    when(tx.scan(any(Scan.class))).thenReturn(List.of(newestRow));
+    stubScanner(
+        stepEventRow(3, EventType.STEP_COMPLETED, newestStamp),
+        stateEventRow(2, EventType.SAGA_STARTED, SagaStatus.RUNNING, newestStamp.minusSeconds(1)));
 
     // Act
     Optional<SagaStore.NewestEvent> newest = store.getNewestEvent("saga-1");
 
     // Assert
-    assertThat(newest).map(SagaStore.NewestEvent::createdAt).contains(newestStamp);
-    assertThat(newest).map(SagaStore.NewestEvent::type).contains(EventType.STEP_COMPLETED);
+    Instant updatedAt = newestStamp.minusSeconds(1);
+    SagaStateSnapshot state =
+        new SagaStateSnapshot(
+            "saga-1",
+            "order-saga",
+            SagaStatus.RUNNING,
+            "v1",
+            Instant.parse("2026-01-01T00:00:00Z"),
+            updatedAt);
+    assertThat(newest)
+        .contains(new SagaStore.NewestEvent(EventType.STEP_COMPLETED, newestStamp, 3, null, state));
   }
 
   @Test
-  void getNewestEvent_eventsExist_scansNewestFirstLimitedToOneRow() throws Exception {
-    // Arrange
-    // The ordering and limit are the contract: "newest" means highest sequence, and recovery must
-    // not pay for a full event scan on every probe.
-    Result row = mock(Result.class);
-    when(row.getTimestampTZ("created_at")).thenReturn(Instant.parse("2026-08-25T10:00:00Z"));
-    when(row.getText("event_type")).thenReturn("STEP_COMPLETED");
-    when(tx.scan(any(Scan.class))).thenReturn(List.of(row));
+  void getNewestEvent_eventsExist_scansNewestFirstAndStopsAtTheNewestStateRow() throws Exception {
+    // Arrange — "newest" means highest sequence, and the probe must not read past the saga's state
+    Instant t = Instant.parse("2026-08-25T10:00:00Z");
+    TransactionCrudOperable.Scanner scanner =
+        scannerOver(
+            List.of(
+                stepEventRow(2, EventType.STEP_COMPLETED, t),
+                stateEventRow(1, EventType.SAGA_STARTED, SagaStatus.RUNNING, t),
+                stateEventRow(0, EventType.SAGA_STARTED, SagaStatus.RUNNING, t)));
+    when(tx.getScanner(any(Scan.class))).thenReturn(scanner);
 
     // Act
     store.getNewestEvent("saga-1");
 
     // Assert
     ArgumentCaptor<Scan> captor = ArgumentCaptor.forClass(Scan.class);
-    verify(tx).scan(captor.capture());
-    Scan scan = captor.getValue();
-    assertThat(scan.getLimit()).isEqualTo(1);
-    assertThat(scan.getOrderings()).containsExactly(Scan.Ordering.desc("sequence"));
-    assertThat(scan.getProjections())
-        .containsExactlyInAnyOrder("sequence", "event_type", "created_at");
+    verify(tx).getScanner(captor.capture());
+    assertThat(captor.getValue().getOrderings()).containsExactly(Scan.Ordering.desc("sequence"));
+    verify(scanner, times(2)).one();
+  }
+
+  @Test
+  void getNewestEvent_newestStateRowIsAClaim_reportsWhenItWasClaimed() throws Exception {
+    // Arrange
+    Instant claimedAt = Instant.parse("2026-08-25T10:00:00Z");
+    stubScanner(
+        stepEventRow(4, EventType.STEP_COMPLETED, claimedAt.plusSeconds(1)),
+        stateEventRow(3, EventType.SAGA_CLAIMED, SagaStatus.RUNNING, claimedAt));
+
+    // Act
+    Optional<SagaStore.NewestEvent> newest = store.getNewestEvent("saga-1");
+
+    // Assert
+    assertThat(newest).map(SagaStore.NewestEvent::lastClaimedAt).contains(claimedAt);
+  }
+
+  @Test
+  void getNewestEvent_statusChangedSinceTheClaim_reportsNoClaim() throws Exception {
+    // Arrange — the status change after the claim is the saga's state now
+    Instant t = Instant.parse("2026-08-25T10:00:00Z");
+    stubScanner(
+        stateEventRow(4, EventType.SAGA_COMPENSATING, SagaStatus.COMPENSATING, t),
+        stateEventRow(3, EventType.SAGA_CLAIMED, SagaStatus.RUNNING, t.minusSeconds(1)));
+
+    // Act
+    Optional<SagaStore.NewestEvent> newest = store.getNewestEvent("saga-1");
+
+    // Assert
+    assertThat(newest).isPresent();
+    assertThat(newest.get().lastClaimedAt()).isNull();
+  }
+
+  @Test
+  void getNewestEvent_eventsButNoneCarriesTheState_throwsNonRetryablePersistenceException()
+      throws Exception {
+    // Arrange — the store never writes such a log, so reading one is a deserialization failure
+    stubScanner(stepEventRow(1, EventType.STEP_COMPLETED, Instant.parse("2026-08-25T10:00:00Z")));
+
+    // Act & Assert
+    assertThatThrownBy(() -> store.getNewestEvent("saga-1"))
+        .isInstanceOfSatisfying(
+            SagaPersistenceException.class, e -> assertThat(e.isRetryable()).isFalse());
   }
 
   @Test
@@ -1862,10 +1999,10 @@ class ScalarDbSagaStoreTest {
     // Arrange
     // Unreachable through this store, which stamps created_at on every append. Reporting the epoch
     // keeps the saga claimable: one that cannot report progress must not become unclaimable.
-    Result row = mock(Result.class);
-    when(row.getTimestampTZ("created_at")).thenReturn(null);
-    when(row.getText("event_type")).thenReturn("STEP_COMPLETED");
-    when(tx.scan(any(Scan.class))).thenReturn(List.of(row));
+    Result stampless = stepEventRow(1, EventType.STEP_COMPLETED, Instant.EPOCH);
+    when(stampless.getTimestampTZ("created_at")).thenReturn(null);
+    stubScanner(
+        stampless, stateEventRow(0, EventType.SAGA_STARTED, SagaStatus.RUNNING, Instant.now()));
 
     // Act
     Optional<SagaStore.NewestEvent> newest = store.getNewestEvent("saga-1");
@@ -1880,10 +2017,10 @@ class ScalarDbSagaStoreTest {
     // A rolling upgrade can leave an older replica reading a type only a newer one writes. The
     // probe has to translate it the way the full row mapper does; a raw IllegalArgumentException
     // would escape this method unwrapped, on every pass, for as long as that saga is a candidate.
-    Result row = mock(Result.class);
-    when(row.getTimestampTZ("created_at")).thenReturn(Instant.parse("2026-08-25T10:00:00Z"));
-    when(row.getText("event_type")).thenReturn("A_TYPE_FROM_A_NEWER_VERSION");
-    when(tx.scan(any(Scan.class))).thenReturn(List.of(row));
+    Instant t = Instant.parse("2026-08-25T10:00:00Z");
+    Result newest = stepEventRow(1, EventType.STEP_COMPLETED, t);
+    when(newest.getText("event_type")).thenReturn("A_TYPE_FROM_A_NEWER_VERSION");
+    stubScanner(newest, stateEventRow(0, EventType.SAGA_STARTED, SagaStatus.RUNNING, t));
 
     // Act & Assert — an unreadable stored event is a permanent failure: not retryable.
     assertThatThrownBy(() -> store.getNewestEvent("saga-1"))
@@ -1894,7 +2031,7 @@ class ScalarDbSagaStoreTest {
   @Test
   void getNewestEvent_storageFailureGiven_throwsSagaPersistenceException() throws Exception {
     // Arrange
-    when(tx.scan(any(Scan.class))).thenThrow(mock(CrudException.class));
+    when(tx.getScanner(any(Scan.class))).thenThrow(mock(CrudException.class));
 
     // Act & Assert
     assertThatThrownBy(() -> store.getNewestEvent("saga-1"))
@@ -1906,61 +2043,50 @@ class ScalarDbSagaStoreTest {
   // ---------------------------------------------------------------------------
 
   @Test
-  void getStateSnapshot_existsInDb_returnsSnapshot() throws Exception {
-    // Arrange
-    Result result = mockStateResult("saga-1", SagaStatus.RUNNING);
-    when(tx.scan(any(Scan.class))).thenReturn(List.of(result));
+  void getStateSnapshot_existsInDb_returnsTheNewestStateRowAsTheSnapshot() throws Exception {
+    // Arrange — a step event sits above the saga's last status change
+    Instant updatedAt = Instant.parse("2026-01-02T00:00:00Z");
+    stubScanner(
+        stepEventRow(1, EventType.STEP_COMPLETED, updatedAt.plusSeconds(1)),
+        stateEventRow(0, EventType.SAGA_STARTED, SagaStatus.RUNNING, updatedAt));
 
     // Act
     Optional<SagaStateSnapshot> snapshot = store.getStateSnapshot("saga-1");
 
     // Assert
-    assertThat(snapshot).isPresent();
-    SagaStateSnapshot s = snapshot.get();
-    assertThat(s.getSagaId()).isEqualTo("saga-1");
-    assertThat(s.getSagaName()).isEqualTo("order-saga");
-    assertThat(s.getStatus()).isEqualTo(SagaStatus.RUNNING);
-    assertThat(s.getDefinitionVersion()).isEqualTo("v1");
-    assertThat(s.getCreatedAt()).isEqualTo(Instant.parse("2026-01-01T00:00:00Z"));
-    assertThat(s.getUpdatedAt()).isEqualTo(Instant.parse("2026-01-01T00:00:00Z"));
+    assertThat(snapshot)
+        .contains(
+            new SagaStateSnapshot(
+                "saga-1",
+                "order-saga",
+                SagaStatus.RUNNING,
+                "v1",
+                Instant.parse("2026-01-01T00:00:00Z"),
+                updatedAt));
   }
 
   @Test
-  void getStateSnapshot_statusAndUpdatedAtGiven_readsTheRowByItsFullKeyNotTheIndex()
+  void getStateSnapshot_parkedWithTimeout_readsUpdatedAtFromTheEventNotTheDeadline()
       throws Exception {
-    // Arrange
-    Instant updatedAt = Instant.parse("2026-01-01T00:00:00Z");
-    Result result = mockStateResult("saga-1", SagaStatus.WAITING, updatedAt);
-    ArgumentCaptor<Get> captor = ArgumentCaptor.forClass(Get.class);
-    when(tx.get(captor.capture())).thenReturn(Optional.of(result));
+    // Arrange — in the timeout slice sweep_at is the deadline; the park time is the event's own
+    Instant parkedAt = Instant.parse("2026-01-02T00:00:00Z");
+    Result row = stateEventRow(2, EventType.STEP_PENDING, SagaStatus.WAITING, parkedAt);
+    when(row.getInt("state_slice")).thenReturn(SagaSchema.WAITING_WITH_TIMEOUT_SLICE);
+    lenient().when(row.getBigInt("sweep_at")).thenReturn(parkedAt.plusSeconds(600).toEpochMilli());
+    stubScanner(row);
 
     // Act
-    Optional<SagaStateSnapshot> snapshot =
-        store.getStateSnapshot("saga-1", SagaStatus.WAITING, updatedAt);
-
-    // Assert — a primary-key Get on (bucket, status, updated_at, saga_id), never an index scan
-    assertThat(snapshot).map(SagaStateSnapshot::getStatus).contains(SagaStatus.WAITING);
-    assertThat(captor.getValue().getClusteringKey()).isPresent();
-    verify(tx, never()).scan(any(Scan.class));
-  }
-
-  @Test
-  void getStateSnapshot_rowNotAtThatStatusAndUpdatedAt_returnsEmpty() throws Exception {
-    // Arrange
-    when(tx.get(any(Get.class))).thenReturn(Optional.empty());
-
-    // Act
-    Optional<SagaStateSnapshot> snapshot =
-        store.getStateSnapshot("saga-1", SagaStatus.WAITING, Instant.EPOCH);
+    Optional<SagaStateSnapshot> snapshot = store.getStateSnapshot("saga-1");
 
     // Assert
-    assertThat(snapshot).isEmpty();
+    assertThat(snapshot).map(SagaStateSnapshot::getStatus).contains(SagaStatus.WAITING);
+    assertThat(snapshot).map(SagaStateSnapshot::getUpdatedAt).contains(parkedAt);
   }
 
   @Test
   void getStateSnapshot_notFound_returnsEmpty() throws Exception {
     // Arrange
-    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    stubScanner();
 
     // Act
     Optional<SagaStateSnapshot> snapshot = store.getStateSnapshot("unknown");
@@ -2030,8 +2156,8 @@ class ScalarDbSagaStoreTest {
 
   @Test
   void findRecoverable_bothStatuses_returnsResultsFromAllScans() throws Exception {
-    // Arrange — recovery scans RUNNING and COMPENSATING per bucket (WAITING is timed out via the
-    // saga_parked index, not the staleness scan); each returns one result
+    // Arrange — recovery scans RUNNING and COMPENSATING per bucket (WAITING is timed out via its
+    // own sweep slice, not the staleness scan); each returns one result
     Result running = mockStateResult("saga-running", SagaStatus.RUNNING);
     Result compensating = mockStateResult("saga-compensating", SagaStatus.COMPENSATING);
     when(tx.scan(any(Scan.class))).thenReturn(List.of(running)).thenReturn(List.of(compensating));
@@ -2173,159 +2299,247 @@ class ScalarDbSagaStoreTest {
   // ---------------------------------------------------------------------------
 
   @Test
-  void claimForRecovery_validSagaGiven_returnsClaimedSnapshot() throws Exception {
-    // Arrange
-    Instant now = Instant.now();
+  void claimForRecovery_stillScheduledSaga_appendsAClaimAfterTheProbedEventOnly() throws Exception {
+    // Arrange — a stale saga keeps its sweep key; the claim is recorded in its log
+    Instant updatedAt = Instant.parse("2026-01-02T00:00:00Z");
     SagaStateSnapshot saga =
-        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
-    Result currentRow = mock(Result.class);
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(currentRow));
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.RUNNING, "v1", updatedAt, updatedAt);
 
     // Act
-    Optional<SagaStateSnapshot> claimed = store.claimForRecovery(saga, "new-owner");
+    Optional<SagaStateSnapshot> claimed =
+        store.claimForRecovery(saga, probeAt(6, saga), "engine-2");
 
     // Assert
-    assertThat(claimed).isPresent();
-    verify(tx).delete(any(Delete.class));
+    assertThat(claimed).contains(saga);
+    verify(tx, never()).get(any(Get.class));
+    verify(tx, never()).delete(any(Delete.class));
+    Insert event = Objects.requireNonNull(insertsByTable(tx).get(SagaSchema.EVENTS_TABLE));
+    assertThat(event.getClusteringKey().orElseThrow().getIntValue(0)).isEqualTo(7);
+    assertThat(Objects.requireNonNull(event.getColumns().get("event_type")).getTextValue())
+        .isEqualTo(EventType.SAGA_CLAIMED.name());
     verify(tx).commit();
-    // Taking the claim is precisely a change of owner, so this is the assertion that matters. It
-    // reads the state row's column, which is where the owner lives now.
-    assertThat(capturedTextColumn(tx, "owner_id")).isEqualTo("new-owner");
   }
 
   @Test
-  void claimForRecovery_unknownStatusAndRowNowOwnedByUs_returnsTheClaimedSnapshot()
+  void claimForRecovery_statusChangedBetweenTheSweepAndTheProbe_returnsEmptyWithoutWriting()
       throws Exception {
-    // The claim's commit is in doubt, so loadStateClaimedBy decides it by reading owner_id off the
-    // row. Ours means the claim landed and the caller may drive the saga.
-    // Arrange
-    ScalarDbSagaStore singleAttemptStore = singleAttemptStore();
-    Instant now = Instant.now();
+    // Arrange — the sweep saw RUNNING; by the probe the saga was compensating. Claiming would
+    // record
+    // the sweep's stale RUNNING state after the probed event.
+    Instant updatedAt = Instant.parse("2026-01-02T00:00:00Z");
     SagaStateSnapshot saga =
-        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
-    Result precheckRow = stateRowWithOwner();
-    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
-    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
-    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
-    Result claimedRow = mockStateResult("saga-1", SagaStatus.RUNNING);
-    when(claimedRow.getText("owner_id")).thenReturn("new-owner");
-    when(verifyTx.scan(any(Scan.class))).thenReturn(List.of(claimedRow));
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.RUNNING, "v1", updatedAt, updatedAt);
+    SagaStateSnapshot probed = saga.withTransition(SagaStatus.COMPENSATING, updatedAt);
 
     // Act
-    Optional<SagaStateSnapshot> claimed = singleAttemptStore.claimForRecovery(saga, "new-owner");
-
-    // Assert
-    assertThat(claimed).isPresent();
-  }
-
-  @Test
-  void claimForRecovery_unknownStatusAndRowOwnedByAnotherReplica_doesNotConfirmTheClaim()
-      throws Exception {
-    // The same in-doubt commit, but the row carries another replica's owner: our claim did not
-    // land, and the verifier must not hand back a row we do not own. Reporting the unresolved
-    // commit is right; silently confirming it would let two replicas drive one saga.
-    // Arrange
-    ScalarDbSagaStore singleAttemptStore = singleAttemptStore();
-    Instant now = Instant.now();
-    SagaStateSnapshot saga =
-        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
-    Result precheckRow = stateRowWithOwner();
-    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
-    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
-    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
-    Result foreignRow = mockStateResult("saga-1", SagaStatus.RUNNING);
-    when(foreignRow.getText("owner_id")).thenReturn("another-replica");
-    when(verifyTx.scan(any(Scan.class))).thenReturn(List.of(foreignRow));
-
-    // Act & Assert
-    assertThatThrownBy(() -> singleAttemptStore.claimForRecovery(saga, "new-owner"))
-        .isInstanceOf(SagaPersistenceException.class);
-  }
-
-  @Test
-  void claimForRecovery_rowNotFound_returnsEmpty() throws Exception {
-    // Arrange
-    Instant now = Instant.now();
-    SagaStateSnapshot saga =
-        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
-    when(tx.get(any(Get.class))).thenReturn(Optional.empty());
-
-    // Act
-    Optional<SagaStateSnapshot> claimed = store.claimForRecovery(saga, "new-owner");
+    Optional<SagaStateSnapshot> claimed = store.claimForRecovery(saga, probeAt(6, probed), "e-2");
 
     // Assert
     assertThat(claimed).isEmpty();
+    verify(txManager, never()).begin();
   }
 
   @Test
-  void claimForRecovery_commitConflictThenRowGone_returnsEmpty() throws Exception {
-    // Arrange — commit conflict on first attempt; retry finds row gone (other replica claimed)
-    Instant now = Instant.now();
+  void claimForRecovery_updatedSinceTheSweep_returnsEmptyWithoutWriting() throws Exception {
+    // Arrange — same status, but a later status change than the one the sweep saw
+    Instant updatedAt = Instant.parse("2026-01-02T00:00:00Z");
     SagaStateSnapshot saga =
-        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
-
-    DistributedTransaction tx2 = mock(DistributedTransaction.class);
-    when(txManager.begin()).thenReturn(tx, tx2);
-
-    // First attempt: row exists but commit fails
-    Result precheckRow = stateRowWithOwner();
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(precheckRow));
-    doThrow(mock(CommitConflictException.class)).when(tx).commit();
-
-    // Retry: row is gone (other replica claimed it)
-    when(tx2.get(any(Get.class))).thenReturn(Optional.empty());
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.RUNNING, "v1", updatedAt, updatedAt);
+    SagaStateSnapshot probed = saga.withTransition(SagaStatus.RUNNING, updatedAt.plusSeconds(1));
 
     // Act
-    Optional<SagaStateSnapshot> claimed = store.claimForRecovery(saga, "new-owner");
+    Optional<SagaStateSnapshot> claimed = store.claimForRecovery(saga, probeAt(6, probed), "e-2");
 
-    // Assert — returns empty because row was claimed by another replica
+    // Assert
+    assertThat(claimed).isEmpty();
+    verify(txManager, never()).begin();
+  }
+
+  @Test
+  void claimForRecovery_handedOffSaga_movesTheSweepRowOffEpoch() throws Exception {
+    // Arrange — a hand-off parked the sweep key at EPOCH; the claim gives it a real time again
+    SagaStateSnapshot saga =
+        new SagaStateSnapshot(
+            "saga-1",
+            "order-saga",
+            SagaStatus.COMPENSATING,
+            "v1",
+            Instant.parse("2026-01-01T00:00:00Z"),
+            Instant.EPOCH);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
+
+    // Act
+    Optional<SagaStateSnapshot> claimed =
+        store.claimForRecovery(saga, probeAt(6, saga), "engine-2");
+
+    // Assert
+    assertThat(claimed).map(SagaStateSnapshot::getUpdatedAt).get().isNotEqualTo(Instant.EPOCH);
+    assertThat(deletedSweepSlice(tx)).isEqualTo(SagaStatus.COMPENSATING.getStatusCode());
+    Insert sweep = Objects.requireNonNull(insertsByTable(tx).get(SagaSchema.SWEEP_TABLE));
+    assertThat(sweep.getClusteringKey().orElseThrow().getBigIntValue(1)).isPositive();
+  }
+
+  @Test
+  void claimForRecovery_handedOffSagaWhoseSweepRowMoved_returnsEmpty() throws Exception {
+    // Arrange — another replica claimed it first and moved the row
+    SagaStateSnapshot saga =
+        new SagaStateSnapshot(
+            "saga-1",
+            "order-saga",
+            SagaStatus.RUNNING,
+            "v1",
+            Instant.parse("2026-01-01T00:00:00Z"),
+            Instant.EPOCH);
+    when(tx.get(any(Get.class))).thenReturn(Optional.empty());
+
+    // Act
+    Optional<SagaStateSnapshot> claimed =
+        store.claimForRecovery(saga, probeAt(6, saga), "engine-2");
+
+    // Assert
+    assertThat(claimed).isEmpty();
+    verify(tx, never()).insert(any(Insert.class));
+  }
+
+  @Test
+  void claimForRecovery_commitConflict_returnsEmptyWithoutRetrying() throws Exception {
+    // Arrange — another writer appended after the probe: the claim lost, and retrying it would
+    // only claim on a view that is already stale
+    Instant updatedAt = Instant.parse("2026-01-02T00:00:00Z");
+    SagaStateSnapshot saga =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.RUNNING, "v1", updatedAt, updatedAt);
+    doThrow(mock(CommitConflictException.class)).when(tx).commit();
+
+    // Act
+    Optional<SagaStateSnapshot> claimed =
+        store.claimForRecovery(saga, probeAt(6, saga), "engine-2");
+
+    // Assert
+    assertThat(claimed).isEmpty();
+    verify(txManager).begin();
+  }
+
+  @Test
+  void claimForRecovery_crudConflict_returnsEmpty() throws Exception {
+    // Arrange
+    Instant updatedAt = Instant.parse("2026-01-02T00:00:00Z");
+    SagaStateSnapshot saga =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.RUNNING, "v1", updatedAt, updatedAt);
+    doThrow(mock(CrudConflictException.class)).when(tx).insert(any(Insert.class));
+
+    // Act
+    Optional<SagaStateSnapshot> claimed =
+        store.claimForRecovery(saga, probeAt(6, saga), "engine-2");
+
+    // Assert
     assertThat(claimed).isEmpty();
   }
 
   @Test
   void claimForRecovery_storageFailureGiven_throwsSagaPersistenceException() throws Exception {
     // Arrange
-    Instant now = Instant.now();
+    Instant updatedAt = Instant.parse("2026-01-02T00:00:00Z");
     SagaStateSnapshot saga =
-        new SagaStateSnapshot("saga-1", "order-saga", SagaStatus.RUNNING, "v1", now, now);
-    when(tx.get(any(Get.class))).thenThrow(mock(CrudException.class));
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.RUNNING, "v1", updatedAt, updatedAt);
+    doThrow(mock(CrudException.class)).when(tx).insert(any(Insert.class));
 
     // Act & Assert
-    assertThatThrownBy(() -> store.claimForRecovery(saga, "new-owner"))
+    assertThatThrownBy(() -> store.claimForRecovery(saga, probeAt(6, saga), "engine-2"))
         .isInstanceOf(SagaPersistenceException.class);
   }
 
   @Test
-  void claimForRecovery_withPinnedNowSupplier_stampsClaimWithSuppliedTime() throws Exception {
-    // Arrange — the store's injected time source is pinned to a future instant. The claim stamp
-    // must come from it, not from wall time: tests that pin the manager's clock rely on row
-    // timestamps staying on the same timeline, or a just-claimed saga instantly looks stale
-    // again to a fast-forwarded staleness scan.
-    Instant pinned = Instant.parse("2030-06-01T00:00:00Z");
-    ScalarDbSagaStore pinnedStore =
-        new ScalarDbSagaStore(
-            txManager,
-            objectMapper,
-            schema,
-            ScalarDbSagaStoreConfig.builder().build(),
-            () -> OWN_APPEND_ID,
-            () -> pinned);
-    Instant createdAt = Instant.parse("2026-01-01T00:00:00Z");
+  void claimForRecovery_unknownStatusAndOwnClaimLanded_returnsTheClaim() throws Exception {
+    // Arrange — the claim's commit is in doubt; its own append id at the claimed sequence proves it
+    // landed, so the caller may drive the saga
+    Instant updatedAt = Instant.parse("2026-01-02T00:00:00Z");
     SagaStateSnapshot saga =
         new SagaStateSnapshot(
-            "saga-1", "order-saga", SagaStatus.RUNNING, "v1", createdAt, createdAt);
-    Result currentRow = mock(Result.class);
-    when(tx.get(any(Get.class))).thenReturn(Optional.of(currentRow));
+            "saga-1", "order-saga", SagaStatus.RUNNING, "v1", updatedAt, updatedAt);
+    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    Result ownClaim = mock(Result.class);
+    when(ownClaim.getText("append_id")).thenReturn(OWN_APPEND_ID);
+    when(verifyTx.get(any(Get.class))).thenReturn(Optional.of(ownClaim));
 
     // Act
-    Optional<SagaStateSnapshot> claimed = pinnedStore.claimForRecovery(saga, "new-owner");
+    Optional<SagaStateSnapshot> claimed =
+        singleAttemptStore().claimForRecovery(saga, probeAt(6, saga), "engine-2");
 
-    // Assert — the claimed snapshot, from which the new state row is built, carries the supplied
-    // time; a raw Instant.now() in the claim path would stamp wall time and fail this
-    assertThat(claimed).isPresent();
-    assertThat(claimed.get().getUpdatedAt()).isEqualTo(pinned);
+    // Assert
+    assertThat(claimed).contains(saga);
+  }
+
+  @Test
+  void claimForRecovery_unknownStatusAndAnotherWritersEventAtTheSequence_returnsEmpty()
+      throws Exception {
+    // Arrange — the commit is in doubt and another writer's event holds the claimed sequence: a
+    // lost race, so the caller must not drive the saga
+    Instant updatedAt = Instant.parse("2026-01-02T00:00:00Z");
+    SagaStateSnapshot saga =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.RUNNING, "v1", updatedAt, updatedAt);
+    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    Result otherWritersEvent = mock(Result.class);
+    when(otherWritersEvent.getText("append_id")).thenReturn(OTHER_APPEND_ID);
+    when(verifyTx.get(any(Get.class))).thenReturn(Optional.of(otherWritersEvent));
+
+    // Act
+    Optional<SagaStateSnapshot> claimed =
+        singleAttemptStore().claimForRecovery(saga, probeAt(6, saga), "engine-2");
+
+    // Assert
+    assertThat(claimed).isEmpty();
+  }
+
+  @Test
+  void claimForRecovery_unknownStatusAndNothingLanded_throwsRetryablePersistenceException()
+      throws Exception {
+    // Arrange — the commit is in doubt and nothing sits at the claimed sequence: the claim did not
+    // land, and with the attempts spent the outcome is reported, not guessed
+    Instant updatedAt = Instant.parse("2026-01-02T00:00:00Z");
+    SagaStateSnapshot saga =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.RUNNING, "v1", updatedAt, updatedAt);
+    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    when(verifyTx.get(any(Get.class))).thenReturn(Optional.empty());
+
+    // Act & Assert
+    assertThatThrownBy(
+            () -> singleAttemptStore().claimForRecovery(saga, probeAt(6, saga), "engine-2"))
+        .isInstanceOfSatisfying(
+            SagaPersistenceException.class, e -> assertThat(e.isRetryable()).isTrue());
+  }
+
+  @Test
+  void claimForRecovery_parkedSagaGiven_throwsIllegalArgumentException() throws Exception {
+    // Arrange — a parked saga is timed out by its own sweep, never claimed
+    Instant updatedAt = Instant.parse("2026-01-02T00:00:00Z");
+    SagaStateSnapshot saga =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.WAITING, "v1", updatedAt, updatedAt);
+
+    // Act & Assert
+    assertThatThrownBy(() -> store.claimForRecovery(saga, probeAt(6, saga), "engine-2"))
+        .isInstanceOf(IllegalArgumentException.class);
+    verify(txManager, never()).begin();
+  }
+
+  /** A recovery probe that found {@code sequence} as the newest event and {@code state} current. */
+  private static SagaStore.NewestEvent probeAt(int sequence, SagaStateSnapshot state) {
+    return new SagaStore.NewestEvent(
+        EventType.STEP_COMPLETED, Instant.parse("2026-01-02T00:00:00Z"), sequence, null, state);
   }
 
   // ---------------------------------------------------------------------------
@@ -2333,27 +2547,47 @@ class ScalarDbSagaStoreTest {
   // ---------------------------------------------------------------------------
 
   @Test
-  void markForRecovery_existingSaga_deletesAndReinserts() throws Exception {
+  void markForRecovery_runningSaga_appendsAReleaseAndMovesTheSweepRowToEpoch() throws Exception {
     // Arrange
-    Result r = mockStateResult("saga-1", SagaStatus.RUNNING);
-    when(tx.scan(any(Scan.class))).thenReturn(List.of(r));
+    stubScanner(
+        stateEventRow(
+            2, EventType.SAGA_CLAIMED, SagaStatus.RUNNING, Instant.parse("2026-01-02T00:00:00Z")));
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class)));
 
     // Act
     store.markForRecovery("saga-1");
 
     // Assert
     verify(tx).delete(any(Delete.class));
-    verify(tx).insert(any(Insert.class));
     verify(tx).commit();
-    // Re-stamping the scan key to EPOCH must not disturb the owner, which this path also reads off
-    // the row rather than from a parameter.
-    assertThat(capturedTextColumn(tx, "owner_id")).isEqualTo("engine-1");
+    Map<String, Insert> inserts = insertsByTable(tx);
+    Insert event = Objects.requireNonNull(inserts.get(SagaSchema.EVENTS_TABLE));
+    assertThat(event.getClusteringKey().orElseThrow().getIntValue(0)).isEqualTo(3);
+    assertThat(Objects.requireNonNull(event.getColumns().get("event_type")).getTextValue())
+        .isEqualTo(EventType.SAGA_RELEASED.name());
+    Insert sweep = Objects.requireNonNull(inserts.get(SagaSchema.SWEEP_TABLE));
+    assertThat(sweep.getClusteringKey().orElseThrow().getBigIntValue(1)).isZero();
+  }
+
+  @Test
+  void markForRecovery_parkedSaga_writesNothing() throws Exception {
+    // Arrange — only a saga being driven needs handing over
+    stubScanner(
+        stateEventRow(
+            2, EventType.STEP_PENDING, SagaStatus.WAITING, Instant.parse("2026-01-02T00:00:00Z")));
+
+    // Act
+    store.markForRecovery("saga-1");
+
+    // Assert
+    verify(tx, never()).insert(any(Insert.class));
+    verify(tx, never()).delete(any(Delete.class));
   }
 
   @Test
   void markForRecovery_noSaga_commitsWithoutModification() throws Exception {
     // Arrange
-    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    stubScanner();
 
     // Act
     store.markForRecovery("saga-1");
@@ -2366,7 +2600,7 @@ class ScalarDbSagaStoreTest {
   @Test
   void markForRecovery_transactionFails_doesNotThrow() throws Exception {
     // Arrange — markForRecovery is best-effort
-    when(tx.scan(any(Scan.class))).thenThrow(new RuntimeException("db error"));
+    when(tx.getScanner(any(Scan.class))).thenThrow(new RuntimeException("db error"));
 
     // Act — should not throw
     store.markForRecovery("saga-1");
@@ -2375,71 +2609,6 @@ class ScalarDbSagaStoreTest {
   // ---------------------------------------------------------------------------
   // deleteSaga
   // ---------------------------------------------------------------------------
-
-  @Test
-  void deleteSaga_completedSaga_deletesStateAndEvents() throws Exception {
-    // Arrange
-    Result stateRow = mockStateResult("saga-1", SagaStatus.COMPLETED);
-    Result eventRow1 = mockEventRow(0);
-    Result eventRow2 = mockEventRow(1);
-    when(tx.scan(scanForTable(SagaSchema.STATE_TABLE))).thenReturn(List.of(stateRow));
-    when(tx.scan(scanForTable(SagaSchema.EVENTS_TABLE))).thenReturn(List.of(eventRow1, eventRow2));
-
-    // Act
-    boolean deleted = store.deleteSaga("saga-1");
-
-    // Assert
-    assertThat(deleted).isTrue();
-    verify(tx, times(3)).delete(any(Delete.class)); // 1 state row + 2 event rows
-    verify(tx).commit();
-  }
-
-  @Test
-  void deleteSaga_alreadyPurgedSaga_returnsFalseWithoutDeleting() throws Exception {
-    // Arrange — no state row and no events remain (another replica already purged the saga)
-    when(tx.scan(scanForTable(SagaSchema.STATE_TABLE))).thenReturn(List.of());
-    when(tx.scan(scanForTable(SagaSchema.EVENTS_TABLE))).thenReturn(List.of());
-
-    // Act
-    boolean deleted = store.deleteSaga("saga-1");
-
-    // Assert — reported as a no-op so budgeting callers can tell it from a real purge
-    assertThat(deleted).isFalse();
-    verify(tx, never()).delete(any(Delete.class));
-    verify(tx).commit();
-  }
-
-  @Test
-  void deleteSaga_compensatedSaga_deletesStateAndEvents() throws Exception {
-    // Arrange
-    Result stateRow = mockStateResult("saga-1", SagaStatus.COMPENSATED);
-    Result eventRow1 = mockEventRow(0);
-    when(tx.scan(scanForTable(SagaSchema.STATE_TABLE))).thenReturn(List.of(stateRow));
-    when(tx.scan(scanForTable(SagaSchema.EVENTS_TABLE))).thenReturn(List.of(eventRow1));
-
-    // Act
-    store.deleteSaga("saga-1");
-
-    // Assert
-    verify(tx, times(2)).delete(any(Delete.class)); // 1 state row + 1 event row
-    verify(tx).commit();
-  }
-
-  @Test
-  void deleteSaga_escalatedSaga_deletesStateAndEvents() throws Exception {
-    // Arrange
-    Result stateRow = mockStateResult("saga-1", SagaStatus.ESCALATED);
-    Result eventRow1 = mockEventRow(0);
-    when(tx.scan(scanForTable(SagaSchema.STATE_TABLE))).thenReturn(List.of(stateRow));
-    when(tx.scan(scanForTable(SagaSchema.EVENTS_TABLE))).thenReturn(List.of(eventRow1));
-
-    // Act
-    store.deleteSaga("saga-1");
-
-    // Assert
-    verify(tx, times(2)).delete(any(Delete.class)); // 1 state row + 1 event row
-    verify(tx).commit();
-  }
 
   @Test
   void deleteSaga_runningSaga_throwsIllegalStateException() throws Exception {
@@ -2462,6 +2631,63 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
+  void deleteSaga_unknownCommitAfterSagaAlreadyPurged_returnsFalse() throws Exception {
+    // Arrange — no events remain (another replica already purged the saga) and the resulting no-op
+    // transaction's commit status is unknown. This call deleted nothing, so budgeting callers must
+    // not be told a purge happened.
+    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+
+    // Act
+    boolean deleted = store.deleteSaga("saga-1");
+
+    // Assert — decided from the attempt's own evidence, without another read
+    assertThat(deleted).isFalse();
+    verify(txManager, times(1)).begin();
+  }
+
+  @Test
+  void deleteSaga_unknownCommitAndSagaGone_returnsTrue() throws Exception {
+    // Arrange — the attempt saw and deleted the saga, but the commit status is unknown; the
+    // verifier's fresh read finds no events, proving the delete (or an equivalent) landed
+    Result stateRow = mockStateResult("saga-1", SagaStatus.COMPLETED);
+    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(stateRow));
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    TransactionCrudOperable.Scanner empty = scannerOver(List.of());
+    when(verifyTx.getScanner(any(Scan.class))).thenReturn(empty);
+
+    // Act
+    boolean deleted = store.deleteSaga("saga-1");
+
+    // Assert
+    assertThat(deleted).isTrue();
+  }
+
+  @Test
+  void deleteSaga_unknownCommitAndSagaStillPresent_retriesAndDeletes() throws Exception {
+    // Arrange — the attempt's unknown-status commit did not land (the verifier still finds the
+    // saga), so the whole transaction is retried, and the retry deletes it and commits cleanly
+    Result stateRow = mockStateResult("saga-1", SagaStatus.COMPLETED);
+    DistributedTransaction verifyTx = mock(DistributedTransaction.class);
+    DistributedTransaction retryTx = mock(DistributedTransaction.class);
+    when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx).thenReturn(retryTx);
+    when(tx.scan(any(Scan.class))).thenReturn(List.of(stateRow));
+    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
+    TransactionCrudOperable.Scanner stillThere = scannerOver(List.of(stateRow));
+    when(verifyTx.getScanner(any(Scan.class))).thenReturn(stillThere);
+    when(retryTx.scan(any(Scan.class))).thenReturn(List.of(stateRow));
+
+    // Act
+    boolean deleted = store.deleteSaga("saga-1");
+
+    // Assert
+    assertThat(deleted).isTrue();
+    verify(retryTx).commit();
+  }
+
+  @Test
   void deleteSaga_transactionFails_throwsSagaPersistenceException() throws Exception {
     // Arrange
     when(tx.scan(any(Scan.class))).thenThrow(mock(CrudException.class));
@@ -2469,67 +2695,6 @@ class ScalarDbSagaStoreTest {
     // Act & Assert
     assertThatThrownBy(() -> store.deleteSaga("saga-1"))
         .isInstanceOf(SagaPersistenceException.class);
-  }
-
-  @Test
-  void deleteSaga_unknownCommitAfterSagaAlreadyPurged_returnsFalse() throws Exception {
-    // Arrange — no state row remains (another replica already purged the saga) and the resulting
-    // no-op transaction's commit status is unknown. The verifier must not mistake "row already
-    // gone before this call" for "our delete landed": this call deleted nothing, so budgeting
-    // callers must not be told a purge happened.
-    when(tx.scan(scanForTable(SagaSchema.STATE_TABLE))).thenReturn(List.of());
-    when(tx.scan(scanForTable(SagaSchema.EVENTS_TABLE))).thenReturn(List.of());
-    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
-
-    // Act
-    boolean deleted = store.deleteSaga("saga-1");
-
-    // Assert — reported as a no-op, decided from the attempt's own evidence without another read
-    assertThat(deleted).isFalse();
-    verify(txManager, times(1)).begin();
-  }
-
-  @Test
-  void deleteSaga_unknownCommitAndStateRowGone_returnsTrue() throws Exception {
-    // Arrange — the attempt saw and deleted the state row, but the commit status is unknown; the
-    // verifier's fresh read finds the row gone, proving the delete (or an equivalent) landed.
-    Result stateRow = mockStateResult("saga-1", SagaStatus.COMPLETED);
-    DistributedTransaction txVerify = mock(DistributedTransaction.class);
-    when(txManager.begin()).thenReturn(tx).thenReturn(txVerify);
-    when(tx.scan(scanForTable(SagaSchema.STATE_TABLE))).thenReturn(List.of(stateRow));
-    when(tx.scan(scanForTable(SagaSchema.EVENTS_TABLE))).thenReturn(List.of());
-    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
-    when(txVerify.scan(any(Scan.class))).thenReturn(List.of());
-
-    // Act
-    boolean deleted = store.deleteSaga("saga-1");
-
-    // Assert
-    assertThat(deleted).isTrue();
-  }
-
-  @Test
-  void deleteSaga_unknownCommitAndStateRowStillPresent_retriesAndDeletes() throws Exception {
-    // Arrange — the attempt saw the state row but its unknown-status commit did not land (the
-    // verifier's read still finds the row), so the whole transaction is retried; the retry
-    // deletes the row and commits cleanly.
-    Result stateRow = mockStateResult("saga-1", SagaStatus.COMPLETED);
-    DistributedTransaction txVerify = mock(DistributedTransaction.class);
-    DistributedTransaction txRetry = mock(DistributedTransaction.class);
-    when(txManager.begin()).thenReturn(tx).thenReturn(txVerify).thenReturn(txRetry);
-    when(tx.scan(scanForTable(SagaSchema.STATE_TABLE))).thenReturn(List.of(stateRow));
-    when(tx.scan(scanForTable(SagaSchema.EVENTS_TABLE))).thenReturn(List.of());
-    doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
-    when(txVerify.scan(any(Scan.class))).thenReturn(List.of(stateRow));
-    when(txRetry.scan(scanForTable(SagaSchema.STATE_TABLE))).thenReturn(List.of(stateRow));
-    when(txRetry.scan(scanForTable(SagaSchema.EVENTS_TABLE))).thenReturn(List.of());
-
-    // Act
-    boolean deleted = store.deleteSaga("saga-1");
-
-    // Assert
-    assertThat(deleted).isTrue();
-    verify(txRetry).commit();
   }
 
   // ---------------------------------------------------------------------------
@@ -2961,7 +3126,7 @@ class ScalarDbSagaStoreTest {
       throws Exception {
     // Arrange — commit throws UTSE, but the verifier confirms the saga was created. It takes two
     // further transactions: tx2 reads the seq-0 event to check the append_id is ours, then tx3
-    // loads the state row to return.
+    // reads the saga's state to return.
     doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
     DistributedTransaction tx2 = mock(DistributedTransaction.class);
     DistributedTransaction tx3 = mock(DistributedTransaction.class);
@@ -2969,8 +3134,15 @@ class ScalarDbSagaStoreTest {
     Result ownEvent = mock(Result.class);
     when(ownEvent.getText("append_id")).thenReturn(OWN_APPEND_ID);
     when(tx2.get(any(Get.class))).thenReturn(Optional.of(ownEvent));
-    Result stateResult = mockStateResult("saga-1", SagaStatus.RUNNING);
-    when(tx3.scan(any(Scan.class))).thenReturn(List.of(stateResult));
+    TransactionCrudOperable.Scanner state =
+        scannerOver(
+            List.of(
+                stateEventRow(
+                    0,
+                    EventType.SAGA_STARTED,
+                    SagaStatus.RUNNING,
+                    Instant.parse("2026-01-01T00:00:00Z"))));
+    when(tx3.getScanner(any(Scan.class))).thenReturn(state);
 
     // Act
     SagaStateSnapshot result = store.createSaga("saga-1", "order-saga", "engine-1", Map.of(), "v1");
@@ -3291,14 +3463,15 @@ class ScalarDbSagaStoreTest {
 
   @Test
   void listStateSnapshots_noStatusFilter_scansEveryStatusPerBucket() throws Exception {
-    // Arrange — 4 buckets x 6 status codes => 24 slice scanners when nothing matches
+    // Arrange — 4 buckets x (6 status codes + the timeout slice) => 28 scanners when nothing
+    // matches
     stubScanner();
 
     // Act
     store.listStateSnapshots(SagaQuery.newBuilder().build());
 
     // Assert
-    verify(tx, times(4 * SagaStatus.values().length)).getScanner(any(Scan.class));
+    verify(tx, times(4 * (SagaStatus.values().length + 1))).getScanner(any(Scan.class));
   }
 
   @Test
@@ -3514,8 +3687,8 @@ class ScalarDbSagaStoreTest {
 
   @Test
   void listStateSnapshots_tokenUnknownVersionGiven_throwsSagaIllegalArgumentException() {
-    // Arrange — version "2" is not recognized
-    String token = encodePageToken("2", "*|-|-", 0, 0, "2026-01-01T00:00:00Z");
+    // Arrange — version "1" is the previous layout's, which this store no longer reads
+    String token = encodePageToken("1", "*|-|-", 0, 0, "2026-01-01T00:00:00Z");
 
     // Act & Assert
     assertThatThrownBy(
@@ -3618,10 +3791,10 @@ class ScalarDbSagaStoreTest {
 
   /**
    * Stubs {@code tx.getScanner(...)} to honor each scan's clustering-key range: a scanner yields
-   * exactly the {@code master} rows in the requested {@code (bucket, status)} slice whose {@code
-   * updated_at} falls within the scan's bounds, respecting {@code startInclusive}. Unlike {@link
-   * #stubScanner}, this lets one dataset drive real multi-page pagination, so the resume cursor
-   * genuinely excludes already-returned cohorts rather than the test hand-feeding each page.
+   * exactly the {@code master} rows in the requested {@code (bucket, slice)} whose {@code sweep_at}
+   * falls within the scan's bounds, respecting {@code startInclusive}. Unlike {@link #stubScanner},
+   * this lets one dataset drive real multi-page pagination, so the resume cursor genuinely excludes
+   * already-returned cohorts rather than the test hand-feeding each page.
    */
   private void stubScannerHonoringRange(Result... master) throws Exception {
     when(tx.getScanner(any(Scan.class)))
@@ -3630,25 +3803,25 @@ class ScalarDbSagaStoreTest {
               Scan scan = invocation.getArgument(0);
               int bucket = scan.getPartitionKey().getIntValue(0);
               Key start = scan.getStartClusteringKey().orElseThrow();
-              int status = start.getIntValue(0);
+              int slice = start.getIntValue(0);
               Instant startTs = Instant.ofEpochMilli(start.getBigIntValue(1));
               boolean startInclusive = scan.getStartInclusive();
               Instant endTs =
                   Instant.ofEpochMilli(scan.getEndClusteringKey().orElseThrow().getBigIntValue(1));
 
-              List<Result> slice = new ArrayList<>();
+              List<Result> rows = new ArrayList<>();
               for (Result r : master) {
-                if (r.getInt("bucket") != bucket || r.getInt("status") != status) {
+                if (r.getInt("bucket") != bucket || r.getInt("slice") != slice) {
                   continue;
                 }
-                Instant ts = Instant.ofEpochMilli(r.getBigInt("updated_at"));
+                Instant ts = Instant.ofEpochMilli(r.getBigInt("sweep_at"));
                 boolean afterStart = startInclusive ? !ts.isBefore(startTs) : ts.isAfter(startTs);
                 if (afterStart && !ts.isAfter(endTs)) {
-                  slice.add(r);
+                  rows.add(r);
                 }
               }
-              slice.sort(Comparator.comparingLong(r -> r.getBigInt("updated_at")));
-              return scannerOver(slice);
+              rows.sort(Comparator.comparingLong(r -> r.getBigInt("sweep_at")));
+              return scannerOver(rows);
             });
   }
 
@@ -3698,21 +3871,8 @@ class ScalarDbSagaStoreTest {
   }
 
   /**
-   * The state row a transition's pre-check reads. It carries {@code owner_id} because every state
-   * write either re-stamps the owner or preserves the one already on the row, and {@code
-   * buildStateInsert} rejects a null. A bare {@code mock(Result.class)} here would return null for
-   * the column and make the test exercise a state the store refuses to write.
-   */
-  private static Result stateRowWithOwner() {
-    Result row = mock(Result.class);
-    lenient().when(row.getText("owner_id")).thenReturn("engine-1");
-    return row;
-  }
-
-  /**
-   * The value of {@code column} on the first captured insert that carries it. The state and event
-   * inserts write disjoint columns, so naming the column selects the insert. Used for {@code
-   * owner_id}, which {@link SagaStateSnapshot} no longer carries, and for {@code append_id}.
+   * The value of {@code column} on the first captured insert that carries it. The sweep and event
+   * inserts write disjoint columns, so naming the column selects the insert.
    */
   private static String capturedTextColumn(DistributedTransaction tx, String column)
       throws Exception {
@@ -3743,17 +3903,9 @@ class ScalarDbSagaStoreTest {
   }
 
   /**
-   * Matches a {@link Scan} by its target table so stubs are independent of the order in which a
-   * method issues its scans (e.g., {@code deleteSaga} scans the state table then the events table).
-   */
-  private static Scan scanForTable(String table) {
-    return argThat(scan -> scan != null && scan.forTable().filter(table::equals).isPresent());
-  }
-
-  /**
    * Captures every {@code tx.insert(...)} on the given transaction, finds the one that carries an
    * {@code append_id} column (the event insert; only event rows have it, so this reliably picks the
-   * event insert out of methods that also write state or parked rows), and asserts its value.
+   * event insert out of methods that also write sweep rows), and asserts its value.
    */
   private static void assertEventInsertCarriesAppendId(
       DistributedTransaction tx, String expectedAppendId) throws Exception {
@@ -3766,48 +3918,105 @@ class ScalarDbSagaStoreTest {
         .getTextValue();
   }
 
-  /** Creates a mock event row with only the sequence field (for deleteSaga). */
-  private Result mockEventRow(int sequence) {
-    Result r = mock(Result.class);
-    when(r.getInt("sequence")).thenReturn(sequence);
-    return r;
-  }
-
   /**
-   * Creates a mock state result with all fields using lenient stubs. Not all callers use all fields
-   * (e.g., findRecoverable doesn't need bucket, deleteSaga doesn't need saga_name), so lenient
-   * stubs prevent UnnecessaryStubbingException.
+   * A row carrying a saga's state, readable both as the newest state event of its log and as its
+   * sweep row. The stubs are lenient because each caller reads only one of the two shapes.
    */
-  private Result mockStateResult(String sagaId, SagaStatus status) {
-    Result r = mock(Result.class);
+  private Result mockStateResult(String sagaId, SagaStatus status, Instant updatedAt) {
+    Result r = stateEventRow(0, EventType.SAGA_STARTED, status, updatedAt);
     lenient().when(r.getText("saga_id")).thenReturn(sagaId);
-    lenient().when(r.getText("saga_name")).thenReturn("order-saga");
-    lenient().when(r.getInt("status")).thenReturn(status.getStatusCode());
-    lenient().when(r.getText("owner_id")).thenReturn("engine-1");
-    lenient().when(r.getText("definition_version")).thenReturn("v1");
     lenient().when(r.getInt("bucket")).thenReturn(0);
+    lenient().when(r.getInt("slice")).thenReturn(SagaSchema.sliceOf(status, false));
+    lenient().when(r.getTimestampTZ("updated_at")).thenReturn(updatedAt);
     lenient()
         .when(r.getTimestampTZ("created_at"))
         .thenReturn(Instant.parse("2026-01-01T00:00:00Z"));
-    lenient()
-        .when(r.getBigInt("updated_at"))
-        .thenReturn(Instant.parse("2026-01-01T00:00:00Z").toEpochMilli());
     return r;
   }
 
+  /** Like {@link #mockStateResult(String, SagaStatus, Instant)}, last changed at creation. */
+  private Result mockStateResult(String sagaId, SagaStatus status) {
+    return mockStateResult(sagaId, status, Instant.parse("2026-01-01T00:00:00Z"));
+  }
+
+  /** Stubs {@code t}'s newest-first read of a saga's events to yield {@code newestFirst}. */
+  private static void stubStateRead(DistributedTransaction t, Result... newestFirst)
+      throws Exception {
+    TransactionCrudOperable.Scanner scanner = scannerOver(List.of(newestFirst));
+    when(t.getScanner(any(Scan.class))).thenReturn(scanner);
+  }
+
   /**
-   * Like {@link #mockStateResult(String, SagaStatus)} but with a caller-chosen {@code updated_at}.
+   * The {@code STEP_PENDING} event an unbounded park wrote, which a transition out of {@code
+   * WAITING} reads back to find the saga's sweep row. Its stubs also answer the sweep-row read.
    */
-  private Result mockStateResult(String sagaId, SagaStatus status, Instant updatedAt) {
-    Result r = mockStateResult(sagaId, status);
-    lenient().when(r.getBigInt("updated_at")).thenReturn(updatedAt.toEpochMilli());
+  private static Result parkEventRow(Instant parkedAt) {
+    return stateEventRow(3, EventType.STEP_PENDING, SagaStatus.WAITING, parkedAt);
+  }
+
+  /** Like {@link #parkEventRow}, for a park with a deadline: its sweep row sits at the deadline. */
+  private static Result boundedParkEventRow(Instant parkedAt, Instant deadline) {
+    Result r = parkEventRow(parkedAt);
+    lenient().when(r.getInt("state_slice")).thenReturn(SagaSchema.WAITING_WITH_TIMEOUT_SLICE);
+    lenient().when(r.getBigInt("sweep_at")).thenReturn(deadline.toEpochMilli());
     return r;
+  }
+
+  /** Matches a {@link Get} on {@code table}. */
+  private static Get getOn(String table) {
+    return argThat(get -> get != null && table.equals(get.forTable().orElse(null)));
+  }
+
+  /** The slice of the sweep row the transaction deleted, which is the slice the saga left. */
+  private static int deletedSweepSlice(DistributedTransaction tx) throws Exception {
+    ArgumentCaptor<Delete> captor = ArgumentCaptor.forClass(Delete.class);
+    verify(tx).delete(captor.capture());
+    return captor.getValue().getClusteringKey().orElseThrow().getIntValue(0);
   }
 
   /** Moves a mocked row into {@code bucket}, so one dataset can span several partitions. */
   private static Result inBucket(Result r, int bucket) {
     lenient().when(r.getInt("bucket")).thenReturn(bucket);
     return r;
+  }
+
+  /**
+   * An event row that carries the saga's state, as every status-changing event does. The stubs are
+   * lenient because a read stops at the newest such row, so no caller touches every column.
+   */
+  private static Result stateEventRow(
+      int sequence, EventType type, SagaStatus status, Instant updatedAt) {
+    Result r = mock(Result.class);
+    lenient().when(r.getInt("sequence")).thenReturn(sequence);
+    lenient().when(r.getText("event_type")).thenReturn(type.name());
+    lenient().when(r.getTimestampTZ("created_at")).thenReturn(updatedAt);
+    lenient().when(r.isNull("state_slice")).thenReturn(false);
+    lenient().when(r.getInt("state_slice")).thenReturn(SagaSchema.sliceOf(status, false));
+    lenient().when(r.getBigInt("sweep_at")).thenReturn(updatedAt.toEpochMilli());
+    lenient().when(r.getText("saga_name")).thenReturn("order-saga");
+    lenient().when(r.getText("definition_version")).thenReturn("v1");
+    lenient()
+        .when(r.getTimestampTZ("saga_created_at"))
+        .thenReturn(Instant.parse("2026-01-01T00:00:00Z"));
+    return r;
+  }
+
+  /** A step event row, which carries none of the saga's state. */
+  private static Result stepEventRow(int sequence, EventType type, Instant createdAt) {
+    Result r = mock(Result.class);
+    lenient().when(r.getInt("sequence")).thenReturn(sequence);
+    lenient().when(r.getText("event_type")).thenReturn(type.name());
+    lenient().when(r.getTimestampTZ("created_at")).thenReturn(createdAt);
+    lenient().when(r.isNull("state_slice")).thenReturn(true);
+    return r;
+  }
+
+  /** The inserts {@code tx} received, keyed by the table each targets. */
+  private static Map<String, Insert> insertsByTable(DistributedTransaction tx) throws Exception {
+    ArgumentCaptor<Insert> captor = ArgumentCaptor.forClass(Insert.class);
+    verify(tx, atLeastOnce()).insert(captor.capture());
+    return captor.getAllValues().stream()
+        .collect(Collectors.toMap(insert -> insert.forTable().orElseThrow(), insert -> insert));
   }
 
   // ---------------------------------------------------------------------------

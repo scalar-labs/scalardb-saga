@@ -53,6 +53,19 @@ public enum EventType {
    */
   SAGA_RESET,
 
+  // --- Recovery hand-offs (StatusEvent) ---
+  // Written by the recovery machinery, not by an operator, and leave the status unchanged.
+  /**
+   * A recovery replica took the saga over. Appended at the sequence the previous driver writes
+   * next, so that driver fails at its next event. The payload names the replica.
+   */
+  SAGA_CLAIMED,
+  /**
+   * The replica driving the saga handed it to recovery while shutting down, so another replica
+   * claims it at once instead of waiting out the staleness threshold.
+   */
+  SAGA_RELEASED,
+
   // --- Step-level (StepEvent) ---
   /**
    * A forward step parked on an asynchronous callback ({@code RUNNING → WAITING}); its output

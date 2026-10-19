@@ -17,9 +17,9 @@ import "saga.proto";
 service AdminService {
   // Lists sagas matching the filter, one page at a time. Drive pagination by the response's
   // `next_page_token` until it is absent. A page can exceed `page_size` — even the 1000 maximum:
-  // a page never splits a same-`updated_at` cohort (rows stamped in one millisecond, e.g. by a
-  // mass escalation), so the cohort straddling the boundary is completed whole on top of an
-  // almost-full page.
+  // a page never splits a cohort (rows sharing one sort timestamp: `updated_at`, or the timeout
+  // deadline for waiting sagas that have one; e.g. a mass escalation in one millisecond), so the
+  // cohort straddling the boundary is completed whole on top of an almost-full page.
   rpc ListSagas (ListSagasRequest) returns (ListSagasResponse);
 
   // Recovers a stuck (RUNNING/COMPENSATING) saga by driving it in the direction the engine's pivot
@@ -54,8 +54,9 @@ message ListSagasRequest {
   optional google.protobuf.Timestamp updated_after = 2;   // inclusive lower bound on updated_at
   optional google.protobuf.Timestamp updated_before = 3;  // inclusive upper bound on updated_at
   // Target results per page; must be in [1, 1000], else INVALID_ARGUMENT (not clamped). It is a
-  // target, not an exact cap: a returned page may exceed it by up to a whole same-`updated_at`
-  // cohort (rows sharing one timestamp) on top of a nearly full page. Absent = server default.
+  // target, not an exact cap: a returned page may exceed it by up to a whole cohort (rows sharing
+  // one sort timestamp: `updated_at`, or the timeout deadline for waiting sagas that have one) on
+  // top of a nearly full page. Absent = server default.
   optional int32 page_size = 4;
   optional string page_token = 5;                      // opaque continuation token
 }

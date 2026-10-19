@@ -141,12 +141,6 @@ public abstract class ForwardingSagaStore implements SagaStore {
   }
 
   @Override
-  public Optional<SagaStateSnapshot> getStateSnapshot(
-      String sagaId, SagaStatus status, Instant updatedAt) {
-    return delegate.getStateSnapshot(sagaId, status, updatedAt);
-  }
-
-  @Override
   public Optional<SagaStateAndEvents> getStateWithEvents(String sagaId, int maxEvents) {
     return delegate.getStateWithEvents(sagaId, maxEvents);
   }
@@ -177,8 +171,9 @@ public abstract class ForwardingSagaStore implements SagaStore {
   }
 
   @Override
-  public Optional<SagaStateSnapshot> claimForRecovery(SagaStateSnapshot saga, String newOwnerId) {
-    return delegate.claimForRecovery(saga, newOwnerId);
+  public Optional<SagaStateSnapshot> claimForRecovery(
+      SagaStateSnapshot saga, NewestEvent probe, String newOwnerId) {
+    return delegate.claimForRecovery(saga, probe, newOwnerId);
   }
 
   @Override

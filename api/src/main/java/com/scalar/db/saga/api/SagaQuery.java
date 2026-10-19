@@ -8,10 +8,10 @@ import org.jspecify.annotations.Nullable;
 /**
  * A paginated query over saga state snapshots, used by the Admin API's listing operation.
  *
- * <p>Filtering is limited to what the {@code saga_state} clustering key supports efficiently: an
- * optional {@link SagaStatus} and an optional {@code updated_at} time window. There is deliberately
- * no name filter — {@code saga_name} is not in the clustering key and is not selective, so
- * filtering by it would require an unindexed full scan.
+ * <p>Filtering is limited to what the store's listing key supports efficiently: an optional {@link
+ * SagaStatus} and an optional {@code updated_at} time window. There is deliberately no name filter
+ * — {@code saga_name} is not in that key and is not selective, so filtering by it would require an
+ * unindexed full scan.
  *
  * <p>Pagination uses an opaque {@link #getPageToken() page token}. Pass {@code null} (or omit it)
  * to start from the beginning; pass the token from the previous {@link SagaPage#getNextPageToken()}
@@ -26,8 +26,9 @@ public final class SagaQuery {
   /**
    * The maximum <b>requested</b> {@link #getPageSize() page size}. This bounds the requested
    * target, not the exact size of a returned {@link SagaPage}. Because a page never splits a cohort
-   * (rows sharing one {@code updated_at}), a returned page may exceed the target — and even this
-   * maximum — by up to a full cohort; see {@link Builder#pageSize(int)}.
+   * (rows sharing one sort timestamp: {@code updated_at}, or the timeout deadline for waiting sagas
+   * that have one), a returned page may exceed the target — and even this maximum — by up to a full
+   * cohort; see {@link Builder#pageSize(int)}.
    */
   public static final int MAX_PAGE_SIZE = 1000;
 
@@ -83,8 +84,8 @@ public final class SagaQuery {
 
   /**
    * The <b>target</b> number of results per page. A returned {@link SagaPage} may exceed this
-   * target by up to a full {@code updated_at} cohort, which is not bounded by the target — see
-   * {@link Builder#pageSize(int)}.
+   * target by up to a full cohort of rows sharing one sort timestamp, which is not bounded by the
+   * target; see {@link Builder#pageSize(int)}.
    *
    * @return the target results per page, in {@code [1, MAX_PAGE_SIZE]}
    */
@@ -180,15 +181,16 @@ public final class SagaQuery {
 
     /**
      * Sets the <b>target</b> page size. A returned {@link SagaPage} may exceed this target: results
-     * are grouped by {@code updated_at} and a page never splits a cohort (rows sharing one
-     * timestamp within one internal scan slice), so a cohort straddling the limit is completed
-     * rather than cut. A single cohort larger than the target is returned whole as an over-sized
-     * page (a mass event spread across slices yields several such pages, not one), so a page may
-     * exceed the target — and even {@link SagaQuery#MAX_PAGE_SIZE} — by the full cohort size; it is
-     * not an upper bound on the returned item count. Callers should provision memory and response
-     * limits for this target plus the largest expected cohort: a page can already hold up to a full
-     * target of rows from earlier scan slices when the cohort that overflows it is completed. This
-     * bounds the requested target only, in {@code [1, MAX_PAGE_SIZE]}.
+     * are grouped by sort timestamp and a page never splits a cohort (rows sharing one sort
+     * timestamp within one internal scan slice: {@code updated_at}, or the timeout deadline for
+     * waiting sagas that have one), so a cohort straddling the limit is completed rather than cut.
+     * A single cohort larger than the target is returned whole as an over-sized page (a mass event
+     * spread across slices yields several such pages, not one), so a page may exceed the target —
+     * and even {@link SagaQuery#MAX_PAGE_SIZE} — by the full cohort size; it is not an upper bound
+     * on the returned item count. Callers should provision memory and response limits for this
+     * target plus the largest expected cohort: a page can already hold up to a full target of rows
+     * from earlier scan slices when the cohort that overflows it is completed. This bounds the
+     * requested target only, in {@code [1, MAX_PAGE_SIZE]}.
      *
      * @param pageSize the target results per page, in {@code [1, MAX_PAGE_SIZE]}
      * @return this builder, for chaining

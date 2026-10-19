@@ -28,14 +28,12 @@ import com.scalar.db.saga.transport.HttpServiceConfig;
 import java.net.http.HttpClient;
 import java.nio.file.Path;
 import java.time.Clock;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -447,9 +445,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   /**
    * Starts a saga as {@code startAsync} does and returns the snapshot of the saga it created
    * instead of only its ID. Not part of {@link SagaOrchestrator}: it serves the server's start
-   * endpoints, which answer with the saga's state. Reading the saga back by ID for that answer
-   * could miss the row just written on a backend whose index lags the write, such as DynamoDB, and
-   * report a running saga as not found; the snapshot in hand cannot.
+   * endpoints, which answer with the saga's state. The start already holds that state, so returning
+   * it saves those endpoints a read of the saga back by ID on every start.
    *
    * <p>The snapshot is the saga as created, {@code RUNNING}; the drive is already under way, so it
    * may have moved on by the time the caller reads it.
@@ -821,7 +818,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   /**
    * Resumes a parked ({@code WAITING}) saga when the async callback for its parked step arrives:
    * atomically records {@code STEP_COMPLETED} (carrying {@code output}), transitions {@code WAITING
-   * -> RUNNING}, and deletes the {@code saga_parked} row. Returns as soon as the step is durably
+   * -> RUNNING}, and takes the saga out of the parked sweep. Returns as soon as the step is durably
    * resumed — the {@code RUNNING} snapshot, not the saga's final state — and runs the forward tail
    * on the async executor rather than the caller's thread.
    *
@@ -835,8 +832,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * @param stepName the step the callback completes (must be the currently parked step)
    * @param output the step's output, merged into the saga context for downstream steps
    * @return the {@code RUNNING} snapshot immediately after the parked step is resumed
-   * @throws SagaStepNotParkedException if the step has not parked yet, or the saga's row lags its
-   *     log; retryable, since the park is about to be recorded
+   * @throws SagaStepNotParkedException if the step has not parked yet; retryable, since the park is
+   *     about to be recorded
    * @throws IllegalStateException if the step is already completed or the saga has moved on, which
    *     the callback endpoint answers as an idempotent duplicate
    * @throws SagaIllegalArgumentException if {@code stepName} is not the currently parked step, or
@@ -889,10 +886,10 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   /**
    * Phase 1 of completing a parked step: validates the saga is {@code WAITING}, that {@code
    * stepName} is the parked step and that {@code output} is a value a context can hold, atomically
-   * records {@code STEP_COMPLETED} + {@code WAITING -> RUNNING} and deletes the {@code saga_parked}
-   * row, then rebuilds the execution context. Kept separate from the forward drive so {@link
-   * #completeStepAsync} can return once this synchronous phase commits and run the drive on the
-   * async executor. Returns everything the forward drive needs.
+   * records {@code STEP_COMPLETED} + {@code WAITING -> RUNNING} and takes the saga out of the
+   * parked sweep, then rebuilds the execution context. Kept separate from the forward drive so
+   * {@link #completeStepAsync} can return once this synchronous phase commits and run the drive on
+   * the async executor. Returns everything the forward drive needs.
    */
   private ResumedStep resumeParked(String sagaId, String stepName, Map<String, Object> output) {
     Objects.requireNonNull(sagaId, "sagaId must not be null");
@@ -924,16 +921,16 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
 
     SagaDefinition def = resolveDefinition(saga);
 
-    // Atomic: STEP_COMPLETED + WAITING -> RUNNING + delete the saga_parked row. The optimistic
-    // WAITING-CK check makes this and a concurrent deadline-timeout sweep mutually exclusive.
+    // Atomic: STEP_COMPLETED + WAITING -> RUNNING + the sweep row out of the waiting slice. Both
+    // read the parked saga's sweep row, so this and a concurrent deadline-timeout sweep conflict.
     String payload = EventPayloadSerializer.serialize(output);
     StepEvent completedEvent = StepEvent.completed(stepIndex, stepName, payload);
     SagaStateSnapshot running = store.resumeParkedStep(saga, events.size(), completedEvent);
 
     // Defense in depth: a successful resume must land in RUNNING. resumeParkedStep already throws
-    // SagaConcurrentModificationException if a concurrent timeout sweep won the WAITING CK, so this
-    // guards only against a store contract violation — never drive forward on a non-RUNNING
-    // snapshot.
+    // SagaConcurrentModificationException if a concurrent timeout sweep moved the parked sweep row
+    // first, so this guards only against a store contract violation — never drive forward on a
+    // non-RUNNING snapshot.
     if (running.getStatus() != SagaStatus.RUNNING) {
       throw new IllegalStateException(
           "resumeParkedStep for saga "
@@ -943,9 +940,9 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     }
 
     // Replay to fold the callback output into context. The resume appended completedEvent at
-    // events.size() and nothing else, and its WAITING-CK check proves the log was untouched since
-    // we read `events` (a parked saga's log grows only through a CK-changing transition). So we
-    // append locally instead of re-reading (replayEvents ignores the event timestamp).
+    // events.size() and nothing else, and its check on the parked state proves the log was
+    // untouched since we read `events` (a parked saga's log grows only through status changes).
+    // So we append locally instead of re-reading (replayEvents ignores the event timestamp).
     List<SagaEvent> updatedEvents = new ArrayList<>(events);
     updatedEvents.add(completedEvent);
     ExecutionContext context = engine.replayEvents(running, updatedEvents);
@@ -953,13 +950,9 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   }
 
   /**
-   * The {@code WAITING} snapshot a callback on {@code stepName} completes, judged from the event
-   * log first. The log is partitioned by saga ID, so reading it is strongly consistent on every
-   * backend. A lookup by saga ID is not: on DynamoDB it reads an index that lags the table.
-   *
-   * <p>A parked saga's newest event is its {@code STEP_PENDING}, written in the same transaction as
-   * the {@code WAITING} row with the same timestamp, so that row is read by its full key. Otherwise
-   * the lookup by ID decides between the two cases the callback contract keeps apart:
+   * The {@code WAITING} snapshot a callback on {@code stepName} completes. The saga's state is read
+   * from its own event partition, so it is current on every backend; the step's events then decide
+   * between the two cases the callback contract keeps apart when the saga is not parked:
    *
    * <ul>
    *   <li>The step has not been parked yet: the engine parks only after the participant accepted
@@ -971,32 +964,15 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * </ul>
    */
   private SagaStateSnapshot parkedSnapshot(String sagaId, String stepName, List<SagaEvent> events) {
+    SagaStateSnapshot saga = getStateSnapshot(sagaId);
     SagaEvent newest = events.isEmpty() ? null : events.get(events.size() - 1);
-    Instant parkedAt = newest == null ? null : newest.getTimestamp();
-    boolean loggedAsParked = newest != null && newest.getEventType() == EventType.STEP_PENDING;
-    if (loggedAsParked && parkedAt != null) {
-      Optional<SagaStateSnapshot> waiting =
-          store.getStateSnapshot(sagaId, SagaStatus.WAITING, parkedAt);
-      if (waiting.isPresent()) {
-        return waiting.get();
-      }
-    }
-    SagaStateSnapshot saga;
-    try {
-      saga = getStateSnapshot(sagaId);
-    } catch (SagaNotFoundException e) {
-      if (events.isEmpty()) {
-        throw e;
-      }
-      // The log proves the saga exists. The lookup missed it because its index lags the write, as
-      // on DynamoDB, so the callback is ahead of the row and is retried.
-      throw new SagaStepNotParkedException(sagaId, stepName);
-    }
-    if (saga.getStatus() == SagaStatus.WAITING && loggedAsParked) {
-      // The keyed read missed although both the log and the lookup say parked: proceed on the
-      // lookup's snapshot, as before, rather than refuse a callback that can be applied.
+    if (saga.getStatus() == SagaStatus.WAITING
+        && newest != null
+        && newest.getEventType() == EventType.STEP_PENDING) {
       return saga;
     }
+    // The events were read before the state, so a park can land between the two reads: the state
+    // says WAITING while the events end before the park. Retrying finds both agreeing.
     boolean stillAhead =
         saga.getStatus() == SagaStatus.RUNNING || saga.getStatus() == SagaStatus.WAITING;
     if (stillAhead && !completionStands(events, stepName)) {
@@ -1256,7 +1232,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   public static final class Builder {
 
     private @Nullable SagaStoreFactory storeFactory;
-    // Mirrors the store's saga-ID discipline: the owner id lands in state rows and log lines, so
+    // Mirrors the store's saga-ID discipline: the owner id lands in claim events and log lines, so
     // it gets the same character set and length bound.
     private static final java.util.regex.Pattern OWNER_ID_PATTERN =
         java.util.regex.Pattern.compile("[a-zA-Z0-9._-]{1,128}");
