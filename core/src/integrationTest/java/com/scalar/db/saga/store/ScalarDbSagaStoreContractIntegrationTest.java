@@ -554,6 +554,46 @@ class ScalarDbSagaStoreContractIntegrationTest {
   }
 
   @Test
+  void claimForRecovery_sagaPurgedSinceTheProbe_returnsEmptyAndWritesNothing() {
+    // Arrange — the owner finished and retention purged the saga while the claim was delayed;
+    // the purge freed the sequence the claim inserts at
+    SagaStateSnapshot swept = newSaga("saga-1");
+    SagaStore.NewestEvent view = probe("saga-1");
+    complete("saga-1", swept, 1);
+    assertThat(store.deleteSaga("saga-1")).isTrue();
+
+    // Act
+    Optional<SagaStateSnapshot> claimed = store.claimForRecovery(swept, view, OTHER_OWNER);
+
+    // Assert — nothing was brought back
+    assertThat(claimed).isEmpty();
+    assertThat(store.getEvents("saga-1")).isEmpty();
+    assertThat(store.getStateSnapshot("saga-1")).isEmpty();
+  }
+
+  @Test
+  void claimForRecovery_sagaRecreatedUnderTheSameIdSinceTheProbe_returnsEmptyAndLeavesItAlone() {
+    // Arrange — after the purge a new saga took the id; it has not reached the claimed sequence
+    SagaStateSnapshot swept = newSaga("saga-1");
+    SagaStore.NewestEvent view = probe("saga-1");
+    complete("saga-1", swept, 1);
+    assertThat(store.deleteSaga("saga-1")).isTrue();
+    // The sweep row's key is the creation time in milliseconds; make the new saga's differ
+    while (Instant.now().toEpochMilli() <= swept.getUpdatedAt().toEpochMilli()) {
+      Thread.onSpinWait();
+    }
+    SagaStateSnapshot recreated = newSaga("saga-1");
+
+    // Act
+    Optional<SagaStateSnapshot> claimed = store.claimForRecovery(swept, view, OTHER_OWNER);
+
+    // Assert
+    assertThat(claimed).isEmpty();
+    assertSameState(store.getStateSnapshot("saga-1").orElseThrow(), recreated);
+    assertThat(eventTypes("saga-1")).containsExactly(EventType.SAGA_STARTED);
+  }
+
+  @Test
   void claimForRecovery_scheduledSaga_recordsTheClaimWithoutChangingTheState() {
     // Arrange
     SagaStateSnapshot created = newSaga("saga-1");

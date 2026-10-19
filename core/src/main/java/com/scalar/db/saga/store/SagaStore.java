@@ -396,6 +396,10 @@ public interface SagaStore extends AutoCloseable {
    * backward-compatible direct store access in tests. A {@code null} cursor in the returned {@link
    * Recoverables} indicates that the scan is complete.
    *
+   * <p>A store may cap how many sagas one call returns from a bucket. When it does, the next sweep
+   * of that bucket continues after the last saga returned, and starts over once it reaches the end,
+   * so sagas a claim leaves in place cannot hide the ones behind them.
+   *
    * @param threshold the staleness cutoff — only sagas updated before this are returned
    * @param cursor the cursor from a previous call, {@link #initialSweepCursor}, or {@code null} to
    *     start an ascending scan
@@ -420,9 +424,9 @@ public interface SagaStore extends AutoCloseable {
   /**
    * Claims a saga for recovery, provided nothing was appended to it since {@code probe} was read
    * and its status and {@code updatedAt} are still the ones {@code saga} carries. Returns empty
-   * otherwise: another replica claimed it first, its driver is still alive, or it changed state
-   * between the sweep and the probe. Exactly one of two replicas claiming from the same probe
-   * succeeds.
+   * otherwise: another replica claimed it first, its driver is still alive, it changed state
+   * between the sweep and the probe, or it was purged (and perhaps recreated under the same id)
+   * since. Exactly one of two replicas claiming from the same probe succeeds.
    *
    * <p>The claim appends {@link EventType#SAGA_CLAIMED} at the sequence after {@code probe}'s. It
    * leaves the saga's status and {@code updatedAt} as they are, except for a saga handed to

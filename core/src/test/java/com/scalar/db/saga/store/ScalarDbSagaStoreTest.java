@@ -2103,10 +2103,9 @@ class ScalarDbSagaStoreTest {
   void findRecoverable_firstCall_scansFirstBucketAndReturnsCursor() throws Exception {
     // Arrange — findRecoverable scans 3 statuses per bucket
     Result r = mockStateResult("saga-stale", SagaStatus.RUNNING);
-    when(tx.scan(any(Scan.class)))
-        .thenReturn(List.of(r))
-        .thenReturn(List.of())
-        .thenReturn(List.of());
+    TransactionCrudOperable.Scanner running = scannerOver(List.of(r));
+    TransactionCrudOperable.Scanner compensating = scannerOver(List.of());
+    when(tx.getScanner(any(Scan.class))).thenReturn(running).thenReturn(compensating);
 
     // Act
     Recoverables result = store.findRecoverable(Instant.now(), null);
@@ -2120,9 +2119,8 @@ class ScalarDbSagaStoreTest {
 
   @Test
   void findRecoverable_chainedCalls_exhaustAllBuckets() throws Exception {
-    // Arrange — schema has 4 buckets; each bucket scan does 3 status queries
-    // All return empty results
-    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    // Arrange — schema has 4 buckets; every slice scan is empty
+    when(tx.getScanner(any(Scan.class))).thenAnswer(invocation -> scannerOver(List.of()));
 
     // Act — chain 4 calls (buckets 0-3), each returning cursor for next bucket
     Recoverables r0 = store.findRecoverable(Instant.now(), null);
@@ -2144,7 +2142,7 @@ class ScalarDbSagaStoreTest {
   @Test
   void findRecoverable_nullCursorGiven_startsFromBucketZero() throws Exception {
     // Arrange
-    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    when(tx.getScanner(any(Scan.class))).thenAnswer(invocation -> scannerOver(List.of()));
 
     // Act
     Recoverables result = store.findRecoverable(Instant.now(), null);
@@ -2160,7 +2158,9 @@ class ScalarDbSagaStoreTest {
     // own sweep slice, not the staleness scan); each returns one result
     Result running = mockStateResult("saga-running", SagaStatus.RUNNING);
     Result compensating = mockStateResult("saga-compensating", SagaStatus.COMPENSATING);
-    when(tx.scan(any(Scan.class))).thenReturn(List.of(running)).thenReturn(List.of(compensating));
+    TransactionCrudOperable.Scanner runningScan = scannerOver(List.of(running));
+    TransactionCrudOperable.Scanner compensatingScan = scannerOver(List.of(compensating));
+    when(tx.getScanner(any(Scan.class))).thenReturn(runningScan).thenReturn(compensatingScan);
 
     // Act
     Recoverables result = store.findRecoverable(Instant.now(), null);
@@ -2170,36 +2170,67 @@ class ScalarDbSagaStoreTest {
     assertThat(result.sagas())
         .extracting(SagaStateSnapshot::getSagaId)
         .containsExactly("saga-running", "saga-compensating");
-    verify(tx, times(2)).scan(any(Scan.class));
+    verify(tx, times(2)).getScanner(any(Scan.class));
   }
 
   /**
    * The scan limit is no longer settable from configuration, so this builder is its only remaining
-   * caller and the only way to vary the page size. Pinning that the configured value reaches every
-   * status scan is what keeps that seam honest — without it the setter would have no consumer at
-   * all beyond a getter round-trip.
+   * caller and the only way to vary the page size. Pinning that the configured value caps every
+   * slice scan is what keeps that seam honest — without it the setter would have no consumer at all
+   * beyond a getter round-trip.
    */
   @Test
-  void findRecoverable_withCustomScanLimit_capsEveryStatusScanAtThatLimit() throws Exception {
-    // Arrange
+  void findRecoverable_withCustomScanLimit_capsEverySliceScanAtThatLimit() throws Exception {
+    // Arrange — 3 rows in each slice, 2 allowed
     ScalarDbSagaStore limited =
         new ScalarDbSagaStore(
             txManager,
             objectMapper,
             schema,
-            ScalarDbSagaStoreConfig.builder().recoveryScanLimit(7).build(),
+            ScalarDbSagaStoreConfig.builder().recoveryScanLimit(2).build(),
             () -> OWN_APPEND_ID);
-    when(tx.scan(any(Scan.class))).thenReturn(List.of());
-    ArgumentCaptor<Scan> scans = ArgumentCaptor.forClass(Scan.class);
+    when(tx.getScanner(any(Scan.class)))
+        .thenAnswer(invocation -> scannerOver(staleRows("a", "b", "c")));
 
     // Act
-    limited.findRecoverable(Instant.now(), null);
+    Recoverables result = limited.findRecoverable(Instant.now(), null);
 
-    // Assert — one scan per recoverable status, each carrying the configured cap
-    verify(tx, times(2)).scan(scans.capture());
-    assertThat(scans.getAllValues())
-        .isNotEmpty()
-        .allSatisfy(s -> assertThat(s.getLimit()).isEqualTo(7));
+    // Assert — two from each of RUNNING and COMPENSATING
+    assertThat(result.sagas())
+        .extracting(SagaStateSnapshot::getSagaId)
+        .containsExactly("a", "b", "a", "b");
+  }
+
+  @Test
+  void findRecoverable_fullSliceRescanned_continuesAfterTheLastReturnedRow() throws Exception {
+    // Arrange — a claim leaves its sweep row in place, so the next pass reads the same rows first
+    ScalarDbSagaStore limited =
+        new ScalarDbSagaStore(
+            txManager,
+            objectMapper,
+            schema,
+            ScalarDbSagaStoreConfig.builder().recoveryScanLimit(2).build(),
+            () -> OWN_APPEND_ID);
+    when(tx.getScanner(any(Scan.class)))
+        .thenAnswer(
+            invocation -> {
+              Scan scan = invocation.getArgument(0);
+              int slice = scan.getStartClusteringKey().orElseThrow().getIntValue(0);
+              return scannerOver(
+                  slice == SagaStatus.RUNNING.getStatusCode()
+                      ? staleRows("a", "b", "c")
+                      : List.of());
+            });
+
+    // Act — three passes over bucket 0
+    List<String> first = ids(limited.findRecoverable(Instant.now(), null));
+    List<String> second = ids(limited.findRecoverable(Instant.now(), null));
+    List<String> third = ids(limited.findRecoverable(Instant.now(), null));
+
+    // Assert — the second pass skips what the first returned; the short second pass starts over
+    assertThat(first).containsExactly("a", "b");
+    assertThat(second).containsExactly("c");
+    assertThat(third).containsExactly("a", "b");
   }
 
   /**
@@ -2224,7 +2255,7 @@ class ScalarDbSagaStoreTest {
   @Test
   void findRecoverable_storageFailureGiven_throwsSagaPersistenceException() throws Exception {
     // Arrange
-    when(tx.scan(any(Scan.class))).thenThrow(mock(CrudException.class));
+    when(tx.getScanner(any(Scan.class))).thenThrow(mock(CrudException.class));
 
     // Act & Assert
     assertThatThrownBy(() -> store.findRecoverable(Instant.now(), null))
@@ -2305,6 +2336,7 @@ class ScalarDbSagaStoreTest {
     SagaStateSnapshot saga =
         new SagaStateSnapshot(
             "saga-1", "order-saga", SagaStatus.RUNNING, "v1", updatedAt, updatedAt);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class))); // the swept sweep row
 
     // Act
     Optional<SagaStateSnapshot> claimed =
@@ -2312,7 +2344,7 @@ class ScalarDbSagaStoreTest {
 
     // Assert
     assertThat(claimed).contains(saga);
-    verify(tx, never()).get(any(Get.class));
+    verify(tx).get(getOn(SagaSchema.SWEEP_TABLE));
     verify(tx, never()).delete(any(Delete.class));
     Insert event = Objects.requireNonNull(insertsByTable(tx).get(SagaSchema.EVENTS_TABLE));
     assertThat(event.getClusteringKey().orElseThrow().getIntValue(0)).isEqualTo(7);
@@ -2405,6 +2437,25 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
+  void claimForRecovery_sweptSweepRowGone_returnsEmptyWithoutWriting() throws Exception {
+    // Arrange — the saga was purged since the probe, and maybe recreated under its id; the purge
+    // freed the sequence, so only the swept row's absence tells
+    Instant updatedAt = Instant.parse("2026-01-02T00:00:00Z");
+    SagaStateSnapshot saga =
+        new SagaStateSnapshot(
+            "saga-1", "order-saga", SagaStatus.RUNNING, "v1", updatedAt, updatedAt);
+    when(tx.get(any(Get.class))).thenReturn(Optional.empty());
+
+    // Act
+    Optional<SagaStateSnapshot> claimed =
+        store.claimForRecovery(saga, probeAt(6, saga), "engine-2");
+
+    // Assert
+    assertThat(claimed).isEmpty();
+    verify(tx, never()).insert(any(Insert.class));
+  }
+
+  @Test
   void claimForRecovery_commitConflict_returnsEmptyWithoutRetrying() throws Exception {
     // Arrange — another writer appended after the probe: the claim lost, and retrying it would
     // only claim on a view that is already stale
@@ -2412,6 +2463,7 @@ class ScalarDbSagaStoreTest {
     SagaStateSnapshot saga =
         new SagaStateSnapshot(
             "saga-1", "order-saga", SagaStatus.RUNNING, "v1", updatedAt, updatedAt);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class))); // the swept sweep row
     doThrow(mock(CommitConflictException.class)).when(tx).commit();
 
     // Act
@@ -2430,6 +2482,7 @@ class ScalarDbSagaStoreTest {
     SagaStateSnapshot saga =
         new SagaStateSnapshot(
             "saga-1", "order-saga", SagaStatus.RUNNING, "v1", updatedAt, updatedAt);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class))); // the swept sweep row
     doThrow(mock(CrudConflictException.class)).when(tx).insert(any(Insert.class));
 
     // Act
@@ -2447,6 +2500,7 @@ class ScalarDbSagaStoreTest {
     SagaStateSnapshot saga =
         new SagaStateSnapshot(
             "saga-1", "order-saga", SagaStatus.RUNNING, "v1", updatedAt, updatedAt);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class))); // the swept sweep row
     doThrow(mock(CrudException.class)).when(tx).insert(any(Insert.class));
 
     // Act & Assert
@@ -2462,6 +2516,7 @@ class ScalarDbSagaStoreTest {
     SagaStateSnapshot saga =
         new SagaStateSnapshot(
             "saga-1", "order-saga", SagaStatus.RUNNING, "v1", updatedAt, updatedAt);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class))); // the swept sweep row
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
     doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
@@ -2486,6 +2541,7 @@ class ScalarDbSagaStoreTest {
     SagaStateSnapshot saga =
         new SagaStateSnapshot(
             "saga-1", "order-saga", SagaStatus.RUNNING, "v1", updatedAt, updatedAt);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class))); // the swept sweep row
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
     doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
@@ -2510,6 +2566,7 @@ class ScalarDbSagaStoreTest {
     SagaStateSnapshot saga =
         new SagaStateSnapshot(
             "saga-1", "order-saga", SagaStatus.RUNNING, "v1", updatedAt, updatedAt);
+    when(tx.get(any(Get.class))).thenReturn(Optional.of(mock(Result.class))); // the swept sweep row
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
     doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
@@ -2695,6 +2752,21 @@ class ScalarDbSagaStoreTest {
     // Act & Assert
     assertThatThrownBy(() -> store.deleteSaga("saga-1"))
         .isInstanceOf(SagaPersistenceException.class);
+  }
+
+  @Test
+  void deleteSaga_completedSaga_readsOnlyKeysAndStateColumns() throws Exception {
+    // Arrange
+    Result stateRow = mockStateResult("saga-1", SagaStatus.COMPLETED);
+    ArgumentCaptor<Scan> captor = ArgumentCaptor.forClass(Scan.class);
+    when(tx.scan(captor.capture())).thenReturn(List.of(stateRow));
+
+    // Act
+    store.deleteSaga("saga-1");
+
+    // Assert — payloads stay unread
+    assertThat(captor.getValue().getProjections())
+        .containsExactlyInAnyOrder("saga_id", "sequence", "state_slice", "sweep_at");
   }
 
   // ---------------------------------------------------------------------------
@@ -2970,7 +3042,7 @@ class ScalarDbSagaStoreTest {
   void findRecoverable_initialSweepCursorGiven_visitsBucketsInOwnersScatteredOrder()
       throws Exception {
     // Arrange
-    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    when(tx.getScanner(any(Scan.class))).thenAnswer(invocation -> scannerOver(List.of()));
 
     // Act — drive one full sweep from the owner's initial cursor
     SagaStore.ScanCursor cursor = store.initialSweepCursor("owner-1");
@@ -2984,7 +3056,7 @@ class ScalarDbSagaStoreTest {
     // Assert — one page per bucket, visited in the owner's permutation order
     assertThat(pages).isEqualTo(4);
     ArgumentCaptor<Scan> scans = ArgumentCaptor.forClass(Scan.class);
-    verify(tx, times(8)).scan(scans.capture()); // 4 buckets x 2 recoverable statuses
+    verify(tx, times(8)).getScanner(scans.capture()); // 4 buckets x 2 recoverable statuses
     int[] expected = SweepScatter.permutation(SweepScatter.seed("owner-1"), 4);
     assertThat(distinctConsecutiveBuckets(scans.getAllValues()))
         .containsExactly(expected[0], expected[1], expected[2], expected[3]);
@@ -3044,7 +3116,7 @@ class ScalarDbSagaStoreTest {
   @Test
   void advanceSweepCursor_pageSkipped_scanContinuesAtNextPermutationBucket() throws Exception {
     // Arrange
-    when(tx.scan(any(Scan.class))).thenReturn(List.of());
+    when(tx.getScanner(any(Scan.class))).thenAnswer(invocation -> scannerOver(List.of()));
 
     // Act — skip the first page (as the manager does for a failing page), then scan
     SagaStore.ScanCursor afterSkip = store.advanceSweepCursor(store.initialSweepCursor("owner-1"));
@@ -3052,7 +3124,7 @@ class ScalarDbSagaStoreTest {
 
     // Assert — the scan hits the owner permutation's second bucket
     ArgumentCaptor<Scan> scans = ArgumentCaptor.forClass(Scan.class);
-    verify(tx, times(2)).scan(scans.capture()); // 2 recoverable statuses in one bucket
+    verify(tx, times(2)).getScanner(scans.capture()); // 2 recoverable statuses in one bucket
     int[] expected = SweepScatter.permutation(SweepScatter.seed("owner-1"), 4);
     assertThat(scans.getAllValues().get(0).getPartitionKey().getIntValue(0)).isEqualTo(expected[1]);
   }
@@ -3823,6 +3895,21 @@ class ScalarDbSagaStoreTest {
               rows.sort(Comparator.comparingLong(r -> r.getBigInt("sweep_at")));
               return scannerOver(rows);
             });
+  }
+
+  /** Sweep rows in one slice, all at one stale timestamp, in the given order. */
+  private List<Result> staleRows(String... sagaIds) {
+    List<Result> rows = new ArrayList<>();
+    for (String id : sagaIds) {
+      Result r = mockStateResult(id, SagaStatus.RUNNING);
+      lenient().when(r.getBigInt("sweep_at")).thenReturn(1_000L);
+      rows.add(r);
+    }
+    return rows;
+  }
+
+  private static List<String> ids(Recoverables page) {
+    return page.sagas().stream().map(SagaStateSnapshot::getSagaId).toList();
   }
 
   /** A scanner mock that yields {@code rows} in order, then drains. */

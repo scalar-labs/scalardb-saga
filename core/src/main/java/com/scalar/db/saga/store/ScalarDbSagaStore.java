@@ -37,6 +37,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
@@ -106,6 +108,11 @@ public final class ScalarDbSagaStore implements SagaStore {
   private final SagaDefinitionSerializer definitionSerializer;
   private final Supplier<String> appendIdSupplier;
   private final Supplier<Instant> nowSupplier;
+
+  // Where each bucket's stale scan of each slice stopped when it filled its limit. A claim leaves
+  // the sweep row in place, so without this every pass would re-read the same oldest rows and the
+  // sagas behind them would wait until those escalate.
+  private final ConcurrentMap<BucketSlice, SweepKey> recoveryResume = new ConcurrentHashMap<>();
 
   /**
    * Creates a new store instance.
@@ -1039,46 +1046,99 @@ public final class ScalarDbSagaStore implements SagaStore {
     }
 
     int bucket = step.bucket();
+    // Cap each slice scan to avoid unbounded memory usage in large buckets.
+    int scanLimit = config.getRecoveryScanLimit();
+    long thresholdMillis = threshold.toEpochMilli();
 
-    List<SagaStateSnapshot> result =
+    List<SliceScan> scans =
         runInTransaction(
             tx -> {
-              List<SagaStateSnapshot> snapshots = new ArrayList<>();
-              // Cap each slice scan to avoid unbounded memory usage in large buckets.
-              // Any sagas beyond the limit are picked up on the next recovery cycle.
-              int scanLimit = config.getRecoveryScanLimit();
+              List<SliceScan> slices = new ArrayList<>();
               for (int slice : RECOVERABLE_SLICES) {
-                List<Result> rows =
-                    tx.scan(
-                        Scan.newBuilder(
-                                buildSweepRangeScan(bucket, slice, Instant.EPOCH, true, threshold))
-                            .limit(scanLimit)
-                            .build());
-                for (Result r : rows) {
-                  snapshots.add(toSweepSnapshot(r));
+                @Nullable SweepKey resume = recoveryResume.get(new BucketSlice(bucket, slice));
+                if (resume != null && resume.sweepAt() > thresholdMillis) {
+                  resume = null; // the clock went back past it; start over
                 }
+                Instant start =
+                    resume == null ? Instant.EPOCH : Instant.ofEpochMilli(resume.sweepAt());
+                List<SagaStateSnapshot> found = new ArrayList<>();
+                // Rows sharing the resume timestamp are skipped by position, not compared by id:
+                // the store orders saga ids by its own collation, which need not be Java's.
+                int toSkip = resume == null ? 0 : resume.rowsReturnedAt();
+                long lastSweepAt = Long.MIN_VALUE;
+                int returnedAtLast = 0;
+                try (TransactionCrudOperable.Scanner scanner =
+                    tx.getScanner(buildSweepRangeScan(bucket, slice, start, true, threshold))) {
+                  for (Optional<Result> next = scanner.one();
+                      next.isPresent() && found.size() < scanLimit;
+                      next = scanner.one()) {
+                    Result r = next.get();
+                    long sweepAt = r.getBigInt("sweep_at");
+                    if (resume != null && sweepAt == resume.sweepAt() && toSkip > 0) {
+                      toSkip--; // returned by an earlier pass
+                      continue;
+                    }
+                    found.add(toSweepSnapshot(r));
+                    returnedAtLast = sweepAt == lastSweepAt ? returnedAtLast + 1 : 1;
+                    lastSweepAt = sweepAt;
+                  }
+                }
+                // A full slice continues after its last row next pass; a short one starts over.
+                @Nullable SweepKey resumeAfter = null;
+                if (found.size() >= scanLimit) {
+                  int returnedAt =
+                      resume != null && resume.sweepAt() == lastSweepAt
+                          ? resume.rowsReturnedAt() + returnedAtLast
+                          : returnedAtLast;
+                  resumeAfter = new SweepKey(lastSweepAt, returnedAt);
+                }
+                slices.add(new SliceScan(slice, found, resumeAfter));
               }
-              return snapshots;
+              return slices;
             },
             null,
             "find recoverable sagas");
 
+    List<SagaStateSnapshot> result = new ArrayList<>();
+    for (SliceScan scan : scans) {
+      result.addAll(scan.sagas());
+      BucketSlice at = new BucketSlice(bucket, scan.slice());
+      @Nullable SweepKey resumeAfter = scan.resumeAfter();
+      if (resumeAfter != null) {
+        recoveryResume.put(at, resumeAfter);
+      } else {
+        recoveryResume.remove(at);
+      }
+    }
     return new Recoverables(result, step.nextCursor());
   }
+
+  private record BucketSlice(int bucket, int slice) {}
+
+  /**
+   * Where a full recovery scan of one slice stopped: the {@code sweep_at} of its last row, and how
+   * many rows at that {@code sweep_at} have been returned since the scan last started over.
+   */
+  private record SweepKey(long sweepAt, int rowsReturnedAt) {}
+
+  private record SliceScan(
+      int slice, List<SagaStateSnapshot> sagas, @Nullable SweepKey resumeAfter) {}
 
   /**
    * {@inheritDoc}
    *
    * <p>The claim is a compare-and-set on the event log: it inserts {@code SAGA_CLAIMED} at the
-   * sequence after {@code probe}'s, without reading first, so anything appended since the probe —
-   * another replica's claim, or a step its live driver just finished — makes the insert collide.
-   * Every status change appends an event, so the sequence covers those as well. A change between
-   * the sweep and the probe is caught before writing, by comparing the sweep's snapshot with the
-   * state the probe read; otherwise the claim would record the sweep's stale state. A collision or
-   * a mismatch is a lost race, never retried: it proves another writer touched the saga. Only a
-   * saga handed to recovery at {@code EPOCH} also moves its sweep row, to the claim time, so the
-   * next sweep does not offer it again; any other claim leaves the row where it is, and the claim
-   * event alone keeps other replicas' probes away for a staleness window.
+   * sequence after {@code probe}'s, so anything appended since the probe — another replica's claim,
+   * or a step its live driver just finished — makes the insert collide. Every status change appends
+   * an event, so the sequence covers those as well. The claim first reads the swept sweep row and
+   * refuses if it is gone: a purge frees the sequence, so only the row tells a saga purged since
+   * the probe, or recreated under its id, from the one that was swept. A change between the sweep
+   * and the probe is caught before writing, by comparing the sweep's snapshot with the state the
+   * probe read; otherwise the claim would record the sweep's stale state. A collision or a mismatch
+   * is a lost race, never retried: it proves another writer touched the saga. Only a saga handed to
+   * recovery at {@code EPOCH} also moves its sweep row, to the claim time, so the next sweep does
+   * not offer it again; any other claim leaves the row where it is, and the claim event alone keeps
+   * other replicas' probes away for a staleness window.
    */
   @Override
   public Optional<SagaStateSnapshot> claimForRecovery(
@@ -1113,10 +1173,14 @@ public final class ScalarDbSagaStore implements SagaStore {
                 StateColumns next =
                     new StateColumns(slice, result.getUpdatedAt().toEpochMilli(), result);
                 StatusEvent event = StatusEvent.claimed(status, newOwnerId);
+                // The sequence alone cannot fence a saga that was purged since the probe: the
+                // purge frees the sequence, and a saga recreated under the same id may not have
+                // reached it. The swept sweep row is gone in both cases, since its key carries the
+                // time.
+                if (tx.get(buildSweepGet(bucket, slice, sweepAt, sagaId)).isEmpty()) {
+                  throw new SagaConcurrentModificationException(sagaId);
+                }
                 if (handedOff) {
-                  if (tx.get(buildSweepGet(bucket, slice, sweepAt, sagaId)).isEmpty()) {
-                    throw new SagaConcurrentModificationException(sagaId);
-                  }
                   appendTransition(
                       tx, sequence, event, appendId, now, bucket, slice, sweepAt, next);
                 } else {
@@ -1284,7 +1348,12 @@ public final class ScalarDbSagaStore implements SagaStore {
     AtomicBoolean sawSaga = new AtomicBoolean();
     return runInTransaction(
         tx -> {
-          List<Result> events = tx.scan(buildEventScan(sagaId));
+          // Only the keys and the state columns are read: payloads are unbounded by default.
+          List<Result> events =
+              tx.scan(
+                  Scan.newBuilder(buildEventScan(sagaId))
+                      .projections("saga_id", "sequence", "state_slice", "sweep_at")
+                      .build());
           sawSaga.set(!events.isEmpty());
           if (events.isEmpty()) {
             return false;

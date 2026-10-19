@@ -53,8 +53,10 @@ class ScalarDbSagaStoreCostIntegrationTest {
     BASELINE.put("approval, rejected", new long[] {27, 35});
     BASELINE.put("poll (getStateSnapshot)", new long[] {1, 0});
     BASELINE.put("detail (getStateWithEvents)", new long[] {1, 0});
-    BASELINE.put("recovery claim", new long[] {7, 3});
-    BASELINE.put("stuck compensation, one pass", new long[] {10, 6});
+    // A claim reads the swept sweep row before appending, so a saga purged since the probe is
+    // not brought back: one read more than the append alone.
+    BASELINE.put("recovery claim", new long[] {8, 3});
+    BASELINE.put("stuck compensation, one pass", new long[] {11, 6});
     // The hand-off records itself as a SAGA_RELEASED event, so the next writer can find the
     // saga's sweep row from its log: one more read and two more records than moving the row alone.
     BASELINE.put("shutdown hand-off", new long[] {5, 7});
