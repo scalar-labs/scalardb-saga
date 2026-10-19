@@ -92,7 +92,7 @@ public final class ScalarDbSagaStore implements SagaStore {
   static final Instant MAX_KEY_INSTANT = Instant.ofEpochMilli(1L << 53);
 
   /** Format version prefix for the opaque list page token. */
-  private static final String PAGE_TOKEN_VERSION = "2";
+  private static final String PAGE_TOKEN_VERSION = "1";
 
   // Circuit breaker for the retention sweep in findByStatusOlderThan: this many consecutive
   // bucket-scan failures are treated as the store being unavailable rather than poison buckets,

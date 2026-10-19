@@ -3687,8 +3687,8 @@ class ScalarDbSagaStoreTest {
 
   @Test
   void listStateSnapshots_tokenUnknownVersionGiven_throwsSagaIllegalArgumentException() {
-    // Arrange — version "1" is the previous layout's, which this store no longer reads
-    String token = encodePageToken("1", "*|-|-", 0, 0, "2026-01-01T00:00:00Z");
+    // Arrange — version "0" is not one this store writes
+    String token = encodePageToken("0", "*|-|-", 0, 0, "2026-01-01T00:00:00Z");
 
     // Act & Assert
     assertThatThrownBy(
