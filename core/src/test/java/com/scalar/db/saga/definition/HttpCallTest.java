@@ -285,7 +285,7 @@ class HttpCallTest {
   }
 
   @Test
-  void jsonBody_numbersGiven_keepsIntegralAsLongAndOthersAsDouble() {
+  void jsonBody_numbersGiven_keepsIntegralAsLongAndOthersAsExactDecimal() {
     // Act
     HttpCall call =
         HttpCall.newBuilder("/order")
@@ -306,10 +306,50 @@ class HttpCallTest {
     // Assert
     assertThat(call.getJsonBody())
         .containsEntry("int", 2L)
-        .containsEntry("float", 1.5d)
-        .containsEntry("decimal", 0.25d)
+        .containsEntry("float", new BigDecimal("1.5"))
+        .containsEntry("decimal", new BigDecimal("0.25"))
         .containsEntry("small", 10L)
         .containsEntry("big", BigInteger.TWO.pow(70));
+  }
+
+  @Test
+  void jsonBody_sameDecimalSpelledDifferentlyGiven_isEqual() {
+    // Act
+    HttpCall trailingZero =
+        HttpCall.newBuilder("/order").jsonBody(Map.of("price", new BigDecimal("1.50"))).build();
+    HttpCall plain = HttpCall.newBuilder("/order").jsonBody(Map.of("price", 1.5d)).build();
+
+    // Assert
+    assertThat(trailingZero).isEqualTo(plain);
+  }
+
+  @Test
+  void jsonBody_wholeDecimalGiven_keepsLong() {
+    // Act
+    HttpCall call =
+        HttpCall.newBuilder("/order").jsonBody(Map.of("count", new BigDecimal("100.0"))).build();
+
+    // Assert
+    assertThat(call.getJsonBody()).containsEntry("count", 100L);
+  }
+
+  @Test
+  void jsonBody_floatGiven_keepsItsDecimalString() {
+    // Act
+    HttpCall call = HttpCall.newBuilder("/order").jsonBody(Map.of("rate", 0.1f)).build();
+
+    // Assert — not 0.10000000149011612, the float's binary value widened to a double.
+    assertThat(call.getJsonBody()).containsEntry("rate", new BigDecimal("0.1"));
+  }
+
+  @Test
+  void jsonBody_numberWithTooManyDigitsGiven_throwsException() {
+    // Arrange — an exponent this large would otherwise expand into a huge integer.
+    HttpCall.Builder builder = HttpCall.newBuilder("/order");
+
+    // Act & Assert
+    assertThatThrownBy(() -> builder.jsonBody(Map.of("n", new BigDecimal("1e2000"))))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test

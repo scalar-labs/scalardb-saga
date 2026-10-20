@@ -1,6 +1,7 @@
 package com.scalar.db.saga.store;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -116,7 +117,12 @@ final class SagaDefinitionSerializer {
    */
   SagaDefinition deserialize(String json) {
     try {
-      JsonNode root = objectMapper.readTree(json);
+      // Decimals read exactly, so a stored jsonBody number compares equal to the one registered.
+      JsonNode root =
+          objectMapper
+              .reader()
+              .with(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
+              .readTree(json);
       requireFields(root, NAME, MODE, VERSION, TIMEOUT_MILLIS, STEPS);
       SagaMode mode = parseEnum(root, MODE, SagaMode.class);
       return mode == SagaMode.TCC ? deserializeTcc(root) : deserializeSaga(root);

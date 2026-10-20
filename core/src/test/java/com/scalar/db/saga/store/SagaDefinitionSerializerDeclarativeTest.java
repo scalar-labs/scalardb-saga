@@ -12,6 +12,7 @@ import com.scalar.db.saga.definition.SagaDefinition.ServiceStep;
 import com.scalar.db.saga.definition.SagaDefinition.ServiceStep.Phase;
 import com.scalar.db.saga.definition.SagaDefinitionParser;
 import com.scalar.db.saga.exception.SagaPersistenceException;
+import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.util.HashMap;
 import java.util.List;
@@ -78,6 +79,8 @@ class SagaDefinitionSerializerDeclarativeTest {
                     2,
                     "price",
                     1.5f,
+                    "total",
+                    new BigDecimal("12345678901234567.890"),
                     "id",
                     BigInteger.ONE,
                     "huge",

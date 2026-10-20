@@ -48,6 +48,9 @@ public final class HttpCall extends CallSpec {
   /** The output token capturing the entire raw response body as a {@code String}. */
   public static final String BODY_OUTPUT = "$body";
 
+  /** The most digits a {@link #getJsonBody()} number may have, before or after the point. */
+  public static final int MAX_NUMBER_DIGITS = 1000;
+
   /** Placeholder syntax for context-value interpolation; shared with the transport resolver. */
   public static final Pattern PLACEHOLDER = Pattern.compile("\\$\\{([^}]*)\\}");
 
@@ -123,9 +126,9 @@ public final class HttpCall extends CallSpec {
   /**
    * The request-body fields, sent as a JSON object for body-carrying verbs. Each value is a JSON
    * value as declared: a {@code String} template ({@code ${key}}-or-literal), a {@code Long},
-   * {@code BigInteger} or {@code Double}, a {@code Boolean}, {@code null}, or a nested {@code Map}
-   * or {@code List} of the same; only strings are templated. Unmodifiable, in declaration order;
-   * always empty for {@link HttpMethod#GET}/{@link HttpMethod#DELETE}.
+   * {@code BigInteger} or {@code BigDecimal}, a {@code Boolean}, {@code null}, or a nested {@code
+   * Map} or {@code List} of the same; only strings are templated. Unmodifiable, in declaration
+   * order; always empty for {@link HttpMethod#GET}/{@link HttpMethod#DELETE}.
    *
    * @return the body fields by field name
    */
@@ -146,7 +149,7 @@ public final class HttpCall extends CallSpec {
 
   /**
    * The explicit request {@code Content-Type}, or {@code null} to use the implicit default ({@code
-   * application/json} for the flat-map {@link #getJsonBody()} body and for a string {@link
+   * application/json} for a {@link #getJsonBody()} map body and for a string {@link
    * #getStringBody()}). When set it overrides that default.
    *
    * @return the content type, or {@code null} for the default
@@ -312,15 +315,21 @@ public final class HttpCall extends CallSpec {
 
     /**
      * Sets the request-body fields. Deep-copied; a value is a {@code String} template, a {@code
-     * Number}, a {@code Boolean}, {@code null}, or a nested {@code Map} with {@code String} keys or
-     * {@code List} of the same. Integral numbers are kept as {@code Long} (or {@code BigInteger}
-     * beyond its range) and the others as {@code Double}, the types a stored definition reads back,
-     * so a definition compares equal to itself after it is stored.
+     * Byte}, {@code Short}, {@code Integer}, {@code Long}, {@code BigInteger}, {@code Float},
+     * {@code Double} or {@code BigDecimal}, a {@code Boolean}, {@code null}, or a nested {@code
+     * Map} with {@code String} keys or {@code List} of the same.
+     *
+     * <p>Numbers are kept exactly, in the one form a stored definition reads back, so a definition
+     * compares equal to itself after it is stored: a number with no fractional part becomes a
+     * {@code Long}, or a {@code BigInteger} beyond its range, and any other becomes a {@code
+     * BigDecimal} without trailing zeros. A {@code Float} or {@code Double} is taken by its decimal
+     * string, so {@code 0.1f} stays {@code 0.1}.
      *
      * @param jsonBody field names to values, sent as a JSON object
      * @return this builder
      * @throws IllegalArgumentException if a value is of another type, a nested map has a key that
-     *     is not a {@code String}, or a number is not finite
+     *     is not a {@code String}, or a number is not finite or has more than {@value
+     *     #MAX_NUMBER_DIGITS} digits
      */
     public Builder jsonBody(Map<String, ?> jsonBody) {
       this.jsonBody = copyObject(jsonBody);
@@ -344,14 +353,11 @@ public final class HttpCall extends CallSpec {
         case null -> null;
         case String s -> s;
         case Boolean b -> b;
-        case Byte n -> n.longValue();
-        case Short n -> n.longValue();
-        case Integer n -> n.longValue();
-        case Long n -> n;
-        case BigInteger n -> n.bitLength() < Long.SIZE ? (Object) n.longValue() : n;
-        case BigDecimal n -> finite(n.doubleValue());
-        case Float n -> finite(n.doubleValue());
-        case Double n -> finite(n);
+        case Byte _, Short _, Integer _, Long _ -> ((Number) value).longValue();
+        case BigInteger n -> exact(new BigDecimal(n));
+        case BigDecimal n -> exact(n);
+        case Float n -> exact(new BigDecimal(finite(n.doubleValue(), n.toString())));
+        case Double n -> exact(new BigDecimal(finite(n, n.toString())));
         case Map<?, ?> map -> copyObject(map);
         case List<?> list -> {
           List<@Nullable Object> copy = new ArrayList<>();
@@ -364,11 +370,33 @@ public final class HttpCall extends CallSpec {
       };
     }
 
-    private static Double finite(double value) {
+    private static String finite(double value, String decimal) {
       if (!Double.isFinite(value)) {
         throw new IllegalArgumentException("jsonBody number must be finite, got " + value);
       }
-      return value;
+      return decimal;
+    }
+
+    /**
+     * The canonical form of a number: integral values as {@code Long} or {@code BigInteger}, others
+     * as a {@code BigDecimal} without trailing zeros. A JSON reader yields one of those for every
+     * spelling of the same value ({@code 1.50}, {@code 1.5}, {@code 15e-1}), so equality survives
+     * the store round trip.
+     */
+    private static Object exact(BigDecimal value) {
+      BigDecimal number = value.stripTrailingZeros();
+      // The digit bound keeps toBigIntegerExact from expanding an exponent such as 1e999999999,
+      // and matches the longest number Jackson reads back by default.
+      if (number.precision() > MAX_NUMBER_DIGITS
+          || number.precision() - number.scale() > MAX_NUMBER_DIGITS) {
+        throw new IllegalArgumentException(
+            "jsonBody number must have at most " + MAX_NUMBER_DIGITS + " digits");
+      }
+      if (number.scale() > 0) {
+        return number;
+      }
+      BigInteger integral = number.toBigIntegerExact();
+      return integral.bitLength() < Long.SIZE ? (Object) integral.longValue() : integral;
     }
 
     /**

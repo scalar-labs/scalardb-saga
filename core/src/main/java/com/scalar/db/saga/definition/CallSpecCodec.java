@@ -1,5 +1,6 @@
 package com.scalar.db.saga.definition;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -45,7 +46,9 @@ public final class CallSpecCodec {
   private static final String CONFIRMATION = "confirmation";
   private static final String CANCELLATION = "cancellation";
 
-  private static final ObjectMapper MAPPER = new ObjectMapper();
+  // Reads a jsonBody tree into plain values; decimals stay exact, as the tree readers keep them.
+  private static final ObjectMapper MAPPER =
+      new ObjectMapper().enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
 
   // The HTTP call spec's own keys. The values of QUERY/JSON_BODY/OUTPUT are free-form user maps and
   // are not validated here.
@@ -119,6 +122,17 @@ public final class CallSpecCodec {
       throw SagaDefinitionException.declarativeStepInvalid(
           stepName, "call spec is missing '" + PATH + "'");
     }
+    try {
+      return buildHttpCall(node, stepName);
+    } catch (IllegalArgumentException | IllegalStateException e) {
+      // A value the builder rejects: a blank path, a jsonBody value it cannot keep, or a body-less
+      // verb (GET/DELETE) that declares a request body. All are definition errors of this step.
+      throw SagaDefinitionException.declarativeStepInvalid(
+          stepName, "invalid call spec: " + (e.getMessage() != null ? e.getMessage() : "unknown"));
+    }
+  }
+
+  private static HttpCall buildHttpCall(JsonNode node, String stepName) {
     HttpCall.Builder callBuilder = HttpCall.newBuilder(node.get(PATH).asText());
     if (isPresent(node, METHOD)) {
       String method = node.get(METHOD).asText();
@@ -150,13 +164,7 @@ public final class CallSpecCodec {
     if (isPresent(node, CALLBACK_TIMEOUT_MILLIS)) {
       callBuilder.callbackTimeoutMillis(node.get(CALLBACK_TIMEOUT_MILLIS).asLong());
     }
-    try {
-      return callBuilder.build();
-    } catch (IllegalStateException e) {
-      // e.g. a body-less verb (GET/DELETE) that declares a request body — a definition error.
-      throw SagaDefinitionException.declarativeStepInvalid(
-          stepName, "invalid call spec: " + (e.getMessage() != null ? e.getMessage() : "unknown"));
-    }
+    return callBuilder.build();
   }
 
   /**

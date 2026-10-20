@@ -2,6 +2,7 @@ package com.scalar.db.saga.definition;
 
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
@@ -143,9 +144,9 @@ public final class SagaDefinitionParser {
     checkUnknownFields(root, name);
     try {
       return mode == SagaMode.TCC ? buildTcc(name, root) : buildSaga(name, root);
-    } catch (IllegalArgumentException | IllegalStateException e) {
-      // A builder rejected a value read from the file, such as a retry policy's out-of-range
-      // maxAttempts or a jsonBody number too large for a double. That is a definition error too.
+    } catch (IllegalArgumentException e) {
+      // A builder rejected a value read from the file, such as a blank step name or a retry
+      // policy's out-of-range maxAttempts. An IllegalStateException is a bug, and is not caught.
       throw SagaDefinitionException.definitionInvalid(
           name, e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
     }
@@ -187,7 +188,8 @@ public final class SagaDefinitionParser {
       builder.timeoutMillis(root.get("timeoutMillis").asLong());
     }
     if (isPresent(root, "defaultRetryPolicy")) {
-      builder.defaultRetryPolicy(parseRetryPolicy(root.get("defaultRetryPolicy")));
+      builder.defaultRetryPolicy(
+          parseRetryPolicy(root.get("defaultRetryPolicy"), "defaultRetryPolicy"));
     }
   }
 
@@ -270,7 +272,10 @@ public final class SagaDefinitionParser {
       stepBuilder.timeoutMillis(stepNode.get("timeoutMillis").asLong());
     }
     if (isPresent(stepNode, "retryPolicy")) {
-      stepBuilder.retryPolicy(parseRetryPolicy(stepNode.get("retryPolicy")));
+      stepBuilder.retryPolicy(
+          parseRetryPolicy(
+              stepNode.get("retryPolicy"),
+              "retryPolicy of step '" + stepNode.path("name").asText() + "'"));
     }
   }
 
@@ -278,7 +283,22 @@ public final class SagaDefinitionParser {
     return node.has(field) && !node.get(field).isNull();
   }
 
-  private static RetryPolicy parseRetryPolicy(JsonNode node) {
+  /**
+   * Reads a retry policy. Its rejections are {@code IllegalArgumentException}s that name {@code
+   * where}, so {@link #buildDefinition} reports which policy was wrong.
+   */
+  private static RetryPolicy parseRetryPolicy(JsonNode node, String where) {
+    if (!node.isObject()) {
+      throw new IllegalArgumentException(where + " must be a JSON object");
+    }
+    try {
+      return readRetryPolicy(node);
+    } catch (IllegalArgumentException e) {
+      throw new IllegalArgumentException(where + ": " + e.getMessage(), e);
+    }
+  }
+
+  private static RetryPolicy readRetryPolicy(JsonNode node) {
     RetryPolicy.Builder builder = RetryPolicy.newBuilder();
     if (node.has("maxAttempts")) {
       builder.maxAttempts(node.get("maxAttempts").asInt());
@@ -352,44 +372,29 @@ public final class SagaDefinitionParser {
     Set<String> retryPolicyKnown =
         Set.of("maxAttempts", "initialIntervalMillis", "backoffMultiplier", "maxIntervalMillis");
 
-    root.fieldNames()
-        .forEachRemaining(
-            f -> {
-              if (!known.contains(f)) {
-                throw SagaDefinitionException.definitionInvalid(
-                    definitionName, "unknown field '" + f + "' in definition");
-              }
-            });
-    checkUnknownFields(root.get("defaultRetryPolicy"), retryPolicyKnown, definitionName);
-
+    checkKnownFields(root, known, "definition", definitionName);
+    checkKnownFields(
+        root.get("defaultRetryPolicy"), retryPolicyKnown, "retry policy", definitionName);
     if (root.has("steps")) {
       for (JsonNode stepNode : root.get("steps")) {
-        stepNode
-            .fieldNames()
-            .forEachRemaining(
-                f -> {
-                  if (!stepKnown.contains(f)) {
-                    throw SagaDefinitionException.definitionInvalid(
-                        definitionName, "unknown field '" + f + "' in step");
-                  }
-                });
-        checkUnknownFields(stepNode.get("retryPolicy"), retryPolicyKnown, definitionName);
+        checkKnownFields(stepNode, stepKnown, "step", definitionName);
+        checkKnownFields(
+            stepNode.get("retryPolicy"), retryPolicyKnown, "retry policy", definitionName);
       }
     }
   }
 
-  private static void checkUnknownFields(
-      @Nullable JsonNode retryPolicy, Set<String> known, String definitionName) {
-    if (retryPolicy == null) {
+  private static void checkKnownFields(
+      @Nullable JsonNode node, Set<String> known, String where, String definitionName) {
+    if (node == null) {
       return;
     }
-    retryPolicy
-        .fieldNames()
+    node.fieldNames()
         .forEachRemaining(
             f -> {
               if (!known.contains(f)) {
                 throw SagaDefinitionException.definitionInvalid(
-                    definitionName, "unknown field '" + f + "' in retry policy");
+                    definitionName, "unknown field '" + f + "' in " + where);
               }
             });
   }
@@ -413,6 +418,8 @@ public final class SagaDefinitionParser {
     ObjectMapper mapper = factory != null ? new ObjectMapper(factory) : new ObjectMapper();
     // Defense in depth against polymorphic-deserialization gadgets (off by default in Jackson 2.x).
     mapper.deactivateDefaultTyping();
+    // Decimals read exactly, as the saga context keeps them; see HttpCall.Builder#jsonBody.
+    mapper.enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
     return mapper;
   }
 }
