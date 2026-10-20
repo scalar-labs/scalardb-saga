@@ -94,6 +94,8 @@ class GrpcSagaOrchestratorClientTest {
 
   @AfterEach
   void tearDown() {
+    // Closed first, so a watch with a retry pending does not outlive the test.
+    client.close();
     channel.shutdownNow();
     server.shutdownNow();
   }
@@ -142,8 +144,7 @@ class GrpcSagaOrchestratorClientTest {
     String sagaId = client.startAsync("transfer", Map.of());
 
     // Assert
-    assertThat(fake.startScript).isEmpty();
-    assertThat(fake.lastStart().getSagaId()).isEqualTo(sagaId);
+    assertThat(fake.starts).extracting(StartSagaRequest::getSagaId).containsExactly(sagaId, sagaId);
   }
 
   @Test
@@ -174,6 +175,32 @@ class GrpcSagaOrchestratorClientTest {
 
     // Assert — the id is the caller's only way to learn whether an attempt landed.
     assertThat(timeout.getSagaId()).isEqualTo(fake.lastStart().getSagaId());
+  }
+
+  @Test
+  void startAsync_retryFindsSagaOfAnotherDefinition_throwsSagaAlreadyExists() {
+    // Arrange — the id was taken by someone else between the lost attempt and the retry.
+    fake.enqueueStartError(Status.UNAVAILABLE.withDescription("lost").asRuntimeException());
+    fake.enqueueStartError(Status.ALREADY_EXISTS.asRuntimeException());
+    fake.getResponse =
+        snapshot("order-42", SagaStatus.COMPLETED).toBuilder().setName("refund").build();
+
+    // Act + Assert
+    assertThatThrownBy(() -> client.startAsync("order-42", "transfer", Map.of()))
+        .isInstanceOf(SagaAlreadyExistsException.class);
+  }
+
+  @Test
+  void startAsync_retryFindsSagaOfAnotherPinnedVersion_throwsSagaAlreadyExists() {
+    // Arrange — same definition name, but not the version this start pinned.
+    fake.enqueueStartError(Status.UNAVAILABLE.withDescription("lost").asRuntimeException());
+    fake.enqueueStartError(Status.ALREADY_EXISTS.asRuntimeException());
+    fake.getResponse = snapshot("order-42", SagaStatus.RUNNING);
+
+    // Act + Assert
+    assertThatThrownBy(
+            () -> client.startAsync("order-42", new SagaDefinitionId("transfer", "v2"), Map.of()))
+        .isInstanceOf(SagaAlreadyExistsException.class);
   }
 
   @Test
@@ -292,7 +319,7 @@ class GrpcSagaOrchestratorClientTest {
   }
 
   @Test
-  void startAsyncWithCallback_sagaParksThenCompletes_callsOnlyOnCompleted() {
+  void startAsyncWithCallback_sagaParksThenCompletes_callsOnlyOnCompleted() throws Exception {
     // Arrange — a window elapsing and a park both answer non-terminal; the watch asks again.
     fake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
     fake.enqueueAwaitSnapshot(snapshot("s-1", SagaStatus.RUNNING));
@@ -304,8 +331,52 @@ class GrpcSagaOrchestratorClientTest {
     client.startAsync("s-1", new SagaDefinitionId("transfer", "v1"), Map.of(), callback);
 
     // Assert — no onParked: the remote client reports the terminal state instead.
+    assertThat(callback.called.await(10, TimeUnit.SECONDS)).isTrue();
     assertThat(callback.calls).containsExactly("onCompleted:s-1");
     assertThat(fake.awaitCalls).isEqualTo(3);
+  }
+
+  @Test
+  void startAsyncWithCallback_answersComeBackAtOnce_pacesTheNextCalls() throws Exception {
+    // Arrange — as from a draining server, or one whose wait window is configured very short.
+    fake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
+    fake.enqueueAwaitSnapshot(snapshot("s-1", SagaStatus.RUNNING));
+    fake.enqueueAwaitSnapshot(snapshot("s-1", SagaStatus.RUNNING));
+    fake.enqueueAwaitSnapshot(snapshot("s-1", SagaStatus.COMPLETED));
+    RecordingCallback callback = new RecordingCallback();
+    long startNanos = System.nanoTime();
+
+    // Act
+    client.startAsync("transfer", Map.of(), callback);
+
+    // Assert — nothing inline: each quick answer defers the next call by at least half a second.
+    assertThat(callback.calls).isEmpty();
+    assertThat(callback.called.await(10, TimeUnit.SECONDS)).isTrue();
+    assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos))
+        .isGreaterThanOrEqualTo(1_000L);
+    assertThat(callback.calls).containsExactly("onCompleted:s-1");
+  }
+
+  @Test
+  void startAsyncWithCallback_unrecognizedStatus_stopsAndLogsInsteadOfWatchingForever()
+      throws Exception {
+    // Arrange — a newer server answers with a status this client does not know.
+    fake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
+    fake.enqueueAwaitSnapshot(SagaSnapshot.getDefaultInstance());
+    RecordingCallback callback = new RecordingCallback();
+    LogCapture log = LogCapture.attach();
+
+    try {
+      // Act
+      client.startAsync("transfer", Map.of(), callback);
+
+      // Assert
+      assertThat(log.published.await(10, TimeUnit.SECONDS)).isTrue();
+      assertThat(fake.awaitCalls).isEqualTo(1);
+      assertThat(callback.calls).isEmpty();
+    } finally {
+      log.detach();
+    }
   }
 
   @Test
@@ -326,19 +397,26 @@ class GrpcSagaOrchestratorClientTest {
   }
 
   @Test
-  void startAsyncWithCallback_sagaPurgedAfterBeingSeen_stopsWithoutCallingOrRetrying() {
+  void startAsyncWithCallback_sagaPurgedAfterBeingSeen_stopsWithoutCallingOrRetrying()
+      throws Exception {
     // Arrange — the watch has had an answer, so the saga was found: a later miss is a purge.
     fake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
     fake.enqueueAwaitSnapshot(snapshot("s-1", SagaStatus.WAITING));
     fake.enqueueAwaitError(Status.NOT_FOUND.withDescription("purged").asRuntimeException());
     RecordingCallback callback = new RecordingCallback();
+    LogCapture log = LogCapture.attach();
 
-    // Act
-    client.startAsync("transfer", Map.of(), callback);
+    try {
+      // Act
+      client.startAsync("transfer", Map.of(), callback);
 
-    // Assert
-    assertThat(callback.calls).isEmpty();
-    assertThat(fake.awaitCalls).isEqualTo(2);
+      // Assert
+      assertThat(log.published.await(10, TimeUnit.SECONDS)).isTrue();
+      assertThat(callback.calls).isEmpty();
+      assertThat(fake.awaitCalls).isEqualTo(2);
+    } finally {
+      log.detach();
+    }
   }
 
   @Test
@@ -431,6 +509,9 @@ class GrpcSagaOrchestratorClientTest {
 
           @Override
           public void onCompensated(SagaStateSnapshot saga) {}
+
+          @Override
+          public void onEscalated(SagaStateSnapshot saga) {}
         };
     LogCapture log = LogCapture.attach();
 
@@ -1457,6 +1538,7 @@ class GrpcSagaOrchestratorClientTest {
   private static final class FakeSagaService extends SagaServiceGrpc.SagaServiceImplBase {
 
     @Nullable StartSagaRequest lastStart;
+    final List<StartSagaRequest> starts = new CopyOnWriteArrayList<>();
     @Nullable AwaitSagaRequest lastAwait;
     @Nullable GetSagaRequest lastGet;
     @Nullable StatusRuntimeException startError;
@@ -1512,6 +1594,7 @@ class GrpcSagaOrchestratorClientTest {
     @Override
     public void startSaga(StartSagaRequest request, StreamObserver<SagaSnapshot> responseObserver) {
       lastStart = request;
+      starts.add(request);
       if (!startScript.isEmpty()) {
         startScript.poll().accept(responseObserver);
         return;

@@ -21,7 +21,6 @@ import com.scalar.db.saga.rpc.SagaServiceGrpc;
 import com.scalar.db.saga.rpc.SagaServiceGrpc.SagaServiceBlockingStub;
 import com.scalar.db.saga.rpc.SagaServiceGrpc.SagaServiceStub;
 import com.scalar.db.saga.rpc.SagaSnapshot;
-import com.scalar.db.saga.rpc.SagaStatus;
 import com.scalar.db.saga.rpc.StartSagaRequest;
 import io.grpc.Context;
 import io.grpc.ManagedChannel;
@@ -53,14 +52,16 @@ import org.jspecify.annotations.Nullable;
  * ManagedChannel} that multiplexes all calls. Call {@link #close()} to release it.
  *
  * <p>The {@code startAsync(..., SagaCallback)} overloads return once the saga is started, then
- * watch it in the background with {@code AwaitSaga} and call the callback when it reaches a
- * terminal state. Unlike the embedded orchestrator, the watch keeps going through a park on an
- * asynchronous step, so {@link SagaCallback#onParked} is never called and the terminal method
- * always is, unless the watch stops first. It stops on {@link #close()}, and on a failure that
- * retrying cannot fix, such as the saga being purged, which is logged. The callback lives in this
- * process only: if the process exits, it is not called. A callback normally runs on a gRPC thread,
+ * watch it in the background with {@code AwaitSaga} until it is terminal; {@link SagaCallback}
+ * describes which methods are called and when none is. A callback normally runs on a gRPC thread,
  * so hand long work to your own executor. When the start already finds the saga terminal, which a
  * retried start can, it runs on the calling thread before {@code startAsync} returns.
+ *
+ * <p>Each watch holds one call open on the client's single connection for up to the server's wait
+ * window ({@code scalar.db.saga.server.sync.max_wait_millis}). A proxy that caps concurrent streams
+ * per HTTP/2 connection, as most L7 load balancers do at around 100, makes calls beyond the cap
+ * wait for a free stream, so a client watching more sagas than that through such a proxy can see
+ * its other calls delayed by up to a window.
  *
  * <p>Every start, {@code startAsync} included, retries a server it cannot reach until {@link
  * Builder#defaultDeadlineMillis} runs out. With no deadline set, a start against a server that is
@@ -86,6 +87,8 @@ import org.jspecify.annotations.Nullable;
 @ThreadSafe
 public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
 
+  // java.util.logging rather than SLF4J: the SDK takes no logging dependency, and grpc-java logs
+  // through JUL too, so an application already routes it wherever it routes gRPC's own logs.
   private static final Logger LOGGER = Logger.getLogger(GrpcSagaOrchestratorClient.class.getName());
 
   private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
@@ -96,6 +99,14 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
    * briefly miss the new saga. With the backoff below that spans a few seconds.
    */
   private static final int NOT_FOUND_RETRIES_BEFORE_SEEN = 6;
+
+  /**
+   * The least time between two watch calls. The server normally holds each call for its whole
+   * window, which paces the watch; one that answers sooner, because the server is draining or its
+   * window is configured short, would otherwise be asked again at once, a store read per round
+   * trip.
+   */
+  private static final long MIN_WATCH_INTERVAL_MILLIS = 1_000L;
 
   /** Capped, jittered exponential backoff between retries of a retryable transport failure. */
   private static final long BACKOFF_BASE_MILLIS = 50L;
@@ -135,6 +146,8 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
       @Nullable ManagedChannel ownedChannel,
       long defaultDeadlineMillis) {
     this.stub = Objects.requireNonNull(stub, "stub must not be null");
+    // Only the channel carries over, not the blocking stub's call options; anything applied to the
+    // stub, such as call credentials, has to be applied to this one as well.
     this.watchStub = SagaServiceGrpc.newStub(stub.getChannel());
     this.ownedChannel = ownedChannel;
     this.defaultDeadlineMillis = defaultDeadlineMillis;
@@ -168,11 +181,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
   public String start(String sagaName, Map<String, Object> input) {
     Objects.requireNonNull(sagaName, "sagaName must not be null");
     Objects.requireNonNull(input, "input must not be null");
-    // Mint the id client-side: it is the idempotency key that makes the start retryable and gives
-    // the await loop an id even if the first response is lost (no server-generated-id start here).
-    String sagaId = UUID.randomUUID().toString();
-    startSynchronously(sagaId, sagaName, null, input);
-    return sagaId;
+    return startSynchronously(null, sagaName, null, input);
   }
 
   @Override
@@ -187,9 +196,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
   public String start(SagaDefinitionId id, Map<String, Object> input) {
     Objects.requireNonNull(id, "id must not be null");
     Objects.requireNonNull(input, "input must not be null");
-    String sagaId = UUID.randomUUID().toString();
-    startSynchronously(sagaId, id.name(), id.version(), input);
-    return sagaId;
+    return startSynchronously(null, id.name(), id.version(), input);
   }
 
   @Override
@@ -328,16 +335,33 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
    * transport failures (the saga keeps running server-side regardless), bounded overall by the
    * client deadline — {@code defaultDeadlineMillis == 0} means block to terminal, matching the
    * embedded orchestrator.
+   *
+   * @return the saga id, the caller's or the one minted here
    */
-  private SagaSnapshot startSynchronously(
-      String sagaId, String name, @Nullable String version, Map<String, Object> input) {
-    long loopDeadlineNanos =
-        defaultDeadlineMillis > 0L
-            ? System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(defaultDeadlineMillis)
-            : 0L;
-    StartSagaRequest request = buildRequest(sagaId, name, version, input, false);
-    SagaSnapshot snapshot = firstStart(request, sagaId, name, version, loopDeadlineNanos);
-    return awaitLoop(sagaId, snapshot, loopDeadlineNanos);
+  private String startSynchronously(
+      @Nullable String sagaId, String name, @Nullable String version, Map<String, Object> input) {
+    String id = idOrMint(sagaId);
+    long loopDeadlineNanos = loopDeadlineNanos();
+    StartSagaRequest request = buildRequest(id, name, version, input, false);
+    SagaSnapshot snapshot = firstStart(request, id, name, version, loopDeadlineNanos);
+    awaitLoop(id, snapshot, loopDeadlineNanos);
+    return id;
+  }
+
+  /**
+   * The caller's id, or a new one. Minted client-side because the id is the idempotency key that
+   * makes a start safe to retry, and the handle the caller needs even when the first answer is
+   * lost.
+   */
+  private static String idOrMint(@Nullable String sagaId) {
+    return sagaId != null ? sagaId : UUID.randomUUID().toString();
+  }
+
+  /** The end of the client deadline in {@link System#nanoTime()} terms, or {@code 0} for none. */
+  private long loopDeadlineNanos() {
+    return defaultDeadlineMillis > 0L
+        ? System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(defaultDeadlineMillis)
+        : 0L;
   }
 
   /**
@@ -345,7 +369,9 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
    * always concrete (client-minted or caller-supplied), the retry is idempotent. {@code
    * ALREADY_EXISTS} on the <i>first</i> attempt is a genuine duplicate (surfaced as {@link
    * SagaAlreadyExistsException}); on a <i>retry</i> it means our earlier attempt landed, so we
-   * fetch the snapshot and proceed to the await loop.
+   * fetch the snapshot and proceed to the await loop. Unless the saga found runs a different
+   * definition: then the id was taken by someone else in the meantime, and it is a duplicate after
+   * all.
    *
    * <p>An admission refusal after a retry is reconciled the same way and for the same reason: the
    * earlier attempt may have created the saga, and that saga may be what is holding the last
@@ -367,7 +393,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
         if (code == Status.Code.ALREADY_EXISTS) {
           if (attempted) {
             try {
-              return getSagaSnapshot(sagaId, loopDeadlineNanos);
+              return adopt(sagaId, name, version, loopDeadlineNanos);
             } catch (SagaTimeoutException refetchTimeout) {
               // The earlier attempt landed, so the saga exists; a bare request timeout would drop
               // the id the caller needs to find it, which on the minted-id overloads is its only
@@ -394,9 +420,11 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
         // is there.
         if (attempted && GrpcClientSupport.isEngineOverloaded(e)) {
           try {
-            return getSagaSnapshot(sagaId, loopDeadlineNanos);
+            return adopt(sagaId, name, version, loopDeadlineNanos);
           } catch (SagaNotFoundException notFound) {
             // Nothing landed, so the refusal was the honest answer after all.
+          } catch (SagaAlreadyExistsException taken) {
+            throw taken;
           } catch (RuntimeException reconcileFailure) {
             // The reconcile itself failed, so it settled nothing. Overload is still the only thing
             // the server actually told us, and it is what a caller keys backpressure on — losing it
@@ -441,6 +469,20 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
     return snapshot;
   }
 
+  /**
+   * Fetches the saga a retried start found under its id, and takes it as the start's own only if it
+   * runs the definition the start asked for.
+   */
+  private SagaSnapshot adopt(
+      String sagaId, String name, @Nullable String version, long loopDeadlineNanos) {
+    SagaSnapshot found = getSagaSnapshot(sagaId, loopDeadlineNanos);
+    if (!found.getName().equals(name)
+        || (version != null && !found.getDefinitionVersion().equals(version))) {
+      throw new SagaAlreadyExistsException(sagaId, ClientProtoMappers.fromProto(found));
+    }
+    return found;
+  }
+
   private SagaSnapshot getSagaSnapshot(String sagaId, long loopDeadlineNanos) {
     try {
       return callWithin(loopDeadlineNanos)
@@ -452,11 +494,14 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
     }
   }
 
+  /**
+   * Whether the snapshot is terminal, by the api's own definition.
+   *
+   * @throws SagaRuntimeException with {@code UNRECOGNIZED_SERVER_ERROR} for a status this client
+   *     does not know, which would otherwise read as never terminal and be waited on forever
+   */
   private static boolean isTerminal(SagaSnapshot snapshot) {
-    SagaStatus status = snapshot.getStatus();
-    return status == SagaStatus.SAGA_STATUS_COMPLETED
-        || status == SagaStatus.SAGA_STATUS_COMPENSATED
-        || status == SagaStatus.SAGA_STATUS_ESCALATED;
+    return ClientProtoMappers.fromProtoStatus(snapshot.getStatus()).isTerminal();
   }
 
   /**
@@ -546,10 +591,15 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
 
   private static long backoffMillis(int attempt) {
     long exp = BACKOFF_BASE_MILLIS << Math.min(attempt, BACKOFF_MAX_SHIFT);
-    long capped = Math.min(BACKOFF_CAP_MILLIS, exp);
-    // Jitter in [capped/2, capped], derived from the clock (no security-sensitive RNG needed), to
-    // avoid a thundering herd when many clients retry a recovered daemon at once.
-    long half = capped / 2L;
+    return jittered(Math.min(BACKOFF_CAP_MILLIS, exp));
+  }
+
+  /**
+   * A delay in [millis/2, millis], derived from the clock (no security-sensitive RNG needed), to
+   * avoid a thundering herd when many clients retry a recovered daemon at once.
+   */
+  private static long jittered(long millis) {
+    long half = millis / 2L;
     long jitter = half == 0L ? 0L : Math.floorMod(System.nanoTime(), half + 1L);
     return half + jitter;
   }
@@ -561,22 +611,36 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
   /**
    * Calls {@code callback} once the saga is terminal, re-issuing {@code AwaitSaga} until it is. A
    * non-terminal answer means the server's window elapsed, or the saga parked, so the watch asks
-   * again at once; a retryable transport failure is retried after a backoff. Nothing here blocks a
-   * thread: each call is asynchronous, and its answer arrives on a gRPC thread.
+   * again, at once unless the answer came sooner than {@link #MIN_WATCH_INTERVAL_MILLIS}; a
+   * retryable transport failure is retried after a backoff. Nothing here blocks a thread: each call
+   * is asynchronous, and its answer arrives on a gRPC thread.
    *
-   * @param seen whether an {@code AwaitSaga} has answered for this saga yet; until one has, {@code
-   *     NOT_FOUND} may be index lag rather than a purge, and is retried
+   * @param retries transport failures since the last answer, which set the backoff
+   * @param notFoundRetriesLeft how many more {@code NOT_FOUND}s to retry; nonzero only until the
+   *     first answer, while a miss may be index lag rather than a purge
    */
   private void watch(
-      String sagaId, SagaSnapshot snapshot, SagaCallback callback, int retries, boolean seen) {
+      String sagaId,
+      SagaSnapshot snapshot,
+      SagaCallback callback,
+      int retries,
+      int notFoundRetriesLeft) {
     if (closed.get()) {
       return;
     }
-    if (isTerminal(snapshot)) {
+    boolean terminal;
+    try {
+      terminal = isTerminal(snapshot);
+    } catch (SagaRuntimeException unrecognized) {
+      logStopped(sagaId, unrecognized);
+      return;
+    }
+    if (terminal) {
       dispatch(sagaId, snapshot, callback);
       return;
     }
     AwaitSagaRequest request = AwaitSagaRequest.newBuilder().setSagaId(sagaId).build();
+    long issuedNanos = System.nanoTime();
     watchContext.run(
         () ->
             watchStub.awaitSaga(
@@ -594,8 +658,19 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
 
                   @Override
                   public void onCompleted() {
-                    if (answer != null) {
-                      watch(sagaId, answer, callback, 0, true);
+                    SagaSnapshot next = answer;
+                    if (next == null) {
+                      return;
+                    }
+                    long elapsedMillis =
+                        TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - issuedNanos);
+                    if (elapsedMillis < MIN_WATCH_INTERVAL_MILLIS && stillRunning(next)) {
+                      schedule(
+                          () -> watch(sagaId, next, callback, 0, 0),
+                          sagaId,
+                          jittered(MIN_WATCH_INTERVAL_MILLIS));
+                    } else {
+                      watch(sagaId, next, callback, 0, 0);
                     }
                   }
 
@@ -604,48 +679,66 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
                     if (closed.get()) {
                       return;
                     }
-                    if (t instanceof StatusRuntimeException
-                        && retryWatch((StatusRuntimeException) t)) {
-                      scheduleRetry(sagaId, snapshot, callback, retries, seen);
-                      return;
+                    Status.Code code =
+                        t instanceof StatusRuntimeException
+                            ? ((StatusRuntimeException) t).getStatus().getCode()
+                            : null;
+                    if (code != null && isRetryable((StatusRuntimeException) t)) {
+                      schedule(
+                          () -> watch(sagaId, snapshot, callback, retries + 1, notFoundRetriesLeft),
+                          sagaId,
+                          backoffMillis(retries));
+                    } else if (code == Status.Code.NOT_FOUND && notFoundRetriesLeft > 0) {
+                      schedule(
+                          () ->
+                              watch(
+                                  sagaId, snapshot, callback, retries + 1, notFoundRetriesLeft - 1),
+                          sagaId,
+                          backoffMillis(retries));
+                    } else {
+                      logStopped(sagaId, t);
                     }
-                    LOGGER.log(
-                        Level.WARNING,
-                        "Stopped watching saga " + sagaId + "; its callback will not be called",
-                        t);
-                  }
-
-                  private boolean retryWatch(StatusRuntimeException e) {
-                    return isRetryable(e)
-                        || (!seen
-                            && e.getStatus().getCode() == Status.Code.NOT_FOUND
-                            && retries < NOT_FOUND_RETRIES_BEFORE_SEEN);
                   }
                 }));
   }
 
+  /**
+   * Whether the watch has to ask again about this snapshot. An unrecognized status counts as no, so
+   * that {@link #watch} reports it at once rather than after a pause.
+   */
+  private static boolean stillRunning(SagaSnapshot snapshot) {
+    try {
+      return !isTerminal(snapshot);
+    } catch (SagaRuntimeException unrecognized) {
+      return false;
+    }
+  }
+
   // The future is dropped, so the task reports its own failure rather than leaving it there.
   @SuppressWarnings("FutureReturnValueIgnored")
-  private void scheduleRetry(
-      String sagaId, SagaSnapshot snapshot, SagaCallback callback, int retries, boolean seen) {
+  private void schedule(Runnable next, String sagaId, long delayMillis) {
     try {
       retryScheduler()
           .schedule(
               () -> {
                 try {
-                  watch(sagaId, snapshot, callback, retries + 1, seen);
+                  next.run();
                 } catch (RuntimeException e) {
-                  LOGGER.log(
-                      Level.WARNING,
-                      "Stopped watching saga " + sagaId + "; its callback will not be called",
-                      e);
+                  logStopped(sagaId, e);
                 }
               },
-              backoffMillis(retries),
+              delayMillis,
               TimeUnit.MILLISECONDS);
     } catch (RejectedExecutionException e) {
       // close() ran after the caller's closed check; the watch ends with the client.
     }
+  }
+
+  private static void logStopped(String sagaId, Throwable cause) {
+    LOGGER.log(
+        Level.WARNING,
+        "Stopped watching saga " + sagaId + "; its callback will not be called",
+        cause);
   }
 
   private synchronized ScheduledExecutorService retryScheduler() {
@@ -660,6 +753,9 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
               runnable -> {
                 Thread thread = new Thread(runnable, "saga-client-watch-retry");
                 thread.setDaemon(true);
+                // Not the creating caller's, which in an application server would pin that
+                // application's classloader for the life of this client.
+                thread.setContextClassLoader(GrpcSagaOrchestratorClient.class.getClassLoader());
                 return thread;
               });
     }
@@ -667,20 +763,36 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
   }
 
   private static void dispatch(String sagaId, SagaSnapshot snapshot, SagaCallback callback) {
-    // Caught so that a failing callback is reported against its saga rather than surfacing inside
-    // gRPC's call machinery as an anonymous listener failure.
+    SagaStateSnapshot saga;
     try {
-      SagaStateSnapshot saga = ClientProtoMappers.fromProto(snapshot);
-      SagaStatus status = snapshot.getStatus();
-      if (status == SagaStatus.SAGA_STATUS_COMPLETED) {
-        callback.onCompleted(saga);
-      } else if (status == SagaStatus.SAGA_STATUS_COMPENSATED) {
-        callback.onCompensated(saga);
-      } else {
-        callback.onEscalated(saga);
+      saga = ClientProtoMappers.fromProto(snapshot);
+    } catch (RuntimeException unreadable) {
+      logStopped(sagaId, unreadable);
+      return;
+    }
+    // Caught so that a failing callback is reported against its saga rather than surfacing inside
+    // gRPC's call machinery as an anonymous listener failure. Throwable, as the embedded
+    // orchestrator catches: an Error from application code says nothing about this client.
+    try {
+      // Every status is listed and there is no default, as in the embedded dispatch: a new status
+      // must not silently inherit another one's callback.
+      switch (saga.getStatus()) {
+        case COMPLETED:
+          callback.onCompleted(saga);
+          break;
+        case COMPENSATED:
+          callback.onCompensated(saga);
+          break;
+        case ESCALATED:
+          callback.onEscalated(saga);
+          break;
+        case RUNNING:
+        case COMPENSATING:
+        case WAITING:
+          throw new IllegalStateException("dispatched a non-terminal saga: " + saga.getStatus());
       }
-    } catch (RuntimeException e) {
-      LOGGER.log(Level.WARNING, "The callback for saga " + sagaId + " threw", e);
+    } catch (Throwable t) {
+      LOGGER.log(Level.WARNING, "The callback for saga " + sagaId + " threw", t);
     }
   }
 
@@ -692,8 +804,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
    * Starts the saga {@code async=true} and returns its id without waiting for a terminal state,
    * then, when {@code callback} is given, watches it in the background. Backs all eight {@code
    * startAsync} overloads; the {@code void} ones ignore the returned id, which the caller already
-   * holds. The start retries transport failures exactly as the blocking {@code start} does, and is
-   * safe to retry for the same reason: the id is minted here when the caller supplies none.
+   * holds. The start retries transport failures exactly as the blocking {@code start} does.
    */
   private String startAsynchronously(
       @Nullable String sagaId,
@@ -701,15 +812,12 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
       @Nullable String version,
       Map<String, Object> input,
       @Nullable SagaCallback callback) {
-    String id = sagaId != null ? sagaId : UUID.randomUUID().toString();
-    long deadlineNanos =
-        defaultDeadlineMillis > 0L
-            ? System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(defaultDeadlineMillis)
-            : 0L;
+    String id = idOrMint(sagaId);
     SagaSnapshot snapshot =
-        firstStart(buildRequest(id, name, version, input, true), id, name, version, deadlineNanos);
+        firstStart(
+            buildRequest(id, name, version, input, true), id, name, version, loopDeadlineNanos());
     if (callback != null) {
-      watch(id, snapshot, callback, 0, false);
+      watch(id, snapshot, callback, 0, NOT_FOUND_RETRIES_BEFORE_SEEN);
     }
     return id;
   }

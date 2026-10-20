@@ -911,6 +911,12 @@ class SagaIntegrationTest {
                 callbackResult.set(saga);
                 callbackLatch.countDown();
               }
+
+              @Override
+              public void onEscalated(SagaStateSnapshot saga) {
+                callbackResult.set(saga);
+                callbackLatch.countDown();
+              }
             };
 
         // Act

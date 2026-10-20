@@ -150,7 +150,8 @@ public interface SagaOrchestrator extends AutoCloseable {
   void start(String sagaId, SagaDefinitionId id, Map<String, Object> input);
 
   /**
-   * Starts a new saga instance with a generated ID (asynchronous — returns immediately).
+   * Starts a new saga instance with a generated ID (asynchronous — returns once the saga is
+   * persisted, without waiting for it to run).
    *
    * <p>This method queries the store on every call to resolve the latest definition version. If you
    * know the exact version, prefer {@link #startAsync(SagaDefinitionId, Map)} to avoid the store
@@ -342,8 +343,9 @@ public interface SagaOrchestrator extends AutoCloseable {
   SagaDetail getSagaDetail(String sagaId);
 
   /**
-   * Shuts down the orchestrator, stopping background tasks and waiting for in-flight sagas to
-   * complete.
+   * Shuts down the orchestrator and stops its background tasks. The embedded orchestrator waits for
+   * in-flight sagas to complete; the client SDK only stops watching them, so their callbacks are
+   * not called (see {@link SagaCallback}).
    */
   @Override
   void close();
