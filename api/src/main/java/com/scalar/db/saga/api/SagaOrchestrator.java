@@ -183,8 +183,6 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @throws SagaDefinitionNotFoundException if no definition matches the given name
    * @throws SagaDefinitionNotServedException if the definition is registered but this deployment
    *     does not serve it
-   * @throws UnsupportedOperationException if the implementation cannot deliver a local completion
-   *     callback (e.g. a remote client with no server-streaming callback channel)
    * @throws SagaIllegalArgumentException if {@code input} holds a value a saga context cannot carry
    *     (only primitives, strings, BigDecimal, and collections thereof)
    * @throws SagaOverloadedException if the engine is at its concurrent saga limit; nothing was
@@ -228,8 +226,6 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @throws SagaDefinitionNotFoundException if no definition matches the given name
    * @throws SagaDefinitionNotServedException if the definition is registered but this deployment
    *     does not serve it
-   * @throws UnsupportedOperationException if the implementation cannot deliver a local completion
-   *     callback (e.g. a remote client with no server-streaming callback channel)
    * @throws SagaAlreadyExistsException if a saga already exists with {@code sagaId}
    * @throws SagaIllegalArgumentException if {@code sagaId} is not of the form {@code
    *     [a-zA-Z0-9._-]{1,128}}, or if {@code input} holds a value a saga context cannot carry (only
@@ -269,8 +265,6 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @throws SagaDefinitionNotFoundException if no definition matches the given name and version
    * @throws SagaDefinitionNotServedException if the definition is registered but this deployment
    *     does not serve it
-   * @throws UnsupportedOperationException if the implementation cannot deliver a local completion
-   *     callback (e.g. a remote client with no server-streaming callback channel)
    * @throws SagaIllegalArgumentException if {@code input} holds a value a saga context cannot carry
    *     (only primitives, strings, BigDecimal, and collections thereof)
    * @throws SagaOverloadedException if the engine is at its concurrent saga limit; nothing was
@@ -310,8 +304,6 @@ public interface SagaOrchestrator extends AutoCloseable {
    * @throws SagaDefinitionNotFoundException if no definition matches the given name and version
    * @throws SagaDefinitionNotServedException if the definition is registered but this deployment
    *     does not serve it
-   * @throws UnsupportedOperationException if the implementation cannot deliver a local completion
-   *     callback (e.g. a remote client with no server-streaming callback channel)
    * @throws SagaAlreadyExistsException if a saga already exists with {@code sagaId}
    * @throws SagaIllegalArgumentException if {@code sagaId} is not of the form {@code
    *     [a-zA-Z0-9._-]{1,128}}, or if {@code input} holds a value a saga context cannot carry (only

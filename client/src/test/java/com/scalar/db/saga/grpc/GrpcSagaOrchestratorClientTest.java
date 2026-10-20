@@ -33,6 +33,7 @@ import com.scalar.db.saga.rpc.GetSagaRequest;
 import com.scalar.db.saga.rpc.SagaServiceGrpc;
 import com.scalar.db.saga.rpc.SagaSnapshot;
 import com.scalar.db.saga.rpc.StartSagaRequest;
+import io.grpc.Context;
 import io.grpc.ManagedChannel;
 import io.grpc.Server;
 import io.grpc.Status;
@@ -40,14 +41,17 @@ import io.grpc.StatusRuntimeException;
 import io.grpc.inprocess.InProcessChannelBuilder;
 import io.grpc.inprocess.InProcessServerBuilder;
 import io.grpc.protobuf.StatusProto;
+import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -55,6 +59,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -65,14 +73,9 @@ class GrpcSagaOrchestratorClientTest {
 
   private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
-  private static final SagaCallback NO_OP_CALLBACK =
-      new SagaCallback() {
-        @Override
-        public void onCompleted(SagaStateSnapshot snapshot) {}
-
-        @Override
-        public void onCompensated(SagaStateSnapshot snapshot) {}
-      };
+  // Held in a field: JUL keeps loggers weakly, so a handler added through a local could be lost.
+  private static final Logger CLIENT_LOGGER =
+      Logger.getLogger(GrpcSagaOrchestratorClient.class.getName());
 
   private FakeSagaService fake;
   private Server server;
@@ -116,11 +119,60 @@ class GrpcSagaOrchestratorClientTest {
   }
 
   @Test
-  void startAsync_byName_setsAsyncTrue() {
-    fake.startResponse = snapshot("gen-2", SagaStatus.RUNNING);
+  void startAsync_byName_mintsClientIdAndSetsAsyncTrue() {
+    // Arrange
+    fake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
+
+    // Act
     String sagaId = client.startAsync("transfer", Map.of());
-    assertThat(sagaId).isEqualTo("gen-2");
+
+    // Assert — the minted id is the idempotency key that makes the start safe to retry.
     assertThat(fake.lastStart().getAsync()).isTrue();
+    assertThat(fake.lastStart().getSagaId()).isEqualTo(sagaId);
+  }
+
+  @Test
+  void startAsync_unavailableThenSuccess_retriesUnderTheSameId() {
+    // Arrange
+    fake.enqueueStartError(Status.UNAVAILABLE.withDescription("blip").asRuntimeException());
+    fake.enqueueStartSnapshot(snapshot("ignored", SagaStatus.RUNNING));
+
+    // Act
+    String sagaId = client.startAsync("transfer", Map.of());
+
+    // Assert
+    assertThat(fake.startScript).isEmpty();
+    assertThat(fake.lastStart().getSagaId()).isEqualTo(sagaId);
+  }
+
+  @Test
+  void startAsync_retrySeesAlreadyExists_returnsTheIdTheEarlierAttemptStarted() {
+    // Arrange — the first attempt landed but its answer was lost, so the retry collides with it.
+    fake.enqueueStartError(Status.UNAVAILABLE.withDescription("lost").asRuntimeException());
+    fake.enqueueStartError(Status.ALREADY_EXISTS.asRuntimeException());
+    fake.getResponse = snapshot("ignored", SagaStatus.RUNNING);
+
+    // Act
+    String sagaId = client.startAsync("transfer", Map.of());
+
+    // Assert
+    assertThat(fake.lastGet().getSagaId()).isEqualTo(sagaId);
+  }
+
+  @Test
+  void startAsync_withDeadline_startKeepsFailing_throwsSagaTimeoutCarryingTheMintedId() {
+    // Arrange
+    GrpcSagaOrchestratorClient deadlineClient =
+        new GrpcSagaOrchestratorClient(SagaServiceGrpc.newBlockingStub(channel), null, 100L);
+    fake.startError = Status.UNAVAILABLE.withDescription("still down").asRuntimeException();
+
+    // Act
+    SagaTimeoutException timeout =
+        catchThrowableOfType(
+            SagaTimeoutException.class, () -> deadlineClient.startAsync("transfer", Map.of()));
+
+    // Assert — the id is the caller's only way to learn whether an attempt landed.
+    assertThat(timeout.getSagaId()).isEqualTo(fake.lastStart().getSagaId());
   }
 
   @Test
@@ -153,20 +205,223 @@ class GrpcSagaOrchestratorClientTest {
   }
 
   // ---------------------------------------------------------------------------
-  // Callback overloads deferred
+  // Callback overloads
   // ---------------------------------------------------------------------------
 
+  // The test channel runs on a direct executor, so a watch that needs no retry finishes, callback
+  // included, before startAsync returns.
+
   @Test
-  void startAsyncWithCallback_allFourOverloads_throwUnsupported() {
-    SagaDefinitionId id = new SagaDefinitionId("transfer", "v2");
-    assertThatThrownBy(() -> client.startAsync("transfer", Map.of(), NO_OP_CALLBACK))
-        .isInstanceOf(UnsupportedOperationException.class);
-    assertThatThrownBy(() -> client.startAsync("sid", "transfer", Map.of(), NO_OP_CALLBACK))
-        .isInstanceOf(UnsupportedOperationException.class);
-    assertThatThrownBy(() -> client.startAsync(id, Map.of(), NO_OP_CALLBACK))
-        .isInstanceOf(UnsupportedOperationException.class);
-    assertThatThrownBy(() -> client.startAsync("sid", id, Map.of(), NO_OP_CALLBACK))
-        .isInstanceOf(UnsupportedOperationException.class);
+  void startAsyncWithCallback_sagaCompletes_callsOnCompletedForThatSaga() {
+    // Arrange
+    fake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
+    fake.enqueueAwaitSnapshot(snapshot("s-1", SagaStatus.COMPLETED));
+    RecordingCallback callback = new RecordingCallback();
+
+    // Act
+    String sagaId = client.startAsync("transfer", Map.of(), callback);
+
+    // Assert
+    assertThat(callback.calls).containsExactly("onCompleted:s-1");
+    assertThat(fake.lastAwait().getSagaId()).isEqualTo(sagaId);
+  }
+
+  @Test
+  void startAsyncWithCallback_sagaCompensates_callsOnCompensated() {
+    // Arrange
+    fake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
+    fake.enqueueAwaitSnapshot(snapshot("s-1", SagaStatus.COMPENSATED));
+    RecordingCallback callback = new RecordingCallback();
+
+    // Act
+    client.startAsync("s-1", "transfer", Map.of(), callback);
+
+    // Assert
+    assertThat(callback.calls).containsExactly("onCompensated:s-1");
+  }
+
+  @Test
+  void startAsyncWithCallback_sagaEscalates_callsOnEscalated() {
+    // Arrange
+    fake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
+    fake.enqueueAwaitSnapshot(snapshot("s-1", SagaStatus.ESCALATED));
+    RecordingCallback callback = new RecordingCallback();
+
+    // Act
+    client.startAsync(new SagaDefinitionId("transfer", "v1"), Map.of(), callback);
+
+    // Assert
+    assertThat(callback.calls).containsExactly("onEscalated:s-1");
+  }
+
+  @Test
+  void startAsyncWithCallback_sagaParksThenCompletes_callsOnlyOnCompleted() {
+    // Arrange — a window elapsing and a park both answer non-terminal; the watch asks again.
+    fake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
+    fake.enqueueAwaitSnapshot(snapshot("s-1", SagaStatus.RUNNING));
+    fake.enqueueAwaitSnapshot(snapshot("s-1", SagaStatus.WAITING));
+    fake.enqueueAwaitSnapshot(snapshot("s-1", SagaStatus.COMPLETED));
+    RecordingCallback callback = new RecordingCallback();
+
+    // Act
+    client.startAsync("s-1", new SagaDefinitionId("transfer", "v1"), Map.of(), callback);
+
+    // Assert — no onParked: the remote client reports the terminal state instead.
+    assertThat(callback.calls).containsExactly("onCompleted:s-1");
+    assertThat(fake.awaitCalls).isEqualTo(3);
+  }
+
+  @Test
+  void startAsyncWithCallback_awaitUnavailableOnce_retriesAndCallsOnCompleted() throws Exception {
+    // Arrange
+    fake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
+    fake.enqueueAwaitError(Status.UNAVAILABLE.withDescription("blip").asRuntimeException());
+    fake.enqueueAwaitSnapshot(snapshot("s-1", SagaStatus.COMPLETED));
+    RecordingCallback callback = new RecordingCallback();
+
+    // Act
+    client.startAsync("transfer", Map.of(), callback);
+
+    // Assert — the retry runs after a backoff on the client's scheduler thread.
+    assertThat(callback.called.await(5, TimeUnit.SECONDS)).isTrue();
+    assertThat(callback.calls).containsExactly("onCompleted:s-1");
+    client.close();
+  }
+
+  @Test
+  void startAsyncWithCallback_sagaPurged_stopsWithoutCallingOrRetrying() {
+    // Arrange
+    fake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
+    fake.enqueueAwaitError(Status.NOT_FOUND.withDescription("purged").asRuntimeException());
+    RecordingCallback callback = new RecordingCallback();
+
+    // Act
+    client.startAsync("transfer", Map.of(), callback);
+
+    // Assert
+    assertThat(callback.calls).isEmpty();
+    assertThat(fake.awaitCalls).isEqualTo(1);
+  }
+
+  @Test
+  void startAsyncWithCallback_callbackThrows_logsItAgainstTheSaga() {
+    // Arrange — gRPC would swallow the exception too, silently cancelling the call, so the log
+    // record is what tells the client's own handling apart from gRPC's.
+    fake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
+    fake.enqueueAwaitSnapshot(snapshot("s-1", SagaStatus.COMPLETED));
+    IllegalStateException bug = new IllegalStateException("application bug");
+    SagaCallback throwing =
+        new SagaCallback() {
+          @Override
+          public void onCompleted(SagaStateSnapshot saga) {
+            throw bug;
+          }
+
+          @Override
+          public void onCompensated(SagaStateSnapshot saga) {}
+        };
+    List<LogRecord> records = new CopyOnWriteArrayList<>();
+    Handler handler =
+        new Handler() {
+          @Override
+          public void publish(LogRecord record) {
+            records.add(record);
+          }
+
+          @Override
+          public void flush() {}
+
+          @Override
+          public void close() {}
+        };
+    CLIENT_LOGGER.addHandler(handler);
+
+    try {
+      // Act
+      String sagaId = client.startAsync("transfer", Map.of(), throwing);
+
+      // Assert
+      assertThat(records)
+          .singleElement()
+          .satisfies(
+              record -> {
+                assertThat(record.getLevel()).isEqualTo(Level.WARNING);
+                assertThat(record.getMessage()).contains(sagaId);
+                assertThat(record.getThrown()).isSameAs(bug);
+              });
+    } finally {
+      CLIENT_LOGGER.removeHandler(handler);
+    }
+  }
+
+  @Test
+  void startAsyncWithCallback_retriedStartFindsSagaTerminal_callsBackBeforeReturning() {
+    // Arrange — the lost first attempt ran the saga to completion before the retry arrived.
+    fake.enqueueStartError(Status.UNAVAILABLE.withDescription("lost").asRuntimeException());
+    fake.enqueueStartError(Status.ALREADY_EXISTS.asRuntimeException());
+    fake.getResponse = snapshot("s-1", SagaStatus.COMPLETED);
+    RecordingCallback callback = new RecordingCallback();
+
+    // Act
+    client.startAsync("s-1", "transfer", Map.of(), callback);
+
+    // Assert — nothing left to watch, so no AwaitSaga.
+    assertThat(callback.calls).containsExactly("onCompleted:s-1");
+    assertThat(fake.awaitCalls).isZero();
+  }
+
+  @Test
+  void startAsyncWithCallback_withClientBuiltInsideACancelledContext_stillCallsOnCompleted()
+      throws Exception {
+    // Arrange — as when an application builds the client lazily inside its own gRPC handler, and
+    // that request ends before the saga does.
+    Context.CancellableContext request = Context.current().withCancellation();
+    GrpcSagaOrchestratorClient builtInRequest =
+        request.call(
+            () -> new GrpcSagaOrchestratorClient(SagaServiceGrpc.newBlockingStub(channel), null));
+    request.cancel(null);
+    fake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
+    fake.enqueueAwaitSnapshot(snapshot("s-1", SagaStatus.COMPLETED));
+    RecordingCallback callback = new RecordingCallback();
+
+    try {
+      // Act
+      builtInRequest.startAsync("transfer", Map.of(), callback);
+
+      // Assert
+      assertThat(callback.calls).containsExactly("onCompleted:s-1");
+    } finally {
+      builtInRequest.close();
+    }
+  }
+
+  @Test
+  void startAsyncWithCallback_clientClosedWhileWatching_cancelsTheWatchWithoutCalling()
+      throws Exception {
+    // Arrange — the await never answers, as a long poll on a saga that does not settle.
+    CountDownLatch cancelled = new CountDownLatch(1);
+    fake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
+    fake.awaitScript.add(
+        observer ->
+            ((ServerCallStreamObserver<SagaSnapshot>) observer)
+                .setOnCancelHandler(cancelled::countDown));
+    RecordingCallback callback = new RecordingCallback();
+    client.startAsync("transfer", Map.of(), callback);
+
+    // Act
+    client.close();
+
+    // Assert
+    assertThat(cancelled.await(5, TimeUnit.SECONDS)).isTrue();
+    assertThat(callback.calls).isEmpty();
+    assertThat(fake.awaitCalls).isEqualTo(1);
+  }
+
+  @Test
+  @SuppressWarnings("NullAway") // deliberately passing null to exercise the runtime guard
+  void startAsyncWithCallback_nullCallback_throwsNpe() {
+    assertThatThrownBy(() -> client.startAsync("transfer", Map.of(), (SagaCallback) null))
+        .isInstanceOf(NullPointerException.class);
   }
 
   // ---------------------------------------------------------------------------
@@ -417,8 +672,8 @@ class GrpcSagaOrchestratorClientTest {
     fake.startError =
         statusWithReason(Status.Code.UNAVAILABLE, SagaErrorCode.ENGINE_OVERLOADED.code(), Map.of());
 
-    // Act & Assert — the async path, pinned separately from the synchronous one above because the
-    // two reach the same answer by different routes: this one never enters the retry loop at all.
+    // Act & Assert — the async path, pinned separately from the synchronous one above: it shares
+    // the retry loop, and must surface the refusal from it at once just the same.
     assertThatThrownBy(() -> client.startAsync("transfer", Map.of()))
         .isInstanceOf(SagaOverloadedException.class)
         .extracting(e -> ((SagaRuntimeException) e).getErrorCode())
@@ -426,29 +681,29 @@ class GrpcSagaOrchestratorClientTest {
   }
 
   @Test
-  void startAsync_bareUnavailableWithNoErrorInfo_staysSagaUnavailable() {
+  void getStateSnapshot_bareUnavailableWithNoErrorInfo_staysSagaUnavailable() {
     // The negative direction, pinned deliberately: a transport-level UNAVAILABLE carries no body,
     // and must not be read as an admission refusal. Treating it as one would tell a caller the
     // request was certainly refused when it may in fact have been executed.
     // Arrange
-    fake.startError = new StatusRuntimeException(Status.UNAVAILABLE);
+    fake.getError = new StatusRuntimeException(Status.UNAVAILABLE);
 
     // Act & Assert
-    assertThatThrownBy(() -> client.startAsync("transfer", Map.of()))
+    assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
         .isInstanceOf(SagaUnavailableException.class)
         .isNotInstanceOf(SagaOverloadedException.class);
   }
 
   @Test
-  void startAsync_unknownCodeWithUnavailableStatus_throwsSagaUnavailable() {
+  void getStateSnapshot_unknownCodeWithUnavailableStatus_throwsSagaUnavailable() {
     // Arrange — a rolling upgrade: a newer daemon sends a code this client does not know, on a
     // retryable UNAVAILABLE. Degrading it to UNRECOGNIZED_SERVER_ERROR (CLIENT_ERROR) here used to
     // stop a caller keying retries on Category.RETRYABLE_SERVER_ERROR; the status the daemon set
     // correctly must win instead.
-    fake.startError = statusWithReason(Status.Code.UNAVAILABLE, "DB-SAGA-99999", Map.of());
+    fake.getError = statusWithReason(Status.Code.UNAVAILABLE, "DB-SAGA-99999", Map.of());
 
     // Act + Assert — classified by the transport status, not the unresolvable code.
-    assertThatThrownBy(() -> client.startAsync("transfer", Map.of()))
+    assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
         .isInstanceOf(SagaUnavailableException.class);
   }
 
@@ -600,19 +855,19 @@ class GrpcSagaOrchestratorClientTest {
         .satisfies(e -> assertThat(e.getMessage()).doesNotContain("x".repeat(250)));
   }
 
-  // UNAVAILABLE/DEADLINE_EXCEEDED are retryable on the synchronous start path, so the mapping is
-  // asserted on the single-shot startAsync path (which surfaces them immediately).
+  // UNAVAILABLE/DEADLINE_EXCEEDED are retried on both start paths, so the mapping is asserted on
+  // the single-shot getStateSnapshot path, which surfaces them immediately.
   @Test
-  void startAsync_unavailable_throwsSagaUnavailable() {
-    fake.startError = Status.UNAVAILABLE.withDescription("down").asRuntimeException();
-    assertThatThrownBy(() -> client.startAsync("transfer", Map.of()))
+  void getStateSnapshot_unavailable_throwsSagaUnavailable() {
+    fake.getError = Status.UNAVAILABLE.withDescription("down").asRuntimeException();
+    assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
         .isInstanceOf(SagaUnavailableException.class);
   }
 
   @Test
-  void startAsync_deadlineExceeded_throwsSagaTimeout() {
-    fake.startError = Status.DEADLINE_EXCEEDED.withDescription("slow").asRuntimeException();
-    assertThatThrownBy(() -> client.startAsync("transfer", Map.of()))
+  void getStateSnapshot_deadlineExceeded_throwsSagaTimeout() {
+    fake.getError = Status.DEADLINE_EXCEEDED.withDescription("slow").asRuntimeException();
+    assertThatThrownBy(() -> client.getStateSnapshot("s-1"))
         .isInstanceOf(SagaTimeoutException.class);
   }
 
@@ -1038,6 +1293,38 @@ class GrpcSagaOrchestratorClientTest {
         .overrideAuthority("saga.example.com")
         .build()
         .close();
+  }
+
+  /** Records each call as {@code method:sagaId}, in order. */
+  private static final class RecordingCallback implements SagaCallback {
+
+    final List<String> calls = new CopyOnWriteArrayList<>();
+    final CountDownLatch called = new CountDownLatch(1);
+
+    @Override
+    public void onCompleted(SagaStateSnapshot saga) {
+      record("onCompleted", saga);
+    }
+
+    @Override
+    public void onCompensated(SagaStateSnapshot saga) {
+      record("onCompensated", saga);
+    }
+
+    @Override
+    public void onEscalated(SagaStateSnapshot saga) {
+      record("onEscalated", saga);
+    }
+
+    @Override
+    public void onParked(SagaStateSnapshot saga) {
+      record("onParked", saga);
+    }
+
+    private void record(String method, SagaStateSnapshot saga) {
+      calls.add(method + ":" + saga.getSagaId());
+      called.countDown();
+    }
   }
 
   private static final class FakeSagaService extends SagaServiceGrpc.SagaServiceImplBase {

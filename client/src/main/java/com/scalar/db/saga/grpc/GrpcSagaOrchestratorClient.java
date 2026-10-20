@@ -19,19 +19,28 @@ import com.scalar.db.saga.rpc.GetSagaDetailRequest;
 import com.scalar.db.saga.rpc.GetSagaRequest;
 import com.scalar.db.saga.rpc.SagaServiceGrpc;
 import com.scalar.db.saga.rpc.SagaServiceGrpc.SagaServiceBlockingStub;
+import com.scalar.db.saga.rpc.SagaServiceGrpc.SagaServiceStub;
 import com.scalar.db.saga.rpc.SagaSnapshot;
 import com.scalar.db.saga.rpc.SagaStatus;
 import com.scalar.db.saga.rpc.StartSagaRequest;
+import io.grpc.Context;
 import io.grpc.ManagedChannel;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
+import io.grpc.stub.StreamObserver;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import net.jcip.annotations.GuardedBy;
 import net.jcip.annotations.ThreadSafe;
 import org.jspecify.annotations.Nullable;
 
@@ -43,10 +52,19 @@ import org.jspecify.annotations.Nullable;
  * <p>Thread-safe and intended to be created once and shared: a single instance holds one {@link
  * ManagedChannel} that multiplexes all calls. Call {@link #close()} to release it.
  *
- * <p>The four {@code startAsync(..., SagaCallback)} overloads throw {@link
- * UnsupportedOperationException}: a local completion callback over a remote, fire-and-forget server
- * needs a server-streaming {@code WatchSaga} RPC, which is not yet supported. Start asynchronously
- * and poll {@link #getStateSnapshot(String)} for the outcome, or use the embedded orchestrator.
+ * <p>The {@code startAsync(..., SagaCallback)} overloads return once the saga is started, then
+ * watch it in the background with {@code AwaitSaga} and call the callback when it reaches a
+ * terminal state. Unlike the embedded orchestrator, the watch keeps going through a park on an
+ * asynchronous step, so {@link SagaCallback#onParked} is never called and the terminal method
+ * always is, unless the watch stops first. It stops on {@link #close()}, and on a failure that
+ * retrying cannot fix, such as the saga being purged, which is logged. The callback lives in this
+ * process only: if the process exits, it is not called. A callback normally runs on a gRPC thread,
+ * so hand long work to your own executor. When the start already finds the saga terminal, which a
+ * retried start can, it runs on the calling thread before {@code startAsync} returns.
+ *
+ * <p>Every start, {@code startAsync} included, retries a server it cannot reach until {@link
+ * Builder#defaultDeadlineMillis} runs out. With no deadline set, a start against a server that is
+ * down waits until the server is back. Set a deadline in production.
  *
  * <p>TLS against a private CA (e.g. a cert-manager-issued server certificate), dialing through a
  * port-forward:
@@ -68,6 +86,8 @@ import org.jspecify.annotations.Nullable;
 @ThreadSafe
 public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
 
+  private static final Logger LOGGER = Logger.getLogger(GrpcSagaOrchestratorClient.class.getName());
+
   private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
   /** Capped, jittered exponential backoff between retries of a retryable transport failure. */
@@ -77,9 +97,20 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
   private static final int BACKOFF_MAX_SHIFT = 16;
 
   private final SagaServiceBlockingStub stub;
+  private final SagaServiceStub watchStub;
   @Nullable private final ManagedChannel ownedChannel;
   private final long defaultDeadlineMillis;
   private final AtomicBoolean closed = new AtomicBoolean(false);
+
+  // Every callback watch runs its calls inside this context, so close() cancels all of them at once
+  // instead of waiting out the channel's drain for long polls that would otherwise hold it open.
+  // Rooted, not derived from the current context: a client built inside a gRPC call would otherwise
+  // tie every watch to that call, and its end or deadline would silently cancel them.
+  private final Context.CancellableContext watchContext = Context.ROOT.withCancellation();
+
+  // Delays a watch's retry after a transport failure. Created on first use, so a client that never
+  // takes a callback starts no thread.
+  @GuardedBy("this") @Nullable private ScheduledExecutorService retryScheduler;
 
   /**
    * Visible for testing — inject a stub over an in-process channel; {@code close()} is then a
@@ -97,6 +128,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
       @Nullable ManagedChannel ownedChannel,
       long defaultDeadlineMillis) {
     this.stub = Objects.requireNonNull(stub, "stub must not be null");
+    this.watchStub = SagaServiceGrpc.newStub(stub.getChannel());
     this.ownedChannel = ownedChannel;
     this.defaultDeadlineMillis = defaultDeadlineMillis;
   }
@@ -169,7 +201,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
   public String startAsync(String sagaName, Map<String, Object> input) {
     Objects.requireNonNull(sagaName, "sagaName must not be null");
     Objects.requireNonNull(input, "input must not be null");
-    return startAsynchronously(null, sagaName, null, input);
+    return startAsynchronously(null, sagaName, null, input, null);
   }
 
   @Override
@@ -177,14 +209,14 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
     Objects.requireNonNull(sagaId, "sagaId must not be null");
     Objects.requireNonNull(sagaName, "sagaName must not be null");
     Objects.requireNonNull(input, "input must not be null");
-    startAsynchronously(sagaId, sagaName, null, input);
+    startAsynchronously(sagaId, sagaName, null, input, null);
   }
 
   @Override
   public String startAsync(SagaDefinitionId id, Map<String, Object> input) {
     Objects.requireNonNull(id, "id must not be null");
     Objects.requireNonNull(input, "input must not be null");
-    return startAsynchronously(null, id.name(), id.version(), input);
+    return startAsynchronously(null, id.name(), id.version(), input, null);
   }
 
   @Override
@@ -192,33 +224,47 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
     Objects.requireNonNull(sagaId, "sagaId must not be null");
     Objects.requireNonNull(id, "id must not be null");
     Objects.requireNonNull(input, "input must not be null");
-    startAsynchronously(sagaId, id.name(), id.version(), input);
+    startAsynchronously(sagaId, id.name(), id.version(), input, null);
   }
 
   // --------------------------------------------------------------------------
-  // startAsync (with callback) — deferred to a future server-streaming WatchSaga RPC
+  // startAsync (with callback)
   // --------------------------------------------------------------------------
 
   @Override
   public String startAsync(String sagaName, Map<String, Object> input, SagaCallback callback) {
-    throw callbackUnsupported();
+    Objects.requireNonNull(sagaName, "sagaName must not be null");
+    Objects.requireNonNull(input, "input must not be null");
+    Objects.requireNonNull(callback, "callback must not be null");
+    return startAsynchronously(null, sagaName, null, input, callback);
   }
 
   @Override
   public void startAsync(
       String sagaId, String sagaName, Map<String, Object> input, SagaCallback callback) {
-    throw callbackUnsupported();
+    Objects.requireNonNull(sagaId, "sagaId must not be null");
+    Objects.requireNonNull(sagaName, "sagaName must not be null");
+    Objects.requireNonNull(input, "input must not be null");
+    Objects.requireNonNull(callback, "callback must not be null");
+    startAsynchronously(sagaId, sagaName, null, input, callback);
   }
 
   @Override
   public String startAsync(SagaDefinitionId id, Map<String, Object> input, SagaCallback callback) {
-    throw callbackUnsupported();
+    Objects.requireNonNull(id, "id must not be null");
+    Objects.requireNonNull(input, "input must not be null");
+    Objects.requireNonNull(callback, "callback must not be null");
+    return startAsynchronously(null, id.name(), id.version(), input, callback);
   }
 
   @Override
   public void startAsync(
       String sagaId, SagaDefinitionId id, Map<String, Object> input, SagaCallback callback) {
-    throw callbackUnsupported();
+    Objects.requireNonNull(sagaId, "sagaId must not be null");
+    Objects.requireNonNull(id, "id must not be null");
+    Objects.requireNonNull(input, "input must not be null");
+    Objects.requireNonNull(callback, "callback must not be null");
+    startAsynchronously(sagaId, id.name(), id.version(), input, callback);
   }
 
   // --------------------------------------------------------------------------
@@ -250,10 +296,18 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
 
   @Override
   public void close() {
-    if (!closed.compareAndSet(false, true) || ownedChannel == null) {
+    if (!closed.compareAndSet(false, true)) {
       return;
     }
-    GrpcClientSupport.shutdown(ownedChannel);
+    watchContext.cancel(null);
+    synchronized (this) {
+      if (retryScheduler != null) {
+        retryScheduler.shutdownNow();
+      }
+    }
+    if (ownedChannel != null) {
+      GrpcClientSupport.shutdown(ownedChannel);
+    }
   }
 
   // --------------------------------------------------------------------------
@@ -461,17 +515,131 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
   }
 
   private static void backoff(int attempt) {
+    try {
+      Thread.sleep(backoffMillis(attempt));
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new SagaRuntimeException(SagaErrorCode.REQUEST_ABORTED, ErrorMetadata.of(), e);
+    }
+  }
+
+  private static long backoffMillis(int attempt) {
     long exp = BACKOFF_BASE_MILLIS << Math.min(attempt, BACKOFF_MAX_SHIFT);
     long capped = Math.min(BACKOFF_CAP_MILLIS, exp);
     // Jitter in [capped/2, capped], derived from the clock (no security-sensitive RNG needed), to
     // avoid a thundering herd when many clients retry a recovered daemon at once.
     long half = capped / 2L;
     long jitter = half == 0L ? 0L : Math.floorMod(System.nanoTime(), half + 1L);
+    return half + jitter;
+  }
+
+  // --------------------------------------------------------------------------
+  // callback watch
+  // --------------------------------------------------------------------------
+
+  /**
+   * Calls {@code callback} once the saga is terminal, re-issuing {@code AwaitSaga} until it is. A
+   * non-terminal answer means the server's window elapsed, or the saga parked, so the watch asks
+   * again at once; a retryable transport failure is retried after a backoff. Nothing here blocks a
+   * thread: each call is asynchronous, and its answer arrives on a gRPC thread.
+   */
+  private void watch(String sagaId, SagaSnapshot snapshot, SagaCallback callback, int retries) {
+    if (closed.get()) {
+      return;
+    }
+    if (isTerminal(snapshot)) {
+      dispatch(sagaId, snapshot, callback);
+      return;
+    }
+    AwaitSagaRequest request = AwaitSagaRequest.newBuilder().setSagaId(sagaId).build();
+    watchContext.run(
+        () ->
+            watchStub.awaitSaga(
+                request,
+                new StreamObserver<SagaSnapshot>() {
+                  @Override
+                  public void onNext(SagaSnapshot next) {
+                    watch(sagaId, next, callback, 0);
+                  }
+
+                  @Override
+                  public void onError(Throwable t) {
+                    if (closed.get()) {
+                      return;
+                    }
+                    if (t instanceof StatusRuntimeException
+                        && isRetryable((StatusRuntimeException) t)) {
+                      scheduleRetry(sagaId, snapshot, callback, retries);
+                      return;
+                    }
+                    LOGGER.log(
+                        Level.WARNING,
+                        "Stopped watching saga " + sagaId + "; its callback will not be called",
+                        t);
+                  }
+
+                  @Override
+                  public void onCompleted() {}
+                }));
+  }
+
+  // The future is dropped, so the task reports its own failure rather than leaving it there.
+  @SuppressWarnings("FutureReturnValueIgnored")
+  private void scheduleRetry(
+      String sagaId, SagaSnapshot snapshot, SagaCallback callback, int retries) {
     try {
-      Thread.sleep(half + jitter);
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-      throw new SagaRuntimeException(SagaErrorCode.REQUEST_ABORTED, ErrorMetadata.of(), e);
+      retryScheduler()
+          .schedule(
+              () -> {
+                try {
+                  watch(sagaId, snapshot, callback, retries + 1);
+                } catch (RuntimeException e) {
+                  LOGGER.log(
+                      Level.WARNING,
+                      "Stopped watching saga " + sagaId + "; its callback will not be called",
+                      e);
+                }
+              },
+              backoffMillis(retries),
+              TimeUnit.MILLISECONDS);
+    } catch (RejectedExecutionException e) {
+      // close() ran after the caller's closed check; the watch ends with the client.
+    }
+  }
+
+  private synchronized ScheduledExecutorService retryScheduler() {
+    // Checked under the lock close() takes after setting the flag, so a scheduler is never created
+    // once close() has looked for one to shut down.
+    if (closed.get()) {
+      throw new RejectedExecutionException("client is closed");
+    }
+    if (retryScheduler == null) {
+      retryScheduler =
+          Executors.newSingleThreadScheduledExecutor(
+              runnable -> {
+                Thread thread = new Thread(runnable, "saga-client-watch-retry");
+                thread.setDaemon(true);
+                return thread;
+              });
+    }
+    return retryScheduler;
+  }
+
+  private static void dispatch(String sagaId, SagaSnapshot snapshot, SagaCallback callback) {
+    // Caught so that a failing callback is reported against its saga rather than surfacing inside
+    // gRPC's call machinery as an anonymous listener failure.
+    try {
+      SagaStateSnapshot saga = ClientProtoMappers.fromProto(snapshot);
+      SagaStatus status = snapshot.getStatus();
+      if (status == SagaStatus.SAGA_STATUS_COMPLETED) {
+        callback.onCompleted(saga);
+      } else if (status == SagaStatus.SAGA_STATUS_COMPENSATED) {
+        callback.onCompensated(saga);
+      } else {
+        callback.onEscalated(saga);
+      }
+    } catch (RuntimeException e) {
+      LOGGER.log(Level.WARNING, "The callback for saga " + sagaId + " threw", e);
     }
   }
 
@@ -480,18 +648,29 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
   // --------------------------------------------------------------------------
 
   /**
-   * Starts the saga {@code async=true} and returns immediately with the saga id, without waiting
-   * for a terminal state. Backs all four non-blocking {@code startAsync} overloads; the {@code
-   * void} ones simply ignore the returned id (which, for a client-supplied id, the caller already
-   * holds).
+   * Starts the saga {@code async=true} and returns its id without waiting for a terminal state,
+   * then, when {@code callback} is given, watches it in the background. Backs all eight {@code
+   * startAsync} overloads; the {@code void} ones ignore the returned id, which the caller already
+   * holds. The start retries transport failures exactly as the blocking {@code start} does, and is
+   * safe to retry for the same reason: the id is minted here when the caller supplies none.
    */
   private String startAsynchronously(
-      @Nullable String sagaId, String name, @Nullable String version, Map<String, Object> input) {
-    try {
-      return stub().startSaga(buildRequest(sagaId, name, version, input, true)).getSagaId();
-    } catch (StatusRuntimeException e) {
-      throw mapStartException(e, name, version, sagaId);
+      @Nullable String sagaId,
+      String name,
+      @Nullable String version,
+      Map<String, Object> input,
+      @Nullable SagaCallback callback) {
+    String id = sagaId != null ? sagaId : UUID.randomUUID().toString();
+    long deadlineNanos =
+        defaultDeadlineMillis > 0L
+            ? System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(defaultDeadlineMillis)
+            : 0L;
+    SagaSnapshot snapshot =
+        firstStart(buildRequest(id, name, version, input, true), id, name, version, deadlineNanos);
+    if (callback != null) {
+      watch(id, snapshot, callback, 0);
     }
+    return id;
   }
 
   private SagaServiceBlockingStub stub() {
@@ -501,19 +680,17 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
   }
 
   private static StartSagaRequest buildRequest(
-      @Nullable String sagaId,
+      String sagaId,
       String name,
       @Nullable String version,
       Map<String, Object> input,
       boolean async) {
     StartSagaRequest.Builder builder =
         StartSagaRequest.newBuilder()
+            .setSagaId(sagaId)
             .setName(name)
             .setAsync(async)
             .setInputJson(toInputJson(input));
-    if (sagaId != null) {
-      builder.setSagaId(sagaId);
-    }
     if (version != null) {
       builder.setVersion(version);
     }
@@ -533,23 +710,13 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
     }
   }
 
-  private static UnsupportedOperationException callbackUnsupported() {
-    return new UnsupportedOperationException(
-        "SagaCallback over gRPC requires a server-streaming WatchSaga RPC; not yet available — "
-            + "start asynchronously and poll getStateSnapshot, or use embedded mode");
-  }
-
   /**
    * Maps a start-call {@link StatusRuntimeException} to the api exception. {@code NOT_FOUND} means
-   * the <i>definition</i> wasn't found (vs a missing saga on getStateSnapshot); {@code
-   * ALREADY_EXISTS} can only arise on the client-supplied-id overloads. Inverse of the daemon
-   * {@code GrpcErrorMapper} — the wire status code is the contract.
+   * the <i>definition</i> wasn't found (vs a missing saga on getStateSnapshot). Inverse of the
+   * daemon {@code GrpcErrorMapper} — the wire status code is the contract.
    */
   private RuntimeException mapStartException(
-      StatusRuntimeException e,
-      String name,
-      @Nullable String version,
-      @Nullable String clientSagaId) {
+      StatusRuntimeException e, String name, @Nullable String version, String clientSagaId) {
     Status.Code code = e.getStatus().getCode();
     // ALREADY_EXISTS is handled ahead of reconstruction: SAGA_ALREADY_EXISTS is deliberately not
     // reconstructible, because SagaAlreadyExistsException needs the existing snapshot and the wire
@@ -569,12 +736,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
     return GrpcClientSupport.mapTransport(e);
   }
 
-  private RuntimeException alreadyExists(@Nullable String clientSagaId, StatusRuntimeException e) {
-    if (clientSagaId == null) {
-      // Server-generated ids do not collide; an ALREADY_EXISTS without a client id is a protocol
-      // invariant violation.
-      return new SagaRuntimeException(SagaErrorCode.INTERNAL_ERROR, ErrorMetadata.of(), e);
-    }
+  private RuntimeException alreadyExists(String clientSagaId, StatusRuntimeException e) {
     SagaStateSnapshot existing;
     try {
       // The conflict response carries no snapshot — re-fetch it (the only extra round-trip, and
@@ -689,10 +851,13 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
     }
 
     /**
-     * How long a call may take, in milliseconds; {@code 0} (the default) is no bound. On the
-     * one-shot RPCs ({@code startAsync}, {@code getStateSnapshot}, {@code getSagaDetail}) it is a
-     * per-call deadline. On the blocking {@code start} it is the whole wait-for-terminal budget,
-     * spanning the start and every {@code AwaitSaga} the loop issues after it.
+     * How long a call may take, in milliseconds; {@code 0} (the default) is no bound. On {@code
+     * getStateSnapshot} and {@code getSagaDetail} it is a per-call deadline. On {@code startAsync}
+     * it bounds the start including its retries; with no bound, a {@code startAsync} against a
+     * server that is down retries until the server is back, as {@code start} does. On the blocking
+     * {@code start} it is the whole wait-for-terminal budget, spanning the start and every {@code
+     * AwaitSaga} the loop issues after it. It does not bound the background watch behind a {@link
+     * SagaCallback}, which runs until the saga is terminal or the client is closed.
      *
      * <p>That second role bounds the caller, not the server: {@code
      * scalar.db.saga.server.sync.max_wait_millis} caps how long one server call holds a connection,
