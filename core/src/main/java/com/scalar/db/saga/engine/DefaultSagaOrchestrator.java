@@ -970,12 +970,17 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
     return resolution.snapshot();
   }
 
-  /** What the failure event records for a participant's report. */
+  /**
+   * What the failure event records for a participant's report. The text comes from outside and is
+   * logged when the step is escalated, so it is flattened to one line first, as an operator's
+   * reason is.
+   */
   private static String reportedCause(@Nullable String error) {
-    if (error == null || error.isBlank()) {
+    String trimmed =
+        error == null ? "" : DefaultSagaAdminService.sanitizeControlChars(error).strip();
+    if (trimmed.isEmpty()) {
       return "participant reported failure";
     }
-    String trimmed = error.strip();
     return "participant reported failure: "
         + (trimmed.length() > MAX_REPORTED_ERROR_CHARS
             ? trimmed.substring(0, MAX_REPORTED_ERROR_CHARS)

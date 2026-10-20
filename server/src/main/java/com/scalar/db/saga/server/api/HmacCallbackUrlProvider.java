@@ -40,23 +40,23 @@ public final class HmacCallbackUrlProvider implements CallbackUrlProvider {
 
   @Override
   public String callbackUrl(String sagaId, String stepName) {
-    return signedUrl(sagaId, stepName, "complete");
+    return signedUrl(sagaId, stepName, HmacUtils.COMPLETE);
   }
 
   @Override
   public String failureUrl(String sagaId, String stepName) {
-    return signedUrl(sagaId, stepName, "fail");
+    return signedUrl(sagaId, stepName, HmacUtils.FAIL);
   }
 
   /**
-   * A signed URL for {@code action} on the step. The token covers the saga, the step and the issue
-   * time, not the action, so either route accepts it; holding the step's URL already grants both.
+   * A signed URL for {@code action} on the step. The action is part of the signed data, so the
+   * token is accepted on that route only.
    */
   private String signedUrl(String sagaId, String stepName, String action) {
     long iat = clock.instant().getEpochSecond();
     String token =
         HmacUtils.hmacSha256Hex(
-            secret, HmacUtils.callbackSignedData(sagaId, stepName, Long.toString(iat)));
+            secret, HmacUtils.callbackSignedData(sagaId, stepName, action, Long.toString(iat)));
     return baseUrl
         + "/sagas/"
         + encodePathSegment(sagaId)

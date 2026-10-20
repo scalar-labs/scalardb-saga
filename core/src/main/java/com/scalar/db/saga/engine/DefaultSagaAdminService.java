@@ -475,9 +475,10 @@ public class DefaultSagaAdminService implements SagaAdminService {
 
   /**
    * Replaces ISO control characters (newlines included) with spaces; log-forging defense. Spaces
-   * rather than removal so that a multi-line reason keeps its word boundaries once flattened.
+   * rather than removal so that a multi-line reason keeps its word boundaries once flattened. Also
+   * applied to a participant's reported failure, which is free text from outside as well.
    */
-  private static String sanitizeControlChars(String value) {
+  static String sanitizeControlChars(String value) {
     StringBuilder sb = new StringBuilder(value.length());
     for (int i = 0; i < value.length(); i++) {
       char c = value.charAt(i);

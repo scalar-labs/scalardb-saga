@@ -26,7 +26,8 @@ class HmacCallbackUrlProviderTest {
         .endsWith("&iat=1700000000");
     // The token verifies against the same secret + signed data the receiving route recomputes.
     String token = url.substring(url.indexOf("token=") + "token=".length(), url.indexOf("&iat="));
-    String signedData = HmacUtils.callbackSignedData("saga-1", "debit", "1700000000");
+    String signedData =
+        HmacUtils.callbackSignedData("saga-1", "debit", HmacUtils.COMPLETE, "1700000000");
     assertThat(HmacUtils.verify(SECRET, signedData, token)).isTrue();
   }
 
@@ -39,13 +40,23 @@ class HmacCallbackUrlProviderTest {
     // Act
     String url = Objects.requireNonNull(provider.failureUrl("saga-1", "debit"));
 
-    // Assert — the same token as the completion URL: it signs the step, not the action.
+    // Assert — signed for the failure route, and not good on the completion route.
     assertThat(url)
         .startsWith("http://daemon:8080/sagas/saga-1/steps/debit/fail?token=")
         .endsWith("&iat=1700000000");
     String token = url.substring(url.indexOf("token=") + "token=".length(), url.indexOf("&iat="));
-    String signedData = HmacUtils.callbackSignedData("saga-1", "debit", "1700000000");
-    assertThat(HmacUtils.verify(SECRET, signedData, token)).isTrue();
+    assertThat(
+            HmacUtils.verify(
+                SECRET,
+                HmacUtils.callbackSignedData("saga-1", "debit", HmacUtils.FAIL, "1700000000"),
+                token))
+        .isTrue();
+    assertThat(
+            HmacUtils.verify(
+                SECRET,
+                HmacUtils.callbackSignedData("saga-1", "debit", HmacUtils.COMPLETE, "1700000000"),
+                token))
+        .isFalse();
   }
 
   @Test

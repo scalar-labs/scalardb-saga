@@ -145,7 +145,8 @@ class CallbackResourceTest {
   void tokenForDifferentStep_returns401() throws Exception {
     // A token computed over a different step name must not authorize this step.
     String tokenForOtherStep =
-        HmacUtils.hmacSha256Hex(SECRET, HmacUtils.callbackSignedData(SAGA_ID, "credit", IAT));
+        HmacUtils.hmacSha256Hex(
+            SECRET, HmacUtils.callbackSignedData(SAGA_ID, "credit", HmacUtils.COMPLETE, IAT));
 
     HttpResponse<String> response = post("?token=" + tokenForOtherStep + "&iat=" + IAT, "{}");
 
@@ -243,7 +244,8 @@ class CallbackResourceTest {
 
     // Act
     HttpResponse<String> response =
-        postFail("?token=" + validToken() + "&iat=" + IAT, "{\"error\":\"card declined\"}", null);
+        postFail(
+            "?token=" + validFailToken() + "&iat=" + IAT, "{\"error\":\"card declined\"}", null);
 
     // Assert
     assertThat(response.statusCode()).isEqualTo(200);
@@ -258,7 +260,7 @@ class CallbackResourceTest {
 
     // Act
     HttpResponse<String> response =
-        postFail("?token=" + validToken() + "&iat=" + IAT, "", " TRUE ");
+        postFail("?token=" + validFailToken() + "&iat=" + IAT, "", " TRUE ");
 
     // Assert
     assertThat(response.statusCode()).isEqualTo(200);
@@ -273,7 +275,7 @@ class CallbackResourceTest {
 
     // Act
     HttpResponse<String> response =
-        postFail("?token=" + validToken() + "&iat=" + IAT, "{\"code\":42}", "false");
+        postFail("?token=" + validFailToken() + "&iat=" + IAT, "{\"code\":42}", "false");
 
     // Assert
     assertThat(response.statusCode()).isEqualTo(200);
@@ -284,7 +286,7 @@ class CallbackResourceTest {
   void fail_errorNotAString_returns400AndReportsNothing() throws Exception {
     // Act
     HttpResponse<String> response =
-        postFail("?token=" + validToken() + "&iat=" + IAT, "{\"error\":{\"why\":1}}", null);
+        postFail("?token=" + validFailToken() + "&iat=" + IAT, "{\"error\":{\"why\":1}}", null);
 
     // Assert
     assertThat(response.statusCode()).isEqualTo(400);
@@ -295,7 +297,7 @@ class CallbackResourceTest {
   void fail_malformedBody_returns400AndReportsNothing() throws Exception {
     // Act
     HttpResponse<String> response =
-        postFail("?token=" + validToken() + "&iat=" + IAT, "{not json", null);
+        postFail("?token=" + validFailToken() + "&iat=" + IAT, "{not json", null);
 
     // Assert
     assertThat(response.statusCode()).isEqualTo(400);
@@ -313,6 +315,26 @@ class CallbackResourceTest {
   }
 
   @Test
+  void fail_completionToken_returns401AndReportsNothing() throws Exception {
+    // Act — the token from the completion URL, presented on the failure route.
+    HttpResponse<String> response = postFail("?token=" + validToken() + "&iat=" + IAT, "{}", null);
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(401);
+    verify(orchestrator, never()).failStepAsync(any(), any(), any(), anyBoolean());
+  }
+
+  @Test
+  void complete_failureToken_returns401AndDoesNotResume() throws Exception {
+    // Act — the token from the failure URL, presented on the completion route.
+    HttpResponse<String> response = post("?token=" + validFailToken() + "&iat=" + IAT, "{}");
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(401);
+    verify(orchestrator, never()).completeStepAsync(any(), any(), any());
+  }
+
+  @Test
   void fail_stepAlreadySettled_isIdempotent200() throws Exception {
     // Arrange — an earlier report, the callback or the deadline sweep settled the step first.
     when(orchestrator.failStepAsync(any(), any(), any(), anyBoolean()))
@@ -320,7 +342,8 @@ class CallbackResourceTest {
     when(orchestrator.getStateSnapshot(SAGA_ID)).thenReturn(snapshot(SagaStatus.COMPENSATING));
 
     // Act
-    HttpResponse<String> response = postFail("?token=" + validToken() + "&iat=" + IAT, "", null);
+    HttpResponse<String> response =
+        postFail("?token=" + validFailToken() + "&iat=" + IAT, "", null);
 
     // Assert
     assertThat(response.statusCode()).isEqualTo(200);
@@ -328,7 +351,13 @@ class CallbackResourceTest {
   }
 
   private String validToken() {
-    return HmacUtils.hmacSha256Hex(SECRET, HmacUtils.callbackSignedData(SAGA_ID, STEP, IAT));
+    return HmacUtils.hmacSha256Hex(
+        SECRET, HmacUtils.callbackSignedData(SAGA_ID, STEP, HmacUtils.COMPLETE, IAT));
+  }
+
+  private String validFailToken() {
+    return HmacUtils.hmacSha256Hex(
+        SECRET, HmacUtils.callbackSignedData(SAGA_ID, STEP, HmacUtils.FAIL, IAT));
   }
 
   private HttpResponse<String> post(String query, String body) throws Exception {

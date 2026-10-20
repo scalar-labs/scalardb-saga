@@ -14,7 +14,8 @@ import org.jspecify.annotations.Nullable;
 
 /**
  * Registers the async-callback routes, on which a participant reports the outcome of an async
- * (parked) step. The daemon verifies the per-step HMAC callback token on both:
+ * (parked) step. The daemon verifies the per-step HMAC callback token on both, and a token is
+ * accepted only on the route it was minted for:
  *
  * <ul>
  *   <li>{@code POST /sagas/{id}/steps/{stepName}/complete?token=&iat=} — the step succeeded. The
@@ -79,7 +80,8 @@ public final class CallbackResource {
         ctx -> {
           String sagaId = ctx.pathParam("id");
           String stepName = ctx.pathParam("stepName");
-          verifyToken(ctx, callbackSecret, maxAgeSeconds, clock, sagaId, stepName);
+          verifyToken(
+              ctx, callbackSecret, maxAgeSeconds, clock, sagaId, stepName, HmacUtils.COMPLETE);
           Map<String, Object> output = parseOutput(ctx);
           SagaStateSnapshot snapshot = complete(orchestrator, sagaId, stepName, output);
           ctx.status(200).json(SagaSnapshotResponse.from(snapshot));
@@ -93,7 +95,7 @@ public final class CallbackResource {
         ctx -> {
           String sagaId = ctx.pathParam("id");
           String stepName = ctx.pathParam("stepName");
-          verifyToken(ctx, callbackSecret, maxAgeSeconds, clock, sagaId, stepName);
+          verifyToken(ctx, callbackSecret, maxAgeSeconds, clock, sagaId, stepName, HmacUtils.FAIL);
           String error = parseError(ctx);
           boolean retryable = "true".equalsIgnoreCase(trimmedHeader(ctx, RETRYABLE_HEADER));
           SagaStateSnapshot snapshot = fail(orchestrator, sagaId, stepName, error, retryable);
@@ -135,12 +137,13 @@ public final class CallbackResource {
   }
 
   /**
-   * Verifies the HMAC token over the data produced by {@link HmacUtils#callbackSignedData}. Both
-   * {@code token} and {@code iat} query parameters are required (the token is computed over {@code
-   * iat}, so it cannot be checked without it). The token must match the lowercase-hex HMAC-SHA256
-   * shape before the signature is checked, so a malformed value is rejected without computing an
-   * HMAC. When {@code maxAgeSeconds} is positive, an authenticated token older than that is
-   * rejected as expired. Any missing, malformed, non-matching, or expired value throws {@link
+   * Verifies the HMAC token over the data produced by {@link HmacUtils#callbackSignedData} for this
+   * route's {@code action}, so a token minted for the other route is rejected. Both {@code token}
+   * and {@code iat} query parameters are required (the token is computed over {@code iat}, so it
+   * cannot be checked without it). The token must match the lowercase-hex HMAC-SHA256 shape before
+   * the signature is checked, so a malformed value is rejected without computing an HMAC. When
+   * {@code maxAgeSeconds} is positive, an authenticated token older than that is rejected as
+   * expired. Any missing, malformed, non-matching, or expired value throws {@link
    * CallbackAuthException} → {@code 401}.
    */
   private static void verifyToken(
@@ -149,7 +152,8 @@ public final class CallbackResource {
       long maxAgeSeconds,
       Clock clock,
       String sagaId,
-      String stepName) {
+      String stepName,
+      String action) {
     String token = ctx.queryParam("token");
     String iat = ctx.queryParam("iat");
     if (token == null || token.isBlank() || iat == null || iat.isBlank()) {
@@ -158,7 +162,7 @@ public final class CallbackResource {
     if (!TOKEN_PATTERN.matcher(token).matches()) {
       throw new CallbackAuthException("malformed callback token");
     }
-    String data = HmacUtils.callbackSignedData(sagaId, stepName, iat);
+    String data = HmacUtils.callbackSignedData(sagaId, stepName, action, iat);
     if (!HmacUtils.verify(callbackSecret, data, token)) {
       throw new CallbackAuthException("invalid callback token");
     }

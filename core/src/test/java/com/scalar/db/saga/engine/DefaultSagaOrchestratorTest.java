@@ -1981,6 +1981,33 @@ class DefaultSagaOrchestratorTest {
     }
 
     @Test
+    void failStepAsync_multiLineError_recordsItOnOneLine() {
+      // Arrange — free text from outside; a newline in it would forge a line in the log that
+      // records an escalation.
+      SagaDefinition def = definition("test-saga");
+      List<SagaEvent> events = parkedOnce();
+      SagaStateSnapshot compensating = snapshot("saga-1", SagaStatus.COMPENSATING);
+      when(store.getEvents("saga-1")).thenReturn(events);
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(store.failParkedStep(eq(waiting), eq(events.size()), any(), eq(SagaStatus.COMPENSATING)))
+          .thenReturn(compensating);
+      when(engine.replayEvents(eq(compensating), any()))
+          .thenReturn(new ExecutionContext("saga-1", Map.of(), compensating));
+
+      // Act
+      orchestrator.failStepAsync("saga-1", "s1", "declined\nINFO forged line\r", false);
+
+      // Assert
+      String message =
+          EventPayloadSerializer.errorMessage(
+              failureRecordedBy(SagaStatus.COMPENSATING).getPayload());
+      assertThat(message)
+          .isEqualTo("participant reported failure: declined INFO forged line")
+          .doesNotContain("\n")
+          .doesNotContain("\r");
+    }
+
+    @Test
     void failStepAsync_beforeThePark_throwsStepNotParkedAndRecordsNothing() {
       // Arrange — the step is being re-issued, so it has not parked again yet.
       when(store.getStateSnapshot("saga-1"))
