@@ -11,6 +11,7 @@ import com.scalar.db.saga.definition.HttpCall;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.math.BigDecimal;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
@@ -51,6 +52,7 @@ class HttpTransportAdapterTest {
           requestMethod.set(ex.getRequestMethod());
           respond(ex, 200, "{\"debit_id\":\"DBT-1\"}");
         });
+    server.createContext("/quote", ex -> respond(ex, 200, "{\"price\":0.10}"));
     server.createContext(
         "/empty-debit",
         ex -> respond(ex, 200, "{}")); // success but missing the expected output field
@@ -249,6 +251,22 @@ class HttpTransportAdapterTest {
                 """
                 {"quantity": 2, "price": 9.5, "gift": true, "amount": 500,
                  "items": [{"sku": "S-1", "note": null}], "tags": ["a", "b"]}"""));
+  }
+
+  @Test
+  void call_outputCapturingDecimal_keepsItExactly() throws Exception {
+    // Arrange
+    HttpCall spec =
+        HttpCall.newBuilder("/quote")
+            .method(HttpMethod.GET)
+            .output(Map.of("price", "$.price"))
+            .build();
+
+    // Act
+    Map<String, Object> output = adapter.call(spec, ctx(Map.of()), "quote").getOutput();
+
+    // Assert — not the double 0.1.
+    assertThat(output).containsEntry("price", new BigDecimal("0.10"));
   }
 
   @Test

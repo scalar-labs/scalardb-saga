@@ -43,7 +43,9 @@ public interface SagaHttpResponse {
   Optional<String> header(String name);
 
   /**
-   * Decodes the body as a JSON object. An empty body yields an empty map.
+   * Decodes the body as a JSON object. An empty body yields an empty map. A JSON number with a
+   * fraction or exponent is a {@link java.math.BigDecimal}, and an integer is an {@code Integer},
+   * {@code Long} or {@link java.math.BigInteger}, by size.
    *
    * @return the object's members, keyed by name
    * @throws StepExecutionException (non-retryable) if the body is not a JSON object
@@ -51,7 +53,8 @@ public interface SagaHttpResponse {
   Map<String, Object> bodyJsonObject() throws StepExecutionException;
 
   /**
-   * Decodes the body as a JSON array. An empty body yields an empty list.
+   * Decodes the body as a JSON array. An empty body yields an empty list. Numbers decode as in
+   * {@link #bodyJsonObject()}.
    *
    * @return the array's elements
    * @throws StepExecutionException (non-retryable) if the body is not a JSON array

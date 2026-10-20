@@ -11,6 +11,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.math.BigDecimal;
 import java.net.ConnectException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -58,6 +59,8 @@ class HttpExchangeTest {
           ex.close();
         });
     server.createContext("/malformed", ex -> respond(ex, 200, "not json"));
+    server.createContext(
+        "/decimal", ex -> respond(ex, 200, "{\"price\":12345678901234567.89,\"count\":2}"));
     server.createContext("/fail503", ex -> respond(ex, 503, "{}"));
     server.createContext("/fail422", ex -> respond(ex, 422, "{}"));
     server.start();
@@ -158,6 +161,19 @@ class HttpExchangeTest {
 
     assertThat(response.status()).isEqualTo(200);
     assertThat(response.bodyJsonObject()).containsEntry("k", "v");
+  }
+
+  @Test
+  void exchange_decimalInResponse_decodesAsExactBigDecimal() throws Exception {
+    // Act
+    HttpCallResponse response =
+        exchange.exchange(
+            "GET", baseUrl, "/decimal", NO_PARAMS, NO_PARAMS, null, null, "saga-1", "step", null);
+
+    // Assert — exact, as the saga context keeps it; integers stay integers.
+    assertThat(response.bodyJsonObject())
+        .containsEntry("price", new BigDecimal("12345678901234567.89"))
+        .containsEntry("count", 2);
   }
 
   @Test
