@@ -204,9 +204,11 @@ import org.jspecify.annotations.Nullable;
  *       but the participant call itself has already been made. Size the threshold above the step
  *       envelope, and make participants tolerate a duplicate invocation
  *   <li>{@code recovery.interval_seconds} — how often the scan runs
- *   <li>{@code recovery.escalation_grace_period_seconds} — how long a saga may stay stuck before it
- *       is escalated for manual intervention: a step whose retries keep failing, a compensation
- *       that keeps failing, or an asynchronous step that keeps being re-driven
+ *   <li>{@code recovery.escalation_grace_period_seconds} — how long recovery keeps retrying a stuck
+ *       saga before it gives up. A step whose retries keep failing, or a compensation that keeps
+ *       failing, is escalated for manual intervention. An asynchronous step that keeps timing out
+ *       is failed: at or before the pivot the saga compensates, and after it the saga is escalated.
+ *       The period starts at the first step failure, or at an asynchronous step's first park
  *   <li>{@code recovery.max_recoveries_per_sweep} — a pass makes two sweeps, one for abandoned
  *       sagas and one for parked sagas past their deadline, and this bounds each separately, so one
  *       pass can do up to twice this number (the pass summary reports them as {@code stale[...]}

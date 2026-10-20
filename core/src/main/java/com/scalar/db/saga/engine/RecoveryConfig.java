@@ -28,9 +28,11 @@ import java.util.Objects;
  * @param intervalSeconds how often the recovery scan runs (in seconds); each replica shifts its
  *     schedule within this interval by a deterministic offset derived from its owner ID, so
  *     replicas started together do not scan in phase
- * @param escalationGracePeriod how long a saga can remain stuck (with step failure events) before
- *     being escalated to {@link SagaStatus#ESCALATED}: a step whose retries keep failing, a
- *     compensation that keeps failing, or an asynchronous step that keeps being re-driven
+ * @param escalationGracePeriod how long recovery keeps retrying a stuck saga before it gives up. A
+ *     step whose retries keep failing, or a compensation that keeps failing, is escalated to {@link
+ *     SagaStatus#ESCALATED}. An asynchronous step that keeps timing out is failed: at or before the
+ *     pivot the saga compensates, and after it the saga is escalated. The period runs from the
+ *     first step failure, or for an asynchronous step from its first park
  * @param maxRecoveriesPerSweep work budget for <em>each</em> sweep of a pass, not for the pass as a
  *     whole: a pass sweeps for stale sagas (committed claims) and for overdue parked sagas
  *     (committed WAITING transitions), and each gets this budget in full, so a pass can do up to
