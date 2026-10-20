@@ -90,6 +90,13 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
 
   private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
+  /**
+   * How many times a watch retries {@code NOT_FOUND} before it has had any answer about the saga:
+   * on a backend whose index lags the write, such as DynamoDB, a lookup right after the start can
+   * briefly miss the new saga. With the backoff below that spans a few seconds.
+   */
+  private static final int NOT_FOUND_RETRIES_BEFORE_SEEN = 6;
+
   /** Capped, jittered exponential backoff between retries of a retryable transport failure. */
   private static final long BACKOFF_BASE_MILLIS = 50L;
 
@@ -359,7 +366,16 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
         Status.Code code = e.getStatus().getCode();
         if (code == Status.Code.ALREADY_EXISTS) {
           if (attempted) {
-            return getSagaSnapshot(sagaId, loopDeadlineNanos);
+            try {
+              return getSagaSnapshot(sagaId, loopDeadlineNanos);
+            } catch (SagaTimeoutException refetchTimeout) {
+              // The earlier attempt landed, so the saga exists; a bare request timeout would drop
+              // the id the caller needs to find it, which on the minted-id overloads is its only
+              // copy.
+              SagaTimeoutException expired = SagaTimeoutException.awaitExpired(sagaId);
+              expired.addSuppressed(refetchTimeout);
+              throw expired;
+            }
           }
           throw mapStartException(e, name, version, sagaId);
         }
@@ -457,7 +473,8 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
    *
    * <p>So the refusal is surfaced at once as {@link
    * com.scalar.db.saga.exception.SagaOverloadedException}, and the caller decides. Every other
-   * retryable failure is still absorbed here, where the request may never have arrived at all.
+   * retryable failure is still absorbed here, where the request may never have arrived at all,
+   * unless the caller's own context has been cancelled.
    */
   private static boolean isRetryable(StatusRuntimeException e) {
     Status.Code code = e.getStatus().getCode();
@@ -465,7 +482,11 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
         code == Status.Code.UNAVAILABLE
             || code == Status.Code.CANCELLED
             || code == Status.Code.DEADLINE_EXCEEDED;
-    return retryableStatus && !GrpcClientSupport.isEngineOverloaded(e);
+    // A call inherits the caller's gRPC context, so once that context is cancelled every attempt
+    // fails at once; retrying would spin until the client deadline, or forever without one.
+    return retryableStatus
+        && !GrpcClientSupport.isEngineOverloaded(e)
+        && !Context.current().isCancelled();
   }
 
   /**
@@ -542,8 +563,12 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
    * non-terminal answer means the server's window elapsed, or the saga parked, so the watch asks
    * again at once; a retryable transport failure is retried after a backoff. Nothing here blocks a
    * thread: each call is asynchronous, and its answer arrives on a gRPC thread.
+   *
+   * @param seen whether an {@code AwaitSaga} has answered for this saga yet; until one has, {@code
+   *     NOT_FOUND} may be index lag rather than a purge, and is retried
    */
-  private void watch(String sagaId, SagaSnapshot snapshot, SagaCallback callback, int retries) {
+  private void watch(
+      String sagaId, SagaSnapshot snapshot, SagaCallback callback, int retries, boolean seen) {
     if (closed.get()) {
       return;
     }
@@ -557,9 +582,21 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
             watchStub.awaitSaga(
                 request,
                 new StreamObserver<SagaSnapshot>() {
+                  // Acted on only once the call completes OK. A call can deliver its answer and
+                  // still fail before its status arrives; acting at once would let the retry that
+                  // failure schedules report the same outcome a second time.
+                  @Nullable private SagaSnapshot answer;
+
                   @Override
                   public void onNext(SagaSnapshot next) {
-                    watch(sagaId, next, callback, 0);
+                    answer = next;
+                  }
+
+                  @Override
+                  public void onCompleted() {
+                    if (answer != null) {
+                      watch(sagaId, answer, callback, 0, true);
+                    }
                   }
 
                   @Override
@@ -568,8 +605,8 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
                       return;
                     }
                     if (t instanceof StatusRuntimeException
-                        && isRetryable((StatusRuntimeException) t)) {
-                      scheduleRetry(sagaId, snapshot, callback, retries);
+                        && retryWatch((StatusRuntimeException) t)) {
+                      scheduleRetry(sagaId, snapshot, callback, retries, seen);
                       return;
                     }
                     LOGGER.log(
@@ -578,21 +615,25 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
                         t);
                   }
 
-                  @Override
-                  public void onCompleted() {}
+                  private boolean retryWatch(StatusRuntimeException e) {
+                    return isRetryable(e)
+                        || (!seen
+                            && e.getStatus().getCode() == Status.Code.NOT_FOUND
+                            && retries < NOT_FOUND_RETRIES_BEFORE_SEEN);
+                  }
                 }));
   }
 
   // The future is dropped, so the task reports its own failure rather than leaving it there.
   @SuppressWarnings("FutureReturnValueIgnored")
   private void scheduleRetry(
-      String sagaId, SagaSnapshot snapshot, SagaCallback callback, int retries) {
+      String sagaId, SagaSnapshot snapshot, SagaCallback callback, int retries, boolean seen) {
     try {
       retryScheduler()
           .schedule(
               () -> {
                 try {
-                  watch(sagaId, snapshot, callback, retries + 1);
+                  watch(sagaId, snapshot, callback, retries + 1, seen);
                 } catch (RuntimeException e) {
                   LOGGER.log(
                       Level.WARNING,
@@ -668,7 +709,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
     SagaSnapshot snapshot =
         firstStart(buildRequest(id, name, version, input, true), id, name, version, deadlineNanos);
     if (callback != null) {
-      watch(id, snapshot, callback, 0);
+      watch(id, snapshot, callback, 0, false);
     }
     return id;
   }
@@ -872,12 +913,6 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
      * saga is running and will settle on its own, but the budget can also expire while the first
      * request is still being retried, and then the poll is what says whether anything was
      * persisted.
-     *
-     * <p>One narrow path misses that exception. When a retried start is answered {@code
-     * ALREADY_EXISTS} the client fetches the saga on what is left of the budget, and a budget that
-     * runs out on that fetch surfaces as {@link SagaErrorCode#REQUEST_TIMEOUT} with no ID, though
-     * the earlier attempt did land. Supplying the saga ID instead of letting the client mint one
-     * keeps a handle in every case.
      *
      * @param defaultDeadlineMillis the bound in milliseconds, or {@code 0} for no bound
      * @return this builder
