@@ -86,10 +86,10 @@ final class HttpTransportAdapter implements TransportAdapter {
     }
 
     // For an async step, hand the participant a callback URL so it can complete the step later, and
-    // a failure URL so it can report that the step failed. The
-    // header is omitted when the provider is null (embedded mode / async completion not
-    // configured — such a step is rejected at registration, so a null provider here means a
-    // non-async step) or when the provider returns null for this step.
+    // a failure URL so it can report that the step failed. Both are omitted when the provider is
+    // null (embedded mode or async completion not configured; such a step is rejected at
+    // registration, so a null provider here means a non-async step) or returns null for this step.
+    // The failure URL alone is omitted when the provider has no failure route.
     List<Map.Entry<String, String>> headers = new ArrayList<>();
     if (http.isAsync() && callbackUrlProvider != null) {
       String callbackUrl = callbackUrlProvider.callbackUrl(context.getSagaId(), stepName);

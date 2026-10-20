@@ -54,10 +54,10 @@ public final class StepEvent implements SagaEvent {
   }
 
   /**
-   * Creates a {@link EventType#STEP_REISSUING} event, marking that the recovery sweep un-parked a
-   * timed-out async step to re-issue its call ({@code WAITING → RUNNING}). It carries no payload
-   * and is folded to a no-op on replay; the subsequent re-park appends a fresh {@link
-   * EventType#STEP_PENDING}. The count of {@code STEP_PENDING} events bounds the re-drive attempts.
+   * Creates a {@link EventType#STEP_REISSUING} event with no payload, marking that a timed-out
+   * async step was un-parked to re-issue its call ({@code WAITING → RUNNING}). It is folded to a
+   * no-op on replay; the subsequent re-park appends a fresh {@link EventType#STEP_PENDING}. The
+   * count of {@code STEP_PENDING} events bounds the re-drive attempts.
    *
    * @param stepIndex the step's zero-based index in the definition, never negative
    * @param stepName the step's name

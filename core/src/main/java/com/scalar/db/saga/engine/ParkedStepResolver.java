@@ -44,26 +44,16 @@ final class ParkedStepResolver {
     this.config = config;
   }
 
-  /** Where {@link #resolve} left the saga. */
-  enum Kind {
-    /** Un-parked and about to be re-issued. */
-    REDRIVEN,
-    /** The step was given up at or before the pivot, and the saga is compensating. */
-    COMPENSATING,
-    /** The step was given up after the pivot, and the saga is escalated. */
-    ESCALATED
-  }
-
   /**
    * A committed transition and what continues the saga from it.
    *
-   * @param snapshot the saga's state as committed
-   * @param kind which transition was committed
-   * @param drive runs the saga on from the transition and returns where it settled, or {@code null}
-   *     when nothing runs, as for an escalated saga
+   * @param snapshot the saga's state as committed: {@code RUNNING} when the step is re-issued,
+   *     {@code COMPENSATING} or {@code ESCALATED} when it is given up
+   * @param drive runs the saga on from the transition and returns where it settled. It rebuilds the
+   *     saga's context itself, so anything that fails after the commit fails inside the drive,
+   *     where each caller handles it; for an escalated saga it only returns the snapshot
    */
-  record Resolution(
-      SagaStateSnapshot snapshot, Kind kind, @Nullable Supplier<SagaStateSnapshot> drive) {}
+  record Resolution(SagaStateSnapshot snapshot, Supplier<SagaStateSnapshot> drive) {}
 
   /**
    * Re-issues or gives up the parked step and commits that transition.
@@ -96,18 +86,13 @@ final class ParkedStepResolver {
         // A reported cause is kept on the re-issue, since no failure event will record it.
         StepEvent reissueEvent =
             StepEvent.reissuing(
-                parkedIndex,
-                stepName,
-                cause == null
-                    ? null
-                    : EventPayloadSerializer.serializeError(
-                        new StepExecutionException(cause, false), false));
+                parkedIndex, stepName, cause == null ? null : failurePayload(cause));
         SagaStateSnapshot running = store.redriveParkedStep(saga, events.size(), reissueEvent);
-        ExecutionContext context = engine.replayEvents(running, appended(events, reissueEvent));
         return new Resolution(
             running,
-            Kind.REDRIVEN,
             () -> {
+              ExecutionContext context =
+                  engine.replayEvents(running, appended(events, reissueEvent));
               engine.resumeFrom(def, context, parkedIndex);
               return context.getCurrentState();
             });
@@ -127,11 +112,11 @@ final class ParkedStepResolver {
       // failed step, which is included because the participant may have committed it.
       SagaStateSnapshot compensating =
           store.failParkedStep(saga, events.size(), failedEvent, SagaStatus.COMPENSATING);
-      ExecutionContext context = engine.replayEvents(compensating, appended(events, failedEvent));
       return new Resolution(
           compensating,
-          Kind.COMPENSATING,
           () -> {
+            ExecutionContext context =
+                engine.replayEvents(compensating, appended(events, failedEvent));
             engine.compensateFrom(def, context, parkedIndex);
             return context.getCurrentState();
           });
@@ -144,7 +129,7 @@ final class ParkedStepResolver {
         reason);
     SagaStateSnapshot escalated =
         store.failParkedStep(saga, events.size(), failedEvent, SagaStatus.ESCALATED);
-    return new Resolution(escalated, Kind.ESCALATED, null);
+    return new Resolution(escalated, () -> escalated);
   }
 
   /**
@@ -205,7 +190,8 @@ final class ParkedStepResolver {
    * else the engine default (mirrors {@code SagaEngine.resolveRetryPolicy}). A TCC confirmation has
    * no definition step of its own: the plan puts the confirmations after all the reservations, at
    * {@code steps.size() + i}, under the fixed confirmation policy (mirrors {@code
-   * SagaEngine.expandTccPlan}).
+   * SagaEngine.expandTccPlan}). Read from the definition rather than from the engine's built plan,
+   * because building the plan instantiates the steps and can fail where this lookup cannot.
    */
   private static int maxRedriveAttempts(SagaDefinition def, int stepIndex) {
     if (stepIndex >= def.getSteps().size()) {
@@ -228,9 +214,11 @@ final class ParkedStepResolver {
    * committed server-side, so compensation must include it.
    */
   static StepEvent giveUpFailedEvent(int stepIndex, String stepName, String reason) {
-    return StepEvent.failed(
-        stepIndex,
-        stepName,
-        EventPayloadSerializer.serializeError(new StepExecutionException(reason, false), false));
+    return StepEvent.failed(stepIndex, stepName, failurePayload(reason));
+  }
+
+  /** A serialized error recording {@code reason}, in the form a step failure payload takes. */
+  private static String failurePayload(String reason) {
+    return EventPayloadSerializer.serializeError(new StepExecutionException(reason, false), false);
   }
 }

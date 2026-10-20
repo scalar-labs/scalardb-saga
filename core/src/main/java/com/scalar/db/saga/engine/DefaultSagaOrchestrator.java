@@ -104,8 +104,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   // principal. A remote front end injects the request's authenticated identity instead.
   private static final String EMBEDDED_OPERATOR = "embedded";
 
-  // The longest a participant's own account of a failure may be when it is recorded. The record
-  // is for an operator reading the timeline, and the timeline caps what it shows anyway.
+  // The longest a participant's own account of a failure may be when it is recorded. It bounds
+  // the size of the event row, since the text arrives from outside.
   private static final int MAX_REPORTED_ERROR_CHARS = 1024;
 
   private final SagaEngine engine;
@@ -854,39 +854,15 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   public SagaStateSnapshot completeStepAsync(
       String sagaId, String stepName, Map<String, Object> output) {
     ResumedStep resumed = resumeParked(sagaId, stepName, output);
-    try {
-      // execute() (not submit()) because the result is ignored: submit() would return a Future we
-      // drop, which both trips Error Prone and silently swallows failures. The inner catch handles
-      // failures instead, logging any Throwable (incl. Error); the saga is persisted as RUNNING, so
-      // recovery is the backstop.
-      asyncExecutor.execute(
-          () -> {
-            // Mirrors submitAsync: record the verdict rather than branching on it, and dispatch in
-            // the finally, so a drive that settled the saga and then threw still notifies. The
-            // resume carries no SagaCallback — the one from the original start died at the park —
-            // so this reaches the settlement listener alone.
-            SagaStateSnapshot executed = null;
-            try {
-              engine.resumeFrom(resumed.def(), resumed.context(), resumed.stepIndex() + 1);
-              executed = resumed.context().getCurrentState();
-            } catch (Throwable t) {
-              logger.error("Async completion drive for saga {} failed unexpectedly", sagaId, t);
-            } finally {
-              try {
-                dispatchOutcome(sagaId, null, executed);
-              } catch (Throwable t) {
-                logger.error("Failed to dispatch outcome for saga {}", sagaId, t);
-              }
-            }
-          });
-    } catch (RejectedExecutionException e) {
-      // Race between close() and execute() — the step is resumed (RUNNING); recovery will drive it.
-      logger.warn(
-          "Async executor rejected completion drive for saga {} (shutting down); "
-              + "recovery will handle it",
-          sagaId,
-          e);
-    }
+    // The resume carries no SagaCallback — the one from the original start died at the park — so
+    // this reaches the settlement listener alone.
+    driveDetached(
+        sagaId,
+        "completion",
+        () -> {
+          engine.resumeFrom(resumed.def(), resumed.context(), resumed.stepIndex() + 1);
+          return resumed.context().getCurrentState();
+        });
     return resumed.running();
   }
 
@@ -938,20 +914,28 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
         retryable ? "retryable" : "not retryable",
         resolution.snapshot().getStatus());
 
-    Supplier<SagaStateSnapshot> drive = resolution.drive();
+    driveDetached(sagaId, "failure-callback", resolution.drive());
+    return resolution.snapshot();
+  }
+
+  /**
+   * Runs a parked saga's continuation on the async executor, so a callback route can answer its
+   * participant once the transition is durable rather than after the rest of the saga. The verdict
+   * is recorded rather than branched on, and the outcome dispatched in the finally, as {@code
+   * submitAsync} does, so a drive that settled the saga and then threw still notifies. {@code
+   * execute()} rather than {@code submit()}: the result is unused, and a dropped Future would
+   * swallow failures. If the executor is shutting down, the transition is still committed and
+   * recovery drives the saga.
+   */
+  private void driveDetached(String sagaId, String label, Supplier<SagaStateSnapshot> drive) {
     try {
-      // As in completeStepAsync: record the verdict and dispatch in the finally, so a drive that
-      // settled the saga and then threw still notifies. An escalated saga has no drive, but a
-      // waiter on it is still owed the outcome.
       asyncExecutor.execute(
           () -> {
-            SagaStateSnapshot executed = drive == null ? resolution.snapshot() : null;
+            SagaStateSnapshot executed = null;
             try {
-              if (drive != null) {
-                executed = drive.get();
-              }
+              executed = drive.get();
             } catch (Throwable t) {
-              logger.error("Failure-callback drive for saga {} failed unexpectedly", sagaId, t);
+              logger.error("Async {} drive for saga {} failed unexpectedly", label, sagaId, t);
             } finally {
               try {
                 dispatchOutcome(sagaId, null, executed);
@@ -961,14 +945,12 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
             }
           });
     } catch (RejectedExecutionException e) {
-      // Race between close() and execute(): the transition is committed; recovery will drive it.
       logger.warn(
-          "Async executor rejected failure-callback drive for saga {} (shutting down); "
-              + "recovery will handle it",
+          "Async executor rejected {} drive for saga {} (shutting down); recovery will handle it",
+          label,
           sagaId,
           e);
     }
-    return resolution.snapshot();
   }
 
   /**
@@ -977,15 +959,10 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    * reason is.
    */
   private static String reportedCause(@Nullable String error) {
-    String trimmed =
-        error == null ? "" : DefaultSagaAdminService.sanitizeControlChars(error).strip();
-    if (trimmed.isEmpty()) {
-      return "participant reported failure";
-    }
-    return "participant reported failure: "
-        + (trimmed.length() > MAX_REPORTED_ERROR_CHARS
-            ? trimmed.substring(0, MAX_REPORTED_ERROR_CHARS)
-            : trimmed);
+    String trimmed = error == null ? "" : TextGuards.oneLine(error).strip();
+    return trimmed.isEmpty()
+        ? "participant reported failure"
+        : "participant reported failure: " + TextGuards.cut(trimmed, MAX_REPORTED_ERROR_CHARS);
   }
 
   /**
@@ -1105,7 +1082,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       throw new SagaStepNotParkedException(sagaId, stepName);
     }
     throw new IllegalStateException(
-        "Cannot complete step for saga " + sagaId + " in status " + saga.getStatus());
+        "Cannot settle step for saga " + sagaId + " in status " + saga.getStatus());
   }
 
   /**
@@ -1141,7 +1118,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       }
     }
     if (parked == null) {
-      throw new IllegalStateException("Saga " + sagaId + " has no parked step to complete");
+      throw new IllegalStateException("Saga " + sagaId + " has no parked step to settle");
     }
     if (!parked.getStepName().equals(stepName)) {
       // Caller input rather than a server fault, so it carries INVALID_ARGUMENT: the step name
@@ -1165,7 +1142,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
           stepName,
           parked.getStepName());
       throw new SagaIllegalArgumentException(
-          "Callback step '" + stepName + "' is not the parked step for saga " + sagaId);
+          "Reported step '" + stepName + "' is not the parked step for saga " + sagaId);
     }
     return parked.getStepIndex();
   }

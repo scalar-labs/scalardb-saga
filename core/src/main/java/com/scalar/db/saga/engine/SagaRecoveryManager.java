@@ -32,7 +32,6 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -1027,16 +1026,12 @@ class SagaRecoveryManager {
     // Re-drive the parked step while within its attempt-count and grace bounds, else give up.
     ParkedStepResolver.Resolution resolution =
         parkedStepResolver.resolve(saga, events, parkedIndex, stepName, def, true, null);
-    Supplier<SagaStateSnapshot> drive = resolution.drive();
-    if (drive == null) {
-      return RecoveryOutcome.COMMITTED;
-    }
     try {
-      SagaStateSnapshot settled = drive.get();
+      SagaStateSnapshot settled = resolution.drive().get();
       logger.debug("Parked saga {} driven on to {}", sagaId, settled.getStatus());
     } catch (Exception e) {
       logger.error(
-          resolution.kind() == ParkedStepResolver.Kind.REDRIVEN
+          resolution.snapshot().getStatus() == SagaStatus.RUNNING
               ? "Re-drive of parked saga {} failed after its WAITING transition committed"
               : "Compensation of parked saga {} failed after its WAITING transition committed",
           sagaId,

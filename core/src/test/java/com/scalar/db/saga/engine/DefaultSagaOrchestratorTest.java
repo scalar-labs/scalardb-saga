@@ -1883,6 +1883,29 @@ class DefaultSagaOrchestratorTest {
     }
 
     @Test
+    void failStepAsync_replayFailsAfterTheCommit_stillAnswersWithTheCommittedState() {
+      // Arrange — the transition commits, then rebuilding the context fails. That belongs to the
+      // detached drive, which recovery backs up; the participant is answered from the commit.
+      SagaDefinition def = definition("test-saga");
+      List<SagaEvent> events = parkedOnce();
+      SagaStateSnapshot compensating = snapshot("saga-1", SagaStatus.COMPENSATING);
+      when(store.getEvents("saga-1")).thenReturn(events);
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(store.failParkedStep(eq(waiting), eq(events.size()), any(), eq(SagaStatus.COMPENSATING)))
+          .thenReturn(compensating);
+      when(engine.replayEvents(eq(compensating), any()))
+          .thenThrow(new IllegalStateException("unreadable log"));
+
+      // Act
+      SagaStateSnapshot result = orchestrator.failStepAsync("saga-1", "s1", null, false);
+
+      // Assert
+      assertThat(result).isSameAs(compensating);
+      verify(engine, timeout(2_000)).replayEvents(eq(compensating), any());
+      verify(engine, never()).compensateFrom(any(), any(), anyInt());
+    }
+
+    @Test
     void failStepAsync_notRetryableAfterThePivot_escalates() {
       // Arrange — under FORWARD every step is past the pivot, so there is nothing to roll back.
       SagaDefinition def =
@@ -2063,6 +2086,44 @@ class DefaultSagaOrchestratorTest {
           .isInstanceOf(SagaStepNotParkedException.class);
       verify(store, never()).failParkedStep(any(), anyInt(), any(), any());
       verify(store, never()).redriveParkedStep(any(), anyInt(), any());
+    }
+
+    @Test
+    void failStepAsync_stepNameMismatch_throwsSagaIllegalArgumentAndRecordsNothing() {
+      // Arrange — parked on "s1", but the report names another step. The park is read back by the
+      // WAITING row's key, which the class setup stubs.
+      when(store.getEvents("saga-1"))
+          .thenReturn(
+              List.of(
+                  StatusEvent.started(null),
+                  StepEvent.pending(0, "s1").withTimestamp(NOW.minusSeconds(60))));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.failStepAsync("saga-1", "other", null, false))
+          .isInstanceOf(SagaIllegalArgumentException.class);
+      verify(store, never()).failParkedStep(any(), anyInt(), any(), any());
+    }
+
+    @Test
+    void failStepAsync_unknownSaga_throwsSagaNotFound() {
+      // Arrange — no events and no row: the saga does not exist.
+      when(store.getEvents("nope")).thenReturn(List.of());
+      when(store.getStateSnapshot("nope")).thenReturn(Optional.empty());
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.failStepAsync("nope", "s1", null, false))
+          .isInstanceOf(SagaNotFoundException.class);
+    }
+
+    @Test
+    void failStepAsync_closedOrchestrator_throwsIllegalStateAndReadsNothing() {
+      // Arrange
+      orchestrator.close();
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.failStepAsync("saga-1", "s1", null, false))
+          .isInstanceOf(IllegalStateException.class);
+      verify(store, never()).getEvents(any());
     }
 
     @Test

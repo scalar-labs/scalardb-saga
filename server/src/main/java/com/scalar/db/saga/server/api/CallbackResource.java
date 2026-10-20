@@ -27,17 +27,17 @@ import org.jspecify.annotations.Nullable;
  *       DefaultSagaOrchestrator#failStepAsync}.
  * </ul>
  *
- * <p><b>Auth.</b> This route is authenticated by the HMAC callback token, <em>not</em> by the
+ * <p><b>Auth.</b> Both routes are authenticated by the HMAC callback token, <em>not</em> by the
  * caller-facing auth (e.g. JWT) that guards the other endpoints — a participant service holds a
- * signed callback URL, not a user credential. The route is therefore tagged {@link
+ * signed callback URL, not a user credential. The routes are therefore tagged {@link
  * SagaOperation#CALLBACK}, which the security layer treats as exempt. An optional {@code iat} TTL
  * (configured via {@code register}) additionally rejects a token older than a maximum age, so a
  * leaked callback URL is not a non-expiring credential.
  *
- * <p><b>Idempotency.</b> A callback for a saga that is no longer {@code WAITING} — a duplicate
- * callback (a prior one already resumed it) or a late one (the timeout sweep already resolved it) —
- * is a no-op that returns the saga's current state rather than an error, so a participant that
- * retries its callback sees a consistent {@code 200}.
+ * <p><b>Idempotency.</b> A callback or failure report for a step that is no longer parked — a
+ * duplicate (a prior report already resumed or failed it) or a late one (the timeout sweep already
+ * resolved it) — is a no-op that returns the saga's current state rather than an error, so a
+ * participant that retries its report sees a consistent {@code 200}.
  */
 public final class CallbackResource {
 
@@ -59,11 +59,12 @@ public final class CallbackResource {
   private CallbackResource() {}
 
   /**
-   * Registers the callback route on the given routing configuration.
+   * Registers the completion and failure routes on the given routing configuration.
    *
    * @param routes the routing configuration the server is created with
    * @param orchestrator the orchestrator whose {@link DefaultSagaOrchestrator#completeStepAsync}
-   *     resumes the parked saga
+   *     resumes the parked saga, and whose {@link DefaultSagaOrchestrator#failStepAsync} settles a
+   *     reported failure
    * @param callbackSecret the HMAC secret the callback token is verified against
    * @param maxAgeSeconds the {@code iat} TTL in seconds; a token older than this is rejected as
    *     expired. {@code 0} disables the check

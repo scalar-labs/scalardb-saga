@@ -29,6 +29,8 @@ import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Exercises {@link CallbackResource} against a real Javalin dispatch (ephemeral port, no ScalarDB)
@@ -166,7 +168,7 @@ class CallbackResourceTest {
     when(orchestrator.completeStepAsync(any(), any(), any()))
         .thenThrow(
             new SagaIllegalArgumentException(
-                "Callback step 'refund' is not the parked step for saga saga-1"));
+                "Reported step 'refund' is not the parked step for saga saga-1"));
 
     HttpResponse<String> response = post("?token=" + validToken() + "&iat=" + IAT, "{}");
 
@@ -265,6 +267,22 @@ class CallbackResourceTest {
     // Assert
     assertThat(response.statusCode()).isEqualTo(200);
     verify(orchestrator).failStepAsync(SAGA_ID, STEP, null, true);
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"false", "yes", "1"})
+  void fail_retryableHeaderOtherThanTrue_reportsItNotRetryable(String header) throws Exception {
+    // Arrange — as on a synchronous response, only "true" asks for a retry.
+    when(orchestrator.failStepAsync(eq(SAGA_ID), eq(STEP), any(), anyBoolean()))
+        .thenReturn(snapshot(SagaStatus.COMPENSATING));
+
+    // Act
+    HttpResponse<String> response =
+        postFail("?token=" + validFailToken() + "&iat=" + IAT, "", header);
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(200);
+    verify(orchestrator).failStepAsync(SAGA_ID, STEP, null, false);
   }
 
   @Test

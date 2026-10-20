@@ -88,8 +88,8 @@ final class ServiceFileParser {
   /**
    * Header names the engine issues itself, so configuring one as a service header cannot change
    * what a participant receives: the engine's value wins. {@code X-Saga-Callback-Url} and {@code
-   * X-Saga-Failure-Url} are set only on the async-step requests that need them, so configuring it
-   * is worse than inert — the rest of the requests would carry a callback URL the engine never
+   * X-Saga-Failure-Url} are set only on the async-step requests that need them, so configuring
+   * either is worse than inert — the rest of the requests would carry a URL the engine never
    * issued. Rejected at parse, where the error can name the offending key, rather than leaving an
    * operator to wonder why their header never arrives. Compared case-insensitively, matching the
    * HTTP spec and the engine's own header merge. The names mirror the engine's internal {@code

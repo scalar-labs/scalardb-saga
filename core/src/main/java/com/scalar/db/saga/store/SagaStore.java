@@ -202,9 +202,9 @@ public interface SagaStore extends AutoCloseable {
    * Fails (gives up on) a parked step, in one transaction: appends {@code failedEvent}, transitions
    * the saga {@code WAITING → targetStatus}, and deletes the {@code saga_parked} row (if any). Used
    * by the recovery sweep once a parked step's re-drive budget is spent (retry attempts or grace
-   * period), or when its definition can't be resolved. The optimistic check on the {@code WAITING}
-   * row makes this and a concurrent callback ({@link #resumeParkedStep}) / re-drive ({@link
-   * #redriveParkedStep}) mutually exclusive.
+   * period), or when its definition can't be resolved, and when a participant reports the step
+   * failed. The optimistic check on the {@code WAITING} row makes this and a concurrent callback
+   * ({@link #resumeParkedStep}) / re-drive ({@link #redriveParkedStep}) mutually exclusive.
    *
    * @param current the current ({@code WAITING}) snapshot (used for optimistic concurrency)
    * @param sequence the event sequence number
@@ -225,10 +225,11 @@ public interface SagaStore extends AutoCloseable {
   /**
    * Un-parks a timed-out step to re-drive it, in one transaction: appends {@code redriveEvent}
    * ({@link EventType#STEP_REISSUING}), transitions the saga {@code WAITING → RUNNING}, and deletes
-   * the {@code saga_parked} row. The recovery sweep then re-executes the step, which re-parks it
-   * with a fresh deadline. The optimistic check on the {@code WAITING} row makes this and a
-   * concurrent callback ({@link #resumeParkedStep}) / timeout ({@link #failParkedStep}) mutually
-   * exclusive.
+   * the {@code saga_parked} row. The step is re-issued because it timed out or because its
+   * participant reported a retryable failure; the engine then re-executes it, which re-parks it
+   * with a fresh deadline. {@code redriveEvent}'s payload, when present, must be stored and read
+   * back unchanged. The optimistic check on the {@code WAITING} row makes this and a concurrent
+   * callback ({@link #resumeParkedStep}) / timeout ({@link #failParkedStep}) mutually exclusive.
    *
    * @param current the current ({@code WAITING}) snapshot (used for optimistic concurrency)
    * @param sequence the event sequence number

@@ -110,11 +110,7 @@ final class SagaDetailReader {
     if (detail == null || detail.length() <= MAX_DETAIL_LENGTH) {
       return detail;
     }
-    int cut = MAX_DETAIL_LENGTH;
-    if (Character.isHighSurrogate(detail.charAt(cut - 1))) {
-      cut--;
-    }
-    return detail.substring(0, cut) + TRUNCATION_MARKER;
+    return TextGuards.cut(detail, MAX_DETAIL_LENGTH) + TRUNCATION_MARKER;
   }
 
   private static @Nullable String stepDetail(StepEvent step) {

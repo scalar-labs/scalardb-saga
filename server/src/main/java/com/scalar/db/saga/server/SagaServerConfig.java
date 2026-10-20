@@ -260,14 +260,15 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code header.<HeaderName>} — a header sent on every request to this service, repeated per
  *       header. This is the channel for calling an <b>authenticated</b> service (e.g. {@code
  *       header.Authorization}), and the value takes a secret reference — confined to {@code
- *       secrets_root}, see below. The engine stamps its own headers ({@code X-Saga-Id}, {@code
- *       X-Saga-Step}, {@code X-Saga-Callback-Url}, {@code X-Saga-Failure-Url}) on every request and
- *       they always win, so configuring one of those names is rejected. Header names are
- *       case-insensitive per the HTTP spec, so setting one name in two spellings is rejected too. A
- *       header value is trimmed, which is what lets a {@code ${file:...}} secret ending in a
- *       newline be sent at all — an untrimmed newline is a control character no HTTP header value
- *       may carry. The names the JDK's HTTP client refuses to send ({@code Connection}, {@code
- *       Content-Length}, {@code Expect}, {@code Host}, {@code Upgrade}) are rejected as well
+ *       secrets_root}, see below. The engine stamps its own headers ({@code X-Saga-Id} and {@code
+ *       X-Saga-Step} on every request, {@code X-Saga-Callback-Url} and {@code X-Saga-Failure-Url}
+ *       on an async step's) and they always win, so configuring one of those names is rejected.
+ *       Header names are case-insensitive per the HTTP spec, so setting one name in two spellings
+ *       is rejected too. A header value is trimmed, which is what lets a {@code ${file:...}} secret
+ *       ending in a newline be sent at all — an untrimmed newline is a control character no HTTP
+ *       header value may carry. The names the JDK's HTTP client refuses to send ({@code
+ *       Connection}, {@code Content-Length}, {@code Expect}, {@code Host}, {@code Upgrade}) are
+ *       rejected as well
  * </ul>
  *
  * <p>The directory-level keys:
