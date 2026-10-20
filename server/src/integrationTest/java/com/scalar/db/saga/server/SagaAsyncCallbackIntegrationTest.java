@@ -15,6 +15,8 @@ import java.net.http.HttpResponse.BodyHandlers;
 import java.nio.file.Path;
 import java.util.Objects;
 import java.util.Properties;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
@@ -34,6 +36,9 @@ class SagaAsyncCallbackIntegrationTest extends ServerIntegrationTestSupport {
   private static final String EAGER_SAGA_NAME = "payment-eager";
 
   private final AtomicReference<String> capturedCallbackUrl = new AtomicReference<>();
+  private final AtomicReference<String> capturedFailureUrl = new AtomicReference<>();
+  private final AtomicInteger chargeCalls = new AtomicInteger();
+  private final AtomicInteger undoCalls = new AtomicInteger();
   private final AtomicReference<String> eagerCallbackUrl = new AtomicReference<>();
   private final AtomicReference<HttpResponse<String>> eagerCallbackResponse =
       new AtomicReference<>();
@@ -67,6 +72,8 @@ class SagaAsyncCallbackIntegrationTest extends ServerIntegrationTestSupport {
         "/charge",
         ex -> {
           capturedCallbackUrl.set(ex.getRequestHeaders().getFirst("X-Saga-Callback-Url"));
+          capturedFailureUrl.set(ex.getRequestHeaders().getFirst("X-Saga-Failure-Url"));
+          chargeCalls.incrementAndGet();
           respond(ex, 202, "{}");
         });
     participant.createContext(
@@ -81,7 +88,12 @@ class SagaAsyncCallbackIntegrationTest extends ServerIntegrationTestSupport {
           }
           respond(ex, 202, "{}");
         });
-    route(participant, "/charge-undo", 200); // compensation (not exercised on the happy path)
+    participant.createContext(
+        "/charge-undo",
+        ex -> {
+          undoCalls.incrementAndGet();
+          respond(ex, 200, "{}");
+        });
   }
 
   @Override
@@ -165,6 +177,67 @@ class SagaAsyncCallbackIntegrationTest extends ServerIntegrationTestSupport {
         postAbsolute(Objects.requireNonNull(eagerCallbackUrl.get()), "{\"paymentId\":\"P-2\"}");
     assertThat(retry.statusCode()).isEqualTo(200);
     assertThat(pollUntilTerminal(sagaId)).isEqualTo("COMPLETED");
+  }
+
+  @Test
+  void asyncStep_participantReportsFailure_compensatesAndRecordsWhy() throws Exception {
+    // Arrange
+    HttpResponse<String> start =
+        post("/sagas", "{\"sagaName\":\"" + SAGA_NAME + "\",\"input\":{}}");
+    String sagaId = MAPPER.readTree(start.body()).get("sagaId").asText();
+    assertThat(status(start)).isEqualTo("WAITING");
+    String failureUrl =
+        Objects.requireNonNull(capturedFailureUrl.get(), "the participant got no failure URL");
+    assertThat(failureUrl).contains("/sagas/" + sagaId + "/steps/charge/fail?token=");
+
+    // Act — the participant reports the step failed, without asking for a retry.
+    HttpResponse<String> failure = postAbsolute(failureUrl, "{\"error\":\"card declined\"}");
+
+    // Assert — the only step is at the pivot, so the saga rolls back, including the failed step.
+    assertThat(failure.statusCode()).isEqualTo(200);
+    assertThat(pollUntilTerminal(sagaId)).isEqualTo("COMPENSATED");
+    assertThat(undoCalls.get()).isEqualTo(1);
+    assertThat(chargeCalls.get()).isEqualTo(1);
+    assertThat(get("/sagas/" + sagaId + "/detail").body()).contains("card declined");
+  }
+
+  @Test
+  void asyncStep_participantReportsRetryableFailure_reissuesTheStepThenCompletes()
+      throws Exception {
+    // Arrange
+    HttpResponse<String> start =
+        post("/sagas", "{\"sagaName\":\"" + SAGA_NAME + "\",\"input\":{}}");
+    String sagaId = MAPPER.readTree(start.body()).get("sagaId").asText();
+    String failureUrl =
+        Objects.requireNonNull(capturedFailureUrl.get(), "the participant got no failure URL");
+
+    // Act — a retryable failure re-issues the step, which calls the participant again.
+    HttpResponse<String> failure =
+        http.send(
+            HttpRequest.newBuilder(URI.create(failureUrl))
+                .header("X-Saga-Retryable", "true")
+                .POST(BodyPublishers.noBody())
+                .build(),
+            BodyHandlers.ofString());
+    assertThat(failure.statusCode()).isEqualTo(200);
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+    while (chargeCalls.get() < 2 && System.nanoTime() < deadline) {
+      Thread.sleep(50);
+    }
+    assertThat(chargeCalls.get()).isEqualTo(2);
+    String secondCallbackUrl = Objects.requireNonNull(capturedCallbackUrl.get());
+    // The re-issued step parks again before its callback can complete it; a callback that beats
+    // the park is refused retryably, so retry it as a participant would.
+    HttpResponse<String> callback = postAbsolute(secondCallbackUrl, "{\"paymentId\":\"P-3\"}");
+    while (callback.statusCode() == 503 && System.nanoTime() < deadline) {
+      Thread.sleep(50);
+      callback = postAbsolute(secondCallbackUrl, "{\"paymentId\":\"P-3\"}");
+    }
+
+    // Assert
+    assertThat(callback.statusCode()).isEqualTo(200);
+    assertThat(pollUntilTerminal(sagaId)).isEqualTo("COMPLETED");
+    assertThat(undoCalls.get()).isZero();
   }
 
   private HttpResponse<String> postAbsolute(String url, String body) throws Exception {

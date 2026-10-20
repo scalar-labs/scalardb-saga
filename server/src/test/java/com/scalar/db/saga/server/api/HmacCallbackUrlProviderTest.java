@@ -31,6 +31,24 @@ class HmacCallbackUrlProviderTest {
   }
 
   @Test
+  void failureUrl_buildsSignedUrlOnTheFailRoute_verifiableWithTheSameSecret() {
+    // Arrange
+    HmacCallbackUrlProvider provider =
+        new HmacCallbackUrlProvider("http://daemon:8080", SECRET, FIXED);
+
+    // Act
+    String url = Objects.requireNonNull(provider.failureUrl("saga-1", "debit"));
+
+    // Assert — the same token as the completion URL: it signs the step, not the action.
+    assertThat(url)
+        .startsWith("http://daemon:8080/sagas/saga-1/steps/debit/fail?token=")
+        .endsWith("&iat=1700000000");
+    String token = url.substring(url.indexOf("token=") + "token=".length(), url.indexOf("&iat="));
+    String signedData = HmacUtils.callbackSignedData("saga-1", "debit", "1700000000");
+    assertThat(HmacUtils.verify(SECRET, signedData, token)).isTrue();
+  }
+
+  @Test
   void callbackUrl_encodesPathSegments() {
     HmacCallbackUrlProvider provider = new HmacCallbackUrlProvider("http://d", SECRET, FIXED);
 

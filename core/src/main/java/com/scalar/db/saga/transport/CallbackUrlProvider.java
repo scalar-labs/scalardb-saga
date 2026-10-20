@@ -23,4 +23,17 @@ public interface CallbackUrlProvider {
    * @return the URL to send as {@code X-Saga-Callback-Url}, or {@code null} to omit the header
    */
   @Nullable String callbackUrl(String sagaId, String stepName);
+
+  /**
+   * Returns the URL a participant calls to report that {@code stepName} of {@code sagaId} failed,
+   * sent as {@code X-Saga-Failure-Url} alongside the callback URL, or {@code null} to omit it.
+   * Defaults to {@code null}, for a provider with no failure route.
+   *
+   * @param sagaId the saga whose step the participant reports on
+   * @param stepName the async step the participant reports on
+   * @return the URL to send as {@code X-Saga-Failure-Url}, or {@code null} to omit the header
+   */
+  default @Nullable String failureUrl(String sagaId, String stepName) {
+    return null;
+  }
 }

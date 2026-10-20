@@ -104,6 +104,10 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   // principal. A remote front end injects the request's authenticated identity instead.
   private static final String EMBEDDED_OPERATOR = "embedded";
 
+  // The longest a participant's own account of a failure may be when it is recorded. The record
+  // is for an operator reading the timeline, and the timeline caps what it shows anyway.
+  private static final int MAX_REPORTED_ERROR_CHARS = 1024;
+
   private final SagaEngine engine;
   private final SagaStore store;
   private final SagaDefinitionRegistry definitionRegistry;
@@ -884,6 +888,98 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
           e);
     }
     return resumed.running();
+  }
+
+  /**
+   * Settles a parked ({@code WAITING}) step that its participant reports as failed, through its
+   * failure callback, rather than leaving it to wait out its deadline. The same rules settle it as
+   * when recovery finds the step past its deadline. A retryable failure re-issues the step while
+   * its retry attempts and the grace period allow; past them, and for a failure that is not
+   * retryable, the step is given up. The saga then compensates if the step is at or before the
+   * pivot, or is escalated if it is after it.
+   *
+   * <p>Like {@link #completeStepAsync}, this returns once the transition is durable, and runs the
+   * re-issued step or the compensation on the async executor. The participant's message, if any, is
+   * recorded on the step's failure event, cut to {@value #MAX_REPORTED_ERROR_CHARS} characters.
+   *
+   * @param sagaId the parked saga
+   * @param stepName the step the participant reports on (must be the currently parked step)
+   * @param error the participant's account of the failure, or {@code null} for none
+   * @param retryable whether the participant asks for the step to be retried
+   * @return the saga's state once the transition commits: {@code RUNNING} when the step is
+   *     re-issued, {@code COMPENSATING} or {@code ESCALATED} when it is given up
+   * @throws SagaStepNotParkedException if the step has not parked yet, or the saga's row lags its
+   *     log; retryable, since the park is about to be recorded
+   * @throws IllegalStateException if the step is already settled or the saga has moved on, which
+   *     the callback endpoint answers as an idempotent duplicate
+   * @throws SagaIllegalArgumentException if {@code stepName} is not the currently parked step
+   * @throws SagaConcurrentModificationException if a concurrent callback or deadline sweep settles
+   *     the parked step first
+   */
+  public SagaStateSnapshot failStepAsync(
+      String sagaId, String stepName, @Nullable String error, boolean retryable) {
+    Objects.requireNonNull(sagaId, "sagaId must not be null");
+    Objects.requireNonNull(stepName, "stepName must not be null");
+    ensureOpen();
+
+    List<SagaEvent> events = store.getEvents(sagaId);
+    SagaStateSnapshot saga = parkedSnapshot(sagaId, stepName, events);
+    int stepIndex = parkedStepIndex(events, sagaId, stepName);
+    SagaDefinition def = resolveDefinition(saga);
+    ParkedStepResolver.Resolution resolution =
+        recoveryManager
+            .parkedStepResolver()
+            .resolve(saga, events, stepIndex, stepName, def, retryable, reportedCause(error));
+    logger.info(
+        "Participant reported step '{}' of saga {} failed ({}); saga is now {}",
+        stepName,
+        sagaId,
+        retryable ? "retryable" : "not retryable",
+        resolution.snapshot().getStatus());
+
+    Supplier<SagaStateSnapshot> drive = resolution.drive();
+    try {
+      // As in completeStepAsync: record the verdict and dispatch in the finally, so a drive that
+      // settled the saga and then threw still notifies. An escalated saga has no drive, but a
+      // waiter on it is still owed the outcome.
+      asyncExecutor.execute(
+          () -> {
+            SagaStateSnapshot executed = drive == null ? resolution.snapshot() : null;
+            try {
+              if (drive != null) {
+                executed = drive.get();
+              }
+            } catch (Throwable t) {
+              logger.error("Failure-callback drive for saga {} failed unexpectedly", sagaId, t);
+            } finally {
+              try {
+                dispatchOutcome(sagaId, null, executed);
+              } catch (Throwable t) {
+                logger.error("Failed to dispatch outcome for saga {}", sagaId, t);
+              }
+            }
+          });
+    } catch (RejectedExecutionException e) {
+      // Race between close() and execute(): the transition is committed; recovery will drive it.
+      logger.warn(
+          "Async executor rejected failure-callback drive for saga {} (shutting down); "
+              + "recovery will handle it",
+          sagaId,
+          e);
+    }
+    return resolution.snapshot();
+  }
+
+  /** What the failure event records for a participant's report. */
+  private static String reportedCause(@Nullable String error) {
+    if (error == null || error.isBlank()) {
+      return "participant reported failure";
+    }
+    String trimmed = error.strip();
+    return "participant reported failure: "
+        + (trimmed.length() > MAX_REPORTED_ERROR_CHARS
+            ? trimmed.substring(0, MAX_REPORTED_ERROR_CHARS)
+            : trimmed);
   }
 
   /**

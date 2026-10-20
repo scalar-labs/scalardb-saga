@@ -2,6 +2,7 @@ package com.scalar.db.saga.server.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -24,6 +25,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Map;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -229,11 +231,117 @@ class CallbackResourceTest {
     verify(orchestrator).completeStepAsync(eq(SAGA_ID), eq(STEP), any());
   }
 
+  // ---------------------------------------------------------------------------
+  // The failure route
+  // ---------------------------------------------------------------------------
+
+  @Test
+  void fail_validTokenWithError_reportsItNotRetryableAndReturns200() throws Exception {
+    // Arrange
+    when(orchestrator.failStepAsync(eq(SAGA_ID), eq(STEP), any(), anyBoolean()))
+        .thenReturn(snapshot(SagaStatus.COMPENSATING));
+
+    // Act
+    HttpResponse<String> response =
+        postFail("?token=" + validToken() + "&iat=" + IAT, "{\"error\":\"card declined\"}", null);
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(200);
+    verify(orchestrator).failStepAsync(SAGA_ID, STEP, "card declined", false);
+  }
+
+  @Test
+  void fail_retryableHeader_reportsItRetryable() throws Exception {
+    // Arrange — matched as on a synchronous response: case-insensitive, trimmed.
+    when(orchestrator.failStepAsync(eq(SAGA_ID), eq(STEP), any(), anyBoolean()))
+        .thenReturn(snapshot(SagaStatus.RUNNING));
+
+    // Act
+    HttpResponse<String> response =
+        postFail("?token=" + validToken() + "&iat=" + IAT, "", " TRUE ");
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(200);
+    verify(orchestrator).failStepAsync(SAGA_ID, STEP, null, true);
+  }
+
+  @Test
+  void fail_bodyWithoutError_reportsNoReason() throws Exception {
+    // Arrange
+    when(orchestrator.failStepAsync(eq(SAGA_ID), eq(STEP), any(), anyBoolean()))
+        .thenReturn(snapshot(SagaStatus.COMPENSATING));
+
+    // Act
+    HttpResponse<String> response =
+        postFail("?token=" + validToken() + "&iat=" + IAT, "{\"code\":42}", "false");
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(200);
+    verify(orchestrator).failStepAsync(SAGA_ID, STEP, null, false);
+  }
+
+  @Test
+  void fail_errorNotAString_returns400AndReportsNothing() throws Exception {
+    // Act
+    HttpResponse<String> response =
+        postFail("?token=" + validToken() + "&iat=" + IAT, "{\"error\":{\"why\":1}}", null);
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(400);
+    verify(orchestrator, never()).failStepAsync(any(), any(), any(), anyBoolean());
+  }
+
+  @Test
+  void fail_malformedBody_returns400AndReportsNothing() throws Exception {
+    // Act
+    HttpResponse<String> response =
+        postFail("?token=" + validToken() + "&iat=" + IAT, "{not json", null);
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(400);
+    verify(orchestrator, never()).failStepAsync(any(), any(), any(), anyBoolean());
+  }
+
+  @Test
+  void fail_invalidToken_returns401AndReportsNothing() throws Exception {
+    // Act
+    HttpResponse<String> response = postFail("?token=deadbeef&iat=" + IAT, "{}", null);
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(401);
+    verify(orchestrator, never()).failStepAsync(any(), any(), any(), anyBoolean());
+  }
+
+  @Test
+  void fail_stepAlreadySettled_isIdempotent200() throws Exception {
+    // Arrange — an earlier report, the callback or the deadline sweep settled the step first.
+    when(orchestrator.failStepAsync(any(), any(), any(), anyBoolean()))
+        .thenThrow(new IllegalStateException("saga not WAITING"));
+    when(orchestrator.getStateSnapshot(SAGA_ID)).thenReturn(snapshot(SagaStatus.COMPENSATING));
+
+    // Act
+    HttpResponse<String> response = postFail("?token=" + validToken() + "&iat=" + IAT, "", null);
+
+    // Assert
+    assertThat(response.statusCode()).isEqualTo(200);
+    verify(orchestrator).getStateSnapshot(SAGA_ID);
+  }
+
   private String validToken() {
     return HmacUtils.hmacSha256Hex(SECRET, HmacUtils.callbackSignedData(SAGA_ID, STEP, IAT));
   }
 
   private HttpResponse<String> post(String query, String body) throws Exception {
+    return send("/complete", query, body, null);
+  }
+
+  private HttpResponse<String> postFail(String query, String body, @Nullable String retryable)
+      throws Exception {
+    return send("/fail", query, body, retryable);
+  }
+
+  private HttpResponse<String> send(
+      String action, String query, String body, @Nullable String retryable) throws Exception {
     URI uri =
         URI.create(
             "http://127.0.0.1:"
@@ -242,14 +350,16 @@ class CallbackResourceTest {
                 + SAGA_ID
                 + "/steps/"
                 + STEP
-                + "/complete"
+                + action
                 + query);
-    return http.send(
+    HttpRequest.Builder request =
         HttpRequest.newBuilder(uri)
             .header("Content-Type", "application/json")
-            .POST(HttpRequest.BodyPublishers.ofString(body))
-            .build(),
-        BodyHandlers.ofString());
+            .POST(HttpRequest.BodyPublishers.ofString(body));
+    if (retryable != null) {
+      request.header("X-Saga-Retryable", retryable);
+    }
+    return http.send(request.build(), BodyHandlers.ofString());
   }
 
   private static SagaStateSnapshot snapshot(SagaStatus status) {

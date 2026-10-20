@@ -7,9 +7,11 @@ import java.time.Clock;
 import java.util.Objects;
 
 /**
- * The daemon's {@link CallbackUrlProvider}: mints a signed callback URL for an async step —
+ * The daemon's {@link CallbackUrlProvider}: mints the signed URLs an async step's participant calls
+ * back on, to complete the step or to report that it failed —
  *
  * <pre>{@code {baseUrl}/sagas/{sagaId}/steps/{stepName}/complete?token={hmac}&iat={epochSeconds}}
+ * {@code {baseUrl}/sagas/{sagaId}/steps/{stepName}/fail?token={hmac}&iat={epochSeconds}}
  * </pre>
  *
  * where {@code token} is {@link HmacUtils#hmacSha256Hex} over {@link HmacUtils#callbackSignedData}.
@@ -38,6 +40,19 @@ public final class HmacCallbackUrlProvider implements CallbackUrlProvider {
 
   @Override
   public String callbackUrl(String sagaId, String stepName) {
+    return signedUrl(sagaId, stepName, "complete");
+  }
+
+  @Override
+  public String failureUrl(String sagaId, String stepName) {
+    return signedUrl(sagaId, stepName, "fail");
+  }
+
+  /**
+   * A signed URL for {@code action} on the step. The token covers the saga, the step and the issue
+   * time, not the action, so either route accepts it; holding the step's URL already grants both.
+   */
+  private String signedUrl(String sagaId, String stepName, String action) {
     long iat = clock.instant().getEpochSecond();
     String token =
         HmacUtils.hmacSha256Hex(
@@ -47,7 +62,9 @@ public final class HmacCallbackUrlProvider implements CallbackUrlProvider {
         + encodePathSegment(sagaId)
         + "/steps/"
         + encodePathSegment(stepName)
-        + "/complete?token="
+        + "/"
+        + action
+        + "?token="
         + token
         + "&iat="
         + iat;

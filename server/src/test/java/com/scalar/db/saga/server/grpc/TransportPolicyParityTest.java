@@ -92,6 +92,7 @@ class TransportPolicyParityTest {
           Map.entry("GET /health", SagaOperation.HEALTH),
           Map.entry("HEAD /health", SagaOperation.HEALTH),
           Map.entry("POST /sagas/{id}/steps/{stepName}/complete", SagaOperation.CALLBACK),
+          Map.entry("POST /sagas/{id}/steps/{stepName}/fail", SagaOperation.CALLBACK),
           Map.entry("POST /sagas", SagaOperation.START_SAGA),
           Map.entry("PUT /sagas/{id}", SagaOperation.START_SAGA),
           Map.entry("GET /sagas/{id}", SagaOperation.GET_SAGA),

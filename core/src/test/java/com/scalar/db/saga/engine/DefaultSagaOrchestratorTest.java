@@ -48,7 +48,10 @@ import com.scalar.db.saga.store.StepEvent;
 import java.math.BigInteger;
 import java.net.URL;
 import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -1813,6 +1816,204 @@ class DefaultSagaOrchestratorTest {
       verify(engine).resumeFrom(def, context, 2);
 
       orchestratorWithMockExecutor.close();
+    }
+  }
+
+  // =========================================================================
+  // failStepAsync
+  // =========================================================================
+
+  @Nested
+  class FailStepAsync {
+
+    private final SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
+
+    @BeforeEach
+    void useARealResolver() {
+      // The resolver applies recovery's rules over the mocked store and engine, so these tests see
+      // the transitions it commits rather than a stub's.
+      RecoveryConfig config =
+          new RecoveryConfig(
+              60_000, 30, Duration.ofHours(4), 1000, 10, Clock.fixed(NOW, ZoneOffset.UTC));
+      // Both lenient: the refusal tests turn the report away before either is reached. A log that
+      // ends in a park is read back by the WAITING row's full key.
+      lenient()
+          .when(recoveryManager.parkedStepResolver())
+          .thenReturn(new ParkedStepResolver(store, engine, config));
+      lenient()
+          .when(store.getStateSnapshot(eq("saga-1"), eq(SagaStatus.WAITING), any()))
+          .thenReturn(Optional.of(waiting));
+    }
+
+    /** A saga parked once on step 0, {@code s1}, a minute ago. */
+    private List<SagaEvent> parkedOnce() {
+      return List.of(
+          StatusEvent.started(null),
+          StepEvent.pending(0, "s1").withTimestamp(NOW.minusSeconds(60)));
+    }
+
+    private StepEvent failureRecordedBy(SagaStatus target) {
+      ArgumentCaptor<StepEvent> captor = ArgumentCaptor.forClass(StepEvent.class);
+      verify(store).failParkedStep(eq(waiting), anyInt(), captor.capture(), eq(target));
+      return captor.getValue();
+    }
+
+    @Test
+    void failStepAsync_notRetryableBeforeThePivot_compensatesWithoutReissuing() {
+      // Arrange
+      SagaDefinition def = definition("test-saga");
+      List<SagaEvent> events = parkedOnce();
+      SagaStateSnapshot compensating = snapshot("saga-1", SagaStatus.COMPENSATING);
+      ExecutionContext context = new ExecutionContext("saga-1", Map.of(), compensating);
+      when(store.getEvents("saga-1")).thenReturn(events);
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(store.failParkedStep(eq(waiting), eq(events.size()), any(), eq(SagaStatus.COMPENSATING)))
+          .thenReturn(compensating);
+      when(engine.replayEvents(eq(compensating), any())).thenReturn(context);
+
+      // Act
+      SagaStateSnapshot result = orchestrator.failStepAsync("saga-1", "s1", "card declined", false);
+
+      // Assert
+      assertThat(result).isSameAs(compensating);
+      assertThat(failureRecordedBy(SagaStatus.COMPENSATING).getPayload())
+          .contains("participant reported failure: card declined");
+      verify(engine, timeout(2_000)).compensateFrom(def, context, 0);
+      verify(store, never()).redriveParkedStep(any(), anyInt(), any());
+    }
+
+    @Test
+    void failStepAsync_notRetryableAfterThePivot_escalates() {
+      // Arrange — under FORWARD every step is past the pivot, so there is nothing to roll back.
+      SagaDefinition def =
+          SagaDefinition.newBuilder("test-saga")
+              .saga()
+              .recoveryStrategy(SagaDefinition.RecoveryStrategy.FORWARD)
+              .step("s1", "com.example.Step1")
+              .add()
+              .build();
+      List<SagaEvent> events = parkedOnce();
+      SagaStateSnapshot escalated = snapshot("saga-1", SagaStatus.ESCALATED);
+      when(store.getEvents("saga-1")).thenReturn(events);
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(store.failParkedStep(eq(waiting), eq(events.size()), any(), eq(SagaStatus.ESCALATED)))
+          .thenReturn(escalated);
+
+      // Act
+      SagaStateSnapshot result = orchestrator.failStepAsync("saga-1", "s1", null, false);
+
+      // Assert
+      assertThat(result).isSameAs(escalated);
+      assertThat(failureRecordedBy(SagaStatus.ESCALATED).getPayload())
+          .contains("participant reported failure");
+      verify(engine, never()).compensateFrom(any(), any(), anyInt());
+    }
+
+    @Test
+    void failStepAsync_retryableWithinItsBounds_reissuesTheStep() {
+      // Arrange
+      SagaDefinition def = definition("test-saga");
+      List<SagaEvent> events = parkedOnce();
+      SagaStateSnapshot running = snapshot("saga-1", SagaStatus.RUNNING);
+      ExecutionContext context = new ExecutionContext("saga-1", Map.of(), running);
+      when(store.getEvents("saga-1")).thenReturn(events);
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(store.redriveParkedStep(eq(waiting), eq(events.size()), any())).thenReturn(running);
+      when(engine.replayEvents(eq(running), any())).thenReturn(context);
+
+      // Act
+      SagaStateSnapshot result = orchestrator.failStepAsync("saga-1", "s1", "busy", true);
+
+      // Assert
+      assertThat(result).isSameAs(running);
+      verify(engine, timeout(2_000)).resumeFrom(def, context, 0);
+      verify(store, never()).failParkedStep(any(), anyInt(), any(), any());
+    }
+
+    @Test
+    void failStepAsync_retryableWithAttemptsSpent_givesUpAndSaysWhy() {
+      // Arrange — three parks at the step use up the default three attempts.
+      SagaDefinition def = definition("test-saga");
+      List<SagaEvent> events =
+          List.of(
+              StatusEvent.started(null),
+              StepEvent.pending(0, "s1").withTimestamp(NOW.minusSeconds(300)),
+              StepEvent.reissuing(0, "s1"),
+              StepEvent.pending(0, "s1").withTimestamp(NOW.minusSeconds(200)),
+              StepEvent.reissuing(0, "s1"),
+              StepEvent.pending(0, "s1").withTimestamp(NOW.minusSeconds(100)));
+      SagaStateSnapshot compensating = snapshot("saga-1", SagaStatus.COMPENSATING);
+      when(store.getEvents("saga-1")).thenReturn(events);
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(store.failParkedStep(eq(waiting), eq(events.size()), any(), eq(SagaStatus.COMPENSATING)))
+          .thenReturn(compensating);
+      when(engine.replayEvents(eq(compensating), any()))
+          .thenReturn(new ExecutionContext("saga-1", Map.of(), compensating));
+
+      // Act
+      SagaStateSnapshot result = orchestrator.failStepAsync("saga-1", "s1", "busy", true);
+
+      // Assert
+      assertThat(result).isSameAs(compensating);
+      assertThat(failureRecordedBy(SagaStatus.COMPENSATING).getPayload())
+          .contains("participant reported failure: busy; async re-drive attempts exhausted");
+    }
+
+    @Test
+    void failStepAsync_longError_recordsItCut() {
+      // Arrange
+      SagaDefinition def = definition("test-saga");
+      List<SagaEvent> events = parkedOnce();
+      SagaStateSnapshot compensating = snapshot("saga-1", SagaStatus.COMPENSATING);
+      when(store.getEvents("saga-1")).thenReturn(events);
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(store.failParkedStep(eq(waiting), eq(events.size()), any(), eq(SagaStatus.COMPENSATING)))
+          .thenReturn(compensating);
+      when(engine.replayEvents(eq(compensating), any()))
+          .thenReturn(new ExecutionContext("saga-1", Map.of(), compensating));
+
+      // Act
+      orchestrator.failStepAsync("saga-1", "s1", "x".repeat(5000), false);
+
+      // Assert
+      String payload = failureRecordedBy(SagaStatus.COMPENSATING).getPayload();
+      assertThat(payload).contains("x".repeat(1024)).doesNotContain("x".repeat(1025));
+    }
+
+    @Test
+    void failStepAsync_beforeThePark_throwsStepNotParkedAndRecordsNothing() {
+      // Arrange — the step is being re-issued, so it has not parked again yet.
+      when(store.getStateSnapshot("saga-1"))
+          .thenReturn(Optional.of(snapshot("saga-1", SagaStatus.RUNNING)));
+      when(store.getEvents("saga-1"))
+          .thenReturn(
+              List.of(
+                  StatusEvent.started(null),
+                  StepEvent.pending(0, "s1").withTimestamp(NOW.minusSeconds(60)),
+                  StepEvent.reissuing(0, "s1")));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.failStepAsync("saga-1", "s1", null, false))
+          .isInstanceOf(SagaStepNotParkedException.class);
+      verify(store, never()).failParkedStep(any(), anyInt(), any(), any());
+      verify(store, never()).redriveParkedStep(any(), anyInt(), any());
+    }
+
+    @Test
+    void failStepAsync_sagaAlreadyCompensating_throwsIllegalStateAsADuplicate() {
+      // Arrange — an earlier report already gave the step up.
+      when(store.getStateSnapshot("saga-1"))
+          .thenReturn(Optional.of(snapshot("saga-1", SagaStatus.COMPENSATING)));
+      when(store.getEvents("saga-1"))
+          .thenReturn(
+              List.of(
+                  StatusEvent.started(null),
+                  StepEvent.pending(0, "s1").withTimestamp(NOW.minusSeconds(60)),
+                  StepEvent.failed(0, "s1", null)));
+
+      // Act & Assert
+      assertThatThrownBy(() -> orchestrator.failStepAsync("saga-1", "s1", null, false))
+          .isInstanceOf(IllegalStateException.class);
     }
   }
 
