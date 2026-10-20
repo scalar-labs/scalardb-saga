@@ -12,16 +12,20 @@ import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaTimeoutException;
 import com.scalar.db.saga.exception.SagaUnauthenticatedException;
 import com.scalar.db.saga.exception.SagaUnavailableException;
+import io.grpc.CallCredentials;
 import io.grpc.ChannelCredentials;
 import io.grpc.Grpc;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
+import io.grpc.Metadata;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.TlsChannelCredentials;
 import io.grpc.protobuf.StatusProto;
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.Objects;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import javax.net.ssl.SSLEngine;
 import org.jspecify.annotations.Nullable;
@@ -123,6 +127,25 @@ final class GrpcClientSupport {
       channel.shutdownNow();
       Thread.currentThread().interrupt();
     }
+  }
+
+  /**
+   * The credential both clients' {@code staticHeaderCredentials} build: a fixed header value on
+   * every call.
+   */
+  static CallCredentials staticHeaderCredentials(String headerName, String headerValue) {
+    Objects.requireNonNull(headerName, "headerName must not be null");
+    Objects.requireNonNull(headerValue, "headerValue must not be null");
+    Metadata.Key<String> key = Metadata.Key.of(headerName, Metadata.ASCII_STRING_MARSHALLER);
+    return new CallCredentials() {
+      @Override
+      public void applyRequestMetadata(
+          RequestInfo requestInfo, Executor appExecutor, MetadataApplier applier) {
+        Metadata headers = new Metadata();
+        headers.put(key, headerValue);
+        applier.apply(headers);
+      }
+    };
   }
 
   /**

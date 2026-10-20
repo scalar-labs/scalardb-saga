@@ -22,6 +22,7 @@ import com.scalar.db.saga.rpc.SagaServiceGrpc.SagaServiceBlockingStub;
 import com.scalar.db.saga.rpc.SagaServiceGrpc.SagaServiceStub;
 import com.scalar.db.saga.rpc.SagaSnapshot;
 import com.scalar.db.saga.rpc.StartSagaRequest;
+import io.grpc.CallCredentials;
 import io.grpc.Context;
 import io.grpc.ManagedChannel;
 import io.grpc.Status;
@@ -50,6 +51,12 @@ import org.jspecify.annotations.Nullable;
  *
  * <p>Thread-safe and intended to be created once and shared: a single instance holds one {@link
  * ManagedChannel} that multiplexes all calls. Call {@link #close()} to release it.
+ *
+ * <p>Against a server with a security provider, every call must carry a credential: set one with
+ * {@link Builder#callCredentials(CallCredentials)}, which {@link #staticHeaderCredentials(String,
+ * String)} builds for the header-based built-in providers. Starting a saga needs the {@code
+ * saga:write} role, and reading one, including the watch behind a {@link SagaCallback}, needs
+ * {@code saga:read}, which {@code saga:write} includes.
  *
  * <p>The {@code startAsync(..., SagaCallback)} overloads return once the saga is started, then
  * watch it in the background with {@code AwaitSaga} until it is terminal; {@link SagaCallback}
@@ -135,7 +142,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
    * no-op.
    */
   GrpcSagaOrchestratorClient(SagaServiceBlockingStub stub, @Nullable ManagedChannel ownedChannel) {
-    this(stub, ownedChannel, 0L);
+    this(stub, ownedChannel, 0L, null);
   }
 
   /**
@@ -145,10 +152,24 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
       SagaServiceBlockingStub stub,
       @Nullable ManagedChannel ownedChannel,
       long defaultDeadlineMillis) {
-    this.stub = Objects.requireNonNull(stub, "stub must not be null");
-    // Only the channel carries over, not the blocking stub's call options; anything applied to the
-    // stub, such as call credentials, has to be applied to this one as well.
-    this.watchStub = SagaServiceGrpc.newStub(stub.getChannel());
+    this(stub, ownedChannel, defaultDeadlineMillis, null);
+  }
+
+  GrpcSagaOrchestratorClient(
+      SagaServiceBlockingStub stub,
+      @Nullable ManagedChannel ownedChannel,
+      long defaultDeadlineMillis,
+      @Nullable CallCredentials callCredentials) {
+    Objects.requireNonNull(stub, "stub must not be null");
+    // The watch stub is built from the channel alone, so the credential is applied to each stub
+    // here rather than to the blocking stub before it arrives, where the watch would miss it.
+    SagaServiceStub async = SagaServiceGrpc.newStub(stub.getChannel());
+    if (callCredentials != null) {
+      stub = stub.withCallCredentials(callCredentials);
+      async = async.withCallCredentials(callCredentials);
+    }
+    this.stub = stub;
+    this.watchStub = async;
     this.ownedChannel = ownedChannel;
     this.defaultDeadlineMillis = defaultDeadlineMillis;
   }
@@ -165,12 +186,27 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
 
   /**
    * Starts building a client, for when plaintext with no deadline is not enough: TLS, a private CA,
-   * an authority override, or a default deadline.
+   * an authority override, a credential, or a default deadline.
    *
    * @return a new builder
    */
   public static Builder newBuilder() {
     return new Builder();
+  }
+
+  /**
+   * Builds {@link CallCredentials} that attach a fixed header value to every call — the credential
+   * form the built-in security providers expect. Use it for an API key ({@code
+   * staticHeaderCredentials("X-API-Key", key)}, matching the {@code apikey} provider's configured
+   * header) or a fixed bearer token ({@code staticHeaderCredentials("Authorization", "Bearer " +
+   * jwt)}). For a token that must refresh, supply a custom {@link CallCredentials} instead.
+   *
+   * @param headerName the metadata header the server's provider reads
+   * @param headerValue the credential value
+   * @return call credentials that present {@code headerValue} under {@code headerName}
+   */
+  public static CallCredentials staticHeaderCredentials(String headerName, String headerValue) {
+    return GrpcClientSupport.staticHeaderCredentials(headerName, headerValue);
   }
 
   // --------------------------------------------------------------------------
@@ -930,6 +966,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
     @Nullable private Path trustCaCertPath;
     @Nullable private String overrideAuthority;
     private long defaultDeadlineMillis = 0L;
+    @Nullable private CallCredentials callCredentials;
 
     private Builder() {}
 
@@ -941,6 +978,20 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
      */
     public Builder target(String target) {
       this.target = Objects.requireNonNull(target, "target must not be null");
+      return this;
+    }
+
+    /**
+     * The credential presented on every call, including the background watch behind a {@link
+     * SagaCallback}. Against a server with a security provider this is required; {@link
+     * #staticHeaderCredentials(String, String)} builds one for the header-based built-in providers.
+     *
+     * @param callCredentials the credential to present on every call
+     * @return this builder
+     */
+    public Builder callCredentials(CallCredentials callCredentials) {
+      this.callCredentials =
+          Objects.requireNonNull(callCredentials, "callCredentials must not be null");
       return this;
     }
 
@@ -1050,7 +1101,10 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
       ManagedChannel channel =
           GrpcClientSupport.openChannel(resolvedTarget, useTls, trustCaCertPath, overrideAuthority);
       return new GrpcSagaOrchestratorClient(
-          SagaServiceGrpc.newBlockingStub(channel), channel, defaultDeadlineMillis);
+          SagaServiceGrpc.newBlockingStub(channel),
+          channel,
+          defaultDeadlineMillis,
+          callCredentials);
     }
   }
 }
