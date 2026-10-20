@@ -45,6 +45,8 @@ public final class CallSpecCodec {
   private static final String CONFIRMATION = "confirmation";
   private static final String CANCELLATION = "cancellation";
 
+  private static final ObjectMapper MAPPER = new ObjectMapper();
+
   // The HTTP call spec's own keys. The values of QUERY/JSON_BODY/OUTPUT are free-form user maps and
   // are not validated here.
   private static final Set<String> KNOWN_HTTP_FIELDS =
@@ -131,7 +133,7 @@ public final class CallSpecCodec {
       callBuilder.query(readStringMap(node.get(QUERY), stepName, QUERY));
     }
     if (isPresent(node, JSON_BODY)) {
-      callBuilder.jsonBody(readStringMap(node.get(JSON_BODY), stepName, JSON_BODY));
+      callBuilder.jsonBody(readObjectMap(node.get(JSON_BODY), stepName));
     }
     if (isPresent(node, STRING_BODY)) {
       callBuilder.stringBody(node.get(STRING_BODY).asText());
@@ -174,7 +176,7 @@ public final class CallSpecCodec {
           node.set(QUERY, toJsonMap(mapper, http.getQuery()));
         }
         if (!http.getJsonBody().isEmpty()) {
-          node.set(JSON_BODY, toJsonMap(mapper, http.getJsonBody()));
+          node.set(JSON_BODY, mapper.valueToTree(http.getJsonBody()));
         }
         if (http.getStringBody() != null) {
           node.put(STRING_BODY, http.getStringBody());
@@ -209,6 +211,17 @@ public final class CallSpecCodec {
     }
     Map<String, String> map = new LinkedHashMap<>();
     node.fields().forEachRemaining(e -> map.put(e.getKey(), e.getValue().asText()));
+    return map;
+  }
+
+  /** Reads the body's fields as JSON values, keeping literal numbers, booleans and nesting. */
+  private static Map<String, ?> readObjectMap(JsonNode node, String stepName) {
+    if (!node.isObject()) {
+      throw SagaDefinitionException.declarativeStepInvalid(
+          stepName, "field '" + JSON_BODY + "' must be a JSON object");
+    }
+    @SuppressWarnings("unchecked")
+    Map<String, ?> map = MAPPER.convertValue(node, Map.class);
     return map;
   }
 

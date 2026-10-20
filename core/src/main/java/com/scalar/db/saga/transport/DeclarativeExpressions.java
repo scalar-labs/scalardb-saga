@@ -4,10 +4,13 @@ import com.scalar.db.saga.api.SagaContext;
 import com.scalar.db.saga.definition.HttpCall;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Resolves the declarative expression syntax shared by all transports (Layer 2b):
@@ -92,14 +95,39 @@ final class DeclarativeExpressions {
     return resolved;
   }
 
-  /** Resolves every value in {@code templates}, preserving types (e.g. a JSON request body). */
-  static Map<String, Object> resolveObjectMap(Map<String, String> templates, SagaContext context)
-      throws TransportException {
-    Map<String, Object> resolved = new LinkedHashMap<>();
-    for (Map.Entry<String, String> entry : templates.entrySet()) {
-      resolved.put(entry.getKey(), resolveObject(entry.getValue(), context));
+  /**
+   * Resolves a JSON request body: each string, at any depth, is resolved by {@link #resolveObject};
+   * numbers, booleans and {@code null} are sent as declared.
+   */
+  static Map<String, @Nullable Object> resolveObjectMap(
+      Map<String, ?> templates, SagaContext context) throws TransportException {
+    Map<String, @Nullable Object> resolved = new LinkedHashMap<>();
+    for (Map.Entry<String, ?> entry : templates.entrySet()) {
+      resolved.put(entry.getKey(), resolveJsonValue(entry.getValue(), context));
     }
     return resolved;
+  }
+
+  private static @Nullable Object resolveJsonValue(@Nullable Object value, SagaContext context)
+      throws TransportException {
+    if (value instanceof String template) {
+      return resolveObject(template, context);
+    }
+    if (value instanceof Map<?, ?> map) {
+      Map<String, @Nullable Object> resolved = new LinkedHashMap<>();
+      for (Map.Entry<?, ?> entry : map.entrySet()) {
+        resolved.put(String.valueOf(entry.getKey()), resolveJsonValue(entry.getValue(), context));
+      }
+      return resolved;
+    }
+    if (value instanceof List<?> list) {
+      List<@Nullable Object> resolved = new ArrayList<>();
+      for (Object element : list) {
+        resolved.add(resolveJsonValue(element, context));
+      }
+      return resolved;
+    }
+    return value;
   }
 
   /**

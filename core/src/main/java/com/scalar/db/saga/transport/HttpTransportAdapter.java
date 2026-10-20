@@ -15,10 +15,10 @@ import org.jspecify.annotations.Nullable;
  * HttpCall}'s {@code ${key}} path/query/jsonBody/stringBody templates against the saga context and
  * performs the call through the shared {@link HttpExchange} (correlation headers, status→retryable
  * classification, SSRF allowlist + body limits, endpoint default headers). The request body is
- * either the flat {@code jsonBody} map serialized as JSON or the raw templated {@code stringBody}
- * string (sent with the call's {@code contentType}, defaulting to {@code application/json}). The
- * response is reduced to the call's {@code output} mapping ({@code $.path} JSON navigation and the
- * {@code $body} raw-body token).
+ * either the {@code jsonBody} map serialized as a JSON object or the raw templated {@code
+ * stringBody} string (sent with the call's {@code contentType}, defaulting to {@code
+ * application/json}). The response is reduced to the call's {@code output} mapping ({@code $.path}
+ * JSON navigation and the {@code $body} raw-body token).
  */
 final class HttpTransportAdapter implements TransportAdapter {
 
@@ -71,9 +71,9 @@ final class HttpTransportAdapter implements TransportAdapter {
             DeclarativeExpressions.resolveString(http.getStringBody(), context)
                 .getBytes(HttpHeaders.charsetOf(contentType));
       } else {
-        // Flat-map body serialized as JSON; the content type defaults to application/json but a
+        // Map body serialized as a JSON object; the content type defaults to application/json but a
         // declared override (e.g. a JSON variant content type) takes precedence.
-        Map<String, Object> requestBody =
+        Map<String, @Nullable Object> requestBody =
             DeclarativeExpressions.resolveObjectMap(http.getJsonBody(), context);
         try {
           body = exchange.encodeJson(requestBody);

@@ -342,6 +342,8 @@ public final class SagaDefinitionParser {
             "timeoutMillis",
             "retryPolicy",
             "pivot");
+    Set<String> retryPolicyKnown =
+        Set.of("maxAttempts", "initialIntervalMillis", "backoffMultiplier", "maxIntervalMillis");
 
     root.fieldNames()
         .forEachRemaining(
@@ -351,6 +353,7 @@ public final class SagaDefinitionParser {
                     definitionName, "unknown field '" + f + "' in definition");
               }
             });
+    checkUnknownFields(root.get("defaultRetryPolicy"), retryPolicyKnown, definitionName);
 
     if (root.has("steps")) {
       for (JsonNode stepNode : root.get("steps")) {
@@ -363,8 +366,25 @@ public final class SagaDefinitionParser {
                         definitionName, "unknown field '" + f + "' in step");
                   }
                 });
+        checkUnknownFields(stepNode.get("retryPolicy"), retryPolicyKnown, definitionName);
       }
     }
+  }
+
+  private static void checkUnknownFields(
+      @Nullable JsonNode retryPolicy, Set<String> known, String definitionName) {
+    if (retryPolicy == null) {
+      return;
+    }
+    retryPolicy
+        .fieldNames()
+        .forEachRemaining(
+            f -> {
+              if (!known.contains(f)) {
+                throw SagaDefinitionException.definitionInvalid(
+                    definitionName, "unknown field '" + f + "' in retry policy");
+              }
+            });
   }
 
   /** The format label for a path {@link #resolveMapper} accepted; used in failure metadata. */

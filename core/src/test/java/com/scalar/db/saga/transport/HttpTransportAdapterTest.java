@@ -3,6 +3,7 @@ package com.scalar.db.saga.transport;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.scalar.db.saga.api.HttpMethod;
 import com.scalar.db.saga.api.SagaContext;
 import com.scalar.db.saga.api.StepResult;
@@ -13,6 +14,9 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -207,6 +211,44 @@ class HttpTransportAdapterTest {
     assertThat(sagaIdHeader.get()).isEqualTo("saga-1");
     assertThat(sagaStepHeader.get()).isEqualTo("debit");
     assertThat(requestMethod.get()).isEqualTo("POST");
+  }
+
+  @Test
+  void call_jsonBodyWithLiteralsAndNesting_sendsValuesAsDeclared() throws Exception {
+    // Arrange — literal numbers, booleans and null keep their JSON type, and strings are resolved
+    // at any depth.
+    Map<String, Object> item = new HashMap<>();
+    item.put("sku", "${sku}");
+    item.put("note", null);
+    HttpCall spec =
+        HttpCall.newBuilder("/notify")
+            .jsonBody(
+                Map.of(
+                    "quantity",
+                    2,
+                    "price",
+                    9.5,
+                    "gift",
+                    true,
+                    "amount",
+                    "${amount}",
+                    "items",
+                    List.of(item),
+                    "tags",
+                    Arrays.asList("a", "${tag}")))
+            .build();
+
+    // Act
+    adapter.call(spec, ctx(Map.of("sku", "S-1", "amount", 500, "tag", "b")), "notify");
+
+    // Assert
+    ObjectMapper mapper = new ObjectMapper();
+    assertThat(mapper.readTree(requestBody.get()))
+        .isEqualTo(
+            mapper.readTree(
+                """
+                {"quantity": 2, "price": 9.5, "gift": true, "amount": 500,
+                 "items": [{"sku": "S-1", "note": null}], "tags": ["a", "b"]}"""));
   }
 
   @Test
