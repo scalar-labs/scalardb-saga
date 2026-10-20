@@ -484,20 +484,18 @@ class SagaServerTest {
   }
 
   /**
-   * The wiring, end to end: with {@code sync.timeout_millis} unset — the default — a synchronous
-   * REST start must still honour the {@code sync.max_wait_millis} ceiling.
+   * The wiring, end to end: a synchronous REST start must honour the {@code sync.max_wait_millis}
+   * ceiling.
    *
    * <p>Covers the seam the unit tests cannot: {@code SagaServerConfigTest} pins the policy and
    * {@code SagaResourceStartTest} passes {@code SagaResource.register} a bound directly, so both
-   * would still pass if {@code registerRoutes} went back to handing REST the raw {@code
-   * sync.timeout_millis}. That handoff is precisely what the original bug was, and a bound of
-   * {@code 0} makes the wait return immediately, so this asserts the request actually waits for a
-   * delayed completion instead.
+   * would still pass if {@code registerRoutes} handed REST anything other than the resolved bound.
+   * That is what the original bug was, a bound of {@code 0} that makes the wait return immediately,
+   * so this asserts the request actually waits for a delayed completion instead.
    */
   @Test
-  void start_syncTimeoutUnset_restStartStillHonoursTheMaxWaitCeiling(@TempDir Path dir)
-      throws Exception {
-    // Arrange — the default: no sync.timeout_millis, only the ceiling.
+  void start_restStart_honoursTheMaxWaitCeiling(@TempDir Path dir) throws Exception {
+    // Arrange — only the ceiling is set.
     Files.writeString(dir.resolve("saga.json"), declarativeJson("saga"));
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.HOST_KEY, "127.0.0.1");
@@ -863,7 +861,6 @@ class SagaServerTest {
     props.setProperty(SagaServerConfig.DEFAULT_SAGA_TIMEOUT_MILLIS_KEY, "7006");
     props.setProperty(SagaServerConfig.DETAIL_MAX_TIMELINE_EVENTS_KEY, "7005");
     props.setProperty(SagaServerConfig.MAX_CONCURRENT_SAGA_STARTS_KEY, "7007");
-    props.setProperty(SagaServerConfig.SYNC_TIMEOUT_MILLIS_KEY, "7002");
     props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "7003");
     props.setProperty(SagaServerConfig.RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY, "7004");
     props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY, "251");

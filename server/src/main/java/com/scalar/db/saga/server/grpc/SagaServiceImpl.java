@@ -39,13 +39,12 @@ import org.jspecify.annotations.Nullable;
  *
  * <p><b>Sync vs async.</b> {@code async=true} starts the saga and returns the running snapshot
  * immediately. {@code async=false} blocks until the saga is terminal, bounded by the {@code
- * sync.max_wait_millis} ceiling tightened by {@code sync.timeout_millis}, and then further by the
- * remaining gRPC call deadline. A saga that parks on an async step does not end the wait early: it
- * may still finish inside the bound, and the read at bound expiry reports that outcome whichever
- * replica produced it. When the wait ends without a terminal state it returns the in-flight
- * snapshot (whose status — the source of truth — is non-terminal, the gRPC analogue of REST's
- * {@code 202}) and <b>the saga keeps running</b>. The wait runs on the server's virtual-thread
- * executor, so a blocked call is cheap.
+ * sync.max_wait_millis} ceiling, tightened by the remaining gRPC call deadline. A saga that parks
+ * on an async step does not end the wait early: it may still finish inside the bound, and the read
+ * at bound expiry reports that outcome whichever replica produced it. When the wait ends without a
+ * terminal state it returns the in-flight snapshot (whose status — the source of truth — is
+ * non-terminal, the gRPC analogue of REST's {@code 202}) and <b>the saga keeps running</b>. The
+ * wait runs on the server's virtual-thread executor, so a blocked call is cheap.
  *
  * <p><b>AwaitSaga.</b> A long-poll on an <i>existing</i> saga: it blocks for one bounded window and
  * returns the terminal snapshot if reached, else the current non-terminal snapshot. The client
@@ -248,9 +247,8 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
   /**
    * Computes a wait bound (ms): the {@code sync.max_wait_millis} ceiling, further tightened by the
    * caller's {@code requestedCapMillis} (AwaitSaga's {@code max_wait_millis}; {@link
-   * Long#MAX_VALUE} for the start path), {@code sync.timeout_millis} (when set), and the remaining
-   * call deadline minus a slack (when the client set one). Always in {@code [0,
-   * sync.max_wait_millis]} — the wait is never unbounded.
+   * Long#MAX_VALUE} for the start path) and by the remaining call deadline minus a slack (when the
+   * client set one). Always in {@code [0, sync.max_wait_millis]} — the wait is never unbounded.
    */
   private long computeBoundMillis(long requestedCapMillis) {
     long bound = syncWaitBound.applyAsLong(requestedCapMillis);

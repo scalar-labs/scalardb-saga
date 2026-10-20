@@ -26,7 +26,7 @@ class RecoveryConfigTest {
     // Assert
     assertThat(config.stalenessThresholdMillis()).isEqualTo(30_000);
     assertThat(config.intervalSeconds()).isEqualTo(10);
-    assertThat(config.compensationGracePeriod()).isEqualTo(Duration.ofHours(2));
+    assertThat(config.escalationGracePeriod()).isEqualTo(Duration.ofHours(2));
     assertThat(config.maxRecoveriesPerSweep()).isEqualTo(500);
     assertThat(config.maxConcurrentRecoveries()).isEqualTo(5);
     assertThat(config.clock()).isEqualTo(FIXED_CLOCK);
@@ -71,26 +71,26 @@ class RecoveryConfigTest {
   }
 
   // =========================================================================
-  // Validation — compensationGracePeriod
+  // Validation — escalationGracePeriod
   // =========================================================================
 
   @Test
   @SuppressWarnings("NullAway")
-  void constructor_nullCompensationGracePeriod_throwsException() {
+  void constructor_nullEscalationGracePeriod_throwsException() {
     // Act & Assert
     assertThatThrownBy(() -> new RecoveryConfig(30_000, 10, null, 500, 5, FIXED_CLOCK))
         .isInstanceOf(NullPointerException.class);
   }
 
   @Test
-  void constructor_zeroCompensationGracePeriod_throwsException() {
+  void constructor_zeroEscalationGracePeriod_throwsException() {
     // Act & Assert
     assertThatThrownBy(() -> new RecoveryConfig(30_000, 10, Duration.ZERO, 500, 5, FIXED_CLOCK))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
-  void constructor_negativeCompensationGracePeriod_throwsException() {
+  void constructor_negativeEscalationGracePeriod_throwsException() {
     // Act & Assert
     assertThatThrownBy(
             () -> new RecoveryConfig(30_000, 10, Duration.ofHours(-1), 500, 5, FIXED_CLOCK))
@@ -160,7 +160,7 @@ class RecoveryConfigTest {
     // Assert
     assertThat(config.stalenessThresholdMillis()).isEqualTo(60_000);
     assertThat(config.intervalSeconds()).isEqualTo(30);
-    assertThat(config.compensationGracePeriod()).isEqualTo(Duration.ofHours(4));
+    assertThat(config.escalationGracePeriod()).isEqualTo(Duration.ofHours(4));
     assertThat(config.maxRecoveriesPerSweep()).isEqualTo(1000);
     assertThat(config.maxConcurrentRecoveries()).isEqualTo(10);
   }
@@ -173,7 +173,7 @@ class RecoveryConfigTest {
     // Assert
     assertThat(config.stalenessThresholdMillis()).isEqualTo(60_000);
     assertThat(config.intervalSeconds()).isEqualTo(30);
-    assertThat(config.compensationGracePeriod()).isEqualTo(Duration.ofHours(4));
+    assertThat(config.escalationGracePeriod()).isEqualTo(Duration.ofHours(4));
     assertThat(config.maxRecoveriesPerSweep()).isEqualTo(1000);
     assertThat(config.maxConcurrentRecoveries()).isEqualTo(10);
     assertThat(config.clock()).isEqualTo(FIXED_CLOCK);

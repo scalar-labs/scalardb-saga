@@ -70,21 +70,17 @@ import org.jspecify.annotations.Nullable;
  * unbounded wait; see {@code todos/086}.
  *
  * <p><b>Bounded synchronous start.</b> A synchronous start runs the saga on the engine's
- * (virtual-thread) executor and waits, never longer than the {@code sync.max_wait_millis} ceiling,
- * tightened by {@code sync.timeout_millis} when that is set. The wait ends as soon as the saga
- * reaches a terminal state, and at the bound at the latest, after which the request returns {@code
- * 202} while the saga keeps running (poll {@code GET /sagas/{id}}). A saga that parks on an async
- * step does not end the wait: it may still finish inside the bound, and the read at bound expiry
- * reports that outcome. This caps how long a single request can hold a thread, so a burst of slow
- * synchronous sagas cannot exhaust the request pool. Returning {@code 202} rather than an error is
- * the honest outcome: the saga is not cancelled, it is still being processed, and it reuses the
- * {@code 202} this endpoint already returns for a non-terminal outcome. The pattern mirrors RFC
- * 7240's {@code Prefer: respond-async, wait=N}, Azure Durable Functions' {@code
- * WaitForCompletionOrCreateCheckStatusResponse}, and Conductor's {@code executeWorkflow} wait
- * timeout.
- *
- * <p>The bound is unconditional: an unset {@code sync.timeout_millis} still leaves the ceiling in
- * force.
+ * (virtual-thread) executor and waits, never longer than the {@code sync.max_wait_millis} ceiling.
+ * The wait ends as soon as the saga reaches a terminal state, and at the bound at the latest, after
+ * which the request returns {@code 202} while the saga keeps running (poll {@code GET
+ * /sagas/{id}}). A saga that parks on an async step does not end the wait: it may still finish
+ * inside the bound, and the read at bound expiry reports that outcome. This caps how long a single
+ * request can hold a thread, so a burst of slow synchronous sagas cannot exhaust the request pool.
+ * Returning {@code 202} rather than an error is the honest outcome: the saga is not cancelled, it
+ * is still being processed, and it reuses the {@code 202} this endpoint already returns for a
+ * non-terminal outcome. The pattern mirrors RFC 7240's {@code Prefer: respond-async, wait=N}, Azure
+ * Durable Functions' {@code WaitForCompletionOrCreateCheckStatusResponse}, and Conductor's {@code
+ * executeWorkflow} wait timeout. *
  *
  * <p>Not yet wired: {@code PUT /sagas/{id}/cancel} (needs the engine's {@code cancel} method). The
  * {@code GET /sagas} listing lives on the admin surface ({@link SagaAdminResource}).
