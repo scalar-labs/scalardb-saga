@@ -17,8 +17,8 @@ container image to `ghcr.io/scalar-labs/scalardb-saga-server`.
 `:server` is deliberately not published to Maven Central — it ships as the image, so a jar on Central
 would be an artifact nobody consumes and everyone has to keep patched.
 
-The image carries one immutable tag per release — `1.0.0`, `1.0.1` — and nothing that floats. There is
-deliberately no `1.0` tag: the minor version line is a branch in this repository, and a second
+The image carries one immutable tag per release — `1.0.0`, `1.0.1` — and no release tag that floats.
+There is deliberately no `1.0` tag: the minor version line is a branch in this repository, and a second
 representation of it in the registry would be one nothing keeps truthful. There is no `latest` either,
 for that reason and a stronger one: a moving tag cannot be verified by the recipe in
 [Verifying a published image](#verifying-a-published-image), because that binds the signature to the
@@ -28,6 +28,12 @@ agree with. `latest` would be the tag most people pull and the only one nobody c
 Every other Scalar image publishes exact versions only, so pin one. Let Dependabot or Renovate bump it,
 which puts the change in your repository rather than silently in ours. (The GitHub release page still
 marks the newest release *Latest*; that is a badge on the release, not a tag on the image.)
+
+The one exception is the snapshot: every commit on `main` and on each version branch also pushes the
+image as that line's `-SNAPSHOT` version, `2.0.0-SNAPSHOT` for instance, the same version its jars
+publish under. That tag moves with every commit, as a Maven snapshot does. It is for tracking a line
+between releases, never for pinning, and it is not signed and carries no SBOM or provenance, so the
+verification recipe does not apply to it.
 
 Consumers pin one version through the BOM, and declare the artifact for the mode they run in. The two
 are alternatives, not a pair: `core` embeds the engine in the application's own process, while the
@@ -81,13 +87,20 @@ after it, live only on that branch and are unreachable from `main` by design.
 
 1. **Make sure the release branch exists and carries the change.**
 
-   For the first release of a minor version, cut its branch from `main` and bump `main` to the next
-   minor snapshot so trunk and the branch stop claiming the same version:
+   For the first release of a minor version, cut its branch from the branch above it: `main` until a
+   major version branch exists, the major version branch after that (`1` for `1.2`). Bump that parent
+   to its next snapshot version first, then cut the new branch from the commit just before the bump.
+   Cutting first would leave both branches carrying the same version until the bump landed, and each
+   would publish its own build under that one snapshot version:
 
    ```bash
-   git switch main && git pull
-   git switch -c <release-branch> && git push -u origin <release-branch>
+   # after the bump has merged into <parent>
+   git switch <parent> && git pull
+   git switch -c <release-branch> <bump-commit>~1 && git push -u origin <release-branch>
    ```
+
+   `<bump-commit>~1` is the commit just before the bump, so the new branch takes everything up to it
+   and nothing that lands on the parent afterwards.
 
    A newly cut branch also needs two pieces of update plumbing.
 
@@ -188,15 +201,34 @@ tag does not mean validation passed, and it does not mean a human released the d
 the image goes out before step 5. Abandoning a release at the Portal, for either reason, leaves its
 tags published.
 
-Clean that up rather than leaving it behind: delete the git tag, the GitHub release and the `ghcr.io`
-package version, so nothing advertises a version Central never published. The tag matters most, because
-both the *Latest* badge and the pre-release classification are derived from tags rather than from what
-was published — so an abandoned tag left in place stops every later release on an older line from taking
-the badge. Dropping the deployment costs nothing else: the version was never released, so the same tag
-can be cut again once whatever caused the abandonment is fixed.
+Clean that up rather than leaving it behind: delete the git tag, the GitHub release and the image, so
+nothing advertises a version Central never published. On `ghcr.io` that means two package versions:
+the one tagged `<version>`, and the signature tagged `sha256-<digest>`: the image digest with its
+`:` written as `-`, where cosign keeps its signature bundles because `ghcr.io` has no referrers API.
+The platform, attestation and bundle manifests under the two become untagged with them, and
+[ghcr-cleanup.yml](.github/workflows/ghcr-cleanup.yml) collects them within the week. The git tag
+matters most, because both the *Latest* badge and the pre-release classification are derived from
+tags rather than from what was published — so an abandoned tag left in place stops every later
+release on an older line from taking the badge. Dropping the deployment costs nothing else: the
+version was never released, so the same tag can be cut again once whatever caused the abandonment is
+fixed.
 
 Every commit on `main` and on each release branch publishes a `-SNAPSHOT` to the Central snapshot
-repository, so downstream work can track either trunk or a maintenance line without waiting for a tag.
+repository, and the server image under the same version to `ghcr.io`, so downstream work can track
+either trunk or a maintenance line without waiting for a tag. A version branch publishes only a
+version on its own line (`1.0` publishes `1.0.*`, `1` publishes `1.*`), so a scratch branch still
+carrying main's version cannot overwrite main's snapshot. That check cannot tell `1` and `1.2` apart
+while both carry `1.2.0-SNAPSHOT`, which is why [cutting a release](#cutting-a-release) bumps the
+parent before cutting the branch.
+
+Central purges old snapshots by itself; `ghcr.io` keeps everything forever. Each push moves the
+snapshot tag and leaves the previous image behind untagged, so
+[ghcr-cleanup.yml](.github/workflows/ghcr-cleanup.yml) deletes untagged versions weekly. It never
+selects a tagged version, and it leaves the children of every multi-arch index that is still tagged
+alone, which is what keeps it from deleting the contents of a release. Never replace it with a plain
+"delete untagged" action: under a release's index, the platform and attestation manifests are
+untagged too. Run it by hand with **dry-run** (the default for a manual run) to see what it would
+delete.
 
 ### Rehearsing the pipeline
 
@@ -238,7 +270,9 @@ and the branch. A forgotten GPG secret therefore cannot publish unsigned artifac
 **Snapshot.** Set `version=0.0.1-SNAPSHOT` on the scratch branch and push. That runs
 [release-snapshot.yml](.github/workflows/release-snapshot.yml), which exercises the credentials, the
 GPG key and a genuine upload, against the Central snapshot repository, which is mutable and
-expendable. It does not cover the Portal deployment, the arm64 leg, cosign or the GitHub release.
+expendable. It also pushes `0.0.1-SNAPSHOT` to `ghcr.io`, which exercises the `linux/arm64` build
+under QEMU and the registry push. It does not cover the Portal deployment, cosign or the GitHub
+release.
 
 **The full path.** Secrets in place, and the pre-release tag above. This is the only rung that
 exercises the Portal deployment, the `linux/arm64` build under QEMU, the signature and the release
@@ -250,9 +284,9 @@ Clean up afterwards:
 | Left behind | Removal |
 | --- | --- |
 | Central deployment | Drop it, as in step 5. It was never released, so Central never published the version and nothing was ever downloadable. |
-| Image tag | Delete the package version in `ghcr.io`. While this repository is private the package is private too, so it was never world-visible. |
+| Image tags | Delete the package versions tagged `0.0.1-rc.1`, `sha256-<digest>` and, from the snapshot rung, `0.0.1-SNAPSHOT` in `ghcr.io`. Their untagged manifests go with the next run of [ghcr-cleanup.yml](.github/workflows/ghcr-cleanup.yml). While this repository is private the package is private too, so none of it was ever world-visible. |
 | GitHub release, tag, scratch branch | Delete all three. |
-| Cosign signature | **Cannot be removed.** Keyless signing records the image digest and this workflow's identity in Sigstore's public transparency log, which is append-only. It reveals the repository path and that a release ran — nothing confidential, but it is permanent, and it is the only part of a rehearsal that is. |
+| Cosign transparency log entry | **Cannot be removed.** Keyless signing records the image digest and this workflow's identity in Sigstore's public transparency log, which is append-only. It reveals the repository path and that a release ran — nothing confidential, but it is permanent, and it is the only part of a rehearsal that is. The signature stored in `ghcr.io` is a separate copy, deleted with the image tags above. |
 
 ### Re-running a failed release
 
@@ -267,7 +301,7 @@ Not every step is idempotent, so check what already succeeded before re-running:
 | Step | On a second run |
 | --- | --- |
 | GitHub release | Safe. Assets are replaced with `--clobber`, and existing notes are left alone in case they were edited by hand. |
-| Image push and signature | Safe in itself: the same tags are overwritten, and an extra signature is harmless. It runs only once the Central upload has succeeded, though, so a re-run aimed at the image still needs the previous deployment dropped. |
+| Image push and signature | Safe in itself: the same tags are overwritten, and an extra signature is harmless. The rebuild never reproduces the previous digest (the Dockerfile upgrades packages and provenance records build times), so the superseded image is left untagged for [ghcr-cleanup.yml](.github/workflows/ghcr-cleanup.yml) to collect; only its `sha256-<digest>` stays tagged, and is deleted by hand. It runs only once the Central upload has succeeded, though, so a re-run aimed at the image still needs the previous deployment dropped. |
 | Maven Central | **Not automatic.** Drop the previous deployment first, as in step 5; the plugin drops one by itself only when the build that uploaded it failed, which a green release is not. Nothing in the workflow enforces this: the build ends at the upload without waiting for the Portal's verdict, so a duplicate can surface as a rejected deployment while the run stays green and the image and the GitHub release go out. If the version was already released, it can never be replaced — ship the fix as the next patch instead. |
 
 ## Repository settings

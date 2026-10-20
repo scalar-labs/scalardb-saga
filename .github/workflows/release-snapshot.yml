@@ -19,15 +19,68 @@ permissions:
 # until the next run succeeds. Let the in-flight publish finish instead. Queued runs still collapse to
 # the newest commit, since GitHub keeps only the most recent pending run per group.
 #
-# The group is keyed by branch rather than shared, because each branch publishes a different version.
-# A single shared group would let a push to one branch evict another branch's still-pending
-# publication, and that snapshot would then be missing until the next commit on that branch.
+# The group is keyed by branch rather than shared, because each branch publishes a different version:
+# the version job below refuses a version from another line. A single shared group would let a push
+# to one branch evict another branch's still-pending publication, and that snapshot would then be
+# missing until the next commit on that branch.
 concurrency:
   group: snapshot-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  # Decides whether this commit publishes, and under which version. Two cases skip rather than fail.
+  #
+  # A release branch carries a released version between the commit that sets it and the next
+  # development bump. Publishing that as a snapshot would be confusing at best; for the image it would
+  # be worse, because the tag is the release's own and the release workflow owns it.
+  #
+  # A scratch branch such as the rehearsal's `0.0` carries main's version for good. Publishing from
+  # there would overwrite main's snapshot, and since the two branches run in different concurrency
+  # groups, an older commit could land last. So a version branch publishes only a version on its own
+  # line: `1.0` publishes `1.0.*`, and `1` publishes `1.*`. main publishes whatever it carries.
+  #
+  # That check cannot separate a branch from its parent while both carry the same version, `1` and
+  # `1.2` both at `1.2.0-SNAPSHOT`. RELEASING.md avoids that state instead: the parent is bumped
+  # before the branch is cut from the commit just before the bump.
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.snapshot.outputs.version }}
+      publish: ${{ steps.snapshot.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
+
+      - name: Check that the version is a snapshot on this branch's line
+        id: snapshot
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version=//p' gradle.properties)
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          skip() {
+            echo "::notice::$1; nothing to publish"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          case "${version}" in
+            *-SNAPSHOT) ;;
+            *) skip "version ${version} is not a snapshot" ;;
+          esac
+          if [ "${BRANCH}" != main ]; then
+            case "${version}" in
+              "${BRANCH}".*) ;;
+              *) skip "version ${version} is not on the ${BRANCH} line" ;;
+            esac
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+
   publish:
+    needs: version
+    if: needs.version.outputs.publish == 'true'
     runs-on: ubuntu-latest
     # Because the concurrency group above never cancels, a hung upload would hold it for GitHub's
     # default six hours and every snapshot behind it would wait that long. Bound the job instead.
@@ -44,27 +97,41 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
 
-      # Between the commit that sets the release version and the next development bump, a release
-      # branch carries a released version rather than a snapshot. Publishing that to the snapshot
-      # repository would be a no-op at best and confusing at worst, so skip rather than fail.
-      - name: Check that the version is a snapshot
-        id: snapshot
-        run: |
-          set -euo pipefail
-          version=$(sed -n 's/^version=//p' gradle.properties)
-          case "${version}" in
-            *-SNAPSHOT) echo "publish=true" >> "$GITHUB_OUTPUT" ;;
-            *)
-              echo "::notice::version ${version} is not a snapshot; nothing to publish"
-              echo "publish=false" >> "$GITHUB_OUTPUT"
-              ;;
-          esac
-
       - name: Publish to the Maven Central snapshot repository
-        if: steps.snapshot.outputs.publish == 'true'
         env:
           ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
           ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
           ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.MAVEN_CENTRAL_GPG_SECRET_KEY }}
           ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.MAVEN_CENTRAL_GPG_PASSPHRASE }}
         run: ./gradlew publishToMavenCentral --no-configuration-cache
+
+  # The server image under the same version as the jars, `<version>-SNAPSHOT`, which moves with every
+  # commit on its line. Runs alongside the Maven publication rather than after it: unlike a release,
+  # nothing here is immutable, so there is no failure worth ordering one before the other for.
+  #
+  # Both architectures, like a release: the getting-started sample runs this image, and much of the
+  # time on Apple silicon. No SBOM, provenance or signature, though. A moving tag cannot be verified
+  # against a release identity (RELEASING.md, "Verifying a published image"), and each attestation is
+  # one more manifest every push orphans for ghcr-cleanup.yml to collect.
+  publish-image:
+    needs: version
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    # The arm64 leg runs under QEMU emulation, the slowest step in the stack; release.yml gives its
+    # image job the same bound.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
+
+      - name: Build and push
+        uses: ./.github/actions/push-server-image
+        with:
+          tags: ghcr.io/scalar-labs/scalardb-saga-server:${{ needs.version.outputs.version }}
+          version: ${{ needs.version.outputs.version }}
+          attest: "false"
+          registry-token: ${{ secrets.GITHUB_TOKEN }}
