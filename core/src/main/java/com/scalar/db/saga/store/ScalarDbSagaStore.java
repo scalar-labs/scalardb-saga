@@ -1763,7 +1763,7 @@ public final class ScalarDbSagaStore implements SagaStore {
       StepEvent event =
           switch (eventType) {
             case STEP_PENDING -> StepEvent.pending(stepIndex, name);
-            case STEP_REISSUING -> StepEvent.reissuing(stepIndex, name);
+            case STEP_REISSUING -> StepEvent.reissuing(stepIndex, name, payload);
             case STEP_COMPLETED -> StepEvent.completed(stepIndex, name, payload);
             case STEP_FAILED -> StepEvent.failed(stepIndex, name, payload);
             case STEP_COMPENSATED -> StepEvent.compensated(stepIndex, name);

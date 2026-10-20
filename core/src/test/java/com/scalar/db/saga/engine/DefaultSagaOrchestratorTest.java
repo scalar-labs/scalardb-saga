@@ -1924,10 +1924,49 @@ class DefaultSagaOrchestratorTest {
       // Act
       SagaStateSnapshot result = orchestrator.failStepAsync("saga-1", "s1", "busy", true);
 
-      // Assert
+      // Assert — the reason rides on the re-issue, since no failure event will record it.
       assertThat(result).isSameAs(running);
+      ArgumentCaptor<StepEvent> reissue = ArgumentCaptor.forClass(StepEvent.class);
+      verify(store).redriveParkedStep(eq(waiting), eq(events.size()), reissue.capture());
+      assertThat(EventPayloadSerializer.errorMessage(reissue.getValue().getPayload()))
+          .isEqualTo("participant reported failure: busy");
       verify(engine, timeout(2_000)).resumeFrom(def, context, 0);
       verify(store, never()).failParkedStep(any(), anyInt(), any(), any());
+    }
+
+    @Test
+    void failStepAsync_retryableOnATccConfirmation_reissuesTheConfirmation() {
+      // Arrange — the confirmation of a one-step TCC saga sits at plan index 1, past the
+      // definition's only step; three parks are within the confirmation policy's ten attempts.
+      SagaDefinition def =
+          SagaDefinition.newBuilder("test-saga")
+              .tcc()
+              .step("s1", "com.example.Step1")
+              .add()
+              .build();
+      StepEvent park = StepEvent.pending(1, "s1").withTimestamp(NOW.minusSeconds(60));
+      List<SagaEvent> events =
+          List.of(
+              StatusEvent.started(null),
+              StepEvent.completed(0, "s1", null),
+              park,
+              StepEvent.reissuing(1, "s1"),
+              park,
+              StepEvent.reissuing(1, "s1"),
+              park);
+      SagaStateSnapshot running = snapshot("saga-1", SagaStatus.RUNNING);
+      ExecutionContext context = new ExecutionContext("saga-1", Map.of(), running);
+      when(store.getEvents("saga-1")).thenReturn(events);
+      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
+      when(store.redriveParkedStep(eq(waiting), eq(events.size()), any())).thenReturn(running);
+      when(engine.replayEvents(eq(running), any())).thenReturn(context);
+
+      // Act
+      SagaStateSnapshot result = orchestrator.failStepAsync("saga-1", "s1", "busy", true);
+
+      // Assert
+      assertThat(result).isSameAs(running);
+      verify(engine, timeout(2_000)).resumeFrom(def, context, 1);
     }
 
     @Test

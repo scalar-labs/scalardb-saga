@@ -55,17 +55,31 @@ public final class StepEvent implements SagaEvent {
 
   /**
    * Creates a {@link EventType#STEP_REISSUING} event, marking that the recovery sweep un-parked a
-   * timed-out async step to re-issue its call ({@code WAITING → RUNNING}). Like {@link #pending},
-   * it carries no payload and is folded to a no-op on replay; the subsequent re-park appends a
-   * fresh {@link EventType#STEP_PENDING}. The count of {@code STEP_PENDING} events bounds the
-   * re-drive attempts.
+   * timed-out async step to re-issue its call ({@code WAITING → RUNNING}). It carries no payload
+   * and is folded to a no-op on replay; the subsequent re-park appends a fresh {@link
+   * EventType#STEP_PENDING}. The count of {@code STEP_PENDING} events bounds the re-drive attempts.
    *
    * @param stepIndex the step's zero-based index in the definition, never negative
    * @param stepName the step's name
    * @return the event
    */
   public static StepEvent reissuing(int stepIndex, String stepName) {
-    return new StepEvent(EventType.STEP_REISSUING, stepIndex, stepName, null, null);
+    return reissuing(stepIndex, stepName, null);
+  }
+
+  /**
+   * Creates a {@link EventType#STEP_REISSUING} event that records why the step is re-issued, as
+   * when its participant reported a retryable failure. Still folded to a no-op on replay: the
+   * payload is a serialized error for the timeline, in the form a {@link EventType#STEP_FAILED}
+   * payload takes, and never a step output.
+   *
+   * @param stepIndex the step's zero-based index in the definition, never negative
+   * @param stepName the step's name
+   * @param payload the serialized error that caused the re-issue, or {@code null}
+   * @return the event
+   */
+  public static StepEvent reissuing(int stepIndex, String stepName, @Nullable String payload) {
+    return new StepEvent(EventType.STEP_REISSUING, stepIndex, stepName, payload, null);
   }
 
   /**

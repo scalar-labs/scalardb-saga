@@ -900,7 +900,8 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
    *
    * <p>Like {@link #completeStepAsync}, this returns once the transition is durable, and runs the
    * re-issued step or the compensation on the async executor. The participant's message, if any, is
-   * recorded on the step's failure event, cut to {@value #MAX_REPORTED_ERROR_CHARS} characters.
+   * recorded on the event for what happened next, the re-issue or the step's failure, flattened to
+   * one line and cut to {@value #MAX_REPORTED_ERROR_CHARS} characters.
    *
    * @param sagaId the parked saga
    * @param stepName the step the participant reports on (must be the currently parked step)

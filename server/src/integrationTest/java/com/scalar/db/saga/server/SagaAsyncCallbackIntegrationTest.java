@@ -216,7 +216,8 @@ class SagaAsyncCallbackIntegrationTest extends ServerIntegrationTestSupport {
         http.send(
             HttpRequest.newBuilder(URI.create(failureUrl))
                 .header("X-Saga-Retryable", "true")
-                .POST(BodyPublishers.noBody())
+                .header("Content-Type", "application/json")
+                .POST(BodyPublishers.ofString("{\"error\":\"approver busy\"}"))
                 .build(),
             BodyHandlers.ofString());
     assertThat(failure.statusCode()).isEqualTo(200);
@@ -238,6 +239,8 @@ class SagaAsyncCallbackIntegrationTest extends ServerIntegrationTestSupport {
     assertThat(callback.statusCode()).isEqualTo(200);
     assertThat(pollUntilTerminal(sagaId)).isEqualTo("COMPLETED");
     assertThat(undoCalls.get()).isZero();
+    // The reported reason survives the re-issue, though no step failure was recorded.
+    assertThat(get("/sagas/" + sagaId + "/detail").body()).contains("approver busy");
   }
 
   private HttpResponse<String> postAbsolute(String url, String body) throws Exception {

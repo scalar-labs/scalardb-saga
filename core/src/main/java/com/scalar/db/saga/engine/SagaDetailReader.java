@@ -119,7 +119,8 @@ final class SagaDetailReader {
 
   private static @Nullable String stepDetail(StepEvent step) {
     return switch (step.getEventType()) {
-      case STEP_FAILED, STEP_COMPENSATION_FAILED ->
+      // A re-issue records an error only when a participant reported the failure behind it.
+      case STEP_FAILED, STEP_COMPENSATION_FAILED, STEP_REISSUING ->
           EventPayloadSerializer.errorMessage(step.getPayload());
       default -> null; // STEP_COMPLETED etc. carry the step's raw output — never exposed here
     };

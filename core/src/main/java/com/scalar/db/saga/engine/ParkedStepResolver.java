@@ -74,8 +74,8 @@ final class ParkedStepResolver {
    * @param stepName the parked step's name
    * @param def the saga's definition
    * @param mayRedrive whether the step may be re-issued at all, within its bounds
-   * @param cause what went wrong, recorded on the failure event when the step is given up, or
-   *     {@code null} to record only which bound was spent
+   * @param cause what went wrong, recorded on the re-issue event or, when the step is given up, on
+   *     the failure event; {@code null} to record only which bound was spent
    * @return the committed transition and the drive that continues from it
    * @throws com.scalar.db.saga.exception.SagaConcurrentModificationException if the saga left
    *     {@code WAITING} since it was read, such as when its callback arrived first
@@ -93,7 +93,15 @@ final class ParkedStepResolver {
       RedriveDecision decision = redriveDecision(events, parkedIndex, def);
       if (decision == RedriveDecision.REDRIVE) {
         // Un-park (WAITING -> RUNNING) and re-issue the step, which re-parks with a fresh deadline.
-        StepEvent reissueEvent = StepEvent.reissuing(parkedIndex, stepName);
+        // A reported cause is kept on the re-issue, since no failure event will record it.
+        StepEvent reissueEvent =
+            StepEvent.reissuing(
+                parkedIndex,
+                stepName,
+                cause == null
+                    ? null
+                    : EventPayloadSerializer.serializeError(
+                        new StepExecutionException(cause, false), false));
         SagaStateSnapshot running = store.redriveParkedStep(saga, events.size(), reissueEvent);
         ExecutionContext context = engine.replayEvents(running, appended(events, reissueEvent));
         return new Resolution(
@@ -194,9 +202,15 @@ final class ParkedStepResolver {
 
   /**
    * The parked step's effective retry max-attempts: the step's own policy, else the saga default,
-   * else the engine default (mirrors {@code SagaEngine.resolveRetryPolicy}).
+   * else the engine default (mirrors {@code SagaEngine.resolveRetryPolicy}). A TCC confirmation has
+   * no definition step of its own: the plan puts the confirmations after all the reservations, at
+   * {@code steps.size() + i}, under the fixed confirmation policy (mirrors {@code
+   * SagaEngine.expandTccPlan}).
    */
   private static int maxRedriveAttempts(SagaDefinition def, int stepIndex) {
+    if (stepIndex >= def.getSteps().size()) {
+      return RetryPolicy.confirmDefault().getMaxAttempts();
+    }
     StepDefinition stepDef = def.getSteps().get(stepIndex);
     RetryPolicy policy = stepDef.getRetryPolicy();
     if (policy == null) {
