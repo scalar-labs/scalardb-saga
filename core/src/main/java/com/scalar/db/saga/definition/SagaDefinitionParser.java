@@ -141,7 +141,14 @@ public final class SagaDefinitionParser {
       throw SagaDefinitionException.definitionInvalid(name, "must have a 'steps' array");
     }
     checkUnknownFields(root, name);
-    return mode == SagaMode.TCC ? buildTcc(name, root) : buildSaga(name, root);
+    try {
+      return mode == SagaMode.TCC ? buildTcc(name, root) : buildSaga(name, root);
+    } catch (IllegalArgumentException | IllegalStateException e) {
+      // A builder rejected a value read from the file, such as a retry policy's out-of-range
+      // maxAttempts or a jsonBody number too large for a double. That is a definition error too.
+      throw SagaDefinitionException.definitionInvalid(
+          name, e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
+    }
   }
 
   private static SagaDefinition buildSaga(String name, JsonNode root) {

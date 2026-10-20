@@ -702,6 +702,25 @@ class SagaDefinitionParserTest {
     }
 
     @Test
+    void parseJson_retryPolicyOutOfRange_throwsSagaDefinitionException() {
+      // Arrange
+      String json =
+          """
+          {
+            "name": "bad",
+            "steps": [
+              { "name": "s1", "stepClass": "com.example.Step1",
+                "retryPolicy": { "maxAttempts": 0 } }
+            ]
+          }
+          """;
+
+      // Act & Assert
+      assertThatThrownBy(() -> SagaDefinitionParser.parseJson(json))
+          .isInstanceOf(SagaDefinitionException.class);
+    }
+
+    @Test
     void parseJson_unknownDefaultRetryPolicyField_throwsException() {
       // Arrange
       String json =

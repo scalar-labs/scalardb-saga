@@ -67,6 +67,21 @@ class SagaDefinitionParserDeclarativeTest {
   }
 
   @Test
+  void parseJson_jsonBodyNumberOverflowingDouble_throwsSagaDefinitionException() {
+    // Arrange
+    String json =
+        """
+        {"name": "order", "mode": "SAGA", "steps": [
+          {"name": "reserve", "service": "inventory",
+           "execution": {"path": "/reserve", "jsonBody": {"price": 1e400}},
+           "compensation": {"path": "/release"}}]}""";
+
+    // Act & Assert
+    assertThatThrownBy(() -> SagaDefinitionParser.parseJson(json))
+        .isInstanceOf(SagaDefinitionException.class);
+  }
+
+  @Test
   void parseJson_jsonBodyNotAnObject_throwsException() {
     // Arrange
     String json =
