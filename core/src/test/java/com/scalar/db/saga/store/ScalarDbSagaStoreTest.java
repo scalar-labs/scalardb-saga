@@ -2211,16 +2211,7 @@ class ScalarDbSagaStoreTest {
             schema,
             ScalarDbSagaStoreConfig.builder().recoveryScanLimit(2).build(),
             () -> OWN_APPEND_ID);
-    when(tx.getScanner(any(Scan.class)))
-        .thenAnswer(
-            invocation -> {
-              Scan scan = invocation.getArgument(0);
-              int slice = scan.getStartClusteringKey().orElseThrow().getIntValue(0);
-              return scannerOver(
-                  slice == SagaStatus.RUNNING.getStatusCode()
-                      ? staleRows("a", "b", "c")
-                      : List.of());
-            });
+    stubRunningSlice(staleRows("a", "b", "c"));
 
     // Act — three passes over bucket 0
     List<String> first = ids(limited.findRecoverable(Instant.now(), null));
@@ -2231,6 +2222,73 @@ class ScalarDbSagaStoreTest {
     assertThat(first).containsExactly("a", "b");
     assertThat(second).containsExactly("c");
     assertThat(third).containsExactly("a", "b");
+  }
+
+  @Test
+  void findRecoverable_handOffBehindTheResumePoint_returnsItOnTheNextPass() throws Exception {
+    // Arrange — the first pass fills the slice, then a saga is handed off at EPOCH
+    ScalarDbSagaStore limited =
+        new ScalarDbSagaStore(
+            txManager,
+            objectMapper,
+            schema,
+            ScalarDbSagaStoreConfig.builder().recoveryScanLimit(2).build(),
+            () -> OWN_APPEND_ID);
+    List<Result> rows = new ArrayList<>(staleRows("a", "b", "c"));
+    stubRunningSlice(rows);
+    limited.findRecoverable(Instant.now(), null);
+    rows.addAll(0, rowsAt(0L, "h"));
+
+    // Act
+    List<String> next = ids(limited.findRecoverable(Instant.now(), null));
+
+    // Assert — the hand-off comes first, and the resumed range still continues after b
+    assertThat(next).containsExactly("h", "c");
+  }
+
+  @Test
+  void findRecoverable_handOffsFillTheSlice_keepsTheResumePoint() throws Exception {
+    // Arrange — the first pass fills the slice, then two hand-offs fill the next one
+    ScalarDbSagaStore limited =
+        new ScalarDbSagaStore(
+            txManager,
+            objectMapper,
+            schema,
+            ScalarDbSagaStoreConfig.builder().recoveryScanLimit(2).build(),
+            () -> OWN_APPEND_ID);
+    List<Result> rows = new ArrayList<>(staleRows("a", "b", "c"));
+    stubRunningSlice(rows);
+    limited.findRecoverable(Instant.now(), null);
+    List<Result> handOffs = rowsAt(0L, "h1", "h2");
+    rows.addAll(0, handOffs);
+
+    // Act — the hand-offs are claimed off EPOCH between the passes
+    List<String> second = ids(limited.findRecoverable(Instant.now(), null));
+    rows.removeAll(handOffs);
+    List<String> third = ids(limited.findRecoverable(Instant.now(), null));
+
+    // Assert
+    assertThat(second).containsExactly("h1", "h2");
+    assertThat(third).containsExactly("c");
+  }
+
+  /** Answers each sweep scan with the RUNNING rows inside its {@code sweep_at} range. */
+  private void stubRunningSlice(List<Result> rows) throws CrudException {
+    when(tx.getScanner(any(Scan.class)))
+        .thenAnswer(
+            invocation -> {
+              Scan scan = invocation.getArgument(0);
+              Key start = scan.getStartClusteringKey().orElseThrow();
+              long from = start.getBigIntValue(1);
+              long to = scan.getEndClusteringKey().orElseThrow().getBigIntValue(1);
+              if (start.getIntValue(0) != SagaStatus.RUNNING.getStatusCode()) {
+                return scannerOver(List.of());
+              }
+              return scannerOver(
+                  rows.stream()
+                      .filter(r -> r.getBigInt("sweep_at") >= from && r.getBigInt("sweep_at") <= to)
+                      .toList());
+            });
   }
 
   /**
@@ -3899,10 +3957,15 @@ class ScalarDbSagaStoreTest {
 
   /** Sweep rows in one slice, all at one stale timestamp, in the given order. */
   private List<Result> staleRows(String... sagaIds) {
+    return rowsAt(1_000L, sagaIds);
+  }
+
+  /** RUNNING sweep rows in one slice, all at {@code sweepAt}, in the given order. */
+  private List<Result> rowsAt(long sweepAt, String... sagaIds) {
     List<Result> rows = new ArrayList<>();
     for (String id : sagaIds) {
       Result r = mockStateResult(id, SagaStatus.RUNNING);
-      lenient().when(r.getBigInt("sweep_at")).thenReturn(1_000L);
+      lenient().when(r.getBigInt("sweep_at")).thenReturn(sweepAt);
       rows.add(r);
     }
     return rows;

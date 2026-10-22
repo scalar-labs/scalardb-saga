@@ -398,7 +398,9 @@ public interface SagaStore extends AutoCloseable {
    *
    * <p>A store may cap how many sagas one call returns from a bucket. When it does, the next sweep
    * of that bucket continues after the last saga returned, and starts over once it reaches the end,
-   * so sagas a claim leaves in place cannot hide the ones behind them.
+   * so sagas a claim leaves in place cannot hide the ones behind them. Sagas handed to recovery at
+   * {@link Instant#EPOCH} are read ahead of that position on every sweep, so a hand-off does not
+   * wait for the scan to wrap.
    *
    * @param threshold the staleness cutoff — only sagas updated before this are returned
    * @param cursor the cursor from a previous call, {@link #initialSweepCursor}, or {@code null} to

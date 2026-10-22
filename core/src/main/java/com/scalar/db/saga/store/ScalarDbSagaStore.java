@@ -1062,30 +1062,49 @@ public final class ScalarDbSagaStore implements SagaStore {
                 Instant start =
                     resume == null ? Instant.EPOCH : Instant.ofEpochMilli(resume.sweepAt());
                 List<SagaStateSnapshot> found = new ArrayList<>();
+                // A hand-off is stamped EPOCH to be taken on the next pass, so a resumed scan reads
+                // those rows first rather than waiting for the cursor to wrap. A claim moves a
+                // hand-off off EPOCH, so they are few.
+                if (resume != null && resume.sweepAt() > 0) {
+                  try (TransactionCrudOperable.Scanner scanner =
+                      tx.getScanner(
+                          buildSweepRangeScan(bucket, slice, Instant.EPOCH, true, Instant.EPOCH))) {
+                    for (Optional<Result> next = scanner.one();
+                        next.isPresent() && found.size() < scanLimit;
+                        next = scanner.one()) {
+                      found.add(toSweepSnapshot(next.get()));
+                    }
+                  }
+                }
                 // Rows sharing the resume timestamp are skipped by position, not compared by id:
                 // the store orders saga ids by its own collation, which need not be Java's.
                 int toSkip = resume == null ? 0 : resume.rowsReturnedAt();
                 long lastSweepAt = Long.MIN_VALUE;
                 int returnedAtLast = 0;
-                try (TransactionCrudOperable.Scanner scanner =
-                    tx.getScanner(buildSweepRangeScan(bucket, slice, start, true, threshold))) {
-                  for (Optional<Result> next = scanner.one();
-                      next.isPresent() && found.size() < scanLimit;
-                      next = scanner.one()) {
-                    Result r = next.get();
-                    long sweepAt = r.getBigInt("sweep_at");
-                    if (resume != null && sweepAt == resume.sweepAt() && toSkip > 0) {
-                      toSkip--; // returned by an earlier pass
-                      continue;
+                if (found.size() < scanLimit) {
+                  try (TransactionCrudOperable.Scanner scanner =
+                      tx.getScanner(buildSweepRangeScan(bucket, slice, start, true, threshold))) {
+                    for (Optional<Result> next = scanner.one();
+                        next.isPresent() && found.size() < scanLimit;
+                        next = scanner.one()) {
+                      Result r = next.get();
+                      long sweepAt = r.getBigInt("sweep_at");
+                      if (resume != null && sweepAt == resume.sweepAt() && toSkip > 0) {
+                        toSkip--; // returned by an earlier pass
+                        continue;
+                      }
+                      found.add(toSweepSnapshot(r));
+                      returnedAtLast = sweepAt == lastSweepAt ? returnedAtLast + 1 : 1;
+                      lastSweepAt = sweepAt;
                     }
-                    found.add(toSweepSnapshot(r));
-                    returnedAtLast = sweepAt == lastSweepAt ? returnedAtLast + 1 : 1;
-                    lastSweepAt = sweepAt;
                   }
                 }
                 // A full slice continues after its last row next pass; a short one starts over.
+                // Hand-offs alone filling it leave the resume point where it was.
                 @Nullable SweepKey resumeAfter = null;
-                if (found.size() >= scanLimit) {
+                if (found.size() >= scanLimit && lastSweepAt == Long.MIN_VALUE) {
+                  resumeAfter = resume;
+                } else if (found.size() >= scanLimit) {
                   int returnedAt =
                       resume != null && resume.sweepAt() == lastSweepAt
                           ? resume.rowsReturnedAt() + returnedAtLast
