@@ -1,6 +1,7 @@
 package com.scalar.db.saga.transport;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.net.ConnectException;
@@ -488,6 +489,9 @@ final class HttpExchange {
     ObjectMapper objectMapper = new ObjectMapper();
     // Defense in depth against polymorphic-deserialization gadgets (off by default in Jackson 2.x).
     objectMapper.deactivateDefaultTyping();
+    // Response decimals read exactly, as the saga context and the stored saga state keep them, so a
+    // captured value has the same type before and after the saga is reloaded.
+    objectMapper.enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
     return objectMapper;
   }
 }

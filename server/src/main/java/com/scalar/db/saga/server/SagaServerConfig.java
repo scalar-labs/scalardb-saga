@@ -145,14 +145,11 @@ import org.jspecify.annotations.Nullable;
  * <ul>
  *   <li>{@code sync.max_wait_millis} — absolute ceiling (ms) on a synchronous start's server-side
  *       wait, so it can never block indefinitely (default {@value #DEFAULT_SYNC_MAX_WAIT_MILLIS}).
- *       Applies to both transports.
- *   <li>{@code sync.timeout_millis} — optional tightening of that ceiling; {@code 0} (default)
- *       means no tightening, <em>not</em> an unbounded wait. A gRPC client's call deadline tightens
- *       it further.
+ *       Applies to both transports; a gRPC client's call deadline tightens it further.
  * </ul>
  *
- * <p>Read the pair through {@link #syncWaitBoundMillis(long)} rather than separately; a transport
- * should be handed the resolved bound, not the two keys behind it.
+ * <p>Read it through {@link #syncWaitBoundMillis(long)}, which also applies a caller's own cap; a
+ * transport should be handed the resolved bound.
  *
  * <h2>Shutdown ({@code shutdown.*})</h2>
  *
@@ -203,12 +200,15 @@ import org.jspecify.annotations.Nullable;
  *       amount: this value is your crash-recovery MTTR.
  *       <p>Recovery is at-least-once across replicas. A step whose attempt sequence outlives this
  *       threshold produces no events while it runs, so another replica can begin recovering the
- *       saga while the first is still executing it; the loser is fenced on its next state write,
- *       but the participant call itself has already been made. Size the threshold above the step
- *       envelope, and make participants tolerate a duplicate invocation
+ *       saga while the first is still executing it; the loser is fenced at its next event, but the
+ *       participant call itself has already been made. Size the threshold above the step envelope,
+ *       and make participants tolerate a duplicate invocation
  *   <li>{@code recovery.interval_seconds} — how often the scan runs
- *   <li>{@code recovery.compensation_grace_period_seconds} — how long a saga may stay stuck with
- *       failing compensation before it is escalated for manual intervention
+ *   <li>{@code recovery.escalation_grace_period_seconds} — how long recovery keeps retrying a stuck
+ *       saga before it gives up. A step whose retries keep failing, or a compensation that keeps
+ *       failing, is escalated for manual intervention. An asynchronous step that keeps timing out
+ *       is failed: at or before the pivot the saga compensates, and after it the saga is escalated.
+ *       The period starts at the first step failure, or at an asynchronous step's first park
  *   <li>{@code recovery.max_recoveries_per_sweep} — a pass makes two sweeps, one for abandoned
  *       sagas and one for parked sagas past their deadline, and this bounds each separately, so one
  *       pass can do up to twice this number (the pass summary reports them as {@code stale[...]}
@@ -362,13 +362,14 @@ import org.jspecify.annotations.Nullable;
  * is never a deliberate way to disable a control, since omitting the key already says that, so an
  * empty value there is far more likely a template that failed to resolve than an intent to run
  * without the protection. That covers {@code callback.max_age_seconds}, {@code
- * max_start_requests_per_minute}, {@code max_concurrent_saga_starts}, and {@code tls.enabled},
- * whose defaults disable the check outright, plus, inside a service file, the settings whose blank
- * fallback would be open ({@code allowed_hosts} would admit any host; a {@code header.<HeaderName>}
- * would send an empty header, and an empty {@code Authorization} is an unauthenticated call) or
- * meaningless ({@code base_url} has no default to fall back to). A service file's {@code
- * max_body_bytes} sits on the other side of that line deliberately: unset leaves the engine's own 1
- * MiB cap in place, so the body stays bounded either way.
+ * max_start_requests_per_minute}, {@code max_concurrent_saga_starts}, {@code
+ * egress.allowed_hosts_ceiling}, and {@code tls.enabled}, whose defaults disable the check
+ * outright, plus, inside a service file, the settings whose blank fallback would be open ({@code
+ * allowed_hosts} would admit any host; a {@code header.<HeaderName>} would send an empty header,
+ * and an empty {@code Authorization} is an unauthenticated call) or meaningless ({@code base_url}
+ * has no default to fall back to). A service file's {@code max_body_bytes} sits on the other side
+ * of that line deliberately: unset leaves the engine's own 1 MiB cap in place, so the body stays
+ * bounded either way.
  *
  * <p>All other properties configure the saga engine's persistence (e.g. ScalarDB connection
  * settings and the {@code scalar.db.saga.store.*} keys documented on {@code
@@ -384,7 +385,7 @@ public final class SagaServerConfig {
   static final String PREFIX = "scalar.db.saga.";
   static final String SERVER_PREFIX = PREFIX + "server.";
 
-  // Mirrors the store's saga-ID discipline: the owner id lands in state rows and log lines, so it
+  // Mirrors the store's saga-ID discipline: the owner id lands in claim events and log lines, so it
   // gets the same character set and length bound.
   private static final java.util.regex.Pattern OWNER_ID_PATTERN =
       java.util.regex.Pattern.compile("[a-zA-Z0-9._-]{1,128}");
@@ -422,7 +423,6 @@ public final class SagaServerConfig {
   static final String TLS_PRIVATE_KEY_PATH_KEY = TLS_PREFIX + "private_key_path";
 
   static final String SYNC_PREFIX = SERVER_PREFIX + "sync.";
-  static final String SYNC_TIMEOUT_MILLIS_KEY = SYNC_PREFIX + "timeout_millis";
   static final String SYNC_MAX_WAIT_MILLIS_KEY = SYNC_PREFIX + "max_wait_millis";
 
   static final String SHUTDOWN_PREFIX = SERVER_PREFIX + "shutdown.";
@@ -436,8 +436,8 @@ public final class SagaServerConfig {
   static final String RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY =
       RECOVERY_PREFIX + "staleness_threshold_millis";
   static final String RECOVERY_INTERVAL_SECONDS_KEY = RECOVERY_PREFIX + "interval_seconds";
-  static final String RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY =
-      RECOVERY_PREFIX + "compensation_grace_period_seconds";
+  static final String RECOVERY_ESCALATION_GRACE_PERIOD_SECONDS_KEY =
+      RECOVERY_PREFIX + "escalation_grace_period_seconds";
   static final String RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY =
       RECOVERY_PREFIX + "max_recoveries_per_sweep";
   static final String RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY =
@@ -513,9 +513,6 @@ public final class SagaServerConfig {
   static final boolean DEFAULT_GRPC_ENABLED = true;
   static final int DEFAULT_GRPC_MAX_INBOUND_METADATA_BYTES = 8 * 1024;
   static final int DEFAULT_MAX_EVENT_PAYLOAD_BYTES = 1_048_576; // 1 MiB
-  // 0 = no extra tightening, NOT an unbounded wait: sync.max_wait_millis is the ceiling and always
-  // applies, on both transports.
-  static final long DEFAULT_SYNC_TIMEOUT_MILLIS = 0L;
   static final long DEFAULT_SYNC_MAX_WAIT_MILLIS =
       60_000L; // ceiling on a synchronous server-side wait
   static final ShutdownMode DEFAULT_SHUTDOWN_MODE = DefaultSagaOrchestrator.DEFAULT_SHUTDOWN_MODE;
@@ -709,7 +706,6 @@ public final class SagaServerConfig {
           TLS_ENABLED_KEY,
           TLS_CERT_CHAIN_PATH_KEY,
           TLS_PRIVATE_KEY_PATH_KEY,
-          SYNC_TIMEOUT_MILLIS_KEY,
           SYNC_MAX_WAIT_MILLIS_KEY,
           SHUTDOWN_MODE_KEY,
           SHUTDOWN_TIMEOUT_MILLIS_KEY,
@@ -717,7 +713,7 @@ public final class SagaServerConfig {
           MAX_CONCURRENT_SAGA_STARTS_KEY,
           RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY,
           RECOVERY_INTERVAL_SECONDS_KEY,
-          RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY,
+          RECOVERY_ESCALATION_GRACE_PERIOD_SECONDS_KEY,
           RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY,
           RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY,
           RETENTION_PERIOD_SECONDS_KEY,
@@ -791,7 +787,6 @@ public final class SagaServerConfig {
   private final @Nullable Path egressCaCertPath;
   // Whether egress.ca_cert_path was left unset: the path above is then the mounted file, if any.
   private final boolean egressCaCertPathDefaulted;
-  private final long syncTimeoutMillis;
   private final long syncMaxWaitMillis;
   private final ShutdownMode shutdownMode;
   private final long shutdownTimeoutMillis;
@@ -897,12 +892,6 @@ public final class SagaServerConfig {
         egressCaCertPath != null
             ? egressCaCertPath
             : existingFile(confDir.resolve(TLS_EGRESS_DIR).resolve(EGRESS_CA_FILE));
-    this.syncTimeoutMillis =
-        parseBoundedLong(
-            resolved.getProperty(SYNC_TIMEOUT_MILLIS_KEY),
-            SYNC_TIMEOUT_MILLIS_KEY,
-            DEFAULT_SYNC_TIMEOUT_MILLIS,
-            0L);
     this.syncMaxWaitMillis =
         parseBoundedLong(
             resolved.getProperty(SYNC_MAX_WAIT_MILLIS_KEY),
@@ -1375,9 +1364,9 @@ public final class SagaServerConfig {
             1L),
         Duration.ofSeconds(
             parseBoundedLong(
-                properties.getProperty(RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY),
-                RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY,
-                defaults.compensationGracePeriod().toSeconds(),
+                properties.getProperty(RECOVERY_ESCALATION_GRACE_PERIOD_SECONDS_KEY),
+                RECOVERY_ESCALATION_GRACE_PERIOD_SECONDS_KEY,
+                defaults.escalationGracePeriod().toSeconds(),
                 1L)),
         parseBoundedInt(
             properties.getProperty(RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY),
@@ -1471,7 +1460,8 @@ public final class SagaServerConfig {
    *
    * @param baseUrl the service base URL
    * @param allowedHosts the SSRF allowlist; empty allows any host
-   * @param maxBodyBytes the request/response body cap in bytes, or {@code 0} for the engine default
+   * @param maxBodyBytes the request/response body cap in bytes, or {@code 0} when the service file
+   *     leaves it unset and the engine default applies
    * @param headers headers sent on every request to this service — the channel for downstream
    *     authentication
    */
@@ -1530,8 +1520,8 @@ public final class SagaServerConfig {
 
   /**
    * Returns the maximum size of the HTTP (Jetty) request-handling thread pool (default {@value
-   * #DEFAULT_MAX_THREADS}). Caps concurrent request threads so a burst of slow requests cannot
-   * exhaust threads.
+   * #DEFAULT_MAX_THREADS}). Handlers run on virtual threads, so this bounds how many requests are
+   * dispatched at once, not how many are in flight; see the class description.
    *
    * @return the maximum number of request-handling threads
    */
@@ -1701,23 +1691,11 @@ public final class SagaServerConfig {
   }
 
   /**
-   * Returns the synchronous-start timeout in milliseconds, or {@code 0} when unset (the default).
-   * When positive it tightens {@link #syncMaxWaitMillis()}; when {@code 0} the ceiling alone
-   * applies. A synchronous start that has not reached a terminal state within the resulting bound
-   * returns {@code 202} and the saga keeps running on the engine's executor (the client polls
-   * {@code GET /sagas/{id}}).
-   *
-   * @return the timeout in milliseconds, or {@code 0} when unset
-   */
-  public long syncTimeoutMillis() {
-    return syncTimeoutMillis;
-  }
-
-  /**
    * Returns the absolute ceiling (ms) on a synchronous start's server-side wait, for both
-   * transports. {@link #syncTimeoutMillis()} and a gRPC client's call deadline can only tighten
-   * this bound, never exceed it, so a synchronous start can never block indefinitely. Defaults to
-   * {@value #DEFAULT_SYNC_MAX_WAIT_MILLIS} ms.
+   * transports. A caller's own cap and a gRPC client's call deadline can only tighten this bound,
+   * never exceed it, so a synchronous start can never block indefinitely. A synchronous start that
+   * has not reached a terminal state within it returns {@code 202}, or the in-flight snapshot over
+   * gRPC, and the saga keeps running. Defaults to {@value #DEFAULT_SYNC_MAX_WAIT_MILLIS} ms.
    *
    * <p>It also sets the cadence of the poll behind a bounded wait: the interval is a sixth of the
    * effective bound, floored at a second and capped at thirty. Raising the bound therefore does two
@@ -1768,25 +1746,19 @@ public final class SagaServerConfig {
 
   /**
    * Returns the bound (ms) a synchronous start may wait: the ceiling {@link #syncMaxWaitMillis()},
-   * tightened by {@code requestedCapMillis} and by {@link #syncTimeoutMillis()} when that is set.
-   * Pass {@link Long#MAX_VALUE} when the caller has no cap of its own.
+   * tightened by {@code requestedCapMillis}. Pass {@link Long#MAX_VALUE} when the caller has no cap
+   * of its own.
    *
-   * <p>Derived state of two configuration keys, so it lives here rather than in either transport. A
-   * transport that needs to tighten it further does so on top of this result, as the gRPC call
-   * deadline does.
-   *
-   * <p>Deliberately {@code public} though only {@link SagaServer} calls it. Restricting it would
-   * protect nothing while {@link #syncTimeoutMillis()} and {@link #syncMaxWaitMillis()} stay
-   * public: combining that pair by hand is the mistake this method exists to prevent, so hiding the
-   * safe method while leaving the raw one reachable is backwards. It also keeps the gRPC tests able
-   * to resolve a bound through a real config instead of restating the policy.
+   * <p>The one place the server-side policy is applied, so it lives here rather than in either
+   * transport. A transport that needs to tighten it further does so on top of this result, as the
+   * gRPC call deadline does. It is {@code public} so the gRPC tests can resolve a bound through a
+   * real config instead of restating the policy.
    *
    * @param requestedCapMillis a caller-supplied cap, or {@code Long.MAX_VALUE} for none
    * @return the wait bound in milliseconds
    */
   public long syncWaitBoundMillis(long requestedCapMillis) {
-    long bound = Math.min(syncMaxWaitMillis, requestedCapMillis);
-    return syncTimeoutMillis > 0L ? Math.min(bound, syncTimeoutMillis) : bound;
+    return Math.min(syncMaxWaitMillis, requestedCapMillis);
   }
 
   /**

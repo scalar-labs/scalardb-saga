@@ -127,7 +127,9 @@ final class SagaDetailReader {
       case SAGA_ESCALATED -> status.getPayload(); // the escalation reason (plain text)
       case SAGA_FORCE_COMPLETED, SAGA_RECOVERING, SAGA_RESET ->
           AdminAuditPayload.reason(status.getPayload());
-      default -> null; // SAGA_STARTED carries the saga input — never exposed here
+      // SAGA_STARTED carries the saga input, and a claim's replica id is server-internal; neither
+      // is exposed here
+      default -> null;
     };
   }
 

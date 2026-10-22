@@ -10,7 +10,9 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
+import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -48,8 +50,8 @@ import org.slf4j.LoggerFactory;
  * <p>Keys under {@code scalar.db.saga.store.scalardb.} are specific to this ScalarDB-backed store:
  *
  * <ul>
- *   <li>{@code scalar.db.saga.store.scalardb.num_buckets} — number of state-table bucket partitions
- *       (default: {@code 16})
+ *   <li>{@code scalar.db.saga.store.scalardb.num_buckets} — number of {@code saga_sweep} bucket
+ *       partitions (default: {@code 16})
  *   <li>{@code scalar.db.saga.store.scalardb.creation_options.<name>} — a ScalarDB creation option
  *       passed, with its value, to every namespace, table, and coordinator-table creation call when
  *       the store creates its schema. The names and defaults are ScalarDB's own; see the
@@ -71,6 +73,11 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
   private static final String CONSENSUS_COMMIT = "consensus-commit";
   private static final String SCALARDB_PREFIX = PROP_PREFIX + "scalardb.";
   private static final String CREATION_OPTIONS_PREFIX = SCALARDB_PREFIX + "creation_options.";
+  private static final Set<String> KNOWN_KEYS =
+      Set.of(
+          PROP_PREFIX + "max_event_payload_bytes",
+          PROP_PREFIX + "transaction_retry_count",
+          SCALARDB_PREFIX + "num_buckets");
 
   /**
    * Boot-time schema creation: ten attempts, pausing from about half a second and doubling to a
@@ -193,9 +200,10 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
   /**
    * Fails unless ScalarDB will run Consensus Commit, before anything connects. The store's
    * correctness is argued against Consensus Commit, not merely tested on it: a status transition
-   * deletes the old state row and inserts the new one, and the claim that a saga has at most one
-   * visible state row holds only because the two commit atomically under its snapshot isolation.
-   * Another manager can boot and run cleanly until that assumption breaks.
+   * appends its event and moves the saga's sweep row by deleting the old one and inserting the new
+   * one, and the claim that a saga has at most one visible sweep row, agreeing with its newest
+   * state-carrying event, holds only because all three commit atomically under its snapshot
+   * isolation. Another manager can boot and run cleanly until that assumption breaks.
    *
    * <p>The value is read through ScalarDB's own {@link DatabaseConfig}, so an unset key and a
    * placeholder resolve exactly as they will for the transaction manager. ScalarDB Cluster's
@@ -221,6 +229,7 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
 
   private static ScalarDbSagaStoreConfig parseConfig(Properties properties) {
     rejectRemovedKeys(properties);
+    rejectUnknownKeys(properties);
     ScalarDbSagaStoreConfig.Builder builder = ScalarDbSagaStoreConfig.builder();
     String maxPayload = properties.getProperty(PROP_PREFIX + "max_event_payload_bytes");
     if (maxPayload != null) {
@@ -260,9 +269,8 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
   }
 
   /**
-   * Fails on a removed key rather than ignoring it. Nothing else validates this namespace, so a
-   * store key that is merely dropped from the parser reads as unset: the deployment starts cleanly
-   * and runs on a default the operator believes they overrode.
+   * Fails on a removed key with a message that names what replaced it. Checked before {@link
+   * #rejectUnknownKeys}, which would reject it too, but only as an unknown key.
    */
   private static void rejectRemovedKeys(Properties properties) {
     String numBuckets = PROP_PREFIX + "num_buckets";
@@ -283,6 +291,27 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
               + "' has been removed; it is now an internal page size. Delete the key. To pace"
               + " recovery, size RecoveryConfig.maxRecoveriesPerSweep instead (daemon key:"
               + " scalar.db.saga.server.recovery.max_recoveries_per_sweep).");
+    }
+  }
+
+  /**
+   * Fails on any key under {@code scalar.db.saga.store.} this factory does not read. Otherwise a
+   * misspelled key reads as unset: the deployment starts cleanly and runs on a default the operator
+   * believes they overrode.
+   */
+  static void rejectUnknownKeys(Properties properties) {
+    for (String key : new TreeSet<>(properties.stringPropertyNames())) {
+      if (key.startsWith(PROP_PREFIX)
+          && !KNOWN_KEYS.contains(key)
+          && !key.startsWith(CREATION_OPTIONS_PREFIX)) {
+        throw new IllegalArgumentException(
+            "Unknown configuration key '"
+                + key
+                + "'. Check it against the keys documented on ScalarDbSagaStoreFactory; unknown"
+                + " keys under '"
+                + PROP_PREFIX
+                + "' are rejected so a typo cannot silently leave a setting at its default.");
+      }
     }
   }
 

@@ -22,9 +22,9 @@ import org.slf4j.LoggerFactory;
 /**
  * Periodic retention manager that purges resolved (terminal) sagas.
  *
- * <p>Scans {@code saga_state} for entries in purgeable statuses ({@link SagaStatus#COMPLETED},
+ * <p>Scans {@code saga_sweep} for entries in purgeable statuses ({@link SagaStatus#COMPLETED},
  * {@link SagaStatus#COMPENSATED}) whose {@code updated_at} is older than the configured retention
- * period, then deletes both the {@code saga_state} row and all {@code saga_events} rows for each
+ * period, then deletes both the {@code saga_sweep} row and all {@code saga_events} rows for each
  * expired saga via {@link SagaStore#deleteSaga}.
  *
  * <p>{@link SagaStatus#ESCALATED} sagas are excluded — they require manual admin resolution before

@@ -64,7 +64,7 @@ class ScalarDbSagaStoreConfig {
   }
 
   /**
-   * Returns the number of bucket partitions for the {@code saga_state} table. Must remain constant
+   * Returns the number of bucket partitions for the {@code saga_sweep} table. Must remain constant
    * once data has been written.
    *
    * @return the number of buckets
@@ -139,7 +139,7 @@ class ScalarDbSagaStoreConfig {
     }
 
     /**
-     * Sets the number of bucket partitions for the {@code saga_state} table. Must remain constant
+     * Sets the number of bucket partitions for the {@code saga_sweep} table. Must remain constant
      * once data has been written. Defaults to {@link SagaSchema#DEFAULT_NUM_BUCKETS}.
      *
      * @param numBuckets the number of buckets (must be &gt; 0)

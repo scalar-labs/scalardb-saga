@@ -4,6 +4,16 @@ package com.scalar.db.saga.api;
  * Callback interface for asynchronous saga completion notifications. Passed to {@link
  * SagaOrchestrator#startAsync} to receive notifications when the saga reaches a terminal state, or
  * parks short of one.
+ *
+ * <p>The two implementations differ on a saga that parks. The embedded orchestrator reports the
+ * outcome of the drive the start began, so a park ends it with {@link #onParked}. The client SDK
+ * watches the saga on the server until it is terminal, so it never calls {@link #onParked} and
+ * reports the terminal state instead, {@link #onEscalated} included.
+ *
+ * <p>Neither guarantees a call. The client SDK stops watching when it is closed, when the saga is
+ * purged, or after a failure that retrying cannot fix; a callback already running when it is closed
+ * may still finish. Neither calls anything if its process exits. Code that waits for a callback
+ * should wait under a bound and fall back to {@link SagaOrchestrator#getStateSnapshot}.
  */
 public interface SagaCallback {
 
@@ -25,26 +35,26 @@ public interface SagaCallback {
    * Called when the saga is escalated ({@link SagaStatus#ESCALATED}): stuck beyond its grace period
    * and needing manual intervention.
    *
-   * <p><b>This does not fire in the normal course.</b> A drive's own verdict is never {@code
-   * ESCALATED}; escalation is set only by recovery, which runs on its own schedule, possibly on
-   * another replica, with no access to the callback the start supplied. Reaching here at all takes
-   * a drive that fails before producing a verdict, so that the outcome must be read back from the
-   * store, plus recovery escalating the same saga in the window before that read. That path is
-   * real, but it is not something to design against: to observe escalation, poll {@link
-   * SagaOrchestrator#getStateSnapshot}.
+   * <p>From the client SDK this is an ordinary outcome, delivered like the other two. From the
+   * embedded orchestrator it is rare: a drive's own verdict is never {@code ESCALATED}, because
+   * escalation is set only by recovery, which runs on its own schedule with no access to the
+   * callback the start supplied. Reaching here takes a drive that fails before producing a verdict,
+   * plus recovery escalating the same saga before its outcome is read back from the store. To
+   * observe escalation embedded, poll {@link SagaOrchestrator#getStateSnapshot}.
    *
-   * <p>Defaults to doing nothing, so no implementation has to write a method that all but never
-   * runs. It stays on the interface rather than being removed so that the narrow path above still
-   * reaches the caller that asked to hear about it.
+   * <p>Not defaulted, so that a callback written against one implementation cannot silently miss an
+   * outcome the other delivers.
    *
    * @param saga the saga's state at escalation
    */
-  default void onEscalated(SagaStateSnapshot saga) {}
+  void onEscalated(SagaStateSnapshot saga);
 
   /**
    * Called when the saga stops without reaching a terminal state: it parked on an asynchronous step
    * and is waiting for that step's callback or its deadline ({@link SagaStatus#WAITING}). The saga
    * is still live and still owned by the engine, and resumes when the step reports back.
+   *
+   * <p>Called by the embedded orchestrator only; see the class description.
    *
    * <p><b>This is the last thing this callback will hear about the saga.</b> Not "might be" — the
    * resume path carries no {@code SagaCallback}, so once {@code onParked} has fired, {@link

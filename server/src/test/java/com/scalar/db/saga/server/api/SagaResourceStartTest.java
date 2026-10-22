@@ -20,7 +20,6 @@ import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.SagaAlreadyExistsException;
 import com.scalar.db.saga.exception.SagaErrorCode;
 import com.scalar.db.saga.exception.SagaIllegalArgumentException;
-import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.server.SagaWaiterRegistry;
 import com.scalar.db.saga.server.security.SagaAuthRequest;
 import com.scalar.db.saga.server.security.SagaAuthenticationException;
@@ -46,11 +45,10 @@ import org.junit.jupiter.api.Test;
 /**
  * Covers the two start endpoints' wait behaviour — the subject of {@code todos/076}.
  *
- * <p>Until 2026-08 an unset {@code sync.timeout_millis} (the default) made a synchronous start run
- * the saga <em>inline on the request thread</em>, unbounded, so ~200 concurrent slow sagas
- * exhausted the Jetty pool. Nothing here tested it, which is why the change that removed it broke
- * no test. These tests pin the replacement: every start dispatches to {@code startAsync} and waits
- * only up to the bound the server was configured with.
+ * <p>A synchronous start once ran the saga <em>inline on the request thread</em>, unbounded, so
+ * ~200 concurrent slow sagas exhausted the Jetty pool. Nothing here tested it, which is why the
+ * change that removed it broke no test. These tests pin the replacement: every start dispatches to
+ * {@code startAsync} and waits only up to the bound the server was configured with.
  */
 class SagaResourceStartTest {
 
@@ -389,25 +387,6 @@ class SagaResourceStartTest {
     assertThat(response.statusCode()).isEqualTo(202);
     assertThat(response.body()).contains(SAGA_ID).contains("RUNNING");
     verify(orchestrator, never()).getStateSnapshot(any(String.class));
-  }
-
-  @Test
-  void postSagas_boundElapsesAndTheReadMissesTheNewSaga_returns202WithTheCreatedSnapshot()
-      throws Exception {
-    // Arrange — the read-back on a backend whose index lags the write (DynamoDB).
-    app.stop();
-    startServer(50L);
-    when(orchestrator.startAsyncReturningSnapshot(
-            isNull(), eq(SAGA_NAME), isNull(), anyMap(), any(SagaCallback.class)))
-        .thenReturn(snapshot(SagaStatus.RUNNING));
-    when(orchestrator.getStateSnapshot(SAGA_ID)).thenThrow(new SagaNotFoundException(SAGA_ID));
-
-    // Act
-    HttpResponse<String> response = post("/sagas", "{\"sagaName\":\"" + SAGA_NAME + "\"}");
-
-    // Assert — the saga exists, so not a 404.
-    assertThat(response.statusCode()).isEqualTo(202);
-    assertThat(response.body()).contains(SAGA_ID).contains("RUNNING");
   }
 
   @Test

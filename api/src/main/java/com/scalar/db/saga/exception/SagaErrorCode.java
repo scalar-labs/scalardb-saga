@@ -447,7 +447,7 @@ public enum SagaErrorCode {
 
   /**
    * A step's compensation action threw. The saga stays {@code COMPENSATING} and recovery retries
-   * the compensation; one stuck past the compensation grace period is escalated for manual
+   * the compensation; one stuck past the escalation grace period is escalated for manual
    * intervention.
    */
   COMPENSATION_FAILED(

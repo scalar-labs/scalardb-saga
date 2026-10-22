@@ -31,11 +31,7 @@ public final class IntegrationTestStore {
   public static final String PROPERTY = "scalardb.saga.integration_test.properties";
 
   private static final List<String> SAGA_TABLES =
-      List.of(
-          SagaSchema.EVENTS_TABLE,
-          SagaSchema.STATE_TABLE,
-          SagaSchema.PARKED_TABLE,
-          SagaSchema.DEFINITIONS_TABLE);
+      List.of(SagaSchema.EVENTS_TABLE, SagaSchema.SWEEP_TABLE, SagaSchema.DEFINITIONS_TABLE);
 
   private IntegrationTestStore() {}
 

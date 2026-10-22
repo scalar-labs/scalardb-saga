@@ -10,6 +10,8 @@ import com.scalar.db.api.Admin;
 import com.scalar.db.api.TableMetadata;
 import com.scalar.db.exception.storage.ExecutionException;
 import com.scalar.db.io.DataType;
+import com.scalar.db.saga.api.SagaStatus;
+import com.scalar.db.saga.exception.SagaPersistenceException;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -108,45 +110,80 @@ class SagaSchemaTest {
             "step_index",
             "step_name",
             "payload",
-            "created_at");
+            "created_at",
+            "state_slice",
+            "sweep_at",
+            "saga_name",
+            "definition_version",
+            "saga_created_at");
     assertThat(metadata.getPartitionKeyNames()).containsExactly("saga_id");
     assertThat(metadata.getClusteringKeyNames()).containsExactly("sequence");
+    assertThat(metadata.getColumnDataType("sweep_at")).isEqualTo(DataType.BIGINT);
+    assertThat(metadata.getSecondaryIndexNames()).isEmpty();
   }
 
   @Test
-  void sagaStateTable_called_returnsMetadataWithExpectedColumns() {
+  void sagaSweepTable_called_returnsMetadataWithExpectedColumns() {
     // Act
-    TableMetadata metadata = SagaSchema.sagaStateTable();
+    TableMetadata metadata = SagaSchema.sagaSweepTable();
 
     // Assert
     assertThat(metadata.getColumnNames())
         .containsExactlyInAnyOrder(
             "bucket",
-            "status",
-            "updated_at",
+            "slice",
+            "sweep_at",
             "saga_id",
             "saga_name",
-            "owner_id",
             "definition_version",
-            "created_at");
+            "created_at",
+            "updated_at");
     assertThat(metadata.getPartitionKeyNames()).containsExactly("bucket");
-    assertThat(metadata.getClusteringKeyNames()).containsExactly("status", "updated_at", "saga_id");
-    assertThat(metadata.getColumnDataType("updated_at")).isEqualTo(DataType.BIGINT);
-    assertThat(metadata.getSecondaryIndexNames()).contains("saga_id");
+    assertThat(metadata.getClusteringKeyNames()).containsExactly("slice", "sweep_at", "saga_id");
+    assertThat(metadata.getColumnDataType("sweep_at")).isEqualTo(DataType.BIGINT);
+    assertThat(metadata.getSecondaryIndexNames()).isEmpty();
+  }
+
+  // --- Slices ---
+
+  @Test
+  void sliceOf_waitingWithTimeout_returnsTheTimeoutSlice() {
+    // Act & Assert
+    assertThat(SagaSchema.sliceOf(SagaStatus.WAITING, true))
+        .isEqualTo(SagaSchema.WAITING_WITH_TIMEOUT_SLICE);
   }
 
   @Test
-  void sagaParkedTable_called_returnsMetadataWithExpectedColumns() {
-    // Act
-    TableMetadata metadata = SagaSchema.sagaParkedTable();
+  void sliceOf_everyStatusWithoutTimeout_returnsItsStatusCode() {
+    for (SagaStatus status : SagaStatus.values()) {
+      // Act & Assert
+      assertThat(SagaSchema.sliceOf(status, false)).isEqualTo(status.getStatusCode());
+    }
+  }
 
-    // Assert
-    assertThat(metadata.getColumnNames())
-        .containsExactlyInAnyOrder("bucket", "parked_deadline", "saga_id");
-    assertThat(metadata.getPartitionKeyNames()).containsExactly("bucket");
-    assertThat(metadata.getClusteringKeyNames()).containsExactly("parked_deadline", "saga_id");
-    assertThat(metadata.getColumnDataType("parked_deadline")).isEqualTo(DataType.BIGINT);
-    assertThat(metadata.getSecondaryIndexNames()).contains("saga_id");
+  @Test
+  void sliceOf_nonWaitingWithTimeout_ignoresTheTimeout() {
+    // Act & Assert
+    assertThat(SagaSchema.sliceOf(SagaStatus.RUNNING, true))
+        .isEqualTo(SagaStatus.RUNNING.getStatusCode());
+  }
+
+  @Test
+  void statusOfSlice_everySlice_roundTripsSliceOf() {
+    for (SagaStatus status : SagaStatus.values()) {
+      for (boolean hasTimeout : new boolean[] {false, true}) {
+        // Act & Assert
+        assertThat(SagaSchema.statusOfSlice(SagaSchema.sliceOf(status, hasTimeout)))
+            .isEqualTo(status);
+      }
+    }
+  }
+
+  @Test
+  void statusOfSlice_unknownSliceGiven_throwsSagaPersistenceException() {
+    // Act & Assert
+    assertThatThrownBy(() -> SagaSchema.statusOfSlice(SagaSchema.WAITING_WITH_TIMEOUT_SLICE + 1))
+        .isInstanceOf(SagaPersistenceException.class);
   }
 
   @Test
@@ -180,11 +217,7 @@ class SagaSchemaTest {
       throws ExecutionException {
     verify(admin).createNamespace(SagaSchema.NAMESPACE, true, options);
     for (String table :
-        List.of(
-            SagaSchema.EVENTS_TABLE,
-            SagaSchema.STATE_TABLE,
-            SagaSchema.PARKED_TABLE,
-            SagaSchema.DEFINITIONS_TABLE)) {
+        List.of(SagaSchema.EVENTS_TABLE, SagaSchema.SWEEP_TABLE, SagaSchema.DEFINITIONS_TABLE)) {
       verify(admin)
           .createTable(
               eq(SagaSchema.NAMESPACE), eq(table), any(TableMetadata.class), eq(true), eq(options));
@@ -198,7 +231,7 @@ class SagaSchemaTest {
     // Assert
     assertThat(SagaSchema.NAMESPACE).isEqualTo("saga");
     assertThat(SagaSchema.EVENTS_TABLE).isEqualTo("saga_events");
-    assertThat(SagaSchema.STATE_TABLE).isEqualTo("saga_state");
+    assertThat(SagaSchema.SWEEP_TABLE).isEqualTo("saga_sweep");
     assertThat(SagaSchema.DEFINITIONS_TABLE).isEqualTo("saga_definitions");
     assertThat(SagaSchema.DEFAULT_NUM_BUCKETS).isEqualTo(16);
   }

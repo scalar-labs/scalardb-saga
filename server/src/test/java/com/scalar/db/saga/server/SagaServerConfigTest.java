@@ -905,61 +905,27 @@ class SagaServerConfigTest {
     assertThat(SagaServerConfig.load(props).host()).isEqualTo("127.0.0.1");
   }
 
-  @Test
-  void load_unsetSyncTimeout_disabledByDefault() {
-    assertThat(SagaServerConfig.load(new Properties()).syncTimeoutMillis())
-        .isEqualTo(SagaServerConfig.DEFAULT_SYNC_TIMEOUT_MILLIS);
-  }
-
-  // The synchronous-wait bound policy. It lives on the config because both keys do, and because
-  // combining them per transport is how REST came to ignore the ceiling entirely (todos/076).
+  // The synchronous-wait bound policy. It lives on the config so that no transport combines the
+  // inputs itself, which is how REST came to ignore the ceiling entirely (todos/076).
 
   @Test
-  void syncWaitBoundMillis_noTimeoutSet_returnsCeiling() {
-    // Arrange — the default: the optional tightening key is unset.
+  void syncWaitBoundMillis_withDefaults_returnsCeiling() {
+    // Arrange
     SagaServerConfig config = SagaServerConfig.load(new Properties());
 
     // Act
     long bound = config.syncWaitBoundMillis(Long.MAX_VALUE);
 
-    // Assert — the ceiling still applies. This is the case that used to block forever on REST.
+    // Assert — the ceiling applies with nothing set. This is the case that used to block forever
+    // on REST.
     assertThat(bound).isEqualTo(SagaServerConfig.DEFAULT_SYNC_MAX_WAIT_MILLIS);
   }
 
   @Test
-  void syncWaitBoundMillis_timeoutTighterThanCeiling_returnsTimeout() {
+  void syncWaitBoundMillis_requestedCapTighterThanCeiling_returnsRequestedCap() {
     // Arrange
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "60000");
-    props.setProperty(SagaServerConfig.SYNC_TIMEOUT_MILLIS_KEY, "5000");
-
-    // Act
-    long bound = SagaServerConfig.load(props).syncWaitBoundMillis(Long.MAX_VALUE);
-
-    // Assert
-    assertThat(bound).isEqualTo(5000L);
-  }
-
-  @Test
-  void syncWaitBoundMillis_timeoutLooserThanCeiling_returnsCeiling() {
-    // Arrange — the timeout may only tighten the ceiling, never raise it.
-    Properties props = new Properties();
-    props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "10000");
-    props.setProperty(SagaServerConfig.SYNC_TIMEOUT_MILLIS_KEY, "60000");
-
-    // Act
-    long bound = SagaServerConfig.load(props).syncWaitBoundMillis(Long.MAX_VALUE);
-
-    // Assert
-    assertThat(bound).isEqualTo(10000L);
-  }
-
-  @Test
-  void syncWaitBoundMillis_requestedCapTightest_returnsRequestedCap() {
-    // Arrange
-    Properties props = new Properties();
-    props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "60000");
-    props.setProperty(SagaServerConfig.SYNC_TIMEOUT_MILLIS_KEY, "30000");
 
     // Act — a caller-supplied cap, as gRPC's AwaitSaga passes.
     long bound = SagaServerConfig.load(props).syncWaitBoundMillis(1000L);
@@ -969,29 +935,16 @@ class SagaServerConfigTest {
   }
 
   @Test
-  void load_syncTimeoutGiven_parsesValue() {
+  void syncWaitBoundMillis_requestedCapLooserThanCeiling_returnsCeiling() {
+    // Arrange — a caller's cap may only tighten the ceiling, never raise it.
     Properties props = new Properties();
-    props.setProperty(SagaServerConfig.SYNC_TIMEOUT_MILLIS_KEY, "5000");
+    props.setProperty(SagaServerConfig.SYNC_MAX_WAIT_MILLIS_KEY, "10000");
 
-    assertThat(SagaServerConfig.load(props).syncTimeoutMillis()).isEqualTo(5000L);
-  }
+    // Act
+    long bound = SagaServerConfig.load(props).syncWaitBoundMillis(60_000L);
 
-  @Test
-  void load_negativeSyncTimeout_throwsIllegalArgumentException() {
-    Properties props = new Properties();
-    props.setProperty(SagaServerConfig.SYNC_TIMEOUT_MILLIS_KEY, "-1");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void load_nonNumericSyncTimeout_throwsIllegalArgumentException() {
-    Properties props = new Properties();
-    props.setProperty(SagaServerConfig.SYNC_TIMEOUT_MILLIS_KEY, "soon");
-
-    assertThatThrownBy(() -> SagaServerConfig.load(props))
-        .isInstanceOf(IllegalArgumentException.class);
+    // Assert
+    assertThat(bound).isEqualTo(10000L);
   }
 
   @Test
@@ -1213,7 +1166,7 @@ class SagaServerConfigTest {
 
     assertThat(config.stalenessThresholdMillis()).isEqualTo(defaults.stalenessThresholdMillis());
     assertThat(config.intervalSeconds()).isEqualTo(defaults.intervalSeconds());
-    assertThat(config.compensationGracePeriod()).isEqualTo(defaults.compensationGracePeriod());
+    assertThat(config.escalationGracePeriod()).isEqualTo(defaults.escalationGracePeriod());
     assertThat(config.maxRecoveriesPerSweep()).isEqualTo(defaults.maxRecoveriesPerSweep());
     assertThat(config.maxConcurrentRecoveries()).isEqualTo(defaults.maxConcurrentRecoveries());
   }
@@ -1223,7 +1176,7 @@ class SagaServerConfigTest {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY, "90000");
     props.setProperty(SagaServerConfig.RECOVERY_INTERVAL_SECONDS_KEY, "15");
-    props.setProperty(SagaServerConfig.RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY, "1800");
+    props.setProperty(SagaServerConfig.RECOVERY_ESCALATION_GRACE_PERIOD_SECONDS_KEY, "1800");
     props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY, "2000");
     props.setProperty(SagaServerConfig.RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY, "25");
 
@@ -1231,7 +1184,7 @@ class SagaServerConfigTest {
 
     assertThat(config.stalenessThresholdMillis()).isEqualTo(90_000L);
     assertThat(config.intervalSeconds()).isEqualTo(15L);
-    assertThat(config.compensationGracePeriod()).isEqualTo(Duration.ofMinutes(30));
+    assertThat(config.escalationGracePeriod()).isEqualTo(Duration.ofMinutes(30));
     assertThat(config.maxRecoveriesPerSweep()).isEqualTo(2000);
     assertThat(config.maxConcurrentRecoveries()).isEqualTo(25);
   }
@@ -1305,7 +1258,7 @@ class SagaServerConfigTest {
       strings = {
         SagaServerConfig.RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY,
         SagaServerConfig.RECOVERY_INTERVAL_SECONDS_KEY,
-        SagaServerConfig.RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY,
+        SagaServerConfig.RECOVERY_ESCALATION_GRACE_PERIOD_SECONDS_KEY,
         SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY,
         SagaServerConfig.RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY,
         SagaServerConfig.RETENTION_PERIOD_SECONDS_KEY,
@@ -1337,7 +1290,7 @@ class SagaServerConfigTest {
     Properties props = new Properties();
     props.setProperty(SagaServerConfig.RECOVERY_STALENESS_THRESHOLD_MILLIS_KEY, "1");
     props.setProperty(SagaServerConfig.RECOVERY_INTERVAL_SECONDS_KEY, "1");
-    props.setProperty(SagaServerConfig.RECOVERY_COMPENSATION_GRACE_PERIOD_SECONDS_KEY, "1");
+    props.setProperty(SagaServerConfig.RECOVERY_ESCALATION_GRACE_PERIOD_SECONDS_KEY, "1");
     props.setProperty(SagaServerConfig.RECOVERY_MAX_RECOVERIES_PER_SWEEP_KEY, "1");
     props.setProperty(SagaServerConfig.RECOVERY_MAX_CONCURRENT_RECOVERIES_KEY, "1");
     props.setProperty(SagaServerConfig.RETENTION_PERIOD_SECONDS_KEY, "1");
@@ -1350,7 +1303,7 @@ class SagaServerConfigTest {
     RecoveryConfig recovery = config.recoveryConfig();
     assertThat(recovery.stalenessThresholdMillis()).isEqualTo(1L);
     assertThat(recovery.intervalSeconds()).isEqualTo(1L);
-    assertThat(recovery.compensationGracePeriod()).isEqualTo(Duration.ofSeconds(1));
+    assertThat(recovery.escalationGracePeriod()).isEqualTo(Duration.ofSeconds(1));
     assertThat(recovery.maxRecoveriesPerSweep()).isEqualTo(1);
     assertThat(recovery.maxConcurrentRecoveries()).isEqualTo(1);
     RetentionConfig retention = config.retentionConfig();

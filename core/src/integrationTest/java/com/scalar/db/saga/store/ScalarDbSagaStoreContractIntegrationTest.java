@@ -156,6 +156,27 @@ class ScalarDbSagaStoreContractIntegrationTest {
     assertThat(result.events()).hasSize(2);
   }
 
+  @Test
+  void reads_moreStepEventsThanAStoragePage_stillFindTheStateBelowThem() {
+    // Arrange — the state lives on the newest status-changing event, here under 25 step events,
+    // more than one page of the storage fetch
+    SagaStateSnapshot created = newSaga("saga-1");
+    for (int sequence = 1; sequence <= 25; sequence++) {
+      store.recordStepEvent("saga-1", sequence, StepEvent.completed(sequence, "s", "{}"));
+    }
+
+    // Act
+    SagaStateSnapshot state = store.getStateSnapshot("saga-1").orElseThrow();
+    SagaStateAndEvents withEvents = store.getStateWithEvents("saga-1", 5).orElseThrow();
+    SagaStore.NewestEvent newest = probe("saga-1");
+
+    // Assert
+    assertSameState(state, created);
+    assertSameState(withEvents.snapshot(), created);
+    assertThat(withEvents.events()).hasSize(5);
+    assertThat(newest.sequence()).isEqualTo(25);
+  }
+
   // ---------------------------------------------------------------------------
   // Status transitions and fencing
   // ---------------------------------------------------------------------------
@@ -405,7 +426,7 @@ class ScalarDbSagaStoreContractIntegrationTest {
 
   @Test
   void resumeParkedStep_afterRedriveAndRepark_throwsSagaConcurrentModificationException() {
-    // Arrange — the saga is WAITING again, so only the moved state row can refuse the stale resume
+    // Arrange — the saga is WAITING again, so only the moved sweep row can refuse the stale resume
     SagaStateSnapshot firstPark = parkedSaga("saga-1", Instant.now().minus(Duration.ofMinutes(1)));
     SagaStateSnapshot redriven =
         store.redriveParkedStep(firstPark, 2, StepEvent.reissuing(0, "approve"));
@@ -470,7 +491,8 @@ class ScalarDbSagaStoreContractIntegrationTest {
     SagaStateSnapshot created = newSaga("saga-1");
 
     // Act
-    Optional<SagaStateSnapshot> claimed = store.claimForRecovery(created, OTHER_OWNER);
+    Optional<SagaStateSnapshot> claimed =
+        store.claimForRecovery(created, probe("saga-1"), OTHER_OWNER);
 
     // Assert
     assertThat(claimed).isPresent();
@@ -482,10 +504,11 @@ class ScalarDbSagaStoreContractIntegrationTest {
   void claimForRecovery_sameViewClaimedTwice_secondClaimReturnsEmpty() {
     // Arrange
     SagaStateSnapshot created = newSaga("saga-1");
-    store.claimForRecovery(created, OTHER_OWNER);
+    SagaStore.NewestEvent view = probe("saga-1");
+    store.claimForRecovery(created, view, OTHER_OWNER);
 
     // Act
-    Optional<SagaStateSnapshot> second = store.claimForRecovery(created, "engine-3");
+    Optional<SagaStateSnapshot> second = store.claimForRecovery(created, view, "engine-3");
 
     // Assert
     assertThat(second).isEmpty();
@@ -495,17 +518,145 @@ class ScalarDbSagaStoreContractIntegrationTest {
   void claimForRecovery_sagaTransitionedSinceTheView_returnsEmpty() {
     // Arrange
     SagaStateSnapshot created = newSaga("saga-1");
+    SagaStore.NewestEvent view = probe("saga-1");
     store.recordStatusEvent(created, 1, StatusEvent.compensating(), OWNER);
 
     // Act & Assert
-    assertThat(store.claimForRecovery(created, OTHER_OWNER)).isEmpty();
+    assertThat(store.claimForRecovery(created, view, OTHER_OWNER)).isEmpty();
+  }
+
+  @Test
+  void claimForRecovery_sagaTransitionedBetweenTheSweepAndTheProbe_returnsEmptyAndWritesNothing() {
+    // Arrange — the sweep saw RUNNING; the saga then started compensating and gave one up, which
+    // recovery does not count as being driven. The probe is fresh, so only the state fences it.
+    SagaStateSnapshot swept = newSaga("saga-1");
+    SagaStateSnapshot compensating =
+        store.recordStatusEvent(swept, 1, StatusEvent.compensating(), OWNER);
+    store.recordStepEvent("saga-1", 2, StepEvent.compensationFailed(0, "reserve", null));
+    SagaStore.NewestEvent view = probe("saga-1");
+
+    // Act
+    Optional<SagaStateSnapshot> claimed = store.claimForRecovery(swept, view, OTHER_OWNER);
+
+    // Assert — the log still says COMPENSATING, the state the sweep row is in
+    assertThat(claimed).isEmpty();
+    assertSameState(store.getStateSnapshot("saga-1").orElseThrow(), compensating);
+    assertThat(eventTypes("saga-1")).doesNotContain(EventType.SAGA_CLAIMED);
+  }
+
+  @Test
+  void claimForRecovery_stepEventAppendedSinceTheView_returnsEmpty() {
+    // Arrange — the owner is alive after all: it appended a step event after the probe
+    SagaStateSnapshot created = newSaga("saga-1");
+    SagaStore.NewestEvent view = probe("saga-1");
+    store.recordStepEvent("saga-1", 1, StepEvent.completed(0, "reserve", "{}"));
+
+    // Act & Assert
+    assertThat(store.claimForRecovery(created, view, OTHER_OWNER)).isEmpty();
+  }
+
+  @Test
+  void claimForRecovery_presumedDeadOwnerAppendsNext_throwsSagaConcurrentModificationException() {
+    // Arrange — the claim takes the sequence the old owner writes next, so the owner is stopped at
+    // its next step event, not only at its next status change
+    SagaStateSnapshot created = newSaga("saga-1");
+    assertThat(store.claimForRecovery(created, probe("saga-1"), OTHER_OWNER)).isPresent();
+
+    // Act & Assert
+    assertThatThrownBy(
+            () -> store.recordStepEvent("saga-1", 1, StepEvent.completed(0, "reserve", "{}")))
+        .isInstanceOf(SagaConcurrentModificationException.class);
+  }
+
+  @Test
+  void claimForRecovery_sagaPurgedSinceTheProbe_returnsEmptyAndWritesNothing() {
+    // Arrange — the owner finished and retention purged the saga while the claim was delayed;
+    // the purge freed the sequence the claim inserts at
+    SagaStateSnapshot swept = newSaga("saga-1");
+    SagaStore.NewestEvent view = probe("saga-1");
+    complete("saga-1", swept, 1);
+    assertThat(store.deleteSaga("saga-1")).isTrue();
+
+    // Act
+    Optional<SagaStateSnapshot> claimed = store.claimForRecovery(swept, view, OTHER_OWNER);
+
+    // Assert — nothing was brought back
+    assertThat(claimed).isEmpty();
+    assertThat(store.getEvents("saga-1")).isEmpty();
+    assertThat(store.getStateSnapshot("saga-1")).isEmpty();
+  }
+
+  @Test
+  void claimForRecovery_sagaRecreatedUnderTheSameIdSinceTheProbe_returnsEmptyAndLeavesItAlone() {
+    // Arrange — after the purge a new saga took the id; it has not reached the claimed sequence
+    SagaStateSnapshot swept = newSaga("saga-1");
+    SagaStore.NewestEvent view = probe("saga-1");
+    complete("saga-1", swept, 1);
+    assertThat(store.deleteSaga("saga-1")).isTrue();
+    // The sweep row's key is the creation time in milliseconds; make the new saga's differ
+    while (Instant.now().toEpochMilli() <= swept.getUpdatedAt().toEpochMilli()) {
+      Thread.onSpinWait();
+    }
+    SagaStateSnapshot recreated = newSaga("saga-1");
+
+    // Act
+    Optional<SagaStateSnapshot> claimed = store.claimForRecovery(swept, view, OTHER_OWNER);
+
+    // Assert
+    assertThat(claimed).isEmpty();
+    assertSameState(store.getStateSnapshot("saga-1").orElseThrow(), recreated);
+    assertThat(eventTypes("saga-1")).containsExactly(EventType.SAGA_STARTED);
+  }
+
+  @Test
+  void claimForRecovery_scheduledSaga_recordsTheClaimWithoutChangingTheState() {
+    // Arrange
+    SagaStateSnapshot created = newSaga("saga-1");
+
+    // Act
+    assertThat(store.claimForRecovery(created, probe("saga-1"), OTHER_OWNER)).isPresent();
+
+    // Assert — updatedAt keeps meaning the last status change
+    assertSameState(store.getStateSnapshot("saga-1").orElseThrow(), created);
+    assertThat(eventTypes("saga-1"))
+        .containsExactly(EventType.SAGA_STARTED, EventType.SAGA_CLAIMED);
+  }
+
+  @Test
+  void getNewestEvent_claimFollowedByAStepEvent_stillReportsTheClaim() {
+    // Arrange — a stuck compensation: the claimed drive fails its compensation again
+    SagaStateSnapshot created = newSaga("saga-1");
+    SagaStateSnapshot compensating =
+        store.recordStatusEvent(created, 1, StatusEvent.compensating(), OWNER);
+    assertThat(store.claimForRecovery(compensating, probe("saga-1"), OTHER_OWNER)).isPresent();
+    store.recordStepEvent("saga-1", 3, StepEvent.compensationFailed(0, "reserve", null));
+
+    // Act
+    SagaStore.NewestEvent newest = probe("saga-1");
+
+    // Assert — the claim's time is what keeps recovery from claiming it again on every pass
+    assertThat(newest.type()).isEqualTo(EventType.STEP_COMPENSATION_FAILED);
+    assertThat(newest.lastClaimedAt()).isNotNull();
+  }
+
+  @Test
+  void getNewestEvent_statusChangedAfterTheClaim_reportsNoClaim() {
+    // Arrange
+    SagaStateSnapshot created = newSaga("saga-1");
+    SagaStateSnapshot claimed =
+        store.claimForRecovery(created, probe("saga-1"), OTHER_OWNER).orElseThrow();
+    store.recordStatusEvent(claimed, 2, StatusEvent.compensating(), OTHER_OWNER);
+
+    // Act & Assert
+    assertThat(probe("saga-1").lastClaimedAt()).isNull();
   }
 
   @Test
   void claimForRecovery_claimedSnapshot_drivesTheNextTransition() {
     // Arrange
     SagaStateSnapshot created = newSaga("saga-1");
-    SagaStateSnapshot claimed = store.claimForRecovery(created, OTHER_OWNER).orElseThrow();
+    SagaStateSnapshot claimed =
+        store.claimForRecovery(created, probe("saga-1"), OTHER_OWNER).orElseThrow();
     int sequence = store.getEventCount("saga-1");
 
     // Act
@@ -555,10 +706,29 @@ class ScalarDbSagaStoreContractIntegrationTest {
     SagaStateSnapshot handedOff = recoverable(Instant.now().minus(HOUR)).get(0);
 
     // Act
-    Optional<SagaStateSnapshot> claimed = store.claimForRecovery(handedOff, OTHER_OWNER);
+    Optional<SagaStateSnapshot> claimed =
+        store.claimForRecovery(handedOff, probe("saga-1"), OTHER_OWNER);
 
     // Assert
     assertThat(claimed).isPresent();
+    assertThat(recoverableIds(Instant.now().minus(HOUR))).isEmpty();
+  }
+
+  @Test
+  void markForRecovery_alreadyHandedOff_rewritesTheSameSweepRowAndStaysClaimable() {
+    // Arrange — the second hand-off deletes and re-inserts the sweep row at the same key in one
+    // transaction; markForRecovery swallows failures, so the second release must be seen landing
+    newSaga("saga-1");
+    store.markForRecovery("saga-1");
+
+    // Act
+    store.markForRecovery("saga-1");
+
+    // Assert
+    assertThat(eventTypes("saga-1")).filteredOn(type -> type == EventType.SAGA_RELEASED).hasSize(2);
+    List<SagaStateSnapshot> handedOff = recoverable(Instant.now().minus(HOUR));
+    assertThat(handedOff).hasSize(1);
+    assertThat(store.claimForRecovery(handedOff.get(0), probe("saga-1"), OTHER_OWNER)).isPresent();
     assertThat(recoverableIds(Instant.now().minus(HOUR))).isEmpty();
   }
 
@@ -569,6 +739,46 @@ class ScalarDbSagaStoreContractIntegrationTest {
 
     // Assert
     assertThat(store.getStateSnapshot("missing")).isEmpty();
+  }
+
+  @Test
+  void markForRecovery_completedSaga_leavesItUntouched() {
+    // Arrange — stamping a finished saga EPOCH would put it first in line for the retention purge
+    newSaga("saga-1");
+    complete("saga-1", 1);
+    SagaStateSnapshot completed = store.getStateSnapshot("saga-1").orElseThrow();
+
+    // Act
+    store.markForRecovery("saga-1");
+
+    // Assert
+    assertSameState(store.getStateSnapshot("saga-1").orElseThrow(), completed);
+    assertThat(eventTypes("saga-1")).doesNotContain(EventType.SAGA_RELEASED);
+  }
+
+  @Test
+  void markForRecovery_parkedSaga_leavesItUntouched() {
+    // Arrange — a parked saga is timed out by its deadline, not driven by recovery
+    SagaStateSnapshot parked = parkedSaga("saga-1", Instant.now().plus(HOUR));
+
+    // Act
+    store.markForRecovery("saga-1");
+
+    // Assert
+    assertSameState(store.getStateSnapshot("saga-1").orElseThrow(), parked);
+    assertThat(eventTypes("saga-1")).doesNotContain(EventType.SAGA_RELEASED);
+  }
+
+  @Test
+  void markForRecovery_runningSaga_takesTheSequenceTheDriveWritesNext() {
+    // Arrange
+    newSaga("saga-1");
+    store.markForRecovery("saga-1");
+
+    // Act & Assert — a drive still running after the hand-off cannot record anything more
+    assertThatThrownBy(
+            () -> store.recordStepEvent("saga-1", 1, StepEvent.completed(0, "reserve", "{}")))
+        .isInstanceOf(SagaConcurrentModificationException.class);
   }
 
   @Test
@@ -715,6 +925,11 @@ class ScalarDbSagaStoreContractIntegrationTest {
   private void complete(String sagaId, SagaStateSnapshot current, int sequence) {
     assertThat(current.getSagaId()).isEqualTo(sagaId);
     store.recordStatusEvent(current, sequence, StatusEvent.completed(), OWNER);
+  }
+
+  /** The newest event, as recovery reads it just before a claim. */
+  private SagaStore.NewestEvent probe(String sagaId) {
+    return store.getNewestEvent(sagaId).orElseThrow();
   }
 
   private List<EventType> eventTypes(String sagaId) {

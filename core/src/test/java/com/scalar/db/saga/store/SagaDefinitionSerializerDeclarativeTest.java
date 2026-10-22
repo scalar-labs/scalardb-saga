@@ -12,6 +12,10 @@ import com.scalar.db.saga.definition.SagaDefinition.ServiceStep;
 import com.scalar.db.saga.definition.SagaDefinition.ServiceStep.Phase;
 import com.scalar.db.saga.definition.SagaDefinitionParser;
 import com.scalar.db.saga.exception.SagaPersistenceException;
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -58,6 +62,48 @@ class SagaDefinitionSerializerDeclarativeTest {
 
     // Assert
     assertThat(firstStep(restored)).isEqualTo(firstStep(original));
+  }
+
+  @Test
+  void serializeAndDeserialize_jsonBodyWithLiteralsAndNesting_roundTripsEqual() {
+    // Arrange — values built programmatically with types that JSON reads back differently (an
+    // Integer, a Float, a small BigInteger) must still compare equal once stored.
+    Map<String, Object> item = new HashMap<>();
+    item.put("sku", "${sku}");
+    item.put("note", null);
+    HttpCall execution =
+        HttpCall.newBuilder("/reserve")
+            .jsonBody(
+                Map.of(
+                    "quantity",
+                    2,
+                    "price",
+                    1.5f,
+                    "total",
+                    new BigDecimal("12345678901234567.890"),
+                    "id",
+                    BigInteger.ONE,
+                    "huge",
+                    BigInteger.TWO.pow(70),
+                    "gift",
+                    true,
+                    "items",
+                    List.of(item)))
+            .build();
+    SagaDefinition original =
+        SagaDefinition.newBuilder("order")
+            .saga()
+            .serviceStep("reserve", "inventory")
+            .execution(execution)
+            .compensation(call("/release"))
+            .add()
+            .build();
+
+    // Act
+    SagaDefinition restored = serializer.deserialize(serializer.serialize(original));
+
+    // Assert
+    assertThat(restored).isEqualTo(original);
   }
 
   @Test

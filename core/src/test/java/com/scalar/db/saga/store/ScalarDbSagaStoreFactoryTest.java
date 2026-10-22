@@ -30,11 +30,10 @@ class ScalarDbSagaStoreFactoryTest {
   private static final Map<String, String> NO_OPTIONS = Map.of();
 
   /**
-   * Nothing else validates the {@code scalar.db.saga.store.} namespace, so a removed key that is
-   * merely dropped from the parser reads as unset: the deployment starts and runs on a default the
-   * operator believes they overrode. The message is asserted because an unconfigured {@code
-   * TransactionFactory} throws the same exception type later in {@code create}, which would let
-   * this pass for the wrong reason.
+   * A removed key gets a message of its own, naming what replaced it, ahead of the generic
+   * unknown-key check that would also reject it. The message is asserted because that check, and an
+   * unconfigured {@code TransactionFactory} later in {@code create}, throw the same exception type,
+   * which would let this pass for the wrong reason.
    */
   @Test
   void create_removedRecoveryScanLimitKeyGiven_throwsIllegalArgumentException() {
@@ -103,6 +102,50 @@ class ScalarDbSagaStoreFactoryTest {
         .isInstanceOf(IllegalArgumentException.class);
   }
 
+  /**
+   * A misspelled key must fail rather than leave its setting at the default. The message is
+   * asserted for the reason given on the removed-key test above.
+   */
+  @Test
+  void create_misspelledStoreKeyGiven_throwsIllegalArgumentException() {
+    // Arrange
+    Properties props = new Properties();
+    props.setProperty("scalar.db.saga.store.transaction_retry_cont", "5");
+
+    // Act & Assert
+    assertThatThrownBy(() -> ScalarDbSagaStoreFactory.create(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(
+            "Unknown configuration key 'scalar.db.saga.store.transaction_retry_cont'");
+  }
+
+  @Test
+  void rejectUnknownKeys_knownStoreAndOtherKeysGiven_passes() {
+    // Arrange — every store key the factory reads, plus keys outside its namespace.
+    Properties props = new Properties();
+    props.setProperty("scalar.db.saga.store.max_event_payload_bytes", "1024");
+    props.setProperty("scalar.db.saga.store.transaction_retry_count", "3");
+    props.setProperty("scalar.db.saga.store.scalardb.num_buckets", "4");
+    props.setProperty("scalar.db.saga.store.scalardb.creation_options.replication-factor", "3");
+    props.setProperty("scalar.db.storage", "cassandra");
+    props.setProperty("scalar.db.saga.server.http.port", "8080");
+
+    // Act & Assert
+    assertThatCode(() -> ScalarDbSagaStoreFactory.rejectUnknownKeys(props))
+        .doesNotThrowAnyException();
+  }
+
+  @Test
+  void rejectUnknownKeys_keyBelowScalardbPrefixGiven_throwsIllegalArgumentException() {
+    // Arrange — under the ScalarDB-specific prefix, but not a key the factory reads.
+    Properties props = new Properties();
+    props.setProperty("scalar.db.saga.store.scalardb.numbuckets", "4");
+
+    // Act & Assert
+    assertThatThrownBy(() -> ScalarDbSagaStoreFactory.rejectUnknownKeys(props))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
   /** Renamed, not removed: the old spelling must fail rather than silently fall back to 16. */
   @Test
   void create_oldNumBucketsKeyGiven_throwsIllegalArgumentException() {
@@ -168,7 +211,7 @@ class ScalarDbSagaStoreFactoryTest {
     // Assert
     verify(admin).createCoordinatorTables(true, options);
     verify(admin).createNamespace(SagaSchema.NAMESPACE, true, options);
-    verify(admin, times(4))
+    verify(admin, times(3))
         .createTable(
             eq(SagaSchema.NAMESPACE), anyString(), any(TableMetadata.class), eq(true), eq(options));
   }

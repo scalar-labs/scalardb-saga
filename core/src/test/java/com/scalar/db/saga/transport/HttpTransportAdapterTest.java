@@ -3,6 +3,7 @@ package com.scalar.db.saga.transport;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.scalar.db.saga.api.HttpMethod;
 import com.scalar.db.saga.api.SagaContext;
 import com.scalar.db.saga.api.StepResult;
@@ -10,9 +11,13 @@ import com.scalar.db.saga.definition.HttpCall;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.math.BigDecimal;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -48,6 +53,7 @@ class HttpTransportAdapterTest {
           requestMethod.set(ex.getRequestMethod());
           respond(ex, 200, "{\"debit_id\":\"DBT-1\"}");
         });
+    server.createContext("/quote", ex -> respond(ex, 200, "{\"price\":0.10}"));
     server.createContext(
         "/empty-debit",
         ex -> respond(ex, 200, "{}")); // success but missing the expected output field
@@ -246,6 +252,60 @@ class HttpTransportAdapterTest {
     assertThat(sagaIdHeader.get()).isEqualTo("saga-1");
     assertThat(sagaStepHeader.get()).isEqualTo("debit");
     assertThat(requestMethod.get()).isEqualTo("POST");
+  }
+
+  @Test
+  void call_jsonBodyWithLiteralsAndNesting_sendsValuesAsDeclared() throws Exception {
+    // Arrange — literal numbers, booleans and null keep their JSON type, and strings are resolved
+    // at any depth.
+    Map<String, Object> item = new HashMap<>();
+    item.put("sku", "${sku}");
+    item.put("note", null);
+    HttpCall spec =
+        HttpCall.newBuilder("/notify")
+            .jsonBody(
+                Map.of(
+                    "quantity",
+                    2,
+                    "price",
+                    9.5,
+                    "gift",
+                    true,
+                    "amount",
+                    "${amount}",
+                    "items",
+                    List.of(item),
+                    "tags",
+                    Arrays.asList("a", "${tag}")))
+            .build();
+
+    // Act
+    adapter.call(spec, ctx(Map.of("sku", "S-1", "amount", 500, "tag", "b")), "notify");
+
+    // Assert
+    ObjectMapper mapper = new ObjectMapper();
+    assertThat(mapper.readTree(requestBody.get()))
+        .isEqualTo(
+            mapper.readTree(
+                """
+                {"quantity": 2, "price": 9.5, "gift": true, "amount": 500,
+                 "items": [{"sku": "S-1", "note": null}], "tags": ["a", "b"]}"""));
+  }
+
+  @Test
+  void call_outputCapturingDecimal_keepsItExactly() throws Exception {
+    // Arrange
+    HttpCall spec =
+        HttpCall.newBuilder("/quote")
+            .method(HttpMethod.GET)
+            .output(Map.of("price", "$.price"))
+            .build();
+
+    // Act
+    Map<String, Object> output = adapter.call(spec, ctx(Map.of()), "quote").getOutput();
+
+    // Assert — not the double 0.1.
+    assertThat(output).containsEntry("price", new BigDecimal("0.10"));
   }
 
   @Test

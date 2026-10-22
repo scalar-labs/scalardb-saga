@@ -21,10 +21,10 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Settles a parked ({@code WAITING}) step that will not complete: re-issues it while its retry
- * attempts and the compensation grace period allow, and otherwise gives it up, compensating the
- * saga at or before the pivot and escalating it after. Shared by the recovery sweep, for a parked
- * step past its deadline, and the failure callback, for a step its participant reports as failed,
- * so the two cannot drift apart.
+ * attempts and the escalation grace period allow, and otherwise gives it up, compensating the saga
+ * at or before the pivot and escalating it after. Shared by the recovery sweep, for a parked step
+ * past its deadline, and the failure callback, for a step its participant reports as failed, so the
+ * two cannot drift apart.
  *
  * <p>{@link #resolve} commits the transition and returns the drive that continues the saga from it
  * without running it, so each caller runs the drive where it needs to: recovery inline, the
@@ -108,7 +108,7 @@ final class ParkedStepResolver {
             : spentBound == null ? cause : cause + "; " + spentBound;
     StepEvent failedEvent = giveUpFailedEvent(parkedIndex, stepName, reason);
     if (parkedIndex <= def.getPivotIndex()) {
-      // WAITING -> COMPENSATING + STEP_FAILED + clear the parked row, then compensate from the
+      // WAITING -> COMPENSATING + STEP_FAILED, out of the parked sweep, then compensate from the
       // failed step, which is included because the participant may have committed it.
       SagaStateSnapshot compensating =
           store.failParkedStep(saga, events.size(), failedEvent, SagaStatus.COMPENSATING);
@@ -134,8 +134,8 @@ final class ParkedStepResolver {
 
   /**
    * The log after a transition that appended {@code event} and nothing else. The transition's
-   * optimistic {@code WAITING} check proves the log was untouched since it was read, so appending
-   * locally stands in for re-reading it ({@code replayEvents} ignores the event timestamp).
+   * {@code WAITING} check proves the log was untouched since it was read, so appending locally
+   * stands in for re-reading it ({@code replayEvents} ignores the event timestamp).
    */
   private static List<SagaEvent> appended(List<SagaEvent> events, SagaEvent event) {
     List<SagaEvent> updated = new ArrayList<>(events);
@@ -154,7 +154,7 @@ final class ParkedStepResolver {
    * Decides whether a parked step is re-driven rather than given up on. Re-drives only within BOTH
    * bounds: the park-attempt count ({@code STEP_PENDING} events at the step) within the step's
    * retry max-attempts — caps hammering a dead participant under a short callback timeout — AND the
-   * time since the first park within the compensation grace period — caps total stuck time under a
+   * time since the first park within the escalation grace period — caps total stuck time under a
    * long one. Otherwise returns which bound was hit (attempts checked first).
    */
   private RedriveDecision redriveDecision(
@@ -179,7 +179,7 @@ final class ParkedStepResolver {
             .map(
                 firstPark ->
                     Duration.between(firstPark, config.clock().instant())
-                            .compareTo(config.compensationGracePeriod())
+                            .compareTo(config.escalationGracePeriod())
                         <= 0)
             .orElse(false);
     return withinGrace ? RedriveDecision.REDRIVE : RedriveDecision.GRACE_EXCEEDED;

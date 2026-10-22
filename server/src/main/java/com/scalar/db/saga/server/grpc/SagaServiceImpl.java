@@ -39,13 +39,12 @@ import org.jspecify.annotations.Nullable;
  *
  * <p><b>Sync vs async.</b> {@code async=true} starts the saga and returns the running snapshot
  * immediately. {@code async=false} blocks until the saga is terminal, bounded by the {@code
- * sync.max_wait_millis} ceiling tightened by {@code sync.timeout_millis}, and then further by the
- * remaining gRPC call deadline. A saga that parks on an async step does not end the wait early: it
- * may still finish inside the bound, and the read at bound expiry reports that outcome whichever
- * replica produced it. When the wait ends without a terminal state it returns the in-flight
- * snapshot (whose status — the source of truth — is non-terminal, the gRPC analogue of REST's
- * {@code 202}) and <b>the saga keeps running</b>. The wait runs on the server's virtual-thread
- * executor, so a blocked call is cheap.
+ * sync.max_wait_millis} ceiling, tightened by the remaining gRPC call deadline. A saga that parks
+ * on an async step does not end the wait early: it may still finish inside the bound, and the read
+ * at bound expiry reports that outcome whichever replica produced it. When the wait ends without a
+ * terminal state it returns the in-flight snapshot (whose status — the source of truth — is
+ * non-terminal, the gRPC analogue of REST's {@code 202}) and <b>the saga keeps running</b>. The
+ * wait runs on the server's virtual-thread executor, so a blocked call is cheap.
  *
  * <p><b>AwaitSaga.</b> A long-poll on an <i>existing</i> saga: it blocks for one bounded window and
  * returns the terminal snapshot if reached, else the current non-terminal snapshot. The client
@@ -145,8 +144,7 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
   /**
    * Waits until {@code sagaId} is terminal or {@code boundMillis} elapses, returning the latest
    * snapshot either way. The first {@link DefaultSagaOrchestrator#getStateSnapshot} also validates
-   * existence (throws {@link com.scalar.db.saga.exception.SagaNotFoundException} → {@code
-   * NOT_FOUND}).
+   * existence (throws {@link SagaNotFoundException} → {@code NOT_FOUND}).
    *
    * <p>Registration precedes that first read, deliberately: a saga settling in between would
    * otherwise notify nobody, and the caller would wait out its whole bound for an outcome that had
@@ -222,7 +220,7 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
               abortSignal(),
               parked,
               computeBoundMillis(Long.MAX_VALUE),
-              () -> readAfterStart(created));
+              () -> orchestrator.getStateSnapshot(sagaId));
     }
     // Never cancel the saga. Shutdown short-circuits the wait rather than letting it run to the
     // bound: the bound is a maximum, not a promise to wait, and a terminating server cannot advance
@@ -232,25 +230,10 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
   }
 
   /**
-   * Reads a saga this call just started. The start persisted it synchronously, but on a backend
-   * whose secondary index lags the write, such as DynamoDB, the lookup by ID can briefly miss the
-   * new row. The saga exists either way, so a miss answers with the snapshot the start returned
-   * rather than an error that would tell the client its running saga was never created.
-   */
-  private SagaStateSnapshot readAfterStart(SagaStateSnapshot created) {
-    try {
-      return orchestrator.getStateSnapshot(created.getSagaId());
-    } catch (SagaNotFoundException e) {
-      return created;
-    }
-  }
-
-  /**
    * Computes a wait bound (ms): the {@code sync.max_wait_millis} ceiling, further tightened by the
    * caller's {@code requestedCapMillis} (AwaitSaga's {@code max_wait_millis}; {@link
-   * Long#MAX_VALUE} for the start path), {@code sync.timeout_millis} (when set), and the remaining
-   * call deadline minus a slack (when the client set one). Always in {@code [0,
-   * sync.max_wait_millis]} — the wait is never unbounded.
+   * Long#MAX_VALUE} for the start path) and by the remaining call deadline minus a slack (when the
+   * client set one). Always in {@code [0, sync.max_wait_millis]} — the wait is never unbounded.
    */
   private long computeBoundMillis(long requestedCapMillis) {
     long bound = syncWaitBound.applyAsLong(requestedCapMillis);
@@ -261,8 +244,7 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
 
   /**
    * Starts the saga the request names, by name or exact version, under the client-supplied ID when
-   * there is one, and returns the snapshot of the saga created. The start endpoints answer from
-   * that snapshot rather than reading the saga back by ID (see {@link #readAfterStart}).
+   * there is one, and returns the snapshot of the saga created.
    */
   private SagaStateSnapshot start(
       StartSagaRequest request, Map<String, Object> input, @Nullable SagaCallback callback) {

@@ -12,9 +12,9 @@ import java.util.Objects;
  *
  * @param stalenessThresholdMillis a saga that has made no progress for this long is considered
  *     abandoned and eligible for recovery. Progress is judged from the saga's newest event, because
- *     step execution appends events without touching the state row: the row alone would make every
- *     long-running saga look dead. Size it above the longest a single step can take, which is its
- *     step timeout — {@code stepDeadline} is an absolute instant computed once before the retry
+ *     step execution appends events without moving the saga's sweep row: the row alone would make
+ *     every long-running saga look dead. Size it above the longest a single step can take, which is
+ *     its step timeout — {@code stepDeadline} is an absolute instant computed once before the retry
  *     loop, so it caps the whole attempt sequence, every retry and all backoff, not each attempt. A
  *     healthy saga emits an event only at step boundaries, so that timeout is the longest silence
  *     to expect. <b>With neither a step timeout nor a saga timeout configured there is no such
@@ -23,13 +23,16 @@ import java.util.Objects;
  *     recovery of genuinely crashed sagas by the same amount, so it is also the crash-recovery
  *     MTTR. Recovery is at-least-once across replicas: a step whose attempt sequence outlives this
  *     threshold emits no events while it runs, so another replica can begin recovering a saga the
- *     first is still executing — the loser is fenced at its next state write, but the participant
- *     call has already gone out, so participants must tolerate a duplicate invocation
+ *     first is still executing — the loser is fenced at its next event, but the participant call
+ *     has already gone out, so participants must tolerate a duplicate invocation
  * @param intervalSeconds how often the recovery scan runs (in seconds); each replica shifts its
  *     schedule within this interval by a deterministic offset derived from its owner ID, so
  *     replicas started together do not scan in phase
- * @param compensationGracePeriod how long a saga can remain stuck (with step failure events) before
- *     being escalated to {@link SagaStatus#ESCALATED}
+ * @param escalationGracePeriod how long recovery keeps retrying a stuck saga before it gives up. A
+ *     step whose retries keep failing, or a compensation that keeps failing, is escalated to {@link
+ *     SagaStatus#ESCALATED}. An asynchronous step that keeps timing out is failed: at or before the
+ *     pivot the saga compensates, and after it the saga is escalated. The period runs from the
+ *     first step failure, or for an asynchronous step from its first park
  * @param maxRecoveriesPerSweep work budget for <em>each</em> sweep of a pass, not for the pass as a
  *     whole: a pass sweeps for stale sagas (committed claims) and for overdue parked sagas
  *     (committed WAITING transitions), and each gets this budget in full, so a pass can do up to
@@ -52,7 +55,7 @@ import java.util.Objects;
 public record RecoveryConfig(
     long stalenessThresholdMillis,
     long intervalSeconds,
-    Duration compensationGracePeriod,
+    Duration escalationGracePeriod,
     int maxRecoveriesPerSweep,
     int maxConcurrentRecoveries,
     Clock clock) {
@@ -66,10 +69,10 @@ public record RecoveryConfig(
     if (intervalSeconds <= 0) {
       throw new IllegalArgumentException("intervalSeconds must be > 0, got " + intervalSeconds);
     }
-    Objects.requireNonNull(compensationGracePeriod, "compensationGracePeriod must not be null");
-    if (compensationGracePeriod.isNegative() || compensationGracePeriod.isZero()) {
+    Objects.requireNonNull(escalationGracePeriod, "escalationGracePeriod must not be null");
+    if (escalationGracePeriod.isNegative() || escalationGracePeriod.isZero()) {
       throw new IllegalArgumentException(
-          "compensationGracePeriod must be positive, got " + compensationGracePeriod);
+          "escalationGracePeriod must be positive, got " + escalationGracePeriod);
     }
     if (maxRecoveriesPerSweep <= 0) {
       throw new IllegalArgumentException(

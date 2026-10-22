@@ -1462,18 +1462,6 @@ class DefaultSagaOrchestratorTest {
     }
 
     @Test
-    void completeStepAsync_lookupMissesASagaTheLogShows_throwsStepNotParkedNotNotFound() {
-      // Arrange — a first step that is async, called back at once: the log already has the start,
-      // but on DynamoDB the lookup by ID can still miss the new row. A 404 would end the callback.
-      when(store.getEvents("saga-1")).thenReturn(List.of(StatusEvent.started(null)));
-      when(store.getStateSnapshot("saga-1")).thenReturn(Optional.empty());
-
-      // Act & Assert
-      assertThatThrownBy(() -> orchestrator.completeStepAsync("saga-1", "s1", Map.of()))
-          .isInstanceOf(SagaStepNotParkedException.class);
-    }
-
-    @Test
     void completeStepAsync_unknownSaga_throwsSagaNotFound() {
       // Arrange — no events and no row: the saga does not exist
       when(store.getEvents("nope")).thenReturn(List.of());
@@ -1552,33 +1540,6 @@ class DefaultSagaOrchestratorTest {
       assertThatThrownBy(() -> orchestrator.completeStepAsync("saga-1", "s1", Map.of()))
           .isInstanceOf(IllegalStateException.class);
       verify(engine, never()).resumeFrom(any(), any(), anyInt());
-    }
-
-    @Test
-    void completeStepAsync_parkInTheLog_readsTheWaitingRowByItsKeyNotById() {
-      // Arrange — the park's STEP_PENDING and the WAITING row share one timestamp, so the row is
-      // read by its full key; the lookup by ID can lag the write on DynamoDB
-      Instant parkedAt = Instant.parse("2026-10-07T00:00:00.123Z");
-      SagaStateSnapshot waiting = snapshot("saga-1", SagaStatus.WAITING);
-      SagaDefinition def = definition("test-saga");
-      SagaStateSnapshot running = snapshot("saga-1", SagaStatus.RUNNING);
-      List<SagaEvent> events =
-          List.of(StatusEvent.started(null), StepEvent.pending(1, "s1").withTimestamp(parkedAt));
-      when(store.getEvents("saga-1")).thenReturn(events);
-      when(store.getStateSnapshot("saga-1", SagaStatus.WAITING, parkedAt))
-          .thenReturn(Optional.of(waiting));
-      when(definitionRegistry.resolve("test-saga", "1.0")).thenReturn(def);
-      when(store.resumeParkedStep(eq(waiting), eq(events.size()), any(StepEvent.class)))
-          .thenReturn(running);
-      when(engine.replayEvents(eq(running), any()))
-          .thenReturn(new ExecutionContext("saga-1", Map.of(), running));
-
-      // Act
-      SagaStateSnapshot result = orchestrator.completeStepAsync("saga-1", "s1", Map.of());
-
-      // Assert
-      assertThat(result).isSameAs(running);
-      verify(store, never()).getStateSnapshot("saga-1");
     }
 
     @Test
@@ -1835,14 +1796,11 @@ class DefaultSagaOrchestratorTest {
       RecoveryConfig config =
           new RecoveryConfig(
               60_000, 30, Duration.ofHours(4), 1000, 10, Clock.fixed(NOW, ZoneOffset.UTC));
-      // Both lenient: the refusal tests turn the report away before either is reached. A log that
-      // ends in a park is read back by the WAITING row's full key.
+      // Both lenient: the refusal tests turn the report away before either is reached.
       lenient()
           .when(recoveryManager.parkedStepResolver())
           .thenReturn(new ParkedStepResolver(store, engine, config));
-      lenient()
-          .when(store.getStateSnapshot(eq("saga-1"), eq(SagaStatus.WAITING), any()))
-          .thenReturn(Optional.of(waiting));
+      lenient().when(store.getStateSnapshot("saga-1")).thenReturn(Optional.of(waiting));
     }
 
     /** A saga parked once on step 0, {@code s1}, a minute ago. */
