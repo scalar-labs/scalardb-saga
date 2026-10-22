@@ -933,7 +933,7 @@ class SagaRecoveryManager {
     // Grace-period policy (recovery-specific): escalate if a step failure has been stuck past the
     // grace period. Sagas with no STEP_FAILED events (crash recovery) skip this and act directly.
     if (isStuckLongerThanGracePeriod(events, EventType.STEP_FAILED, EventType.STEP_COMPLETED)) {
-      escalate(context, "step retry stuck for over " + config.compensationGracePeriod());
+      escalate(context, "step retry stuck for over " + config.escalationGracePeriod());
       return;
     }
     engine.recover(RecoveryActionResolver.resolve(events, def, SagaStatus.RUNNING), def, context);
@@ -944,7 +944,7 @@ class SagaRecoveryManager {
     // Grace-period policy (recovery-specific): compensation stuck past the grace period escalates.
     if (isStuckLongerThanGracePeriod(
         events, EventType.STEP_COMPENSATION_FAILED, EventType.STEP_COMPENSATED)) {
-      escalate(context, "compensation stuck for over " + config.compensationGracePeriod());
+      escalate(context, "compensation stuck for over " + config.escalationGracePeriod());
       return;
     }
     engine.recover(
@@ -1103,7 +1103,7 @@ class SagaRecoveryManager {
    * Decides whether a timed-out parked step is re-driven rather than given up on. Re-drives only
    * within BOTH bounds: the park-attempt count ({@code STEP_PENDING} events at the step) within the
    * step's retry max-attempts — caps hammering a dead participant under a short callback timeout —
-   * AND the time since the first park within the compensation grace period — caps total stuck time
+   * AND the time since the first park within the escalation grace period — caps total stuck time
    * under a long one. Otherwise returns which bound was hit (attempts checked first).
    */
   private RedriveDecision redriveDecision(
@@ -1128,7 +1128,7 @@ class SagaRecoveryManager {
             .map(
                 firstPark ->
                     Duration.between(firstPark, config.clock().instant())
-                            .compareTo(config.compensationGracePeriod())
+                            .compareTo(config.escalationGracePeriod())
                         <= 0)
             .orElse(false);
     return withinGrace ? RedriveDecision.REDRIVE : RedriveDecision.GRACE_EXCEEDED;
@@ -1208,7 +1208,7 @@ class SagaRecoveryManager {
       anchor = reset.get();
     }
     return Duration.between(anchor, config.clock().instant())
-            .compareTo(config.compensationGracePeriod())
+            .compareTo(config.escalationGracePeriod())
         > 0;
   }
 

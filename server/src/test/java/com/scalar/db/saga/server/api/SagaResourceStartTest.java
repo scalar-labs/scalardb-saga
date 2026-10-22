@@ -45,11 +45,10 @@ import org.junit.jupiter.api.Test;
 /**
  * Covers the two start endpoints' wait behaviour — the subject of {@code todos/076}.
  *
- * <p>Until 2026-08 an unset {@code sync.timeout_millis} (the default) made a synchronous start run
- * the saga <em>inline on the request thread</em>, unbounded, so ~200 concurrent slow sagas
- * exhausted the Jetty pool. Nothing here tested it, which is why the change that removed it broke
- * no test. These tests pin the replacement: every start dispatches to {@code startAsync} and waits
- * only up to the bound the server was configured with.
+ * <p>A synchronous start once ran the saga <em>inline on the request thread</em>, unbounded, so
+ * ~200 concurrent slow sagas exhausted the Jetty pool. Nothing here tested it, which is why the
+ * change that removed it broke no test. These tests pin the replacement: every start dispatches to
+ * {@code startAsync} and waits only up to the bound the server was configured with.
  */
 class SagaResourceStartTest {
 
