@@ -102,6 +102,10 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   // principal. A remote front end injects the request's authenticated identity instead.
   private static final String EMBEDDED_OPERATOR = "embedded";
 
+  // The longest a participant's own account of a failure may be when it is recorded. It bounds
+  // the size of the event row, since the text arrives from outside.
+  private static final int MAX_REPORTED_ERROR_CHARS = 1024;
+
   private final SagaEngine engine;
   private final SagaStore store;
   private final SagaDefinitionRegistry definitionRegistry;
@@ -847,23 +851,88 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
   public SagaStateSnapshot completeStepAsync(
       String sagaId, String stepName, Map<String, Object> output) {
     ResumedStep resumed = resumeParked(sagaId, stepName, output);
+    // The resume carries no SagaCallback — the one from the original start died at the park — so
+    // this reaches the settlement listener alone.
+    driveDetached(
+        sagaId,
+        "completion",
+        () -> {
+          engine.resumeFrom(resumed.def(), resumed.context(), resumed.stepIndex() + 1);
+          return resumed.context().getCurrentState();
+        });
+    return resumed.running();
+  }
+
+  /**
+   * Settles a parked ({@code WAITING}) step that its participant reports as failed, through its
+   * failure callback, rather than leaving it to wait out its deadline. The same rules settle it as
+   * when recovery finds the step past its deadline. A retryable failure re-issues the step while
+   * its retry attempts and the grace period allow; past them, and for a failure that is not
+   * retryable, the step is given up. The saga then compensates if the step is at or before the
+   * pivot, or is escalated if it is after it.
+   *
+   * <p>Like {@link #completeStepAsync}, this returns once the transition is durable, and runs the
+   * re-issued step or the compensation on the async executor. The participant's message, if any, is
+   * recorded on the event for what happened next, the re-issue or the step's failure, flattened to
+   * one line and cut to {@value #MAX_REPORTED_ERROR_CHARS} characters.
+   *
+   * @param sagaId the parked saga
+   * @param stepName the step the participant reports on (must be the currently parked step)
+   * @param error the participant's account of the failure, or {@code null} for none
+   * @param retryable whether the participant asks for the step to be retried
+   * @return the saga's state once the transition commits: {@code RUNNING} when the step is
+   *     re-issued, {@code COMPENSATING} or {@code ESCALATED} when it is given up
+   * @throws SagaStepNotParkedException if the step has not parked yet, or the saga's row lags its
+   *     log; retryable, since the park is about to be recorded
+   * @throws IllegalStateException if the step is already settled or the saga has moved on, which
+   *     the callback endpoint answers as an idempotent duplicate
+   * @throws SagaIllegalArgumentException if {@code stepName} is not the currently parked step
+   * @throws SagaConcurrentModificationException if a concurrent callback or deadline sweep settles
+   *     the parked step first
+   */
+  public SagaStateSnapshot failStepAsync(
+      String sagaId, String stepName, @Nullable String error, boolean retryable) {
+    Objects.requireNonNull(sagaId, "sagaId must not be null");
+    Objects.requireNonNull(stepName, "stepName must not be null");
+    ensureOpen();
+
+    List<SagaEvent> events = store.getEvents(sagaId);
+    SagaStateSnapshot saga = parkedSnapshot(sagaId, stepName, events);
+    int stepIndex = parkedStepIndex(events, sagaId, stepName);
+    SagaDefinition def = resolveDefinition(saga);
+    ParkedStepResolver.Resolution resolution =
+        recoveryManager
+            .parkedStepResolver()
+            .resolve(saga, events, stepIndex, stepName, def, retryable, reportedCause(error));
+    logger.info(
+        "Participant reported step '{}' of saga {} failed ({}); saga is now {}",
+        stepName,
+        sagaId,
+        retryable ? "retryable" : "not retryable",
+        resolution.snapshot().getStatus());
+
+    driveDetached(sagaId, "failure-callback", resolution.drive());
+    return resolution.snapshot();
+  }
+
+  /**
+   * Runs a parked saga's continuation on the async executor, so a callback route can answer its
+   * participant once the transition is durable rather than after the rest of the saga. The verdict
+   * is recorded rather than branched on, and the outcome dispatched in the finally, as {@code
+   * submitAsync} does, so a drive that settled the saga and then threw still notifies. {@code
+   * execute()} rather than {@code submit()}: the result is unused, and a dropped Future would
+   * swallow failures. If the executor is shutting down, the transition is still committed and
+   * recovery drives the saga.
+   */
+  private void driveDetached(String sagaId, String label, Supplier<SagaStateSnapshot> drive) {
     try {
-      // execute() (not submit()) because the result is ignored: submit() would return a Future we
-      // drop, which both trips Error Prone and silently swallows failures. The inner catch handles
-      // failures instead, logging any Throwable (incl. Error); the saga is persisted as RUNNING, so
-      // recovery is the backstop.
       asyncExecutor.execute(
           () -> {
-            // Mirrors submitAsync: record the verdict rather than branching on it, and dispatch in
-            // the finally, so a drive that settled the saga and then threw still notifies. The
-            // resume carries no SagaCallback — the one from the original start died at the park —
-            // so this reaches the settlement listener alone.
             SagaStateSnapshot executed = null;
             try {
-              engine.resumeFrom(resumed.def(), resumed.context(), resumed.stepIndex() + 1);
-              executed = resumed.context().getCurrentState();
+              executed = drive.get();
             } catch (Throwable t) {
-              logger.error("Async completion drive for saga {} failed unexpectedly", sagaId, t);
+              logger.error("Async {} drive for saga {} failed unexpectedly", label, sagaId, t);
             } finally {
               try {
                 dispatchOutcome(sagaId, null, executed);
@@ -873,14 +942,24 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
             }
           });
     } catch (RejectedExecutionException e) {
-      // Race between close() and execute() — the step is resumed (RUNNING); recovery will drive it.
       logger.warn(
-          "Async executor rejected completion drive for saga {} (shutting down); "
-              + "recovery will handle it",
+          "Async executor rejected {} drive for saga {} (shutting down); recovery will handle it",
+          label,
           sagaId,
           e);
     }
-    return resumed.running();
+  }
+
+  /**
+   * What the failure event records for a participant's report. The text comes from outside and is
+   * logged when the step is escalated, so it is flattened to one line first, as an operator's
+   * reason is.
+   */
+  private static String reportedCause(@Nullable String error) {
+    String trimmed = error == null ? "" : TextGuards.oneLine(error).strip();
+    return trimmed.isEmpty()
+        ? "participant reported failure"
+        : "participant reported failure: " + TextGuards.cut(trimmed, MAX_REPORTED_ERROR_CHARS);
   }
 
   /**
@@ -979,7 +1058,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       throw new SagaStepNotParkedException(sagaId, stepName);
     }
     throw new IllegalStateException(
-        "Cannot complete step for saga " + sagaId + " in status " + saga.getStatus());
+        "Cannot settle step for saga " + sagaId + " in status " + saga.getStatus());
   }
 
   /**
@@ -1015,7 +1094,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
       }
     }
     if (parked == null) {
-      throw new IllegalStateException("Saga " + sagaId + " has no parked step to complete");
+      throw new IllegalStateException("Saga " + sagaId + " has no parked step to settle");
     }
     if (!parked.getStepName().equals(stepName)) {
       // Caller input rather than a server fault, so it carries INVALID_ARGUMENT: the step name
@@ -1039,7 +1118,7 @@ public class DefaultSagaOrchestrator implements SagaOrchestrator {
           stepName,
           parked.getStepName());
       throw new SagaIllegalArgumentException(
-          "Callback step '" + stepName + "' is not the parked step for saga " + sagaId);
+          "Reported step '" + stepName + "' is not the parked step for saga " + sagaId);
     }
     return parked.getStepIndex();
   }

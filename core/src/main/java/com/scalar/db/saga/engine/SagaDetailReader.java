@@ -110,16 +110,13 @@ final class SagaDetailReader {
     if (detail == null || detail.length() <= MAX_DETAIL_LENGTH) {
       return detail;
     }
-    int cut = MAX_DETAIL_LENGTH;
-    if (Character.isHighSurrogate(detail.charAt(cut - 1))) {
-      cut--;
-    }
-    return detail.substring(0, cut) + TRUNCATION_MARKER;
+    return TextGuards.cut(detail, MAX_DETAIL_LENGTH) + TRUNCATION_MARKER;
   }
 
   private static @Nullable String stepDetail(StepEvent step) {
     return switch (step.getEventType()) {
-      case STEP_FAILED, STEP_COMPENSATION_FAILED ->
+      // A re-issue records an error only when a participant reported the failure behind it.
+      case STEP_FAILED, STEP_COMPENSATION_FAILED, STEP_REISSUING ->
           EventPayloadSerializer.errorMessage(step.getPayload());
       default -> null; // STEP_COMPLETED etc. carry the step's raw output — never exposed here
     };

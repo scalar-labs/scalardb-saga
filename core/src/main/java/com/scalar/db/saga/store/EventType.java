@@ -73,8 +73,11 @@ public enum EventType {
    */
   STEP_PENDING,
   /**
-   * The recovery sweep un-parked a timed-out asynchronous step to re-issue its call ({@code WAITING
-   * → RUNNING}); a fresh {@link #STEP_PENDING} follows when it parks again.
+   * A parked asynchronous step was un-parked to re-issue its call ({@code WAITING → RUNNING}),
+   * because it timed out or its participant reported a retryable failure; a fresh {@link
+   * #STEP_PENDING} follows when it parks again. The payload is optional: when present it is a
+   * serialized error recording the reported failure, in the form a {@link #STEP_FAILED} payload
+   * takes, never a step output. A store must keep it; replay folds the event to a no-op.
    */
   STEP_REISSUING,
   /** A step's forward action completed; the payload is its serialized output. */

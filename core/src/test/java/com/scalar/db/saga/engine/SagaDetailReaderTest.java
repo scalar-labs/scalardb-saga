@@ -139,6 +139,19 @@ class SagaDetailReaderTest {
   }
 
   @Test
+  void read_reissueWithReportedError_showsTheError() {
+    // Act — a re-issue after a participant reported a retryable failure.
+    List<TimelineEvent> timeline =
+        readTimeline(
+            StepEvent.reissuing(0, "debit", errorPayload("busy")).withTimestamp(TS),
+            StepEvent.reissuing(0, "debit").withTimestamp(TS));
+
+    // Assert — and a re-issue after a timeout has nothing to show.
+    assertThat(timeline.get(0).getDetail()).isEqualTo("busy");
+    assertThat(timeline.get(1).getDetail()).isNull();
+  }
+
+  @Test
   void read_stepFailureMessageOverCap_cutsDetailAndAppendsMarker() {
     // Arrange — the shape the cap exists for: a step failure embedding a large response body
     String message = "x".repeat(SagaDetailReader.MAX_DETAIL_LENGTH + 5000);

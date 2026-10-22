@@ -1024,6 +1024,49 @@ class SagaRecoveryManagerTest {
     }
 
     @Test
+    void recover_overdueParkedTccConfirmation_redrivesUnderTheConfirmationPolicy() {
+      // Arrange — a one-step TCC saga parked on its confirmation, which the plan puts at index 1,
+      // past the definition's single step. Three parks would spend the default three attempts; the
+      // confirmation policy allows ten, so the step is re-driven.
+      SagaStateSnapshot waiting = snapshot(SagaStatus.WAITING);
+      SagaStateSnapshot running = snapshot(SagaStatus.RUNNING);
+      SagaDefinition def =
+          SagaDefinition.newBuilder(SAGA_NAME)
+              .tcc()
+              .step("debit", "com.example.Debit")
+              .add()
+              .build();
+      StepEvent park = StepEvent.pending(1, "debit").withTimestamp(NOW.minusSeconds(60));
+      List<SagaEvent> events =
+          List.of(
+              StatusEvent.started(null),
+              StepEvent.completed(0, "debit", null),
+              park,
+              StepEvent.reissuing(1, "debit"),
+              park,
+              StepEvent.reissuing(1, "debit"),
+              park);
+      ExecutionContext ctx = mock(ExecutionContext.class);
+
+      noStaleRecoverables();
+      when(store.findOverdueParkedSagas(any(), any()))
+          .thenReturn(new OverdueParked(List.of(SAGA_ID), null));
+      when(store.getStateSnapshot(SAGA_ID)).thenReturn(Optional.of(waiting));
+      when(store.getEvents(SAGA_ID)).thenReturn(events);
+      when(registry.resolve(SAGA_NAME, DEF_VERSION)).thenReturn(def);
+      when(store.redriveParkedStep(eq(waiting), anyInt(), any(StepEvent.class)))
+          .thenReturn(running);
+      when(engine.replayEvents(eq(running), any())).thenReturn(ctx);
+
+      // Act
+      manager.recover();
+
+      // Assert
+      verify(engine).resumeFrom(def, ctx, 1);
+      verify(store, never()).failParkedStep(any(), anyInt(), any(), any());
+    }
+
+    @Test
     void recover_overdueParkedAttemptsExhausted_givesUp() {
       // Arrange — three park attempts (== maxAttempts=3), all recent: the count bound is spent.
       SagaStateSnapshot waiting = snapshot(SagaStatus.WAITING);

@@ -18,24 +18,44 @@ import javax.crypto.spec.SecretKeySpec;
  */
 final class HmacUtils {
 
+  /** The action a token for the completion route signs. */
+  static final String COMPLETE = "complete";
+
+  /** The action a token for the failure route signs. */
+  static final String FAIL = "fail";
+
   private static final String HMAC_SHA256 = "HmacSHA256";
   private static final char[] HEX = "0123456789abcdef".toCharArray();
 
   private HmacUtils() {}
 
   /**
-   * The canonical data signed by a callback token, binding {@code sagaId}, {@code stepName}, and
-   * {@code iat}. The two variable-length fields are length-prefixed ({@code <len>:<value>}) so the
-   * {@code :} separators are unambiguous even when a field contains a {@code :} — {@code sagaId} is
-   * client-supplied free text and step names are not constrained to exclude {@code :}. Without the
-   * prefix, distinct tuples could collide (e.g. {@code (a:b, c)} and {@code (a, b:c)} both yield
-   * {@code a:b:c:iat}), letting a token minted for one saga or step validate for another. {@code
-   * iat} is trailing so it needs no prefix. Both the minting side ({@link HmacCallbackUrlProvider})
-   * and the verifying side ({@link CallbackResource}) must sign the string produced here, so they
-   * agree on the layout.
+   * The canonical data signed by a callback token, binding {@code sagaId}, {@code stepName}, the
+   * route's {@code action} ({@link #COMPLETE} or {@link #FAIL}), and {@code iat}. The action is
+   * signed so that each URL grants only its own route: a participant that hands its completion URL
+   * to someone else has not also handed over the power to fail the step. The variable-length fields
+   * are length-prefixed ({@code <len>:<value>}) so the {@code :} separators are unambiguous even
+   * when a field contains a {@code :} — {@code sagaId} is client-supplied free text and step names
+   * are not constrained to exclude {@code :}. Without the prefix, distinct tuples could collide
+   * (e.g. {@code (a:b, c)} and {@code (a, b:c)} both yield {@code a:b:c:iat}), letting a token
+   * minted for one saga or step validate for another. {@code iat} is trailing so it needs no
+   * prefix. Both the minting side ({@link HmacCallbackUrlProvider}) and the verifying side ({@link
+   * CallbackResource}) must sign the string produced here, so they agree on the layout.
    */
-  static String callbackSignedData(String sagaId, String stepName, String iat) {
-    return sagaId.length() + ":" + sagaId + ":" + stepName.length() + ":" + stepName + ":" + iat;
+  static String callbackSignedData(String sagaId, String stepName, String action, String iat) {
+    return sagaId.length()
+        + ":"
+        + sagaId
+        + ":"
+        + stepName.length()
+        + ":"
+        + stepName
+        + ":"
+        + action.length()
+        + ":"
+        + action
+        + ":"
+        + iat;
   }
 
   /**

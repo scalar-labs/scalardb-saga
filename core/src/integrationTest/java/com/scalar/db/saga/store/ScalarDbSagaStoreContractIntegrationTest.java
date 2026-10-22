@@ -396,6 +396,21 @@ class ScalarDbSagaStoreContractIntegrationTest {
   }
 
   @Test
+  void redriveParkedStep_reissueWithAReportedError_keepsItsPayload() {
+    // Arrange
+    SagaStateSnapshot parked = parkedSaga("saga-1", Instant.now().minus(Duration.ofMinutes(1)));
+    String error = "{\"message\":\"participant reported failure: busy\"}";
+
+    // Act
+    store.redriveParkedStep(parked, 2, StepEvent.reissuing(0, "approve", error));
+
+    // Assert
+    SagaEvent last = store.getEvents("saga-1").get(2);
+    assertThat(last.getEventType()).isEqualTo(EventType.STEP_REISSUING);
+    assertThat(((StepEvent) last).getPayload()).isEqualTo(error);
+  }
+
+  @Test
   void resumeParkedStep_afterTheTimeoutFailedTheStep_throwsSagaConcurrentModificationException() {
     // Arrange
     SagaStateSnapshot parked = parkedSaga("saga-1", Instant.now().minus(Duration.ofMinutes(1)));

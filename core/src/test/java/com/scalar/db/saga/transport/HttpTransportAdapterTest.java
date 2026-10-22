@@ -38,6 +38,7 @@ class HttpTransportAdapterTest {
   private final AtomicReference<String> requestBody = new AtomicReference<>();
   private final AtomicReference<byte[]> requestBodyBytes = new AtomicReference<>();
   private final AtomicReference<String> callbackUrlHeader = new AtomicReference<>();
+  private final AtomicReference<String> failureUrlHeader = new AtomicReference<>();
   private final AtomicInteger hitCount = new AtomicInteger();
 
   @BeforeEach
@@ -82,6 +83,7 @@ class HttpTransportAdapterTest {
         "/async",
         ex -> {
           callbackUrlHeader.set(ex.getRequestHeaders().getFirst(HttpHeaders.SAGA_CALLBACK_URL));
+          failureUrlHeader.set(ex.getRequestHeaders().getFirst(HttpHeaders.SAGA_FAILURE_URL));
           respond(ex, 202, "{}"); // 202 Accepted — the participant will call back later
         });
     server.createContext("/fail503", ex -> respond(ex, 503, "{}"));
@@ -136,6 +138,43 @@ class HttpTransportAdapterTest {
         .call(spec, ctx(Map.of()), "debit");
 
     assertThat(callbackUrlHeader.get()).isEqualTo("http://cb/saga-1/debit");
+  }
+
+  @Test
+  void call_asyncStep_injectsFailureUrlHeader() throws Exception {
+    // Arrange
+    HttpCall spec = HttpCall.newBuilder("/async").method(HttpMethod.POST).async(true).build();
+    CallbackUrlProvider provider =
+        new CallbackUrlProvider() {
+          @Override
+          public String callbackUrl(String sagaId, String stepName) {
+            return "http://cb/" + sagaId + "/" + stepName + "/complete";
+          }
+
+          @Override
+          public String failureUrl(String sagaId, String stepName) {
+            return "http://cb/" + sagaId + "/" + stepName + "/fail";
+          }
+        };
+
+    // Act
+    adapterWithProvider(provider).call(spec, ctx(Map.of()), "debit");
+
+    // Assert
+    assertThat(failureUrlHeader.get()).isEqualTo("http://cb/saga-1/debit/fail");
+  }
+
+  @Test
+  void call_asyncStepWithNoFailureRoute_omitsFailureUrlHeader() throws Exception {
+    // Arrange — a provider that only implements the callback URL.
+    HttpCall spec = HttpCall.newBuilder("/async").method(HttpMethod.POST).async(true).build();
+
+    // Act
+    adapterWithProvider((sagaId, step) -> "http://cb/x").call(spec, ctx(Map.of()), "debit");
+
+    // Assert
+    assertThat(callbackUrlHeader.get()).isEqualTo("http://cb/x");
+    assertThat(failureUrlHeader.get()).isNull();
   }
 
   @Test

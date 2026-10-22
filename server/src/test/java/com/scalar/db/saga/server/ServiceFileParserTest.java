@@ -449,7 +449,14 @@ class ServiceFileParserTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"X-Saga-Id", "X-Saga-Step", "X-Saga-Callback-Url", "x-saga-id"})
+    @ValueSource(
+        strings = {
+          "X-Saga-Id",
+          "X-Saga-Step",
+          "X-Saga-Callback-Url",
+          "X-Saga-Failure-Url",
+          "x-saga-id"
+        })
     void parseFile_engineReservedHeaderGiven_throwsIllegalArgumentException(String header)
         throws IOException {
       // The engine stamps these itself and its value always wins; the lower-cased spelling is in
