@@ -1,7 +1,13 @@
 package com.scalar.db.saga.definition;
 
 import com.scalar.db.saga.api.HttpMethod;
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -12,14 +18,14 @@ import org.jspecify.annotations.Nullable;
 
 /**
  * An HTTP {@link CallSpec} (Layer 2b): a verb, a URL path (templated), optional query parameters
- * (templated), a request body (either a flat field map sent as JSON, or a raw templated string with
- * an explicit content type), and an output-extraction mapping.
+ * (templated), a request body (either a field map sent as a JSON object, or a raw templated string
+ * with an explicit content type), and an output-extraction mapping.
  *
  * <p>At runtime the {@code ${key}} expressions in {@link #getPath()}, {@link #getQuery()}, {@link
  * #getJsonBody()}, and {@link #getStringBody()} are resolved from the saga context.
  *
- * <p><b>Request body.</b> A body-carrying verb uses <em>either</em> {@link #getJsonBody()} (a flat
- * field map serialized as a JSON object, content type {@code application/json} unless overridden by
+ * <p><b>Request body.</b> A body-carrying verb uses <em>either</em> {@link #getJsonBody()} (a field
+ * map serialized as a JSON object, content type {@code application/json} unless overridden by
  * {@link #getContentType()}) <em>or</em> {@link #getStringBody()} (a raw string template sent
  * verbatim with {@link #getContentType()}, defaulting to {@code application/json}). The two are
  * mutually exclusive — declaring both is a build-time error.
@@ -42,13 +48,16 @@ public final class HttpCall extends CallSpec {
   /** The output token capturing the entire raw response body as a {@code String}. */
   public static final String BODY_OUTPUT = "$body";
 
+  /** The most digits a {@link #getJsonBody()} number may have, before or after the point. */
+  public static final int MAX_NUMBER_DIGITS = 1000;
+
   /** Placeholder syntax for context-value interpolation; shared with the transport resolver. */
   public static final Pattern PLACEHOLDER = Pattern.compile("\\$\\{([^}]*)\\}");
 
   private final HttpMethod method;
   private final String path;
   private final Map<String, String> query;
-  private final Map<String, String> jsonBody;
+  private final Map<String, @Nullable Object> jsonBody;
   private final @Nullable String stringBody;
   private final @Nullable String contentType;
   private final Map<String, String> output;
@@ -59,7 +68,7 @@ public final class HttpCall extends CallSpec {
     this.method = builder.method;
     this.path = builder.path;
     this.query = Map.copyOf(builder.query);
-    this.jsonBody = Map.copyOf(builder.jsonBody);
+    this.jsonBody = builder.jsonBody;
     this.stringBody = builder.stringBody;
     this.contentType = builder.contentType;
     this.output = Map.copyOf(builder.output);
@@ -115,13 +124,15 @@ public final class HttpCall extends CallSpec {
   }
 
   /**
-   * The request-body field templates (field → {@code ${key}}-or-literal), sent as a JSON object for
-   * body-carrying verbs. Unmodifiable; always empty for {@link HttpMethod#GET}/{@link
-   * HttpMethod#DELETE}.
+   * The request-body fields, sent as a JSON object for body-carrying verbs. Each value is a JSON
+   * value as declared: a {@code String} template ({@code ${key}}-or-literal), a {@code Long},
+   * {@code BigInteger} or {@code BigDecimal}, a {@code Boolean}, {@code null}, or a nested {@code
+   * Map} or {@code List} of the same; only strings are templated. Unmodifiable, in declaration
+   * order; always empty for {@link HttpMethod#GET}/{@link HttpMethod#DELETE}.
    *
-   * @return the body field templates by field name
+   * @return the body fields by field name
    */
-  public Map<String, String> getJsonBody() {
+  public Map<String, @Nullable Object> getJsonBody() {
     return jsonBody;
   }
 
@@ -138,7 +149,7 @@ public final class HttpCall extends CallSpec {
 
   /**
    * The explicit request {@code Content-Type}, or {@code null} to use the implicit default ({@code
-   * application/json} for the flat-map {@link #getJsonBody()} body and for a string {@link
+   * application/json} for a {@link #getJsonBody()} map body and for a string {@link
    * #getStringBody()}). When set it overrides that default.
    *
    * @return the content type, or {@code null} for the default
@@ -178,9 +189,18 @@ public final class HttpCall extends CallSpec {
     Set<String> keys = new HashSet<>();
     collectKeys(path, keys);
     query.values().forEach(value -> collectKeys(value, keys));
-    jsonBody.values().forEach(value -> collectKeys(value, keys));
+    collectNestedKeys(jsonBody, keys);
     collectKeys(stringBody, keys);
     return keys;
+  }
+
+  private static void collectNestedKeys(@Nullable Object value, Set<String> into) {
+    switch (value) {
+      case String template -> collectKeys(template, into);
+      case Map<?, ?> map -> map.values().forEach(v -> collectNestedKeys(v, into));
+      case List<?> list -> list.forEach(v -> collectNestedKeys(v, into));
+      case null, default -> {}
+    }
   }
 
   private static void collectKeys(@Nullable String template, Set<String> into) {
@@ -260,7 +280,7 @@ public final class HttpCall extends CallSpec {
     private final String path;
     private HttpMethod method = HttpMethod.POST;
     private Map<String, String> query = Map.of();
-    private Map<String, String> jsonBody = Map.of();
+    private Map<String, @Nullable Object> jsonBody = Map.of();
     private @Nullable String stringBody;
     private @Nullable String contentType;
     private Map<String, String> output = Map.of();
@@ -294,14 +314,89 @@ public final class HttpCall extends CallSpec {
     }
 
     /**
-     * Sets the request-body field templates. Defensively copied.
+     * Sets the request-body fields. Deep-copied; a value is a {@code String} template, a {@code
+     * Byte}, {@code Short}, {@code Integer}, {@code Long}, {@code BigInteger}, {@code Float},
+     * {@code Double} or {@code BigDecimal}, a {@code Boolean}, {@code null}, or a nested {@code
+     * Map} with {@code String} keys or {@code List} of the same.
      *
-     * @param jsonBody field names to {@code ${key}}-or-literal values, sent as a JSON object
+     * <p>Numbers are kept exactly, in the one form a stored definition reads back, so a definition
+     * compares equal to itself after it is stored: a number with no fractional part becomes a
+     * {@code Long}, or a {@code BigInteger} beyond its range, and any other becomes a {@code
+     * BigDecimal} without trailing zeros. A {@code Float} or {@code Double} is taken by its decimal
+     * string, so {@code 0.1f} stays {@code 0.1}.
+     *
+     * @param jsonBody field names to values, sent as a JSON object
      * @return this builder
+     * @throws IllegalArgumentException if a value is of another type, a nested map has a key that
+     *     is not a {@code String}, or a number is not finite or has more than {@value
+     *     #MAX_NUMBER_DIGITS} digits
      */
-    public Builder jsonBody(Map<String, String> jsonBody) {
-      this.jsonBody = Map.copyOf(jsonBody);
+    public Builder jsonBody(Map<String, ?> jsonBody) {
+      this.jsonBody = copyObject(jsonBody);
       return this;
+    }
+
+    private static Map<String, @Nullable Object> copyObject(Map<?, ?> map) {
+      Map<String, @Nullable Object> copy = new LinkedHashMap<>();
+      map.forEach(
+          (key, value) -> {
+            if (!(key instanceof String name)) {
+              throw new IllegalArgumentException("jsonBody key must be a String, got " + key);
+            }
+            copy.put(name, copyValue(value));
+          });
+      return Collections.unmodifiableMap(copy);
+    }
+
+    private static @Nullable Object copyValue(@Nullable Object value) {
+      return switch (value) {
+        case null -> null;
+        case String s -> s;
+        case Boolean b -> b;
+        case Byte _, Short _, Integer _, Long _ -> ((Number) value).longValue();
+        case BigInteger n -> exact(new BigDecimal(n));
+        case BigDecimal n -> exact(n);
+        case Float n -> exact(new BigDecimal(finite(n.doubleValue(), n.toString())));
+        case Double n -> exact(new BigDecimal(finite(n, n.toString())));
+        case Map<?, ?> map -> copyObject(map);
+        case List<?> list -> {
+          List<@Nullable Object> copy = new ArrayList<>();
+          list.forEach(element -> copy.add(copyValue(element)));
+          yield Collections.unmodifiableList(copy);
+        }
+        default ->
+            throw new IllegalArgumentException(
+                "jsonBody value must be a JSON value, got " + value.getClass().getName());
+      };
+    }
+
+    private static String finite(double value, String decimal) {
+      if (!Double.isFinite(value)) {
+        throw new IllegalArgumentException("jsonBody number must be finite, got " + value);
+      }
+      return decimal;
+    }
+
+    /**
+     * The canonical form of a number: integral values as {@code Long} or {@code BigInteger}, others
+     * as a {@code BigDecimal} without trailing zeros. A JSON reader yields one of those for every
+     * spelling of the same value ({@code 1.50}, {@code 1.5}, {@code 15e-1}), so equality survives
+     * the store round trip.
+     */
+    private static Object exact(BigDecimal value) {
+      BigDecimal number = value.stripTrailingZeros();
+      // The digit bound keeps toBigIntegerExact from expanding an exponent such as 1e999999999,
+      // and matches the longest number Jackson reads back by default.
+      if (number.precision() > MAX_NUMBER_DIGITS
+          || number.precision() - number.scale() > MAX_NUMBER_DIGITS) {
+        throw new IllegalArgumentException(
+            "jsonBody number must have at most " + MAX_NUMBER_DIGITS + " digits");
+      }
+      if (number.scale() > 0) {
+        return number;
+      }
+      BigInteger integral = number.toBigIntegerExact();
+      return integral.bitLength() < Long.SIZE ? (Object) integral.longValue() : integral;
     }
 
     /**
@@ -319,7 +414,7 @@ public final class HttpCall extends CallSpec {
 
     /**
      * Overrides the request {@code Content-Type} (otherwise the implicit {@code application/json}
-     * for a flat-map {@link #jsonBody(Map)} or string {@link #stringBody(String)}).
+     * for a {@link #jsonBody(Map)} map or string {@link #stringBody(String)}).
      *
      * @param contentType the {@code Content-Type} header value
      * @return this builder
@@ -374,8 +469,8 @@ public final class HttpCall extends CallSpec {
      * Builds the {@link HttpCall}.
      *
      * @return the immutable call spec
-     * @throws IllegalStateException if both a flat-map {@link #jsonBody(Map)} body and a string
-     *     {@link #stringBody(String)} are set; if a body-less verb ({@link HttpMethod#GET}/{@link
+     * @throws IllegalStateException if both a {@link #jsonBody(Map)} map body and a string {@link
+     *     #stringBody(String)} are set; if a body-less verb ({@link HttpMethod#GET}/{@link
      *     HttpMethod#DELETE}) declares any request body (a {@link #jsonBody(Map)} map or a {@link
      *     #stringBody(String)} string); or if an {@link #output(Map)} expression is neither {@link
      *     #BODY_OUTPUT} nor a {@code $.path} expression with non-empty segments; if {@code
@@ -385,7 +480,7 @@ public final class HttpCall extends CallSpec {
     public HttpCall build() {
       if (!jsonBody.isEmpty() && stringBody != null) {
         throw new IllegalStateException(
-            "a flat-map request body and a raw string body are mutually exclusive; set only one");
+            "a JSON map request body and a raw string body are mutually exclusive; set only one");
       }
       if (!method.hasBody() && (!jsonBody.isEmpty() || stringBody != null)) {
         throw new IllegalStateException(

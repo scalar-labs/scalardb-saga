@@ -683,6 +683,81 @@ class SagaDefinitionParserTest {
     }
 
     @Test
+    void parseJson_unknownStepRetryPolicyField_throwsException() {
+      // Arrange
+      String json =
+          """
+          {
+            "name": "bad",
+            "steps": [
+              { "name": "s1", "stepClass": "com.example.Step1",
+                "retryPolicy": { "maxAttempt": 5 } }
+            ]
+          }
+          """;
+
+      // Act & Assert
+      assertThatThrownBy(() -> SagaDefinitionParser.parseJson(json))
+          .isInstanceOf(SagaDefinitionException.class);
+    }
+
+    @Test
+    void parseJson_retryPolicyOutOfRange_throwsSagaDefinitionException() {
+      // Arrange
+      String json =
+          """
+          {
+            "name": "bad",
+            "steps": [
+              { "name": "s1", "stepClass": "com.example.Step1",
+                "retryPolicy": { "maxAttempts": 0 } }
+            ]
+          }
+          """;
+
+      // Act & Assert
+      assertThatThrownBy(() -> SagaDefinitionParser.parseJson(json))
+          .isInstanceOf(SagaDefinitionException.class);
+    }
+
+    @Test
+    void parseJson_retryPolicyNotAnObject_throwsSagaDefinitionException() {
+      // Arrange
+      String json =
+          """
+          {
+            "name": "bad",
+            "steps": [
+              { "name": "s1", "stepClass": "com.example.Step1", "retryPolicy": 3 }
+            ]
+          }
+          """;
+
+      // Act & Assert
+      assertThatThrownBy(() -> SagaDefinitionParser.parseJson(json))
+          .isInstanceOf(SagaDefinitionException.class);
+    }
+
+    @Test
+    void parseJson_unknownDefaultRetryPolicyField_throwsException() {
+      // Arrange
+      String json =
+          """
+          {
+            "name": "bad",
+            "defaultRetryPolicy": { "maxAttempts": 5, "jitter": true },
+            "steps": [
+              { "name": "s1", "stepClass": "com.example.Step1" }
+            ]
+          }
+          """;
+
+      // Act & Assert
+      assertThatThrownBy(() -> SagaDefinitionParser.parseJson(json))
+          .isInstanceOf(SagaDefinitionException.class);
+    }
+
+    @Test
     void parseJson_invalidMode_throwsException() {
       // Arrange
       String json =

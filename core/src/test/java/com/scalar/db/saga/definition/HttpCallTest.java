@@ -4,7 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.scalar.db.saga.api.HttpMethod;
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
@@ -127,7 +130,7 @@ class HttpCallTest {
 
   @Test
   void build_requestAndBodyBothGiven_throwsException() {
-    // Act & Assert — a flat-map body and a raw string body are mutually exclusive.
+    // Act & Assert — a JSON map body and a raw string body are mutually exclusive.
     assertThatThrownBy(
             () ->
                 HttpCall.newBuilder("/debit")
@@ -267,6 +270,129 @@ class HttpCallTest {
     // Act & Assert
     assertThat(call.referencedContextKeys())
         .containsExactlyInAnyOrder("accountId", "traceId", "amount", "memo");
+  }
+
+  @Test
+  void referencedContextKeys_inNestedJsonBody_collectsKeys() {
+    // Arrange
+    HttpCall call =
+        HttpCall.newBuilder("/order")
+            .jsonBody(Map.of("item", Map.of("sku", "${sku}"), "tags", List.of("${tag}", 1)))
+            .build();
+
+    // Act & Assert
+    assertThat(call.referencedContextKeys()).containsExactlyInAnyOrder("sku", "tag");
+  }
+
+  @Test
+  void jsonBody_numbersGiven_keepsIntegralAsLongAndOthersAsExactDecimal() {
+    // Act
+    HttpCall call =
+        HttpCall.newBuilder("/order")
+            .jsonBody(
+                Map.of(
+                    "int",
+                    2,
+                    "float",
+                    1.5f,
+                    "decimal",
+                    new BigDecimal("0.25"),
+                    "small",
+                    BigInteger.TEN,
+                    "big",
+                    BigInteger.TWO.pow(70)))
+            .build();
+
+    // Assert
+    assertThat(call.getJsonBody())
+        .containsEntry("int", 2L)
+        .containsEntry("float", new BigDecimal("1.5"))
+        .containsEntry("decimal", new BigDecimal("0.25"))
+        .containsEntry("small", 10L)
+        .containsEntry("big", BigInteger.TWO.pow(70));
+  }
+
+  @Test
+  void jsonBody_sameDecimalSpelledDifferentlyGiven_isEqual() {
+    // Act
+    HttpCall trailingZero =
+        HttpCall.newBuilder("/order").jsonBody(Map.of("price", new BigDecimal("1.50"))).build();
+    HttpCall plain = HttpCall.newBuilder("/order").jsonBody(Map.of("price", 1.5d)).build();
+
+    // Assert
+    assertThat(trailingZero).isEqualTo(plain);
+  }
+
+  @Test
+  void jsonBody_wholeDecimalGiven_keepsLong() {
+    // Act
+    HttpCall call =
+        HttpCall.newBuilder("/order").jsonBody(Map.of("count", new BigDecimal("100.0"))).build();
+
+    // Assert
+    assertThat(call.getJsonBody()).containsEntry("count", 100L);
+  }
+
+  @Test
+  void jsonBody_floatGiven_keepsItsDecimalString() {
+    // Act
+    HttpCall call = HttpCall.newBuilder("/order").jsonBody(Map.of("rate", 0.1f)).build();
+
+    // Assert — not 0.10000000149011612, the float's binary value widened to a double.
+    assertThat(call.getJsonBody()).containsEntry("rate", new BigDecimal("0.1"));
+  }
+
+  @Test
+  void jsonBody_numberWithTooManyDigitsGiven_throwsException() {
+    // Arrange — an exponent this large would otherwise expand into a huge integer.
+    HttpCall.Builder builder = HttpCall.newBuilder("/order");
+
+    // Act & Assert
+    assertThatThrownBy(() -> builder.jsonBody(Map.of("n", new BigDecimal("1e2000"))))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void jsonBody_nullValueGiven_keepsNull() {
+    // Arrange
+    Map<String, Object> body = new HashMap<>();
+    body.put("note", null);
+
+    // Act
+    HttpCall call = HttpCall.newBuilder("/order").jsonBody(body).build();
+
+    // Assert
+    assertThat(call.getJsonBody()).containsEntry("note", null);
+  }
+
+  @Test
+  void jsonBody_nonJsonValueGiven_throwsException() {
+    // Arrange
+    HttpCall.Builder builder = HttpCall.newBuilder("/order");
+
+    // Act & Assert
+    assertThatThrownBy(() -> builder.jsonBody(Map.of("when", new Object())))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void jsonBody_nestedNonStringKeyGiven_throwsException() {
+    // Arrange
+    HttpCall.Builder builder = HttpCall.newBuilder("/order");
+
+    // Act & Assert
+    assertThatThrownBy(() -> builder.jsonBody(Map.of("item", Map.of(1, "x"))))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void jsonBody_nonFiniteNumberGiven_throwsException() {
+    // Arrange
+    HttpCall.Builder builder = HttpCall.newBuilder("/order");
+
+    // Act & Assert
+    assertThatThrownBy(() -> builder.jsonBody(Map.of("price", Double.NaN)))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
