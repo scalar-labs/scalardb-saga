@@ -4,7 +4,6 @@ import com.scalar.db.saga.api.SagaCallback;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.engine.DefaultSagaOrchestrator;
 import com.scalar.db.saga.exception.SagaInvalidRequestException;
-import com.scalar.db.saga.exception.SagaNotFoundException;
 import com.scalar.db.saga.server.BoundedWait;
 import com.scalar.db.saga.server.SagaWaiterRegistry;
 import com.scalar.db.saga.server.security.SagaOperation;
@@ -272,24 +271,9 @@ public final class SagaResource {
               shutdownSignal,
               parked,
               timeoutMillis,
-              () -> readAfterStart(orchestrator, created));
+              () -> orchestrator.getStateSnapshot(sagaId));
     }
     respond(ctx, snapshot.getStatus().isTerminal() ? 200 : 202, snapshot);
-  }
-
-  /**
-   * Reads a saga this request just started. The start persisted it synchronously, but on a backend
-   * whose secondary index lags the write, such as DynamoDB, the lookup by ID can briefly miss the
-   * new row. The saga exists either way, so a miss answers with the snapshot the start returned
-   * rather than a 404 that would tell the client its running saga was never created.
-   */
-  private static SagaStateSnapshot readAfterStart(
-      DefaultSagaOrchestrator orchestrator, SagaStateSnapshot created) {
-    try {
-      return orchestrator.getStateSnapshot(created.getSagaId());
-    } catch (SagaNotFoundException e) {
-      return created;
-    }
   }
 
   /** Renders a saga snapshot as the JSON response body with the given HTTP status. */

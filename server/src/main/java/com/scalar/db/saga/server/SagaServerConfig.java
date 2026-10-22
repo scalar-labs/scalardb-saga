@@ -203,9 +203,9 @@ import org.jspecify.annotations.Nullable;
  *       amount: this value is your crash-recovery MTTR.
  *       <p>Recovery is at-least-once across replicas. A step whose attempt sequence outlives this
  *       threshold produces no events while it runs, so another replica can begin recovering the
- *       saga while the first is still executing it; the loser is fenced on its next state write,
- *       but the participant call itself has already been made. Size the threshold above the step
- *       envelope, and make participants tolerate a duplicate invocation
+ *       saga while the first is still executing it; the loser is fenced at its next event, but the
+ *       participant call itself has already been made. Size the threshold above the step envelope,
+ *       and make participants tolerate a duplicate invocation
  *   <li>{@code recovery.interval_seconds} — how often the scan runs
  *   <li>{@code recovery.compensation_grace_period_seconds} — how long a saga may stay stuck with
  *       failing compensation before it is escalated for manual intervention
@@ -383,7 +383,7 @@ public final class SagaServerConfig {
   static final String PREFIX = "scalar.db.saga.";
   static final String SERVER_PREFIX = PREFIX + "server.";
 
-  // Mirrors the store's saga-ID discipline: the owner id lands in state rows and log lines, so it
+  // Mirrors the store's saga-ID discipline: the owner id lands in claim events and log lines, so it
   // gets the same character set and length bound.
   private static final java.util.regex.Pattern OWNER_ID_PATTERN =
       java.util.regex.Pattern.compile("[a-zA-Z0-9._-]{1,128}");

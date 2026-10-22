@@ -14,21 +14,20 @@ import org.jspecify.annotations.Nullable;
 /**
  * Persistence interface for saga operations.
  *
- * <p>Implementations must guarantee atomicity: {@link #createSaga} and {@link #recordStatusEvent}
- * write to both the event stream and the state table in a single transaction.
+ * <p>Implementations must guarantee atomicity: every operation that changes a saga's state appends
+ * its event and changes the state in a single transaction.
  *
  * <p>This interface carries {@link SagaStateSnapshot} as its currency, and that is a published
  * {@code api} type. Server-internal bookkeeping therefore stops here rather than riding it: an
- * implementation keeps such a field in its own rows and never surfaces it on the snapshot. {@code
- * owner_id} is the worked example. See {@link SagaStateSnapshot} for the rule.
+ * implementation keeps such a field in its own rows and never surfaces it on the snapshot. See
+ * {@link SagaStateSnapshot} for the rule. The {@code ownerId} a caller passes names the replica
+ * making the change; an implementation may record it but never returns it.
  *
- * <p><b>When {@code owner_id} changes.</b> Only three operations re-stamp it: {@link #createSaga},
- * {@link #recordStatusEvent} and {@link #claimForRecovery}, each from an {@code ownerId} the caller
- * supplies. The transitions out of {@code WAITING} preserve whatever the row already held, because
- * they take no claim; a parked-step callback or timeout can therefore be applied by a replica other
- * than the one {@code owner_id} names, and the column keeps naming the earlier driver until the
- * next status event. So {@code owner_id} records who last claimed or last recorded a status event,
- * not necessarily who is executing right now.
+ * <p><b>A parked saga's log grows only through status changes.</b> Once a saga is {@code WAITING},
+ * the next event appended to it is the one that moves it out: a resume, a give-up or a re-drive.
+ * Nothing appends a plain step event or a claim to a parked saga. The ScalarDB store relies on this
+ * to find a parked saga's state from the event just before the caller's sequence, and reports a log
+ * that breaks it as damage.
  */
 public interface SagaStore extends AutoCloseable {
 
@@ -41,8 +40,8 @@ public interface SagaStore extends AutoCloseable {
   // ---------------------------------------------------------------------------
 
   /**
-   * Creates a new saga instance, writing both a {@link EventType#SAGA_STARTED} event and an initial
-   * {@code saga_state} row in one transaction.
+   * Creates a new saga instance in one transaction: appends {@link EventType#SAGA_STARTED} and
+   * enters the saga in the recovery sweep as {@code RUNNING}.
    *
    * @param sagaId caller-supplied saga ID, or {@code null} to generate a UUID. When provided, the
    *     ID should be reasonably short (e.g., UUID format) and contain only printable characters.
@@ -103,19 +102,19 @@ public interface SagaStore extends AutoCloseable {
 
   /**
    * Records a saga-level status event and transitions the saga state atomically in one transaction,
-   * stamping the transitioned row's {@code updated_at} with the transition time. A convenience for
-   * {@link #recordStatusEvent(SagaStateSnapshot, int, StatusEvent, String, Instant)} with a {@code
-   * null} timestamp.
+   * stamping the saga's {@code updatedAt} with the transition time. A convenience for {@link
+   * #recordStatusEvent(SagaStateSnapshot, int, StatusEvent, String, Instant)} with a {@code null}
+   * timestamp.
    *
    * @param current the current state snapshot (used for optimistic concurrency)
    * @param sequence the event sequence number
    * @param event the status event to record
-   * @param ownerId the replica recording this transition (stamped as the saga's owner)
+   * @param ownerId the replica recording this transition
    * @return the post-transition state snapshot
    * @throws com.scalar.db.saga.exception.SagaConcurrentModificationException if another writer
-   *     transitioned the saga first: the pre-check finds the state row already moved, or the event
-   *     row at {@code sequence} carries someone else's writer id, as read by an in-doubt commit's
-   *     verifier or by the read-back once conflicts have exhausted the retries
+   *     transitioned the saga first: the saga's state has moved on since {@code current}, or the
+   *     event row at {@code sequence} carries someone else's writer id, as read by an in-doubt
+   *     commit's verifier or by the read-back once conflicts have exhausted the retries
    */
   default SagaStateSnapshot recordStatusEvent(
       SagaStateSnapshot current, int sequence, StatusEvent event, String ownerId) {
@@ -125,31 +124,26 @@ public interface SagaStore extends AutoCloseable {
   /**
    * Records a saga-level status event and transitions the saga state atomically in one transaction.
    *
-   * <p>The new status is derived from {@link StatusEvent#getTargetStatus()}. The transitioned row
-   * is stamped with {@code ownerId} as the replica now processing this saga (an observability
-   * field), so a status event recorded by the engine, by recovery or by an admin operation moves
-   * the column to whoever recorded it. This is one of the three operations that re-stamp it; see
-   * the interface javadoc for the ones that preserve it instead.
+   * <p>The new status is derived from {@link StatusEvent#getTargetStatus()}.
    *
-   * <p>{@code stateUpdatedAt} sets the transitioned row's {@code updated_at}. That column is also
-   * the recovery sweeper's scan key (it scans oldest-first), so passing {@link Instant#EPOCH} hands
-   * the saga to the sweeper for immediate pickup — the co-committed equivalent of a following
-   * {@link #markForRecovery}, without the second transaction. Pass {@code null} to stamp the
-   * current transition time; that is the normal case, for which the four-argument overload reads
-   * better. The event's own audit timestamp is always the real time regardless.
+   * <p>{@code stateUpdatedAt} sets the saga's {@code updatedAt}. That time is also the recovery
+   * sweeper's scan key (it scans oldest-first), so passing {@link Instant#EPOCH} hands the saga to
+   * the sweeper for immediate pickup — the co-committed equivalent of a following {@link
+   * #markForRecovery}, without the second transaction. Pass {@code null} to stamp the current
+   * transition time; that is the normal case, for which the four-argument overload reads better.
+   * The event's own audit timestamp is always the real time regardless.
    *
    * @param current the current state snapshot (used for optimistic concurrency)
    * @param sequence the event sequence number
    * @param event the status event to record
-   * @param ownerId the replica recording this transition (stamped as the saga's owner)
-   * @param stateUpdatedAt the {@code updated_at} to stamp on the transitioned row, or {@code null}
-   *     for the current transition time; {@link Instant#EPOCH} schedules the saga for immediate
-   *     recovery
+   * @param ownerId the replica recording this transition
+   * @param stateUpdatedAt the {@code updatedAt} to give the saga, or {@code null} for the current
+   *     transition time; {@link Instant#EPOCH} schedules the saga for immediate recovery
    * @return the post-transition state snapshot
    * @throws com.scalar.db.saga.exception.SagaConcurrentModificationException if another writer
-   *     transitioned the saga first: the pre-check finds the state row already moved, or the event
-   *     row at {@code sequence} carries someone else's writer id, as read by an in-doubt commit's
-   *     verifier or by the read-back once conflicts have exhausted the retries
+   *     transitioned the saga first: the saga's state has moved on since {@code current}, or the
+   *     event row at {@code sequence} carries someone else's writer id, as read by an in-doubt
+   *     commit's verifier or by the read-back once conflicts have exhausted the retries
    */
   SagaStateSnapshot recordStatusEvent(
       SagaStateSnapshot current,
@@ -160,9 +154,9 @@ public interface SagaStore extends AutoCloseable {
 
   /**
    * Parks a forward step on an async callback, in one transaction: appends {@code pendingEvent},
-   * transitions the saga {@code RUNNING → WAITING}, and — when {@code parkedDeadline} is non-null —
-   * writes a {@code saga_parked} row so the recovery sweeper can time it out. A {@code null}
-   * deadline means "wait indefinitely" and writes no {@code saga_parked} row.
+   * and transitions the saga {@code RUNNING → WAITING}. With a non-null {@code parkedDeadline} the
+   * recovery sweeper times the step out once the deadline passes; a {@code null} deadline means
+   * "wait indefinitely", and the step is never timed out.
    *
    * @param current the current ({@code RUNNING}) snapshot (used for optimistic concurrency)
    * @param sequence the event sequence number
@@ -170,9 +164,9 @@ public interface SagaStore extends AutoCloseable {
    * @param parkedDeadline the absolute timeout deadline, or {@code null} for an unbounded wait
    * @return the post-transition ({@code WAITING}) snapshot
    * @throws com.scalar.db.saga.exception.SagaConcurrentModificationException if another writer
-   *     transitioned the saga first: the pre-check finds the state row already moved, or the event
-   *     row at {@code sequence} carries someone else's writer id, as read by an in-doubt commit's
-   *     verifier or by the read-back once conflicts have exhausted the retries
+   *     transitioned the saga first: the saga's state has moved on since {@code current}, or the
+   *     event row at {@code sequence} carries someone else's writer id, as read by an in-doubt
+   *     commit's verifier or by the read-back once conflicts have exhausted the retries
    */
   SagaStateSnapshot park(
       SagaStateSnapshot current,
@@ -182,29 +176,29 @@ public interface SagaStore extends AutoCloseable {
 
   /**
    * Resumes a parked step when its callback arrives, in one transaction: appends {@code
-   * completedEvent}, transitions the saga {@code WAITING → RUNNING}, and deletes the {@code
-   * saga_parked} row (if any). The optimistic check on the {@code WAITING} row makes this and the
-   * deadline-timeout sweep mutually exclusive.
+   * completedEvent} and transitions the saga {@code WAITING → RUNNING}, which also takes it out of
+   * the timeout sweep. The check that the saga is still in the {@code WAITING} state of {@code
+   * current} makes this and the deadline-timeout sweep mutually exclusive.
    *
    * @param current the current ({@code WAITING}) snapshot (used for optimistic concurrency)
    * @param sequence the event sequence number
    * @param completedEvent the {@link EventType#STEP_COMPLETED} event carrying the callback output
    * @return the post-transition ({@code RUNNING}) snapshot
    * @throws com.scalar.db.saga.exception.SagaConcurrentModificationException if another writer
-   *     transitioned the saga first: the pre-check finds the state row already moved, or the event
-   *     row at {@code sequence} carries someone else's writer id, as read by an in-doubt commit's
-   *     verifier or by the read-back once conflicts have exhausted the retries
+   *     transitioned the saga first: the saga's state has moved on since {@code current}, or the
+   *     event row at {@code sequence} carries someone else's writer id, as read by an in-doubt
+   *     commit's verifier or by the read-back once conflicts have exhausted the retries
    */
   SagaStateSnapshot resumeParkedStep(
       SagaStateSnapshot current, int sequence, StepEvent completedEvent);
 
   /**
    * Fails (gives up on) a parked step, in one transaction: appends {@code failedEvent}, transitions
-   * the saga {@code WAITING → targetStatus}, and deletes the {@code saga_parked} row (if any). Used
-   * by the recovery sweep once a parked step's re-drive budget is spent (retry attempts or grace
-   * period), or when its definition can't be resolved. The optimistic check on the {@code WAITING}
-   * row makes this and a concurrent callback ({@link #resumeParkedStep}) / re-drive ({@link
-   * #redriveParkedStep}) mutually exclusive.
+   * the saga {@code WAITING → targetStatus}, which also takes it out of the timeout sweep. Used by
+   * the recovery sweep once a parked step's re-drive budget is spent (retry attempts or grace
+   * period), or when its definition can't be resolved. The check that the saga is still in the
+   * {@code WAITING} state of {@code current} makes this and a concurrent callback ({@link
+   * #resumeParkedStep}) / re-drive ({@link #redriveParkedStep}) mutually exclusive.
    *
    * @param current the current ({@code WAITING}) snapshot (used for optimistic concurrency)
    * @param sequence the event sequence number
@@ -213,9 +207,9 @@ public interface SagaStore extends AutoCloseable {
    *     (post-pivot, needs manual resolution)
    * @return the post-transition snapshot
    * @throws com.scalar.db.saga.exception.SagaConcurrentModificationException if another writer
-   *     transitioned the saga first: the pre-check finds the state row already moved, or the event
-   *     row at {@code sequence} carries someone else's writer id, as read by an in-doubt commit's
-   *     verifier or by the read-back once conflicts have exhausted the retries
+   *     transitioned the saga first: the saga's state has moved on since {@code current}, or the
+   *     event row at {@code sequence} carries someone else's writer id, as read by an in-doubt
+   *     commit's verifier or by the read-back once conflicts have exhausted the retries
    * @throws IllegalArgumentException if {@code targetStatus} is not {@code COMPENSATING} or {@code
    *     ESCALATED}
    */
@@ -224,9 +218,9 @@ public interface SagaStore extends AutoCloseable {
 
   /**
    * Un-parks a timed-out step to re-drive it, in one transaction: appends {@code redriveEvent}
-   * ({@link EventType#STEP_REISSUING}), transitions the saga {@code WAITING → RUNNING}, and deletes
-   * the {@code saga_parked} row. The recovery sweep then re-executes the step, which re-parks it
-   * with a fresh deadline. The optimistic check on the {@code WAITING} row makes this and a
+   * ({@link EventType#STEP_REISSUING}) and transitions the saga {@code WAITING → RUNNING}. The
+   * recovery sweep then re-executes the step, which re-parks it with a fresh deadline. The check
+   * that the saga is still in the {@code WAITING} state of {@code current} makes this and a
    * concurrent callback ({@link #resumeParkedStep}) / timeout ({@link #failParkedStep}) mutually
    * exclusive.
    *
@@ -235,9 +229,9 @@ public interface SagaStore extends AutoCloseable {
    * @param redriveEvent the {@link EventType#STEP_REISSUING} event for the un-parked step
    * @return the post-transition ({@code RUNNING}) snapshot
    * @throws com.scalar.db.saga.exception.SagaConcurrentModificationException if another writer
-   *     transitioned the saga first: the pre-check finds the state row already moved, or the event
-   *     row at {@code sequence} carries someone else's writer id, as read by an in-doubt commit's
-   *     verifier or by the read-back once conflicts have exhausted the retries
+   *     transitioned the saga first: the saga's state has moved on since {@code current}, or the
+   *     event row at {@code sequence} carries someone else's writer id, as read by an in-doubt
+   *     commit's verifier or by the read-back once conflicts have exhausted the retries
    */
   SagaStateSnapshot redriveParkedStep(
       SagaStateSnapshot current, int sequence, StepEvent redriveEvent);
@@ -259,26 +253,39 @@ public interface SagaStore extends AutoCloseable {
   int getEventCount(String sagaId);
 
   /**
-   * The newest event's type and stamp: everything recovery needs to judge whether a saga is being
-   * driven, without reading any payload.
+   * The newest event's type, stamp and sequence, when the saga was last claimed for recovery, and
+   * the saga's state: everything recovery needs to judge whether a saga is being driven, and to
+   * claim it.
    *
    * @param type the event's type
    * @param createdAt when the event was appended
+   * @param sequence the event's sequence; a claim appends at the next one, so it fails if anything
+   *     was appended since this read
+   * @param lastClaimedAt when the saga was last claimed, if no status change has happened since,
+   *     else {@code null}
+   * @param state the saga's state as of this read; a claim refuses a sweep's snapshot that no
+   *     longer matches it
    */
-  record NewestEvent(EventType type, Instant createdAt) {}
+  record NewestEvent(
+      EventType type,
+      Instant createdAt,
+      int sequence,
+      @Nullable Instant lastClaimedAt,
+      SagaStateSnapshot state) {}
 
   /**
-   * Returns the newest event for this saga, or empty when it has none at all. Reads only the type
-   * and the timestamp, never the payload.
+   * Returns the newest event for this saga, or empty when it has none at all.
    *
-   * <p>Recovery uses this as a progress probe: a saga whose state row looks stale but whose event
-   * stream is recent was <em>recently driven</em>, so it must not be claimed on state-row age
-   * alone. The type matters because some events say the opposite — a compensation failure is
-   * written by a drive that then gives up, so it marks the end of an attempt rather than progress.
+   * <p>Recovery uses this as a progress probe: a saga whose last status change looks stale but
+   * whose event stream is recent was <em>recently driven</em>, so it must not be claimed on the age
+   * of its status alone. The type matters because some events say the opposite — a compensation
+   * failure is written by a drive that then gives up, so it marks the end of an attempt rather than
+   * progress. {@link NewestEvent#lastClaimedAt()} says whether another replica already took the
+   * saga over since its last status change.
    *
-   * <p>An empty result means a state row exists with no events behind it, which the store itself
-   * cannot produce — {@link #createSaga} writes the first event in the same transaction as the row
-   * — so the caller should treat it as damage rather than as an absence of progress.
+   * <p>An empty result for a saga a sweep returned means the sweep table and the event log
+   * disagree, which the store itself cannot produce, so the caller should treat it as damage rather
+   * than as an absence of progress.
    *
    * <p>"Newest" means highest {@code sequence}, not latest wall clock. Events are stamped by
    * whichever replica appended them, so under cross-replica skew the highest-sequence row can carry
@@ -305,19 +312,6 @@ public interface SagaStore extends AutoCloseable {
    * @return the snapshot, or empty if no saga has that ID
    */
   Optional<SagaStateSnapshot> getStateSnapshot(String sagaId);
-
-  /**
-   * Reads the saga's state only if it is at exactly {@code status} and {@code updatedAt}, by the
-   * state row's full key rather than a lookup by saga ID. For a caller that already knows both,
-   * from the event log for example: on a backend whose secondary-index reads lag the base table, a
-   * lookup by ID can miss a just-written row, while this read cannot.
-   *
-   * @param sagaId the saga instance ID
-   * @param status the status the state row must be at
-   * @param updatedAt the row's last state-change time, as the event log recorded it
-   * @return the snapshot, or empty when the saga is not at that status and timestamp
-   */
-  Optional<SagaStateSnapshot> getStateSnapshot(String sagaId, SagaStatus status, Instant updatedAt);
 
   /**
    * Reads a saga's state snapshot and its event stream in a single transaction, so the two are a
@@ -402,6 +396,12 @@ public interface SagaStore extends AutoCloseable {
    * backward-compatible direct store access in tests. A {@code null} cursor in the returned {@link
    * Recoverables} indicates that the scan is complete.
    *
+   * <p>A store may cap how many sagas one call returns from a bucket. When it does, the next sweep
+   * of that bucket continues after the last saga returned, and starts over once it reaches the end,
+   * so sagas a claim leaves in place cannot hide the ones behind them. Sagas handed to recovery at
+   * {@link Instant#EPOCH} are read ahead of that position on every sweep, so a hand-off does not
+   * wait for the scan to wrap.
+   *
    * @param threshold the staleness cutoff — only sagas updated before this are returned
    * @param cursor the cursor from a previous call, {@link #initialSweepCursor}, or {@code null} to
    *     start an ascending scan
@@ -424,19 +424,31 @@ public interface SagaStore extends AutoCloseable {
   }
 
   /**
-   * Attempts to claim a saga for recovery by updating its owner. Returns an empty {@link Optional}
-   * if the saga has already been claimed by another recovery process (optimistic concurrency
-   * check).
+   * Claims a saga for recovery, provided nothing was appended to it since {@code probe} was read
+   * and its status and {@code updatedAt} are still the ones {@code saga} carries. Returns empty
+   * otherwise: another replica claimed it first, its driver is still alive, it changed state
+   * between the sweep and the probe, or it was purged (and perhaps recreated under the same id)
+   * since. Exactly one of two replicas claiming from the same probe succeeds.
    *
-   * @param saga the saga snapshot to claim
-   * @param newOwnerId the new owner (recovery process) ID
-   * @return the claimed snapshot, or empty if already claimed
+   * <p>The claim appends {@link EventType#SAGA_CLAIMED} at the sequence after {@code probe}'s. It
+   * leaves the saga's status and {@code updatedAt} as they are, except for a saga handed to
+   * recovery with {@code updatedAt} at {@code EPOCH} ({@link #markForRecovery}): that one is moved
+   * to the claim time, so the next sweep does not offer it again.
+   *
+   * @param saga the snapshot a recovery sweep returned; {@code RUNNING} or {@code COMPENSATING}
+   * @param probe the saga's newest event, read by {@link #getNewestEvent} just before the claim
+   * @param newOwnerId the claiming replica's ID, recorded in the claim event
+   * @return the claimed snapshot, or empty if the saga changed since the sweep or {@code probe}
+   * @throws IllegalArgumentException if {@code saga} is not {@code RUNNING} or {@code COMPENSATING}
    */
-  Optional<SagaStateSnapshot> claimForRecovery(SagaStateSnapshot saga, String newOwnerId);
+  Optional<SagaStateSnapshot> claimForRecovery(
+      SagaStateSnapshot saga, NewestEvent probe, String newOwnerId);
 
   /**
-   * Marks a saga for immediate recovery by setting its {@code updated_at} to epoch 0, ensuring it
-   * will be picked up by the next recovery scan.
+   * Hands a saga being driven here to recovery, so the next recovery sweep takes it at once: its
+   * {@code updatedAt} becomes {@code EPOCH}, and {@link EventType#SAGA_RELEASED} records the
+   * hand-off. Acts only on a {@code RUNNING} or {@code COMPENSATING} saga. Best effort: a failure
+   * is logged, and recovery takes the saga after the staleness threshold instead.
    *
    * @param sagaId the saga instance ID
    */
@@ -448,9 +460,8 @@ public interface SagaStore extends AutoCloseable {
 
   /**
    * Finds parked (async {@code WAITING}) sagas whose timeout deadline is at or before {@code
-   * threshold}, from the dedicated {@code saga_parked} index. Used by recovery to time out async
-   * steps whose callback never arrived. A parked step with no timeout (wait indefinitely) has no
-   * index row and is never returned.
+   * threshold}. Used by recovery to time out async steps whose callback never arrived. A parked
+   * step with no timeout (wait indefinitely) is never returned.
    *
    * <p>Cursor-paged one bucket per call, like {@link #findRecoverable}: pass the previous result's
    * cursor to continue, starting from {@link #initialSweepCursor} for the owner's scattered order
@@ -498,9 +509,9 @@ public interface SagaStore extends AutoCloseable {
    * Deletes all events and state for a terminal saga (COMPLETED, COMPENSATED, or ESCALATED).
    *
    * @param sagaId the saga instance ID to delete
-   * @return {@code true} if this call deleted the saga's state row; {@code false} if the saga was
-   *     already purged (e.g., by a concurrently sweeping replica), so callers budgeting work can
-   *     tell real purges from no-ops
+   * @return {@code true} if this call deleted the saga; {@code false} if the saga was already
+   *     purged (e.g., by a concurrently sweeping replica), so callers budgeting work can tell real
+   *     purges from no-ops
    */
   boolean deleteSaga(String sagaId);
 

@@ -74,8 +74,7 @@ public enum SagaStatus {
   /**
    * Returns {@code true} if sagas in this status are eligible for the recovery staleness scan:
    * resuming forward execution (RUNNING) or compensation (COMPENSATING). A parked (WAITING) saga is
-   * excluded — it is timed out via the dedicated {@code saga_parked} deadline index, not by {@code
-   * updated_at} staleness.
+   * excluded: it is timed out by its step's deadline, if it has one, never by staleness.
    *
    * @return whether the recovery staleness scan considers sagas in this status
    */

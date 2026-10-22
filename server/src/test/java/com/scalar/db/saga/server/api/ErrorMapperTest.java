@@ -457,7 +457,7 @@ class ErrorMapperTest {
     // mapper unwrapped. Answering it with the caller's 400 told every client its own request was
     // malformed while a total outage went unrecorded; INVALID_ARGUMENT is USER_ERROR, so the retry
     // contract also told them not to retry and not to alert.
-    toThrow = new IllegalArgumentException("Table not found: saga.saga_state");
+    toThrow = new IllegalArgumentException("Table not found: saga.saga_sweep");
 
     try (LogCapture logs = LogCapture.of(ErrorMapper.class)) {
       // Act
@@ -467,7 +467,7 @@ class ErrorMapperTest {
       assertThat(response.statusCode()).isEqualTo(500);
       assertThat(response.body()).contains(SagaErrorCode.INTERNAL_ERROR.code());
       // The table name is internal topology and stays server-side.
-      assertThat(response.body()).doesNotContain("saga_state");
+      assertThat(response.body()).doesNotContain("saga_sweep");
       assertThat(logs.events())
           .anySatisfy(
               event -> {
@@ -476,7 +476,7 @@ class ErrorMapperTest {
                 assertThat(event.getThrowableProxy().getClassName())
                     .isEqualTo(IllegalArgumentException.class.getName());
                 assertThat(event.getThrowableProxy().getMessage())
-                    .isEqualTo("Table not found: saga.saga_state");
+                    .isEqualTo("Table not found: saga.saga_sweep");
               });
     }
   }

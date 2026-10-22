@@ -48,8 +48,8 @@ import org.slf4j.LoggerFactory;
  * <p>Keys under {@code scalar.db.saga.store.scalardb.} are specific to this ScalarDB-backed store:
  *
  * <ul>
- *   <li>{@code scalar.db.saga.store.scalardb.num_buckets} — number of state-table bucket partitions
- *       (default: {@code 16})
+ *   <li>{@code scalar.db.saga.store.scalardb.num_buckets} — number of {@code saga_sweep} bucket
+ *       partitions (default: {@code 16})
  *   <li>{@code scalar.db.saga.store.scalardb.creation_options.<name>} — a ScalarDB creation option
  *       passed, with its value, to every namespace, table, and coordinator-table creation call when
  *       the store creates its schema. The names and defaults are ScalarDB's own; see the
@@ -193,9 +193,10 @@ public class ScalarDbSagaStoreFactory implements SagaStoreFactory {
   /**
    * Fails unless ScalarDB will run Consensus Commit, before anything connects. The store's
    * correctness is argued against Consensus Commit, not merely tested on it: a status transition
-   * deletes the old state row and inserts the new one, and the claim that a saga has at most one
-   * visible state row holds only because the two commit atomically under its snapshot isolation.
-   * Another manager can boot and run cleanly until that assumption breaks.
+   * appends its event and moves the saga's sweep row by deleting the old one and inserting the new
+   * one, and the claim that a saga has at most one visible sweep row, agreeing with its newest
+   * state-carrying event, holds only because all three commit atomically under its snapshot
+   * isolation. Another manager can boot and run cleanly until that assumption breaks.
    *
    * <p>The value is read through ScalarDB's own {@link DatabaseConfig}, so an unset key and a
    * placeholder resolve exactly as they will for the transaction manager. ScalarDB Cluster's

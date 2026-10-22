@@ -12,6 +12,7 @@ import com.scalar.db.saga.api.SagaQuery;
 import com.scalar.db.saga.api.SagaStateSnapshot;
 import com.scalar.db.saga.api.SagaStatus;
 import com.scalar.db.saga.definition.SagaDefinition;
+import com.scalar.db.saga.store.EventType;
 import com.scalar.db.saga.store.SagaStore;
 import com.scalar.db.saga.store.SagaStore.ScanCursor;
 import com.scalar.db.saga.store.StatusEvent;
@@ -170,6 +171,14 @@ class ForwardingSagaStoreTest {
     }
     if (type == SagaQuery.class) {
       return SagaQuery.newBuilder().build();
+    }
+    if (type == SagaStore.NewestEvent.class) {
+      return new SagaStore.NewestEvent(
+          EventType.STEP_COMPLETED,
+          Instant.ofEpochSecond(3_000_000L + position),
+          position,
+          null,
+          (SagaStateSnapshot) dummyValue(SagaStateSnapshot.class, position));
     }
     if (type == ScanCursor.class) {
       return new ScanCursor() {};

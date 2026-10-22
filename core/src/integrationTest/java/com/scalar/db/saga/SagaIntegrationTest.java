@@ -1133,7 +1133,7 @@ class SagaIntegrationTest {
         clock.advance(Duration.ofHours(5));
         orchestrator.recover();
 
-        // Assert — post-pivot timeout escalates (no compensation); parked row cleared
+        // Assert — post-pivot timeout escalates (no compensation); out of the parked sweep
         assertThat(orchestrator.getStateSnapshot(sagaId).getStatus())
             .isEqualTo(SagaStatus.ESCALATED);
         assertThat(step1.getCompensationCount()).isEqualTo(0);
@@ -1344,29 +1344,18 @@ class SagaIntegrationTest {
           DefaultSagaOrchestrator orchestrator =
               replica(failingStore, steps, "replica-fail", budgetOfOne)) {
         failingStore.failEventReads.set(true);
-        // A claim rewrites the state row's clustering key with a fresh updated_at, so capturing it
-        // per saga lets the assertion below count claims from durable state. Load-bearing
-        // assumption: claimForRecovery stamps a new updated_at, and nothing else in this pass
-        // rewrites an unclaimed saga's row.
-        List<Instant> updatedAtBefore = new ArrayList<>();
-        for (String id : sagaIds) {
-          updatedAtBefore.add(baseStore.getStateSnapshot(id).orElseThrow().getUpdatedAt());
-        }
-
         // Act — one pass with budget 1
         orchestrator.recover();
 
         // Assert — the committed-but-failed claim spent the budget: exactly one saga was claimed,
         // not a full-revolution claim spree that would hide all three from other replicas
         failingStore.failEventReads.set(false);
-        long claimed = 0;
-        for (int i = 0; i < sagaIds.size(); i++) {
-          Instant updatedAtAfter =
-              baseStore.getStateSnapshot(sagaIds.get(i)).orElseThrow().getUpdatedAt();
-          if (!updatedAtAfter.equals(updatedAtBefore.get(i))) {
-            claimed++;
-          }
-        }
+        // Every claim appends a SAGA_CLAIMED event, so the logs count the claims that landed
+        long claimed =
+            sagaIds.stream()
+                .flatMap(id -> baseStore.getEvents(id).stream())
+                .filter(e -> e.getEventType() == EventType.SAGA_CLAIMED)
+                .count();
         assertThat(claimed).isEqualTo(1);
         assertThat(completedCount(orchestrator, sagaIds)).isZero();
       }
@@ -1414,7 +1403,7 @@ class SagaIntegrationTest {
     @Test
     void recover_twoReplicasRaceOverdueParkedSaga_exactlyOneCompensates() throws Exception {
       // Arrange — a parked (WAITING) saga past both its deadline and the grace period; two
-      // replicas sweep it concurrently. The WAITING-CK check must let exactly one give up.
+      // replicas sweep it concurrently. The parked sweep-row check must let exactly one give up.
       MutableClock clock = new MutableClock(Instant.now());
       // The manager clock runs 5h ahead of the store's wall-clock row stamps, which would make
       // any row the winner just transitioned look instantly "stale" to the loser's staleness
