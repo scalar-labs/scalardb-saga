@@ -80,7 +80,7 @@ import org.jspecify.annotations.Nullable;
  * is still being processed, and it reuses the {@code 202} this endpoint already returns for a
  * non-terminal outcome. The pattern mirrors RFC 7240's {@code Prefer: respond-async, wait=N}, Azure
  * Durable Functions' {@code WaitForCompletionOrCreateCheckStatusResponse}, and Conductor's {@code
- * executeWorkflow} wait timeout. *
+ * executeWorkflow} wait timeout.
  *
  * <p>Not yet wired: {@code PUT /sagas/{id}/cancel} (needs the engine's {@code cancel} method). The
  * {@code GET /sagas} listing lives on the admin surface ({@link SagaAdminResource}).
