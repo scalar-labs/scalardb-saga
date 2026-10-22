@@ -8,22 +8,50 @@ class TextGuardsTest {
 
   @Test
   void oneLine_controlCharactersGiven_replacesEachWithASpace() {
-    assertThat(TextGuards.oneLine("a\nb\r\tc\u0000d")).isEqualTo("a b  c d");
+    // Arrange
+    String text = "a\nb\r\tc\u0000d";
+
+    // Act
+    String line = TextGuards.oneLine(text);
+
+    // Assert
+    assertThat(line).isEqualTo("a b  c d");
   }
 
   @Test
   void oneLine_plainTextGiven_returnsItUnchanged() {
-    assertThat(TextGuards.oneLine("card declined")).isEqualTo("card declined");
+    // Arrange
+    String text = "card declined";
+
+    // Act
+    String line = TextGuards.oneLine(text);
+
+    // Assert
+    assertThat(line).isEqualTo("card declined");
   }
 
   @Test
   void cut_textWithinMaxGiven_returnsItWhole() {
-    assertThat(TextGuards.cut("abc", 3)).isEqualTo("abc");
+    // Arrange
+    String text = "abc";
+
+    // Act
+    String cut = TextGuards.cut(text, 3);
+
+    // Assert
+    assertThat(cut).isEqualTo("abc");
   }
 
   @Test
   void cut_textOverMaxGiven_returnsFirstMaxChars() {
-    assertThat(TextGuards.cut("abcdef", 4)).isEqualTo("abcd");
+    // Arrange
+    String text = "abcdef";
+
+    // Act
+    String cut = TextGuards.cut(text, 4);
+
+    // Assert
+    assertThat(cut).isEqualTo("abcd");
   }
 
   @Test
