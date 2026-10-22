@@ -36,8 +36,10 @@ updates:
         patterns:
           - "io.netty*"
 
+  # `/` covers only .github/workflows; the composite actions under .github/actions are listed
+  # separately, or the actions they call would never be bumped.
   - package-ecosystem: github-actions
-    directory: /
+    directories: ["/", "/.github/actions/*"]
     schedule:
       interval: weekly
     groups:
@@ -69,7 +71,7 @@ updates:
   # separately), so a cherry-pick of a workflow bump conflicts more often than it applies, and each
   # line keeps its own github-actions entry instead.
   - package-ecosystem: github-actions
-    directory: /
+    directories: ["/", "/.github/actions/*"]
     target-branch: "3"
     schedule:
       interval: weekly
@@ -79,7 +81,7 @@ updates:
           - "*"
 
   - package-ecosystem: github-actions
-    directory: /
+    directories: ["/", "/.github/actions/*"]
     target-branch: "3.19"
     schedule:
       interval: weekly

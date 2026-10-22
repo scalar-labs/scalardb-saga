@@ -73,12 +73,12 @@ class GrpcErrorMapperTest {
       // Act
       StatusRuntimeException e =
           GrpcErrorMapper.toStatusRuntimeException(
-              new IllegalArgumentException("Table not found: saga.saga_state"));
+              new IllegalArgumentException("Table not found: saga.saga_sweep"));
 
       // Assert
       assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INTERNAL);
       // The table name is internal topology and stays server-side.
-      assertThat(e.getStatus().getDescription()).doesNotContain("saga_state");
+      assertThat(e.getStatus().getDescription()).doesNotContain("saga_sweep");
       ErrorInfo info = errorInfo(e);
       assertThat(info.getReason()).isEqualTo(SagaErrorCode.INTERNAL_ERROR.code());
       assertThat(logs.events())
@@ -87,7 +87,7 @@ class GrpcErrorMapperTest {
                 assertThat(event.getLevel()).isEqualTo(Level.ERROR);
                 assertThat(event.getThrowableProxy()).isNotNull();
                 assertThat(event.getThrowableProxy().getMessage())
-                    .isEqualTo("Table not found: saga.saga_state");
+                    .isEqualTo("Table not found: saga.saga_sweep");
               });
     }
   }

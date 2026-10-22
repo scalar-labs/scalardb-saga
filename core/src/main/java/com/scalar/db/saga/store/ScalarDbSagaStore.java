@@ -37,7 +37,10 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import org.jspecify.annotations.Nullable;
@@ -47,9 +50,13 @@ import org.slf4j.LoggerFactory;
 /**
  * ScalarDB-backed implementation of {@link SagaStore}.
  *
- * <p>Uses two tables ({@code saga_events} and {@code saga_state}) for saga persistence and a third
- * ({@code saga_definitions}) for definition storage. All state-mutating operations use ScalarDB
- * transactions for atomicity.
+ * <p>A saga lives in two tables (see {@link SagaSchema}): {@code saga_events}, whose newest event
+ * that carries a state is the saga's current state, and {@code saga_sweep}, the bucket-partitioned
+ * list the background sweeps and the admin listing read. Every write that changes a saga's state
+ * appends its event and moves its sweep row in one transaction, so the two never disagree, and a
+ * writer derives the sweep row's key from the state it holds instead of looking it up. Reading one
+ * saga reads its own event partition; there is no secondary index. Definitions live in {@code
+ * saga_definitions}. All state-mutating operations use ScalarDB transactions for atomicity.
  *
  * <p>All transaction operations are executed through {@link #runInTransaction}, which provides
  * unified retry logic for {@link TransactionException} (including {@link
@@ -62,31 +69,28 @@ public final class ScalarDbSagaStore implements SagaStore {
   private static final Logger logger = LoggerFactory.getLogger(ScalarDbSagaStore.class);
 
   private static final Pattern SAGA_ID_PATTERN = Pattern.compile("[a-zA-Z0-9._-]{1,128}");
-  private static final int[] RECOVERABLE_STATUS_CODES =
+  private static final int[] RECOVERABLE_SLICES =
       java.util.Arrays.stream(SagaStatus.values())
           .filter(SagaStatus::isRecoverable)
-          .mapToInt(SagaStatus::getStatusCode)
+          .mapToInt(status -> SagaSchema.sliceOf(status, false))
           .toArray();
 
-  /**
-   * All status codes in ascending order — the stable sweep order for an all-status admin listing.
-   */
-  private static final int[] ALL_STATUS_CODES =
-      java.util.Arrays.stream(SagaStatus.values())
-          .mapToInt(SagaStatus::getStatusCode)
+  /** All slice codes in ascending order — the stable sweep order for an all-status listing. */
+  private static final int[] ALL_SLICES =
+      java.util.stream.IntStream.concat(
+              java.util.Arrays.stream(SagaStatus.values()).mapToInt(SagaStatus::getStatusCode),
+              java.util.stream.IntStream.of(SagaSchema.WAITING_WITH_TIMEOUT_SLICE))
           .sorted()
           .toArray();
 
   /**
-   * The earliest instant the epoch-millisecond {@code updated_at} key can hold: -2^53 ms, the low
-   * end of the BIGINT range ScalarDB accepts on every backend. Cosmos DB rejects a key value beyond
-   * it, a scan bound included, so the listing's bounds and open-ended sentinel stay inside it.
+   * The earliest instant the epoch-millisecond {@code sweep_at} key can hold: -2^53 ms, the low end
+   * of the BIGINT range ScalarDB accepts on every backend. Cosmos DB rejects a key value beyond it,
+   * a scan bound included, so the listing's bounds and open-ended sentinel stay inside it.
    */
   static final Instant MIN_KEY_INSTANT = Instant.ofEpochMilli(-(1L << 53));
 
-  /**
-   * The latest instant the {@code updated_at} key can hold: 2^53 ms, the high end of that range.
-   */
+  /** The latest instant the {@code sweep_at} key can hold: 2^53 ms, the high end of that range. */
   static final Instant MAX_KEY_INSTANT = Instant.ofEpochMilli(1L << 53);
 
   /** Format version prefix for the opaque list page token. */
@@ -104,6 +108,11 @@ public final class ScalarDbSagaStore implements SagaStore {
   private final SagaDefinitionSerializer definitionSerializer;
   private final Supplier<String> appendIdSupplier;
   private final Supplier<Instant> nowSupplier;
+
+  // Where each bucket's stale scan of each slice stopped when it filled its limit. A claim leaves
+  // the sweep row in place, so without this every pass would re-read the same oldest rows and the
+  // sagas behind them would wait until those escalate.
+  private final ConcurrentMap<BucketSlice, SweepKey> recoveryResume = new ConcurrentHashMap<>();
 
   /**
    * Creates a new store instance.
@@ -190,8 +199,9 @@ public final class ScalarDbSagaStore implements SagaStore {
     StatusEvent startedEvent = StatusEvent.started(payload);
     String id = sagaId; // effectively final for lambda
     int bucket = schema.bucketOf(id);
+    int slice = SagaSchema.sliceOf(SagaStatus.RUNNING, false);
     // Identifies this call's own seq-0 event, so a post-UnknownTransactionStatus verify can tell
-    // our insert apart from a saga that already owns this id. A state-row read cannot: a row is
+    // our insert apart from a saga that already owns this id. A state read cannot: a state is
     // present either way, so it would confirm the commit and hand back the other caller's saga.
     String appendId = appendIdSupplier.get();
 
@@ -199,11 +209,19 @@ public final class ScalarDbSagaStore implements SagaStore {
       return runInTransaction(
           tx -> {
             Instant now = nowSupplier.get();
-            tx.insert(buildEventInsert(id, 0, startedEvent, appendId, now));
             SagaStateSnapshot snapshot =
                 new SagaStateSnapshot(
                     id, sagaName, SagaStatus.RUNNING, definitionVersion, now, now);
-            tx.insert(buildStateInsert(bucket, snapshot, ownerId));
+            long sweepAt = now.toEpochMilli();
+            tx.insert(
+                buildEventInsert(
+                    id,
+                    0,
+                    startedEvent,
+                    appendId,
+                    now,
+                    new StateColumns(slice, sweepAt, snapshot)));
+            tx.insert(buildSweepInsert(bucket, slice, sweepAt, snapshot));
             return snapshot;
           },
           verifyOwnAppendCommitted(id, 0, appendId),
@@ -344,10 +362,6 @@ public final class ScalarDbSagaStore implements SagaStore {
     return registeredAt;
   }
 
-  private static Instant updatedAt(Result row) {
-    return Instant.ofEpochMilli(row.getBigInt("updated_at"));
-  }
-
   // ---------------------------------------------------------------------------
   // Events
   // ---------------------------------------------------------------------------
@@ -358,7 +372,7 @@ public final class ScalarDbSagaStore implements SagaStore {
     String appendId = appendIdSupplier.get();
     runInTransaction(
         tx -> {
-          tx.insert(buildEventInsert(sagaId, sequence, event, appendId, nowSupplier.get()));
+          tx.insert(buildEventInsert(sagaId, sequence, event, appendId, nowSupplier.get(), null));
           return Boolean.TRUE;
         },
         () ->
@@ -377,34 +391,30 @@ public final class ScalarDbSagaStore implements SagaStore {
       String ownerId,
       @Nullable Instant stateUpdatedAt) {
     validatePayloadSize(event.getPayload());
+    requireNotWaiting(current);
     String sagaId = current.getSagaId();
     SagaStatus newStatus = event.getTargetStatus();
     int bucket = schema.bucketOf(sagaId);
+    int slice = SagaSchema.sliceOf(current.getStatus(), false);
+    long sweepAt = current.getUpdatedAt().toEpochMilli();
     String appendId = appendIdSupplier.get();
 
     return runInTransaction(
         tx -> {
-          Instant now = nowSupplier.get();
-
-          // Verify the row still exists at the snapshot's CK.
-          // Because status and updated_at are part of the clustering key,
-          // every mutation DELETEs the old CK and INSERTs at a new CK.
-          // If the row exists here, no other replica has touched it.
-          int oldStatus = current.getStatus().getStatusCode();
-          Optional<Result> row =
-              tx.get(buildStateGet(bucket, oldStatus, current.getUpdatedAt(), sagaId));
-          if (row.isEmpty()) {
+          // The saga's sweep row sits at the key its current state names. If it is not there,
+          // another writer moved the saga on since the caller read it.
+          if (tx.get(buildSweepGet(bucket, slice, sweepAt, sagaId)).isEmpty()) {
             throw new SagaConcurrentModificationException(sagaId);
           }
-
-          tx.insert(buildEventInsert(sagaId, sequence, event, appendId, now));
-          tx.delete(buildStateDelete(bucket, oldStatus, current.getUpdatedAt(), sagaId));
-          // The event's audit timestamp is always the real time; the state row's updated_at is the
-          // recovery-scan key, so a caller passes EPOCH to hand the saga to the sweeper immediately
-          // (null = the transition time).
-          Instant rowUpdatedAt = stateUpdatedAt != null ? stateUpdatedAt : now;
-          SagaStateSnapshot updated = current.withTransition(newStatus, rowUpdatedAt);
-          tx.insert(buildStateInsert(bucket, updated, ownerId));
+          Instant now = nowSupplier.get();
+          // The event's audit timestamp is always the real time; updatedAt is the recovery-scan
+          // key, so a caller passes EPOCH to hand the saga to the sweeper at once (null = now).
+          Instant newUpdatedAt = stateUpdatedAt != null ? stateUpdatedAt : now;
+          SagaStateSnapshot updated = current.withTransition(newStatus, newUpdatedAt);
+          StateColumns next =
+              new StateColumns(
+                  SagaSchema.sliceOf(newStatus, false), newUpdatedAt.toEpochMilli(), updated);
+          appendTransition(tx, sequence, event, appendId, now, bucket, slice, sweepAt, next);
           return updated;
         },
         verifyOwnAppendCommitted(sagaId, sequence, appendId),
@@ -422,32 +432,29 @@ public final class ScalarDbSagaStore implements SagaStore {
       int sequence,
       StepEvent pendingEvent,
       @Nullable Instant parkedDeadline) {
+    requireNotWaiting(current);
+    requireInKeyRange(parkedDeadline, "parkedDeadline");
     String sagaId = current.getSagaId();
     int bucket = schema.bucketOf(sagaId);
+    int slice = SagaSchema.sliceOf(current.getStatus(), false);
+    long sweepAt = current.getUpdatedAt().toEpochMilli();
     String appendId = appendIdSupplier.get();
 
     return runInTransaction(
         tx -> {
-          Instant now = nowSupplier.get();
-
-          // Optimistic check: the row must still be at the snapshot's (RUNNING) CK.
-          int oldStatus = current.getStatus().getStatusCode();
-          Optional<Result> row =
-              tx.get(buildStateGet(bucket, oldStatus, current.getUpdatedAt(), sagaId));
-          if (row.isEmpty()) {
+          if (tx.get(buildSweepGet(bucket, slice, sweepAt, sagaId)).isEmpty()) {
             throw new SagaConcurrentModificationException(sagaId);
           }
-          String ownerId = row.get().getText("owner_id");
-
-          tx.insert(buildEventInsert(sagaId, sequence, pendingEvent, appendId, now));
-          tx.delete(buildStateDelete(bucket, oldStatus, current.getUpdatedAt(), sagaId));
+          Instant now = nowSupplier.get();
           SagaStateSnapshot updated = current.withTransition(SagaStatus.WAITING, now);
-          tx.insert(buildStateInsert(bucket, updated, ownerId));
-          // A bounded park records its deadline for the recovery sweeper; an unbounded park
-          // (null deadline) writes no row and is never timed out.
-          if (parkedDeadline != null) {
-            tx.insert(buildParkedInsert(bucket, parkedDeadline, sagaId));
-          }
+          // A bounded park sorts by its deadline, where the timeout sweep finds it; an unbounded
+          // one sorts by the park time, where no timeout sweep reads it.
+          StateColumns next =
+              new StateColumns(
+                  SagaSchema.sliceOf(SagaStatus.WAITING, parkedDeadline != null),
+                  (parkedDeadline != null ? parkedDeadline : now).toEpochMilli(),
+                  updated);
+          appendTransition(tx, sequence, pendingEvent, appendId, now, bucket, slice, sweepAt, next);
           return updated;
         },
         verifyOwnAppendCommitted(sagaId, sequence, appendId),
@@ -482,17 +489,21 @@ public final class ScalarDbSagaStore implements SagaStore {
   }
 
   /**
-   * Shared body for the three claim-less transitions out of {@code WAITING} — {@code
-   * resumeParkedStep} (callback), {@code failParkedStep} (give-up), and {@code redriveParkedStep}
-   * (re-drive). In one transaction, after a fail-fast pre-check that the row is still at the
-   * snapshot's ({@code WAITING}) CK, it appends {@code event}, transitions the saga to {@code
-   * targetStatus}, and clears the parked-deadline row (found via the saga_id secondary index since
-   * its {@code parked_deadline} CK is unknown here; an unbounded park left none).
+   * Shared body for the three transitions out of {@code WAITING}: {@code resumeParkedStep}
+   * (callback), {@code failParkedStep} (give-up) and {@code redriveParkedStep} (re-drive). In one
+   * transaction it appends {@code event}, transitions the saga to {@code targetStatus}, and moves
+   * its sweep row out of the parked slice.
    *
-   * <p>The state-row delete is the real mutual-exclusion point: two transitions deleting the same
-   * {@code WAITING} CK conflict at commit, so exactly one commits; a loser retries, re-reads an
-   * empty CK in the pre-check, and throws {@link SagaConcurrentModificationException}. Kept in one
-   * place so the three race-safety-critical paths cannot silently diverge.
+   * <p>The parked saga's sweep key is not in the snapshot: a park with a timeout sorts by its
+   * deadline. It is read from the event just before {@code sequence}, the step's {@code
+   * STEP_PENDING}, because a parked saga's log grows only through status changes (see {@link
+   * SagaStore}). That event must also be the park the snapshot describes, by its time; otherwise
+   * the caller holds an older park, and the saga has moved on.
+   *
+   * <p>The sweep-row delete is the real mutual-exclusion point: two transitions deleting the same
+   * row conflict at commit, so exactly one commits; a loser retries, finds the row gone, and throws
+   * {@link SagaConcurrentModificationException}. Kept in one place so the three
+   * race-safety-critical paths cannot silently diverge.
    */
   private SagaStateSnapshot transitionParkedStep(
       SagaStateSnapshot current,
@@ -501,38 +512,75 @@ public final class ScalarDbSagaStore implements SagaStore {
       SagaStatus targetStatus,
       String op) {
     String sagaId = current.getSagaId();
+    if (current.getStatus() != SagaStatus.WAITING) {
+      throw new SagaConcurrentModificationException(sagaId);
+    }
     int bucket = schema.bucketOf(sagaId);
     String appendId = appendIdSupplier.get();
 
     return runInTransaction(
         tx -> {
-          Instant now = nowSupplier.get();
-
-          // Fail-fast pre-check on the WAITING CK; the state-row delete below is the real
-          // exclusion.
-          int oldStatus = current.getStatus().getStatusCode();
-          Optional<Result> row =
-              tx.get(buildStateGet(bucket, oldStatus, current.getUpdatedAt(), sagaId));
-          if (row.isEmpty()) {
+          ParkedState parked = readParkedState(tx, sagaId, sequence, current);
+          if (tx.get(buildSweepGet(bucket, parked.slice(), parked.sweepAt(), sagaId)).isEmpty()) {
             throw new SagaConcurrentModificationException(sagaId);
           }
-          String ownerId = row.get().getText("owner_id");
-
-          tx.insert(buildEventInsert(sagaId, sequence, event, appendId, now));
-          tx.delete(buildStateDelete(bucket, oldStatus, current.getUpdatedAt(), sagaId));
+          Instant now = nowSupplier.get();
           SagaStateSnapshot updated = current.withTransition(targetStatus, now);
-          tx.insert(buildStateInsert(bucket, updated, ownerId));
-
-          for (Result parked : tx.scan(buildParkedIndexScan(sagaId))) {
-            tx.delete(
-                buildParkedDelete(
-                    bucket, Instant.ofEpochMilli(parked.getBigInt("parked_deadline")), sagaId));
-          }
+          StateColumns next =
+              new StateColumns(
+                  SagaSchema.sliceOf(targetStatus, false), now.toEpochMilli(), updated);
+          appendTransition(
+              tx, sequence, event, appendId, now, bucket, parked.slice(), parked.sweepAt(), next);
           return updated;
         },
         verifyOwnAppendCommitted(sagaId, sequence, appendId),
         op + " for saga " + sagaId,
         sagaId);
+  }
+
+  /**
+   * The sweep key of the park that {@code current} describes, read from the event just before
+   * {@code sequence}.
+   *
+   * @throws SagaConcurrentModificationException when the saga is no longer in that park
+   * @throws SagaPersistenceException when the saga is still parked but the event before {@code
+   *     sequence} carries no state, which breaks the rule that a parked saga's log grows only
+   *     through status changes
+   */
+  private ParkedState readParkedState(
+      DistributedTransaction tx, String sagaId, int sequence, SagaStateSnapshot current)
+      throws Exception {
+    Optional<Result> previous =
+        sequence > 0 ? tx.get(buildEventGet(sagaId, sequence - 1)) : Optional.empty();
+    if (previous.isEmpty()) {
+      throw new SagaConcurrentModificationException(sagaId);
+    }
+    Result row = previous.get();
+    if (row.isNull("state_slice")) {
+      // Either the caller is behind (the saga moved on, and later events filled the log), or the
+      // log of a still-parked saga grew by an event that changed nothing. The first is a lost
+      // race; the second is damage, and reporting it as a race would stall the saga silently.
+      Optional<SagaStateSnapshot> latest = readHead(tx, sagaId).map(Head::state);
+      if (latest.isPresent() && latest.get().getStatus() == SagaStatus.WAITING) {
+        logger.error(
+            "Saga {} is parked, but event {} before the caller's sequence carries no state;"
+                + " a parked saga's log must grow only through status changes",
+            sagaId,
+            sequence - 1);
+        throw SagaPersistenceException.deserializationFailed(
+            new IllegalStateException(
+                "Parked saga " + sagaId + " has a stateless event at " + (sequence - 1)));
+      }
+      throw new SagaConcurrentModificationException(sagaId);
+    }
+    int slice = row.getInt("state_slice");
+    Instant parkedAt = row.getTimestampTZ("created_at");
+    if (SagaSchema.statusOfSlice(slice) != SagaStatus.WAITING
+        || parkedAt == null
+        || parkedAt.toEpochMilli() != current.getUpdatedAt().toEpochMilli()) {
+      throw new SagaConcurrentModificationException(sagaId);
+    }
+    return new ParkedState(slice, row.getBigInt("sweep_at"));
   }
 
   /**
@@ -576,9 +624,9 @@ public final class ScalarDbSagaStore implements SagaStore {
   }
 
   /**
-   * Verifier for any write that appends one event and leaves a state row: the transitions (park,
-   * resume, timeout, {@code recordStatusEvent}) and {@code createSaga}'s seq-0 insert. Treats the
-   * tx as committed when the event at {@code sequence} was written by us (see {@link
+   * Verifier for any write that appends one event and changes the saga's state: the transitions
+   * (park, resume, timeout, {@code recordStatusEvent}) and {@code createSaga}'s seq-0 insert.
+   * Treats the tx as committed when the event at {@code sequence} was written by us (see {@link
    * #verifyOwnEventCommitted}). On a match it returns the resulting state snapshot; when the event
    * is absent it returns empty so the caller retries; when another writer won the sequence, {@link
    * #verifyOwnEventCommitted} throws {@link SagaConcurrentModificationException} directly.
@@ -612,33 +660,39 @@ public final class ScalarDbSagaStore implements SagaStore {
     }
     return runInTransaction(
         tx -> {
-          Optional<SagaStateSnapshot> snapshot =
-              tx.scan(buildStateIndexScan(sagaId)).stream()
-                  .findFirst()
-                  .map(this::toSagaStateSnapshot);
-          if (snapshot.isEmpty()) {
+          // One newest-first pass serves both halves: the events to return, and the saga's state,
+          // which is the newest event that carries one. The pass keeps reading past the events it
+          // returns only until it reaches that state.
+          List<Result> newestFirst = new ArrayList<>();
+          @Nullable SagaStateSnapshot state = null;
+          try (TransactionCrudOperable.Scanner scanner =
+              tx.getScanner(buildNewestFirstScan(sagaId))) {
+            for (Optional<Result> next = scanner.one(); next.isPresent(); next = scanner.one()) {
+              Result r = next.get();
+              if (newestFirst.size() <= maxEvents) {
+                newestFirst.add(r);
+              }
+              if (state == null && isStateRow(r)) {
+                state = toStateSnapshot(sagaId, r);
+              }
+              if (state != null && newestFirst.size() > maxEvents) {
+                break;
+              }
+            }
+          }
+          if (newestFirst.isEmpty()) {
             return Optional.<SagaStateAndEvents>empty();
           }
-          if (maxEvents == Integer.MAX_VALUE) {
-            // Unbounded read; also keeps maxEvents + 1 below from overflowing.
-            List<SagaEvent> events =
-                tx.scan(buildEventScan(sagaId)).stream().map(this::toSagaEvent).toList();
-            return Optional.of(new SagaStateAndEvents(snapshot.get(), events, false));
+          if (state == null) {
+            throw noStateRow(sagaId);
           }
-          // Scan newest-first with one extra row so truncation is detected without a second read
-          // or a count; the events table clusters on the single INT key `sequence`, so a reverse
-          // ordered, limited scan is exactly the supported shape.
-          Scan scan =
-              Scan.newBuilder(buildEventScan(sagaId))
-                  .ordering(Scan.Ordering.desc("sequence"))
-                  .limit(maxEvents + 1)
-                  .build();
-          List<SagaEvent> newestFirst = tx.scan(scan).stream().map(this::toSagaEvent).toList();
           boolean truncated = newestFirst.size() > maxEvents;
           List<SagaEvent> retained =
-              new ArrayList<>(truncated ? newestFirst.subList(0, maxEvents) : newestFirst);
+              new ArrayList<>(
+                  (truncated ? newestFirst.subList(0, maxEvents) : newestFirst)
+                      .stream().map(this::toSagaEvent).toList());
           Collections.reverse(retained); // back to ascending (chronological) order
-          return Optional.of(new SagaStateAndEvents(snapshot.get(), retained, truncated));
+          return Optional.of(new SagaStateAndEvents(state, retained, truncated));
         },
         null, // read-only — retry the whole transaction on UTSE
         "get saga state with events " + sagaId);
@@ -659,46 +713,27 @@ public final class ScalarDbSagaStore implements SagaStore {
   @Override
   public Optional<NewestEvent> getNewestEvent(String sagaId) {
     return runInTransaction(
-        tx -> {
-          // The same reverse-ordered, limited shape getStateWithEvents uses, and supported for the
-          // same reason. What is specific here is the projection: recovery wants the type and the
-          // stamp, so the payload never leaves the store.
-          Scan scan =
-              Scan.newBuilder(buildEventScan(sagaId))
-                  .projections("sequence", "event_type", "created_at")
-                  .ordering(Scan.Ordering.desc("sequence"))
-                  .limit(1)
-                  .build();
-          return tx.scan(scan).stream()
-              .findFirst()
-              .map(
-                  r -> {
-                    Instant createdAt = r.getTimestampTZ("created_at");
-                    if (createdAt == null) {
-                      // Unreachable through this store, which stamps created_at on every append.
-                      // Reporting the epoch rather than throwing keeps a damaged row claimable: a
-                      // saga that cannot report progress must not become permanently unclaimable.
-                      logger.warn(
-                          "Newest event of saga {} has no created_at; treating as no progress",
-                          sagaId);
-                      createdAt = Instant.EPOCH;
-                    }
-                    String eventTypeStr =
-                        Objects.requireNonNull(
-                            r.getText("event_type"), "event_type must not be null");
-                    EventType eventType;
-                    try {
-                      eventType = EventType.valueOf(eventTypeStr);
-                    } catch (IllegalArgumentException e) {
-                      // Same conversion the full row mapper does. A raw IllegalArgumentException
-                      // would escape this public method unwrapped, and during a rolling upgrade an
-                      // older replica reading a type only the newer one writes would surface it on
-                      // every pass for that saga.
-                      throw SagaPersistenceException.deserializationFailed(e);
-                    }
-                    return new NewestEvent(eventType, createdAt);
-                  });
-        },
+        tx ->
+            readHead(tx, sagaId)
+                .map(
+                    head -> {
+                      Instant createdAt = head.newestCreatedAt();
+                      if (createdAt == null) {
+                        // Unreachable through this store, which stamps created_at on every append.
+                        // Reporting the epoch rather than throwing keeps a damaged row claimable: a
+                        // saga that cannot report progress must not become permanently unclaimable.
+                        logger.warn(
+                            "Newest event of saga {} has no created_at; treating as no progress",
+                            sagaId);
+                        createdAt = Instant.EPOCH;
+                      }
+                      return new NewestEvent(
+                          head.newestType(),
+                          createdAt,
+                          head.newestSequence(),
+                          head.lastClaimedAt(),
+                          head.state());
+                    }),
         null, // read-only — retry the whole transaction on UTSE
         "get newest event for saga " + sagaId);
   }
@@ -713,18 +748,20 @@ public final class ScalarDbSagaStore implements SagaStore {
   }
 
   /**
-   * Lists {@code saga_state} snapshots for {@link SagaStore#listStateSnapshots}, paginating by
-   * <b>whole {@code updated_at} cohorts</b> — a page boundary never splits the rows that share a
-   * single timestamp.
+   * Lists saga snapshots for {@link SagaStore#listStateSnapshots} from {@code saga_sweep},
+   * paginating by <b>whole cohorts</b> of one sort timestamp ({@code sweep_at}): a page boundary
+   * never splits the rows that share one. {@code sweep_at} is the saga's {@code updatedAt}, except
+   * in the slice of parked steps with a timeout, which sorts by deadline; there the time filters
+   * are applied to {@code updated_at} in memory, and a cohort is the rows sharing one deadline.
    *
    * <h4>Why cohort pagination, and not a keyset cursor on {@code saga_id}</h4>
    *
    * The natural way to page a bucket-partitioned scan is a keyset cursor over the clustering key
-   * {@code (status, updated_at, saga_id)}. Two ScalarDB properties rule that out here:
+   * {@code (slice, sweep_at, saga_id)}. Two ScalarDB properties rule that out here:
    *
    * <ul>
    *   <li>A {@code Scan} can only range on the <b>last</b> clustering-key column it specifies, with
-   *       the preceding columns pinned to equality. Resuming "strictly after {@code (updated_at,
+   *       the preceding columns pinned to equality. Resuming "strictly after {@code (sweep_at,
    *       saga_id)}" would range on two columns at once, which ScalarDB rejects.
    *   <li>More fundamentally, ScalarDB does <b>not normalize TEXT collation</b>: the ordering of
    *       {@code saga_id} (a TEXT clustering key) is whatever the underlying database does and is
@@ -734,13 +771,13 @@ public final class ScalarDbSagaStore implements SagaStore {
    *       assumption, a silent no-drop hazard at exact-timestamp ties.
    * </ul>
    *
-   * <p>So this design never compares {@code saga_id} at all. The cursor is {@code (bucket, status,
-   * updated_at)} and resume is a pure {@code updated_at > cursor} range. {@code updated_at} is a
-   * timestamp, not TEXT, so its ordering is collation-independent and consistent across every
-   * backend. To keep the cursor sound without a {@code saga_id} tiebreaker, a page returns a
-   * timestamp's cohort <b>in full or not at all</b>: when a slice fills the page limit, {@link
-   * #scanSlice} streams on just far enough to <b>complete</b> the cohort straddling the boundary,
-   * then stops at the next cohort and sets the cursor to the completed cohort's timestamp.
+   * <p>So this design never compares {@code saga_id} at all. The cursor is {@code (bucket, slice,
+   * sweep_at)} and resume is a pure {@code sweep_at > cursor} range. {@code sweep_at} is an
+   * integer, not TEXT, so its ordering is collation-independent and consistent across every
+   * backend. To keep the cursor sound without a {@code saga_id} tiebreaker, a page returns a cohort
+   * <b>in full or not at all</b>: when a slice fills the page limit, {@link #scanSlice} streams on
+   * just far enough to <b>complete</b> the cohort straddling the boundary, then stops at the next
+   * cohort and sets the cursor to the completed cohort's timestamp.
    *
    * <h4>Trade-off: {@code pageSize} is a target, and the memory bound is {@code pageSize} plus
    * cohort size</h4>
@@ -749,41 +786,41 @@ public final class ScalarDbSagaStore implements SagaStore {
    * page runs <b>over</b> it to finish the cohort straddling the limit, and a single cohort larger
    * than {@code pageSize} is returned whole as an over-sized page (a mass event spread across
    * slices yields several such pages, not one). So the rows materialized for one page are bounded
-   * by {@code pageSize} plus the <b>largest cohort</b> (rows sharing one {@code updated_at} within
-   * one {@code (bucket, status)} slice): the page can already hold up to a full target of rows from
+   * by {@code pageSize} plus the <b>largest cohort</b> (rows sharing one {@code sweep_at} within
+   * one {@code (bucket, slice)}): the page can already hold up to a full target of rows from
    * earlier slices when the cohort that overflows it is completed. The cohort term is the one
-   * unbounded quantity in this path: recovery caps its analogous per-status scan (see {@link
+   * unbounded quantity in this path: recovery caps its analogous per-slice scan (see {@link
    * ScalarDbSagaStoreConfig#getRecoveryScanLimit()}), but this listing does not. A pathological
-   * cohort — e.g. a mass transition stamping many sagas with the same millisecond {@code
-   * updated_at}, divided only across {@code numBuckets} — therefore drives peak memory for the
-   * call. Operators should provision heap and response limits for {@code pageSize} plus the largest
-   * expected cohort. Listing is best-effort under concurrent mutation.
+   * cohort — e.g. a mass transition stamping many sagas with the same millisecond, divided only
+   * across {@code numBuckets} — therefore drives peak memory for the call. Operators should
+   * provision heap and response limits for {@code pageSize} plus the largest expected cohort.
+   * Listing is best-effort under concurrent mutation.
    *
    * <h4>Future option: bound memory by splitting cohorts on {@code saga_id}</h4>
    *
    * To cap memory at {@code pageSize} and make page sizes exact, pagination could page
    * <b>within</b> a cohort using {@code saga_id} — the trailing clustering-key column — as a keyset
-   * tiebreaker. The objection above is about a <b>global</b> {@code (updated_at, saga_id)} keyset
+   * tiebreaker. The objection above is about a <b>global</b> {@code (sweep_at, saga_id)} keyset
    * (two ranging columns; and sentinel or in-memory schemes that assume an order). An
-   * <b>intra-cohort</b> keyset sidesteps both: with {@code updated_at} pinned to equality a scan
+   * <b>intra-cohort</b> keyset sidesteps both: with {@code sweep_at} pinned to equality a scan
    * ranges on {@code saga_id} alone, and resuming with the backend's own {@code saga_id > last}
    * predicate is collation-safe — it relies only on each backend being self-consistent, never on an
    * assumed Java or byte order. It is deferred because it reintroduces a {@code saga_id} comparison
-   * and a two-phase resume scan (finish the cohort, then advance {@code updated_at}) on mid-cohort
+   * and a two-phase resume scan (finish the cohort, then advance {@code sweep_at}) on mid-cohort
    * resumes. It can be added later <b>without breaking compatibility</b>: today's cursor is a valid
    * future cursor with no intra-cohort offset, so existing page tokens keep resuming correctly.
    *
-   * <h4>Cost: sequential per-slice transactions, {@code O(numBuckets × statuses)} per page</h4>
+   * <h4>Cost: sequential per-slice transactions, {@code O(numBuckets × slices)} per page</h4>
    *
-   * Each {@code (bucket, status)} slice is scanned in its own read-only transaction (see {@link
+   * Each {@code (bucket, slice)} is scanned in its own read-only transaction (see {@link
    * #scanSlice}), and the slices are swept sequentially until the page fills or every slice drains.
-   * A page therefore costs up to {@code numBuckets × statuses} round-trips <b>independent of how
-   * many rows it returns</b> — a sparse or empty match walks every slice before returning (at
-   * defaults, 16 buckets × 6 statuses = 96; a status filter collapses the inner sweep to one, so up
-   * to {@code numBuckets}). This is acceptable for a low-frequency admin listing: the cost is
-   * latency, not correctness, and every transaction is read-only. The escape hatch, if it ever
-   * matters, is a concurrent per-bucket fan-out, deferred because the bucket-ordered cursor would
-   * then need a cross-bucket merge and a different resume scheme.
+   * A page therefore costs up to {@code numBuckets × slices} round-trips <b>independent of how many
+   * rows it returns</b> — a sparse or empty match walks every slice before returning (at defaults,
+   * 16 buckets × 7 slices = 112; a status filter collapses the inner sweep to one slice, or two for
+   * {@code WAITING}). This is acceptable for a low-frequency admin listing: the cost is latency,
+   * not correctness, and every transaction is read-only. The escape hatch, if it ever matters, is a
+   * concurrent per-bucket fan-out, deferred because the bucket-ordered cursor would then need a
+   * cross-bucket merge and a different resume scheme.
    */
   @Override
   public SagaPage<SagaStateSnapshot> listStateSnapshots(SagaQuery query) {
@@ -791,43 +828,37 @@ public final class ScalarDbSagaStore implements SagaStore {
     int pageSize = query.getPageSize();
     @Nullable Instant updatedAfter = requireInKeyRange(query.getUpdatedAfter(), "updatedAfter");
     @Nullable Instant updatedBefore = requireInKeyRange(query.getUpdatedBefore(), "updatedBefore");
-    // Open-ended upper bound: scan to the latest instant the key can hold, so every stored row is
-    // in range. That sentinel keeps the end key at the same clustering-key width as the start key.
-    Instant endTs = updatedBefore != null ? updatedBefore : MAX_KEY_INSTANT;
 
-    // Which status slices to sweep, in a stable ascending order, and where a token resumes.
+    // Which slices to sweep, in a stable ascending order, and where a token resumes.
     SagaStatus statusFilter = query.getStatus();
-    int[] statusCodes =
-        statusFilter != null ? new int[] {statusFilter.getStatusCode()} : ALL_STATUS_CODES;
+    int[] slices = statusFilter != null ? slicesOf(statusFilter) : ALL_SLICES;
     // A token is bound to the filters that produced it; reusing it under different filters is
     // rejected rather than silently resuming against the wrong data.
     String filterKey = PageCursor.filterKey(query);
     String pageToken = query.getPageToken();
     @Nullable PageCursor cursor =
-        pageToken == null ? null : PageCursor.decode(pageToken, numBuckets, statusCodes, filterKey);
+        pageToken == null ? null : PageCursor.decode(pageToken, numBuckets, slices, filterKey);
 
     List<SagaStateSnapshot> items = new ArrayList<>();
     int startBucket = cursor != null ? cursor.bucket() : 0;
 
     for (int bucket = startBucket; bucket < numBuckets; bucket++) {
-      int startStatusIdx =
-          (cursor != null && bucket == cursor.bucket())
-              ? indexOfStatus(statusCodes, cursor.statusCode())
-              : 0;
-      for (int si = startStatusIdx; si < statusCodes.length; si++) {
-        int statusCode = statusCodes[si];
-        // Resume from the token only in the exact (bucket, status) slice it points at.
+      int startSliceIdx =
+          (cursor != null && bucket == cursor.bucket()) ? indexOf(slices, cursor.slice()) : 0;
+      for (int si = startSliceIdx; si < slices.length; si++) {
+        int slice = slices[si];
+        // Resume from the token only in the exact (bucket, slice) it points at.
         @Nullable Instant afterTs =
-            (cursor != null && bucket == cursor.bucket() && statusCode == cursor.statusCode())
-                ? cursor.updatedAt()
+            (cursor != null && bucket == cursor.bucket() && slice == cursor.slice())
+                ? cursor.sweepAt()
                 : null;
         SliceResult result =
-            scanSlice(bucket, statusCode, afterTs, updatedAfter, endTs, pageSize - items.size());
+            scanSlice(bucket, slice, afterTs, updatedAfter, updatedBefore, pageSize - items.size());
         items.addAll(result.rows());
         if (result.resumeTs() != null) {
           // The page filled within this slice; the token resumes it after the last complete cohort.
           return new SagaPage<>(
-              items, new PageCursor(bucket, statusCode, result.resumeTs()).encode(filterKey));
+              items, new PageCursor(bucket, slice, result.resumeTs()).encode(filterKey));
         }
         // Slice drained — move on to the next one.
       }
@@ -837,8 +868,8 @@ public final class ScalarDbSagaStore implements SagaStore {
   }
 
   /**
-   * Scans one {@code (bucket, status)} slice in its own transaction (never one tx across a page),
-   * returning whole {@code updated_at} cohorts up to about {@code limit} rows.
+   * Scans one {@code (bucket, slice)} of {@code saga_sweep} in its own transaction (never one tx
+   * across a page), returning whole {@code sweep_at} cohorts up to about {@code limit} rows.
    *
    * <p>Streams the slice in clustering order with a {@link TransactionCrudOperable.Scanner}: once
    * it holds at least {@code limit} rows it keeps pulling only far enough to finish the cohort in
@@ -848,17 +879,22 @@ public final class ScalarDbSagaStore implements SagaStore {
    * completes an over-sized single-timestamp cohort for free. The scanner lives entirely within
    * this one (read-only) transaction and is closed before commit.
    *
+   * <p>In every slice but the one of parked steps with a timeout, {@code sweep_at} is the saga's
+   * {@code updatedAt}, so the time filters bound the scan itself. In that slice they cannot, and
+   * are applied to each row's {@code updated_at} instead.
+   *
    * @return the rows plus, when the slice was <b>not</b> drained, the last complete timestamp to
    *     resume after; {@link SliceResult#resumeTs()} is {@code null} when the slice is fully
    *     drained
    */
   private SliceResult scanSlice(
       int bucket,
-      int statusCode,
+      int slice,
       @Nullable Instant afterTs,
       @Nullable Instant updatedAfter,
-      Instant endTs,
+      @Nullable Instant updatedBefore,
       int limit) {
+    boolean filterInMemory = slice == SagaSchema.WAITING_WITH_TIMEOUT_SLICE;
     return runInTransaction(
         tx -> {
           Instant startTs;
@@ -866,23 +902,33 @@ public final class ScalarDbSagaStore implements SagaStore {
           if (afterTs != null) {
             startTs = afterTs; // resume strictly after the last fully-returned timestamp
             startInclusive = false;
+          } else if (filterInMemory) {
+            startTs = MIN_KEY_INSTANT;
+            startInclusive = true;
           } else {
             startTs = updatedAfter != null ? updatedAfter : Instant.EPOCH;
             startInclusive = true;
           }
+          // Open-ended upper bound: scan to the latest instant the key can hold, so every stored
+          // row
+          // is in range. That sentinel keeps the end key at the same width as the start key.
+          Instant endTs = filterInMemory || updatedBefore == null ? MAX_KEY_INSTANT : updatedBefore;
 
           List<SagaStateSnapshot> rows = new ArrayList<>();
-          @Nullable Instant lastTs = null; // timestamp of the last row accepted
+          @Nullable Instant lastTs = null; // sort timestamp of the last row accepted
           try (TransactionCrudOperable.Scanner scanner =
-              tx.getScanner(
-                  buildStateRangeScan(bucket, statusCode, startTs, startInclusive, endTs))) {
+              tx.getScanner(buildSweepRangeScan(bucket, slice, startTs, startInclusive, endTs))) {
             for (Optional<Result> next = scanner.one(); next.isPresent(); next = scanner.one()) {
               Result r = next.get();
-              Instant ts = updatedAt(r);
+              Instant ts = Instant.ofEpochMilli(r.getBigInt("sweep_at"));
               if (rows.size() >= limit && !ts.equals(lastTs)) {
                 break; // limit met and a new cohort begins — leave it for the next page
               }
-              rows.add(toSagaStateSnapshot(r));
+              SagaStateSnapshot snapshot = toSweepSnapshot(r);
+              if (filterInMemory && !withinWindow(snapshot, updatedAfter, updatedBefore)) {
+                continue;
+              }
+              rows.add(snapshot);
               lastTs = ts;
             }
           }
@@ -895,9 +941,23 @@ public final class ScalarDbSagaStore implements SagaStore {
         "list saga snapshots");
   }
 
-  private static int indexOfStatus(int[] statusCodes, int statusCode) {
-    for (int i = 0; i < statusCodes.length; i++) {
-      if (statusCodes[i] == statusCode) {
+  private static boolean withinWindow(
+      SagaStateSnapshot snapshot, @Nullable Instant updatedAfter, @Nullable Instant updatedBefore) {
+    long updatedAt = snapshot.getUpdatedAt().toEpochMilli();
+    return (updatedAfter == null || updatedAt >= updatedAfter.toEpochMilli())
+        && (updatedBefore == null || updatedAt <= updatedBefore.toEpochMilli());
+  }
+
+  /** The slices that hold sagas in {@code status}: one per status, and two for {@code WAITING}. */
+  private static int[] slicesOf(SagaStatus status) {
+    return status == SagaStatus.WAITING
+        ? new int[] {status.getStatusCode(), SagaSchema.WAITING_WITH_TIMEOUT_SLICE}
+        : new int[] {status.getStatusCode()};
+  }
+
+  private static int indexOf(int[] codes, int code) {
+    for (int i = 0; i < codes.length; i++) {
+      if (codes[i] == code) {
         return i;
       }
     }
@@ -905,10 +965,10 @@ public final class ScalarDbSagaStore implements SagaStore {
   }
 
   /**
-   * Rejects an {@code updated_at} bound outside the range the key can hold ({@link
-   * #MIN_KEY_INSTANT} to {@link #MAX_KEY_INSTANT}), with a clear message, rather than letting it
-   * surface as a lower-level exception when the scan key is built. Sub-millisecond precision needs
-   * no handling here: {@code toEpochMilli} drops it, the same way the stored values were written.
+   * Rejects a time outside the range the {@code sweep_at} key can hold ({@link #MIN_KEY_INSTANT} to
+   * {@link #MAX_KEY_INSTANT}), with a clear message, rather than letting it surface as a
+   * lower-level exception when the key is built. Sub-millisecond precision needs no handling here:
+   * {@code toEpochMilli} drops it, the same way the stored values were written.
    *
    * @return {@code bound} unchanged (including {@code null}, which means no bound)
    */
@@ -975,7 +1035,7 @@ public final class ScalarDbSagaStore implements SagaStore {
 
   @Override
   public int recoveryPageSize() {
-    return config.getRecoveryScanLimit() * RECOVERABLE_STATUS_CODES.length;
+    return config.getRecoveryScanLimit() * RECOVERABLE_SLICES.length;
   }
 
   @Override
@@ -986,100 +1046,215 @@ public final class ScalarDbSagaStore implements SagaStore {
     }
 
     int bucket = step.bucket();
+    // Cap each slice scan to avoid unbounded memory usage in large buckets.
+    int scanLimit = config.getRecoveryScanLimit();
+    long thresholdMillis = threshold.toEpochMilli();
 
-    List<SagaStateSnapshot> result =
+    List<SliceScan> scans =
         runInTransaction(
             tx -> {
-              List<SagaStateSnapshot> snapshots = new ArrayList<>();
-              // Cap each status scan to avoid unbounded memory usage in large buckets.
-              // Any sagas beyond the limit are picked up on the next recovery cycle.
-              int scanLimit = config.getRecoveryScanLimit();
-              for (int status : RECOVERABLE_STATUS_CODES) {
-                List<Result> rows =
-                    tx.scan(
-                        Scan.newBuilder(
-                                buildStateRangeScan(bucket, status, Instant.EPOCH, true, threshold))
-                            .limit(scanLimit)
-                            .build());
-                for (Result r : rows) {
-                  snapshots.add(toSagaStateSnapshot(r));
+              List<SliceScan> slices = new ArrayList<>();
+              for (int slice : RECOVERABLE_SLICES) {
+                @Nullable SweepKey resume = recoveryResume.get(new BucketSlice(bucket, slice));
+                if (resume != null && resume.sweepAt() > thresholdMillis) {
+                  resume = null; // the clock went back past it; start over
                 }
+                Instant start =
+                    resume == null ? Instant.EPOCH : Instant.ofEpochMilli(resume.sweepAt());
+                List<SagaStateSnapshot> found = new ArrayList<>();
+                // A hand-off is stamped EPOCH to be taken on the next pass, so a resumed scan reads
+                // those rows first rather than waiting for the cursor to wrap. A claim moves a
+                // hand-off off EPOCH, so they are few.
+                if (resume != null && resume.sweepAt() > 0) {
+                  try (TransactionCrudOperable.Scanner scanner =
+                      tx.getScanner(
+                          buildSweepRangeScan(bucket, slice, Instant.EPOCH, true, Instant.EPOCH))) {
+                    for (Optional<Result> next = scanner.one();
+                        next.isPresent() && found.size() < scanLimit;
+                        next = scanner.one()) {
+                      found.add(toSweepSnapshot(next.get()));
+                    }
+                  }
+                }
+                // Rows sharing the resume timestamp are skipped by position, not compared by id:
+                // the store orders saga ids by its own collation, which need not be Java's.
+                int toSkip = resume == null ? 0 : resume.rowsReturnedAt();
+                long lastSweepAt = Long.MIN_VALUE;
+                int returnedAtLast = 0;
+                if (found.size() < scanLimit) {
+                  try (TransactionCrudOperable.Scanner scanner =
+                      tx.getScanner(buildSweepRangeScan(bucket, slice, start, true, threshold))) {
+                    for (Optional<Result> next = scanner.one();
+                        next.isPresent() && found.size() < scanLimit;
+                        next = scanner.one()) {
+                      Result r = next.get();
+                      long sweepAt = r.getBigInt("sweep_at");
+                      if (resume != null && sweepAt == resume.sweepAt() && toSkip > 0) {
+                        toSkip--; // returned by an earlier pass
+                        continue;
+                      }
+                      found.add(toSweepSnapshot(r));
+                      returnedAtLast = sweepAt == lastSweepAt ? returnedAtLast + 1 : 1;
+                      lastSweepAt = sweepAt;
+                    }
+                  }
+                }
+                // A full slice continues after its last row next pass; a short one starts over.
+                // Hand-offs alone filling it leave the resume point where it was.
+                @Nullable SweepKey resumeAfter = null;
+                if (found.size() >= scanLimit && lastSweepAt == Long.MIN_VALUE) {
+                  resumeAfter = resume;
+                } else if (found.size() >= scanLimit) {
+                  int returnedAt =
+                      resume != null && resume.sweepAt() == lastSweepAt
+                          ? resume.rowsReturnedAt() + returnedAtLast
+                          : returnedAtLast;
+                  resumeAfter = new SweepKey(lastSweepAt, returnedAt);
+                }
+                slices.add(new SliceScan(slice, found, resumeAfter));
               }
-              return snapshots;
+              return slices;
             },
             null,
             "find recoverable sagas");
 
+    List<SagaStateSnapshot> result = new ArrayList<>();
+    for (SliceScan scan : scans) {
+      result.addAll(scan.sagas());
+      BucketSlice at = new BucketSlice(bucket, scan.slice());
+      @Nullable SweepKey resumeAfter = scan.resumeAfter();
+      if (resumeAfter != null) {
+        recoveryResume.put(at, resumeAfter);
+      } else {
+        recoveryResume.remove(at);
+      }
+    }
     return new Recoverables(result, step.nextCursor());
   }
 
+  private record BucketSlice(int bucket, int slice) {}
+
+  /**
+   * Where a full recovery scan of one slice stopped: the {@code sweep_at} of its last row, and how
+   * many rows at that {@code sweep_at} have been returned since the scan last started over.
+   */
+  private record SweepKey(long sweepAt, int rowsReturnedAt) {}
+
+  private record SliceScan(
+      int slice, List<SagaStateSnapshot> sagas, @Nullable SweepKey resumeAfter) {}
+
+  /**
+   * {@inheritDoc}
+   *
+   * <p>The claim is a compare-and-set on the event log: it inserts {@code SAGA_CLAIMED} at the
+   * sequence after {@code probe}'s, so anything appended since the probe — another replica's claim,
+   * or a step its live driver just finished — makes the insert collide. Every status change appends
+   * an event, so the sequence covers those as well. The claim first reads the swept sweep row and
+   * refuses if it is gone: a purge frees the sequence, so only the row tells a saga purged since
+   * the probe, or recreated under its id, from the one that was swept. A change between the sweep
+   * and the probe is caught before writing, by comparing the sweep's snapshot with the state the
+   * probe read; otherwise the claim would record the sweep's stale state. A collision or a mismatch
+   * is a lost race, never retried: it proves another writer touched the saga. Only a saga handed to
+   * recovery at {@code EPOCH} also moves its sweep row, to the claim time, so the next sweep does
+   * not offer it again; any other claim leaves the row where it is, and the claim event alone keeps
+   * other replicas' probes away for a staleness window.
+   */
   @Override
-  public Optional<SagaStateSnapshot> claimForRecovery(SagaStateSnapshot saga, String newOwnerId) {
+  public Optional<SagaStateSnapshot> claimForRecovery(
+      SagaStateSnapshot saga, NewestEvent probe, String newOwnerId) {
+    SagaStatus status = saga.getStatus();
+    if (!status.isRecoverable()) {
+      throw new IllegalArgumentException(
+          "Only RUNNING or COMPENSATING sagas are claimed: " + status);
+    }
+    long sweepAt = saga.getUpdatedAt().toEpochMilli();
+    // Compared in the sweep key's unit: the store keeps milliseconds.
+    if (probe.state().getStatus() != status
+        || probe.state().getUpdatedAt().toEpochMilli() != sweepAt) {
+      return Optional.empty();
+    }
     String sagaId = saga.getSagaId();
     int bucket = schema.bucketOf(sagaId);
-    int status = saga.getStatus().getStatusCode();
+    int slice = SagaSchema.sliceOf(status, false);
+    boolean handedOff = saga.getUpdatedAt().equals(Instant.EPOCH);
+    int sequence = probe.sequence() + 1;
+    String appendId = appendIdSupplier.get();
+    // Written by the transaction body and returned by the verifier, so an unknown commit that did
+    // land reports the snapshot this claim produced.
+    AtomicReference<SagaStateSnapshot> claimedRef = new AtomicReference<>(saga);
 
     try {
-      SagaStateSnapshot result =
+      SagaStateSnapshot claimed =
           runInTransaction(
               tx -> {
                 Instant now = nowSupplier.get();
-
-                // Verify the row still exists at the snapshot's CK.
-                Optional<Result> current =
-                    tx.get(buildStateGet(bucket, status, saga.getUpdatedAt(), sagaId));
-
-                if (current.isEmpty()) {
+                SagaStateSnapshot result = handedOff ? saga.withTransition(status, now) : saga;
+                StateColumns next =
+                    new StateColumns(slice, result.getUpdatedAt().toEpochMilli(), result);
+                StatusEvent event = StatusEvent.claimed(status, newOwnerId);
+                // The sequence alone cannot fence a saga that was purged since the probe: the
+                // purge frees the sequence, and a saga recreated under the same id may not have
+                // reached it. The swept sweep row is gone in both cases, since its key carries the
+                // time.
+                if (tx.get(buildSweepGet(bucket, slice, sweepAt, sagaId)).isEmpty()) {
                   throw new SagaConcurrentModificationException(sagaId);
                 }
-
-                tx.delete(buildStateDelete(bucket, status, saga.getUpdatedAt(), sagaId));
-                SagaStateSnapshot claimed =
-                    new SagaStateSnapshot(
-                        sagaId,
-                        saga.getSagaName(),
-                        saga.getStatus(),
-                        saga.getDefinitionVersion(),
-                        saga.getCreatedAt(),
-                        now);
-                tx.insert(buildStateInsert(bucket, claimed, newOwnerId));
-                return claimed;
+                if (handedOff) {
+                  appendTransition(
+                      tx, sequence, event, appendId, now, bucket, slice, sweepAt, next);
+                } else {
+                  tx.insert(buildEventInsert(sagaId, sequence, event, appendId, now, next));
+                }
+                claimedRef.set(result);
+                return result;
               },
-              () -> loadStateClaimedBy(sagaId, newOwnerId),
-              "claim saga " + sagaId + " for recovery");
-      return Optional.of(result);
+              () ->
+                  verifyOwnEventCommitted(sagaId, sequence, appendId)
+                      ? Optional.of(Objects.requireNonNull(claimedRef.get()))
+                      : Optional.empty(),
+              "claim saga " + sagaId + " for recovery",
+              false);
+      return Optional.of(claimed);
     } catch (SagaConcurrentModificationException e) {
       return Optional.empty();
+    } catch (SagaPersistenceException e) {
+      if (e.getCause() instanceof CommitConflictException
+          || e.getCause() instanceof CrudConflictException) {
+        return Optional.empty();
+      }
+      throw e;
     }
   }
 
   @Override
   public void markForRecovery(String sagaId) {
+    int bucket = schema.bucketOf(sagaId);
     try {
       runInTransaction(
           tx -> {
-            Optional<Result> result = tx.scan(buildStateIndexScan(sagaId)).stream().findFirst();
-
-            if (result.isEmpty()) {
-              return Boolean.TRUE; // no-op
+            Optional<Head> head = readHead(tx, sagaId);
+            if (head.isEmpty() || !head.get().state().getStatus().isRecoverable()) {
+              // Gone, parked, or finished: only a saga being driven needs handing over.
+              return Boolean.TRUE;
             }
-
-            Result r = result.get();
-            int bucket = r.getInt("bucket");
-            SagaStateSnapshot current = toSagaStateSnapshot(r);
-
-            tx.delete(
-                buildStateDelete(
-                    bucket, current.getStatus().getStatusCode(), current.getUpdatedAt(), sagaId));
-            SagaStateSnapshot marked =
-                new SagaStateSnapshot(
-                    sagaId,
-                    current.getSagaName(),
-                    current.getStatus(),
-                    current.getDefinitionVersion(),
-                    current.getCreatedAt(),
-                    Instant.EPOCH);
-            tx.insert(buildStateInsert(bucket, marked, r.getText("owner_id")));
+            SagaStateSnapshot current = head.get().state();
+            int slice = SagaSchema.sliceOf(current.getStatus(), false);
+            long sweepAt = current.getUpdatedAt().toEpochMilli();
+            if (tx.get(buildSweepGet(bucket, slice, sweepAt, sagaId)).isEmpty()) {
+              return Boolean.TRUE; // the log and the sweep table disagree; leave it to recovery
+            }
+            Instant now = nowSupplier.get();
+            SagaStateSnapshot marked = current.withTransition(current.getStatus(), Instant.EPOCH);
+            appendTransition(
+                tx,
+                head.get().newestSequence() + 1,
+                StatusEvent.released(current.getStatus()),
+                appendIdSupplier.get(),
+                now,
+                bucket,
+                slice,
+                sweepAt,
+                new StateColumns(slice, 0L, marked));
             return Boolean.TRUE;
           },
           null, // best-effort — no verifier
@@ -1108,7 +1283,13 @@ public final class ScalarDbSagaStore implements SagaStore {
               // Cap the scan to bound memory; anything beyond is picked up next recovery cycle.
               List<Result> rows =
                   tx.scan(
-                      Scan.newBuilder(buildParkedRangeScan(bucket, threshold))
+                      Scan.newBuilder(
+                              buildSweepRangeScan(
+                                  bucket,
+                                  SagaSchema.WAITING_WITH_TIMEOUT_SLICE,
+                                  MIN_KEY_INSTANT,
+                                  true,
+                                  threshold))
                           .limit(config.getRecoveryScanLimit())
                           .build());
               return rows.stream().map(r -> r.getText("saga_id")).toList();
@@ -1153,7 +1334,7 @@ public final class ScalarDbSagaStore implements SagaStore {
   }
 
   /**
-   * Finds sagas in a specific (bucket, status) partition with {@code updated_at} older than the
+   * Finds sagas in a specific (bucket, status) slice with {@code updatedAt} older than the
    * threshold.
    */
   private List<SagaStateSnapshot> findByStatusInBucket(
@@ -1163,11 +1344,15 @@ public final class ScalarDbSagaStore implements SagaStore {
           List<Result> rows =
               tx.scan(
                   Scan.newBuilder(
-                          buildStateRangeScan(
-                              bucket, status.getStatusCode(), Instant.EPOCH, true, threshold))
+                          buildSweepRangeScan(
+                              bucket,
+                              SagaSchema.sliceOf(status, false),
+                              Instant.EPOCH,
+                              true,
+                              threshold))
                       .limit(maxResults)
                       .build());
-          return rows.stream().map(this::toSagaStateSnapshot).toList();
+          return rows.stream().map(this::toSweepSnapshot).toList();
         },
         null,
         "find sagas by status");
@@ -1175,54 +1360,63 @@ public final class ScalarDbSagaStore implements SagaStore {
 
   @Override
   public boolean deleteSaga(String sagaId) {
+    int bucket = schema.bucketOf(sagaId);
     // Written by every attempt of the transaction body and read by the commit verifier, so after
-    // an unknown commit it can tell "our attempt deleted the row" from "the row was already gone
+    // an unknown commit it can tell "our attempt deleted the saga" from "the saga was already gone
     // before this call ran" — post-state alone cannot distinguish the two.
-    AtomicBoolean sawStateRow = new AtomicBoolean();
+    AtomicBoolean sawSaga = new AtomicBoolean();
     return runInTransaction(
         tx -> {
-          Optional<Result> stateResult = tx.scan(buildStateIndexScan(sagaId)).stream().findFirst();
-          sawStateRow.set(stateResult.isPresent());
-
-          if (stateResult.isPresent()) {
-            Result r = stateResult.get();
-            SagaStatus status = SagaStatus.fromStatusCode(r.getInt("status"));
-            if (!status.isTerminal()) {
-              throw new IllegalStateException(
-                  "Cannot delete saga in non-terminal status: " + status);
-            }
-            tx.delete(
-                buildStateDelete(r.getInt("bucket"), r.getInt("status"), updatedAt(r), sagaId));
-          }
-
-          List<Result> eventResults =
+          // Only the keys and the state columns are read: payloads are unbounded by default.
+          List<Result> events =
               tx.scan(
                   Scan.newBuilder(buildEventScan(sagaId))
-                      .projections("saga_id", "sequence")
+                      .projections("saga_id", "sequence", "state_slice", "sweep_at")
                       .build());
-
-          for (Result r : eventResults) {
+          sawSaga.set(!events.isEmpty());
+          if (events.isEmpty()) {
+            return false;
+          }
+          // The state is the newest event that carries one; the scan is in ascending order.
+          @Nullable Result stateRow = null;
+          for (Result r : events) {
+            if (isStateRow(r)) {
+              stateRow = r;
+            }
+          }
+          if (stateRow == null) {
+            throw noStateRow(sagaId);
+          }
+          SagaStatus status = SagaSchema.statusOfSlice(stateRow.getInt("state_slice"));
+          if (!status.isTerminal()) {
+            throw new IllegalStateException("Cannot delete saga in non-terminal status: " + status);
+          }
+          int slice = stateRow.getInt("state_slice");
+          long sweepAt = stateRow.getBigInt("sweep_at");
+          if (tx.get(buildSweepGet(bucket, slice, sweepAt, sagaId)).isPresent()) {
+            tx.delete(buildSweepDelete(bucket, slice, sweepAt, sagaId));
+          }
+          for (Result r : events) {
             tx.delete(buildEventDelete(sagaId, r.getInt("sequence")));
           }
-
-          // True only when this call removed the state row; an already-purged saga is a no-op so
+          // True only when this call removed the saga; an already-purged saga is a no-op so
           // budgeting callers can tell real purges from races with other replicas.
-          return stateResult.isPresent();
+          return true;
         },
         () -> {
-          if (!sawStateRow.get()) {
-            // The attempt never saw a state row, so whatever the commit's fate, this call deleted
+          if (!sawSaga.get()) {
+            // The attempt never saw the saga, so whatever the commit's fate, this call deleted
             // nothing: an already-purged saga must not be reported as a purge, or budgeting
             // callers would charge work that never happened.
             return Optional.of(Boolean.FALSE);
           }
-          // Verify deletion after an unknown commit: the attempt saw the row, so its absence now
-          // means our delete (or an equivalent one) landed; report it as a real purge. If the row
-          // is still present the commit did not land, and the transaction is retried. A deletion
-          // leaves no marker of who performed it, so a racer that also saw the row but lost the
+          // Verify deletion after an unknown commit: the attempt saw the saga, so its absence now
+          // means our delete (or an equivalent one) landed; report it as a real purge. If it is
+          // still present the commit did not land, and the transaction is retried. A deletion
+          // leaves no marker of who performed it, so a racer that also saw the saga but lost the
           // commit may reach here and report true as well, double charging one budget unit. That
           // takes both rarities in one call: a lost race whose commit outcome is also unknown. A
-          // cleanly failed commit never gets here — it is retried, and the retry sees the row
+          // cleanly failed commit never gets here — it is retried, and the retry sees the saga
           // already gone and reports false.
           Optional<SagaStateSnapshot> state = loadStateSnapshot(sagaId);
           return state.isEmpty() ? Optional.of(Boolean.TRUE) : Optional.empty();
@@ -1427,10 +1621,10 @@ public final class ScalarDbSagaStore implements SagaStore {
    * <p>A commit conflict is a definite abort, so our write did not land. It does not follow that
    * another writer's did: two writers contending on the same rows can both conflict and both
    * exhaust with neither committing. Every attempt re-runs the action from scratch, and the
-   * transition ops re-read the state row each time, so reaching here means we never once observed
-   * another writer take it; {@code recordStepEvent} is a bare append that reads nothing and so
-   * observes nothing at all. Either way this is the weakest evidence of a collision in this class,
-   * not the strongest.
+   * transition ops re-read the saga's state each time, so reaching here means we never once
+   * observed another writer take it; {@code recordStepEvent} is a bare append that reads nothing
+   * and so observes nothing at all. Either way this is the weakest evidence of a collision in this
+   * class, not the strongest.
    *
    * <p>A CRUD conflict aborts the attempt just as a commit conflict does, and says just as little
    * about who won. The transition ops raise it when their pre-check read finds a record another
@@ -1481,152 +1675,214 @@ public final class ScalarDbSagaStore implements SagaStore {
   // Internal helpers
   // ---------------------------------------------------------------------------
 
-  // -- saga_state builders --
+  // -- saga_sweep builders --
 
-  private Get buildStateGet(int bucket, int status, Instant updatedAt, String sagaId) {
+  private Get buildSweepGet(int bucket, int slice, long sweepAt, String sagaId) {
     return Get.newBuilder()
         .namespace(SagaSchema.NAMESPACE)
-        .table(SagaSchema.STATE_TABLE)
+        .table(SagaSchema.SWEEP_TABLE)
         .partitionKey(Key.ofInt("bucket", bucket))
-        .clusteringKey(stateClusteringKey(status, updatedAt, sagaId))
+        .clusteringKey(sweepClusteringKey(slice, sweepAt, sagaId))
         .build();
   }
 
-  private Delete buildStateDelete(int bucket, int status, Instant updatedAt, String sagaId) {
+  private Delete buildSweepDelete(int bucket, int slice, long sweepAt, String sagaId) {
     return Delete.newBuilder()
         .namespace(SagaSchema.NAMESPACE)
-        .table(SagaSchema.STATE_TABLE)
+        .table(SagaSchema.SWEEP_TABLE)
         .partitionKey(Key.ofInt("bucket", bucket))
-        .clusteringKey(stateClusteringKey(status, updatedAt, sagaId))
+        .clusteringKey(sweepClusteringKey(slice, sweepAt, sagaId))
         .build();
   }
 
-  /**
-   * The owner is passed separately because it is server-internal and deliberately absent from
-   * {@link SagaStateSnapshot} (see that class). Callers either hold it as a parameter or read it
-   * off the row they are replacing.
-   */
-  private Insert buildStateInsert(int bucket, SagaStateSnapshot snapshot, String ownerId) {
-    // Restores the fail-fast that the snapshot's constructor used to provide while it carried the
-    // owner. Without it a null reaches ScalarDB, which accepts it and commits a NULL column, and
-    // "present but unowned" then reads the same as "missing" everywhere downstream. NullAway
-    // cannot catch it: Result.getText sits outside the annotated packages, so it is treated as
-    // non-null. Every write path funnels through here, including the three that read the owner off
-    // the row.
-    Objects.requireNonNull(ownerId, "ownerId must not be null");
+  private Insert buildSweepInsert(int bucket, int slice, long sweepAt, SagaStateSnapshot snapshot) {
     return Insert.newBuilder()
         .namespace(SagaSchema.NAMESPACE)
-        .table(SagaSchema.STATE_TABLE)
+        .table(SagaSchema.SWEEP_TABLE)
         .partitionKey(Key.ofInt("bucket", bucket))
-        .clusteringKey(
-            stateClusteringKey(
-                snapshot.getStatus().getStatusCode(),
-                snapshot.getUpdatedAt(),
-                snapshot.getSagaId()))
+        .clusteringKey(sweepClusteringKey(slice, sweepAt, snapshot.getSagaId()))
         .textValue("saga_name", snapshot.getSagaName())
-        .textValue("owner_id", ownerId)
         .textValue("definition_version", snapshot.getDefinitionVersion())
         .timestampTZValue("created_at", snapshot.getCreatedAt())
+        .timestampTZValue("updated_at", snapshot.getUpdatedAt())
         .build();
   }
 
   /**
-   * Looks up a single state row by {@code saga_id} via the secondary index.
-   *
-   * <p>Uses a {@code Scan} with {@code limit(1)} rather than a {@code Get} on the index
-   * deliberately. ConsensusCommit's Get-with-index currently throws {@link
-   * IllegalArgumentException} when two physical rows transiently share the same {@code saga_id}
-   * during a status transition. Scan tolerates this and keeps the store always runnable. Once that
-   * limitation is resolved, this can be reverted to a single {@code Get} on the index.
-   *
-   * <p>Callers can therefore treat the result as at most one visible row: {@code saga_id} is a
-   * unique UUID, and a status transition (delete old row + insert new row) is committed atomically
-   * by ConsensusCommit, so under snapshot isolation a reader sees either the pre-state or the
-   * post-state — never both. {@code stream().findFirst()} on the result is thus always the current
-   * state; there is no set of rows to order by {@code updated_at}.
+   * Appends {@code event} carrying the saga's new state, and moves the saga's sweep row from its
+   * old key to the one that state names. The caller has read the old row in the same transaction,
+   * so the delete needs no read of its own and conflicts with any other writer moving the same row.
    */
-  private Scan buildStateIndexScan(String sagaId) {
-    return Scan.newBuilder()
-        .namespace(SagaSchema.NAMESPACE)
-        .table(SagaSchema.STATE_TABLE)
-        .indexKey(Key.ofText("saga_id", sagaId))
-        .limit(1)
-        .build();
+  private void appendTransition(
+      DistributedTransaction tx,
+      int sequence,
+      SagaEvent event,
+      String appendId,
+      Instant now,
+      int bucket,
+      int oldSlice,
+      long oldSweepAt,
+      StateColumns next)
+      throws Exception {
+    String sagaId = next.snapshot().getSagaId();
+    tx.insert(buildEventInsert(sagaId, sequence, event, appendId, now, next));
+    tx.delete(buildSweepDelete(bucket, oldSlice, oldSweepAt, sagaId));
+    tx.insert(buildSweepInsert(bucket, next.slice(), next.sweepAt(), next.snapshot()));
   }
 
   /**
-   * Builds an {@code updated_at}-range scan over one {@code (bucket, status)} slice of {@code
-   * saga_state}, from {@code [startTs .. endInclusive]} on the second clustering-key column ({@code
-   * status} fixed). ScalarDB only allows ranging on the last specified clustering key, which is why
-   * the Admin listing paginates by whole {@code updated_at} cohorts rather than a {@code saga_id}
-   * keyset (see {@link #listStateSnapshots}). Recovery and retention call this as {@code (EPOCH,
-   * true, threshold)}, reproducing their original {@code [EPOCH, threshold]} scan exactly.
+   * Builds a {@code sweep_at}-range scan over one {@code (bucket, slice)} of {@code saga_sweep},
+   * from {@code [startTs .. endInclusive]} on the second clustering-key column ({@code slice}
+   * fixed). ScalarDB only allows ranging on the last specified clustering key, which is why the
+   * admin listing paginates by whole cohorts rather than a {@code saga_id} keyset (see {@link
+   * #listStateSnapshots}).
    */
-  private Scan buildStateRangeScan(
-      int bucket, int status, Instant startTs, boolean startInclusive, Instant endInclusive) {
+  private Scan buildSweepRangeScan(
+      int bucket, int slice, Instant startTs, boolean startInclusive, Instant endInclusive) {
     return Scan.newBuilder()
         .namespace(SagaSchema.NAMESPACE)
-        .table(SagaSchema.STATE_TABLE)
+        .table(SagaSchema.SWEEP_TABLE)
         .partitionKey(Key.ofInt("bucket", bucket))
         .start(
             Key.newBuilder()
-                .addInt("status", status)
-                .addBigInt("updated_at", startTs.toEpochMilli())
+                .addInt("slice", slice)
+                .addBigInt("sweep_at", startTs.toEpochMilli())
                 .build(),
             startInclusive)
         .end(
             Key.newBuilder()
-                .addInt("status", status)
-                .addBigInt("updated_at", endInclusive.toEpochMilli())
+                .addInt("slice", slice)
+                .addBigInt("sweep_at", endInclusive.toEpochMilli())
                 .build(),
             true)
         .build();
   }
 
-  /** Scans one {@code saga_parked} bucket for deadlines in {@code [EPOCH, threshold]}. */
-  private Scan buildParkedRangeScan(int bucket, Instant threshold) {
-    return Scan.newBuilder()
-        .namespace(SagaSchema.NAMESPACE)
-        .table(SagaSchema.PARKED_TABLE)
-        .partitionKey(Key.ofInt("bucket", bucket))
-        .start(Key.newBuilder().addBigInt("parked_deadline", 0L).build(), true)
-        .end(Key.newBuilder().addBigInt("parked_deadline", threshold.toEpochMilli()).build(), true)
-        .build();
-  }
-
-  private Insert buildParkedInsert(int bucket, Instant parkedDeadline, String sagaId) {
-    return Insert.newBuilder()
-        .namespace(SagaSchema.NAMESPACE)
-        .table(SagaSchema.PARKED_TABLE)
-        .partitionKey(Key.ofInt("bucket", bucket))
-        .clusteringKey(parkedClusteringKey(parkedDeadline, sagaId))
-        .build();
-  }
-
-  private Delete buildParkedDelete(int bucket, Instant parkedDeadline, String sagaId) {
-    return Delete.newBuilder()
-        .namespace(SagaSchema.NAMESPACE)
-        .table(SagaSchema.PARKED_TABLE)
-        .partitionKey(Key.ofInt("bucket", bucket))
-        .clusteringKey(parkedClusteringKey(parkedDeadline, sagaId))
-        .build();
-  }
-
-  /** Looks up a single {@code saga_parked} row by {@code saga_id} via the secondary index. */
-  private Scan buildParkedIndexScan(String sagaId) {
-    return Scan.newBuilder()
-        .namespace(SagaSchema.NAMESPACE)
-        .table(SagaSchema.PARKED_TABLE)
-        .indexKey(Key.ofText("saga_id", sagaId))
-        .limit(1)
-        .build();
-  }
-
-  private static Key parkedClusteringKey(Instant parkedDeadline, String sagaId) {
+  private static Key sweepClusteringKey(int slice, long sweepAt, String sagaId) {
     return Key.newBuilder()
-        .addBigInt("parked_deadline", parkedDeadline.toEpochMilli())
+        .addInt("slice", slice)
+        .addBigInt("sweep_at", sweepAt)
         .addText("saga_id", sagaId)
         .build();
+  }
+
+  /** A sweep row as a snapshot; see {@link #toStateSnapshot} for how {@code updatedAt} is read. */
+  private SagaStateSnapshot toSweepSnapshot(Result r) {
+    int slice = r.getInt("slice");
+    Instant updatedAt =
+        slice == SagaSchema.WAITING_WITH_TIMEOUT_SLICE
+            ? r.getTimestampTZ("updated_at")
+            : Instant.ofEpochMilli(r.getBigInt("sweep_at"));
+    return new SagaStateSnapshot(
+        r.getText("saga_id"),
+        r.getText("saga_name"),
+        SagaSchema.statusOfSlice(slice),
+        r.getText("definition_version"),
+        r.getTimestampTZ("created_at"),
+        updatedAt);
+  }
+
+  // -- the saga's state, read from and written to the event log --
+
+  /** The state columns a state-changing event carries; see {@link SagaSchema#sagaEventsTable()}. */
+  private record StateColumns(int slice, long sweepAt, SagaStateSnapshot snapshot) {}
+
+  /** The sweep key of a parked saga, as its {@code STEP_PENDING} event recorded it. */
+  private record ParkedState(int slice, long sweepAt) {}
+
+  /**
+   * What a newest-first read of a saga's events finds: the newest event, the saga's state (the
+   * newest event that carries one), and when the saga was last claimed if no status change has
+   * happened since.
+   */
+  private record Head(
+      int newestSequence,
+      EventType newestType,
+      @Nullable Instant newestCreatedAt,
+      SagaStateSnapshot state,
+      @Nullable Instant lastClaimedAt) {}
+
+  private Scan buildNewestFirstScan(String sagaId) {
+    return Scan.newBuilder(buildEventScan(sagaId)).ordering(Scan.Ordering.desc("sequence")).build();
+  }
+
+  /**
+   * Reads a saga's events newest-first until it reaches the newest one that carries the saga's
+   * state, and stops there. A plain step event carries none, so the read passes as many of them as
+   * the saga has appended since its last status change. Consensus Commit fetches rows from storage
+   * a page at a time ({@code scalar.db.scan_fetch_size}), so this is one round trip unless that
+   * many step events exceed a page.
+   *
+   * @return the head, or empty when the saga has no events
+   */
+  private Optional<Head> readHead(DistributedTransaction tx, String sagaId) throws Exception {
+    try (TransactionCrudOperable.Scanner scanner = tx.getScanner(buildNewestFirstScan(sagaId))) {
+      @Nullable Result newest = null;
+      for (Optional<Result> next = scanner.one(); next.isPresent(); next = scanner.one()) {
+        Result r = next.get();
+        if (newest == null) {
+          newest = r;
+        }
+        if (isStateRow(r)) {
+          EventType stateType = eventTypeOf(r);
+          @Nullable Instant lastClaimedAt =
+              stateType == EventType.SAGA_CLAIMED ? r.getTimestampTZ("created_at") : null;
+          return Optional.of(
+              new Head(
+                  newest.getInt("sequence"),
+                  eventTypeOf(newest),
+                  newest.getTimestampTZ("created_at"),
+                  toStateSnapshot(sagaId, r),
+                  lastClaimedAt));
+        }
+      }
+      if (newest == null) {
+        return Optional.empty();
+      }
+      throw noStateRow(sagaId);
+    }
+  }
+
+  private static boolean isStateRow(Result r) {
+    return !r.isNull("state_slice");
+  }
+
+  /**
+   * The saga's state as a state-carrying event recorded it. {@code updatedAt} is {@code sweep_at},
+   * except in the slice of parked steps with a timeout, where {@code sweep_at} is the deadline and
+   * {@code updatedAt} is the park time, the event's own {@code created_at}.
+   */
+  private static SagaStateSnapshot toStateSnapshot(String sagaId, Result r) {
+    int slice = r.getInt("state_slice");
+    Instant updatedAt =
+        slice == SagaSchema.WAITING_WITH_TIMEOUT_SLICE
+            ? r.getTimestampTZ("created_at")
+            : Instant.ofEpochMilli(r.getBigInt("sweep_at"));
+    return new SagaStateSnapshot(
+        sagaId,
+        r.getText("saga_name"),
+        SagaSchema.statusOfSlice(slice),
+        r.getText("definition_version"),
+        r.getTimestampTZ("saga_created_at"),
+        updatedAt);
+  }
+
+  /** A saga with events but none that carries its state: the store never writes one. */
+  private static SagaPersistenceException noStateRow(String sagaId) {
+    return SagaPersistenceException.deserializationFailed(
+        new IllegalStateException("Saga " + sagaId + " has events but none carries its state"));
+  }
+
+  /**
+   * Rejects a {@code WAITING} snapshot for a write that derives the saga's sweep key from the
+   * snapshot: a parked saga's key may be its deadline, which the snapshot does not carry.
+   */
+  private static void requireNotWaiting(SagaStateSnapshot current) {
+    if (current.getStatus() == SagaStatus.WAITING) {
+      throw new IllegalArgumentException(
+          "A WAITING saga leaves that state only by a resume, a give-up or a re-drive: "
+              + current.getSagaId());
+    }
   }
 
   // -- saga_definitions builders --
@@ -1704,8 +1960,18 @@ public final class ScalarDbSagaStore implements SagaStore {
         .build();
   }
 
+  /**
+   * Builds an event insert. A state-changing event also carries the saga's state after it ({@code
+   * state}); a plain step event passes {@code null} and leaves those columns out of the write
+   * entirely, so Cassandra writes no tombstones for them.
+   */
   private Insert buildEventInsert(
-      String sagaId, int sequence, SagaEvent event, String appendId, Instant now) {
+      String sagaId,
+      int sequence,
+      SagaEvent event,
+      String appendId,
+      Instant now,
+      @Nullable StateColumns state) {
     var builder =
         Insert.newBuilder()
             .namespace(SagaSchema.NAMESPACE)
@@ -1722,6 +1988,15 @@ public final class ScalarDbSagaStore implements SagaStore {
           builder
               .intValue("step_index", ste.getStepIndex())
               .textValue("step_name", ste.getStepName());
+    }
+    if (state != null) {
+      SagaStateSnapshot snapshot = state.snapshot();
+      builder
+          .intValue("state_slice", state.slice())
+          .bigIntValue("sweep_at", state.sweepAt())
+          .textValue("saga_name", snapshot.getSagaName())
+          .textValue("definition_version", snapshot.getDefinitionVersion())
+          .timestampTZValue("saga_created_at", snapshot.getCreatedAt());
     }
     return builder.build();
   }
@@ -1745,18 +2020,12 @@ public final class ScalarDbSagaStore implements SagaStore {
   }
 
   private SagaEvent toSagaEvent(Result r) {
-    String eventTypeStr = r.getText("event_type");
     int stepIndex = r.getInt("step_index");
     @Nullable String stepName = r.isNull("step_name") ? null : r.getText("step_name");
     @Nullable String payload = r.isNull("payload") ? null : r.getText("payload");
     Instant createdAt = r.getTimestampTZ("created_at");
 
-    EventType eventType;
-    try {
-      eventType = EventType.valueOf(eventTypeStr);
-    } catch (IllegalArgumentException e) {
-      throw SagaPersistenceException.deserializationFailed(e);
-    }
+    EventType eventType = eventTypeOf(r);
 
     if (stepIndex >= 0) {
       String name = Objects.requireNonNull(stepName, "stepName must not be null for step events");
@@ -1785,6 +2054,14 @@ public final class ScalarDbSagaStore implements SagaStore {
                 StatusEvent.reconstruct(eventType, SagaStatus.COMPLETED, payload);
             case SAGA_RECOVERING, SAGA_RESET ->
                 StatusEvent.reconstruct(eventType, AdminAuditPayload.target(payload), payload);
+            case SAGA_CLAIMED, SAGA_RELEASED -> {
+              if (!isStateRow(r)) {
+                throw SagaPersistenceException.deserializationFailed(
+                    new IllegalStateException(eventType + " event carries no state"));
+              }
+              yield StatusEvent.reconstruct(
+                  eventType, SagaSchema.statusOfSlice(r.getInt("state_slice")), payload);
+            }
             default ->
                 throw SagaPersistenceException.deserializationFailed(
                     new IllegalStateException("Unknown saga event type: " + eventType));
@@ -1793,52 +2070,21 @@ public final class ScalarDbSagaStore implements SagaStore {
     }
   }
 
-  private SagaStateSnapshot toSagaStateSnapshot(Result r) {
-    return new SagaStateSnapshot(
-        r.getText("saga_id"),
-        r.getText("saga_name"),
-        SagaStatus.fromStatusCode(r.getInt("status")),
-        r.getText("definition_version"),
-        r.getTimestampTZ("created_at"),
-        updatedAt(r));
-  }
-
-  /**
-   * The saga's state row if {@code expectedOwnerId} currently owns it, else empty. Reads the owner
-   * from the row because {@link SagaStateSnapshot} does not carry it; one scan serves both the
-   * ownership test and the snapshot it returns.
-   */
-  private Optional<SagaStateSnapshot> loadStateClaimedBy(String sagaId, String expectedOwnerId) {
-    return runInTransaction(
-        tx ->
-            tx.scan(buildStateIndexScan(sagaId)).stream()
-                .findFirst()
-                .filter(r -> expectedOwnerId.equals(r.getText("owner_id")))
-                .map(this::toSagaStateSnapshot),
-        null,
-        "verify claim of saga " + sagaId);
-  }
-
-  @Override
-  public Optional<SagaStateSnapshot> getStateSnapshot(
-      String sagaId, SagaStatus status, Instant updatedAt) {
-    int bucket = schema.bucketOf(sagaId);
-    return runInTransaction(
-        tx ->
-            tx.get(buildStateGet(bucket, status.getStatusCode(), updatedAt, sagaId))
-                .map(this::toSagaStateSnapshot),
-        null,
-        "load saga state " + sagaId);
+  /** The stored event type, or a deserialization failure for a type this version does not know. */
+  private static EventType eventTypeOf(Result r) {
+    String eventTypeStr = Objects.requireNonNull(r.getText("event_type"), "event_type");
+    try {
+      return EventType.valueOf(eventTypeStr);
+    } catch (IllegalArgumentException e) {
+      // During a rolling upgrade an older replica reading a type only a newer one writes lands
+      // here; a raw IllegalArgumentException would escape the store's methods unwrapped.
+      throw SagaPersistenceException.deserializationFailed(e);
+    }
   }
 
   private Optional<SagaStateSnapshot> loadStateSnapshot(String sagaId) {
     return runInTransaction(
-        tx ->
-            tx.scan(buildStateIndexScan(sagaId)).stream()
-                .findFirst()
-                .map(this::toSagaStateSnapshot),
-        null,
-        "load saga state " + sagaId);
+        tx -> readHead(tx, sagaId).map(Head::state), null, "load saga state " + sagaId);
   }
 
   private void validateSagaId(String sagaId) {
@@ -1868,14 +2114,6 @@ public final class ScalarDbSagaStore implements SagaStore {
     } catch (JsonProcessingException e) {
       throw SagaPersistenceException.serializationFailed(e);
     }
-  }
-
-  private static Key stateClusteringKey(int status, Instant updatedAt, String sagaId) {
-    return Key.newBuilder()
-        .addInt("status", status)
-        .addBigInt("updated_at", updatedAt.toEpochMilli())
-        .addText("saga_id", sagaId)
-        .build();
   }
 
   private void abortQuietly(@Nullable DistributedTransaction tx) {
@@ -1913,9 +2151,9 @@ public final class ScalarDbSagaStore implements SagaStore {
   private record SliceResult(List<SagaStateSnapshot> rows, @Nullable Instant resumeTs) {}
 
   /**
-   * The wire-portable position of an Admin listing: the {@code (bucket, status, updated_at)} of the
-   * last fully-returned timestamp cohort. There is deliberately no {@code saga_id} — pagination
-   * never compares that TEXT column, since ScalarDB does not normalize its collation (see {@link
+   * The wire-portable position of an Admin listing: the {@code (bucket, slice, sweep_at)} of the
+   * last fully-returned cohort. There is deliberately no {@code saga_id} — pagination never
+   * compares that TEXT column, since ScalarDB does not normalize its collation (see {@link
    * #listStateSnapshots}).
    *
    * <p>The token also carries a {@link #filterKey(SagaQuery) filter key} — the normalized status
@@ -1931,7 +2169,7 @@ public final class ScalarDbSagaStore implements SagaStore {
    * token carries only a scan position and filter key within already-authorized data, so it is not
    * signed.
    */
-  private record PageCursor(int bucket, int statusCode, Instant updatedAt) {
+  private record PageCursor(int bucket, int slice, Instant sweepAt) {
 
     private static final String DELIMITER = "|";
 
@@ -1976,15 +2214,15 @@ public final class ScalarDbSagaStore implements SagaStore {
               PAGE_TOKEN_VERSION,
               filterKey, // three sub-parts: status, after, before
               Integer.toString(bucket),
-              Integer.toString(statusCode),
-              updatedAt.toString());
+              Integer.toString(slice),
+              sweepAt.toString());
       return Base64.getUrlEncoder()
           .withoutPadding()
           .encodeToString(payload.getBytes(StandardCharsets.UTF_8));
     }
 
     static PageCursor decode(
-        String token, int numBuckets, int[] allowedStatusCodes, String expectedFilterKey) {
+        String token, int numBuckets, int[] allowedSlices, String expectedFilterKey) {
       // Reject an oversized token before allocating its decoded bytes (defense in depth; the daemon
       // also bounds request size).
       if (token.length() > MAX_ENCODED_LENGTH) {
@@ -1996,7 +2234,7 @@ public final class ScalarDbSagaStore implements SagaStore {
       } catch (IllegalArgumentException e) {
         throw new SagaIllegalArgumentException("Malformed page token", e);
       }
-      // version | status | after | before | bucket | statusCode | updatedAt
+      // version | status | after | before | bucket | slice | sweepAt
       String[] parts = payload.split(Pattern.quote(DELIMITER), 7);
       if (parts.length != 7 || !PAGE_TOKEN_VERSION.equals(parts[0])) {
         throw new SagaIllegalArgumentException("Unrecognized page token");
@@ -2006,12 +2244,12 @@ public final class ScalarDbSagaStore implements SagaStore {
         throw new SagaIllegalArgumentException("Page token does not match the query");
       }
       int bucket;
-      int statusCode;
-      Instant updatedAt;
+      int slice;
+      Instant sweepAt;
       try {
         bucket = Integer.parseInt(parts[4]);
-        statusCode = Integer.parseInt(parts[5]);
-        updatedAt = Instant.parse(parts[6]);
+        slice = Integer.parseInt(parts[5]);
+        sweepAt = Instant.parse(parts[6]);
       } catch (RuntimeException e) {
         throw new SagaIllegalArgumentException("Malformed page token", e);
       }
@@ -2019,14 +2257,13 @@ public final class ScalarDbSagaStore implements SagaStore {
         throw new SagaIllegalArgumentException("Page token bucket out of range");
       }
       // Defense in depth: even with a matching filter key the token is unsigned, so guard the
-      // resume math against a tampered statusCode outside the swept set (would index out of
-      // bounds).
-      if (indexOfStatus(allowedStatusCodes, statusCode) < 0) {
+      // resume math against a tampered slice outside the swept set (would index out of bounds).
+      if (indexOf(allowedSlices, slice) < 0) {
         throw new SagaIllegalArgumentException("Page token does not match the query");
       }
       // Held to the same range as the query bounds, since it becomes the next scan's start key.
-      requireInKeyRange(updatedAt, "Page token updatedAt");
-      return new PageCursor(bucket, statusCode, updatedAt);
+      requireInKeyRange(sweepAt, "Page token sweepAt");
+      return new PageCursor(bucket, slice, sweepAt);
     }
   }
 }

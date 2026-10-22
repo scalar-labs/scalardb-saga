@@ -145,8 +145,7 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
   /**
    * Waits until {@code sagaId} is terminal or {@code boundMillis} elapses, returning the latest
    * snapshot either way. The first {@link DefaultSagaOrchestrator#getStateSnapshot} also validates
-   * existence (throws {@link com.scalar.db.saga.exception.SagaNotFoundException} → {@code
-   * NOT_FOUND}).
+   * existence (throws {@link SagaNotFoundException} → {@code NOT_FOUND}).
    *
    * <p>Registration precedes that first read, deliberately: a saga settling in between would
    * otherwise notify nobody, and the caller would wait out its whole bound for an outcome that had
@@ -222,27 +221,13 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
               abortSignal(),
               parked,
               computeBoundMillis(Long.MAX_VALUE),
-              () -> readAfterStart(created));
+              () -> orchestrator.getStateSnapshot(sagaId));
     }
     // Never cancel the saga. Shutdown short-circuits the wait rather than letting it run to the
     // bound: the bound is a maximum, not a promise to wait, and a terminating server cannot advance
     // the saga anyway. Whatever ended the wait, this is the freshest state — its status is the
     // source of truth, and a non-terminal one is the gRPC analogue of REST's 202.
     return answer;
-  }
-
-  /**
-   * Reads a saga this call just started. The start persisted it synchronously, but on a backend
-   * whose secondary index lags the write, such as DynamoDB, the lookup by ID can briefly miss the
-   * new row. The saga exists either way, so a miss answers with the snapshot the start returned
-   * rather than an error that would tell the client its running saga was never created.
-   */
-  private SagaStateSnapshot readAfterStart(SagaStateSnapshot created) {
-    try {
-      return orchestrator.getStateSnapshot(created.getSagaId());
-    } catch (SagaNotFoundException e) {
-      return created;
-    }
   }
 
   /**
@@ -261,8 +246,7 @@ public final class SagaServiceImpl extends SagaServiceGrpc.SagaServiceImplBase {
 
   /**
    * Starts the saga the request names, by name or exact version, under the client-supplied ID when
-   * there is one, and returns the snapshot of the saga created. The start endpoints answer from
-   * that snapshot rather than reading the saga back by ID (see {@link #readAfterStart}).
+   * there is one, and returns the snapshot of the saga created.
    */
   private SagaStateSnapshot start(
       StartSagaRequest request, Map<String, Object> input, @Nullable SagaCallback callback) {

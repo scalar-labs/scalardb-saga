@@ -168,7 +168,7 @@ class ScalarDbSagaStoreFactoryTest {
     // Assert
     verify(admin).createCoordinatorTables(true, options);
     verify(admin).createNamespace(SagaSchema.NAMESPACE, true, options);
-    verify(admin, times(4))
+    verify(admin, times(3))
         .createTable(
             eq(SagaSchema.NAMESPACE), anyString(), any(TableMetadata.class), eq(true), eq(options));
   }

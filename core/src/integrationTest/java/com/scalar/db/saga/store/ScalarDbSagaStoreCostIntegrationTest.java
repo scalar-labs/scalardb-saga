@@ -47,15 +47,19 @@ class ScalarDbSagaStoreCostIntegrationTest {
   static {
     BASELINE.put("sync success", new long[] {16, 21});
     BASELINE.put("sync failure, compensated", new long[] {29, 37});
-    BASELINE.put("async, callback in time", new long[] {24, 36});
-    BASELINE.put("async, timed out after 2 re-drives", new long[] {49, 75});
+    BASELINE.put("async, callback in time", new long[] {24, 32});
+    BASELINE.put("async, timed out after 2 re-drives", new long[] {49, 63});
     BASELINE.put("approval, accepted", new long[] {24, 32});
     BASELINE.put("approval, rejected", new long[] {27, 35});
     BASELINE.put("poll (getStateSnapshot)", new long[] {1, 0});
-    BASELINE.put("detail (getStateWithEvents)", new long[] {2, 0});
-    BASELINE.put("recovery claim", new long[] {8, 5});
-    BASELINE.put("stuck compensation, one pass", new long[] {11, 8});
-    BASELINE.put("shutdown hand-off", new long[] {4, 5});
+    BASELINE.put("detail (getStateWithEvents)", new long[] {1, 0});
+    // A claim reads the swept sweep row before appending, so a saga purged since the probe is
+    // not brought back: one read more than the append alone.
+    BASELINE.put("recovery claim", new long[] {8, 3});
+    BASELINE.put("stuck compensation, one pass", new long[] {11, 6});
+    // The hand-off records itself as a SAGA_RELEASED event, so the next writer can find the
+    // saga's sweep row from its log: one more read and two more records than moving the row alone.
+    BASELINE.put("shutdown hand-off", new long[] {5, 7});
     BASELINE.put("retention purge", new long[] {5, 13});
     BASELINE.put("idle sweeps (recovery + timeout + retention)", new long[] {80, 0});
     BASELINE.put("admin listing page", new long[] {18, 0});
@@ -214,8 +218,8 @@ class ScalarDbSagaStoreCostIntegrationTest {
   private void recoveryClaim(String id) {
     SagaStateSnapshot stale = store.getStateSnapshot(id).orElseThrow();
     store.getNewestEvent(id);
-    store.getNewestEvent(id);
-    assertThat(store.claimForRecovery(stale, "engine-2")).isPresent();
+    SagaStore.NewestEvent probe = store.getNewestEvent(id).orElseThrow();
+    assertThat(store.claimForRecovery(stale, probe, "engine-2")).isPresent();
     store.getEvents(id);
   }
 
@@ -223,8 +227,8 @@ class ScalarDbSagaStoreCostIntegrationTest {
   private void stuckPass(String id) {
     SagaStateSnapshot stale = store.getStateSnapshot(id).orElseThrow();
     store.getNewestEvent(id);
-    store.getNewestEvent(id);
-    assertThat(store.claimForRecovery(stale, "engine-2")).isPresent();
+    SagaStore.NewestEvent probe = store.getNewestEvent(id).orElseThrow();
+    assertThat(store.claimForRecovery(stale, probe, "engine-2")).isPresent();
     int sequence = store.getEvents(id).size();
     store.recordStepEvent(id, sequence, StepEvent.compensationFailed(0, "reserve", null));
   }

@@ -1158,8 +1158,8 @@ class SagaEngineTest {
       engine.executeSaga(def, saga, Map.of());
 
       // Assert — the duplicate was rejected, and the live drive was left alone. Marking here
-      // would stamp the epoch on a row the running drive owns, rewriting the clustering key it
-      // holds and killing it: a duplicate dispatch must not fail a healthy saga.
+      // would append a hand-off at the sequence the running drive writes next, stopping it: a
+      // duplicate dispatch must not halt a healthy saga.
       verify(store, never()).markForRecovery(any());
       // Only one step execution (the original, not the duplicate)
       verify(step1, times(1)).execute(any(SagaContext.class));

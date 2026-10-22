@@ -263,25 +263,6 @@ class SagaServiceImplTest {
   }
 
   @Test
-  void startSaga_syncReadMissesTheNewSaga_returnsTheCreatedRunningSnapshot() {
-    // Arrange — the read-back on a backend whose index lags the write (DynamoDB). The callback
-    // never fires, so the bound elapses and the wait reads the store, which misses the new row.
-    when(orchestrator.startAsyncReturningSnapshot(
-            isNull(), eq("transfer"), isNull(), eq(Map.of()), any(SagaCallback.class)))
-        .thenReturn(snapshot("gen-x", SagaStatus.RUNNING));
-    when(orchestrator.getStateSnapshot("gen-x")).thenThrow(new SagaNotFoundException("gen-x"));
-
-    // Act
-    SagaSnapshot response = stub(50).startSaga(startByName("transfer", false));
-
-    // Assert — the saga exists, so neither INTERNAL nor NOT_FOUND.
-    assertThat(response.getSagaId()).isEqualTo("gen-x");
-    assertThat(response.getStatus())
-        .isEqualTo(com.scalar.db.saga.rpc.SagaStatus.SAGA_STATUS_RUNNING);
-    verify(orchestrator).getStateSnapshot("gen-x");
-  }
-
-  @Test
   void startSaga_definitionNotFound_returnsNotFound() {
     when(orchestrator.startAsyncReturningSnapshot(null, "unknown", null, Map.of(), null))
         .thenThrow(SagaDefinitionNotFoundException.byName("unknown"));
@@ -331,7 +312,7 @@ class SagaServiceImplTest {
     // mapper wraps it. Every caller-input rejection on this path carries a typed exception, so a
     // stdlib one is the server's problem and must not be attributed to whoever happened to call.
     when(orchestrator.startAsyncReturningSnapshot(null, "transfer", null, Map.of(), null))
-        .thenThrow(new IllegalArgumentException("Table not found: saga.saga_state"));
+        .thenThrow(new IllegalArgumentException("Table not found: saga.saga_sweep"));
 
     // Act & Assert
     assertThatThrownBy(() -> stub(0).startSaga(startByName("transfer", true)))
@@ -341,7 +322,7 @@ class SagaServiceImplTest {
               assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.INTERNAL);
               assertThat(e.getStatus().getDescription())
                   .contains(SagaErrorCode.INTERNAL_ERROR.code())
-                  .doesNotContain("saga_state");
+                  .doesNotContain("saga_sweep");
             });
   }
 
