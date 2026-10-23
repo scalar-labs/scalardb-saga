@@ -18,7 +18,8 @@ completed steps when one of them fails.
   [Docker Compose](https://docs.docker.com/compose/install/) V2 or later
 - `curl`, or any other HTTP client
 - A web browser, for the live dashboard
-- JDK 25, to build the server image in the first step below
+- JDK 17 or later, to build the server image in the first step below (the build downloads the
+  JDK 25 it compiles with if you don't have one)
 
 Nothing after that step needs a JDK: the saga server runs as a container and you drive it over
 HTTP.
@@ -50,7 +51,7 @@ the first GA release publishes a matching image, build it yourself from the repo
 ```
 
 That tags the image with the `version` in `gradle.properties`, which is the tag Compose pulls by
-default. Building needs JDK 25; nothing else in the walkthrough does.
+default. Building needs JDK 17 or later; nothing else in the walkthrough does.
 
 ### Start the containers
 
