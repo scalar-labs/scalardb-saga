@@ -35,7 +35,12 @@ import com.scalar.db.saga.rpc.SagaSnapshot;
 import com.scalar.db.saga.rpc.StartSagaRequest;
 import io.grpc.Context;
 import io.grpc.ManagedChannel;
+import io.grpc.Metadata;
 import io.grpc.Server;
+import io.grpc.ServerCall;
+import io.grpc.ServerCallHandler;
+import io.grpc.ServerInterceptor;
+import io.grpc.ServerInterceptors;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.inprocess.InProcessChannelBuilder;
@@ -51,6 +56,7 @@ import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
@@ -74,6 +80,9 @@ class GrpcSagaOrchestratorClientTest {
 
   private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
+  private static final Metadata.Key<String> API_KEY =
+      Metadata.Key.of("X-API-Key", Metadata.ASCII_STRING_MARSHALLER);
+
   // Held in a field: JUL keeps loggers weakly, so a handler added through a local could be lost.
   private static final Logger CLIENT_LOGGER =
       Logger.getLogger(GrpcSagaOrchestratorClient.class.getName());
@@ -82,12 +91,30 @@ class GrpcSagaOrchestratorClientTest {
   private Server server;
   private ManagedChannel channel;
   private GrpcSagaOrchestratorClient client;
+  // The API-key header each call arrived with, by method name; "" for none.
+  private final Map<String, String> apiKeyByMethod = new ConcurrentHashMap<>();
 
   @BeforeEach
   void setUp() throws IOException {
     fake = new FakeSagaService();
     String name = InProcessServerBuilder.generateName();
-    server = InProcessServerBuilder.forName(name).directExecutor().addService(fake).build().start();
+    ServerInterceptor recordApiKey =
+        new ServerInterceptor() {
+          @Override
+          public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
+              ServerCall<ReqT, RespT> call, Metadata headers, ServerCallHandler<ReqT, RespT> next) {
+            String apiKey = headers.get(API_KEY);
+            apiKeyByMethod.put(
+                call.getMethodDescriptor().getBareMethodName(), apiKey == null ? "" : apiKey);
+            return next.startCall(call, headers);
+          }
+        };
+    server =
+        InProcessServerBuilder.forName(name)
+            .directExecutor()
+            .addService(ServerInterceptors.intercept(fake, recordApiKey))
+            .build()
+            .start();
     channel = InProcessChannelBuilder.forName(name).directExecutor().build();
     client = new GrpcSagaOrchestratorClient(SagaServiceGrpc.newBlockingStub(channel), null);
   }
@@ -1430,6 +1457,68 @@ class GrpcSagaOrchestratorClientTest {
         .setCreatedAt(Timestamp.newBuilder().setSeconds(1000L).build())
         .setUpdatedAt(Timestamp.newBuilder().setSeconds(2000L).build())
         .build();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Credentials
+  // ---------------------------------------------------------------------------
+
+  @Test
+  void startAsyncWithCallback_withCallCredentials_sendsTheCredentialOnEveryCall() {
+    // Arrange
+    GrpcSagaOrchestratorClient authenticated =
+        new GrpcSagaOrchestratorClient(
+            SagaServiceGrpc.newBlockingStub(channel),
+            null,
+            0L,
+            GrpcSagaOrchestratorClient.staticHeaderCredentials("X-API-Key", "k-1"));
+    fake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
+    fake.enqueueAwaitSnapshot(snapshot("s-1", SagaStatus.COMPLETED));
+    fake.getResponse = snapshot("s-1", SagaStatus.COMPLETED);
+    RecordingCallback callback = new RecordingCallback();
+
+    try {
+      // Act
+      String sagaId = authenticated.startAsync("transfer", Map.of(), callback);
+      authenticated.getStateSnapshot(sagaId);
+
+      // Assert — the watch's calls go through their own stub and must carry it too.
+      assertThat(callback.calls).containsExactly("onCompleted:s-1");
+      assertThat(apiKeyByMethod)
+          .containsEntry("StartSaga", "k-1")
+          .containsEntry("AwaitSaga", "k-1")
+          .containsEntry("GetSaga", "k-1");
+    } finally {
+      authenticated.close();
+    }
+  }
+
+  @Test
+  void start_withoutCallCredentials_sendsNoCredential() {
+    // Arrange
+    fake.startResponse = snapshot("ignored", SagaStatus.COMPLETED);
+
+    // Act
+    client.start("transfer", Map.of());
+
+    // Assert
+    assertThat(apiKeyByMethod).containsEntry("StartSaga", "");
+  }
+
+  @Test
+  @SuppressWarnings("NullAway") // deliberately passing null to exercise the runtime guard
+  void callCredentials_nullGiven_throwsNpe() {
+    // Act & Assert
+    assertThatThrownBy(() -> GrpcSagaOrchestratorClient.newBuilder().callCredentials(null))
+        .isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  @SuppressWarnings("NullAway") // deliberately passing null to exercise the runtime guard
+  void staticHeaderCredentials_nullValueGiven_throwsNpe() {
+    // Act & Assert
+    assertThatThrownBy(() -> GrpcSagaOrchestratorClient.staticHeaderCredentials("X-API-Key", null))
+        .isInstanceOf(NullPointerException.class);
   }
 
   @Test
