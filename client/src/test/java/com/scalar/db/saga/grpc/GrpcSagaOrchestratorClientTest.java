@@ -420,29 +420,9 @@ class GrpcSagaOrchestratorClientTest {
   }
 
   @Test
-  void startAsyncWithCallback_notFoundBeforeFirstAnswer_retriesAndCallsOnCompleted()
+  void startAsyncWithCallback_notFoundBeforeFirstAnswer_stopsWithoutCallingOrRetrying()
       throws Exception {
-    // Arrange — a backend whose index lags the write misses the saga the start just created.
-    fake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
-    fake.enqueueAwaitError(Status.NOT_FOUND.withDescription("lagging").asRuntimeException());
-    fake.enqueueAwaitSnapshot(snapshot("s-1", SagaStatus.COMPLETED));
-    RecordingCallback callback = new RecordingCallback();
-
-    try {
-      // Act
-      client.startAsync("transfer", Map.of(), callback);
-
-      // Assert
-      assertThat(callback.called.await(5, TimeUnit.SECONDS)).isTrue();
-      assertThat(callback.calls).containsExactly("onCompleted:s-1");
-    } finally {
-      client.close();
-    }
-  }
-
-  @Test
-  void startAsyncWithCallback_neverFound_givesUpAndLogs() throws Exception {
-    // Arrange
+    // Arrange — the start commits before it answers, so even the first miss is a purge.
     fake.startResponse = snapshot("ignored", SagaStatus.RUNNING);
     fake.awaitError = Status.NOT_FOUND.withDescription("gone").asRuntimeException();
     RecordingCallback callback = new RecordingCallback();
@@ -452,9 +432,9 @@ class GrpcSagaOrchestratorClientTest {
       // Act
       client.startAsync("transfer", Map.of(), callback);
 
-      // Assert — the first try plus six retries, then the watch stops.
+      // Assert
       assertThat(log.published.await(10, TimeUnit.SECONDS)).isTrue();
-      assertThat(fake.awaitCalls).isEqualTo(7);
+      assertThat(fake.awaitCalls).isEqualTo(1);
       assertThat(callback.calls).isEmpty();
     } finally {
       log.detach();
