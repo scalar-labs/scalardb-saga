@@ -1508,6 +1508,7 @@ class GrpcSagaOrchestratorClientTest {
   @Test
   @SuppressWarnings("NullAway") // deliberately passing null to exercise the runtime guard
   void callCredentials_nullGiven_throwsNpe() {
+    // Act & Assert
     assertThatThrownBy(() -> GrpcSagaOrchestratorClient.newBuilder().callCredentials(null))
         .isInstanceOf(NullPointerException.class);
   }
@@ -1515,6 +1516,7 @@ class GrpcSagaOrchestratorClientTest {
   @Test
   @SuppressWarnings("NullAway") // deliberately passing null to exercise the runtime guard
   void staticHeaderCredentials_nullValueGiven_throwsNpe() {
+    // Act & Assert
     assertThatThrownBy(() -> GrpcSagaOrchestratorClient.staticHeaderCredentials("X-API-Key", null))
         .isInstanceOf(NullPointerException.class);
   }

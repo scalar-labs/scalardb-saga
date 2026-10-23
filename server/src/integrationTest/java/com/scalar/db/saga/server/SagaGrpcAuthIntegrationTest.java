@@ -119,6 +119,7 @@ class SagaGrpcAuthIntegrationTest extends ServerIntegrationTestSupport {
 
   @Test
   void noCredential_start_isUnauthenticated() {
+    // Act & Assert
     assertThatThrownBy(() -> client(null).start(SAGA_NAME, Map.of()))
         .isInstanceOf(SagaUnauthenticatedException.class);
   }
