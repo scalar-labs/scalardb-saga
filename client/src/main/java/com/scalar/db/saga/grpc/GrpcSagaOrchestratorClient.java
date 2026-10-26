@@ -101,13 +101,6 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
   private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
   /**
-   * How many times a watch retries {@code NOT_FOUND} before it has had any answer about the saga:
-   * on a backend whose index lags the write, such as DynamoDB, a lookup right after the start can
-   * briefly miss the new saga. With the backoff below that spans a few seconds.
-   */
-  private static final int NOT_FOUND_RETRIES_BEFORE_SEEN = 6;
-
-  /**
    * The least time between two watch calls. The server normally holds each call for its whole
    * window, which paces the watch; one that answers sooner, because the server is draining or its
    * window is configured short, would otherwise be asked again at once, a store read per round
@@ -652,15 +645,8 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
    * is asynchronous, and its answer arrives on a gRPC thread.
    *
    * @param retries transport failures since the last answer, which set the backoff
-   * @param notFoundRetriesLeft how many more {@code NOT_FOUND}s to retry; nonzero only until the
-   *     first answer, while a miss may be index lag rather than a purge
    */
-  private void watch(
-      String sagaId,
-      SagaSnapshot snapshot,
-      SagaCallback callback,
-      int retries,
-      int notFoundRetriesLeft) {
+  private void watch(String sagaId, SagaSnapshot snapshot, SagaCallback callback, int retries) {
     if (closed.get()) {
       return;
     }
@@ -702,11 +688,11 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
                         TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - issuedNanos);
                     if (elapsedMillis < MIN_WATCH_INTERVAL_MILLIS && stillRunning(next)) {
                       schedule(
-                          () -> watch(sagaId, next, callback, 0, 0),
+                          () -> watch(sagaId, next, callback, 0),
                           sagaId,
                           jittered(MIN_WATCH_INTERVAL_MILLIS));
                     } else {
-                      watch(sagaId, next, callback, 0, 0);
+                      watch(sagaId, next, callback, 0);
                     }
                   }
 
@@ -721,14 +707,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
                             : null;
                     if (code != null && isRetryable((StatusRuntimeException) t)) {
                       schedule(
-                          () -> watch(sagaId, snapshot, callback, retries + 1, notFoundRetriesLeft),
-                          sagaId,
-                          backoffMillis(retries));
-                    } else if (code == Status.Code.NOT_FOUND && notFoundRetriesLeft > 0) {
-                      schedule(
-                          () ->
-                              watch(
-                                  sagaId, snapshot, callback, retries + 1, notFoundRetriesLeft - 1),
+                          () -> watch(sagaId, snapshot, callback, retries + 1),
                           sagaId,
                           backoffMillis(retries));
                     } else {
@@ -853,7 +832,7 @@ public final class GrpcSagaOrchestratorClient implements SagaOrchestrator {
         firstStart(
             buildRequest(id, name, version, input, true), id, name, version, loopDeadlineNanos());
     if (callback != null) {
-      watch(id, snapshot, callback, 0, NOT_FOUND_RETRIES_BEFORE_SEEN);
+      watch(id, snapshot, callback, 0);
     }
     return id;
   }
