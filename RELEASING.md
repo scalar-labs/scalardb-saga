@@ -100,7 +100,9 @@ after it, live only on that branch and are unreachable from `main` by design.
    ```
 
    `<bump-commit>~1` is the commit just before the bump, so the new branch takes everything up to it
-   and nothing that lands on the parent afterwards.
+   and nothing that lands on the parent afterwards. The bump sets the getting-started Compose
+   default as well as `gradle.properties`, as in step 2; CI fails a pull request where the two
+   disagree.
 
    A newly cut branch also needs two pieces of update plumbing.
 
@@ -151,9 +153,11 @@ after it, live only on that branch and are unreachable from `main` by design.
    image: ghcr.io/scalar-labs/scalardb-saga-server:${SAGA_VERSION:-<version>}
    ```
 
-   That default is the only image a reader who has built nothing pulls, so it has to name a version
-   that exists. CI fails the pull request when the two disagree, and `verify-version` refuses the
-   tag, so a release cannot ship with a stale one.
+   The default always names the version in `gradle.properties`, on every branch and at every bump,
+   so the walkthrough runs the server that commit builds. CI fails any pull request where the two
+   disagree, and `verify-version` refuses the tag, so a release cannot ship with a stale one. Until
+   step 4 pushes the image, the release branch names a tag that does not exist yet; the walkthrough
+   fails to pull on that branch for those minutes, which is accepted.
 
 3. Tag that commit on the release branch and push the tag:
 
@@ -178,7 +182,8 @@ after it, live only on that branch and are unreachable from `main` by design.
    deployment id: <id>`) and the Portal token in `~/.gradle/gradle.properties` as
    `mavenCentralUsername` and `mavenCentralPassword`. Without the token the task itself still
    reports success and the build fails afterwards, during its end-of-build actions.
-6. Bump the release branch to the next patch `-SNAPSHOT` (`1.0.1-SNAPSHOT`).
+6. Bump the release branch to the next patch `-SNAPSHOT` (`1.0.1-SNAPSHOT`), in `gradle.properties`
+   and the getting-started Compose default together, as in step 2.
 
 The tag is the source of truth for *which commit*, and `gradle.properties` for *which version*; the
 workflow fails if they disagree rather than deriving one from the other, so a jar whose internal
@@ -267,10 +272,10 @@ with. The upload never happens — it is an end-of-build action that runs only w
 succeeded — so nothing reaches Central or `ghcr.io`, and there is nothing to clean up but the tag
 and the branch. A forgotten GPG secret therefore cannot publish unsigned artifacts.
 
-**Snapshot.** Set `version=0.0.1-SNAPSHOT` on the scratch branch and push. That runs
-[release-snapshot.yml](.github/workflows/release-snapshot.yml), which exercises the credentials, the
-GPG key and a genuine upload, against the Central snapshot repository, which is mutable and
-expendable. It also pushes `0.0.1-SNAPSHOT` to `ghcr.io`, which exercises the `linux/arm64` build
+**Snapshot.** Set `version=0.0.1-SNAPSHOT` on the scratch branch, and the Compose default to match,
+then push. That runs [release-snapshot.yml](.github/workflows/release-snapshot.yml), which exercises
+the credentials, the GPG key and a genuine upload, against the Central snapshot repository, which is
+mutable and expendable. It also pushes `0.0.1-SNAPSHOT` to `ghcr.io`, which exercises the `linux/arm64` build
 under QEMU and the registry push. It does not cover the Portal deployment, cosign or the GitHub
 release.
 
