@@ -26,6 +26,7 @@ updates:
           - "com.uber.nullaway*"
           - "com.vanniktech*"
           - "net.ltgt.gradle*"
+          - "org.gradle.toolchains*"
       # gRPC ships its modules as a set and the BOM must match the stubs.
       grpc:
         patterns:
