@@ -17,12 +17,10 @@ import com.scalar.db.saga.rpc.AdminServiceGrpc.AdminServiceBlockingStub;
 import com.scalar.db.saga.rpc.InterventionRequest;
 import io.grpc.CallCredentials;
 import io.grpc.ManagedChannel;
-import io.grpc.Metadata;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import java.nio.file.Path;
 import java.util.Objects;
-import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import net.jcip.annotations.ThreadSafe;
@@ -100,18 +98,7 @@ public final class GrpcSagaAdminClient implements SagaAdminService {
    * @return call credentials that present {@code headerValue} under {@code headerName}
    */
   public static CallCredentials staticHeaderCredentials(String headerName, String headerValue) {
-    Objects.requireNonNull(headerName, "headerName must not be null");
-    Objects.requireNonNull(headerValue, "headerValue must not be null");
-    Metadata.Key<String> key = Metadata.Key.of(headerName, Metadata.ASCII_STRING_MARSHALLER);
-    return new CallCredentials() {
-      @Override
-      public void applyRequestMetadata(
-          RequestInfo requestInfo, Executor appExecutor, MetadataApplier applier) {
-        Metadata headers = new Metadata();
-        headers.put(key, headerValue);
-        applier.apply(headers);
-      }
-    };
+    return GrpcClientSupport.staticHeaderCredentials(headerName, headerValue);
   }
 
   // --------------------------------------------------------------------------
