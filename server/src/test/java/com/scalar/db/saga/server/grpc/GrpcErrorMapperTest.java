@@ -29,10 +29,12 @@ import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import com.scalar.db.saga.exception.SagaStepNotParkedException;
 import com.scalar.db.saga.server.LogCapture;
 import com.scalar.db.saga.server.api.ErrorMapper;
+import com.scalar.db.saga.server.docs.StatusCodeReference;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.protobuf.StatusProto;
 import java.time.Instant;
+import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
@@ -379,7 +381,7 @@ class GrpcErrorMapperTest {
             // Reserved, produced nowhere yet (see SagaErrorCode).
             SagaErrorCode.STEP_TIMEOUT,
             SagaErrorCode.STEP_USER_FAILURE,
-            // Recorded into saga state as a timeline event, never a top-level error response.
+            // Logged when a compensation fails, never a top-level error response.
             SagaErrorCode.COMPENSATION_FAILED);
 
     Set<SagaErrorCode> covered =
@@ -390,6 +392,45 @@ class GrpcErrorMapperTest {
     assertThat(covered)
         .as("every SagaErrorCode needs a dispatch-table row or a commented exclusion above")
         .isEqualTo(EnumSet.complementOf(excluded));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void statusCodeReference_everyDocumentedStatus_isOneThisMapperProduces() {
+    // Arrange — the dispatch arms, which the golden-table test pins, plus the interceptor refusals,
+    // which answer through close() instead.
+    Map<SagaErrorCode, Set<Status.Code>> produced = new EnumMap<>(SagaErrorCode.class);
+    for (Arm arm : allArms()) {
+      produced
+          .computeIfAbsent(arm.code(), c -> EnumSet.noneOf(Status.Code.class))
+          .add(arm.status());
+    }
+    for (SagaErrorCode code :
+        List.of(
+            SagaErrorCode.UNAUTHENTICATED,
+            SagaErrorCode.PERMISSION_DENIED,
+            SagaErrorCode.SERVICE_UNAVAILABLE,
+            SagaErrorCode.RATE_LIMIT_EXCEEDED,
+            SagaErrorCode.INTERNAL_ERROR)) {
+      io.grpc.ServerCall<Object, Object> call = org.mockito.Mockito.mock(io.grpc.ServerCall.class);
+      org.mockito.ArgumentCaptor<Status> status = org.mockito.ArgumentCaptor.forClass(Status.class);
+      GrpcErrorMapper.close(call, code);
+      org.mockito.Mockito.verify(call).close(status.capture(), org.mockito.ArgumentMatchers.any());
+      produced
+          .computeIfAbsent(code, c -> EnumSet.noneOf(Status.Code.class))
+          .add(status.getValue().getCode());
+    }
+
+    for (Map.Entry<SagaErrorCode, StatusCodeReference.Entry> e :
+        StatusCodeReference.ENTRIES.entrySet()) {
+      // Act
+      List<Status.Code> documented = e.getValue().grpc();
+
+      // Assert
+      assertThat(produced.getOrDefault(e.getKey(), Set.of()))
+          .as("gRPC statuses the status-code page lists for %s", e.getKey())
+          .containsAll(documented);
+    }
   }
 
   @Test

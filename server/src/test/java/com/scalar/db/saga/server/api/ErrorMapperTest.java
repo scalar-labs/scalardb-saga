@@ -21,6 +21,7 @@ import com.scalar.db.saga.exception.SagaRuntimeException;
 import com.scalar.db.saga.exception.SagaStatePreconditionException;
 import com.scalar.db.saga.exception.SagaStepNotParkedException;
 import com.scalar.db.saga.server.LogCapture;
+import com.scalar.db.saga.server.docs.StatusCodeReference;
 import com.scalar.db.saga.server.security.SagaAuthUnavailableException;
 import com.scalar.db.saga.server.security.SagaAuthenticationException;
 import com.scalar.db.saga.server.security.SagaAuthorizationException;
@@ -36,7 +37,9 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.time.Instant;
+import java.util.EnumMap;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -387,6 +390,26 @@ class ErrorMapperTest {
       assertThat(response.body())
           .as("body code of %s", arm.thrown().getClass().getSimpleName())
           .contains(arm.code().code());
+    }
+  }
+
+  @Test
+  void statusCodeReference_everyDocumentedStatus_isOneThisMapperProduces() {
+    // Arrange — the golden-table test pins what each row answers.
+    Map<SagaErrorCode, Set<Integer>> produced = new EnumMap<>(SagaErrorCode.class);
+    for (Arm arm : allArms()) {
+      produced.computeIfAbsent(arm.code(), c -> new HashSet<>()).add(arm.status());
+    }
+
+    for (Map.Entry<SagaErrorCode, StatusCodeReference.Entry> e :
+        StatusCodeReference.ENTRIES.entrySet()) {
+      // Act
+      List<Integer> documented = e.getValue().http();
+
+      // Assert
+      assertThat(produced.getOrDefault(e.getKey(), Set.of()))
+          .as("HTTP statuses the status-code page lists for %s", e.getKey())
+          .containsAll(documented);
     }
   }
 
