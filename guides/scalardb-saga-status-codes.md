@@ -97,7 +97,7 @@ A definition file is not valid JSON or YAML.
 
 **Action**
 
-Fix the syntax error that the detail reports, then load the definition again.
+Fix the syntax error that the parser reports in the exception's cause, then load the definition again.
 
 ### `DB-SAGA-10005`
 
@@ -189,7 +189,7 @@ Declarative step definition is invalid
 
 **Status**
 
-Not returned by the API. When loading its definitions, the server logs this code and rejects the whole configuration: at startup the server does not start, and on a reload it keeps serving its previous configuration. An embedded engine throws it when the definition is registered.
+HTTP `400 Bad Request`, gRPC `INVALID_ARGUMENT`. Returned only by an operator's recover or reset, when the saga's definition version names a service the server no longer has. Otherwise, when loading its definitions, the server logs this code and rejects the whole configuration: at startup the server does not start, and on a reload it keeps serving its previous configuration. An embedded engine throws it when the definition is registered.
 
 **Cause**
 
@@ -349,7 +349,7 @@ Definition version is already registered with different content
 
 **Status**
 
-Not returned by the API. When loading its definitions, the server logs this code and rejects the whole configuration: at startup the server does not start, and on a reload it keeps serving its previous configuration. An embedded engine throws it when the definition is registered.
+Not returned by the API. The server logs it while registering definitions. At startup the server does not start. On a reload, the conflicting definition is not applied, but other parts of the change, such as service changes and other definitions, may already have taken effect. An embedded engine throws it when the definition is registered.
 
 **Cause**
 
@@ -501,7 +501,7 @@ The caller has started more sagas than the server's rate limit allows.
 
 **Action**
 
-Wait as long as `Retry-After` says, then retry.
+Retry with backoff, waiting at least as long as the server advises when it does: `Retry-After` on REST, `RetryInfo` on gRPC.
 
 ### `DB-SAGA-20005`
 
@@ -541,7 +541,7 @@ The server is running as many sagas as its limit allows, so it refused to start 
 
 **Action**
 
-Retry with backoff and jitter, waiting at least as long as `Retry-After` says. If refusals continue, review the server's limits and the capacity of the services it calls.
+Retry with backoff and jitter, waiting at least as long as the server advises when it does: `Retry-After` on REST, `RetryInfo` on gRPC. If refusals continue, review the server's limits and the capacity of the services it calls.
 
 ### `DB-SAGA-20007`
 
@@ -561,7 +561,7 @@ A participant reported an asynchronous step's result before the server recorded 
 
 **Action**
 
-Send the same report again with backoff, waiting at least as long as `Retry-After` says.
+Send the same report again with backoff, waiting at least as long as `Retry-After` says when it is present.
 
 ### `DB-SAGA-29999`
 

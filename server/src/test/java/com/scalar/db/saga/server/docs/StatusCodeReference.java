@@ -42,7 +42,8 @@ public final class StatusCodeReference {
           // The client SDK reports an unreachable server as SERVICE_UNAVAILABLE instead.
           SagaErrorCode.SERVER_UNREACHABLE);
 
-  // A bad definition rejects the whole configuration pass, so the server never serves part of it.
+  // These codes fail the pass in validation, before anything is applied, so the server never
+  // serves part of it.
   private static final String REJECTS_CONFIGURATION =
       " the server logs this code and rejects the whole configuration: at startup the server does"
           + " not start, and on a reload it keeps serving its previous configuration.";
@@ -92,7 +93,19 @@ public final class StatusCodeReference {
         other(
             "Embedded mode only. A custom step resolver throws it when it cannot find the HTTP"
                 + " endpoint it asks for."));
-    m.put(SagaErrorCode.INVALID_STEP_DEFINITION, other(DEFINITION_LOAD));
+    // An operator's recover or reset drives the saga on the request. After a restart that can be
+    // the first plan build for the saga's definition version, which fails here when the version
+    // names a service the server no longer has.
+    m.put(
+        SagaErrorCode.INVALID_STEP_DEFINITION,
+        wire(
+            400,
+            Status.Code.INVALID_ARGUMENT,
+            "Returned only by an operator's recover or reset, when the saga's definition version"
+                + " names a service the server no longer has. Otherwise, when loading its"
+                + " definitions,"
+                + REJECTS_CONFIGURATION
+                + " An embedded engine throws it when the definition is registered."));
     m.put(SagaErrorCode.UNAUTHENTICATED, wire(401, Status.Code.UNAUTHENTICATED, null));
     m.put(SagaErrorCode.PERMISSION_DENIED, wire(403, Status.Code.PERMISSION_DENIED, null));
     m.put(SagaErrorCode.SAGA_NOT_FOUND, wire(404, Status.Code.NOT_FOUND, null));
@@ -105,7 +118,16 @@ public final class StatusCodeReference {
             List.of(),
             "REST only. An unknown gRPC method gets a bare `UNIMPLEMENTED` instead."));
     m.put(SagaErrorCode.SAGA_ALREADY_EXISTS, wire(409, Status.Code.ALREADY_EXISTS, null));
-    m.put(SagaErrorCode.SAGA_DEFINITION_VERSION_CONTENT_CONFLICT, other(DEFINITION_LOAD));
+    // Raised while registering, after validation and the service swap, so unlike the codes above
+    // it can leave part of a reload applied.
+    m.put(
+        SagaErrorCode.SAGA_DEFINITION_VERSION_CONTENT_CONFLICT,
+        other(
+            "Not returned by the API. The server logs it while registering definitions. At startup"
+                + " the server does not start. On a reload, the conflicting definition is not"
+                + " applied, but other parts of the change, such as service changes and other"
+                + " definitions, may already have taken effect. An embedded engine throws it when"
+                + " the definition is registered."));
     m.put(SagaErrorCode.SAGA_WRONG_STATE, wire(422, Status.Code.FAILED_PRECONDITION, null));
     m.put(SagaErrorCode.SAGA_PARKED, wire(422, Status.Code.FAILED_PRECONDITION, null));
     m.put(

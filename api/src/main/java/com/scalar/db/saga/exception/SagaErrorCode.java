@@ -104,7 +104,7 @@ public enum SagaErrorCode {
       "Saga definition source is not parseable",
       ErrorMetadataSchema.of("source", "detail"),
       "A definition file is not valid JSON or YAML.",
-      "Fix the syntax error that the detail reports, then load the definition again."),
+      "Fix the syntax error that the parser reports in the exception's cause, then load the definition again."),
 
   /**
    * A definition source (file, classpath resource, or extension) could not be resolved to a
@@ -340,7 +340,7 @@ public enum SagaErrorCode {
       "Rate limit exceeded",
       ErrorMetadataSchema.none(),
       "The caller has started more sagas than the server's rate limit allows.",
-      "Wait as long as `Retry-After` says, then retry."),
+      "Retry with backoff, waiting at least as long as the server advises when it does: `Retry-After` on REST, `RetryInfo` on gRPC."),
 
   /**
    * The server abandoned the operation mid-flight, typically interrupted by its own shutdown,
@@ -367,7 +367,7 @@ public enum SagaErrorCode {
       "The engine is at its concurrent saga limit",
       ErrorMetadataSchema.none(),
       "The server is running as many sagas as its limit allows, so it refused to start another. Nothing was stored, so the saga ID is still free. Unlike `DB-SAGA-20004`, this limit is shared by all callers.",
-      "Retry with backoff and jitter, waiting at least as long as `Retry-After` says. If refusals continue, review the server's limits and the capacity of the services it calls."),
+      "Retry with backoff and jitter, waiting at least as long as the server advises when it does: `Retry-After` on REST, `RetryInfo` on gRPC. If refusals continue, review the server's limits and the capacity of the services it calls."),
 
   /**
    * An async-step callback arrived before the saga recorded the park it answers, so acking it now
@@ -380,7 +380,7 @@ public enum SagaErrorCode {
       "The step has not finished parking yet",
       ErrorMetadataSchema.of("saga_id", "step_name"),
       "A participant reported an asynchronous step's result before the server recorded that the saga is waiting for it, which can happen when the participant reports immediately. The report was not applied.",
-      "Send the same report again with backoff, waiting at least as long as `Retry-After` says."),
+      "Send the same report again with backoff, waiting at least as long as `Retry-After` says when it is present."),
 
   /**
    * The server sent a retryable (2xxxx) code this client SDK has no mapping for, usually because
