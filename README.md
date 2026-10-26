@@ -177,7 +177,7 @@ Snapshots built from `main` are published to the Central snapshot repository.
 
 Bug reports and feature suggestions are welcome as GitHub issues.
 
-Building requires JDK 17 or later to run Gradle; the build downloads the JDK 25 it compiles with if
+Building requires JDK 21 or later to run Gradle; the build downloads the JDK 25 it compiles with if
 you don't have one. Before opening a pull request:
 
 ```bash
