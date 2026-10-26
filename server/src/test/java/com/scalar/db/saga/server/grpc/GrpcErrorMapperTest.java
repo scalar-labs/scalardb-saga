@@ -405,13 +405,16 @@ class GrpcErrorMapperTest {
           .computeIfAbsent(arm.code(), c -> EnumSet.noneOf(Status.Code.class))
           .add(arm.status());
     }
-    for (SagaErrorCode code :
+    List<SagaErrorCode> refusals =
         List.of(
             SagaErrorCode.UNAUTHENTICATED,
             SagaErrorCode.PERMISSION_DENIED,
             SagaErrorCode.SERVICE_UNAVAILABLE,
             SagaErrorCode.RATE_LIMIT_EXCEEDED,
-            SagaErrorCode.INTERNAL_ERROR)) {
+            SagaErrorCode.INTERNAL_ERROR);
+
+    // Act
+    for (SagaErrorCode code : refusals) {
       io.grpc.ServerCall<Object, Object> call = org.mockito.Mockito.mock(io.grpc.ServerCall.class);
       org.mockito.ArgumentCaptor<Status> status = org.mockito.ArgumentCaptor.forClass(Status.class);
       GrpcErrorMapper.close(call, code);
@@ -421,15 +424,12 @@ class GrpcErrorMapperTest {
           .add(status.getValue().getCode());
     }
 
+    // Assert
     for (Map.Entry<SagaErrorCode, StatusCodeReference.Entry> e :
         StatusCodeReference.ENTRIES.entrySet()) {
-      // Act
-      List<Status.Code> documented = e.getValue().grpc();
-
-      // Assert
       assertThat(produced.getOrDefault(e.getKey(), Set.of()))
           .as("gRPC statuses the status-code page lists for %s", e.getKey())
-          .containsAll(documented);
+          .containsAll(e.getValue().grpc());
     }
   }
 

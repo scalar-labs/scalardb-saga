@@ -43,7 +43,8 @@ public final class StatusCodesPage {
     m.put(
         Category.USER_ERROR,
         "User errors. The request, or the state of the saga it names, is wrong; sending the same"
-            + " request again fails the same way.");
+            + " request again fails the same way until the request or the server's state"
+            + " changes.");
     m.put(
         Category.RETRYABLE_SERVER_ERROR,
         "Retryable server errors. The failure is transient; retry the same request with backoff.");
@@ -53,8 +54,9 @@ public final class StatusCodesPage {
             + " attention.");
     m.put(
         Category.CLIENT_ERROR,
-        "Client errors. The Java client SDK raises them itself, when a call fails without a"
-            + " ScalarDB Saga error from the server.");
+        "Client errors. The Java client SDK raises them itself, for conditions on the client side"
+            + " such as a deadline or a cancellation, or for a response it cannot interpret. Whether"
+            + " to retry depends on the code.");
     return m;
   }
 
@@ -137,7 +139,7 @@ public final class StatusCodesPage {
       parts.add(
           "HTTP "
               + entry.http().stream()
-                  .map(s -> "`" + s + " " + REASONS.get(s) + "`")
+                  .map(s -> "`" + s + " " + reason(s) + "`")
                   .collect(Collectors.joining(" or ")));
     }
     if (!entry.grpc().isEmpty()) {
@@ -153,6 +155,15 @@ public final class StatusCodesPage {
       return statuses;
     }
     return statuses.isEmpty() ? entry.note() : statuses + ". " + entry.note();
+  }
+
+  private static String reason(int status) {
+    String reason = REASONS.get(status);
+    if (reason == null) {
+      throw new IllegalStateException(
+          "No reason phrase for HTTP " + status + "; add it to REASONS");
+    }
+    return reason;
   }
 
   private StatusCodesPage() {}

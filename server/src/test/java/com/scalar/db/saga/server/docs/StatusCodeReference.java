@@ -2,6 +2,7 @@ package com.scalar.db.saga.server.docs;
 
 import com.scalar.db.saga.exception.SagaErrorCode;
 import io.grpc.Status;
+import java.util.Collections;
 import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.List;
@@ -36,11 +37,12 @@ public final class StatusCodeReference {
 
   /** Codes nothing produces yet. Their numbers are taken, but no user can meet them. */
   public static final Set<SagaErrorCode> RESERVED =
-      EnumSet.of(
-          SagaErrorCode.STEP_TIMEOUT,
-          SagaErrorCode.STEP_USER_FAILURE,
-          // The client SDK reports an unreachable server as SERVICE_UNAVAILABLE instead.
-          SagaErrorCode.SERVER_UNREACHABLE);
+      Collections.unmodifiableSet(
+          EnumSet.of(
+              SagaErrorCode.STEP_TIMEOUT,
+              SagaErrorCode.STEP_USER_FAILURE,
+              // The client SDK reports an unreachable server as SERVICE_UNAVAILABLE instead.
+              SagaErrorCode.SERVER_UNREACHABLE));
 
   // These codes fail the pass in validation, before anything is applied, so the server never
   // serves part of it.
@@ -55,7 +57,7 @@ public final class StatusCodeReference {
 
   private static final String CLIENT_SDK = "Not sent by the server. The Java client SDK raises it.";
 
-  public static final Map<SagaErrorCode, Entry> ENTRIES = build();
+  public static final Map<SagaErrorCode, Entry> ENTRIES = Collections.unmodifiableMap(build());
 
   private static Map<SagaErrorCode, Entry> build() {
     Map<SagaErrorCode, Entry> m = new EnumMap<>(SagaErrorCode.class);

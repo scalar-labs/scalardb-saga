@@ -10,10 +10,10 @@ The first digit after `DB-SAGA-` is the code's class, which says whether retryin
 
 | Class | Description |
 | --- | --- |
-| `DB-SAGA-1xxxx` | User errors. The request, or the state of the saga it names, is wrong; sending the same request again fails the same way. |
+| `DB-SAGA-1xxxx` | User errors. The request, or the state of the saga it names, is wrong; sending the same request again fails the same way until the request or the server's state changes. |
 | `DB-SAGA-2xxxx` | Retryable server errors. The failure is transient; retry the same request with backoff. |
 | `DB-SAGA-3xxxx` | Non-retryable server errors. Retrying does not help; the server or its data needs attention. |
-| `DB-SAGA-4xxxx` | Client errors. The Java client SDK raises them itself, when a call fails without a ScalarDB Saga error from the server. |
+| `DB-SAGA-4xxxx` | Client errors. The Java client SDK raises them itself, for conditions on the client side such as a deadline or a cancellation, or for a response it cannot interpret. Whether to retry depends on the code. |
 
 ## `DB-SAGA-1xxxx` status codes
 
@@ -33,7 +33,7 @@ HTTP `400 Bad Request` or `413 Content Too Large`, gRPC `INVALID_ARGUMENT`. The 
 
 **Cause**
 
-The request is malformed: a required field is missing or malformed, the body cannot be parsed, or a query parameter has an invalid value. The `detail` metadata says which.
+The request is malformed: a required field is missing or has the wrong form, the body cannot be parsed, or a query parameter has an invalid value. The `detail` metadata says which.
 
 **Action**
 
@@ -97,7 +97,7 @@ A definition file is not valid JSON or YAML.
 
 **Action**
 
-Fix the syntax error that the parser reports in the exception's cause, then load the definition again.
+Fix the file's syntax, then load the definition again. An embedded engine attaches the parser's diagnostic as the exception's cause; the server's log names only the file.
 
 ### `DB-SAGA-10005`
 
@@ -177,7 +177,7 @@ A step needs an HTTP endpoint, but none matches: no endpoint is registered, none
 
 **Action**
 
-Register the endpoint, fix its name, or select one by annotating the `SagaHttpClient` parameter with `@Named`.
+Register the endpoint, fix its name, or name one by calling `httpClient(name)` in the step resolver.
 
 ### `DB-SAGA-10009`
 
@@ -197,7 +197,7 @@ A declarative service step breaks a validation rule, such as a missing or malfor
 
 **Action**
 
-Fix the step as the detail describes, then load the definition again.
+Fix the step as the detail describes, then load the definition again. If an operator's recover or reset returned it, add the missing service back to the server's configuration instead; the intervention is already recorded, so check the saga's state before repeating it.
 
 ### `DB-SAGA-10101`
 
@@ -217,7 +217,7 @@ The request has no valid credential, or the credential has expired.
 
 **Action**
 
-Send a valid API key or bearer token, then send the request again.
+Send a valid API key or bearer token, then send the request again. On a participant callback route, the credential is the token in the callback URL: use the URL exactly as the server sent it, before the token expires.
 
 ### `DB-SAGA-10102`
 
@@ -233,7 +233,7 @@ HTTP `403 Forbidden`, gRPC `PERMISSION_DENIED`
 
 **Cause**
 
-The caller is authenticated but does not have the role the operation requires. The response does not name the role; the server's audit log does.
+The caller is authenticated but does not have the role the operation requires. The response does not name the role; the server's log does, at `INFO`.
 
 **Action**
 
@@ -404,7 +404,7 @@ Wait for the participant's report or the step's timeout.
 **Message**
 
 ```markdown
-Saga definition is registered but not served by this daemon
+Saga definition is registered but not served by this server
 ```
 
 **Status**
@@ -497,11 +497,11 @@ HTTP `429 Too Many Requests`, gRPC `RESOURCE_EXHAUSTED`. Returned only for saga 
 
 **Cause**
 
-The caller has started more sagas than the server's rate limit allows.
+The caller has sent more saga-start requests than the server's rate limit allows.
 
 **Action**
 
-Retry with backoff, waiting at least as long as the server advises when it does: `Retry-After` on REST, `RetryInfo` on gRPC.
+Retry with backoff. If the response includes a delay (`Retry-After` on REST, `RetryInfo` on gRPC), wait at least that long.
 
 ### `DB-SAGA-20005`
 
@@ -537,11 +537,11 @@ HTTP `503 Service Unavailable`, gRPC `UNAVAILABLE`. Returned only for saga start
 
 **Cause**
 
-The server is running as many sagas as its limit allows, so it refused to start another. Nothing was stored, so the saga ID is still free. Unlike `DB-SAGA-20004`, this limit is shared by all callers.
+The server is driving as many newly started sagas as its limit allows, so it refused to start another. Parked sagas, resumed sagas, recovery, and operator actions do not count toward the limit. Nothing was stored, so the saga ID is still free. Unlike `DB-SAGA-20004`, this limit is shared by all callers.
 
 **Action**
 
-Retry with backoff and jitter, waiting at least as long as the server advises when it does: `Retry-After` on REST, `RetryInfo` on gRPC. If refusals continue, review the server's limits and the capacity of the services it calls.
+Retry with backoff and jitter. If the response includes a delay (`Retry-After` on REST, `RetryInfo` on gRPC), wait at least that long. If refusals continue, review the server's limits and the capacity of the services it calls.
 
 ### `DB-SAGA-20007`
 
@@ -561,7 +561,7 @@ A participant reported an asynchronous step's result before the server recorded 
 
 **Action**
 
-Send the same report again with backoff, waiting at least as long as `Retry-After` says when it is present.
+Send the same report again with backoff. If the response includes `Retry-After`, wait at least that long.
 
 ### `DB-SAGA-29999`
 
