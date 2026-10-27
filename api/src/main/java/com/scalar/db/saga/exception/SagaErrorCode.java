@@ -245,8 +245,11 @@ public enum SagaErrorCode {
       Category.USER_ERROR,
       "Saga already exists",
       ErrorMetadataSchema.of("saga_id"),
-      "A saga with the given ID already exists.",
-      "Use a different ID, or get the existing saga's state."),
+      "A saga with the given ID already exists. This usually means an earlier request with the same"
+          + " ID, such as a retry, already started it.",
+      "Get the existing saga's state. If it is the saga you meant to start, an earlier request"
+          + " already started it, so do not start it again. Use a different ID only for a different"
+          + " saga."),
 
   /**
    * A definition is already registered under this name and version with different content; bump the

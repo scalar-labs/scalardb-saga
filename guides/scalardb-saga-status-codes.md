@@ -333,11 +333,11 @@ HTTP `409 Conflict`, gRPC `ALREADY_EXISTS`
 
 **Cause**
 
-A saga with the given ID already exists.
+A saga with the given ID already exists. This usually means an earlier request with the same ID, such as a retry, already started it.
 
 **Action**
 
-Use a different ID, or get the existing saga's state.
+Get the existing saga's state. If it is the saga you meant to start, an earlier request already started it, so do not start it again. Use a different ID only for a different saga.
 
 ### `DB-SAGA-10302`
 
