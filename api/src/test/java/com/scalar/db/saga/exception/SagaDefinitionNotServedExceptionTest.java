@@ -20,7 +20,7 @@ class SagaDefinitionNotServedExceptionTest {
     assertThat(e.getMetadata()).containsEntry("saga_name", "order-saga").hasSize(1);
     assertThat(e.getMessage())
         .isEqualTo(
-            "DB-SAGA-10403: Saga definition is registered but not served by this daemon"
+            "DB-SAGA-10403: Saga definition is registered but not served by this server"
                 + " [saga_name=order-saga]");
   }
 

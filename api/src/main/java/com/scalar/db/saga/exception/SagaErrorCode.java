@@ -65,8 +65,8 @@ public enum SagaErrorCode {
       Category.USER_ERROR,
       "Request is invalid",
       ErrorMetadataSchema.of("detail"),
-      "The request message itself failed validation at the server edge: a missing or malformed field, an unparseable body, or an invalid query-parameter value. Only a remote caller can produce this; the embedded engine has no request to validate. A caller value the engine rejected is INVALID_ARGUMENT instead.",
-      "Fix the request per the detail and retry."),
+      "The request is malformed: a required field is missing or has the wrong form, the body cannot be parsed, or a query parameter has an invalid value. The `detail` metadata says which.",
+      "Fix the request as the detail describes, then send it again."),
 
   /**
    * A value the caller passed failed validation, such as a malformed page token, a blank reason, or
@@ -78,8 +78,8 @@ public enum SagaErrorCode {
       Category.USER_ERROR,
       "Argument is invalid",
       ErrorMetadataSchema.of("detail"),
-      "A value the caller passed failed validation — a malformed page token, a blank reason, an out-of-range timestamp. Raised by the engine and by client-side pre-checks, so it reaches callers in both embedded and server mode.",
-      "Fix the argument per the detail and retry."),
+      "A value in the request is not valid, such as a malformed page token, a blank reason, or an out-of-range timestamp. The `detail` metadata says which value.",
+      "Fix the value as the detail describes, then send the request again."),
 
   /**
    * A saga definition violates a validation rule, such as a duplicate step name, a bad pivot
@@ -91,8 +91,8 @@ public enum SagaErrorCode {
       Category.USER_ERROR,
       "Saga definition is invalid",
       ErrorMetadataSchema.of("saga_name", "detail"),
-      "The definition violates a validation rule (e.g. duplicate step name, bad pivot placement, malformed field value). The detail identifies the specific violation.",
-      "Fix the definition per the detail and re-register."),
+      "A saga definition breaks a validation rule, such as a duplicate step name or a misplaced pivot step. The `detail` metadata names the rule.",
+      "Fix the definition as the detail describes, then load it again."),
 
   /**
    * A saga definition source (JSON or YAML) has a syntax error; the cause carries the parser's
@@ -103,8 +103,8 @@ public enum SagaErrorCode {
       Category.USER_ERROR,
       "Saga definition source is not parseable",
       ErrorMetadataSchema.of("source", "detail"),
-      "The definition source (JSON or YAML) has a syntactic error. The cause carries the parser's diagnostic.",
-      "Fix the JSON/YAML syntax error indicated by the parser cause."),
+      "A definition file is not valid JSON or YAML.",
+      "Fix the file's syntax, then load the definition again. An embedded engine attaches the parser's diagnostic as the exception's cause; the server's log names only the file."),
 
   /**
    * A definition source (file, classpath resource, or extension) could not be resolved to a
@@ -115,8 +115,8 @@ public enum SagaErrorCode {
       Category.USER_ERROR,
       "Saga definition source cannot be read",
       ErrorMetadataSchema.of("source"),
-      "The file, classpath resource, or extension could not be resolved to a readable definition source.",
-      "Verify the path/resource exists, is readable, and has a supported extension (.json, .yaml, .yml)."),
+      "A definition file or classpath resource cannot be found or read, or its name does not end in `.json`, `.yaml`, or `.yml`.",
+      "Check that the file or resource exists, can be read, and has a supported extension."),
 
   /**
    * A class-based step could not be resolved or instantiated: not found, not a {@code Step} or
@@ -128,8 +128,8 @@ public enum SagaErrorCode {
       Category.USER_ERROR,
       "Step class cannot be resolved or instantiated",
       ErrorMetadataSchema.of("step_class", "detail"),
-      "Reflective resolution of the class-based step failed (not found, not a Step/TccStep, wrong constructor shape, unresolvable parameter, or constructor threw). The detail identifies the specific failure.",
-      "Fix the step class per the detail and ensure it is on the runtime classpath."),
+      "A class-based step cannot be loaded or created: the class is not on the classpath, does not implement `Step` or `TccStep`, or its constructor cannot be called or fails. The `detail` metadata says which.",
+      "Fix the step class as the detail describes, and make sure it is on the classpath."),
 
   /**
    * A definition names a class-based step, which a saga server cannot run: it executes declarative
@@ -140,8 +140,8 @@ public enum SagaErrorCode {
       Category.USER_ERROR,
       "Class-based step is not supported on the server",
       ErrorMetadataSchema.of("saga_name", "step_name"),
-      "The server runs declarative definitions only; class steps cannot be executed remotely.",
-      "Convert the step to a declarative service step or embed the engine instead."),
+      "A definition uses a class-based step. The server runs only declarative service steps.",
+      "Replace the step with a declarative service step, or run the engine embedded in your application."),
 
   /**
    * A step needed an HTTP endpoint, but the orchestrator has no matching registration: none
@@ -152,8 +152,8 @@ public enum SagaErrorCode {
       Category.USER_ERROR,
       "HTTP endpoint lookup failed",
       ErrorMetadataSchema.of("detail"),
-      "A step needed an HTTP endpoint, but the orchestrator has no matching registration (none registered, name not found, or multiple registered without a qualifier).",
-      "Register the endpoint on the orchestrator's builder, fix the lookup name, or annotate the SagaHttpClient parameter with @Named to select one."),
+      "A step needs an HTTP endpoint, but none matches: no endpoint is registered, none has the requested name, or several are registered and the step does not name one.",
+      "Register the endpoint, fix its name, or name one by calling `httpClient(name)` in the step resolver."),
 
   /**
    * One declarative service step violates a validation rule, such as a missing or malformed call
@@ -165,8 +165,8 @@ public enum SagaErrorCode {
       Category.USER_ERROR,
       "Declarative step definition is invalid",
       ErrorMetadataSchema.of("step_name", "detail"),
-      "One declarative service step violates a validation rule (e.g. a missing or malformed call field, a bad phase combination). The step-scoped sibling of INVALID_DEFINITION: the step-level validation paths know which step failed but not which saga definition encloses it.",
-      "Fix the step per the detail and re-register the definition."),
+      "A declarative service step breaks a validation rule, such as a missing or malformed call field. The `detail` metadata names the rule.",
+      "Fix the step as the detail describes, then load the definition again. If an operator's recover or reset returned it, add the missing service back to the server's configuration instead; the intervention is already recorded, so check the saga's state before repeating it."),
 
   // ── Auth (101xx) ─────────────────────────────────────────────────────
   /** The request presented no valid credential. HTTP 401. */
@@ -175,8 +175,8 @@ public enum SagaErrorCode {
       Category.USER_ERROR,
       "Authentication required",
       ErrorMetadataSchema.none(),
-      "The request did not present a valid credential.",
-      "Attach a valid credential (API key, bearer token) and retry."),
+      "The request has no valid credential, or the credential has expired.",
+      "Send a valid API key or bearer token, then send the request again. On a participant callback route, the credential is the token in the callback URL: use the URL exactly as the server sent it, before the token expires."),
 
   /**
    * The authenticated principal lacks the role the operation requires. HTTP 403.
@@ -191,8 +191,8 @@ public enum SagaErrorCode {
       Category.USER_ERROR,
       "Permission denied",
       ErrorMetadataSchema.none(),
-      "The authenticated principal lacks the role required for this operation. The role itself is deliberately not sent on the wire; each operation's required role is static policy, documented in the API reference, and the server's audit log records the principal and the missing role.",
-      "Look up the operation's required role in the API reference and request it from an administrator."),
+      "The caller is authenticated but does not have the role the operation requires. The response does not name the role; the server's log does, at `INFO`.",
+      "Ask an administrator for the role that the operation requires."),
 
   // ── Not-found (102xx) ────────────────────────────────────────────────
   /** No saga instance exists with the given id. HTTP 404. */
@@ -201,8 +201,8 @@ public enum SagaErrorCode {
       Category.USER_ERROR,
       "Saga not found",
       ErrorMetadataSchema.of("saga_id"),
-      "No saga instance exists with the given ID.",
-      "Verify the saga ID; the saga may have been purged or never existed."),
+      "No saga exists with the given ID.",
+      "Check the saga ID. The saga may never have been started, or retention may have removed it."),
 
   /** No saga definition is registered under the given name. HTTP 404. */
   SAGA_DEFINITION_NOT_FOUND(
@@ -210,8 +210,8 @@ public enum SagaErrorCode {
       Category.USER_ERROR,
       "Saga definition not found",
       ErrorMetadataSchema.of("saga_name"),
-      "No saga definition is registered under the given name.",
-      "Register the saga definition or fix the name."),
+      "No saga definition has the given name.",
+      "Check the definition name, or add the definition to the server."),
 
   /** The saga definition exists, but not at the requested version. HTTP 404. */
   SAGA_DEFINITION_VERSION_NOT_FOUND(
@@ -219,8 +219,8 @@ public enum SagaErrorCode {
       Category.USER_ERROR,
       "Saga definition version not found",
       ErrorMetadataSchema.of("saga_name", "version"),
-      "The saga definition exists but not at the requested version.",
-      "Register that version or start the saga at an existing version."),
+      "The saga definition exists, but not at the requested version.",
+      "Use a version that exists, or add the requested version."),
 
   /**
    * The request path or method matches no registered REST route. Only a remote caller can produce
@@ -231,8 +231,8 @@ public enum SagaErrorCode {
       Category.USER_ERROR,
       "No such endpoint",
       ErrorMetadataSchema.of("detail"),
-      "The request path (or method) matches no registered REST route. Only a remote caller can produce this; the embedded engine has no routes.",
-      "Check the request method and path against the API reference."),
+      "No REST route matches the request's method and path.",
+      "Check the request's method and path."),
 
   // ── Conflict (103xx) ─────────────────────────────────────────────────
   /**
@@ -245,8 +245,11 @@ public enum SagaErrorCode {
       Category.USER_ERROR,
       "Saga already exists",
       ErrorMetadataSchema.of("saga_id"),
-      "A saga with the given client-supplied ID already exists.",
-      "Use a different ID, or fetch the existing saga's state."),
+      "A saga with the given ID already exists. This usually means an earlier request with the same"
+          + " ID, such as a retry, already started it.",
+      "Get the existing saga's state. If it is the saga you meant to start, an earlier request"
+          + " already started it, so do not start it again. Use a different ID only for a different"
+          + " saga."),
 
   /**
    * A definition is already registered under this name and version with different content; bump the
@@ -257,8 +260,8 @@ public enum SagaErrorCode {
       Category.USER_ERROR,
       "Definition version is already registered with different content",
       ErrorMetadataSchema.of("saga_name", "version"),
-      "A definition with this (name, version) already exists but its content differs from what was submitted.",
-      "Bump the version instead of re-registering under the same one."),
+      "A definition with this name and version is already registered, with different content.",
+      "Give the changed definition a new version."),
 
   // ── Precondition failed (104xx) ──────────────────────────────────────
   /**
@@ -270,8 +273,8 @@ public enum SagaErrorCode {
       Category.USER_ERROR,
       "Operation not allowed in the saga's current state",
       ErrorMetadataSchema.of("saga_id", "current_state", "requested_operation"),
-      "The saga is in a status the operation does not accept (e.g. force-completing a non-escalated saga, resuming an escalated one).",
-      "GET the saga for its current state; only certain transitions are allowed per status."),
+      "The saga's status does not allow the operation, such as force-completing a saga that is not escalated.",
+      "Get the saga's current status, and use an operation that status allows."),
 
   /**
    * The saga is waiting on an asynchronous callback and resolves through that callback or its
@@ -282,8 +285,8 @@ public enum SagaErrorCode {
       Category.USER_ERROR,
       "Saga is parked and cannot be resumed automatically",
       ErrorMetadataSchema.of("saga_id"),
-      "The saga is WAITING on an async callback and resolves via the callback or its timeout — not via admin action.",
-      "Wait for the callback or the timeout; do not attempt to drive the saga manually."),
+      "The saga is waiting for an asynchronous step. It continues when the participant reports the step's result or the step times out, not through an operator action.",
+      "Wait for the participant's report or the step's timeout."),
 
   /**
    * The saga definition is registered in the store but is not part of this daemon's configuration:
@@ -293,10 +296,10 @@ public enum SagaErrorCode {
   SAGA_DEFINITION_NOT_SERVED(
       "DB-SAGA-10403",
       Category.USER_ERROR,
-      "Saga definition is registered but not served by this daemon",
+      "Saga definition is registered but not served by this server",
       ErrorMetadataSchema.of("saga_name"),
-      "The saga is registered in the store but is not part of this daemon's configuration: either it was retired by removing its definition file, or this replica's configuration has not caught up with a newly added one. Sagas already running under it finish normally.",
-      "If the saga was retired, stop starting it. If it was just added, retry — another replica may already serve it, and this one will once its configuration syncs."),
+      "The definition is registered, but this server does not serve it: either it was retired by removing its file, or this server has not yet loaded a newly added one. Sagas already running under it finish normally.",
+      "If the definition was retired, stop starting it. If it was just added, retry; the server serves it once it loads the new configuration."),
 
   // ── RETRYABLE_SERVER_ERROR (2xxxx) ───────────────────────────────────
   /**
@@ -309,8 +312,8 @@ public enum SagaErrorCode {
       Category.RETRYABLE_SERVER_ERROR,
       "Another writer modified the saga first",
       ErrorMetadataSchema.of("saga_id"),
-      "Optimistic locking detected a concurrent modification by another engine replica or operator.",
-      "Retry the operation from a fresh snapshot. This is typically transient."),
+      "Another server or an operator changed the saga at the same time.",
+      "Retry the operation. This is usually transient."),
 
   /** A transient failure occurred while accessing the underlying store. */
   PERSISTENCE_STORE_UNAVAILABLE(
@@ -318,8 +321,8 @@ public enum SagaErrorCode {
       Category.RETRYABLE_SERVER_ERROR,
       "Underlying store is temporarily unavailable",
       ErrorMetadataSchema.none(),
-      "A transient failure occurred while accessing the underlying store.",
-      "Retry the operation. If failures persist, check the store's health."),
+      "The database is temporarily unavailable.",
+      "Retry the operation. If it keeps failing, check the database."),
 
   /**
    * The saga service, or one of its upstream dependencies such as the identity provider, could not
@@ -330,8 +333,8 @@ public enum SagaErrorCode {
       Category.RETRYABLE_SERVER_ERROR,
       "Service temporarily unavailable",
       ErrorMetadataSchema.none(),
-      "The saga service could not fulfill the request; the failure is transient. Applies to the saga service itself or one of its upstream dependencies (e.g. the identity provider).",
-      "Retry the operation with backoff."),
+      "The server, or a service it depends on such as the identity provider, is temporarily unavailable.",
+      "Retry with backoff."),
 
   /** The request exceeded the server's configured rate limit for this operation. */
   RATE_LIMIT_EXCEEDED(
@@ -339,8 +342,8 @@ public enum SagaErrorCode {
       Category.RETRYABLE_SERVER_ERROR,
       "Rate limit exceeded",
       ErrorMetadataSchema.none(),
-      "The request exceeded the server's configured rate limit for this operation.",
-      "Back off and retry after a short delay."),
+      "The caller has sent more saga-start requests than the server's rate limit allows.",
+      "Retry with backoff. If the response includes a delay (`Retry-After` on REST, `RetryInfo` on gRPC), wait at least that long."),
 
   /**
    * The server abandoned the operation mid-flight, typically interrupted by its own shutdown,
@@ -352,8 +355,8 @@ public enum SagaErrorCode {
       Category.RETRYABLE_SERVER_ERROR,
       "Operation aborted by the server",
       ErrorMetadataSchema.none(),
-      "The server abandoned the operation mid-flight — typically an interrupt during shutdown — rather than a dependency failing. Distinct from REQUEST_ABORTED, where the caller cancelled its own request.",
-      "Retry the operation; it will land on another replica, or on this server after it restarts."),
+      "The server stopped the operation partway through, usually because it is shutting down.",
+      "Retry the operation. Another server, or this one after it restarts, handles it."),
 
   /**
    * The server already runs as many sagas as its admission cap allows and refused to start another.
@@ -366,8 +369,8 @@ public enum SagaErrorCode {
       Category.RETRYABLE_SERVER_ERROR,
       "The engine is at its concurrent saga limit",
       ErrorMetadataSchema.none(),
-      "The server is already running as many sagas as its admission cap allows, so it refused to start another. Nothing was persisted: the saga does not exist and its ID is still free. Distinct from RATE_LIMIT_EXCEEDED, which is about how often this caller may ask; this is about how much work the server is doing for everyone.",
-      "Retry with backoff and jitter, honouring Retry-After when present. Sustained rejection means the cap, the request rate limit, or downstream capacity needs revisiting."),
+      "The server is driving as many newly started sagas as its limit allows, so it refused to start another. Parked sagas, resumed sagas, recovery, and operator actions do not count toward the limit. Nothing was stored, so the saga ID is still free. Unlike `DB-SAGA-20004`, this limit is shared by all callers.",
+      "Retry with backoff and jitter. If the response includes a delay (`Retry-After` on REST, `RetryInfo` on gRPC), wait at least that long. If refusals continue, review the server's limits and the capacity of the services it calls."),
 
   /**
    * An async-step callback arrived before the saga recorded the park it answers, so acking it now
@@ -379,8 +382,8 @@ public enum SagaErrorCode {
       Category.RETRYABLE_SERVER_ERROR,
       "The step has not finished parking yet",
       ErrorMetadataSchema.of("saga_id", "step_name"),
-      "An async-step callback or failure report arrived before the saga recorded that it is waiting on that step. The engine parks a saga only after the participant accepts the call, so a participant that calls back immediately can arrive first. Nothing was recorded; the report was not applied.",
-      "Retry the same request with backoff, honouring Retry-After when present. Once the park is recorded, it settles the step."),
+      "A participant reported an asynchronous step's result before the server recorded that the saga is waiting for it, which can happen when the participant reports immediately. The report was not applied.",
+      "Send the same report again with backoff. If the response includes `Retry-After`, wait at least that long."),
 
   /**
    * The server sent a retryable (2xxxx) code this client SDK has no mapping for, usually because
@@ -392,8 +395,8 @@ public enum SagaErrorCode {
       Category.RETRYABLE_SERVER_ERROR,
       "The server reported a retryable error this client does not recognize",
       ErrorMetadataSchema.of("server_value"),
-      "The server sent a RETRYABLE_SERVER_ERROR (2xxxx) code this client SDK has no mapping for; usually a version skew where the server is newer. The category digit is a frozen wire contract, so the failure is known to be transient even though the specific code is not.",
-      "Retry with backoff; upgrade the client SDK to interpret the specific code."),
+      "The server returned a retryable error code that this version of the client SDK does not know, usually because the server is newer.",
+      "Retry with backoff, and upgrade the client SDK."),
 
   // ── NON_RETRYABLE_SERVER_ERROR (3xxxx) ───────────────────────────────
   /** JSON serialization of an event payload failed; typically an engine bug. */
@@ -402,8 +405,8 @@ public enum SagaErrorCode {
       Category.NON_RETRYABLE_SERVER_ERROR,
       "Failed to serialize event payload",
       ErrorMetadataSchema.none(),
-      "JSON serialization of the event payload failed.",
-      "Inspect the payload structure; this is typically an engine bug."),
+      "The server could not convert saga data to JSON to store it.",
+      "Contact your administrator with the error details. This usually indicates a bug."),
 
   /**
    * Stored data could not be deserialized, possibly because the schema drifted between the writer
@@ -414,8 +417,8 @@ public enum SagaErrorCode {
       Category.NON_RETRYABLE_SERVER_ERROR,
       "Failed to deserialize event payload or definition",
       ErrorMetadataSchema.none(),
-      "The stored data could not be deserialized, possibly due to schema drift.",
-      "Check for schema-version mismatch between the writer and reader."),
+      "Stored saga data or a stored definition could not be read, possibly because an incompatible version wrote it.",
+      "Check that every server runs a compatible version, and contact your administrator with the error details."),
 
   /**
    * Reserved, not yet produced: a step exceeded its configured timeout before returning a result.
@@ -430,8 +433,8 @@ public enum SagaErrorCode {
       Category.NON_RETRYABLE_SERVER_ERROR,
       "Step timed out",
       ErrorMetadataSchema.of("step_name", "step_index"),
-      "The step exceeded its configured timeout before returning a result.",
-      "Increase the step's timeout or optimize the step; the saga compensates and settles."),
+      "The step exceeded its timeout before returning a result.",
+      "Increase the step's timeout, or make the step faster."),
 
   /**
    * Reserved, not yet produced, for the same reason as {@link #STEP_TIMEOUT}: a step threw a non-
@@ -442,8 +445,8 @@ public enum SagaErrorCode {
       Category.NON_RETRYABLE_SERVER_ERROR,
       "Step reported a user failure",
       ErrorMetadataSchema.of("step_name", "step_index"),
-      "The step threw a non-retryable failure; a business-rule rejection, or a 4xx from a declarative service step.",
-      "Inspect the step's failure detail; the saga compensates and settles."),
+      "The step failed permanently, such as with a business-rule rejection or a 4xx response from a service step.",
+      "Check the step's failure detail."),
 
   /**
    * A step's compensation action threw. The saga stays {@code COMPENSATING} and recovery retries
@@ -455,8 +458,8 @@ public enum SagaErrorCode {
       Category.NON_RETRYABLE_SERVER_ERROR,
       "Compensation of step failed",
       ErrorMetadataSchema.of("step_name", "step_index"),
-      "The step's compensation action threw an exception.",
-      "Investigate the compensation implementation; recovery retries the compensation and escalates the saga if it stays stuck past the grace period."),
+      "A step's compensation failed.",
+      "Check the participant's compensation. Recovery retries it, and escalates the saga if it keeps failing past the escalation grace period."),
 
   /**
    * The engine hit an unexpected internal error; the catch-all for a server fault no other code
@@ -467,7 +470,7 @@ public enum SagaErrorCode {
       Category.NON_RETRYABLE_SERVER_ERROR,
       "Internal error",
       ErrorMetadataSchema.none(),
-      "The engine encountered an unexpected internal error.",
+      "The server hit an unexpected error.",
       "Contact your administrator with the error details."),
 
   // ── CLIENT_ERROR (4xxxx — client SDK only) ────────────────────────────
@@ -486,8 +489,8 @@ public enum SagaErrorCode {
       Category.CLIENT_ERROR,
       "The saga server could not be reached",
       ErrorMetadataSchema.none(),
-      "The request did not reach the server, or the server returned no structured error.",
-      "Verify the server endpoint and network connectivity, then retry."),
+      "The client could not reach the server.",
+      "Check the server address and the network, then retry."),
 
   /** The request did not complete before its deadline. */
   REQUEST_TIMEOUT(
@@ -495,8 +498,8 @@ public enum SagaErrorCode {
       Category.CLIENT_ERROR,
       "The request to the saga server timed out",
       ErrorMetadataSchema.none(),
-      "The request did not complete before its deadline.",
-      "Retry the request or increase the deadline."),
+      "The request did not finish before its deadline.",
+      "Retry the request, or set a longer deadline."),
 
   /**
    * The caller cancelled the operation (a thread interrupt, a future cancellation, or client
@@ -507,8 +510,8 @@ public enum SagaErrorCode {
       Category.CLIENT_ERROR,
       "The request was aborted before it could complete",
       ErrorMetadataSchema.none(),
-      "The caller cancelled the operation (thread interrupt, future cancellation, or client shutdown) before the RPC completed.",
-      "If the abort was unintentional, avoid interrupting or cancelling the calling thread and retry."),
+      "The application cancelled the request before it finished, by interrupting the calling thread, cancelling its future, or closing the client.",
+      "If the cancellation was not intended, avoid interrupting or cancelling the call, then retry."),
 
   /**
    * The response carried a bare transport status and no saga error body. Servers attach a code to
@@ -521,8 +524,8 @@ public enum SagaErrorCode {
       Category.CLIENT_ERROR,
       "The server reported only a transport status with no error body",
       ErrorMetadataSchema.of("server_value"),
-      "The response carried a bare transport status and no saga error body. Servers attach a code to every response, so this typically comes from the transport runtime itself (a message-size rejection, say) or an intermediary, not from the saga application.",
-      "Inspect server_value (the transport status) and the cause. This is not a version skew; upgrading the client SDK will not change it."),
+      "The response carried a gRPC status but no ScalarDB Saga error. It usually comes from the gRPC runtime itself, such as a message-size limit, or from a proxy between the client and the server.",
+      "Check the status in the `server_value` metadata and the exception's cause. Upgrading the client SDK does not help."),
 
   /**
    * The saga did not reach a terminal state within the client-side wait bound. Usually it is still
@@ -536,8 +539,8 @@ public enum SagaErrorCode {
       Category.CLIENT_ERROR,
       "The wait for the saga to finish timed out",
       ErrorMetadataSchema.of("saga_id"),
-      "The saga did not reach a terminal state within the client-side wait bound: the caller's wait budget expired. Usually the saga is running and will settle on its own, but the budget can also expire while the first start request is still being retried, where whether anything was persisted is unknown. Distinct from REQUEST_TIMEOUT, where the request itself did not complete.",
-      "Poll saga_id (getStateSnapshot or awaitSaga) to learn where the saga stands: either it is running and will settle on its own, or it is not found, meaning the start had not landed when the poll ran. Do not re-send under a fresh ID. saga_id is also the idempotency key the start was sent under, and an attempt still in flight can land after a not-found poll, so any re-send must reuse saga_id. A caller that started the saga without supplying an ID has no other copy of it."),
+      "The saga did not finish within the client's wait limit. Usually it is still running and finishes on its own; but if the limit expired while the start was still being retried, the saga may not exist.",
+      "Check the saga by the ID in the `saga_id` metadata. If it is not found, start it again with that same ID, never a new one, because an earlier attempt may still arrive."),
 
   /**
    * The server sent an error-code token or wire enum value this client SDK has no mapping for;
@@ -548,8 +551,8 @@ public enum SagaErrorCode {
       Category.CLIENT_ERROR,
       "The server returned a value this client does not recognize",
       ErrorMetadataSchema.of("server_value"),
-      "The server sent an error-code token or wire enum value the client SDK has no mapping for. Usually a version skew: the server is newer than this client SDK.",
-      "Upgrade the client SDK to a version compatible with the server."),
+      "The server returned an error code or value that this version of the client SDK does not know, usually because the server is newer.",
+      "Upgrade the client SDK to a version that matches the server."),
   ;
 
   /**

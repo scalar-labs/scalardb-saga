@@ -116,6 +116,27 @@ dependencies {
 }
 
 // ---------------------------------------------------------------------------
+// Status-code page
+// ---------------------------------------------------------------------------
+
+// The page is rendered from SagaErrorCode and the wire statuses the error-mapper tests check, so
+// its renderer lives with those tests. StatusCodesPageTest fails when the committed page is stale.
+val statusCodesPage = layout.projectDirectory.file("../guides/scalardb-saga-status-codes.md")
+
+tasks.register<JavaExec>("generateStatusCodes") {
+    description = "Rewrites the status-code page from SagaErrorCode."
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass = "com.scalar.db.saga.server.docs.StatusCodesPage"
+    args(statusCodesPage.asFile.absolutePath)
+}
+
+// The freshness test reads the page from outside this module; declaring it keeps an edit to the
+// page from being answered by an up-to-date or cached test run.
+tasks.test {
+    inputs.file(statusCodesPage).withPathSensitivity(PathSensitivity.RELATIVE)
+}
+
+// ---------------------------------------------------------------------------
 // Container image
 // ---------------------------------------------------------------------------
 
