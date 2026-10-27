@@ -64,7 +64,9 @@ A definition runs in one of two modes, set by `mode`.
 - **`TCC` (Try-Confirm-Cancel):** every step first makes a *reservation*, such as holding funds
   rather than charging them. Only when every reservation succeeds are they all *confirmed*. If any
   reservation fails, the ones already made are *cancelled*. Choose this mode when your services can
-  hold a resource provisionally and you do not want other transactions to see a partial workflow.
+  hold a resource provisionally and you do not want other transactions to see the effect of a
+  workflow that may still fail. The confirmations run one after another, so while they run, other
+  transactions can see one participant confirmed and another still reserved.
 
 TCC needs more from each participant (three calls instead of two, and a notion of a reservation that
 expires or is cancelled), so start with `SAGA` mode unless your services already support
@@ -438,7 +440,9 @@ a `POST` to the callback URL, and the saga resumes:
   off by default; when you set it, make it longer than your longest `callbackTimeoutMillis`.
 - **A repeated callback is harmless.** A callback for a step that has already resumed returns
   `200` with the saga's current state, so the participant can retry its callback until it gets an
-  answer.
+  answer. The exception is a repeat that arrives after the saga has moved on and parked on a later
+  step: it returns `400`. The earlier report was accepted, so the participant does not need to send
+  it again.
 
 If the work fails, the participant sends a `POST` to the failure URL instead:
 
@@ -460,7 +464,8 @@ X-Saga-Retryable: true
   it. A missing body, or a missing or `null` `error`, records only that the participant reported a
   failure.
 - **The same rules apply as for the callback.** The URL carries the same kind of signed token, and a
-  report for a step that has already resumed or failed returns `200` with the saga's current state.
+  report for a step that has already resumed or failed returns `200` with the saga's current state,
+  unless the saga has since parked on a later step, in which case it returns `400`.
 
 Both URLs can also answer:
 
@@ -468,7 +473,7 @@ Both URLs can also answer:
 | --- | --- | --- |
 | `503` with `Retry-After` | The report arrived before the saga finished parking, such as a callback sent right after the `202`. | Yes, after `Retry-After`. |
 | `401` | The token is missing, invalid, or too old. | No |
-| `400` | The body is malformed, `error` is not a string, or the step is not the one the URL names. | No |
+| `400` | The body is malformed, `error` is not a string, or the saga is parked on a step other than the one the URL names, such as a later step after an earlier report was accepted. | No |
 | `404` | No saga has this ID. | No |
 
 If no callback arrives within `callbackTimeoutMillis` (or the saga's timeout, if that is sooner), the

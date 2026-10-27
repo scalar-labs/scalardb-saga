@@ -122,7 +122,10 @@ PUT /sagas/{id}
 ```
 
 `POST` starts a saga with an ID the server generates. `PUT` starts one with the ID in the path,
-which makes the request safe to retry: a second `PUT` with the same ID never starts a second saga.
+which makes the request safe to retry: a second `PUT` with the same ID never starts a second saga
+while the first is kept. [Retention](configurations.md#retention) deletes a finished saga after a
+while, and a `PUT` after that starts the saga again, so if a retry can come later than that, also
+deduplicate in your application.
 Use `PUT` whenever your application may send the request again, such as after a timeout. A retry
 that gets `409` means the earlier attempt created the saga; get its state with
 [`GET /sagas/{id}`](#get-a-saga).
@@ -382,7 +385,7 @@ Recovery then drives them in the background.
 | --- | --- |
 | `resetCount` | How many sagas were reset. |
 | `skipped` | The sagas in the page that were not reset, each with a `reason` and a `detail`, which can be `null`. See the reasons below. |
-| `nextPageToken` | Pass it as `pageToken` to reset the next page, or `null` when no escalated sagas are left in the window. |
+| `nextPageToken` | Pass it as `pageToken` to reset the next page, or `null` when the scan has reached the end of the window. A `null` token does not mean every saga was reset: the sagas in `skipped` can still be `ESCALATED`, so handle them separately. |
 
 | Skip reason | Meaning |
 | --- | --- |
@@ -414,7 +417,8 @@ The routes exist only when the server has a
 [callback secret](configurations.md#participant-callbacks); without one, they answer `404`.
 
 Both routes return `200` with the [saga object](#the-saga-object), including for a report that
-repeats an earlier one.
+repeats an earlier one. A repeat that arrives after the saga has parked on a later step returns
+`400` instead; the earlier report was accepted, so it does not need to be sent again.
 
 ## Check health
 

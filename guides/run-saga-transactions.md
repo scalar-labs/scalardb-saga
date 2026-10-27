@@ -212,7 +212,10 @@ SagaStatus status = client.getStateSnapshot(sagaId).getStatus();
 
 If your application crashes or loses its connection without learning whether a saga started, it can
 call `start` again with the same ID. Either the saga starts, or `SagaAlreadyExistsException` reports
-the one that already exists, so the same work never runs twice.
+the one that already exists, so the same work never runs twice while the saga is kept.
+[Retention](configurations.md#retention) deletes a finished saga after a while, and a `start` with
+its ID after that runs the saga again, so if a retry can come later than that, also deduplicate in
+your application.
 
 Derive the ID from your business key, such as the order ID, so that a retry produces the same ID. An
 ID can be up to 128 characters of letters, digits, `.`, `_`, and `-`.
@@ -317,14 +320,16 @@ With `defaultDeadlineMillis` set to `0`, `start` waits as long as the saga runs.
 asynchronous step and no timeout can wait indefinitely, and so can the thread that started it. In
 production, set `defaultDeadlineMillis` to the longest your application can wait for an answer.
 
-When the deadline passes, `start` throws `SagaTimeoutException`. The saga keeps running on the
-server; only the wait ended. Get the saga's ID from `getSagaId()` and check it later:
+When the deadline passes, `start` throws `SagaTimeoutException`, and the outcome is unknown: the
+deadline can pass while `start` is still trying to reach the server, before the saga exists. Get
+the saga's ID from `getSagaId()` and check it. If no saga has that ID, start it again with the same
+ID:
 
 ```java
 try {
   client.start(sagaId, "order-saga", input);
 } catch (SagaTimeoutException e) {
-  // The saga is still running. Check e.getSagaId() later.
+  // The outcome is unknown. Check e.getSagaId(), and reuse that ID for any retry.
 }
 ```
 
@@ -465,11 +470,19 @@ For every route, its request and response, and its status codes, see the
 
 In embedded mode, the engine runs inside your application instead of in a server, and saga state
 goes straight to your database through ScalarDB. `DefaultSagaOrchestrator`, in `scalardb-saga-core`,
-implements the same `SagaOrchestrator` interface as the client SDK, so the code on this page runs
-unchanged against either, with one difference: an embedded completion callback reports a saga that
-waits on an asynchronous step through `onParked` and then reports nothing more, where the client
-SDK keeps watching it. Embedded mode requires Java 25, and lets a step be a Java class instead of
-a service call. For details, see the [root README](../README.md).
+implements the same `SagaOrchestrator` interface as the client SDK, so the code on this page
+compiles against either, but an embedded engine waits less:
+
+- **`start` returns after one pass over the saga.** If a compensation fails, the saga is left
+  `COMPENSATING` for recovery to finish, and `start` returns anyway, where the client SDK keeps
+  waiting until the saga is final. Check the status after `start`, and if it is not final, poll
+  `getStateSnapshot` until it is.
+- **An embedded completion callback stops at a parked saga.** It reports a saga that waits on an
+  asynchronous step through `onParked` and then reports nothing more, where the client SDK keeps
+  watching it.
+
+Embedded mode requires Java 25, and lets a step be a Java class instead of a service call. For
+details, see the [root README](../README.md).
 
 Call `startBackgroundTasks()` once, after you build the engine. It starts recovery, which finishes
 sagas that a stopped instance left unfinished, and retention, which removes finished sagas. Without

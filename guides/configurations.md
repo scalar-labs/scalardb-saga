@@ -59,8 +59,9 @@ server starts. It exits with one of these codes:
 | `2` | The command line is wrong, such as an unknown option. |
 | `3` | The check did not happen: the properties file could not be read, or the command failed while running. An unreadable definition or service file is reported as a problem, with `1`. |
 
-Only `1` means the configuration was checked and rejected, so a CI step should test for it rather
-than for any non-zero code. For what it can and cannot check, see
+A CI step that gates a deployment should require `0`: `2` and `3` mean the check did not run, so
+they prove nothing about the configuration. Test for `1` only in a test that deliberately supplies
+an invalid configuration. For what it can and cannot check, see
 [server/docker/README.md](../server/docker/README.md#checking-a-configuration-before-it-ships).
 
 ## General
@@ -136,7 +137,7 @@ choice, `<name>`:
 | Name | Description | Default |
 | --- | --- | --- |
 | `scalar.db.saga.server.security.apikey.header` | The request header callers send the key in. | `X-API-Key` |
-| `scalar.db.saga.server.security.apikey.key.<name>.secret` | The key's value. Must be a secret reference, such as `${file:UTF-8:/run/secrets/writer-key}`; a key written inline is rejected. | Required, for at least one key |
+| `scalar.db.saga.server.security.apikey.key.<name>.secret` | The key's value. Must be a secret reference, such as `${file:UTF-8:/run/secrets/writer-key}`; a key written inline is rejected. Unlike other values, it is not trimmed, so write the secret file without a trailing newline: a key that ends in one never matches the header. | Required, for at least one key |
 | `scalar.db.saga.server.security.apikey.key.<name>.roles` | The key's roles, separated by commas, such as `saga:write`. | Required |
 | `scalar.db.saga.server.security.apikey.key.<name>.principal` | The identity recorded for the key's operator actions. | `<name>` |
 
