@@ -18,11 +18,8 @@ completed steps when one of them fails.
   [Docker Compose](https://docs.docker.com/compose/install/) V2 or later
 - `curl`, or any other HTTP client
 - A web browser, for the live dashboard
-- JDK 17 or later, to build the server image in the first step below (the build downloads the
-  JDK 25 it compiles with if you don't have one)
 
-Nothing after that step needs a JDK: the saga server runs as a container and you drive it over
-HTTP.
+The saga server runs as a container and you drive it over HTTP, so the walkthrough needs no JDK.
 
 ## Clone the ScalarDB Saga repository
 
@@ -39,21 +36,6 @@ cd scalardb-saga/getting-started
 ```
 
 ## Start the sample environment
-
-### Build the server image first
-
-The sample tracks this branch, so it runs the server this branch builds — a published release is
-older than the configuration in `conf/`, and refuses to start on a key it does not recognize. Until
-the first GA release publishes a matching image, build it yourself from the repository root:
-
-```console
-./gradlew :server:dockerBuild
-```
-
-That tags the image with the `version` in `gradle.properties`, which is the tag Compose pulls by
-default. Building needs JDK 17 or later; nothing else in the walkthrough does.
-
-### Start the containers
 
 Start the database, the participant services, and the saga server by running the following command:
 
@@ -411,6 +393,8 @@ To go further:
   application, where steps can be Java code rather than service calls.
 
 The Compose file pulls `ghcr.io/scalar-labs/scalardb-saga-server`, defaulting to the `version` in
-`gradle.properties` — the tag `:server:dockerBuild` applies, as described at the top. Set
+`gradle.properties`, so the sample runs the server this branch builds; a server older than the
+configuration in `conf/` refuses to start on a key it does not recognize. On a development line that
+version is a snapshot, re-published on every commit, and Compose pulls it again on each `up`. Set
 `SAGA_VERSION` to run a different image, such as a published release on a branch whose configuration
 that release understands.

@@ -26,23 +26,18 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
-      # On a release-version commit the getting-started Compose default has to name the version being
-      # released. `verify-version` refuses the tag otherwise, but by then the tag is already pushed,
-      # so catching it here puts the failure in the pull request that sets the version — which is
-      # where the omission happens, and what step 2 of RELEASING.md merges through a PR for.
-      #
-      # A snapshot version means an ordinary branch, where the default legitimately names the last
-      # release rather than what this tree builds, so there is nothing to compare.
-      - name: Check the getting-started Compose default on a release-version commit
+      # The getting-started Compose default has to name the version this tree builds, on every
+      # branch: a snapshot line pulls the image release-snapshot.yml pushes under that version, and a
+      # release-version commit pulls the image its tag publishes. A default that names any other
+      # version runs a server whose configuration keys may not match the sample's config file, and
+      # it breaks only for a fresh clone, since an earlier pull of the old tag stays in local Docker.
+      # Checking every commit puts the failure in the pull request that bumps the version, which is
+      # where the omission happens; `verify-version` refuses a release tag too, but only once it is
+      # pushed.
+      - name: Check the getting-started Compose default matches gradle.properties
         run: |
           set -euo pipefail
           version=$(sed -n 's/^version=//p' gradle.properties)
-          case "${version}" in
-            *-SNAPSHOT)
-              echo "::notice::${version} is a snapshot; the Compose default names the last release"
-              exit 0
-              ;;
-          esac
           compose=getting-started/docker-compose.yaml
           # Single-quoted on purpose: sed must see the literal `${SAGA_VERSION:-` text, so the shell
           # must not expand it.
@@ -55,8 +50,7 @@ jobs:
           fi
           if [ "${default}" != "${version}" ]; then
             echo "::error::${compose} defaults SAGA_VERSION to ${default}, but gradle.properties" \
-              "names release ${version}. Update the default in this pull request; the release" \
-              "workflow refuses the tag otherwise."
+              "names ${version}. Update the default in this pull request."
             exit 1
           fi
 

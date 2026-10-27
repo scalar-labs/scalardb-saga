@@ -55,10 +55,13 @@ services:
   saga-server:
     # The default names the version this branch builds, so the sample always runs a server whose
     # configuration keys match the config file beside it — a server older than this branch rejects a
-    # key it has never heard of and refuses to start. On main that version is a snapshot, which is
-    # not published: build it first (see the README). A release branch names its released version
-    # instead, and the release workflow asserts the two agree before publishing.
+    # key it has never heard of and refuses to start. A snapshot line pulls the image every commit
+    # on it publishes, and a release commit pulls its own release; CI asserts the default equals the
+    # version in gradle.properties.
     image: ghcr.io/scalar-labs/scalardb-saga-server:${SAGA_VERSION:-4.0.0-SNAPSHOT}
+    # A snapshot tag moves with every commit on its line, and `up` would otherwise keep running the
+    # copy it pulled first. A released tag never moves, so for one this only costs a network check.
+    pull_policy: always
     ports:
       - "12080:12080" # REST
       - "12051:12051" # gRPC
