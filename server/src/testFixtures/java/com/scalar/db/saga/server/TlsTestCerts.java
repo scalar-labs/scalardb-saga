@@ -38,10 +38,6 @@ public final class TlsTestCerts {
    * @param privateKeyPath the PEM file holding the private key
    * @param certificate the generated certificate, parsed
    */
-  @SuppressFBWarnings(
-      value = "EI_EXPOSE_REP",
-      justification =
-          "Test-only value carrier; X509Certificate is not mutated by anything holding it")
   public record PemPair(Path certChainPath, Path privateKeyPath, X509Certificate certificate) {}
 
   private static final String ALIAS = "tls";
