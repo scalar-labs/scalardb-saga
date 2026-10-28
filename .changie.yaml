@@ -1,0 +1,37 @@
+# Changelog entries: https://changie.dev. Every user-facing pull request adds one file to
+# .changes/unreleased/ with `changie new`; a release collects them with `changie batch` and rebuilds
+# CHANGELOG.md with `changie merge`. The flow is in RELEASING.md, under "Changelog".
+#
+# A file per change, never an edit to CHANGELOG.md, because Auto-PR backports by cherry-pick: a new
+# file always applies cleanly to a release line, where an edit to CHANGELOG.md either conflicts or
+# lands silently in a section that line has already released.
+changesDir: .changes
+unreleasedDir: unreleased
+headerPath: header.tpl.md
+changelogPath: CHANGELOG.md
+versionExt: md
+versionFormat: '## [{{.Version}}] - {{.Time.Format "2006-01-02"}}'
+kindFormat: '### {{.Kind}}'
+changeFormat: '- {{.Body}}{{if .Custom.PR}} ([#{{.Custom.PR}}](https://github.com/scalar-labs/scalardb-saga/pull/{{.Custom.PR}})){{end}}'
+# Microseconds keep two entries of one kind written in the same second from sharing a name.
+fragmentFileFormat: '{{.Kind}}-{{.Time.Format "20060102-150405.000000"}}'
+# The section names the ScalarDB family uses, rather than Keep a Changelog's Added, Changed, Fixed.
+kinds:
+  - key: enhancement
+    label: Enhancements
+  - key: improvement
+    label: Improvements
+  - key: bugfix
+    label: Bug fixes
+custom:
+  - key: PR
+    label: Pull request number
+    type: int
+    minInt: 1
+    optional: true
+newlines:
+  afterChangelogHeader: 1
+  beforeKind: 1
+  afterKind: 1
+  endOfVersion: 1
+envPrefix: CHANGIE_
