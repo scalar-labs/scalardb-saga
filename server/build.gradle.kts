@@ -1,3 +1,5 @@
+import net.ltgt.gradle.errorprone.errorprone
+
 plugins {
     id("scalardb-saga.java-conventions")
     id("scalardb-saga.license-report-conventions")
@@ -142,6 +144,24 @@ tasks.test {
 
 val imageName = "ghcr.io/scalar-labs/scalardb-saga-server"
 
+// Temporary fix for https://emudhra.we-have-a-problem.com/
+// Compiles Oracle's CheckCerts.java so that the image can include CheckCerts.class. Users can run
+// `java CheckCerts` in the container's working directory to confirm that the compromised CA
+// certificates are not trusted by the actual runtime. We can remove this task, its `from` in
+// dockerContext, docker/CheckCerts.java and the COPY in the Dockerfile after we update to the fixed
+// version of Java.
+val compileCheckCerts = tasks.register<JavaCompile>("compileCheckCerts") {
+    description = "Compiles CheckCerts.java to include it in the server image."
+    source(layout.projectDirectory.file("docker/CheckCerts.java"))
+    classpath = files()
+    destinationDirectory = layout.buildDirectory.dir("check-certs")
+    // The class must run on the JRE in the image (Java 25).
+    options.release = 25
+    // An unmodified copy of Oracle's checker, kept outside every source set so Spotless leaves it
+    // alone; Error Prone is off for the same reason.
+    options.errorprone.enabled = false
+}
+
 // Assembles the Docker build context. Kept separate from the build itself so that the release
 // workflow can hand this directory to docker/build-push-action — which gets multi-arch, layer
 // caching, SBOM, and provenance attestation that an `Exec` task invoking `docker build` cannot — while
@@ -159,6 +179,10 @@ val dockerContext by tasks.registering(Sync::class) {
     from(tasks.installDist) { into("dist") }
     from(rootProject.file("LICENSE"))
     from(tasks.named("generateLicenseReport")) { include("THIRD-PARTY-NOTICES.txt") }
+    // Temporary fix for https://emudhra.we-have-a-problem.com/ (CheckCerts.java arrives with docker/).
+    // Only the class: from(task) copies every declared output, and JavaCompile also declares its
+    // incremental-compilation state file (build/tmp/<task>/previous-compilation-data.bin) as one.
+    from(compileCheckCerts) { include("*.class") }
 }
 
 // Local convenience only: single-architecture, loaded into the local Docker daemon. The release workflow

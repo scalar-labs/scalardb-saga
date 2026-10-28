@@ -79,6 +79,11 @@ COPY conf/ ./conf/
 # regardless of platform.
 COPY LICENSE THIRD-PARTY-NOTICES.txt /licenses/
 
+# Temporary fix for https://emudhra.we-have-a-problem.com/
+# Users can run `java CheckCerts` in the WORKDIR to confirm that the compromised CA certificates are
+# not trusted. We can remove this COPY after we update to the fixed version of Java.
+COPY CheckCerts.class CheckCerts.java ./
+
 USER 201:201
 
 # The SagaServerConfig defaults: 12080 REST, 12051 gRPC. Both transports are on by default and either
