@@ -143,9 +143,14 @@ A backport needs nothing: the cherry-pick carries the entry file to the release 
 `.changes/v<version>.md` into release notes: the entries were written one change at a time, so
 combine those that describe one change and reword them to read as a whole.
 
-- **A minor release** batches on `main`, before its branch is cut (step 1 below). Every change
-  lands on `main` first, so `main` holds all of the minor's entries, and the batch reaches the
-  release branch with everything else.
+- **A minor release** batches on the branch its release branch is cut from, before the cut (step
+  1 below): `main` until a major version branch exists, the major version branch after that (`3`
+  for `3.20`). Entries reach a major version branch the way its code does, by backport, so that
+  branch holds exactly the minor's entries, and the cut takes the batch along.
+- **A major release** batches on `main`. `main` still holds its copies of every entry that shipped
+  from the previous major version branch, since those reached that branch by cherry-pick, so drop
+  them from the new major's notes while editing them. The batches on that branch deleted them, so
+  `git log origin/<major> --diff-filter=D --name-only -- .changes/unreleased` lists them.
 - **A patch release** batches on its release branch, in the pull request that sets the version
   (step 2). It collects only what was backported. `main` keeps its own copies of those entries,
   so the next minor lists those fixes too, which is right for anyone upgrading from the previous
@@ -157,7 +162,7 @@ combine those that describe one change and reword them to read as a whole.
 `.changes/unreleased/`. The GitHub release takes that file as its notes.
 
 An entry left pending ships in the tagged release, so it belongs in that release's notes. It
-happens when a fix reaches the release branch after its minor was batched on `main`, or when a patch
+happens when a fix reaches the release branch after its minor was batched, or when a patch
 missed a late backport. `changie batch` refuses a version it has already written, so fold the
 entries in by hand, on the release branch, through a pull request:
 
@@ -181,17 +186,14 @@ git tag v<version> && git push origin v<version>
 
 1. **Make sure the release branch exists and carries the change.**
 
-   For the first release of a minor version, first collect its changelog on `main`, through a pull
-   request (see [Changelog](#changelog)):
+   For the first release of a minor version, first collect its changelog, through a pull request,
+   on the branch the new branch is cut from below (see [Changelog](#changelog)):
 
    ```bash
    changie batch v<version>
    # edit .changes/v<version>.md into release notes
    changie merge
    ```
-
-   If the branch above it is a major version branch, merge `main` into that branch after the pull
-   request merges, so the release branch is cut with the batch on it.
 
    Then cut its branch from the branch above it: `main` until a major version branch exists, the
    major version branch after that (`1` for `1.2`). Bump that parent to its next snapshot version
@@ -267,11 +269,11 @@ git tag v<version> && git push origin v<version>
 
    For a patch release, collect the changelog in the same pull request: run `changie batch
    v<version>`, edit `.changes/v<version>.md`, and run `changie merge`. A minor release batched on
-   `main` in step 1, and a pre-release batches nothing (see [Changelog](#changelog)).
+   its parent branch in step 1, and a pre-release batches nothing (see [Changelog](#changelog)).
 
 3. Tag that commit on the release branch and push the tag. The heading of `.changes/v<version>.md`
    carries the date `changie batch` ran; if the tag goes out on another day, which is usual for a
-   minor batched on `main`, correct that date and run `changie merge` in a pull request first:
+   minor batched before its branch was cut, correct that date and run `changie merge` in a pull request first:
 
    ```bash
    git switch <release-branch> && git pull

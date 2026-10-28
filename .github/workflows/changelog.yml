@@ -34,13 +34,13 @@ jobs:
 
       # Every pending entry, not only this pull request's: a malformed one fails `changie batch` at
       # release time, and finding out there is too late. changie refuses an unknown kind or broken
-      # YAML by itself; an entry with no body renders as a bare `- `, which it accepts, so that is
-      # checked here.
+      # YAML by itself, but accepts an entry with no body, which renders as a bare `- `, or as just
+      # its pull request link when it has one; both are checked here.
       - name: Check the pending entries are valid
         run: |
           set -euo pipefail
           rendered=$(changie batch v0.0.0 --dry-run)
-          if grep -qx -- '- *' <<< "${rendered}"; then
+          if grep -Eqx -- '- *( \(\[#[0-9]+\]\([^)]*\)\))? *' <<< "${rendered}"; then
             echo "::error::an entry in .changes/unreleased/ has no body"
             exit 1
           fi

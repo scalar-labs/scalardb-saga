@@ -147,7 +147,7 @@ jobs:
       #
       # A release tag with entries still pending fails too. They are in the tagged tree, so they ship
       # in this release, and leaving them would credit them to the next one. That happens when a fix
-      # reaches the release branch after its minor was batched on main, or when a patch forgot to
+      # reaches the release branch after its minor was batched, or when a patch forgot to
       # batch a late backport; RELEASING.md says how to fold them in.
       - name: Read the release notes
         id: notes
@@ -160,6 +160,13 @@ jobs:
           # already says.
           if [ -f "${file}" ]; then
             notes=$(tail -n +2 "${file}" | sed '/./,$!d')
+            # A pre-release tagged after the batch still ships any fix that arrived since, so it lists
+            # those too. A release tag with such entries fails below instead.
+            if [ "${tag}" != "${core}" ] && compgen -G ".changes/unreleased/*.yaml" > /dev/null; then
+              pending=$(changie batch "${core}" --dry-run | tail -n +2 | sed '/./,$!d')
+              notes=$(printf '%s\n\n%s\n\n%s' "${notes}" \
+                "Also in this build, and not yet in ${file}:" "${pending}")
+            fi
           elif [ "${tag}" != "${core}" ]; then
             notes=$(changie batch "${core}" --dry-run | tail -n +2 | sed '/./,$!d')
           else

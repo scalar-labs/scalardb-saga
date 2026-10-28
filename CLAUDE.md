@@ -153,7 +153,7 @@ The flow, for people and agents alike, is in [RELEASING.md](RELEASING.md#changel
 - The body says what users see, not how the code changed; start it with `[BREAKING]` when users have to change their code, configuration, or deployment. A change of two kinds gets two entries
 - A change users cannot see (refactor, tests, CI, docs) gets the `no-changelog` label and no entry. The `Changelog` workflow fails a `feat:` or `fix:` PR with neither
 - A backport carries its entry by cherry-pick; add nothing to it
-- At release, `changie batch v<version>` then `changie merge`: a minor on `main` before the branch cut, a patch on its release branch. `verify-version` refuses a release tag without `.changes/v<version>.md`, or with entries still pending, before anything is published
+- At release, `changie batch v<version>` then `changie merge`: a minor on the branch its release branch is cut from (`main`, or the major version branch once one exists) before the cut, a patch on its release branch, a major on `main`. `verify-version` refuses a release tag without `.changes/v<version>.md`, or with entries still pending, before anything is published
 
 ## TODO
 
