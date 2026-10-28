@@ -17,7 +17,10 @@
 # is what stops a virtual thread pinning its carrier while it blocks on a monitor; while it pins,
 # effective database concurrency is capped at the number of carriers. Interim releases stop receiving
 # patches the moment the next one ships, so only LTS majors are candidates.
-FROM eclipse-temurin:25-jre-noble@sha256:b4c93a50fc67612798db73d68ca3b0ee4ebdd51736e59cca370e689b9797037e
+#
+# Ubuntu resolute (26.04) underneath because it is the current Ubuntu LTS. Like the JRE major, moving
+# to the next one is a deliberate manual change.
+FROM eclipse-temurin:25.0.4.1_1-jre-resolute@sha256:acd83cdf6c9b5bfcd7c4e9d3e1969bacaacdcfa034c074500ab28610fb840f81
 
 # Two things in one layer, since each `RUN` is a layer and neither is worth its own:
 #
@@ -25,17 +28,29 @@ FROM eclipse-temurin:25-jre-noble@sha256:b4c93a50fc67612798db73d68ca3b0ee4ebdd51
 #    carry packages whose CVEs are already fixed upstream; upgrading at build time closes that window
 #    without waiting for a base image respin. hadolint flags apt-get upgrade (DL3005) as making builds
 #    non-deterministic — which is the intent, and the digest pin above fixes the starting point.
+#    DEBIAN_FRONTEND=noninteractive makes any package whose configuration asks a question take its
+#    default instead of waiting on a prompt no build has a TTY to answer. It is exported inside the
+#    RUN rather than set with ENV so it stays out of the runtime image.
 # 2. Create a fixed numeric uid/gid, matching the convention the other Scalar server images use, so a
 #    Kubernetes runAsNonRoot admission check passes without a passwd lookup and any mounted volume's
-#    ownership stays predictable across upgrades.
+#    ownership stays predictable across upgrades. The account gets nologin as its shell: nothing ever
+#    logs in as the daemon user, so a real shell would serve only an attacker who reaches it.
 #
 # hadolint ignore=DL3005
-RUN apt-get update \
+RUN export DEBIAN_FRONTEND=noninteractive \
+ && apt-get update \
  && apt-get upgrade -y --no-install-recommends \
  && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --system --gid 201 scalardb \
- && useradd --system --uid 201 --gid 201 --no-create-home scalardb
+ && useradd --system --uid 201 --gid 201 --no-create-home --shell /usr/sbin/nologin scalardb
+
+# Temporary fix for https://emudhra.we-have-a-problem.com/
+# We can remove this RUN after we update to the fixed version of Java.
+RUN keytool -delete -cacerts -storepass changeit -alias "cn_emsign_ecc_root_ca__g3,o_emudhra_technologies_limited,ou_emsign_pki,c_in [jdk]" \
+ && keytool -delete -cacerts -storepass changeit -alias "cn_emsign_root_ca__g1,o_emudhra_technologies_limited,ou_emsign_pki,c_in [jdk]" \
+ && keytool -delete -cacerts -storepass changeit -alias "cn_emsign_ecc_root_ca__c3,o_emudhra_inc,ou_emsign_pki,c_us [jdk]" \
+ && keytool -delete -cacerts -storepass changeit -alias "cn_emsign_root_ca__c1,o_emudhra_inc,ou_emsign_pki,c_us [jdk]"
 
 WORKDIR /scalardb-saga
 
