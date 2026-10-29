@@ -282,7 +282,7 @@ These keys configure how the server keeps saga state through ScalarDB. Saga stat
 | Name | Description | Default |
 | --- | --- | --- |
 | `scalar.db.saga.store.max_event_payload_bytes` | The largest data a single saga event can hold, such as a saga's input or a step's output, in bytes. It also sets the largest gRPC message the server accepts. `0` means no limit. | `1048576` (1 MiB) |
-| `scalar.db.saga.store.transaction_retry_count` | How many times a store transaction is attempted, including the first, before it fails. Conflicts, an unknown commit status, and other transaction failures are attempted again. At least `1`. | `3` |
+| `scalar.db.saga.store.transaction_max_attempts` | How many times a store transaction is attempted, including the first, before it fails. Conflicts, an unknown commit status, and other transaction failures are attempted again. At least `1`. | `3` |
 | `scalar.db.saga.store.scalardb.num_buckets` | How many partitions the sweep table, which recovery, retention, and saga listing scan, is spread across. Cannot change once the table holds data. | `16` |
 | `scalar.db.saga.store.scalardb.creation_options.<name>` | A ScalarDB creation option, passed as is when the server creates its namespace and tables on first start, such as `replication-factor` for Cassandra. It has no effect on tables that already exist. | None |
 
