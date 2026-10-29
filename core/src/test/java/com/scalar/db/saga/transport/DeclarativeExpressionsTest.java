@@ -213,11 +213,12 @@ class DeclarativeExpressionsTest {
 
   @Test
   void resolvePath_dotDotValueInLiteralQuery_keepsValue() throws Exception {
-    // Act — after the template's '?', a ".." is query text, not a path segment
-    String path = DeclarativeExpressions.resolvePath("/orders?dir=${d}", ctx(Map.of("d", "..")));
+    // Act — after the template's '?', "/../" is query text, not a path segment
+    String path =
+        DeclarativeExpressions.resolvePath("/orders?filter=/${id}/x", ctx(Map.of("id", "..")));
 
     // Assert
-    assertThat(path).isEqualTo("/orders?dir=..");
+    assertThat(path).isEqualTo("/orders?filter=/../x");
   }
 
   @Test
