@@ -188,6 +188,39 @@ class DeclarativeExpressionsTest {
   }
 
   @Test
+  void resolvePath_dotDotValueBeforeLiteralQuery_throwsNonRetryable() {
+    // Act — the template's own '?' ends the path, so the last segment is still ".."
+    Throwable thrown =
+        org.assertj.core.api.Assertions.catchThrowable(
+            () ->
+                DeclarativeExpressions.resolvePath(
+                    "/orders/${id}?force=true", ctx(Map.of("id", ".."))));
+
+    // Assert
+    assertThat(thrown).isInstanceOf(TransportException.class);
+  }
+
+  @Test
+  void resolvePath_dotDotValueBeforeLiteralFragment_throwsNonRetryable() {
+    // Act
+    Throwable thrown =
+        org.assertj.core.api.Assertions.catchThrowable(
+            () -> DeclarativeExpressions.resolvePath("/orders/${id}#top", ctx(Map.of("id", ".."))));
+
+    // Assert
+    assertThat(thrown).isInstanceOf(TransportException.class);
+  }
+
+  @Test
+  void resolvePath_dotDotValueInLiteralQuery_keepsValue() throws Exception {
+    // Act — after the template's '?', a ".." is query text, not a path segment
+    String path = DeclarativeExpressions.resolvePath("/orders?dir=${d}", ctx(Map.of("d", "..")));
+
+    // Assert
+    assertThat(path).isEqualTo("/orders?dir=..");
+  }
+
+  @Test
   void resolvePath_valueWithDotsInsideSegment_keepsValue() throws Exception {
     // Act — dots that do not make up a whole segment are ordinary characters
     String path =

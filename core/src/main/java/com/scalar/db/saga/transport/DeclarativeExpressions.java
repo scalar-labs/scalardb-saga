@@ -86,14 +86,22 @@ final class DeclarativeExpressions {
     return result.toString();
   }
 
-  // Every '/' in the resolved path comes from the template, since encoding turns one in a value
-  // into %2F, so splitting on it yields the segments the request will carry.
+  // Every '/', '?' and '#' in the resolved path comes from the template, since encoding turns one
+  // in a value into %2F, %3F or %23. So the path part ends at the first '?' or '#', and splitting
+  // it on '/' yields the segments the request will carry.
   private static void rejectSubstitutedDotSegment(
       StringBuilder path, BitSet substituted, String template) throws TransportException {
+    int pathEnd = path.length();
+    for (String delimiter : List.of("?", "#")) {
+      int index = path.indexOf(delimiter);
+      if (index >= 0) {
+        pathEnd = Math.min(pathEnd, index);
+      }
+    }
     int start = 0;
-    while (start <= path.length()) {
+    while (start <= pathEnd) {
       int slash = path.indexOf("/", start);
-      int end = slash < 0 ? path.length() : slash;
+      int end = slash < 0 || slash > pathEnd ? pathEnd : slash;
       String segment = path.substring(start, end);
       if ((segment.equals(".") || segment.equals(".."))
           && substituted.nextSetBit(start) >= 0
