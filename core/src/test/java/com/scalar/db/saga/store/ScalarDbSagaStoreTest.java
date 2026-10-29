@@ -826,7 +826,7 @@ class ScalarDbSagaStoreTest {
             txManager,
             objectMapper,
             schema,
-            ScalarDbSagaStoreConfig.builder().transactionRetryCount(1).build(),
+            ScalarDbSagaStoreConfig.builder().transactionMaxAttempts(1).build(),
             () -> OWN_APPEND_ID);
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
@@ -855,7 +855,7 @@ class ScalarDbSagaStoreTest {
             txManager,
             objectMapper,
             schema,
-            ScalarDbSagaStoreConfig.builder().transactionRetryCount(1).build(),
+            ScalarDbSagaStoreConfig.builder().transactionMaxAttempts(1).build(),
             () -> OWN_APPEND_ID);
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     when(txManager.begin()).thenReturn(tx).thenReturn(verifyTx);
@@ -1759,7 +1759,7 @@ class ScalarDbSagaStoreTest {
             txManager,
             objectMapper,
             schema,
-            ScalarDbSagaStoreConfig.builder().transactionRetryCount(2).build(),
+            ScalarDbSagaStoreConfig.builder().transactionMaxAttempts(2).build(),
             () -> "test-append-id-" + supplierCalls.incrementAndGet());
     DistributedTransaction verifyTx = mock(DistributedTransaction.class);
     DistributedTransaction retryTx = mock(DistributedTransaction.class);
@@ -3241,7 +3241,7 @@ class ScalarDbSagaStoreTest {
             txManager,
             objectMapper,
             schema,
-            ScalarDbSagaStoreConfig.builder().transactionRetryCount(2).build());
+            ScalarDbSagaStoreConfig.builder().transactionMaxAttempts(2).build());
     doThrow(mock(CrudConflictException.class)).when(tx).insert(any(Insert.class));
 
     // Act & Assert — a retry-exhausted store failure is transient: retryable.
@@ -3310,7 +3310,7 @@ class ScalarDbSagaStoreTest {
             txManager,
             objectMapper,
             schema,
-            ScalarDbSagaStoreConfig.builder().transactionRetryCount(2).build());
+            ScalarDbSagaStoreConfig.builder().transactionMaxAttempts(2).build());
     doThrow(mock(UnknownTransactionStatusException.class)).when(tx).commit();
     // Verifier transactions all fail
     DistributedTransaction tx2 = mock(DistributedTransaction.class);
@@ -3442,28 +3442,28 @@ class ScalarDbSagaStoreTest {
   }
 
   @Test
-  void build_withDefaults_hasDefaultTransactionRetryCount() {
+  void build_withDefaults_hasDefaultTransactionMaxAttempts() {
     // Act
     ScalarDbSagaStoreConfig config = ScalarDbSagaStoreConfig.builder().build();
 
     // Assert
-    assertThat(config.getTransactionRetryCount()).isEqualTo(3);
+    assertThat(config.getTransactionMaxAttempts()).isEqualTo(3);
   }
 
   @Test
-  void transactionRetryCount_positiveValueGiven_setsValue() {
+  void transactionMaxAttempts_positiveValueGiven_setsValue() {
     // Act
     ScalarDbSagaStoreConfig config =
-        ScalarDbSagaStoreConfig.builder().transactionRetryCount(5).build();
+        ScalarDbSagaStoreConfig.builder().transactionMaxAttempts(5).build();
 
     // Assert
-    assertThat(config.getTransactionRetryCount()).isEqualTo(5);
+    assertThat(config.getTransactionMaxAttempts()).isEqualTo(5);
   }
 
   @Test
-  void transactionRetryCount_zeroGiven_throwsIllegalArgumentException() {
+  void transactionMaxAttempts_zeroGiven_throwsIllegalArgumentException() {
     // Act & Assert
-    assertThatThrownBy(() -> ScalarDbSagaStoreConfig.builder().transactionRetryCount(0))
+    assertThatThrownBy(() -> ScalarDbSagaStoreConfig.builder().transactionMaxAttempts(0))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
@@ -4016,7 +4016,7 @@ class ScalarDbSagaStoreTest {
         txManager,
         objectMapper,
         schema,
-        ScalarDbSagaStoreConfig.builder().transactionRetryCount(1).build(),
+        ScalarDbSagaStoreConfig.builder().transactionMaxAttempts(1).build(),
         () -> OWN_APPEND_ID);
   }
 

@@ -124,7 +124,7 @@ class ScalarDbSagaStoreFactoryTest {
     // Arrange — every store key the factory reads, plus keys outside its namespace.
     Properties props = new Properties();
     props.setProperty("scalar.db.saga.store.max_event_payload_bytes", "1024");
-    props.setProperty("scalar.db.saga.store.transaction_retry_count", "3");
+    props.setProperty("scalar.db.saga.store.transaction_max_attempts", "3");
     props.setProperty("scalar.db.saga.store.scalardb.num_buckets", "4");
     props.setProperty("scalar.db.saga.store.scalardb.creation_options.replication-factor", "3");
     props.setProperty("scalar.db.storage", "cassandra");
@@ -157,6 +157,18 @@ class ScalarDbSagaStoreFactoryTest {
     assertThatThrownBy(() -> ScalarDbSagaStoreFactory.create(props))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("scalar.db.saga.store.scalardb.num_buckets");
+  }
+
+  @Test
+  void create_oldTransactionRetryCountKeyGiven_throwsIllegalArgumentException() {
+    // Arrange
+    Properties props = new Properties();
+    props.setProperty("scalar.db.saga.store.transaction_retry_count", "3");
+
+    // Act & Assert
+    assertThatThrownBy(() -> ScalarDbSagaStoreFactory.create(props))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("scalar.db.saga.store.transaction_max_attempts");
   }
 
   @Test
