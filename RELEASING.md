@@ -351,9 +351,11 @@ delete.
 
 ### Rehearsing the pipeline
 
-Nothing in `publish-maven`, `publish-image` or `github-release` has ever run: the Central credentials,
-the emulated arm64 build, the keyless signature and the release creation are all untested. The first
-release is the worst version to discover that with, because it is the one that cannot be taken back.
+`publish-maven`, `publish-image` and `github-release` run only on a release tag, so no pull request
+exercises them: the Central credentials, the emulated arm64 build, the keyless signature and the
+release creation are tested by the next release and by nothing before it. After a change to any of
+them, or to the secrets or the signing key they use, rehearse before tagging, because a release
+cannot be taken back.
 
 A pre-release version is not a substitute. It lowers the stakes — nothing depends on it, and the
 suffix keeps it from taking the *Latest* badge — but a released Central version is immutable
