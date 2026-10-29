@@ -58,7 +58,7 @@ services:
     # key it has never heard of and refuses to start. A snapshot line pulls the image every commit
     # on it publishes, and a release commit pulls its own release; CI asserts the default equals the
     # version in gradle.properties.
-    image: ghcr.io/scalar-labs/scalardb-saga-server:${SAGA_VERSION:-3.20.0-rc.1}
+    image: ghcr.io/scalar-labs/scalardb-saga-server:${SAGA_VERSION:-3.20.0}
     # A snapshot tag moves with every commit on its line, and `up` would otherwise keep running the
     # copy it pulled first. A released tag never moves, so for one this only costs a network check.
     pull_policy: always
