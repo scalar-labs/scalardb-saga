@@ -5,6 +5,7 @@ import com.scalar.db.saga.definition.HttpCall;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -64,18 +65,51 @@ final class DeclarativeExpressions {
    * single path segment so a context value cannot inject path/query/fragment delimiters (or break
    * the request on a space). Literal template text — the {@code /} separators and any static {@code
    * ?}/{@code #} — is left untouched. A {@code /} inside a value is encoded to {@code %2F}, so the
-   * value stays one segment and cannot traverse the path (e.g. {@code ../../admin}).
+   * value stays one segment and cannot traverse the path (e.g. {@code ../../admin}). Encoding
+   * leaves {@code .} alone, so a segment that a substitution turns into exactly {@code .} or {@code
+   * ..} is rejected instead: a participant or proxy that resolves dot segments would otherwise
+   * serve a different path, and encoding the dots is no defence against a server that decodes
+   * before it resolves.
    */
   static String resolvePath(String template, SagaContext context) throws TransportException {
     rejectUnclosedPlaceholder(template);
     Matcher matcher = PLACEHOLDER.matcher(template);
     StringBuilder result = new StringBuilder();
+    BitSet substituted = new BitSet();
     while (matcher.find()) {
       String encoded = encodePathSegment(String.valueOf(requireScalar(matcher.group(1), context)));
       matcher.appendReplacement(result, Matcher.quoteReplacement(encoded));
+      substituted.set(result.length() - encoded.length(), result.length());
     }
     matcher.appendTail(result);
+    rejectSubstitutedDotSegment(result, substituted, template);
     return result.toString();
+  }
+
+  // Every '/' in the resolved path comes from the template, since encoding turns one in a value
+  // into %2F, so splitting on it yields the segments the request will carry.
+  private static void rejectSubstitutedDotSegment(
+      StringBuilder path, BitSet substituted, String template) throws TransportException {
+    int start = 0;
+    while (start <= path.length()) {
+      int slash = path.indexOf("/", start);
+      int end = slash < 0 ? path.length() : slash;
+      String segment = path.substring(start, end);
+      if ((segment.equals(".") || segment.equals(".."))
+          && substituted.nextSetBit(start) >= 0
+          && substituted.nextSetBit(start) < end) {
+        // Pre-send template resolution → the request was never built/sent, so nothing committed.
+        throw new TransportException(
+            "Path template '"
+                + template
+                + "' resolves to the dot segment '"
+                + segment
+                + "', which would change the request's path",
+            false,
+            true);
+      }
+      start = end + 1;
+    }
   }
 
   private static String encodePathSegment(String value) {
