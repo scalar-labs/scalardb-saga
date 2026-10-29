@@ -25,10 +25,10 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      # Full history, so the base commit the check diffs against is present.
+      # The merge commit and its parents: its first parent is the base the pull request merges onto.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
-          fetch-depth: 0
+          fetch-depth: 2
 
       - uses: ./.github/actions/setup-changie
 
@@ -48,7 +48,6 @@ jobs:
       # Through env, never interpolated into the script: a pull request title is untrusted input.
       - name: Check a user-facing pull request adds an entry
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           TITLE: ${{ github.event.pull_request.title }}
           SKIP: ${{ contains(github.event.pull_request.labels.*.name, 'no-changelog') }}
         run: |
@@ -61,7 +60,7 @@ jobs:
             echo "Labelled no-changelog; no entry is required"
             exit 0
           fi
-          added=$(git diff --name-only --diff-filter=A "${BASE_SHA}" HEAD -- '.changes/unreleased/*.yaml')
+          added=$(git diff --name-only --diff-filter=A HEAD^1 HEAD -- '.changes/unreleased/*.yaml')
           if [ -z "${added}" ]; then
             echo "::error::a feat: or fix: pull request needs a changelog entry. Run \`changie new\`" \
               "and commit the file it writes (see \"Changelog\" in RELEASING.md), or add the" \
