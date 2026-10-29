@@ -272,7 +272,7 @@ deployment, see [server/docker/README.md](../server/docker/README.md#configurati
 | Name | Description | Default |
 | --- | --- | --- |
 | `scalar.db.saga.server.shutdown.mode` | What a stopping server waits for: `WAIT_CURRENT_STEP` stops each saga after its running step, and `WAIT_ALL_SAGAS` waits for sagas to finish. Sagas left unfinished are resumed by recovery on another server. | `WAIT_CURRENT_STEP` |
-| `scalar.db.saga.server.shutdown.timeout_millis` | The most time shutdown takes in total, in milliseconds. `0` skips the waits, and hands running sagas to recovery at once. | `30000` |
+| `scalar.db.saga.server.shutdown.timeout_millis` | The budget for the drain, in milliseconds. Shutdown takes a few seconds more, so set the termination grace period above it, as described in [server/docker/README.md](../server/docker/README.md#graceful-shutdown). `0` skips the waits, and hands running sagas to recovery at once. | `30000` |
 
 ## Store
 
@@ -282,7 +282,7 @@ These keys configure how the server keeps saga state through ScalarDB. Saga stat
 | Name | Description | Default |
 | --- | --- | --- |
 | `scalar.db.saga.store.max_event_payload_bytes` | The largest data a single saga event can hold, such as a saga's input or a step's output, in bytes. It also sets the largest gRPC message the server accepts. `0` means no limit. | `1048576` (1 MiB) |
-| `scalar.db.saga.store.transaction_retry_count` | How many times a store write is retried after a transaction conflict. | `3` |
+| `scalar.db.saga.store.transaction_retry_count` | How many times a store transaction is attempted, including the first, before it fails. Conflicts, an unknown commit status, and other transaction failures are attempted again. At least `1`. | `3` |
 | `scalar.db.saga.store.scalardb.num_buckets` | How many partitions the sweep table, which recovery, retention, and saga listing scan, is spread across. Cannot change once the table holds data. | `16` |
 | `scalar.db.saga.store.scalardb.creation_options.<name>` | A ScalarDB creation option, passed as is when the server creates its namespace and tables on first start, such as `replication-factor` for Cassandra. It has no effect on tables that already exist. | None |
 

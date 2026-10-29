@@ -127,8 +127,8 @@ while the first is kept. [Retention](configurations.md#retention) deletes a fini
 while, and a `PUT` after that starts the saga again, so if a retry can come later than that, also
 deduplicate in your application.
 Use `PUT` whenever your application may send the request again, such as after a timeout. A retry
-that gets `409` means the earlier attempt created the saga; get its state with
-[`GET /sagas/{id}`](#get-a-saga).
+that gets `409` means the earlier attempt created the saga. That saga may still be running, so get
+its state with [`GET /sagas/{id}`](#get-a-saga) until the status is final.
 
 | Query parameter | Description |
 | --- | --- |

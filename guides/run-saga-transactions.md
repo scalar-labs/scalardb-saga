@@ -204,11 +204,18 @@ String sagaId = "order-" + orderId;
 try {
   client.start(sagaId, "order-saga", input);
 } catch (SagaAlreadyExistsException e) {
-  // An earlier attempt already started this saga; e.getExisting() is its current state.
+  // An earlier attempt already started this saga, which may still be running.
 }
-SagaStatus status = client.getStateSnapshot(sagaId).getStatus();
-// Act on status as in Start a saga, whichever attempt started it.
+SagaStateSnapshot snapshot = client.getStateSnapshot(sagaId);
+while (!snapshot.getStatus().isTerminal()) {
+  Thread.sleep(1000);
+  snapshot = client.getStateSnapshot(sagaId);
+}
+// Act on snapshot.getStatus() as in Start a saga, whichever attempt started it.
 ```
+
+`SagaAlreadyExistsException` is thrown as soon as the ID is found taken, without waiting for that
+saga to finish, so the example reads the status until it is final.
 
 If your application crashes or loses its connection without learning whether a saga started, it can
 call `start` again with the same ID. Either the saga starts, or `SagaAlreadyExistsException` reports
@@ -370,7 +377,7 @@ exceptions instead: `IllegalStateException` for a start on a closed client, and
 | --- | --- | --- |
 | `SagaDefinitionNotFoundException` | No definition has this name, or this name and version. | Fix the name or version. |
 | `SagaDefinitionNotServedException` | The definition exists, but this server does not serve it: it was retired, or was added so recently that this server has not loaded it yet. | Check the server's definitions. For a new definition, retry later. |
-| `SagaAlreadyExistsException` | A saga with this ID already exists. | Treat it as the result of an earlier attempt. `getExisting()` returns its state. |
+| `SagaAlreadyExistsException` | A saga with this ID already exists. | Treat it as the result of an earlier attempt. `getExisting()` returns its state, which may not be final yet. |
 | `SagaIllegalArgumentException` | The saga ID or an input value is invalid. | Fix the request. |
 | `SagaOverloadedException` | The server is at its [limit of concurrent saga starts](configurations.md#admission-control). Nothing was started. | Retry later, or reject the request in your application. The SDK retries only connection failures, not this, so your application can decide. |
 | `SagaRuntimeException` with `RATE_LIMIT_EXCEEDED` | The server's [limit on new sagas per minute](configurations.md#admission-control) was reached. Nothing was started. | Retry after a short delay. |
