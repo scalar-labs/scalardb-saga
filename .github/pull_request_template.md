@@ -20,16 +20,9 @@
 - [ ] Any remaining open issues linked to this PR are documented and up-to-date (Jira, GitHub, etc.).
 - [ ] Tests (unit, integration, etc.) have been added for the changes.
 - [ ] My changes generate no new warnings.
+- [ ] I have added a changelog entry with `changie new`, or labelled this PR `no-changelog` if users cannot see the change (see "Changelog" in RELEASING.md).
 - [ ] Any dependent changes in other PRs have been merged and published.
 
 ## Additional notes (optional)
 
 > Provide any additional information or notes that may be relevant to the reviewers or stakeholders.
-
-## Release notes
-
-> Provide release note text for this PR based on the guidelines at [Guidelines for Writing Release Notes](https://developers.scalar-labs.com/docs/style-guide/release-notes/).
->
-> For example:
->
-> Added validation for the Consensus Commit mutation operation.

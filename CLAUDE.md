@@ -132,6 +132,7 @@ See [server/docker/README.md](server/docker/README.md) for running it.
   - `image-arm64-native-test` — the same boot under QEMU on `linux/arm64`, asserting the `aarch_64` epoll native loads; only `linux-x86_64` arrives transitively, so nothing else catches a dropped classifier
   - Both smoke jobs boot from the shared fixture in `.github/smoke/`
 - **Release** (`release.yml`, on `v<major>.<minor>.<patch>` tags, with or without a pre-release suffix) — asserts the tag matches `gradle.properties` and that the tagged commit is on the release branch its version names, then publishes to Maven Central, pushes the multi-arch image, signs it, and creates the GitHub release
+- **Changelog** (`changelog.yml`, on every PR, re-run on title and label edits) — requires a changie entry on `feat:` and `fix:` PRs unless labelled `no-changelog`, and validates every pending entry; changie comes from `.github/actions/setup-changie`, pinned by version and checksum, which Dependabot cannot bump. See [Changelog](#changelog)
 - **GHCR cleanup** (`ghcr-cleanup.yml`, weekly) — deletes untagged `ghcr.io` versions a moving snapshot tag leaves behind, via `snok/container-retention-policy`, which spares the children of every still-tagged multi-arch index. Never swap in a plain "delete untagged" action: a release's platform and attestation manifests are untagged too, and deleting them breaks the release. The snok container is pinned by digest, which Dependabot cannot update (it skips `docker://` references); bump it by hand as the workflow comment describes
 - **Dependabot** (`.github/dependabot.yml`) — gradle (incl. the version catalog), github-actions, and the Dockerfile base-image digest. Gradle and docker target `main` only; release lines receive those bumps as Auto-PR backports. Only github-actions has per-release-branch `target-branch` entries (workflow files drift between lines). Every github-actions entry lists `/.github/actions/*` beside `/`, because `/` covers only `.github/workflows`; the composite `push-server-image` action, shared by `release.yml` and `release-snapshot.yml`, would otherwise never be bumped.
 - **Auto-PR** (`.github/workflows/auto-pr.yml`) — on merge into `main` or a version branch, opens cherry-pick backport PRs on every line named by a family-shared "ScalarDB <version>" GitHub project attached to the merged PR (projects are shared across the ScalarDB family; consumers scope by repository) (shared `scalar-labs/actions` reusable workflow; conflicting cherry-picks become draft PRs with instructions)
@@ -143,6 +144,16 @@ See [server/docker/README.md](server/docker/README.md) for running it.
 - **Trunk-based development with release branches** — every change lands on `main` first; releases are cut from minor version branches (`1.0`, `1.1`), never from `main`. Fixes are backported down the lines, never merged up. See [RELEASING.md](RELEASING.md).
 - Branches are named after the version they carry, with no prefix — major version branch `1`, minor version branch `1.0` — so they match the `[0-9]+` and `[0-9]+.[0-9]+` patterns every workflow keys off. A patch is a tag, not a branch.
 - **Conventional Commits** (e.g., `feat: add saga engine`, `fix: handle timeout`)
+
+## Changelog
+
+The flow, for people and agents alike, is in [RELEASING.md](RELEASING.md#changelog). In short:
+
+- **A user-facing pull request adds a changie entry; never edit `CHANGELOG.md` or `.changes/v*.md` in a feature PR.** After opening the PR, run `changie new --interactive=false --kind <enhancement|improvement|bugfix> --custom PR=<number> --body "<what users see>"` and commit the file it writes to `.changes/unreleased/`. If changie is not installed, write that YAML file by hand in the form RELEASING.md shows (`kind`, `body`, `time`, `custom.PR`), named `<kind>-<yyyyMMdd-HHmmss.SSSSSS>.yaml`, and single-quote the body: an unquoted `[BREAKING] ...` parses as a YAML list, which fails the `Changelog` workflow
+- The body says what users see, not how the code changed; start it with `[BREAKING]` when users have to change their code, configuration, or deployment. A change of two kinds gets two entries
+- A change users cannot see (refactor, tests, CI, docs) gets the `no-changelog` label and no entry. The `Changelog` workflow fails a `feat:` or `fix:` PR with neither
+- A backport carries its entry by cherry-pick; add nothing to it
+- At release, `changie batch v<version>` then `changie merge`: a minor on the branch its release branch is cut from (`main`, or the major version branch once one exists) before the cut, a patch on its release branch, a major on `main`. `verify-version` refuses a release tag without `.changes/v<version>.md`, or with entries still pending, before anything is published
 
 ## TODO
 
